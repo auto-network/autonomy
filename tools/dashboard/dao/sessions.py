@@ -90,6 +90,39 @@ def _iso_to_epoch(ts: str | None) -> float:
 _ACTIVE_SESSION_TYPES = {"container", "host", "terminal", "chatwith"}
 
 
+def _claude_credentials_alias_map() -> dict[str, str]:
+    """Return ``{org_uuid: alias}`` from ``dashboard.claude.credentials``.
+
+    Used to resolve the friendly alias for a session's stored
+    ``harness_token`` (org UUID). Best-effort — failures collapse to
+    ``{}`` so the harness_token still surfaces as the bare UUID rather
+    than crashing the active-sessions endpoint.
+    """
+    try:
+        from tools.graph import ops as graph_ops
+        from tools.graph.schemas.claude_credentials import (
+            CLAUDE_CREDENTIALS_SET_ID,
+        )
+    except Exception:
+        return {}
+    try:
+        members = graph_ops.read_set(
+            CLAUDE_CREDENTIALS_SET_ID, org=graph_ops.CALLER_ORG,
+        )
+    except Exception:
+        return {}
+    out: dict[str, str] = {}
+    for m in getattr(members, "members", []) or []:
+        payload = getattr(m, "payload", None)
+        if not isinstance(payload, dict):
+            continue
+        alias = payload.get("alias")
+        key = getattr(m, "key", None)
+        if isinstance(alias, str) and alias and isinstance(key, str) and key:
+            out[key] = alias
+    return out
+
+
 def get_active_sessions(threshold: int = 600) -> list[dict]:
     """Return interactive sessions (container/host/terminal/chatwith).
 
@@ -100,12 +133,14 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
     """
     now = time.time()
     db_rows = _db_live_sessions()
+    alias_map = _claude_credentials_alias_map()
     sessions = []
     for row in db_rows:
         stype = row.get("type", "")
         if stype not in _ACTIVE_SESSION_TYPES:
             continue
         age = now - (row.get("last_activity") or row["created_at"])
+        harness_token = row.get("harness_token") or None
         entry = {
             "session_id": row.get("session_uuid") or row["tmux_name"],
             "project": row["project"],
@@ -123,11 +158,15 @@ def get_active_sessions(threshold: int = 600) -> list[dict]:
             # model is the most-recent assistant turn's model id.
             "harness": row.get("harness") or "claude",
             "model": row.get("model") or None,
-            # auto-ghhdg: harness-agnostic credential pointer (org UUID once
-            # bead 4 lands; alias string in the interim). Operator triage
-            # only — surfaces in the session drawer next to harness/model.
-            # Null for codex sessions and pre-multi-token rows.
-            "harness_token": row.get("harness_token") or None,
+            # auto-08n3f: harness_token holds the Anthropic org UUID (substrate
+            # key on dashboard.claude.credentials); harness_token_alias is the
+            # operator-friendly name from the credentials row's payload, joined
+            # in by _claude_credentials_alias_map. Null for codex sessions
+            # and pre-cutover rows that may still hold raw alias strings.
+            "harness_token": harness_token,
+            "harness_token_alias": (
+                alias_map.get(harness_token) if harness_token else None
+            ),
         }
         entry["org"] = resolve_session_org(entry)
         sessions.append(entry)
@@ -531,6 +570,9 @@ def get_recent_sessions(
     except Exception:
         pass  # dashboard.db not initialised — skip overlay
 
+    # auto-08n3f: substrate join for the friendly alias by org UUID.
+    alias_map = _claude_credentials_alias_map()
+
     # ── Step 3: merge + filter live ───────────────────────────────
     merged: dict[str, dict] = {}
     for row in graph_rows:
@@ -560,9 +602,15 @@ def get_recent_sessions(
             # consume them via a single DAO contract.
             row["harness"] = db_row.get("harness") or "claude"
             row["model"] = db_row.get("model") or None
-            # auto-ghhdg: harness-agnostic credential pointer (org UUID
-            # once bead 4 lands).
+            # auto-08n3f: org UUID stored on the row, friendly alias joined
+            # in via dashboard.claude.credentials.
             row["harness_token"] = db_row.get("harness_token") or None
+            if row["harness_token"]:
+                row["harness_token_alias"] = (
+                    alias_map.get(row["harness_token"])
+                )
+            else:
+                row["harness_token_alias"] = None
             # Prefer dashboard.db's last_activity (epoch float) for ordering
             # when newer than graph.db's last_activity_at (ISO).
             db_la = db_row.get("last_activity") or 0

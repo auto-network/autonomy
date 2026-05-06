@@ -137,6 +137,10 @@ def main() -> int:
             "launched_at": datetime.now(timezone.utc).isoformat(),
             "harness": args.harness,
         }
+        if creds is not None and creds.get("harness_token"):
+            # auto-08n3f: stamp the Anthropic org UUID so the dashboard
+            # joins it to the friendly alias on registration.
+            meta_doc["harness_token"] = creds["harness_token"]
         if metadata:
             meta_doc.update(metadata)
             if "graph_org" not in meta_doc:

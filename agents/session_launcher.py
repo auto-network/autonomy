@@ -19,15 +19,16 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import secrets
 import shlex
-import shutil
 import subprocess
 import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -262,64 +263,83 @@ def _capability_env(capabilities) -> dict[str, str]:
 # ── Credential Resolution ─────────────────────────────────────────────────────
 
 
-CLAUDE_TOKEN_FILE_PREFIX = ".setup-token"
-CLAUDE_DEFAULT_ALIAS = "default"
+def _credentials_org() -> str:
+    """Return the substrate org slug used to read Claude credential rows.
 
-
-def _claude_credentials_dir() -> Path:
-    return Path(
-        os.environ.get(
-            "CLAUDE_CREDENTIALS_DIR", str(Path.home() / ".claude"),
-        )
+    Matches the resolution used by the OAuth refresh poller and
+    ``graph claude install`` so all three paths converge on the same
+    rows.
+    """
+    return (
+        os.environ.get("GRAPH_ORG")
+        or os.environ.get("GRAPH_SCOPE")
+        or "autonomy"
     )
 
 
-def list_claude_token_files() -> list[Path]:
-    """Return every ``~/.claude/.setup-token*`` file on the host, sorted.
+def _setup_token_rows() -> list[Any]:
+    """Return ``dashboard.claude.setup_tokens`` rows from substrate.
 
-    Each file is one Claude account: ``.setup-token`` is the default
-    account (alias ``"default"``); ``.setup-token.<alias>`` carries the
-    suffix as its alias. Operators add accounts by saving a fresh
-    setup-token from the Anthropic console under a new suffix; ``rm``
-    removes one. ``ls`` is the registry — no separate config file.
-
-    Honors ``CLAUDE_CREDENTIALS_DIR`` for tests. Missing dirs return ``[]``.
+    Filters out rows whose substrate ``expires_at`` (``created_at + 1y``
+    per the schema's @cache TTL) has elapsed. The cache_gc sweep handles
+    expiry asynchronously; we filter inline so a stale row that hasn't
+    been swept yet doesn't get picked.
     """
-    creds_dir = _claude_credentials_dir()
-    if not creds_dir.is_dir():
-        return []
-    return sorted(
-        p for p in creds_dir.iterdir()
-        if p.is_file() and p.name.startswith(CLAUDE_TOKEN_FILE_PREFIX)
+    from tools.graph import ops as _ops
+    from tools.graph.schemas.claude_setup_tokens import (
+        CLAUDE_SETUP_TOKEN_TTL,
+        CLAUDE_SETUP_TOKENS_SET_ID,
     )
 
-
-def alias_for_token_file(p: Path) -> str:
-    """Map a ``.setup-token*`` filename to its operator-facing alias.
-
-    ``.setup-token`` → ``"default"``; ``.setup-token.primary`` →
-    ``"primary"``. Mirror of the convention enforced by
-    :func:`list_claude_token_files`.
-    """
-    if p.name == CLAUDE_TOKEN_FILE_PREFIX:
-        return CLAUDE_DEFAULT_ALIAS
-    return p.name.removeprefix(CLAUDE_TOKEN_FILE_PREFIX + ".")
-
-
-def _read_token_file(p: Path) -> str | None:
     try:
-        token = p.read_text().strip()
-    except OSError:
-        return None
-    return token or None
+        members = _ops.read_set(
+            CLAUDE_SETUP_TOKENS_SET_ID, org=_credentials_org(),
+        )
+    except Exception:
+        logger.exception("session_launcher: read_set(claude.setup_tokens) failed")
+        return []
+    rows = list(getattr(members, "members", []) or [])
+    now = datetime.now(timezone.utc)
+    fresh: list[Any] = []
+    for row in rows:
+        created_at = getattr(row, "created_at", None)
+        if not created_at:
+            # Missing created_at → assume fresh; we've nothing better to go on.
+            fresh.append(row)
+            continue
+        try:
+            dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            fresh.append(row)
+            continue
+        if dt + CLAUDE_SETUP_TOKEN_TTL > now:
+            fresh.append(row)
+    return fresh
+
+
+def _credentials_rows() -> list[Any]:
+    """Return ``dashboard.claude.credentials`` rows from substrate."""
+    from tools.graph import ops as _ops
+    from tools.graph.schemas.claude_credentials import (
+        CLAUDE_CREDENTIALS_SET_ID,
+    )
+
+    try:
+        members = _ops.read_set(
+            CLAUDE_CREDENTIALS_SET_ID, org=_credentials_org(),
+        )
+    except Exception:
+        logger.exception("session_launcher: read_set(claude.credentials) failed")
+        return []
+    return list(getattr(members, "members", []) or [])
 
 
 def _claude_usage_rows() -> list[dict]:
     """Return live ``dashboard.harness.usage`` rows for Claude.
 
     Best-effort — failures (DB unavailable, settings substrate missing,
-    etc.) collapse to ``[]`` so token selection falls back to alphabetical
-    order rather than crashing the launch path.
+    etc.) collapse to ``[]`` so token selection falls back to random
+    pick rather than crashing the launch path.
     """
     try:
         from tools.graph import settings_ops
@@ -343,16 +363,17 @@ def _claude_usage_rows() -> list[dict]:
     return payloads
 
 
-def _token_headroom_score(payload: dict) -> tuple[float, float]:
-    """Return ``(short_headroom, long_headroom)`` for sort ranking.
+def _token_headroom_score(payload: dict) -> float:
+    """Return min(short headroom, long headroom) for max-min ranking.
 
-    Higher headroom = more capacity remaining = pick first. Missing or
-    malformed values collapse to 0 so a row with no telemetry sorts
-    BELOW a row with valid <100% utilization but ABOVE one at 100%.
+    A token's score is the smaller of its two window headrooms — the
+    bottleneck. Picking ``max(score)`` is the max-min rule from the
+    design note: choose the credential with the most slack on its
+    tightest window.
     """
     windows = payload.get("windows") if isinstance(payload, dict) else None
     if not isinstance(windows, dict):
-        return (0.0, 0.0)
+        return 0.0
     short = windows.get("short") if isinstance(windows.get("short"), dict) else {}
     long_ = windows.get("long") if isinstance(windows.get("long"), dict) else {}
 
@@ -362,115 +383,193 @@ def _token_headroom_score(payload: dict) -> tuple[float, float]:
             return 0.0
         return max(0.0, 100.0 - float(used))
 
-    return (_headroom(short), _headroom(long_))
+    return min(_headroom(short), _headroom(long_))
 
 
-def _select_token_alias(
-    files: list[Path], *, prefer_alias: str | None,
-) -> Path | None:
-    """Choose which ``.setup-token*`` file to use for a launch.
+def _is_usage_stale(payload: dict, *, now: datetime) -> bool:
+    """``True`` when the harness-usage row is older than the schema's TTL.
 
-    Selection rule (graph note: see bead description):
-
-    * Caller-supplied ``prefer_alias`` wins when the file exists.
-    * Otherwise rank by ``dashboard.harness.usage`` headroom — highest
-      ``(100 - short.used_percent)`` first, ties broken by long-window
-      headroom. Tokens with no usage row yet (first launch) rank at top
-      so brand-new accounts get used.
-    * Within ranks, alphabetical alias order is the final tiebreak so
-      the same-utilization case is deterministic across launches.
+    The schema's TTL is 15 minutes; rows older than that are considered
+    stale enough to fall through to the random-pick branch even though
+    cache_gc hasn't swept them yet. Missing / malformed ``updated_at``
+    counts as stale (we don't trust unrecoverable telemetry).
     """
-    if not files:
-        return None
+    from tools.dashboard.harness_usage_settings import HARNESS_USAGE_CACHE_TTL
+
+    raw = payload.get("updated_at")
+    if not isinstance(raw, str) or not raw.strip():
+        return True
+    try:
+        ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return True
+    return (now - ts) > HARNESS_USAGE_CACHE_TTL
+
+
+def _credentials_alias_for_org(creds_rows: list[Any], org_uuid: str) -> str | None:
+    """Look up the operator-friendly alias for ``org_uuid`` from creds rows."""
+    for row in creds_rows:
+        if getattr(row, "key", None) != org_uuid:
+            continue
+        payload = getattr(row, "payload", None)
+        if isinstance(payload, dict):
+            alias = payload.get("alias")
+            if isinstance(alias, str) and alias:
+                return alias
+    return None
+
+
+def _resolve_credentials_via_substrate(
+    *, prefer_alias: str | None,
+    rng: random.Random | None = None,
+) -> dict | None:
+    """Substrate-backed credential picker.
+
+    Returns ``{"type": "token", "token": <raw_key>, "alias": <alias>,
+    "harness_token": <org_uuid>}`` for the picked credential, or
+    ``None`` when no rows are available even after auto-install.
+
+    Selection rule (graph note ``73c4e9ef-bbc``):
+
+    * If ``prefer_alias`` is set and matches an installed credentials
+      row, pick the matching setup-token row (operator override).
+    * If every setup-token row has a fresh harness-usage row, pick the
+      one with the highest min(short_headroom, long_headroom) — the
+      max-min over the bottleneck window. Deterministic given fixed
+      usage rows.
+    * Otherwise (some tokens lack telemetry, or all do), random pick
+      drawn uniformly from the available setup-token rows so brand-new
+      accounts get exercised before we know their utilization.
+
+    Empty unexpired-tokens set triggers ``graph claude install`` and
+    re-reads the substrate; if install also yields nothing we return
+    ``None``.
+    """
+    rng = rng or random
+    tokens = _setup_token_rows()
+    if not tokens:
+        # Auto-install path. Best-effort: failures here surface to the
+        # caller as None and the existing "No Claude credentials found"
+        # error message takes over.
+        try:
+            subprocess.run(["graph", "claude", "install"], check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+            logger.exception(
+                "session_launcher: `graph claude install` failed; "
+                "no Claude credentials available",
+            )
+            return None
+        tokens = _setup_token_rows()
+        if not tokens:
+            return None
+
+    creds_rows = _credentials_rows()
+
+    chosen = None
     if prefer_alias:
-        for p in files:
-            if alias_for_token_file(p) == prefer_alias:
-                return p
-        # Unknown alias falls through to rate-limit selection rather
-        # than failing — the operator's intent is a hint, not a hard
-        # constraint, and a typo shouldn't block dispatch.
+        # Operator override — find the credentials row whose alias
+        # matches, then pick the setup-token row keyed by the same org
+        # UUID. A typo / unknown alias falls through to the usage-based
+        # selection rather than failing dispatch.
+        target_org_uuid: str | None = None
+        for row in creds_rows:
+            payload = getattr(row, "payload", None)
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("alias") == prefer_alias:
+                target_org_uuid = getattr(row, "key", None)
+                break
+        if target_org_uuid:
+            for token_row in tokens:
+                if getattr(token_row, "key", None) == target_org_uuid:
+                    chosen = token_row
+                    break
 
-    rows_by_alias: dict[str, dict] = {}
-    for payload in _claude_usage_rows():
-        alias = payload.get("alias")
-        if isinstance(alias, str) and alias:
-            rows_by_alias[alias] = payload
+    if chosen is None:
+        usage_rows = _claude_usage_rows()
+        now = datetime.now(timezone.utc)
+        usage_by_org: dict[str, dict] = {}
+        for payload in usage_rows:
+            account_id = payload.get("account_id")
+            if not isinstance(account_id, str) or not account_id:
+                continue
+            if _is_usage_stale(payload, now=now):
+                continue
+            usage_by_org[account_id] = payload
 
-    def _rank(p: Path) -> tuple[float, float, str, str]:
-        alias = alias_for_token_file(p)
-        payload = rows_by_alias.get(alias)
-        if payload is None:
-            # First-launch / no telemetry yet: rank at top so brand-new
-            # tokens get exercised before ones we've already seen.
-            return (1e9, 1e9, "0", alias)
-        short, long_ = _token_headroom_score(payload)
-        return (short, long_, "1", alias)
+        token_keys = [getattr(t, "key", None) for t in tokens]
+        if all(k in usage_by_org for k in token_keys if k):
+            # Every token has fresh telemetry → max-min deterministic.
+            def _score(token_row: Any) -> tuple[float, str]:
+                org_uuid = getattr(token_row, "key", "") or ""
+                payload = usage_by_org.get(org_uuid, {})
+                # Tiebreak by org UUID so the same usage state always
+                # produces the same pick.
+                return (_token_headroom_score(payload), org_uuid)
+            chosen = max(tokens, key=_score)
+        else:
+            # Some / all tokens lack fresh usage → uniform random pick.
+            chosen = rng.choice(tokens)
 
-    ranked = sorted(files, key=_rank, reverse=True)
-    return ranked[0]
+    org_uuid = getattr(chosen, "key", None)
+    payload = getattr(chosen, "payload", None)
+    if not isinstance(payload, dict):
+        return None
+    raw_key = payload.get("raw_key")
+    if not isinstance(raw_key, str) or not raw_key:
+        return None
+    alias = _credentials_alias_for_org(creds_rows, org_uuid) if org_uuid else None
+    out: dict = {
+        "type": "token",
+        "token": raw_key,
+        "harness_token": org_uuid,
+    }
+    if alias:
+        out["alias"] = alias
+    return out
 
 
 def _resolve_credentials(
     *, prefer_alias: str | None = None,
 ) -> dict | None:
-    """Resolve Claude credentials from env, setup-token files, or credentials file.
+    """Resolve Claude credentials for a session launch.
 
-    Returns a dict with 'type' key:
-      {"type": "token", "token": "...", "alias": "default" | "primary" | ...}
-      {"type": "creds_file", "path": "/path/to/.credentials.json"}
-    Returns None if no credentials found.
+    Returns a dict shaped:
+      {"type": "token", "token": <raw_key>, "alias": <alias>,
+       "harness_token": <org_uuid>}
+
+    Or ``None`` when no credentials are reachable.
 
     Selection order:
-      1. ``CLAUDE_CODE_OAUTH_TOKEN`` env var → returned without an alias
-         (legacy compat path; carrier of caller intent).
-      2. Multi-file enumeration of ``~/.claude/.setup-token*``. When
-         multiple files exist, ``prefer_alias`` wins; otherwise pick by
-         rate-limit headroom from the live ``dashboard.harness.usage``
-         rows (see :func:`_select_token_alias`).
-      3. ``~/.claude/.credentials.json`` (legacy creds-file path) when no
-         setup-token files exist.
+      1. ``CLAUDE_CODE_OAUTH_TOKEN`` env var (legacy compat — operator
+         override, returned without an alias).
+      2. Substrate-backed picker over ``dashboard.claude.setup_tokens``
+         rows. ``prefer_alias`` wins when matched; otherwise max-min
+         over harness usage if every token has fresh telemetry, else
+         uniform random pick. Empty rows trigger ``graph claude
+         install`` and a re-read.
     """
-    creds_dir = _claude_credentials_dir()
-
     oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
     if oauth_token:
         return {"type": "token", "token": oauth_token}
 
-    files = list_claude_token_files()
-    chosen = _select_token_alias(files, prefer_alias=prefer_alias)
-    if chosen is not None:
-        token = _read_token_file(chosen)
-        if token:
-            return {
-                "type": "token",
-                "token": token,
-                "alias": alias_for_token_file(chosen),
-            }
-
-    creds_file = creds_dir / ".credentials.json"
-    if creds_file.exists():
-        return {"type": "creds_file", "path": str(creds_file)}
-
-    return None
+    return _resolve_credentials_via_substrate(prefer_alias=prefer_alias)
 
 
 def _setup_auth_docker_args(creds: dict, run_dir: Path) -> list[str] | None:
     """Convert resolved credentials to docker run args.
 
-    For creds_file type, copies the credentials file into run_dir and adds
-    a volume mount for it. Sets creds["creds_copy"] to the copy path so the
-    caller can schedule cleanup.
+    For substrate-backed credentials (``type=="token"`` with a
+    ``harness_token``), the picker has already pulled the long-lived
+    ``raw_key`` from the substrate. We pass it as
+    ``CLAUDE_CODE_OAUTH_TOKEN`` so the in-container ``claude`` binary
+    picks it up directly — the env-var path Anthropic supports across
+    every supported version.
 
     Returns docker arg list, or None if creds type is unrecognised.
     """
     if creds["type"] == "token":
         return ["-e", f"CLAUDE_CODE_OAUTH_TOKEN={creds['token']}"]
-
-    if creds["type"] == "creds_file":
-        creds_copy = run_dir / ".credentials.json"
-        shutil.copy2(creds["path"], str(creds_copy))
-        creds["creds_copy"] = str(creds_copy)
-        return ["-v", f"{creds_copy}:/home/agent/.claude/.credentials.json:ro"]
 
     return None
 
@@ -666,14 +765,14 @@ def launch_session(
             "launched_at": datetime.now(timezone.utc).isoformat(),
             "harness": harness,
         }
-        if creds is not None and creds.get("alias"):
+        if creds is not None and creds.get("harness_token"):
             # Operator-facing credential pointer for triage. The dashboard
             # reads this back when the session is registered so the drawer
             # can show "which Anthropic account is this session burning".
-            # auto-ghhdg renamed the field from claude_token_alias to
-            # harness_token (harness-agnostic; will hold an org UUID once
-            # bead 4 of the substrate-credentials cutover lands).
-            meta_doc["harness_token"] = creds["alias"]
+            # auto-08n3f: this is now the Anthropic org UUID (the substrate
+            # key on dashboard.claude.credentials). The dashboard joins it
+            # to the row's friendly ``alias`` for display.
+            meta_doc["harness_token"] = creds["harness_token"]
         if metadata:
             meta_doc.update(metadata)
             if "graph_org" not in meta_doc:

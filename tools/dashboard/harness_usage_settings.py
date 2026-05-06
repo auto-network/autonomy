@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 from tools.graph.schemas.registry import (
@@ -37,9 +35,10 @@ SYNOPSIS = {
         "codex usage",
         "footer tiles",
         "auth identity",
-        "claude token alias",
     ],
-    "related_set_ids": [],
+    "related_set_ids": [
+        "dashboard.claude.credentials#1",
+    ],
 }
 
 
@@ -80,9 +79,11 @@ class DashboardHarnessUsageV1(SettingSchema):
     alias: str | None = field(
         default=None,
         description=(
-            "Operator-controlled token alias (e.g. 'primary'); the suffix "
-            "of ~/.claude/.setup-token.<alias> for the file that produced "
-            "this row. None for non-token paths (transcript, env override)."
+            "Operator-controlled friendly alias (e.g. 'primary'). For Claude "
+            "this is the ``alias`` field on the matching "
+            "``dashboard.claude.credentials`` row; informational on this row "
+            "so the dashboard can render the friendly name without a join. "
+            "None for non-token paths (transcript, env override)."
         ),
     )
     account_id: str | None = field(
@@ -253,67 +254,6 @@ def iso_to_epoch_seconds(value: Any) -> int | None:
     return int(parsed.timestamp())
 
 
-def load_claude_credential_bundle(path: str | Path) -> dict[str, Any] | None:
-    """Load a Claude OAuth credential bundle from a setup-token or creds file.
-
-    auto-10lsv: dropped the legacy ``fingerprint`` output; identity is now
-    keyed by Anthropic org UUID (from the /usage response header) plus the
-    operator-facing token alias. Old callers that read ``fingerprint`` are
-    gone; the bundle dict no longer carries that field.
-    """
-
-    p = Path(path)
-    try:
-        raw = p.read_text(encoding="utf-8")
-    except OSError:
-        return None
-
-    if p.name.startswith(".setup-token"):
-        token = raw.strip()
-        if not token:
-            return None
-        return {
-            "source_kind": "setup_token",
-            "path": str(p),
-            "access_token": token,
-            "refresh_token": None,
-            "subscription_type": None,
-            "rate_limit_tier": None,
-            "expires_at_ms": None,
-        }
-
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    oauth = payload.get("claudeAiOauth")
-    if not isinstance(oauth, dict):
-        return None
-    access_token = oauth.get("accessToken")
-    if not isinstance(access_token, str) or not access_token.strip():
-        return None
-    refresh_token = oauth.get("refreshToken")
-    expires_at_ms = oauth.get("expiresAt")
-    try:
-        expires_at_ms = int(expires_at_ms) if expires_at_ms is not None else None
-    except (TypeError, ValueError):
-        expires_at_ms = None
-
-    return {
-        "source_kind": "credentials_json",
-        "path": str(p),
-        "access_token": access_token,
-        "refresh_token": refresh_token if isinstance(refresh_token, str) and refresh_token else None,
-        "subscription_type": oauth.get("subscriptionType")
-        if isinstance(oauth.get("subscriptionType"), str) else None,
-        "rate_limit_tier": oauth.get("rateLimitTier")
-        if isinstance(oauth.get("rateLimitTier"), str) else None,
-        "expires_at_ms": expires_at_ms,
-    }
-
-
 def normalize_codex_usage_payload(
     state: dict[str, Any],
     *,
@@ -351,10 +291,10 @@ def normalize_claude_usage_payload(
 ) -> dict[str, Any]:
     """Build a Claude harness-usage row payload.
 
-    ``alias`` is the operator-facing token alias (the ``.setup-token.<alias>``
-    suffix that produced this bundle, or ``"default"`` for the bare file).
-    Stamped onto every row so the dashboard can map an org row back to the
-    file the operator can edit.
+    ``alias`` is the operator-facing friendly name from the matching
+    ``dashboard.claude.credentials`` row (the same field operators set
+    via ``graph claude install --alias <name>``). Stamped onto every
+    row so the dashboard can render the friendly name without a join.
     """
     identity = _resolve_claude_identity(org_id)
     return _build_usage_payload(

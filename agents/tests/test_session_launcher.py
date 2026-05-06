@@ -670,178 +670,466 @@ def test_capability_env_resolves_host_binding_from_environ(
     assert "GH_TOKEN=ghp_from_host_env" in envs
 
 
-# ── auto-10lsv: multi-token Claude auth ─────────────────────────────
+# ── auto-08n3f: substrate-backed multi-token Claude auth ────────────
 
 
-class TestListClaudeTokenFiles:
-    def test_returns_only_setup_token_files(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
-        (tmp_path / ".setup-token").write_text("default-tok")
-        (tmp_path / ".setup-token.primary").write_text("primary-tok")
-        (tmp_path / ".credentials.json").write_text("{}")
-        (tmp_path / "unrelated.txt").write_text("nope")
+class _FakeRow:
+    """Stand-in for substrate ``ResolvedSetting`` used by the picker tests.
 
-        files = session_launcher.list_claude_token_files()
-        names = [p.name for p in files]
-        assert names == [".setup-token", ".setup-token.primary"]
+    Carries just the fields the launcher reads (``key``, ``payload``,
+    ``created_at``) so we can compose deterministic substrate states
+    without spinning up a real graph DB.
+    """
 
-    def test_missing_dir_returns_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path / "nope"))
-        assert session_launcher.list_claude_token_files() == []
+    def __init__(
+        self, *, key: str, payload: dict,
+        created_at: str = "2026-05-06T00:00:00Z",
+    ) -> None:
+        self.key = key
+        self.payload = payload
+        self.created_at = created_at
 
-    def test_alias_for_token_file(self, tmp_path):
-        assert session_launcher.alias_for_token_file(
-            tmp_path / ".setup-token",
-        ) == "default"
-        assert session_launcher.alias_for_token_file(
-            tmp_path / ".setup-token.primary",
-        ) == "primary"
+
+def _setup_token_row(org_uuid: str, raw_key: str) -> _FakeRow:
+    return _FakeRow(key=org_uuid, payload={"raw_key": raw_key})
+
+
+def _credentials_row(org_uuid: str, alias: str) -> _FakeRow:
+    return _FakeRow(
+        key=org_uuid,
+        payload={
+            "alias": alias,
+            "organization_name": f"{alias}-org",
+            "account_email": f"{alias}@example.com",
+            "access_token": f"sk-ant-oat01-access-{alias}",
+            "refresh_token": f"sk-ant-ort01-refresh-{alias}",
+            "expires_at_ms": 9999999999999,
+            "scopes": ["user:profile"],
+        },
+    )
+
+
+_FRESH_USAGE_TS = "2026-05-06T00:00:00Z"
+
+
+def _usage_payload(
+    org_uuid: str, alias: str, *,
+    short_pct: float, long_pct: float,
+    updated_at: str = _FRESH_USAGE_TS,
+) -> dict:
+    return {
+        "harness": "claude",
+        "account_id": org_uuid,
+        "alias": alias,
+        "updated_at": updated_at,
+        "windows": {
+            "short": {"used_percent": short_pct},
+            "long": {"used_percent": long_pct},
+        },
+    }
+
+
+@pytest.fixture
+def freeze_now(monkeypatch):
+    """Pin ``datetime.now(timezone.utc)`` inside session_launcher."""
+    from datetime import datetime, timezone
+
+    fixed = datetime(2026, 5, 6, 0, 0, 0, tzinfo=timezone.utc)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # noqa: D401
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    monkeypatch.setattr(session_launcher, "datetime", _FrozenDatetime)
+    return fixed
+
+
+class TestSubstrateCredentialsPicker:
+    """Acceptance criteria for ``_resolve_credentials_via_substrate``.
+
+    Three scenarios from the bead spec:
+    (a) all setup tokens have fresh harness-usage rows → max-min pick is
+        deterministic.
+    (b) some tokens lack fresh usage rows → uniform random pick.
+    (c) zero unexpired setup-token rows → calls ``graph claude install``.
+    """
+
+    def test_a_maxmin_pick_is_deterministic(self, monkeypatch, freeze_now):
+        tokens = [
+            _setup_token_row("org-A", "raw-A"),
+            _setup_token_row("org-B", "raw-B"),
+        ]
+        creds = [
+            _credentials_row("org-A", "gmail"),
+            _credentials_row("org-B", "auto-network"),
+        ]
+        usage = [
+            # B has more headroom on the short window (95% free vs 20%);
+            # max-min picks B.
+            _usage_payload("org-A", "gmail",
+                           short_pct=80.0, long_pct=10.0),
+            _usage_payload("org-B", "auto-network",
+                           short_pct=5.0, long_pct=10.0),
+        ]
+        monkeypatch.setattr(session_launcher, "_setup_token_rows", lambda: tokens)
+        monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: creds)
+        monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: usage)
+
+        result = session_launcher._resolve_credentials_via_substrate(
+            prefer_alias=None,
+        )
+
+        assert result == {
+            "type": "token",
+            "token": "raw-B",
+            "harness_token": "org-B",
+            "alias": "auto-network",
+        }
+
+    def test_a_repeats_pick_across_calls(self, monkeypatch, freeze_now):
+        """Same usage state → same pick. Determinism (no rng involvement)."""
+        tokens = [
+            _setup_token_row("org-A", "raw-A"),
+            _setup_token_row("org-B", "raw-B"),
+        ]
+        creds = [
+            _credentials_row("org-A", "gmail"),
+            _credentials_row("org-B", "auto-network"),
+        ]
+        usage = [
+            _usage_payload("org-A", "gmail",
+                           short_pct=80.0, long_pct=10.0),
+            _usage_payload("org-B", "auto-network",
+                           short_pct=5.0, long_pct=10.0),
+        ]
+        monkeypatch.setattr(session_launcher, "_setup_token_rows", lambda: tokens)
+        monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: creds)
+        monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: usage)
+
+        # Force the rng to a state that would prefer A if the random
+        # branch fired — the test should still pick B because all tokens
+        # have fresh telemetry, so the deterministic branch runs.
+        rng = __import__("random").Random(0)
+        first = session_launcher._resolve_credentials_via_substrate(
+            prefer_alias=None, rng=rng,
+        )
+        second = session_launcher._resolve_credentials_via_substrate(
+            prefer_alias=None, rng=rng,
+        )
+        assert first == second
+        assert first["harness_token"] == "org-B"
+
+    def test_b_random_pick_uniform_when_some_lack_usage(
+        self, monkeypatch, freeze_now,
+    ):
+        """B token has no harness-usage row → fall through to random pick.
+
+        We seed the rng so the choice is reproducible and assert it
+        returns one of the two tokens. The acceptance criterion is
+        "random pick chosen uniformly" — we exercise both branches by
+        calling with two distinct seeds.
+        """
+        tokens = [
+            _setup_token_row("org-A", "raw-A"),
+            _setup_token_row("org-B", "raw-B"),
+        ]
+        creds = [
+            _credentials_row("org-A", "gmail"),
+            _credentials_row("org-B", "auto-network"),
+        ]
+        # Only org-A has a usage row — org-B has nothing → random branch.
+        usage = [
+            _usage_payload("org-A", "gmail",
+                           short_pct=10.0, long_pct=10.0),
+        ]
+        monkeypatch.setattr(session_launcher, "_setup_token_rows", lambda: tokens)
+        monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: creds)
+        monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: usage)
+
+        import random as _random
+        results = set()
+        for seed in range(20):
+            r = _random.Random(seed)
+            picked = session_launcher._resolve_credentials_via_substrate(
+                prefer_alias=None, rng=r,
+            )
+            assert picked is not None
+            results.add(picked["harness_token"])
+        # Both tokens must appear over a small range of seeds — proves
+        # the picker is drawing uniformly rather than always returning
+        # the first token.
+        assert results == {"org-A", "org-B"}
+
+    def test_b_random_pick_when_no_usage_at_all(self, monkeypatch, freeze_now):
+        """First-launch / empty harness-usage set → random branch fires."""
+        tokens = [
+            _setup_token_row("org-A", "raw-A"),
+            _setup_token_row("org-B", "raw-B"),
+        ]
+        creds = [
+            _credentials_row("org-A", "gmail"),
+            _credentials_row("org-B", "auto-network"),
+        ]
+        monkeypatch.setattr(session_launcher, "_setup_token_rows", lambda: tokens)
+        monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: creds)
+        monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
+
+        import random as _random
+        # Force the rng output to org-B so we can assert exactly.
+        class _PinnedRng:
+            def choice(self, seq):
+                return seq[1]
+
+        result = session_launcher._resolve_credentials_via_substrate(
+            prefer_alias=None, rng=_PinnedRng(),
+        )
+        assert result["harness_token"] == "org-B"
+        assert result["alias"] == "auto-network"
+
+    def test_b_random_pick_when_usage_is_stale(self, monkeypatch, freeze_now):
+        """Usage rows older than the schema TTL count as "no usage" → random."""
+        tokens = [
+            _setup_token_row("org-A", "raw-A"),
+            _setup_token_row("org-B", "raw-B"),
+        ]
+        creds = [
+            _credentials_row("org-A", "gmail"),
+            _credentials_row("org-B", "auto-network"),
+        ]
+        usage = [
+            _usage_payload(
+                "org-A", "gmail",
+                short_pct=10.0, long_pct=10.0,
+                updated_at="2025-01-01T00:00:00Z",  # ancient
+            ),
+            _usage_payload(
+                "org-B", "auto-network",
+                short_pct=10.0, long_pct=10.0,
+                updated_at="2025-01-01T00:00:00Z",
+            ),
+        ]
+        monkeypatch.setattr(session_launcher, "_setup_token_rows", lambda: tokens)
+        monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: creds)
+        monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: usage)
+
+        class _PinnedRng:
+            def choice(self, seq):
+                return seq[0]
+
+        result = session_launcher._resolve_credentials_via_substrate(
+            prefer_alias=None, rng=_PinnedRng(),
+        )
+        # Stale usage means we hit the random branch and the rng wins —
+        # not the (would-be-) max-min pick on the stale numbers.
+        assert result["harness_token"] == "org-A"
+
+    def test_c_zero_tokens_calls_graph_claude_install(
+        self, monkeypatch, freeze_now,
+    ):
+        """No unexpired setup-token rows → call install, then re-read."""
+        # First call: empty. After install: one row appears.
+        states = [[], [_setup_token_row("org-A", "raw-A")]]
+
+        def _fake_setup_tokens():
+            return states.pop(0)
+
+        install_calls: list[list[str]] = []
+
+        def _fake_run(cmd, **kwargs):
+            install_calls.append(list(cmd))
+
+            class _R:
+                returncode = 0
+            return _R()
+
+        monkeypatch.setattr(session_launcher, "_setup_token_rows", _fake_setup_tokens)
+        monkeypatch.setattr(
+            session_launcher, "_credentials_rows",
+            lambda: [_credentials_row("org-A", "gmail")],
+        )
+        monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
+        monkeypatch.setattr(session_launcher.subprocess, "run", _fake_run)
+
+        result = session_launcher._resolve_credentials_via_substrate(
+            prefer_alias=None,
+        )
+
+        assert install_calls == [["graph", "claude", "install"]]
+        assert result is not None
+        assert result["harness_token"] == "org-A"
+        assert result["alias"] == "gmail"
+
+    def test_c_install_failure_returns_none(self, monkeypatch, freeze_now):
+        """If install also yields nothing, return None so the launcher
+        surfaces "No Claude credentials found" the way it does today."""
+        import subprocess as _sp
+
+        monkeypatch.setattr(session_launcher, "_setup_token_rows", lambda: [])
+        monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: [])
+        monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
+
+        def _fake_run(cmd, **kwargs):
+            raise _sp.CalledProcessError(1, cmd)
+
+        monkeypatch.setattr(session_launcher.subprocess, "run", _fake_run)
+
+        assert (
+            session_launcher._resolve_credentials_via_substrate(prefer_alias=None)
+            is None
+        )
+
+    def test_prefer_alias_resolves_to_matching_org(
+        self, monkeypatch, freeze_now,
+    ):
+        """Operator override picks the credentials row whose alias matches,
+        then the setup-token row keyed by the same org UUID."""
+        tokens = [
+            _setup_token_row("org-A", "raw-A"),
+            _setup_token_row("org-B", "raw-B"),
+        ]
+        creds = [
+            _credentials_row("org-A", "gmail"),
+            _credentials_row("org-B", "auto-network"),
+        ]
+        usage = [
+            _usage_payload("org-A", "gmail",
+                           short_pct=5.0, long_pct=5.0),
+            _usage_payload("org-B", "auto-network",
+                           short_pct=80.0, long_pct=80.0),
+        ]
+        monkeypatch.setattr(session_launcher, "_setup_token_rows", lambda: tokens)
+        monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: creds)
+        monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: usage)
+
+        # auto-network wins despite gmail having more headroom because
+        # the operator override is authoritative.
+        result = session_launcher._resolve_credentials_via_substrate(
+            prefer_alias="auto-network",
+        )
+        assert result["harness_token"] == "org-B"
+        assert result["alias"] == "auto-network"
+
+    def test_prefer_unknown_alias_falls_through_to_selection(
+        self, monkeypatch, freeze_now,
+    ):
+        """A typo / unknown alias does not block dispatch — the picker
+        just falls through to the headroom-based or random selection."""
+        tokens = [_setup_token_row("org-A", "raw-A")]
+        creds = [_credentials_row("org-A", "gmail")]
+        usage = [
+            _usage_payload("org-A", "gmail",
+                           short_pct=10.0, long_pct=10.0),
+        ]
+        monkeypatch.setattr(session_launcher, "_setup_token_rows", lambda: tokens)
+        monkeypatch.setattr(session_launcher, "_credentials_rows", lambda: creds)
+        monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: usage)
+
+        result = session_launcher._resolve_credentials_via_substrate(
+            prefer_alias="ghost",
+        )
+        assert result["harness_token"] == "org-A"
+
+    def test_expired_setup_token_rows_filtered(self, monkeypatch, freeze_now):
+        """Setup-token rows past their @cache TTL (1y) are dropped before
+        the picker considers them."""
+        from datetime import timedelta
+        from tools.graph.schemas.claude_setup_tokens import (
+            CLAUDE_SETUP_TOKEN_TTL,
+        )
+        # One fresh row (created today) + one expired row (created 2y ago).
+        fresh = _FakeRow(
+            key="org-A",
+            payload={"raw_key": "raw-A"},
+            created_at=freeze_now.isoformat(),
+        )
+        expired_at = freeze_now - CLAUDE_SETUP_TOKEN_TTL - timedelta(days=1)
+        old = _FakeRow(
+            key="org-B",
+            payload={"raw_key": "raw-B"},
+            created_at=expired_at.isoformat(),
+        )
+
+        # Stand in for ops.read_set: return both rows; _setup_token_rows
+        # itself does the filtering, so let it run unmocked.
+        from types import SimpleNamespace
+
+        def _fake_read_set(set_id, org=None):
+            return SimpleNamespace(members=[fresh, old])
+
+        import tools.graph.ops as _ops
+        monkeypatch.setattr(_ops, "read_set", _fake_read_set)
+        monkeypatch.setattr(
+            session_launcher, "_credentials_rows",
+            lambda: [_credentials_row("org-A", "gmail")],
+        )
+        monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
+
+        class _PinnedRng:
+            def choice(self, seq):
+                # The picker should only see the fresh row, so seq[0] is org-A.
+                assert len(seq) == 1
+                return seq[0]
+
+        result = session_launcher._resolve_credentials_via_substrate(
+            prefer_alias=None, rng=_PinnedRng(),
+        )
+        assert result["harness_token"] == "org-A"
 
 
 class TestResolveCredentials:
     def test_env_var_wins_and_emits_no_alias(self, tmp_path, monkeypatch):
-        """Acceptance criterion #4: CLAUDE_CODE_OAUTH_TOKEN compat path preserved."""
-        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
-        (tmp_path / ".setup-token").write_text("file-tok")
+        """Acceptance criterion: ``CLAUDE_CODE_OAUTH_TOKEN`` env-var
+        override path preserved (operator backstop when substrate is
+        unavailable / hand-launched runs)."""
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "env-tok-xyz")
 
         creds = session_launcher._resolve_credentials()
         assert creds == {"type": "token", "token": "env-tok-xyz"}
         assert "alias" not in creds
 
-    def test_falls_through_to_credentials_json_when_no_setup_tokens(
-        self, tmp_path, monkeypatch,
-    ):
-        """Acceptance criterion #5: legacy creds_file path preserved."""
-        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
+    def test_returns_none_when_substrate_empty(self, monkeypatch):
+        """Empty substrate, install also fails → None."""
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-        creds_file = tmp_path / ".credentials.json"
-        creds_file.write_text('{"claudeAiOauth": {"accessToken": "x"}}')
+        monkeypatch.setattr(session_launcher, "_setup_token_rows", lambda: [])
 
-        creds = session_launcher._resolve_credentials()
+        def _bail(cmd, **kwargs):
+            import subprocess as _sp
+            raise _sp.CalledProcessError(1, cmd)
 
-        assert creds == {"type": "creds_file", "path": str(creds_file)}
+        monkeypatch.setattr(session_launcher.subprocess, "run", _bail)
 
-    def test_returns_none_when_nothing_found(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
-        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
         assert session_launcher._resolve_credentials() is None
-
-    def test_picks_token_file_and_emits_alias(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
-        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-        (tmp_path / ".setup-token").write_text("default-tok\n")
-
-        # No usage rows yet (first launch / empty graph) → returns alias.
-        monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
-
-        creds = session_launcher._resolve_credentials()
-        assert creds == {
-            "type": "token", "token": "default-tok", "alias": "default",
-        }
-
-    def test_prefer_alias_wins_when_file_exists(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
-        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-        (tmp_path / ".setup-token").write_text("default-tok")
-        (tmp_path / ".setup-token.primary").write_text("primary-tok")
-        monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
-
-        creds = session_launcher._resolve_credentials(prefer_alias="primary")
-        assert creds["alias"] == "primary"
-        assert creds["token"] == "primary-tok"
-
-    def test_prefer_unknown_alias_falls_through_to_selection(
-        self, tmp_path, monkeypatch,
-    ):
-        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
-        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-        (tmp_path / ".setup-token").write_text("default-tok")
-        monkeypatch.setattr(session_launcher, "_claude_usage_rows", lambda: [])
-
-        # Unknown alias does not block the launch — the selector picks the
-        # default file as the next-best option.
-        creds = session_launcher._resolve_credentials(prefer_alias="ghost")
-        assert creds["alias"] == "default"
-
-    def test_picks_least_used_token_by_short_window_headroom(
-        self, tmp_path, monkeypatch,
-    ):
-        """Acceptance criterion #3: launcher picks low-utilization token."""
-        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
-        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-        (tmp_path / ".setup-token").write_text("default-tok")
-        (tmp_path / ".setup-token.primary").write_text("primary-tok")
-
-        usage_rows = [
-            # default at 80% short → 20% headroom
-            {
-                "harness": "claude", "alias": "default",
-                "windows": {"short": {"used_percent": 80.0}, "long": {}},
-            },
-            # primary at 5% short → 95% headroom (winner)
-            {
-                "harness": "claude", "alias": "primary",
-                "windows": {"short": {"used_percent": 5.0}, "long": {}},
-            },
-        ]
-        monkeypatch.setattr(
-            session_launcher, "_claude_usage_rows", lambda: usage_rows,
-        )
-
-        creds = session_launcher._resolve_credentials()
-        assert creds["alias"] == "primary"
-
-    def test_first_launch_token_ranks_above_already_seen(
-        self, tmp_path, monkeypatch,
-    ):
-        """Brand-new tokens (no usage row) outrank ones with telemetry so
-        they get exercised before refreshing existing rows."""
-        monkeypatch.setenv("CLAUDE_CREDENTIALS_DIR", str(tmp_path))
-        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-        (tmp_path / ".setup-token").write_text("default-tok")
-        (tmp_path / ".setup-token.fresh").write_text("fresh-tok")
-
-        usage_rows = [
-            # default has telemetry: 0% used → 100% headroom (high but
-            # finite).
-            {
-                "harness": "claude", "alias": "default",
-                "windows": {"short": {"used_percent": 0.0}, "long": {}},
-            },
-            # fresh has no row → ranks at top per the selector contract.
-        ]
-        monkeypatch.setattr(
-            session_launcher, "_claude_usage_rows", lambda: usage_rows,
-        )
-
-        creds = session_launcher._resolve_credentials()
-        assert creds["alias"] == "fresh"
 
 
 def test_meta_doc_records_harness_token(
     tmp_path, fake_crosstalk, captured_run, monkeypatch,
 ):
-    """auto-10lsv (renamed in auto-ghhdg): launcher writes the chosen
-    credential pointer into .session_meta.json under ``harness_token`` so
-    the dashboard can surface it on registration."""
+    """auto-08n3f: launcher writes the chosen Anthropic org UUID into
+    ``.session_meta.json`` under ``harness_token`` so the dashboard can
+    join it to the friendly alias on registration."""
     monkeypatch.setattr(
         session_launcher,
         "_resolve_credentials",
-        lambda: {"type": "token", "token": "tok-xyz", "alias": "primary"},
+        lambda: {
+            "type": "token",
+            "token": "tok-xyz",
+            "alias": "primary",
+            "harness_token": "879d3b11-f034-4e6e-87b2-6a8f839f4779",
+        },
     )
     run_dir = tmp_path / "run"
     _run(output_dir=str(run_dir))
 
     meta = json.loads((run_dir / "sessions" / ".session_meta.json").read_text())
-    assert meta["harness_token"] == "primary"
+    assert meta["harness_token"] == "879d3b11-f034-4e6e-87b2-6a8f839f4779"
 
 
 def test_meta_doc_omits_token_when_none(
     tmp_path, fake_crosstalk, captured_run, monkeypatch,
 ):
-    """No alias on the creds dict (env-var path or creds_file) → no
-    ``harness_token`` key in the meta doc."""
+    """No ``harness_token`` on the creds dict (env-var compat path) →
+    no ``harness_token`` key in the meta doc."""
     monkeypatch.setattr(
         session_launcher,
         "_resolve_credentials",
