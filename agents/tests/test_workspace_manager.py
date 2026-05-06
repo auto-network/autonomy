@@ -858,6 +858,94 @@ def test_cleanup_preserves_worktree_with_local_commits(tmp_path, monkeypatch):
     assert "local commits" == reason
 
 
+def test_cleanup_removes_worktree_after_cherry_pick(tmp_path, monkeypatch):
+    """Cherry-picked commits must not keep a worktree alive forever.
+
+    Regression for the cleanup-vs-dashboard ahead-counter divergence:
+    the dashboard's ``_worktree_commits_ahead`` does patch-id matching
+    via ``git cherry``, but the cleanup preserve-check used to do raw
+    ``rev-list --count base..HEAD``. After a session's commit got
+    cherry-picked onto master with a new SHA, raw rev-list still saw
+    "1 ahead" and the worktree was preserved indefinitely, even though
+    the dashboard reported ``commits_ahead=0``. This test pins the
+    fixed behaviour: same patch-id on base ⇒ worktree is removable.
+    """
+    session = "sess-cherry"
+    worktrees_dir, _clone, worktree = _make_writable_session_worktree(
+        tmp_path, session, monkeypatch,
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "config", "user.email", "t@t"], check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "config", "user.name", "t"], check=True,
+    )
+
+    # Commit a change on the session branch.
+    (worktree / "feature.txt").write_text("feature work\n")
+    subprocess.run(["git", "-C", str(worktree), "add", "feature.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(worktree), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "feature",
+        ],
+        check=True,
+    )
+    session_sha = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    # Synthesize a cherry-pick onto main: same tree, different parent ⇒
+    # different SHA, identical patch-id. ``git cherry`` then sees the
+    # session commit's patch as already present on main.
+    main_parent = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "main"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    feature_tree = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", f"{session_sha}^{{tree}}"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    new_main_sha = subprocess.run(
+        [
+            "git", "-C", str(worktree),
+            "-c", "commit.gpgsign=false",
+            "-c", "user.email=t@t", "-c", "user.name=t",
+            "commit-tree", feature_tree, "-p", main_parent,
+            "-m", "cherry-pick of feature",
+        ],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(worktree), "update-ref",
+         "refs/heads/main", new_main_sha],
+        check=True,
+    )
+
+    # Sanity: SHAs differ, but ``git cherry`` reports zero "+ " lines.
+    assert session_sha != new_main_sha
+    cherry_out = subprocess.run(
+        ["git", "-C", str(worktree), "cherry", "main", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    plus_lines = [ln for ln in cherry_out.splitlines() if ln.startswith("+ ")]
+    assert plus_lines == [], (
+        f"expected no '+ ' lines from `git cherry main HEAD`, got: {cherry_out!r}"
+    )
+
+    # The fixed preserve-check sees patch-id-on-base ⇒ remove.
+    result = wm.cleanup_session_worktrees(
+        session, worktrees_dir=worktrees_dir,
+    )
+    assert str(worktree) in result.removed, (
+        f"expected worktree removed; "
+        f"preserved={result.preserved} errors={result.errors}"
+    )
+    assert not result.preserved
+    assert not worktree.exists()
+
+
 def test_cleanup_force_removes_dirty_worktree(tmp_path, monkeypatch):
     session = "sess-force"
     worktrees_dir, clone, worktree = _make_writable_session_worktree(
