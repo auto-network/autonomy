@@ -159,6 +159,8 @@ Run `graph --help` for full reference.
 
 **Search heuristic.** Lead with the single highest-signal term. Multi-term queries and `--or` widen the candidate set and tend to score the obvious hit *down*, not up. If the row you want is buried, scope before widening: `--type session` / `--type note` / `--project` / `--tag` all compose. Reach for `--or` only when the strict-AND query legitimately returns nothing.
 
+**Reading notes — comments and the trailer.** `graph read <note>` shows open (non-integrated) comments by default; `--all-comments` adds the ones already rolled into the body — only needed for synthesis passes / audits. Every read ends with a trailer like `── 14,328 chars · 287 lines · 19 comments (14 open, 5 integrated) ──`. If you don't see it, you didn't read to the end. If the comment count there exceeds what you rendered, your `--max-chars` or shell pipe (`head`, `tail`) hid feedback — re-read without the cap before drawing conclusions.
+
 **Sharing files with the operator (`graph share`)**
 
 Use `graph share <file> [--alt ...] [--caption ...]` to drop an image (or
