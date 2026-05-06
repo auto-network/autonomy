@@ -8603,13 +8603,14 @@ def _fetch_claude_oauth_usage(
     duration so production traces attribute every call to its outcome.
     Bearer token is never logged."""
     url = "https://api.anthropic.com/api/oauth/usage"
+    from tools.graph.claude_oauth import CLAUDE_USER_AGENT
     req = urllib_request.Request(
         url,
         headers={
             "Authorization": f"Bearer {access_token}",
             "anthropic-beta": "oauth-2025-04-20",
             "Content-Type": "application/json",
-            "User-Agent": "autonomy-dashboard/1.0",
+            "User-Agent": CLAUDE_USER_AGENT,
         },
         method="GET",
     )
