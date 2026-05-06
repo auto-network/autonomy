@@ -80,9 +80,16 @@ def _post_form(url: str, data: dict[str, str]) -> dict[str, Any]:
     """POST form-encoded ``data`` to ``url`` and return the JSON body.
 
     Surfaces non-2xx with a clean :class:`OAuthError`. Used for the
-    authorization-code → token exchange. We rely on urllib (stdlib) so
-    the OAuth path works in any environment without optional deps.
+    authorization-code → token exchange and the refresh-token grant.
+    We rely on urllib (stdlib) so the OAuth path works in any environment
+    without optional deps.
+
+    Every call logs intent (grant_type) before the request, then either
+    success (HTTP code, duration) or failure (HTTP code + sanitized
+    error_description) so production debugging has full per-request
+    visibility. Token values are never logged.
     """
+    grant_type = data.get("grant_type", "<unknown>")
     encoded = urllib.parse.urlencode(data).encode("ascii")
     req = urllib.request.Request(
         url,
@@ -93,29 +100,65 @@ def _post_form(url: str, data: dict[str, str]) -> dict[str, Any]:
         },
         method="POST",
     )
+    logger.info("oauth: POST %s grant_type=%s", url, grant_type)
+    started = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = resp.read()
+            status_code = resp.status
     except urllib.error.HTTPError as e:
+        elapsed_ms = (time.monotonic() - started) * 1000
         body = e.read() or b""
         try:
             parsed = json.loads(body.decode("utf-8") or "{}")
         except (json.JSONDecodeError, UnicodeDecodeError):
             parsed = {}
+        err_desc = parsed.get("error_description") or parsed.get("error") or ""
+        logger.error(
+            "oauth: POST %s grant_type=%s FAILED HTTP %d in %.1fms: %s",
+            url, grant_type, e.code, elapsed_ms, err_desc or repr(body[:200]),
+        )
         raise OAuthError(
             f"token endpoint returned HTTP {e.code}: "
-            f"{parsed.get('error_description') or parsed.get('error') or body!r}"
+            f"{err_desc or body!r}"
         ) from None
     except urllib.error.URLError as e:
+        elapsed_ms = (time.monotonic() - started) * 1000
+        logger.error(
+            "oauth: POST %s grant_type=%s UNREACHABLE in %.1fms: %s",
+            url, grant_type, elapsed_ms, e.reason,
+        )
         raise OAuthError(f"token endpoint unreachable: {e.reason}") from None
+    elapsed_ms = (time.monotonic() - started) * 1000
     try:
-        return json.loads(body.decode("utf-8"))
+        parsed_body = json.loads(body.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        logger.error(
+            "oauth: POST %s grant_type=%s returned HTTP %d non-JSON body in %.1fms",
+            url, grant_type, status_code, elapsed_ms,
+        )
         raise OAuthError(f"token endpoint returned non-JSON body: {e}") from None
+    # Log success with the response shape that's safe to surface — never
+    # the access_token / refresh_token themselves. expires_in + scope +
+    # organization.uuid are enough for ops to triage.
+    org_meta = parsed_body.get("organization") if isinstance(parsed_body, dict) else None
+    org_uuid = org_meta.get("uuid") if isinstance(org_meta, dict) else None
+    logger.info(
+        "oauth: POST %s grant_type=%s OK HTTP %d in %.1fms expires_in=%s scope=%r org=%s",
+        url, grant_type, status_code, elapsed_ms,
+        parsed_body.get("expires_in") if isinstance(parsed_body, dict) else None,
+        parsed_body.get("scope") if isinstance(parsed_body, dict) else None,
+        org_uuid,
+    )
+    return parsed_body
 
 
 def _post_bearer(url: str, bearer_token: str) -> dict[str, Any]:
-    """POST an empty body to ``url`` with ``Authorization: Bearer <token>``."""
+    """POST an empty body to ``url`` with ``Authorization: Bearer <token>``.
+
+    Logs intent / success / failure with HTTP code + duration; bearer
+    token is never logged.
+    """
     req = urllib.request.Request(
         url,
         data=b"",
@@ -126,25 +169,52 @@ def _post_bearer(url: str, bearer_token: str) -> dict[str, Any]:
         },
         method="POST",
     )
+    logger.info("oauth: POST %s (Bearer auth)", url)
+    started = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = resp.read()
+            status_code = resp.status
     except urllib.error.HTTPError as e:
+        elapsed_ms = (time.monotonic() - started) * 1000
         body = e.read() or b""
         try:
             parsed = json.loads(body.decode("utf-8") or "{}")
         except (json.JSONDecodeError, UnicodeDecodeError):
             parsed = {}
+        err_desc = parsed.get("error_description") or parsed.get("error") or ""
+        logger.error(
+            "oauth: POST %s (Bearer auth) FAILED HTTP %d in %.1fms: %s",
+            url, e.code, elapsed_ms, err_desc or repr(body[:200]),
+        )
         raise OAuthError(
             f"mint endpoint returned HTTP {e.code}: "
-            f"{parsed.get('error_description') or parsed.get('error') or body!r}"
+            f"{err_desc or body!r}"
         ) from None
     except urllib.error.URLError as e:
+        elapsed_ms = (time.monotonic() - started) * 1000
+        logger.error(
+            "oauth: POST %s (Bearer auth) UNREACHABLE in %.1fms: %s",
+            url, elapsed_ms, e.reason,
+        )
         raise OAuthError(f"mint endpoint unreachable: {e.reason}") from None
+    elapsed_ms = (time.monotonic() - started) * 1000
     try:
-        return json.loads(body.decode("utf-8"))
+        parsed_body = json.loads(body.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        logger.error(
+            "oauth: POST %s (Bearer auth) returned HTTP %d non-JSON body in %.1fms",
+            url, status_code, elapsed_ms,
+        )
         raise OAuthError(f"mint endpoint returned non-JSON body: {e}") from None
+    # Mint response only contains 'raw_key' (and possibly other metadata).
+    # Don't log raw_key itself; just confirm we got one.
+    has_key = bool(isinstance(parsed_body, dict) and parsed_body.get("raw_key"))
+    logger.info(
+        "oauth: POST %s (Bearer auth) OK HTTP %d in %.1fms raw_key_present=%s",
+        url, status_code, elapsed_ms, has_key,
+    )
+    return parsed_body
 
 
 # ── Authorize URL builder ────────────────────────────────────
@@ -241,7 +311,12 @@ def exchange_code_for_token(
         "client_id": CLIENT_ID,
         "redirect_uri": redirect_uri,
     })
-    return parse_token_response(body)
+    parsed = parse_token_response(body)
+    logger.info(
+        "oauth: code-exchange resolved org=%s account=%s scope=%r",
+        parsed.organization_uuid, parsed.account_email, parsed.scope,
+    )
+    return parsed
 
 
 def mint_setup_token(*, console_access_token: str) -> str:
@@ -250,10 +325,16 @@ def mint_setup_token(*, console_access_token: str) -> str:
     Anthropic's response carries ``raw_key`` (and possibly other
     metadata; we only persist the key per the design).
     """
+    logger.info("oauth: minting setup-token via %s", MINT_URL)
     body = _post_bearer(MINT_URL, console_access_token)
     raw_key = body.get("raw_key")
     if not isinstance(raw_key, str) or not raw_key:
+        logger.error(
+            "oauth: mint response missing 'raw_key' (keys=%s)",
+            sorted(body.keys()) if isinstance(body, dict) else type(body).__name__,
+        )
         raise OAuthError("mint response missing 'raw_key'")
+    logger.info("oauth: mint OK (raw_key length=%d)", len(raw_key))
     return raw_key
 
 
@@ -355,13 +436,17 @@ def run_loopback_capture(
     server = http.server.HTTPServer(("127.0.0.1", port), handler_cls)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    logger.info("oauth: loopback listener started on port %d", port)
     try:
         opened = False
         try:
             opened = bool(open_browser(authorize_url))
         except Exception as e:  # noqa: BLE001 — webbrowser is finicky
             logger.warning("webbrowser.open failed: %s", e)
-        if not opened:
+        if opened:
+            logger.info("oauth: browser opened to authorize URL")
+        else:
+            logger.warning("oauth: browser did not open; falling back to operator paste")
             print(
                 "Could not open the browser automatically. Visit this URL:\n"
                 f"  {authorize_url}",
@@ -369,6 +454,7 @@ def run_loopback_capture(
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             if "code" in handler_cls.captured:
+                logger.info("oauth: authorization code captured on loopback")
                 return AuthCodeCapture(
                     code=handler_cls.captured["code"],
                     state=handler_cls.captured.get("state"),
@@ -376,11 +462,15 @@ def run_loopback_capture(
             if "error" in handler_cls.captured:
                 err = handler_cls.captured["error"]
                 desc = handler_cls.captured.get("error_description", "")
+                logger.error("oauth: authorize callback returned error: %s%s",
+                             err, f" — {desc}" if desc else "")
                 raise OAuthError(
                     f"login failed: {err}"
                     + (f" — {desc}" if desc else "")
                 )
             time.sleep(0.1)
+        logger.error("oauth: timed out after %ds waiting for browser callback",
+                     int(timeout_seconds))
         raise OAuthError(
             f"timed out after {int(timeout_seconds)}s waiting for the "
             "browser callback"
@@ -422,6 +512,7 @@ def run_oauth_flow(
     port = pick_ephemeral_port()
     redirect_uri = f"http://localhost:{port}/cb"
     state = secrets.token_urlsafe(16)
+    logger.info("oauth: starting flow scope=%r redirect_uri=%s", scope, redirect_uri)
     authorize_url = build_authorize_url(
         scope=scope,
         code_challenge=code_challenge,
@@ -435,6 +526,8 @@ def run_oauth_flow(
         timeout_seconds=timeout_seconds,
     )
     if capture.state is not None and capture.state != state:
+        logger.error("oauth: state mismatch — got=%r expected=%r — aborting",
+                     capture.state, state)
         raise OAuthError(
             "OAuth state mismatch — possible CSRF; aborting"
         )
