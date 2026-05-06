@@ -661,6 +661,13 @@ class _TailState:
     recent_user_turns: deque = field(
         default_factory=lambda: deque(maxlen=_TURN_CORRECTION_RECENT_USER_MSG_LIMIT)
     )
+    # auto-edec1.4: the deque above is in-process and resets on every
+    # uvicorn --reload (or any other restart). Without a seed, corrections
+    # that fire in the cold-start window find no candidates and get
+    # silently dropped. We lazy-seed once per state from the JSONL tail
+    # the first time we see a turn-correction; this flag prevents
+    # re-scanning when the JSONL has no user entries yet.
+    recent_user_turns_seeded: bool = False
 
 
 def _entry_identity(entry: dict) -> str:
@@ -791,6 +798,80 @@ def _read_harness_token_from_meta(
         if isinstance(token, str) and token.strip():
             return token.strip()
     return None
+
+
+def _seed_recent_user_turns_from_jsonl(
+    ts: _TailState,
+    jsonl_path: str | None,
+) -> None:
+    """Pre-populate ``ts.recent_user_turns`` by tail-scanning the JSONL.
+
+    auto-edec1.4: the matcher's lookback deque (``_TailState.recent_user_turns``)
+    lives in-process. Any restart — uvicorn ``--reload``, crash, manual
+    stop — wipes it. Without a seed, turn-corrections issued in the
+    cold-start window find an empty deque and get silently dropped
+    despite emitting valid JSON.
+
+    Re-reading the JSONL on demand is the durable solution: the file is
+    always present (it's how the agent persists every turn), doesn't
+    require shutdown-time bookkeeping, and survives every restart type.
+
+    Best-effort by design. Any failure leaves the deque empty, which is
+    exactly the pre-fix behavior — the matcher will still skip and log
+    the skip. We never raise out of this function.
+
+    Field-shape note: the matcher reads ``entry["message_id"]`` and
+    ``entry["content"]`` (string). Raw JSONL stores those as ``uuid``
+    and ``message.content`` (which can be a list of typed blocks for
+    multi-block user turns). We map at read time so the seeded entries
+    are interchangeable with what ``_remember_user_entry`` produces
+    live.
+    """
+    if not jsonl_path:
+        return
+    try:
+        # Bound the cost — JSONLs grow large but only the last few user
+        # turns matter for matching. The deque has its own maxlen, so
+        # any excess seeded entries fall off the front naturally.
+        tail_lines = (
+            Path(jsonl_path).read_text(errors="replace").splitlines()[-200:]
+        )
+    except OSError:
+        return
+
+    for raw in tail_lines:
+        try:
+            entry = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if entry.get("type") != "user":
+            continue
+        message_id = entry.get("uuid")
+        if not isinstance(message_id, str) or not message_id:
+            continue
+
+        # Claude's wire format puts the user body under message.content,
+        # which may be a string OR a list of typed blocks. The matcher's
+        # similarity scorer only handles strings, so flatten list-shaped
+        # content to the joined text payload.
+        msg = entry.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list):
+            content = "".join(
+                block.get("text", "")
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        if not isinstance(content, str) or not content:
+            continue
+
+        # Append in chronological order; deque maxlen handles eviction.
+        # Mirrors _remember_user_entry's stored shape exactly.
+        ts.recent_user_turns.append({
+            "message_id": message_id,
+            "content": content,
+            "timestamp": entry.get("timestamp", "") or "",
+        })
 
 
 class SessionMonitor:
@@ -2059,6 +2140,21 @@ class SessionMonitor:
         """
         if not entries:
             return
+        # auto-edec1.4: lazy-seed the matcher's lookback deque from the
+        # JSONL tail when this is the first turn-correction we've seen
+        # on this _TailState. The deque is in-memory and resets on
+        # every uvicorn --reload (or any other restart); without a seed
+        # the cold-start window silently drops every correction. Bounded
+        # cost (one 200-line tail read), idempotent (the flag prevents
+        # re-scanning), and a no-op when the batch carries no
+        # turn_correction entries — so unrelated entry processing pays
+        # nothing.
+        if (
+            not ts.recent_user_turns_seeded
+            and any(e.get("type") == "turn_correction" for e in entries)
+        ):
+            ts.recent_user_turns_seeded = True
+            _seed_recent_user_turns_from_jsonl(ts, row.get("jsonl_path"))
         session_uuid = row.get("session_uuid")
         claimed_targets: set[str] = set()
         existing_rows: dict[str, dict | None] = {}
