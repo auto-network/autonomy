@@ -837,6 +837,34 @@ def get_session(tmux_name: str) -> dict | None:
     return dict(row) if row else None
 
 
+def get_tmux_name_for_source(graph_source_id: str, session_uuid: str | None = None) -> str | None:
+    """Reverse lookup: return the tmux_name linked to a graph source.
+
+    Tries the validated ``graph_source_id`` link first; falls back to
+    ``session_uuid`` (the JSONL stem stored in source metadata) so freshly
+    ingested sources resolve before the linker runs. Returns None when
+    nothing matches.
+    """
+    if not graph_source_id and not session_uuid:
+        return None
+    conn = get_conn()
+    if graph_source_id:
+        row = conn.execute(
+            "SELECT tmux_name FROM tmux_sessions WHERE graph_source_id=? LIMIT 1",
+            (graph_source_id,),
+        ).fetchone()
+        if row and row["tmux_name"]:
+            return row["tmux_name"]
+    if session_uuid:
+        row = conn.execute(
+            "SELECT tmux_name FROM tmux_sessions WHERE session_uuid=? LIMIT 1",
+            (session_uuid,),
+        ).fetchone()
+        if row and row["tmux_name"]:
+            return row["tmux_name"]
+    return None
+
+
 def is_session_live(tmux_name: str) -> bool:
     """Return True iff a row exists for ``tmux_name`` and is_live=1.
 

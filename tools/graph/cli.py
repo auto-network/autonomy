@@ -596,6 +596,71 @@ def _resolve_tmux_name_to_source_id(tmux_name: str) -> str | None:
         return None
 
 
+def _lookup_tmux_for_source(source: dict) -> str | None:
+    """Reverse lookup: tmux name for a source dict (host mode).
+
+    Container mode: the dashboard API attaches ``tmux_session`` directly to
+    the source payload; this helper is the host-side equivalent that reads
+    the local ``dashboard.db`` so ``graph read`` can render the same chip
+    even when no API client is in use.
+    """
+    if not isinstance(source, dict) or source.get("type") != "session":
+        return None
+    sid = source.get("id") or ""
+    meta = source.get("metadata") or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except (ValueError, TypeError):
+            meta = {}
+    session_uuid = meta.get("session_uuid") or meta.get("session_id")
+    db_path = Path(__file__).parents[2] / "data" / "dashboard.db"
+    if not (db_path.exists() and db_path.stat().st_size > 0):
+        return None
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        if sid:
+            row = conn.execute(
+                "SELECT tmux_name FROM tmux_sessions WHERE graph_source_id=? LIMIT 1",
+                (sid,),
+            ).fetchone()
+            if row and row["tmux_name"]:
+                conn.close()
+                return row["tmux_name"]
+        if session_uuid:
+            row = conn.execute(
+                "SELECT tmux_name FROM tmux_sessions WHERE session_uuid=? LIMIT 1",
+                (session_uuid,),
+            ).fetchone()
+            if row and row["tmux_name"]:
+                conn.close()
+                return row["tmux_name"]
+        conn.close()
+    except sqlite3.Error:
+        pass
+    return None
+
+
+def _print_session_header_chip(source: dict) -> None:
+    """Render ``Session: <tmux>`` + ``Viewer: …/session/<tmux>`` lines for
+    session-type sources, when a tmux name is known.
+
+    The dashboard API path attaches ``tmux_session`` to the source payload;
+    the host path falls back to a local ``dashboard.db`` lookup.
+    """
+    if not isinstance(source, dict) or source.get("type") != "session":
+        return
+    tmux = source.get("tmux_session") or _lookup_tmux_for_source(source)
+    if not tmux:
+        return
+    api_base = (os.environ.get("GRAPH_API") or "").rstrip("/")
+    viewer = f"{api_base}/session/{tmux}" if api_base else f"/session/{tmux}"
+    print(f"Session: {tmux}")
+    print(f"Viewer: {viewer}")
+
+
 def _maybe_resolve_session_arg(value: str) -> str | None:
     """If *value* looks like a tmux name, return its graph_source_id (or None).
 
@@ -944,6 +1009,7 @@ def _cmd_read_via_api(args, source_arg: str, version_req, client: "HttpClient") 
     print(f"Title:  {source.get('title', '?')}")
     if source.get("created_at"):
         print(f"Date:   {source['created_at'][:10]}")
+    _print_session_header_chip(source)
     print(f"{'─' * 72}")
     for e in entries:
         turn = e.get("turn_number", "?")
@@ -1091,6 +1157,7 @@ def _cmd_read_body(args, source, db, version_req, _json):
     print(f"Source: {source['id'][:12]}  {source['type']}{proj}")
     print(f"Title:  {source.get('title', '?')}")
     print(f"Date:   {source.get('created_at', '?')[:10]}")
+    _print_session_header_chip(source)
     if source.get("file_path"):
         print(f"File:   {source['file_path']}")
     # Show author for notes when it's not the default "user"
