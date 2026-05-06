@@ -667,10 +667,13 @@ def launch_session(
             "harness": harness,
         }
         if creds is not None and creds.get("alias"):
-            # Operator-facing token alias for triage. The dashboard reads
-            # this back when the session is registered so the drawer can
-            # show "which Anthropic account is this session burning".
-            meta_doc["claude_token_alias"] = creds["alias"]
+            # Operator-facing credential pointer for triage. The dashboard
+            # reads this back when the session is registered so the drawer
+            # can show "which Anthropic account is this session burning".
+            # auto-ghhdg renamed the field from claude_token_alias to
+            # harness_token (harness-agnostic; will hold an org UUID once
+            # bead 4 of the substrate-credentials cutover lands).
+            meta_doc["harness_token"] = creds["alias"]
         if metadata:
             meta_doc.update(metadata)
             if "graph_org" not in meta_doc:

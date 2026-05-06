@@ -349,20 +349,23 @@ class TestHistoricalDispatchBackfill:
         assert count == 1, f"Backfill is not idempotent — got {count} rows"
 
 
-# ── auto-10lsv: register_session reads claude_token_alias from meta ───
+# ── auto-ghhdg: register_session reads harness_token from meta ────────
 
 
-class TestRegisterSessionPropagatesClaudeTokenAlias:
-    """register_session must surface the launcher's chosen Claude token alias.
+class TestRegisterSessionPropagatesHarnessToken:
+    """register_session must surface the launcher's chosen credential pointer.
 
-    The launcher stamps ``claude_token_alias`` into ``.session_meta.json``;
+    The launcher stamps ``harness_token`` into ``.session_meta.json``;
     register_session reads it back when given a ``run_dir`` and writes it
-    to ``tmux_sessions.claude_token_alias`` so the dashboard's session
-    drawer can paint it next to harness/model.
+    to ``tmux_sessions.harness_token`` so the dashboard's session drawer
+    can paint it next to harness/model.
+
+    Renamed from claude_token_alias in auto-ghhdg as part of the substrate-
+    credentials cutover (the column will hold an org UUID once bead 4 lands).
     """
 
     @pytest.mark.asyncio
-    async def test_register_session_writes_claude_token_alias_from_meta(
+    async def test_register_session_writes_harness_token_from_meta(
         self, monitor_env,
     ):
         tmp_path, db_path, sm_mod = monitor_env
@@ -375,7 +378,7 @@ class TestRegisterSessionPropagatesClaudeTokenAlias:
             "type": "dispatch",
             "container_name": "auto-token-alias-1",
             "harness": "claude",
-            "claude_token_alias": "primary",
+            "harness_token": "primary",
         }))
 
         mon = sm_mod.SessionMonitor()
@@ -388,10 +391,10 @@ class TestRegisterSessionPropagatesClaudeTokenAlias:
 
         row = _fetch_row(db_path, "auto-token-alias-1")
         assert row is not None
-        assert row["claude_token_alias"] == "primary"
+        assert row["harness_token"] == "primary"
 
     @pytest.mark.asyncio
-    async def test_register_session_no_alias_when_meta_missing(
+    async def test_register_session_no_token_when_meta_missing(
         self, monitor_env,
     ):
         tmp_path, db_path, sm_mod = monitor_env
@@ -412,4 +415,4 @@ class TestRegisterSessionPropagatesClaudeTokenAlias:
 
         row = _fetch_row(db_path, "auto-token-alias-2")
         assert row is not None
-        assert row["claude_token_alias"] is None
+        assert row["harness_token"] is None

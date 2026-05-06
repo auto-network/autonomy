@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     label               TEXT DEFAULT '',
     topics              TEXT DEFAULT '[]',
     role                TEXT DEFAULT '',
-    claude_token_alias  TEXT
+    harness_token       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS turn_corrections (
@@ -211,13 +211,25 @@ def init_db(db_path: Path | None = None) -> None:
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN model TEXT DEFAULT NULL")
         _conn.commit()
-    # Migrate: add claude_token_alias column (auto-10lsv — multi-token Claude auth)
+    # Migrate: harness_token column (auto-ghhdg — rename from claude_token_alias).
+    # Three cases:
+    #   1. fresh DB → CREATE TABLE already added harness_token, nothing to do.
+    #   2. legacy DB with claude_token_alias → RENAME COLUMN.
+    #   3. DB created between auto-10lsv and this rename without the legacy column
+    #      (e.g. dropped + recreated) → ADD COLUMN.
     try:
-        _conn.execute("SELECT claude_token_alias FROM tmux_sessions LIMIT 0")
+        _conn.execute("SELECT harness_token FROM tmux_sessions LIMIT 0")
     except sqlite3.OperationalError:
-        _conn.execute(
-            "ALTER TABLE tmux_sessions ADD COLUMN claude_token_alias TEXT DEFAULT NULL"
-        )
+        try:
+            _conn.execute("SELECT claude_token_alias FROM tmux_sessions LIMIT 0")
+        except sqlite3.OperationalError:
+            _conn.execute(
+                "ALTER TABLE tmux_sessions ADD COLUMN harness_token TEXT DEFAULT NULL"
+            )
+        else:
+            _conn.execute(
+                "ALTER TABLE tmux_sessions RENAME COLUMN claude_token_alias TO harness_token"
+            )
         _conn.commit()
     logger.info("dashboard_db: initialised at %s", path)
 
@@ -244,7 +256,7 @@ def insert_session(
     jsonl_path: str | None = None,
     session_uuid: str | None = None,
     resolution_dir: str | None = None,
-    claude_token_alias: str | None = None,
+    harness_token: str | None = None,
 ) -> None:
     """INSERT a new session row. Raises sqlite3.IntegrityError on duplicate name."""
     import json as _json
@@ -258,12 +270,12 @@ def insert_session(
         " (tmux_name, type, project, harness, harness_state,"
         "  bead_id, jsonl_path, session_uuid,"
         "  resolution_dir, session_uuids, curr_jsonl_file, created_at, is_live,"
-        "  claude_token_alias)"
+        "  harness_token)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
         (tmux_name, session_type, project, harness, harness_state,
          bead_id, jsonl_path, session_uuid,
          resolution_dir, session_uuids, curr_jsonl_file, time.time(),
-         claude_token_alias),
+         harness_token),
     )
     conn.commit()
 
@@ -955,7 +967,7 @@ def upsert_session(
     last_message: str = "",
     is_live: bool = True,
     label: str = "",
-    claude_token_alias: str | None = None,
+    harness_token: str | None = None,
 ) -> None:
     """INSERT ... ON CONFLICT — used for seeding on first run.
 
@@ -969,7 +981,7 @@ def upsert_session(
         "  bead_id, jsonl_path, session_uuid,"
         "  resolution_dir, session_uuids, curr_jsonl_file,"
         "  created_at, is_live, file_offset, last_message, label,"
-        "  claude_token_alias)"
+        "  harness_token)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(tmux_name) DO UPDATE SET"
         "  harness = excluded.harness,"
@@ -984,7 +996,7 @@ def upsert_session(
         "  last_message = CASE WHEN excluded.last_message != ''"
         "    THEN excluded.last_message ELSE last_message END,"
         "  is_live = excluded.is_live,"
-        "  claude_token_alias = COALESCE(excluded.claude_token_alias, claude_token_alias),"
+        "  harness_token = COALESCE(excluded.harness_token, harness_token),"
         # When a previously-dead row is revived via seed, clear the stale
         # 'dead' activity_state so it doesn't contradict is_live=1. Non-dead
         # states (idle / thinking / tool_running) are preserved.
@@ -997,7 +1009,7 @@ def upsert_session(
             resolution_dir, session_uuids, curr_jsonl_file,
             created_at or time.time(), 1 if is_live else 0, file_offset, last_message,
             label,
-            claude_token_alias,
+            harness_token,
         ),
     )
     conn.commit()

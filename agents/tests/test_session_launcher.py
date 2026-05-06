@@ -819,11 +819,12 @@ class TestResolveCredentials:
         assert creds["alias"] == "fresh"
 
 
-def test_meta_doc_records_claude_token_alias(
+def test_meta_doc_records_harness_token(
     tmp_path, fake_crosstalk, captured_run, monkeypatch,
 ):
-    """auto-10lsv: launcher writes the chosen alias into .session_meta.json
-    so the dashboard can surface it on registration."""
+    """auto-10lsv (renamed in auto-ghhdg): launcher writes the chosen
+    credential pointer into .session_meta.json under ``harness_token`` so
+    the dashboard can surface it on registration."""
     monkeypatch.setattr(
         session_launcher,
         "_resolve_credentials",
@@ -833,14 +834,14 @@ def test_meta_doc_records_claude_token_alias(
     _run(output_dir=str(run_dir))
 
     meta = json.loads((run_dir / "sessions" / ".session_meta.json").read_text())
-    assert meta["claude_token_alias"] == "primary"
+    assert meta["harness_token"] == "primary"
 
 
-def test_meta_doc_omits_alias_when_none(
+def test_meta_doc_omits_token_when_none(
     tmp_path, fake_crosstalk, captured_run, monkeypatch,
 ):
     """No alias on the creds dict (env-var path or creds_file) → no
-    ``claude_token_alias`` key in the meta doc."""
+    ``harness_token`` key in the meta doc."""
     monkeypatch.setattr(
         session_launcher,
         "_resolve_credentials",
@@ -850,7 +851,7 @@ def test_meta_doc_omits_alias_when_none(
     _run(output_dir=str(run_dir))
 
     meta = json.loads((run_dir / "sessions" / ".session_meta.json").read_text())
-    assert "claude_token_alias" not in meta
+    assert "harness_token" not in meta
 
 
 def test_no_hardcoded_license_mount(tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch):

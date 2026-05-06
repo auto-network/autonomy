@@ -197,13 +197,15 @@
         </div>
       </template>
       <!-- auto-10lsv: which Anthropic account is this session burning?
-           Surfaces the operator-facing token alias chosen by the launcher.
-           Container claude sessions only — host claude is single-account
-           today; codex is unrelated. -->
-      <template x-if="s.harness === 'claude' && s.claude_token_alias">
+           Surfaces the operator-facing credential pointer chosen by the
+           launcher. Container claude sessions only — host claude is
+           single-account today; codex is unrelated. auto-ghhdg renamed
+           the field to harness_token (harness-agnostic; will hold an org
+           UUID after bead 4 lands the friendly-alias join). -->
+      <template x-if="s.harness === 'claude' && s.harness_token">
         <div class="sc-footer-item" data-testid="session-token-alias">
           <span class="sc-footer-label">token</span>
-          <span class="sc-footer-value" x-text="s.claude_token_alias"></span>
+          <span class="sc-footer-value" x-text="s.harness_token"></span>
         </div>
       </template>
     </div>
