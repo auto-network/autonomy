@@ -1306,7 +1306,18 @@
           this.queueReviewHeaderState();
         } catch (err) {
           this.error = err.message || String(err);
-          _toast('Worktree refresh failed: ' + this.error, 'error');
+          // If the failure leaves the page empty (initial load, or
+          // the prior data has already been cleared), the page is in
+          // an unrecoverable state — escalate the toast to a full-
+          // screen modal with a Refresh button rather than letting
+          // an 8-second toast scroll away over a blank surface. A
+          // failed manual refresh of a populated page still has
+          // visible data on screen, so a regular toast is fine.
+          const fatal = !this.rows || this.rows.length === 0;
+          _toast(
+            'Worktree refresh failed: ' + this.error,
+            fatal ? 'fatal' : 'error',
+          );
         } finally {
           this.loading = false;
           this.refreshing = false;
