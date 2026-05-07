@@ -2173,7 +2173,70 @@ setInterval(checkPendingDesigns, 10000);
 
 // ── Toast notifications ──────────────────────────────────────
 
+// ``fatal``-class toasts escalate to a blocking full-screen modal
+// with an explicit Refresh button. Used when the page is in an
+// unrecoverable state (e.g. initial load failed and no data reached
+// the surface) — a regular toast scrolls away and leaves the page
+// silently broken. The modal stays put until the operator acts.
+function _showFatalModal(message) {
+  // De-dupe: a second fatal call updates the existing message rather
+  // than stacking modals on top of each other.
+  const existing = document.getElementById('fatal-modal-backdrop');
+  if (existing) {
+    const msgEl = existing.querySelector('.fatal-modal-message');
+    if (msgEl) msgEl.textContent = message || '';
+    return;
+  }
+  const backdrop = document.createElement('div');
+  backdrop.id = 'fatal-modal-backdrop';
+  backdrop.className = 'fatal-modal-backdrop';
+  backdrop.setAttribute('role', 'alertdialog');
+  backdrop.setAttribute('aria-modal', 'true');
+  backdrop.setAttribute('aria-labelledby', 'fatal-modal-title');
+  backdrop.setAttribute('data-testid', 'fatal-modal');
+
+  const card = document.createElement('div');
+  card.className = 'fatal-modal-card';
+
+  const title = document.createElement('div');
+  title.id = 'fatal-modal-title';
+  title.className = 'fatal-modal-title';
+  title.textContent = 'Needs refresh';
+
+  const msg = document.createElement('div');
+  msg.className = 'fatal-modal-message';
+  msg.setAttribute('data-testid', 'fatal-modal-message');
+  msg.textContent = message || '';
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'fatal-modal-button';
+  button.setAttribute('data-testid', 'fatal-modal-refresh');
+  button.textContent = 'Refresh';
+  button.addEventListener('click', () => {
+    if (typeof window !== 'undefined' && window.location
+        && typeof window.location.reload === 'function') {
+      window.location.reload();
+    }
+  });
+
+  card.appendChild(title);
+  card.appendChild(msg);
+  card.appendChild(button);
+  backdrop.appendChild(card);
+  document.body.appendChild(backdrop);
+  // Focus the Refresh button so Enter/Space resolves the modal
+  // without forcing the operator to mouse over to it.
+  if (typeof button.focus === 'function') {
+    try { button.focus(); } catch (_) { /* not focusable in test */ }
+  }
+}
+
 function showToast(message, type) {
+  if (type === 'fatal') {
+    _showFatalModal(message);
+    return;
+  }
   const container = document.getElementById('toast-container');
   if (!container) return;
   const el = document.createElement('div');
@@ -2190,6 +2253,13 @@ function showToast(message, type) {
       el.addEventListener('animationend', () => el.remove());
     }
   }, 8000);
+}
+
+// Expose the modal renderer for tests and any caller that wants to
+// trigger the fatal flow without going through showToast.
+if (typeof window !== 'undefined') {
+  window.showToast = showToast;
+  window.showFatalModal = _showFatalModal;
 }
 
 // ── Dispatcher state watcher (global, all pages) ─────────────

@@ -264,6 +264,42 @@
       from { opacity: 1; transform: translateX(0); }
       to { opacity: 0; transform: translateX(1rem); }
     }
+    /* Fatal-class toast escalates to a full-screen blocking dialog
+       with an explicit Refresh button. Used when the page is in an
+       unrecoverable state (e.g. initial load failed and no data
+       reached the surface). */
+    .fatal-modal-backdrop {
+      position: fixed; inset: 0; z-index: 200;
+      background: rgba(15, 23, 42, 0.85);
+      display: flex; align-items: center; justify-content: center;
+      padding: 1rem; animation: toast-in 0.2s ease-out;
+    }
+    .fatal-modal-card {
+      background: #111827; border: 1px solid #dc2626;
+      border-radius: 0.75rem; padding: 1.5rem;
+      max-width: 32rem; width: 100%;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+      color: #fecaca;
+    }
+    .fatal-modal-title {
+      font-size: 1rem; font-weight: 600;
+      color: #fca5a5; margin-bottom: 0.5rem;
+      letter-spacing: 0.02em;
+    }
+    .fatal-modal-message {
+      font-size: 0.875rem; color: #fecaca;
+      line-height: 1.5; margin-bottom: 1.25rem;
+      word-break: break-word; white-space: pre-wrap;
+    }
+    .fatal-modal-button {
+      display: inline-block; cursor: pointer;
+      background: #dc2626; color: #fef2f2;
+      border: none; border-radius: 0.5rem;
+      padding: 0.5rem 1.25rem; font-size: 0.875rem;
+      font-weight: 600;
+    }
+    .fatal-modal-button:hover { background: #ef4444; }
+    .fatal-modal-button:focus { outline: 2px solid #fca5a5; outline-offset: 2px; }
     /* Experiment gallery */
     .design-variant {
       border: 1px solid #374151; border-radius: 0.5rem; margin-bottom: 1.5rem;
