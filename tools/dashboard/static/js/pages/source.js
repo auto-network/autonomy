@@ -135,9 +135,27 @@
       // ── Header metadata strip (turns · range · duration · tokens) ──
       // Chat-only. All getters return null/false for non-chat or empty
       // sources so the wrapper template's x-if collapses cleanly.
+      //
+      // Defense-in-depth: prefer authoritative ``source.metadata`` fields
+      // (``total_turns``, ``started_at``, ``ended_at``, token counts) over
+      // values derived from ``allEntries``. The entries list can be a
+      // sliced view (context-mode windowing, future caps) — metadata
+      // reflects the full source. Falls back to entry-derived values for
+      // non-session sources where these fields are absent.
+
+      get _sourceMeta() {
+        try {
+          if (typeof this.src?.metadata === 'string') return JSON.parse(this.src.metadata);
+          return this.src?.metadata || {};
+        } catch { return {}; }
+      },
 
       get turnsCount() {
-        if (!this.isChat || !this.allEntries.length) return null;
+        if (!this.isChat) return null;
+        const meta = this._sourceMeta;
+        const t = meta?.total_turns;
+        if (Number.isFinite(t) && t > 0) return t;
+        if (!this.allEntries.length) return null;
         return this.allEntries.length;
       },
 
@@ -153,6 +171,12 @@
       },
 
       get startAt() {
+        const meta = this._sourceMeta;
+        const s = meta?.started_at;
+        if (typeof s === 'string' && s) {
+          const d = new Date(s);
+          if (!isNaN(d.getTime())) return d.toISOString();
+        }
         const dates = this._entryDates();
         if (!dates.length) return null;
         const ms = Math.min(...dates.map(d => d.getTime()));
@@ -160,6 +184,12 @@
       },
 
       get endAt() {
+        const meta = this._sourceMeta;
+        const e = meta?.ended_at;
+        if (typeof e === 'string' && e) {
+          const d = new Date(e);
+          if (!isNaN(d.getTime())) return d.toISOString();
+        }
         const dates = this._entryDates();
         if (!dates.length) return null;
         const ms = Math.max(...dates.map(d => d.getTime()));
@@ -187,7 +217,13 @@
       },
 
       get timeRangeFormatted() {
-        if (!this.isChat || this.allEntries.length < 2) return null;
+        if (!this.isChat) return null;
+        // Single-entry chat: nothing to range over. Prefer metadata's
+        // total_turns when available so a viewer that's currently
+        // showing a sliced/empty entries list still hides the range.
+        const turns = this.turnsCount;
+        if (turns != null && turns < 2) return null;
+        if (turns == null && this.allEntries.length < 2) return null;
         if (!this.startAt || !this.endAt) return null;
         const start = new Date(this.startAt);
         const end = new Date(this.endAt);
@@ -216,7 +252,16 @@
       },
 
       get tokenEstimate() {
-        if (!this.isChat || !this.allEntries.length) return null;
+        if (!this.isChat) return null;
+        // Authoritative source: metadata's total_input_tokens +
+        // total_output_tokens (set at ingest from the underlying chat).
+        // Fall back to a char-based estimate over allEntries when
+        // metadata is absent (non-session sources, partial ingests).
+        const meta = this._sourceMeta;
+        const ti = Number(meta?.total_input_tokens) || 0;
+        const to = Number(meta?.total_output_tokens) || 0;
+        if (ti + to > 0) return ti + to;
+        if (!this.allEntries.length) return null;
         let total = 0;
         for (const e of this.allEntries) {
           if (e && typeof e.content === 'string') total += e.content.length;
@@ -234,7 +279,8 @@
       },
 
       get hasMeta() {
-        if (!this.isChat || !this.allEntries.length) return false;
+        if (!this.isChat) return false;
+        if (!this.allEntries.length && !this.turnsCount) return false;
         return !!(
           this.turnsCount ||
           this.timeRangeFormatted ||

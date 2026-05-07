@@ -2556,8 +2556,11 @@ async def api_source_read(request):
             return JSONResponse({"error": "source not found"}, status_code=404)
         _attach_source_org(source)
         return JSONResponse(source)
+    # Asset/full-read surface — unbounded by default. Callers may pass
+    # ``?max_chars=N`` to take an explicit slice; the sole frontend caller
+    # (agent-actions.js) wants the whole thing.
     try:
-        max_chars = int(request.query_params.get("max_chars", "50000"))
+        max_chars = int(request.query_params.get("max_chars", "0"))
     except ValueError:
         return JSONResponse({"error": "invalid max_chars"}, status_code=400)
     turn_raw = request.query_params.get("turn")
@@ -4999,6 +5002,8 @@ async def _resolve_primer(primer: str) -> str | None:
     if not graph_id:
         return None
     try:
+        # Cap protects the LLM context window — primer text is injected
+        # verbatim into the next session's first message.
         payload = await asyncio.to_thread(
             graph_ops.read_source_full, graph_id, max_chars=50000,
         )
@@ -11674,8 +11679,13 @@ async def api_graph_resolve(request):
     source = graph_ops.get_source(id, org=org)
     if source:
         source = await _refresh_graph_session_source(source)
+        # Page-load is unbounded by design — full source for the browser.
+        # The LLM-context cap belongs to _resolve_primer, which calls
+        # ops.read_source_full directly with an explicit max_chars. The
+        # ``?max_chars=`` query param is intentionally not parsed here;
+        # the route does not accept it.
         result = await asyncio.to_thread(
-            graph_ops.read_source_full, source["id"], org=org, max_chars=50000,
+            graph_ops.read_source_full, source["id"], org=org, max_chars=0,
             around_turn=around_turn, window=window, tail_n=tail_n,
         )
         if result is None:

@@ -270,6 +270,63 @@ def test_read_source_full_tail_n_bypasses_max_chars_cap(graph_db_env):
         assert len(e["content"]) >= 800
 
 
+def test_read_source_full_max_chars_zero_means_unbounded(graph_db_env):
+    """``max_chars=0`` (or any non-positive value) opts out of the cap.
+
+    Pins the contract for UI / full-read callers: ``api_graph_resolve``
+    passes ``max_chars=0`` so the source-viewer page-load gets the full
+    transcript regardless of size, and the header metadata strip never
+    sees a silently truncated entries list. Joins the existing
+    ``around_turn`` / ``tail_n`` cases that already bypass the cap.
+    """
+    db = GraphDB(str(graph_db_env))
+    # 80 turns * ~800 chars = ~64K — exceeds the legacy 50K default.
+    src = _seed_long_session(db, turns=80)
+    db.close()
+
+    # Sanity: default-args read truncates at 50K.
+    capped = ops.read_source_full(src.id)
+    assert capped is not None
+    assert capped["truncated"] is True
+    assert len(capped["entries"]) < 80
+
+    # ``max_chars=0`` returns every turn.
+    full = ops.read_source_full(src.id, max_chars=0)
+    assert full is not None
+    assert full["truncated"] is False
+    turns = [e["turn_number"] for e in full["entries"]]
+    assert turns == list(range(1, 81))
+    # Each entry must carry its full 800-char body — no inner truncation.
+    for e in full["entries"]:
+        assert len(e["content"]) >= 800
+
+    # Negative values are also treated as unbounded.
+    full_neg = ops.read_source_full(src.id, max_chars=-1)
+    assert full_neg is not None
+    assert full_neg["truncated"] is False
+    assert len(full_neg["entries"]) == 80
+
+
+def test_read_source_full_default_value_caps(graph_db_env):
+    """Sanity: the legacy 50K default still applies to existing callers
+    (e.g. ``_resolve_primer``) that don't opt out.
+
+    The default exists to protect LLM-prompt callers; raising it or
+    removing it would regress the primer surface. This test pins the
+    default behaviour so a future refactor can't quietly flip it.
+    """
+    db = GraphDB(str(graph_db_env))
+    src = _seed_long_session(db, turns=80)
+    db.close()
+
+    result = ops.read_source_full(src.id)
+    assert result is not None
+    # Default cap is 50000 — ~800 char entries fit ~62 of them.
+    assert result["truncated"] is True
+    assert result["total_chars"] <= 50000
+    assert len(result["entries"]) < 80
+
+
 def test_read_source_full_tail_n_empty_source(graph_db_env):
     """A source with no thoughts/derivations returns an empty list under
     ``tail_n`` — no SQL error from the MAX() resolver."""

@@ -165,3 +165,78 @@ def test_api_graph_resolve_positive_from_400(test_app):
             assert r.status_code == 400
             r2 = client.get(f"/api/graph/{_RESOLVED_SOURCE['id']}?from=0")
             assert r2.status_code == 400
+
+
+# ── Page-load is unbounded by design (auto-urf1s) ─────────────────────
+
+
+def test_api_graph_resolve_passes_max_chars_zero(test_app):
+    """``api_graph_resolve`` always calls ``read_source_full`` with
+    ``max_chars=0`` (unbounded). Pre-fix it hard-coded ``max_chars=50000``,
+    silently truncating long sessions and corrupting the source-viewer
+    header metadata strip. The route now hands the full transcript to
+    the browser surface."""
+    from tools.dashboard import server
+
+    captured: dict = {}
+
+    def fake_read_source_full(source_id, **kwargs):
+        captured["kwargs"] = kwargs
+        return {
+            "source": _RESOLVED_SOURCE,
+            "entries": [],
+            "truncated": False,
+            "total_chars": 0,
+            "comments": [],
+        }
+
+    with patch.object(server.graph_ops, "get_source",
+                      return_value=_RESOLVED_SOURCE):
+        with patch.object(server.graph_ops, "read_source_full",
+                          side_effect=fake_read_source_full):
+            with TestClient(test_app) as client:
+                r = client.get(f"/api/graph/{_RESOLVED_SOURCE['id']}")
+                assert r.status_code == 200, r.text
+
+    assert captured["kwargs"].get("max_chars") == 0, (
+        f"api_graph_resolve must pass max_chars=0 (unbounded); got "
+        f"{captured['kwargs'].get('max_chars')!r}"
+    )
+
+
+def test_api_graph_resolve_ignores_query_max_chars(test_app):
+    """``GET /api/graph/{id}?max_chars=10000`` does **not** override the
+    server-side cap. The query param is dead end-to-end on this route —
+    page-load is unbounded by design (no caller-side override). Pre-fix
+    behaviour silently dropped the param too, but for the wrong reason
+    (the value never reached read_source_full anyway). Post-fix this is
+    explicit: the route hard-codes ``max_chars=0`` regardless."""
+    from tools.dashboard import server
+
+    captured: dict = {}
+
+    def fake_read_source_full(source_id, **kwargs):
+        captured["kwargs"] = kwargs
+        return {
+            "source": _RESOLVED_SOURCE,
+            "entries": [],
+            "truncated": False,
+            "total_chars": 0,
+            "comments": [],
+        }
+
+    with patch.object(server.graph_ops, "get_source",
+                      return_value=_RESOLVED_SOURCE):
+        with patch.object(server.graph_ops, "read_source_full",
+                          side_effect=fake_read_source_full):
+            with TestClient(test_app) as client:
+                r = client.get(
+                    f"/api/graph/{_RESOLVED_SOURCE['id']}?max_chars=10000"
+                )
+                assert r.status_code == 200, r.text
+
+    # ``max_chars=10000`` query param is ignored — server hard-codes 0.
+    assert captured["kwargs"].get("max_chars") == 0, (
+        f"?max_chars= must not flow through; got "
+        f"{captured['kwargs'].get('max_chars')!r}"
+    )

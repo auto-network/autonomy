@@ -1180,6 +1180,55 @@ SWEEP_HEADER_META_NOTE = {
     "content": "# Header meta sweep — note\n\nNotes never render the chat metadata strip.",
 }
 
+# Fixture for TestGraphSourcePageLoad (auto-urf1s). A session whose
+# entries body exceeds the legacy 50K cap and whose ``metadata`` carries
+# authoritative ``total_turns`` / ``started_at`` / ``ended_at`` fields.
+# The bead spec: the source-viewer page-load returns the full transcript
+# (no caller-side cap) and the header metadata strip reads from
+# ``source.metadata`` rather than recomputing from a sliced entries list.
+SWEEP_LONG_SESSION_ID = "ce200017-0000-0000-0000-000000000017"
+SWEEP_LONG_SESSION_TURNS = 70  # 70 × 1000 chars = 70K — exceeds 50K cap.
+
+# Each entry's body needs to be ~1000 chars so the seeded source has more
+# than 60K of text. The browser-TZ-rendered range is HH:MM, so spacing
+# turns by an integer number of minutes keeps the assertion stable: turn
+# 1 at 09:00 UTC, turn N at 10:09 UTC for N=70.
+_SWEEP_LONG_BODY = "L" * 1000
+
+
+def _sweep_long_session_entries() -> list[dict]:
+    out = []
+    for i in range(1, SWEEP_LONG_SESSION_TURNS + 1):
+        # Minute offset = (i-1) so turn 1 at 09:00, turn 70 at 10:09.
+        h = 9 + ((i - 1) // 60)
+        m = (i - 1) % 60
+        out.append({
+            "turn_number": i,
+            "role": "user" if i % 2 == 1 else "assistant",
+            "content": _SWEEP_LONG_BODY,
+            "created_at": f"2026-05-01T{h:02d}:{m:02d}:00Z",
+        })
+    return out
+
+
+SWEEP_LONG_SESSION = {
+    "id": SWEEP_LONG_SESSION_ID,
+    "title": "auto-urf1s long-session sweep — full transcript",
+    "type": "session",
+    "project": "autonomy",
+    "created_at": "2026-05-01T09:00:00Z",
+    "metadata": json.dumps({
+        "total_turns": SWEEP_LONG_SESSION_TURNS,
+        "started_at": "2026-05-01T09:00:00Z",
+        "ended_at": f"2026-05-01T{9 + ((SWEEP_LONG_SESSION_TURNS - 1) // 60):02d}:"
+                    f"{(SWEEP_LONG_SESSION_TURNS - 1) % 60:02d}:00Z",
+        "total_input_tokens": 25000,
+        "total_output_tokens": 15000,
+    }),
+    "content": "Long-session sweep fixture — exceeds the legacy 50K cap.",
+    "entries": _sweep_long_session_entries(),
+}
+
 # Fixtures for TestAgentActionsDropdown (auto-aia85). Two notes — one in
 # the autonomy org (which has the seeded action set) and one in an org
 # with no seeded actions. The dropdown must render for the first and
@@ -1373,6 +1422,7 @@ SWEEP_GRAPH_SOURCES = {
     SWEEP_HEADER_META_MULTIDAY_ID: SWEEP_HEADER_META_MULTIDAY,
     SWEEP_HEADER_META_SINGLE_ENTRY_ID: SWEEP_HEADER_META_SINGLE_ENTRY,
     SWEEP_HEADER_META_NOTE_ID: SWEEP_HEADER_META_NOTE,
+    SWEEP_LONG_SESSION_ID: SWEEP_LONG_SESSION,
 }
 
 SWEEP_GRAPH_ATTACHMENTS = {
@@ -6817,6 +6867,127 @@ class TestSourceViewerHeaderMetadata:
         assert self._d.get("strip", {}).get("absent_or_hidden"), (
             "Fixture D: meta strip must be absent or hidden for non-chat sources — "
             f"got: {self._d!r}"
+        )
+
+
+# ── TestGraphSourcePageLoad: long-session page-load is unbounded ────
+#
+# auto-urf1s: source-viewer page-load (``GET /api/graph/{id}``) returns
+# the full transcript — no caller-side cap, no override via
+# ``?max_chars=``. Header metadata (turns, time range) reads
+# authoritative values from ``source.metadata``, not derived from a
+# possibly-truncated entries list.
+
+LONG_SESSION_HEADER_CHECKS = """
+    function _i(testid) {
+        var el = document.querySelector('[data-testid="' + testid + '"]');
+        return {
+            present: !!el,
+            text: el ? (el.textContent || '').trim() : '',
+        };
+    }
+    r.turns = _i('sv-meta-turns');
+    r.range = _i('sv-meta-time-range');
+    r.tokens = _i('sv-meta-tokens');
+"""
+
+
+class TestGraphSourcePageLoad:
+    """Long-session page-load returns the full transcript and renders
+    header metadata from the authoritative ``source.metadata`` fields
+    rather than recomputing from the entries list (auto-urf1s).
+
+    Acceptance:
+
+    * ``GET /api/graph/{long_session_id}`` returns ``truncated: false``
+      and one entry per ``metadata.total_turns`` — the legacy 50K cap is
+      gone on this route.
+    * ``GET /api/graph/{long_session_id}?max_chars=10000`` returns the
+      **same** payload — the query param is ignored by design (page-load
+      is unbounded; the LLM-context cap belongs to ``_resolve_primer``,
+      which calls ``ops.read_source_full`` directly).
+    * The source-viewer page renders the metadata-derived turns count
+      and time range, not values derived from the entries list.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, sweep_server, request):
+        request.cls._sweep_url = sweep_server["url"]
+        request.cls._render = _navigate_and_check(
+            f"/graph/{SWEEP_LONG_SESSION_ID[:12]}",
+            LONG_SESSION_HEADER_CHECKS,
+            wait_ms=900,
+        )
+
+    def test_api_graph_returns_full_transcript(self):
+        """``GET /api/graph/{id}`` returns every entry — no truncation."""
+        status, body = _http_get(
+            f"{self._sweep_url}/api/graph/{SWEEP_LONG_SESSION_ID}"
+        )
+        assert status == 200, f"GET /api/graph/{SWEEP_LONG_SESSION_ID} → {status}"
+        data = json.loads(body)
+        assert data.get("truncated") is False, (
+            f"page-load route must return truncated=False; got "
+            f"{data.get('truncated')!r}"
+        )
+        entries = data.get("entries") or []
+        assert len(entries) == SWEEP_LONG_SESSION_TURNS, (
+            f"expected {SWEEP_LONG_SESSION_TURNS} entries, got "
+            f"{len(entries)} — the route silently truncated the tail"
+        )
+        turns = [e.get("turn_number") for e in entries]
+        assert turns == list(range(1, SWEEP_LONG_SESSION_TURNS + 1)), (
+            f"entries must cover turn 1..{SWEEP_LONG_SESSION_TURNS} in "
+            f"order; got first={turns[:3]} last={turns[-3:]}"
+        )
+
+    def test_api_graph_ignores_query_max_chars(self):
+        """``?max_chars=10000`` does not honour caller-side override —
+        page-load is unbounded by design. Pins the design decision."""
+        status, body = _http_get(
+            f"{self._sweep_url}/api/graph/{SWEEP_LONG_SESSION_ID}"
+            "?max_chars=10000"
+        )
+        assert status == 200
+        data = json.loads(body)
+        assert data.get("truncated") is False, (
+            "?max_chars=10000 must not introduce truncation — query param "
+            "is dead end-to-end on this route"
+        )
+        entries = data.get("entries") or []
+        assert len(entries) == SWEEP_LONG_SESSION_TURNS, (
+            f"?max_chars=10000 must not slice the response; got "
+            f"{len(entries)} entries instead of {SWEEP_LONG_SESSION_TURNS}"
+        )
+
+    def test_header_turns_count_from_metadata(self):
+        """The strip's turns chip shows ``metadata.total_turns``,
+        not ``allEntries.length``. Both happen to be equal here, but the
+        contract is "trust the metadata" — keeps headline numbers honest
+        even if any future caller truncates."""
+        text = self._render.get("turns", {}).get("text", "")
+        assert text == f"{SWEEP_LONG_SESSION_TURNS} turns", (
+            f"sv-meta-turns must read 'N turns' from metadata.total_turns; "
+            f"got {text!r}"
+        )
+
+    def test_header_time_range_present(self):
+        """Time range renders for a multi-entry chat. Browser TZ is
+        unknown, so we only assert the strip surfaced *something* in the
+        right shape (HH:MM → HH:MM, optional date prefix on each side
+        for multi-day spans). Pre-fix: this would silently render a
+        truncated end-time when long sessions were capped."""
+        text = self._render.get("range", {}).get("text", "")
+        # Either same-day "HH:MM → HH:MM" or multi-day "Mon DD HH:MM → ...".
+        same_day = re.match(r"^\d{2}:\d{2} → \d{2}:\d{2}$", text)
+        multi_day = re.match(
+            r"^[A-Z][a-z]{2} \d+ \d{2}:\d{2} → "
+            r"[A-Z][a-z]{2} \d+ \d{2}:\d{2}$",
+            text,
+        )
+        assert same_day or multi_day, (
+            f"sv-meta-time-range must match HH:MM → HH:MM (single-day) "
+            f"or 'Mon DD HH:MM → Mon DD HH:MM' (multi-day); got {text!r}"
         )
 
 
