@@ -149,6 +149,68 @@ def test_list_session_status_calls_dashboard_endpoint():
     assert rows == [{"tmux_name": "auto-test", "is_live": 1}]
 
 
+def test_read_source_full_does_not_send_max_chars():
+    """``HttpClient.read_source_full`` must not put ``max_chars`` on the
+    wire. The page-load route (``GET /api/graph/{id}``) is unbounded by
+    design — pinning this contract keeps a future refactor from quietly
+    re-adding a query param the server doesn't read anyway.
+    """
+    client = _make_client()
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None, context=None):
+        captured["url"] = req.full_url
+        captured["method"] = req.get_method()
+        return _FakeResponse(
+            {"source": {"id": "abc"}, "entries": [], "truncated": False,
+             "total_chars": 0}
+        )
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        client.read_source_full("abc-123")
+
+    assert "/api/graph/abc-123" in captured["url"]
+    assert "max_chars" not in captured["url"], (
+        f"HttpClient.read_source_full must not transmit max_chars; "
+        f"got URL: {captured['url']!r}"
+    )
+    assert captured["method"] == "GET"
+
+
+def test_read_source_full_signature_omits_max_chars():
+    """Compile-time check: ``max_chars`` is not a parameter of
+    ``HttpClient.read_source_full``. The HTTP route is unbounded by
+    design; the lying parameter has been deleted.
+    """
+    import inspect
+    sig = inspect.signature(HttpClient.read_source_full)
+    assert "max_chars" not in sig.parameters, (
+        f"HttpClient.read_source_full.max_chars should have been removed; "
+        f"got signature: {sig}"
+    )
+
+
+def test_read_source_full_forwards_window_and_tail():
+    """Slice params still flow to the wire — only ``max_chars`` was deleted."""
+    client = _make_client()
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None, context=None):
+        captured["url"] = req.full_url
+        return _FakeResponse({"source": {"id": "abc"}, "entries": []})
+
+    # tail mode → ``?from=-N``
+    with patch("urllib.request.urlopen", fake_urlopen):
+        client.read_source_full("abc-123", tail_n=5)
+    assert "from=-5" in captured["url"]
+
+    # around-turn mode → ``?turn=N&window=W``
+    with patch("urllib.request.urlopen", fake_urlopen):
+        client.read_source_full("abc-123", around_turn=10, window=3)
+    assert "turn=10" in captured["url"]
+    assert "window=3" in captured["url"]
+
+
 def test_get_dispatch_wait_status_calls_dashboard_endpoint():
     """Dispatch wait status routes to the dedicated dashboard endpoint."""
     client = _make_client()

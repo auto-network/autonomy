@@ -235,7 +235,6 @@ class HttpClient:
         self,
         source_id,
         *,
-        max_chars: int = 50000,
         org: str | None = None,
         peers: list[str] | None = None,
         around_turn: int | None = None,
@@ -251,6 +250,12 @@ class HttpClient:
         API parity with the local ``ops`` function but is not forwarded
         — the dashboard handler already does own-first + peer-public
         resolution server-side.
+
+        Returns the **full source — no character cap**. The HTTP route is
+        unbounded by design (browser surface). If you intend to feed
+        this response into an LLM prompt, cap explicitly at the call
+        site or use ``ops.read_source_full(..., max_chars=N)`` directly
+        — the wire protocol does not carry a caller-side ``max_chars``.
         """
         params: dict[str, str] = {}
         if around_turn is not None:

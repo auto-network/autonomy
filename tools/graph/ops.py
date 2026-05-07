@@ -3243,6 +3243,19 @@ def read_source_full(
 
     Cross-org: own-org full surface first, then peer public surface.
 
+    ``max_chars`` semantics:
+
+    * ``max_chars > 0`` — cap the returned content at this many characters
+      across all entries. The default 50000 exists for **LLM-prompt
+      callers** (e.g. ``_resolve_primer``) that inject the result into a
+      model context window and need a hard upper bound. If the cap is
+      hit, ``truncated`` is set to True and the tail of the entries list
+      is dropped.
+    * ``max_chars <= 0`` — **unbounded**. UI / full-read callers that
+      render to a human surface should pass ``max_chars=0`` so the full
+      transcript comes back. Joins the existing ``around_turn`` and
+      ``tail_n`` cases that bypass the cap.
+
     When ``around_turn`` is given, only entries with
     ``turn_number BETWEEN around_turn - window AND around_turn + window``
     are returned. The ``max_chars`` cap is not applied inside the window
@@ -3339,7 +3352,11 @@ def read_source_full(
 
     total_chars = 0
     truncated = False
-    skip_cap = around_turn is not None or (tail_n is not None and tail_n >= 1)
+    skip_cap = (
+        around_turn is not None
+        or (tail_n is not None and tail_n >= 1)
+        or max_chars <= 0
+    )
     out_entries: list[dict] = []
     for e in entries_src:
         c = e.get("content") or ""

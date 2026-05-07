@@ -1277,12 +1277,20 @@ def resolve_source_for_api(source_id: str) -> dict | None:
                     "turn_number": 1, "content": content, "message_id": None, "metadata": {}}]
     comments = src.pop("comments", [])
     version_count = src.pop("version_count", 1)
+    # Mirror the real ``ops.read_source_full`` response shape so the
+    # truncated/total_chars contract is consistent — the mock DAO never
+    # caps content, so truncated is always False here.
+    total_chars = sum(
+        len(e.get("content") or "") for e in entries if isinstance(e, dict)
+    )
     return {
         "source": src,
         "entries": entries,
         "edges": [],
         "comments": comments,
         "version_count": version_count,
+        "truncated": False,
+        "total_chars": total_chars,
     }
 
 

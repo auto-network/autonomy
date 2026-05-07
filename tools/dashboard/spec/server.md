@@ -37,13 +37,25 @@ GET /api/search?q=...&project=...&or=1&limit=N
 GET /api/sources?project=...&type=...&limit=N
                          → graph sources [--project ...] [--type ...] [--limit N]
 
-GET /api/source/{id}     → graph read {id} --max-chars 50000
+GET /api/source/{id}     → graph read {id} (full source, no cap by default)
 GET /api/context/{id}/{turn}?window=3
                          → graph context {id} {turn} --window 3
 
 GET /api/projects        → workspace registry (agents/projects.yaml)
 GET /api/stats           → graph stats
 ```
+
+### Source-read cap policy
+
+Per-route ``max_chars`` rules — content caps on full-source reads:
+
+| Route | Default cap | ``?max_chars=`` honoured? | Rationale |
+|-------|-------------|---------------------------|-----------|
+| ``GET /api/graph/{id}`` | unbounded (full source) | **no** — query param ignored | Browser surface (source viewer). Returns the full transcript so header metadata and the entries list stay consistent. The HTTP wire (``HttpClient.read_source_full``) does not carry ``max_chars`` either; the parameter is dead end-to-end on this route by design. |
+| ``GET /api/source/{id}`` | unbounded (``max_chars=0``) | **yes** — caller may pass an explicit slice | Asset / full-read surface. Sole frontend caller wants the whole source; explicit override exists for callers that need a slice. |
+| ``_resolve_primer`` (internal helper, not a route) | ``max_chars=50000`` | n/a — direct ``ops.read_source_full`` call | Cap protects the LLM context window — primer text is injected verbatim into the next session's first message. |
+
+If you add a new caller that feeds a graph source into an LLM prompt, cap explicitly at the call site or use ``ops.read_source_full(..., max_chars=N)`` directly. Don't reintroduce the cap on the HTTP route — the only argument for it (defensive against accidental dumps) is outweighed by the present harm of silent metadata corruption when long sessions are silently truncated.
 
 ### Implementation Pattern
 
