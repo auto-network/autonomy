@@ -1944,6 +1944,7 @@ class TestWorktreeMonitorCapabilityCache:
         assert snapshot["review"] is None
 
 
+@pytest.mark.usefixtures("isolated_settings_db")
 class TestWorktreeMonitorBackgroundFetchPolicy:
     """Per Jeremy's directive (2026-04-30) the background poll must not
     do external network. Only exception: a watch-active row whose
@@ -2387,6 +2388,7 @@ class TestWorktreeApiSourceControlBlock:
 # ── Watch / nag mode persistence (P4) ─────────────────────────────────
 
 
+@pytest.mark.usefixtures("isolated_settings_db")
 class TestWorktreeMonitorNagMode:
     """``WorktreeMonitor`` persists the per-row nag mode in memory and
     exposes it on the cached source_control snapshot.
@@ -2406,6 +2408,16 @@ class TestWorktreeMonitorNagMode:
         assert monitor.get_nag_mode("auto-x", "autonomy") == "nag_all"
         # Distinct repo on the same session keeps its own default.
         assert monitor.get_nag_mode("auto-x", "enterprise") == "silent"
+
+    def test_set_nag_mode_persists_across_monitor_restart(self):
+        from tools.dashboard import worktree_monitor as wm_module
+
+        monitor = wm_module.WorktreeMonitor()
+        monitor.set_nag_mode("auto-x", "autonomy", "nag_all", duration_seconds=600)
+
+        fresh = wm_module.WorktreeMonitor()
+        assert fresh.get_nag_mode("auto-x", "autonomy") == "nag_all"
+        assert 0.0 < fresh.get_nag_expiry_remaining("auto-x", "autonomy") <= 600.0
 
     def test_set_nag_mode_rejects_invalid_value(self):
         from tools.dashboard import worktree_monitor as wm_module
@@ -2441,12 +2453,13 @@ class TestWorktreeMonitorNagMode:
         from tools.dashboard import worktree_monitor as wm_module
 
         monitor = wm_module.WorktreeMonitor()
-        # 1ms duration so we can step past it deterministically.
+        # Use a small but non-trivial duration so the immediate lookup
+        # still sees the live mode even after the Settings write.
         monitor.set_nag_mode(
-            "auto-x", "autonomy", "nag_all", duration_seconds=0.001,
+            "auto-x", "autonomy", "nag_all", duration_seconds=1.0,
         )
         assert monitor.get_nag_mode("auto-x", "autonomy") == "nag_all"
-        time.sleep(0.005)
+        time.sleep(1.2)
         # Past expiry — entry remains in-memory but the live mode is
         # silent so the polling decision tree won't poll any more.
         assert monitor.get_nag_mode("auto-x", "autonomy") == "silent"
@@ -2477,7 +2490,32 @@ class TestWorktreeMonitorNagMode:
                 "auto-x", "autonomy", "nag_all", duration_seconds=-5.0,
             )
 
+    def test_expired_persisted_watch_reverts_to_silent_after_restart(self):
+        from tools.dashboard import worktree_monitor as wm_module
+        from tools.graph import settings_ops
 
+        settings_ops.upsert_by_key(
+            "dashboard.worktree.watch",
+            1,
+            "auto-x:autonomy",
+            {
+                "mode": "nag_all",
+                "expires_at": time.time() - 60.0,
+            },
+            org="autonomy",
+        )
+
+        fresh = wm_module.WorktreeMonitor()
+        assert fresh.get_nag_mode("auto-x", "autonomy") == "silent"
+        row = settings_ops.resolve_set_key(
+            "dashboard.worktree.watch",
+            "auto-x:autonomy",
+            org="autonomy",
+        )
+        assert row is None
+
+
+@pytest.mark.usefixtures("isolated_settings_db")
 class TestWorktreeWatchEndpoint:
     """``PUT /api/worktrees/{session}/{repo}/watch`` writes the nag mode."""
 
@@ -3326,6 +3364,7 @@ class TestNextPollDelay:
         assert next_poll_delay(100_000) is None
 
 
+@pytest.mark.usefixtures("isolated_settings_db")
 class TestArmingNagWhenDone:
     """``set_nag_mode("nag_done", ...)`` arms the smart-cadence clock and
     clears any prior fired-state for the row."""
@@ -3372,7 +3411,19 @@ class TestArmingNagWhenDone:
         # nag_all uses the legacy budget gate, not the smart cadence.
         assert ("auto-x", "autonomy") not in monitor._armed_at
 
+    def test_restart_restores_armed_at_for_nag_done(self):
+        from tools.dashboard import worktree_monitor as wm
 
+        monitor = wm.WorktreeMonitor()
+        monitor.set_nag_mode("auto-x", "autonomy", "nag_done")
+
+        fresh = wm.WorktreeMonitor()
+        assert fresh.get_nag_mode("auto-x", "autonomy") == "nag_done"
+        armed = fresh._armed_at[("auto-x", "autonomy")]
+        assert armed <= time.monotonic()
+
+
+@pytest.mark.usefixtures("isolated_settings_db")
 class TestSmartCadenceShouldPoll:
     """``_should_poll_in_background`` for nag_done rows respects the
     smart-cadence schedule keyed off ``armed_at``."""
@@ -3490,7 +3541,32 @@ class TestSmartCadenceShouldPoll:
             now + 60,
         )
 
+    def test_restart_rehydrates_nag_done_cadence_clock(self):
+        from tools.dashboard import worktree_monitor as wm
+        from tools.graph import settings_ops
 
+        settings_ops.upsert_by_key(
+            "dashboard.worktree.watch",
+            1,
+            "auto-x:autonomy",
+            {
+                "mode": "nag_done",
+                "expires_at": time.time() + 600.0,
+                "armed_at": time.time() - 31.0,
+            },
+            org="autonomy",
+        )
+
+        monitor = self._seeded_monitor()
+        assert monitor.get_nag_mode("auto-x", "autonomy") == "nag_done"
+        assert monitor._should_poll_in_background(
+            ("auto-x", "autonomy"),
+            monitor._source_control_cache[("auto-x", "autonomy")],
+            time.monotonic(),
+        )
+
+
+@pytest.mark.usefixtures("isolated_settings_db")
 class TestFireTerminalTransitions:
     """``_fire_terminal_transitions`` per-PR CrossTalk delivery."""
 

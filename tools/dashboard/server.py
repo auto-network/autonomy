@@ -6994,8 +6994,9 @@ async def api_worktree_watch_set(request):
     duration defaults to ``NAG_DEFAULT_DURATION_SECONDS`` and is
     clamped to ``NAG_MAX_DURATION_SECONDS`` (4 h). After the duration
     elapses the row reverts to silent automatically, no operator
-    action required. Storage stays in-memory on :class:`WorktreeMonitor`
-    for v1.
+    action required. The live timers remain in-memory on
+    :class:`WorktreeMonitor`, but the requested mode is persisted in
+    Settings so restart can reconstruct it.
     """
     from tools.dashboard.worktree_monitor import NAG_MODES, NAG_DEFAULT
 
