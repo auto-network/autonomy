@@ -983,6 +983,23 @@ class TestWorktreePage:
         assert "subject: pr.title" in js
         assert "body: pr.body" in js
 
+    def test_pr_review_stale_banner_wired(self):
+        """PR-mode Review should surface the backend's stale diff signal
+        instead of silently rendering an empty or misleading diff."""
+        template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+
+        assert 'data-testid="review-pr-stale-banner"' in template
+        assert 'isPrReview() && selectedCommit.commit.stale' in template
+        assert "Refresh required" in template
+        assert "selectedCommit.commit.stale_reason" in template
+        assert "Refresh PR state and reopen Review." in template
+
+        assert "stale: false" in js
+        assert "stale_reason: ''" in js
+        assert "stale: !!detail.stale" in js
+        assert "stale_reason: detail.reason || ''" in js
+
     def test_per_row_refresh_button_wired(self):
         """The review overlay's Refresh button posts to the per-row
         force-GET endpoint — restoring the operator's force-fetch

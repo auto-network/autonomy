@@ -748,6 +748,15 @@
                        x-markdown="selectedCommit.commit.body"></div>
                 </template>
 
+                <template x-if="isPrReview() && selectedCommit.commit.stale">
+                  <div class="mb-6 max-w-4xl rounded-2xl border border-amber-300/30 bg-amber-300/10 px-4 py-3 text-sm leading-6 text-amber-100"
+                       data-testid="review-pr-stale-banner">
+                    <div class="font-semibold uppercase tracking-[0.16em] text-amber-200">Refresh required</div>
+                    <div class="mt-2"
+                         x-text="selectedCommit.commit.stale_reason || 'This PR diff is stale because the cached review SHAs are no longer present locally. Refresh PR state and reopen Review.'"></div>
+                  </div>
+                </template>
+
                 <div class="mb-6">
                   <div x-ref="commitFilesHeader"
                        class="sticky z-[8] -mx-2 mb-2 flex items-center justify-between gap-3 border-y border-white/10 bg-gray-950/95 px-2 py-2 backdrop-blur"

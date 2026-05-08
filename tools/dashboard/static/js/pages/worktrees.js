@@ -1024,6 +1024,8 @@
             files: [],
             stats: {files: 0, additions: 0, deletions: 0},
             patch: '',
+            stale: false,
+            stale_reason: '',
           },
           commitIndex: -1,
           position: 0,
@@ -1053,6 +1055,8 @@
               ...this.selectedCommit.commit,
               files,
               patch: detail.patch || '',
+              stale: !!detail.stale,
+              stale_reason: detail.reason || '',
               stats: {
                 files: files.length,
                 additions: files.reduce((s, f) => s + (f.additions || 0), 0),
