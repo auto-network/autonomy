@@ -1052,6 +1052,7 @@ class TestWorktreePage:
         assert 'data-testid="pr-navigator"' in template
         assert 'data-testid="pr-navigator-pr-row"' in template
         assert 'data-testid="pr-navigator-commit-row"' in template
+        assert 'data-testid="pr-navigator-commit-stats"' in template
         assert 'data-testid="pr-navigator-unlinked-row"' in template
         # Groups come from rowReviewGroups (one PR section per binding,
         # plus an optional Unlinked commits section).
@@ -1066,8 +1067,13 @@ class TestWorktreePage:
         # rows use reviewCommitChecks, grouped under the owning PR.
         assert 'check in rowPrChecks(item.row, group.pr)' in template
         assert 'check in reviewCommitChecks(entry.commit)' in template
+        assert 'x-text="commitStatsSummary(entry.commit)"' in template
 
         # Helpers exist with the expected shapes.
+        assert "hasStackedPrs(row) {" in js
+        assert "stackedCardCountLabel(row, total) {" in js
+        assert "stackedCardSummary(row) {" in js
+        assert "commitStatsSummary(commit) {" in js
         assert "rowReviewGroups(row) {" in js
         assert "rowPrChecks(row, pr)" in js
         assert "reviewCommitChecks(_commit)" in js  # Returns [] until per-commit data lands.
@@ -1091,6 +1097,23 @@ class TestWorktreePage:
         assert "const explicitShas = Array.isArray(pr.commit_shas) ? pr.commit_shas : [];" in js
         assert "const start = Math.max(" in js
         assert "label: 'Unlinked commits'" in js
+
+    def test_stacked_rows_hide_first_commit_detail_chrome_until_review(self):
+        """Multi-PR cards should stop pretending the first commit is the
+        primary detail surface; commit bodies and file lists move behind
+        Review, while the card shows stack summary + per-commit deltas."""
+        template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+
+        assert 'data-testid="stacked-pr-summary"' in template
+        assert 'x-if="hasStackedPrs(item.row)"' in template
+        assert 'x-if="!hasStackedPrs(item.row)"' in template
+        assert 'Open Review for commit messages, file lists, and integrated diff details.' in template
+        assert 'x-text="stackedCardSummary(item.row)"' in template
+        assert 'x-text="stackedCardCountLabel(item.row, item.total)"' in template
+        assert "return prCount + ' PRs · ' + total + ' commits';" in js
+        assert "return prCount + ' ' + prLabel + ' stacked across ' + commitCount + ' ' + commitLabel;" in js
+        assert "return files + ' ' + fileLabel + ' +' + additions + ' -' + deletions;" in js
 
     def test_default_review_entry_prefers_pr_review(self):
         """Default review entry should land on PR status when review

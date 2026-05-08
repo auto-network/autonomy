@@ -582,6 +582,35 @@
         return prs.length ? prs[0] : null;
       },
 
+      hasStackedPrs(row) {
+        return this.rowPrs(row).length > 1;
+      },
+
+      stackedCardCountLabel(row, total) {
+        const prCount = this.rowPrs(row).length;
+        if (prCount <= 1) return 'commit 1 of ' + total;
+        return prCount + ' PRs · ' + total + ' commits';
+      },
+
+      stackedCardSummary(row) {
+        const prCount = this.rowPrs(row).length;
+        const commitCount = this.commitList(row).length;
+        const prLabel = prCount === 1 ? 'PR' : 'PRs';
+        const commitLabel = commitCount === 1 ? 'commit' : 'commits';
+        return prCount + ' ' + prLabel + ' stacked across ' + commitCount + ' ' + commitLabel;
+      },
+
+      commitStatsSummary(commit) {
+        const stats = (commit && commit.stats) || {};
+        const files = Number.isFinite(stats.files)
+          ? stats.files
+          : (((commit && commit.files) || []).length);
+        const additions = Number.isFinite(stats.additions) ? stats.additions : 0;
+        const deletions = Number.isFinite(stats.deletions) ? stats.deletions : 0;
+        const fileLabel = files === 1 ? 'file' : 'files';
+        return files + ' ' + fileLabel + ' +' + additions + ' -' + deletions;
+      },
+
       rowReviewGroups(row) {
         const commits = this.commitList(row);
         const prs = this.rowPrs(row);

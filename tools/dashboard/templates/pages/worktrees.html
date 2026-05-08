@@ -212,7 +212,7 @@
                     </a>
                   </template>
                   <span class="rounded-full bg-slate-800 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400"
-                        x-text="'commit 1 of ' + item.total"></span>
+                        x-text="stackedCardCountLabel(item.row, item.total)"></span>
                 </div>
                 <button type="button"
                         class="h-10 shrink-0 rounded-2xl bg-indigo-600 px-4 text-sm font-semibold text-white transition hover:bg-indigo-500"
@@ -221,38 +221,81 @@
               </div>
 
               <div class="min-w-0">
-                <button type="button" class="block w-full min-w-0 text-left" @click="selectCommit(item)">
-                  <div class="mt-1 flex flex-col items-start gap-1.5"
-                       data-branch-row>
-                    <span class="inline-flex min-w-0 items-center gap-2"
-                          data-branch-part="src">
-                      <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">src</span>
-                      <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
-                        <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
-                              x-text="repoName(item.row)"></span>
-                        <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
-                              x-text="sourceBranch(item.row)"></span>
+                <template x-if="hasStackedPrs(item.row)">
+                  <div>
+                    <div class="mt-1 flex flex-col items-start gap-1.5"
+                         data-branch-row>
+                      <span class="inline-flex min-w-0 items-center gap-2"
+                            data-branch-part="src">
+                        <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">src</span>
+                        <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
+                          <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
+                                x-text="repoName(item.row)"></span>
+                          <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
+                                x-text="sourceBranch(item.row)"></span>
+                        </span>
                       </span>
-                    </span>
-                    <span class="text-xs text-slate-600"
-                          data-branch-part="arrow"
-                          aria-hidden="true">→</span>
-                    <span class="inline-flex min-w-0 items-center gap-2"
-                          data-branch-part="dst">
-                      <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">dst</span>
-                      <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
-                        <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
-                              x-text="repoName(item.row)"></span>
-                        <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
-                              x-text="targetBranch(item.row)"></span>
+                      <span class="text-xs text-slate-600"
+                            data-branch-part="arrow"
+                            aria-hidden="true">→</span>
+                      <span class="inline-flex min-w-0 items-center gap-2"
+                            data-branch-part="dst">
+                        <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">dst</span>
+                        <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
+                          <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
+                                x-text="repoName(item.row)"></span>
+                          <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
+                                x-text="targetBranch(item.row)"></span>
+                        </span>
                       </span>
-                    </span>
+                    </div>
+                    <div class="mt-3 rounded-3xl border border-white/10 bg-white/[0.035] px-4 py-4 shadow-[0_16px_40px_rgba(0,0,0,0.22)]"
+                         data-testid="stacked-pr-summary">
+                      <div class="flex flex-wrap items-baseline justify-between gap-2">
+                        <div class="text-[10px] font-semibold uppercase tracking-[0.22em] text-slate-500">Stacked review</div>
+                        <div class="font-mono text-[11px] text-slate-400"
+                             x-text="stackedCardSummary(item.row)"></div>
+                      </div>
+                      <p class="mt-3 max-w-2xl text-sm leading-6 text-slate-300">
+                        PR titles and per-commit line deltas stay visible on the card. Open Review for commit messages, file lists, and integrated diff details.
+                      </p>
+                    </div>
                   </div>
-                  <h3 class="mt-3 min-w-0 overflow-hidden break-words text-xl font-semibold leading-7 text-white md:text-2xl"
-                      x-text="item.commit.subject"></h3>
-                  <p class="mt-3 line-clamp-3 min-w-0 overflow-hidden whitespace-pre-wrap break-words text-sm leading-6 text-slate-400"
-                     x-text="item.commit.body || 'No commit body.'"></p>
-                </button>
+                </template>
+                <template x-if="!hasStackedPrs(item.row)">
+                  <button type="button" class="block w-full min-w-0 text-left" @click="selectCommit(item)">
+                    <div class="mt-1 flex flex-col items-start gap-1.5"
+                         data-branch-row>
+                      <span class="inline-flex min-w-0 items-center gap-2"
+                            data-branch-part="src">
+                        <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">src</span>
+                        <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
+                          <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
+                                x-text="repoName(item.row)"></span>
+                          <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
+                                x-text="sourceBranch(item.row)"></span>
+                        </span>
+                      </span>
+                      <span class="text-xs text-slate-600"
+                            data-branch-part="arrow"
+                            aria-hidden="true">→</span>
+                      <span class="inline-flex min-w-0 items-center gap-2"
+                            data-branch-part="dst">
+                        <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">dst</span>
+                        <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
+                          <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
+                                x-text="repoName(item.row)"></span>
+                          <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
+                                x-text="targetBranch(item.row)"></span>
+                        </span>
+                      </span>
+                    </div>
+                    <h3 class="mt-3 min-w-0 overflow-hidden break-words text-xl font-semibold leading-7 text-white md:text-2xl"
+                        x-text="item.commit.subject"></h3>
+                    <p class="mt-3 line-clamp-3 min-w-0 overflow-hidden whitespace-pre-wrap break-words text-sm leading-6 text-slate-400"
+                       x-text="item.commit.body || 'No commit body.'"></p>
+                  </button>
+                </template>
               </div>
 
               <template x-if="rowPrs(item.row).length">
@@ -319,8 +362,15 @@
                                     data-testid="pr-navigator-commit-row">
                               <span class="rounded-full border border-white/10 bg-slate-900 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-300"
                                     x-text="entry.commit.short_sha || shortSha(entry.commit.sha)"></span>
-                              <span class="min-w-0 truncate text-sm text-slate-200"
-                                    x-text="entry.commit.subject"></span>
+                              <template x-if="hasStackedPrs(item.row)">
+                                <span class="min-w-0 truncate font-mono text-[11px] text-slate-300"
+                                      data-testid="pr-navigator-commit-stats"
+                                      x-text="commitStatsSummary(entry.commit)"></span>
+                              </template>
+                              <template x-if="!hasStackedPrs(item.row)">
+                                <span class="min-w-0 truncate text-sm text-slate-200"
+                                      x-text="entry.commit.subject"></span>
+                              </template>
                               <span class="flex shrink-0 items-center gap-1.5">
                                 <template x-for="check in reviewCommitChecks(entry.commit)" :key="'card-' + entry.commit.sha + '-' + check.id">
                                   <span class="inline-flex h-7 w-7 cursor-help items-center justify-center rounded-full border text-[10px] font-bold tracking-wide"
@@ -345,36 +395,38 @@
                 </div>
               </template>
 
-              <div class="mt-4 min-w-0">
-                <div class="mb-2 flex items-center justify-between gap-3">
-                  <div class="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Changed in this commit</div>
-                  <div class="flex shrink-0 items-center gap-2 font-mono text-[10px] text-slate-500">
-                    <span x-text="item.commit.stats.files + ' files'"></span>
-                    <span class="text-emerald-300" x-text="'+' + item.commit.stats.additions"></span>
-                    <span class="text-rose-300" x-text="'-' + item.commit.stats.deletions"></span>
-                  </div>
-                </div>
-                <div class="divide-y divide-white/10 border-y border-white/10">
-                  <template x-for="file in item.commit.files.slice(0, 3)" :key="commitKey(item) + file.status + file.path">
-                    <div class="grid grid-cols-[0.85rem_minmax(0,1fr)_auto] items-center gap-1.5 py-1.5">
-                      <span class="text-center font-mono text-[10px] font-bold text-indigo-200" x-text="file.status"></span>
-                      <span class="min-w-0 overflow-hidden whitespace-nowrap font-mono text-[11px] leading-4 text-slate-300"
-                            :title="file.path"
-                            x-text="fitPath(file.path, $el)"></span>
-                      <span class="inline-flex shrink-0 items-center gap-1 font-mono text-[10px]">
-                        <span class="text-emerald-300" x-text="'+' + file.additions"></span>
-                        <span class="text-rose-300" x-text="'-' + file.deletions"></span>
-                      </span>
+              <template x-if="!hasStackedPrs(item.row)">
+                <div class="mt-4 min-w-0">
+                  <div class="mb-2 flex items-center justify-between gap-3">
+                    <div class="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Changed in this commit</div>
+                    <div class="flex shrink-0 items-center gap-2 font-mono text-[10px] text-slate-500">
+                      <span x-text="item.commit.stats.files + ' files'"></span>
+                      <span class="text-emerald-300" x-text="'+' + item.commit.stats.additions"></span>
+                      <span class="text-rose-300" x-text="'-' + item.commit.stats.deletions"></span>
                     </div>
+                  </div>
+                  <div class="divide-y divide-white/10 border-y border-white/10">
+                    <template x-for="file in item.commit.files.slice(0, 3)" :key="commitKey(item) + file.status + file.path">
+                      <div class="grid grid-cols-[0.85rem_minmax(0,1fr)_auto] items-center gap-1.5 py-1.5">
+                        <span class="text-center font-mono text-[10px] font-bold text-indigo-200" x-text="file.status"></span>
+                        <span class="min-w-0 overflow-hidden whitespace-nowrap font-mono text-[11px] leading-4 text-slate-300"
+                              :title="file.path"
+                              x-text="fitPath(file.path, $el)"></span>
+                        <span class="inline-flex shrink-0 items-center gap-1 font-mono text-[10px]">
+                          <span class="text-emerald-300" x-text="'+' + file.additions"></span>
+                          <span class="text-rose-300" x-text="'-' + file.deletions"></span>
+                        </span>
+                      </div>
+                    </template>
+                  </div>
+                  <template x-if="item.total > 1">
+                    <div class="mt-2 text-[11px] text-slate-500" x-text="'+' + (item.total - 1) + ' later commits in this stack'"></div>
+                  </template>
+                  <template x-if="item.commit.files.length > 3">
+                    <div class="mt-2 text-[11px] text-slate-500" x-text="'+' + (item.commit.files.length - 3) + ' more paths in full view'"></div>
                   </template>
                 </div>
-                <template x-if="item.total > 1">
-                  <div class="mt-2 text-[11px] text-slate-500" x-text="'+' + (item.total - 1) + ' later commits in this stack'"></div>
-                </template>
-                <template x-if="item.commit.files.length > 3">
-                  <div class="mt-2 text-[11px] text-slate-500" x-text="'+' + (item.commit.files.length - 3) + ' more paths in full view'"></div>
-                </template>
-              </div>
+              </template>
             </article>
           </div>
         </template>
