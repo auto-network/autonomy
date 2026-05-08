@@ -1042,8 +1042,8 @@ class TestWorktreePage:
 
     def test_pr_navigator_template_and_helpers_wired(self):
         """The on-card PR/commit navigator (settled design 3435e03f, lines
-        205-258) renders only when the row has a PR, exposes one PR row
-        plus one row per commit, and ties click handlers to
+        205-258) renders only when the row has a PR, exposes grouped PR
+        sections with nested commit rows, and ties click handlers to
         ``openReviewPr`` / ``openReviewCommit``."""
         template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
         js = (JS_DIR / "pages" / "worktrees.js").read_text()
@@ -1052,21 +1052,23 @@ class TestWorktreePage:
         assert 'data-testid="pr-navigator"' in template
         assert 'data-testid="pr-navigator-pr-row"' in template
         assert 'data-testid="pr-navigator-commit-row"' in template
-        # PR rows loop over rowPrs (one entry per binding for stacked PRs);
-        # per-commit rows bind to openReviewCommit unchanged.
+        assert 'data-testid="pr-navigator-unlinked-row"' in template
+        # Groups come from rowReviewGroups (one PR section per binding,
+        # plus an optional Unlinked commits section).
         assert 'x-if="rowPrs(item.row).length"' in template
-        assert 'x-for="pr in rowPrs(item.row)"' in template
-        assert '@click="openReviewPr(item.row, pr)"' in template
-        assert '@click="openReviewCommit(item.row, idx)"' in template
+        assert 'x-for="group in rowReviewGroups(item.row)"' in template
+        assert '@click="openReviewPr(item.row, group.pr)"' in template
+        assert '@click="openReviewCommit(item.row, entry.index)"' in template
         # Both rows render the icon disc strip with checkIconClass coloring.
         assert ':class="checkIconClass(check.status)"' in template
         assert 'x-text="check.icon"' in template
         # PR row uses rowPrChecks(item.row, pr) (per-PR checks); commit
-        # rows use reviewCommitChecks.
-        assert 'check in rowPrChecks(item.row, pr)' in template
-        assert 'check in reviewCommitChecks(commit)' in template
+        # rows use reviewCommitChecks, grouped under the owning PR.
+        assert 'check in rowPrChecks(item.row, group.pr)' in template
+        assert 'check in reviewCommitChecks(entry.commit)' in template
 
         # Helpers exist with the expected shapes.
+        assert "rowReviewGroups(row) {" in js
         assert "rowPrChecks(row, pr)" in js
         assert "reviewCommitChecks(_commit)" in js  # Returns [] until per-commit data lands.
         assert "checkIconClass(status) {" in js
@@ -1078,6 +1080,17 @@ class TestWorktreePage:
         assert "border-emerald-300/20 bg-emerald-300/12 text-emerald-100" in js
         assert "border-amber-300/20 bg-amber-300/12 text-amber-100" in js
         assert "border-rose-300/20 bg-rose-300/12 text-rose-100" in js
+
+    def test_row_review_groups_prefers_commit_shas_then_safe_fallback(self):
+        """Grouped PR rendering should use explicit commit_shas when the
+        backend provides them, then fall back to conservative local
+        boundary slicing and preserve leftovers as Unlinked commits."""
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+
+        assert "commit_shas: Array.isArray(review.commit_shas) ? review.commit_shas.slice() : []" in js
+        assert "const explicitShas = Array.isArray(pr.commit_shas) ? pr.commit_shas : [];" in js
+        assert "const start = Math.max(" in js
+        assert "label: 'Unlinked commits'" in js
 
     def test_default_review_entry_prefers_pr_review(self):
         """Default review entry should land on PR status when review
