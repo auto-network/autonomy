@@ -1,6 +1,8 @@
 <template x-if="selectedCommit">
   <div class="worktree-review-overlay fixed inset-0 z-50 overflow-y-auto bg-gray-950"
        x-ref="commitDetailScroller"
+       @click.self="selectedCommit = null"
+       @keydown.escape.window="selectedCommit = null"
        @scroll.passive="syncReviewHeaderState()"
        data-testid="worktree-commit-detail">
     <section class="worktree-review-shell min-h-screen bg-gray-950">
@@ -19,11 +21,13 @@
                   <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
                         x-text="selectedCommit.row.session_name"></span>
                 </template>
-                <span class="inline-flex overflow-hidden rounded-full border border-white/10 text-[10px] font-semibold">
-                  <span class="bg-slate-800 px-2 py-0.5 uppercase tracking-wider text-slate-500">repo</span>
-                  <span class="bg-slate-900 px-2 py-0.5 font-mono text-slate-200"
-                        x-text="repoName(selectedCommit.row)"></span>
-                </span>
+                <template x-if="selectedCommit.row.repo_name">
+                  <span class="inline-flex overflow-hidden rounded-full border border-white/10 text-[10px] font-semibold">
+                    <span class="bg-slate-800 px-2 py-0.5 uppercase tracking-wider text-slate-500">repo</span>
+                    <span class="bg-slate-900 px-2 py-0.5 font-mono text-slate-200"
+                          x-text="repoName(selectedCommit.row)"></span>
+                  </span>
+                </template>
                 <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
                       :class="statusClass(selectedCommit.row)"
                       x-text="statusLabel(selectedCommit.row)"></span>
@@ -53,12 +57,14 @@
                 </template>
               </div>
               <div class="absolute right-0 top-0 flex items-center gap-2">
-                <button type="button"
-                        class="h-10 rounded-2xl border border-white/10 bg-white/[0.03] px-3 text-xs font-semibold text-slate-300 transition hover:border-white/20 hover:text-white disabled:cursor-wait disabled:opacity-50"
-                        :disabled="rowRefreshing"
-                        @click="refreshSelectedRow()"
-                        data-testid="review-overlay-refresh-button"
-                        x-text="rowRefreshing ? 'Refreshing...' : 'Refresh'">Refresh</button>
+                <template x-if="canRefreshSelectedRow()">
+                  <button type="button"
+                          class="h-10 rounded-2xl border border-white/10 bg-white/[0.03] px-3 text-xs font-semibold text-slate-300 transition hover:border-white/20 hover:text-white disabled:cursor-wait disabled:opacity-50"
+                          :disabled="rowRefreshing"
+                          @click="refreshSelectedRow()"
+                          data-testid="review-overlay-refresh-button"
+                          x-text="rowRefreshing ? 'Refreshing...' : 'Refresh'">Refresh</button>
+                </template>
                 <button type="button"
                         class="h-10 w-10 shrink-0 rounded-full border border-white/10 bg-white/[0.03] text-slate-300"
                         @click="selectedCommit = null">×</button>
@@ -72,12 +78,18 @@
                     <span class="inline-flex min-w-0 items-center gap-2"
                           data-branch-part="src">
                       <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">src</span>
-                      <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
-                        <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
-                              x-text="repoName(selectedCommit.row)"></span>
-                        <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
+                      <template x-if="selectedCommit.row.repo_name">
+                        <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
+                          <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
+                                x-text="repoName(selectedCommit.row)"></span>
+                          <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
+                                x-text="sourceBranch(selectedCommit.row)"></span>
+                        </span>
+                      </template>
+                      <template x-if="!selectedCommit.row.repo_name">
+                        <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 bg-slate-900 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-200"
                               x-text="sourceBranch(selectedCommit.row)"></span>
-                      </span>
+                      </template>
                     </span>
                     <span class="text-sm text-slate-600"
                           data-branch-part="arrow"
@@ -85,12 +97,18 @@
                     <span class="inline-flex min-w-0 items-center gap-2"
                           data-branch-part="dst">
                       <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">dst</span>
-                      <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
-                        <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
-                              x-text="repoName(selectedCommit.row)"></span>
-                        <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
+                      <template x-if="selectedCommit.row.repo_name">
+                        <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
+                          <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
+                                x-text="repoName(selectedCommit.row)"></span>
+                          <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
+                                x-text="targetBranch(selectedCommit.row)"></span>
+                        </span>
+                      </template>
+                      <template x-if="!selectedCommit.row.repo_name">
+                        <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 bg-slate-900 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-200"
                               x-text="targetBranch(selectedCommit.row)"></span>
-                      </span>
+                      </template>
                     </span>
                     <template x-if="!isPrReview() && selectedCommit.pr">
                       <button type="button"
@@ -189,6 +207,7 @@
         <div>
           <template x-if="(selectedCommit.commit.body || '').trim()">
             <div class="mb-6 max-w-4xl text-sm leading-6 text-slate-300"
+                 data-testid="worktree-review-commit-body"
                  x-markdown="selectedCommit.commit.body"></div>
           </template>
 

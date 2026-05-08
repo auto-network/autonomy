@@ -470,22 +470,6 @@
       localRefreshPending: {},
       notificationsZoom: 'normal',
       voterId: _resolveOperatorId(),
-      // ── auto-24a60: worktree-merge Diff overlay ────────────────
-      // Centered modal opened from a worktree-merge card's [Diff →]
-      // button. Lazy-fetches /api/dispatch/runs/<run_id>/commit-detail
-      // (subject, body, files, patch) and renders inline. Closing the
-      // overlay does NOT navigate or push history — the underlying
-      // /activity scroll position + tab selection survive intact.
-      diffOverlay: {
-        open: false,
-        runId: null,
-        loading: false,
-        error: null,
-        data: null,
-        // _fallbackHref points at /worktrees when commit-detail fetch
-        // fails — operator-recoverable rather than a dead-end modal.
-        fallbackHref: '/worktrees',
-      },
       _AskSchema: null,
       _VoteSchema: null,
       _RefreshSchema: null,
@@ -526,46 +510,17 @@
         this.attentionZoom = mode;
       },
 
-      // ── auto-24a60: worktree-merge Diff overlay ──────────────────
       async openDiffOverlay(entry) {
         if (!entry || !entry.run_id) return;
-        const runId = entry.run_id;
-        this.diffOverlay = {
-          open: true,
-          runId: runId,
-          loading: true,
-          error: null,
-          data: null,
-          fallbackHref: '/worktrees',
-        };
-        try {
-          const resp = await fetch('/api/dispatch/runs/' + encodeURIComponent(runId) + '/commit-detail');
-          if (!resp.ok) {
-            const body = await resp.text().catch(() => '');
-            throw new Error('commit-detail HTTP ' + resp.status + (body ? ': ' + body.slice(0, 200) : ''));
-          }
-          const data = await resp.json();
-          // Preserve current overlay identity — operator may have
-          // closed the modal and opened a different one mid-flight.
-          if (this.diffOverlay.runId !== runId) return;
-          this.diffOverlay.data = data;
-          this.diffOverlay.loading = false;
-        } catch (err) {
-          if (this.diffOverlay.runId !== runId) return;
-          this.diffOverlay.loading = false;
-          this.diffOverlay.error = (err && err.message) || String(err);
+        const ok = await window.openCommitOverlay({
+          runId: entry.run_id,
+          sessionName: entry.container_name || '',
+          branch: entry.branch || '',
+          subject: entry._wtHeadline || entry.commit_message || '',
+        });
+        if (!ok) {
+          window.location.assign('/worktrees');
         }
-      },
-
-      closeDiffOverlay() {
-        this.diffOverlay = {
-          open: false,
-          runId: null,
-          loading: false,
-          error: null,
-          data: null,
-          fallbackHref: '/worktrees',
-        };
       },
 
       formatAttentionTimeRange(entry) {
