@@ -794,7 +794,9 @@ class TestWorktreePage:
         assert "await _checkVersion();" in app_js
         assert "data-hard-reload" in app_js
         assert "_watchWorktreesBoot" not in app_js
-        assert "window.location.reload();" not in app_js
+        # Worktrees should not own a bespoke reload path. The generic fatal
+        # refresh modal in app.js is allowed to call reload for all routes.
+        assert "data-testid', 'fatal-modal-refresh'" in app_js
 
     def test_template_uses_required_status_labels(self):
         template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
