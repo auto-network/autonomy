@@ -1010,6 +1010,26 @@ class TestWorktreePage:
         assert "this.rows.splice(idx, 1, updated)" in js
         assert "this.syncOverlayRows()" in js
 
+    def test_pr_empty_state_cta_wired(self):
+        """Rows with no visible ``source_control`` block should explain
+        the absence and offer a row-scoped refresh affordance."""
+        template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+
+        assert 'data-testid="pr-empty-state-cta"' in template
+        assert '!item.row.source_control' in template
+        assert 'PR status has not been fetched for this worktree yet.' in template
+        assert 'data-testid="pr-empty-state-refresh-button"' in template
+        assert '@click="refreshRowSourceControl(item.row)"' in template
+        assert ':disabled="isCardRefreshing(item.row)"' in template
+        assert "Refresh PR state" in template
+
+        assert "cardRefreshing: {}" in js
+        assert "isCardRefreshing(row) {" in js
+        assert "async _refreshRowFromServer(row) {" in js
+        assert "async refreshRowSourceControl(row) {" in js
+        assert "delete this.cardRefreshing[key];" in js
+
     def test_pr_nag_controls_wired(self):
         """The card-level Silent / Nag All Changes / Nag When Done
         controls (settled design 3435e03f, lines 485-498) bind to the
