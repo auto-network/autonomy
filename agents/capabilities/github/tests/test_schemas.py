@@ -65,7 +65,7 @@ def test_check_entry_field_set():
 
 def test_review_payload_field_set():
     expected = {
-        "number", "url", "title", "body", "head_sha", "base_sha",
+        "number", "node_id", "url", "title", "body", "head_sha", "base_sha",
         "base_branch", "state", "is_draft", "aggregate_state",
         "running", "checks", "commit_shas",
     }
@@ -127,6 +127,7 @@ def test_check_entry_payload_validates():
 def test_review_payload_validates():
     ReviewPayloadV1.validate({
         "number": 303,
+        "node_id": "PR_kwD123",
         "url": "https://example.com/pr/303",
         "title": "Add capability layer",
         "body": "Body…",
@@ -283,6 +284,24 @@ def test_real_dataclass_round_trips_through_its_payload_schema():
         state="ready",
     )
     result.payload_schema.validate(result.to_dict())
+
+    review = service.ReviewPayload(
+        number=42,
+        node_id="PR_kwD42",
+        url="https://example.com/pr/42",
+        title="Wire PR node ids",
+        body="Body",
+        head_sha="a" * 40,
+        base_sha="b" * 40,
+        base_branch="main",
+        state="open",
+        is_draft=False,
+        aggregate_state="green",
+        running=False,
+        checks=(entry,),
+        commit_shas=("a" * 40,),
+    )
+    review.payload_schema.validate(review.to_dict())
 
 
 # ── Codegen drift gate ──────────────────────────────────────

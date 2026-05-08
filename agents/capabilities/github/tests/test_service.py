@@ -60,6 +60,7 @@ def test_parse_pull_response_basic():
         "Content-Type: application/json\r\n"
         "\r\n"
         '{"title": "Add binding", "body": "see bead", "state": "open", '
+        '"node_id": "PR_kwDOA1", '
         '"draft": false, "html_url": "https://github.com/o/r/pull/1", '
         '"head": {"sha": "head1"}, '
         '"base": {"sha": "base1", "ref": "main"}}'
@@ -67,6 +68,7 @@ def test_parse_pull_response_basic():
     parsed = parse_pull_response(stdout)
     assert parsed["title"] == "Add binding"
     assert parsed["body"] == "see bead"
+    assert parsed["node_id"] == "PR_kwDOA1"
     assert parsed["state"] == "open"
     assert parsed["head_sha"] == "head1"
     assert parsed["base_sha"] == "base1"

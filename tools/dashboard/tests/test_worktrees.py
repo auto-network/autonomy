@@ -2826,6 +2826,7 @@ class TestWorktreeReviewBindings:
         raw = json.dumps([
             {
                 "number": 100,
+                "id": "PR_kwDO100",
                 "title": "Stack base",
                 "body": "",
                 "state": "OPEN",
@@ -2839,6 +2840,7 @@ class TestWorktreeReviewBindings:
             },
             {
                 "number": 101,
+                "id": "PR_kwDO101",
                 "title": "Stack top",
                 "body": "",
                 "state": "OPEN",
@@ -2896,6 +2898,8 @@ class TestWorktreeReviewBindings:
         ).to_dict()
         assert cache_rows["owner/repo:100"].payload["head_sha"] == head100
         assert cache_rows["owner/repo:101"].payload["head_sha"] == head101
+        assert cache_rows["owner/repo:100"].payload["node_id"] == "PR_kwDO100"
+        assert cache_rows["owner/repo:101"].payload["node_id"] == "PR_kwDO101"
         assert cache_rows["owner/repo:100"].payload["checks"] == []
 
     def test_binding_present_composes_from_cache_with_zero_gh_calls(
@@ -2920,6 +2924,7 @@ class TestWorktreeReviewBindings:
             "owner/repo:42",
             {
                 "title": "Cached PR", "body": "from cache",
+                "node_id": "PR_kwDO42",
                 "state": "open", "head_sha": "head456", "base_sha": "real-base",
                 "base_branch": "main", "is_draft": False, "provider": "github",
                 "url": "https://example/pull/42",
@@ -2947,6 +2952,7 @@ class TestWorktreeReviewBindings:
         assert len(snapshot["reviews"]) == 1
         review = snapshot["reviews"][0]
         assert review["number"] == 42
+        assert review["node_id"] == "PR_kwDO42"
         assert review["title"] == "Cached PR"
         # Binding base_sha overrides cache.base_sha for per-PR scoping.
         assert review["base_sha"] == "fa12cd34"

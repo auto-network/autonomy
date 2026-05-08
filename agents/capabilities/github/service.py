@@ -87,7 +87,7 @@ FAILURE_NOT_MODIFIED = "not_modified"
 # the first PR (via a secondary ``gh pr view`` or local
 # ``git merge-base``) is a v2 refinement.
 PR_LIST_FIELDS = (
-    "number,state,title,body,url,"
+    "id,number,state,title,body,url,"
     "headRefName,headRefOid,baseRefName,"
     "isDraft,mergeable,mergeStateStatus,reviewDecision,"
     "statusCheckRollup,commits,updatedAt"
@@ -203,6 +203,7 @@ class ReviewPayload:
     """
 
     number: int | None
+    node_id: str
     url: str
     title: str
     body: str
@@ -219,6 +220,7 @@ class ReviewPayload:
     def to_dict(self) -> dict:
         return {
             "number": self.number,
+            "node_id": self.node_id,
             "url": self.url,
             "title": self.title,
             "body": self.body,
@@ -381,6 +383,7 @@ def _normalize_one_pr(data: dict) -> ReviewPayload | None:
 
     return ReviewPayload(
         number=data.get("number"),
+        node_id=data.get("id") or "",
         url=data.get("url") or "",
         title=(data.get("title") or "").strip(),
         body=data.get("body") or "",
@@ -458,6 +461,7 @@ def _assign_commits_to_reviews(
         out.append(
             ReviewPayload(
                 number=review.number,
+                node_id=review.node_id,
                 url=review.url,
                 title=review.title,
                 body=review.body,
@@ -1096,6 +1100,7 @@ def parse_pull_response(stdout: str, etag: str | None = None) -> dict:
     return {
         "title": (data.get("title") or "").strip(),
         "body": data.get("body") or "",
+        "node_id": (data.get("node_id") or "") if isinstance(data, dict) else "",
         "state": state,
         "head_sha": (head.get("sha") if isinstance(head, dict) else "") or "",
         "base_sha": (base.get("sha") if isinstance(base, dict) else "") or "",
