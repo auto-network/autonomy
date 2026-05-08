@@ -151,6 +151,22 @@ def _is_review_terminal(review: dict | None) -> bool:
     return True
 
 
+def _is_review_refresh_terminal(review: dict | None) -> bool:
+    """A cached review can skip remote refresh once terminal is known.
+
+    For refresh gating we treat a closed/merged PR as terminal even if
+    checks are absent, because the operator explicitly does not want a
+    terminal-bound row to keep probing GitHub. Open PRs remain governed
+    by the check-status terminal test above.
+    """
+    if not review:
+        return False
+    state = str(review.get("state") or "").lower()
+    if state in ("closed", "merged"):
+        return True
+    return _is_review_terminal(review)
+
+
 def _format_terminal_message(review: dict) -> str:
     """Compose the GREEN/RED CrossTalk body for a terminalized PR.
 
@@ -518,6 +534,19 @@ async def _refresh_bindings_via_rest(
         cached = cache_map.get(cache_key)
         cached_etag = (cached or {}).get("etag")
 
+        if _is_review_refresh_terminal(cached):
+            try:
+                settings_ops.upsert_by_key(
+                    REVIEW_STATE_SET_ID, REVIEW_STATE_REVISION,
+                    cache_key, cached, org="autonomy",
+                )
+            except Exception:
+                logger.warning(
+                    "worktree_monitor: cache touch failed for %s",
+                    cache_key, exc_info=True,
+                )
+            continue
+
         rest = await source_control_review_read_by_id_v1(
             row.session_name,
             row.repo_name,
@@ -528,19 +557,36 @@ async def _refresh_bindings_via_rest(
             timeout=int(_GITHUB_REVIEW_TIMEOUT),
         )
         if rest.failure == FAILURE_NOT_MODIFIED:
-            # Cache still fresh — touch ``updated_at`` by re-writing the
-            # same payload. Skip when there's no cache to refresh.
-            if cached is not None:
-                try:
-                    settings_ops.add_setting(
-                        REVIEW_STATE_SET_ID, REVIEW_STATE_REVISION,
-                        cache_key, cached, org="autonomy",
-                    )
-                except Exception:
-                    logger.warning(
-                        "worktree_monitor: cache touch failed for %s",
-                        cache_key, exc_info=True,
-                    )
+            # The PR document did not change, but non-terminal reviews
+            # can still have fresher check-runs. Reuse the cached head
+            # sha for the sub-fetch and keep the rest of the payload.
+            if cached is None:
+                continue
+            payload = dict(cached)
+            head_sha = str(cached.get("head_sha") or "")
+            checks = list(cached.get("checks") or [])
+            if head_sha:
+                checks_rest = await source_control_check_runs_read_for_sha_v1(
+                    row.session_name,
+                    row.repo_name,
+                    head_sha=head_sha,
+                    rows=all_rows,
+                    repo_slug=repo_slug or None,
+                    timeout=int(_GITHUB_REVIEW_TIMEOUT),
+                )
+                if checks_rest.ok:
+                    checks = parse_check_runs_response(checks_rest.stdout)
+            payload["checks"] = checks
+            try:
+                settings_ops.upsert_by_key(
+                    REVIEW_STATE_SET_ID, REVIEW_STATE_REVISION,
+                    cache_key, payload, org="autonomy",
+                )
+            except Exception:
+                logger.warning(
+                    "worktree_monitor: cache write failed for %s",
+                    cache_key, exc_info=True,
+                )
             continue
         if rest.failure == FAILURE_RATE_LIMITED:
             rate_limited = True
@@ -591,7 +637,7 @@ async def _refresh_bindings_via_rest(
         if parsed.get("url"):
             payload["url"] = parsed["url"]
         try:
-            settings_ops.add_setting(
+            settings_ops.upsert_by_key(
                 REVIEW_STATE_SET_ID, REVIEW_STATE_REVISION,
                 cache_key, payload, org="autonomy",
             )

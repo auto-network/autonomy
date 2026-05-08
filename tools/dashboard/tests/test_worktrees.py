@@ -2885,7 +2885,7 @@ class TestRefreshOneOverBindings:
         assert snapshot is not None
         assert snapshot["reviews"][0]["title"] == "Bound"
 
-    def test_refresh_one_binding_path_treats_304_as_cache_fresh(
+    def test_refresh_one_binding_path_rechecks_non_terminal_304(
         self, isolated_settings_db, monkeypatch,
     ):
         from agents.capabilities.github import service as wg
@@ -2893,7 +2893,7 @@ class TestRefreshOneOverBindings:
         from tools.graph import settings_ops
 
         self._seed_binding()
-        # Pre-seed cache with an etag.
+        # Pre-seed cache with a non-terminal review + etag.
         settings_ops.add_setting(
             "autonomy.source_control.review_state", 1,
             "owner/repo:99",
@@ -2902,12 +2902,14 @@ class TestRefreshOneOverBindings:
                 "head_sha": "headSHA", "base_sha": "baseSHA",
                 "base_branch": "main", "is_draft": False, "provider": "github",
                 "etag": '"etag-A"',
-                "checks": [{"id": "build", "label": "build", "status": "pass"}],
+                "checks": [{"id": "build", "label": "build", "status": "running"}],
             },
             org="autonomy",
         )
+        seen = {"review_calls": 0, "checks_head_sha": None}
 
         async def fake_review(*args, **kwargs):
+            seen["review_calls"] += 1
             return wg.WorktreeGithubExecResult(
                 operation=wg.OP_REVIEW_READ_BY_ID,
                 session_name="auto-x", repo_name="autonomy",
@@ -2916,11 +2918,63 @@ class TestRefreshOneOverBindings:
                 stdout="HTTP/2.0 304 Not Modified\r\n\r\n",
             )
 
-        # check-runs op should NOT be called on 304 — assert if it is.
-        async def boom_checks(*args, **kwargs):
-            raise AssertionError("check-runs should not be re-fetched on 304")
+        async def fake_checks(*args, **kwargs):
+            seen["checks_head_sha"] = kwargs.get("head_sha")
+            return wg.WorktreeGithubExecResult(
+                operation=wg.OP_CHECK_RUNS_READ_FOR_SHA,
+                session_name="auto-x", repo_name="autonomy",
+                ok=True,
+                stdout='{"check_runs":[{"id":1,"name":"build","status":"completed","conclusion":"success"}]}',
+            )
 
         monkeypatch.setattr(wm, "source_control_review_read_by_id_v1", fake_review)
+        monkeypatch.setattr(wm, "source_control_check_runs_read_for_sha_v1", fake_checks)
+        monkeypatch.setattr(wm, "derive_repo_slug", lambda _p: "owner/repo")
+
+        monitor = wm.WorktreeMonitor()
+        row = _row(session="auto-x", repo="autonomy", live=True)
+        asyncio.run(monitor._refresh_one_source_control(row, [row]))
+
+        cached = settings_ops.read_set(
+            "autonomy.source_control.review_state",
+            prefix="owner/repo", org="autonomy",
+        ).to_dict()
+        payload = cached["owner/repo:99"].payload
+        assert seen["review_calls"] == 1
+        assert seen["checks_head_sha"] == "headSHA"
+        assert payload["checks"][0]["status"] == "pass"
+
+        snapshot = monitor.get_source_control("auto-x", "autonomy")
+        assert snapshot["reviews"][0]["title"] == "Cached"
+        assert snapshot["reviews"][0]["checks"][0]["status"] == "pass"
+
+    def test_refresh_one_binding_path_skips_terminal_cached_review(
+        self, isolated_settings_db, monkeypatch,
+    ):
+        from tools.dashboard import worktree_monitor as wm
+        from tools.graph import settings_ops
+
+        self._seed_binding()
+        settings_ops.add_setting(
+            "autonomy.source_control.review_state", 1,
+            "owner/repo:99",
+            {
+                "title": "Merged", "body": "B", "state": "merged",
+                "head_sha": "headSHA", "base_sha": "baseSHA",
+                "base_branch": "main", "is_draft": False, "provider": "github",
+                "etag": '"etag-A"',
+                "checks": [],
+            },
+            org="autonomy",
+        )
+
+        async def boom_review(*args, **kwargs):
+            raise AssertionError("terminal cached review should not probe GitHub")
+
+        async def boom_checks(*args, **kwargs):
+            raise AssertionError("terminal cached review should not fetch check-runs")
+
+        monkeypatch.setattr(wm, "source_control_review_read_by_id_v1", boom_review)
         monkeypatch.setattr(wm, "source_control_check_runs_read_for_sha_v1", boom_checks)
         monkeypatch.setattr(wm, "derive_repo_slug", lambda _p: "owner/repo")
 
@@ -2928,9 +2982,9 @@ class TestRefreshOneOverBindings:
         row = _row(session="auto-x", repo="autonomy", live=True)
         asyncio.run(monitor._refresh_one_source_control(row, [row]))
 
-        # Cache content unchanged; the snapshot still reads "Cached".
         snapshot = monitor.get_source_control("auto-x", "autonomy")
-        assert snapshot["reviews"][0]["title"] == "Cached"
+        assert snapshot["reviews"][0]["title"] == "Merged"
+        assert snapshot["reviews"][0]["state"] == "merged"
 
 
 # ── Smart-cadence + nag-when-terminal (auto-bugm6) ─────────────────────
