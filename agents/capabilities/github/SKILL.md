@@ -43,11 +43,16 @@ covers which commit range, and it fetches state by id instead.
 After you create the PR, run:
 
 ```bash
-agents/capabilities/github/bin/declare-review-binding.sh <PR_NUMBER>
+agents/capabilities/github/bin/declare-review-binding.sh
 ```
 
-…or for stacked PRs (the second one onward), chain off the previous
-PR's head SHA:
+The helper resolves the current branch's PR via `gh pr view`, derives
+the binding key automatically, and prefers the PR's live `baseRefOid`
+so stacked PRs pointed at another branch get the right base commit
+without hand-written SHAs.
+
+If you need to override the base explicitly, or force chaining off the
+previous PR's cached head SHA, use:
 
 ```bash
 agents/capabilities/github/bin/declare-review-binding.sh \

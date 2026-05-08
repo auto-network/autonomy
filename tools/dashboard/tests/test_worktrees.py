@@ -4253,3 +4253,113 @@ class TestDeclarePrAmendedHelper:
         # Wording cue from the bead's acceptance: "I just amended a commit"
         # workflow. Match loosely so future copy-edits don't break.
         assert "amended" in text.lower()
+
+
+class TestDeclareReviewBindingHelper:
+    """The review-binding helper should support a one-call current-PR flow."""
+
+    def test_helper_script_infers_current_pr_and_base_sha_from_gh(self, tmp_path):
+        import os
+        import subprocess
+
+        helper = (
+            Path(__file__).resolve().parents[3]
+            / "agents" / "capabilities" / "github"
+            / "bin" / "declare-review-binding.sh"
+        )
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+        (repo / "README.md").write_text("base\n")
+        subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base"],
+            check=True,
+        )
+        base_sha = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "feature"], check=True)
+
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        gh_log = tmp_path / "gh.log"
+        graph_log = tmp_path / "graph.log"
+
+        (fake_bin / "gh").write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "printf '%s\\n' \"$@\" > \"$FAKE_GH_LOG\"\n"
+            "printf '%s\\n' \"$FAKE_GH_JSON\"\n"
+        )
+        (fake_bin / "graph").write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "printf '%s\\n' \"$@\" > \"$FAKE_GRAPH_LOG\"\n"
+        )
+        (fake_bin / "jq").write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "args = sys.argv[1:]\n"
+            "raw = sys.stdin.read()\n"
+            "if args == ['-r', '.number // empty']:\n"
+            "    print(json.loads(raw).get('number', '') or '')\n"
+            "elif args == ['-r', '.baseRefOid // empty']:\n"
+            "    print(json.loads(raw).get('baseRefOid', '') or '')\n"
+            "elif len(args) >= 5 and args[0] == '-cn' and args[1] == '--arg' and args[2] == 'base_sha':\n"
+            "    print(json.dumps({'base_sha': args[3]}))\n"
+            "else:\n"
+            "    raise SystemExit(f'unsupported fake jq args: {args}')\n"
+        )
+        os.chmod(fake_bin / "gh", 0o755)
+        os.chmod(fake_bin / "graph", 0o755)
+        os.chmod(fake_bin / "jq", 0o755)
+
+        env = os.environ.copy()
+        env.update({
+            "SESSION_NAME": "auto-test",
+            "REPO_NAME": "autonomy",
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "FAKE_GH_LOG": str(gh_log),
+            "FAKE_GH_JSON": json.dumps({"number": 303, "baseRefOid": base_sha}),
+            "FAKE_GRAPH_LOG": str(graph_log),
+        })
+
+        result = subprocess.run(
+            [str(helper)],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        assert "declared binding: auto-test:autonomy:feature:303" in result.stdout
+        assert f"base_sha={base_sha}" in result.stdout
+        assert gh_log.read_text().splitlines() == [
+            "pr", "view", "--json", "number,baseRefOid",
+        ]
+
+        graph_args = graph_log.read_text().splitlines()
+        assert graph_args[:3] == ["set", "add", "autonomy.worktree.review_binding#1"]
+        key_index = graph_args.index("--key") + 1
+        inline_index = graph_args.index("--inline") + 1
+        org_index = graph_args.index("--org") + 1
+        assert graph_args[key_index] == "auto-test:autonomy:feature:303"
+        assert json.loads(graph_args[inline_index]) == {"base_sha": base_sha}
+        assert graph_args[org_index] == "autonomy"
+
+    def test_skill_md_documents_zero_arg_binding_helper(self):
+        skill = (
+            Path(__file__).resolve().parents[3]
+            / "agents" / "capabilities" / "github" / "SKILL.md"
+        )
+        text = skill.read_text()
+        assert "declare-review-binding.sh" in text
+        assert "gh pr view" in text
+        assert "derive" in text.lower()
+        assert "baseRefOid" in text

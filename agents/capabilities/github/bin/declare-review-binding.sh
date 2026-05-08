@@ -4,16 +4,18 @@
 # after ``gh pr create``.
 #
 # Usage:
+#   declare-review-binding.sh
 #   declare-review-binding.sh <REVIEW_ID>
 #   declare-review-binding.sh --previous-review-id <PREV_ID> <REVIEW_ID>
 #   declare-review-binding.sh --base-sha <SHA> <REVIEW_ID>
 #
-# Without ``--previous-review-id`` / ``--base-sha`` the helper computes
-# the binding's ``base_sha`` as ``git merge-base origin/main HEAD`` —
-# the right value for a non-stacked PR. ``--previous-review-id`` chains
-# the binding off the previous PR's head_sha (read from the cache via
-# ``graph set get``), giving stacked PRs the per-PR-scoped diff the
-# UI expects.
+# Without ``REVIEW_ID`` the helper resolves the current branch's PR via
+# ``gh pr view``. Without ``--previous-review-id`` / ``--base-sha`` it
+# prefers that PR's ``baseRefOid`` from GitHub — the correct base commit
+# even when the PR is stacked on another branch. If GitHub does not return
+# ``baseRefOid``, the helper falls back to ``git merge-base origin/main
+# HEAD``. ``--previous-review-id`` still chains the binding off the
+# previous PR's head_sha (read from the cache via ``graph set get``).
 #
 # Required env (set automatically by the dispatcher in agent containers):
 #   SESSION_NAME — e.g. ``auto-x``
@@ -52,16 +54,24 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ $# -lt 1 ]; then
-  echo "missing REVIEW_ID" >&2
-  usage
-fi
-
-REVIEW_ID="$1"
+REVIEW_ID="${1:-}"
 
 : "${SESSION_NAME:?SESSION_NAME must be set (dispatcher injects it; export manually for local runs)}"
 : "${REPO_NAME:?REPO_NAME must be set}"
 BRANCH="${BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
+
+GH_PR_JSON=""
+if [ -z "$REVIEW_ID" ] || { [ -z "$EXPLICIT_BASE_SHA" ] && [ -z "$PREVIOUS_REVIEW_ID" ]; }; then
+  GH_PR_JSON="$(gh pr view ${REVIEW_ID:+$REVIEW_ID} --json number,baseRefOid)"
+fi
+
+if [ -z "$REVIEW_ID" ]; then
+  REVIEW_ID="$(printf '%s' "$GH_PR_JSON" | jq -r '.number // empty')"
+  if [ -z "$REVIEW_ID" ]; then
+    echo "could not determine REVIEW_ID from gh pr view" >&2
+    exit 64
+  fi
+fi
 
 if [ -n "$EXPLICIT_BASE_SHA" ]; then
   BASE_SHA="$EXPLICIT_BASE_SHA"
@@ -81,6 +91,11 @@ elif [ -n "$PREVIOUS_REVIEW_ID" ]; then
     exit 65
   fi
   BASE_SHA="$PREV_HEAD"
+elif [ -n "$GH_PR_JSON" ]; then
+  BASE_SHA="$(printf '%s' "$GH_PR_JSON" | jq -r '.baseRefOid // empty')"
+  if [ -z "$BASE_SHA" ]; then
+    BASE_SHA="$(git merge-base origin/main HEAD)"
+  fi
 else
   BASE_SHA="$(git merge-base origin/main HEAD)"
 fi
