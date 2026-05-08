@@ -97,8 +97,16 @@ the bare session name (`agents/launch_session_cli.py:86` vs `:111`).
   skill to ingest).
 
 ### Service Management
-Dashboard hot-reloads Python changes automatically. Full restart only needed for config/env changes:
+Dashboard hot-reloads Python changes automatically. Full restart only needed for config/env changes.
+
+The dashboard auto-starts at boot via systemd user service. Both interfaces manage the same process:
 ```bash
+# systemd (preferred)
+systemctl --user status dashboard
+systemctl --user restart dashboard
+systemctl --user stop dashboard
+
+# script (also works)
 tools/dashboard/start-dashboard.sh --status    # check if running
 tools/dashboard/start-dashboard.sh --restart   # full restart
 tools/dashboard/start-dashboard.sh --stop      # stop
