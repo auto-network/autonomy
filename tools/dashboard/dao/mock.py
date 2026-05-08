@@ -51,6 +51,14 @@ import os
 from pathlib import Path
 from typing import Any
 
+from tools.graph.schemas.source_control_review_state import (
+    SET_ID as REVIEW_STATE_SET_ID,
+)
+from tools.graph.schemas.worktree_review_binding import (
+    SET_ID as REVIEW_BINDING_SET_ID,
+    parse_binding_key,
+)
+
 FIXTURE_PATH = Path(os.environ.get("DASHBOARD_MOCK", "fixtures.json"))
 
 BEAD_DEFAULTS: dict[str, Any] = {
@@ -698,6 +706,9 @@ def get_worktrees() -> list[dict]:
         item = _fill(row, WORKTREE_ROW_DEFAULTS)
         item["commits"] = [_worktree_commit(commit) for commit in item.get("commits", [])]
         item["dirty_files"] = [_worktree_file(file) for file in item.get("dirty_files", [])]
+        snapshot = _mock_bound_source_control(item)
+        if snapshot is not None:
+            item["source_control"] = snapshot
         rows.append(item)
     return rows
 
@@ -724,17 +735,122 @@ def get_worktree_changes_detail(session_name: str, repo_name: str) -> dict | Non
     return item
 
 
-def get_worktree_integrated_diff_detail(session_name: str, repo_name: str) -> dict | None:
+def get_worktree_integrated_diff_detail(
+    session_name: str,
+    repo_name: str,
+    review_id: str | None = None,
+) -> dict | None:
     """Mock-mode integrated PR diff. Same shape as the dirty-changes detail."""
     data = _load()
     details = data.get("worktree_integrated_diff_details", {})
-    key = f"{session_name}/{repo_name}"
-    detail = details.get(key)
+    detail = None
+    if review_id:
+        detail = details.get(f"{session_name}/{repo_name}/{review_id}")
+    if detail is None:
+        detail = details.get(f"{session_name}/{repo_name}")
     if detail is None:
         return None
     item = _fill(detail, WORKTREE_DIRTY_DETAIL_DEFAULTS)
     item["files"] = [_worktree_file(file) for file in item.get("files", [])]
     return item
+
+
+def _mock_bound_source_control(row: dict) -> dict | None:
+    """Compose ``row.source_control`` from mock Settings fixtures when possible."""
+    if row.get("source_control") is not None:
+        return row.get("source_control")
+    branch = str(row.get("branch") or "")
+    if not branch:
+        return None
+    prefix = f"{row.get('session_name')}:{row.get('repo_name')}:{branch}:"
+    bindings = [
+        member for member in get_settings_members(REVIEW_BINDING_SET_ID, org="autonomy")
+        if str(member.get("key") or "").startswith(prefix)
+    ]
+    bindings.sort(key=lambda member: str(member.get("key") or ""))
+    if not bindings:
+        return None
+
+    repo_slug = str(row.get("source_control_repo_slug") or "").strip()
+    cache_map: dict[str, dict] = {}
+    if repo_slug:
+        state_prefix = repo_slug + ":"
+        for member in get_settings_members(REVIEW_STATE_SET_ID, org="autonomy"):
+            key = str(member.get("key") or "")
+            if key.startswith(state_prefix):
+                cache_map[key] = dict(member.get("payload") or {})
+
+    reviews: list[dict] = []
+    any_stale = False
+    for binding in bindings:
+        try:
+            _session, _repo, _branch, review_id = parse_binding_key(str(binding.get("key") or ""))
+        except ValueError:
+            continue
+        binding_payload = dict(binding.get("payload") or {})
+        cache = cache_map.get(f"{repo_slug}:{review_id}") if repo_slug else None
+        review = _mock_review_payload(review_id, binding_payload, cache)
+        if review.get("stale"):
+            any_stale = True
+        reviews.append(review)
+
+    snapshot: dict[str, Any] = {
+        "state": "ready",
+        "implementation": "autonomy/github",
+        "reason": None,
+        "reviews": reviews,
+        "review": reviews[0] if reviews else None,
+        "watch": {"mode": str(row.get("source_control_watch_mode") or "silent")},
+    }
+    if any_stale:
+        snapshot["stale"] = True
+    return snapshot
+
+
+def _mock_review_payload(review_id: str, binding_payload: dict, cache: dict | None) -> dict:
+    """Mirror the bound-review payload shape the Worktrees UI consumes."""
+    base_sha = str(binding_payload.get("base_sha") or "")
+    if cache is None:
+        return {
+            "number": int(review_id) if review_id.isdigit() else None,
+            "review_id": review_id,
+            "url": "",
+            "title": "",
+            "body": "",
+            "head_sha": "",
+            "base_sha": base_sha,
+            "base_branch": "",
+            "state": "open",
+            "is_draft": False,
+            "aggregate_state": "yellow",
+            "running": False,
+            "checks": [],
+            "commit_shas": [],
+            "stale": True,
+        }
+
+    checks = [dict(check) for check in (cache.get("checks") or [])]
+    running = any(
+        (check.get("status") in ("running", "pending"))
+        for check in checks
+    )
+    has_failure = any((check.get("status") == "fail") for check in checks)
+    return {
+        "number": int(review_id) if review_id.isdigit() else None,
+        "review_id": review_id,
+        "url": cache.get("url") or "",
+        "title": cache.get("title") or "",
+        "body": cache.get("body") or "",
+        "head_sha": cache.get("head_sha") or "",
+        "base_sha": base_sha or (cache.get("base_sha") or ""),
+        "base_branch": cache.get("base_branch") or "",
+        "state": cache.get("state") or "open",
+        "is_draft": bool(cache.get("is_draft")),
+        "aggregate_state": "yellow" if has_failure else "green",
+        "running": running,
+        "checks": checks,
+        "commit_shas": [],
+    }
 
 
 # ── dispatch DAO interface ───────────────────────────────────────────

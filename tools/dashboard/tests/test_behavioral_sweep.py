@@ -1525,6 +1525,57 @@ SWEEP_WORKTREE_BETA_COMMITS = [
     },
 ]
 
+SWEEP_WORKTREE_DELTA_COMMITS = [
+    {
+        "sha": "4444444ddddddddddddddddddddddddddddddddd",
+        "short_sha": "4444444",
+        "subject": "Add suspend_timeout to worker pool directives",
+        "author": "Delta Agent",
+        "date": "2026-04-24 04:10",
+        "body": "Introduces suspend_timeout and the first stacked PR slice.",
+        "files": [
+            {
+                "status": "M",
+                "path": "enterprise/jobs/directives.py",
+                "additions": 42,
+                "deletions": 6,
+            },
+        ],
+    },
+    {
+        "sha": "5555555eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "short_sha": "5555555",
+        "subject": "Thread serialize_on through worker admission",
+        "author": "Delta Agent",
+        "date": "2026-04-24 04:24",
+        "body": "Stacks on suspend_timeout and keeps worker admission deterministic.",
+        "files": [
+            {
+                "status": "M",
+                "path": "enterprise/jobs/admission.py",
+                "additions": 31,
+                "deletions": 9,
+            },
+        ],
+    },
+    {
+        "sha": "6666666fffffffffffffffffffffffffffffffff",
+        "short_sha": "6666666",
+        "subject": "Reconcile suspended resolve-image jobs",
+        "author": "Delta Agent",
+        "date": "2026-04-24 04:38",
+        "body": "Carries the stacked review into resolve-image job handling.",
+        "files": [
+            {
+                "status": "M",
+                "path": "enterprise/jobs/resolve_image.py",
+                "additions": 57,
+                "deletions": 14,
+            },
+        ],
+    },
+]
+
 SWEEP_WORKTREE_ROWS = [
     {
         "session_name": "auto-sweep-alpha",
@@ -1572,6 +1623,25 @@ SWEEP_WORKTREE_ROWS = [
         "session_live": True,
         "commits": SWEEP_WORKTREE_BETA_COMMITS,
         "dirty_files": [],
+        "source_control_repo_slug": "anchore/enterprise",
+    },
+    {
+        "session_name": "auto-sweep-delta",
+        "session_title": "Delta — stacked PR review",
+        "repo_name": "enterprise_ng",
+        "worktree_path": "/tmp/worktrees/auto-sweep-delta/enterprise_ng",
+        "managed_clone": "/tmp/repos/enterprise_ng.git",
+        "branch": "jspilman/image_dedupe_flow",
+        "target_branch": "main",
+        "commits_ahead": 3,
+        "is_dirty": False,
+        "ff_eligible": False,
+        "clone_stale": False,
+        "rebase_required": False,
+        "session_live": True,
+        "commits": SWEEP_WORKTREE_DELTA_COMMITS,
+        "dirty_files": [],
+        "source_control_repo_slug": "anchore/enterprise_ng",
     },
     {
         "session_name": "auto-sweep-gamma",
@@ -1677,6 +1747,121 @@ index 7654321..1234567 100644
      return True""",
     },
 }
+
+SWEEP_WORKTREE_INTEGRATED_DIFF_DETAILS = {
+    "auto-sweep-delta/enterprise_ng/5008": {
+        "files": [
+            {
+                "status": "M",
+                "path": "enterprise/jobs/directives.py",
+                "additions": 42,
+                "deletions": 6,
+            },
+            {
+                "status": "M",
+                "path": "enterprise/jobs/pool_manager.py",
+                "additions": 18,
+                "deletions": 3,
+            },
+        ],
+        "patch": """diff --git a/enterprise/jobs/directives.py b/enterprise/jobs/directives.py
+index 1111111..2222222 100644
+--- a/enterprise/jobs/directives.py
++++ b/enterprise/jobs/directives.py
+@@ -12,6 +12,11 @@ class WorkerDirective:
+     retry_limit: int
++    suspend_timeout: int | None = None
++
++def serialize_on(pool_name: str) -> str:
++    return pool_name
+""",
+    },
+    "auto-sweep-delta/enterprise_ng/5009": {
+        "files": [],
+        "patch": "",
+        "stale": True,
+        "reason": "Cached review SHAs no longer exist in the local commit stack. Refresh PR state and reopen Review.",
+    },
+}
+
+SWEEP_WORKTREE_REVIEW_BINDINGS = [
+    {
+        "id": "mock-binding-beta-7644",
+        "key": "auto-sweep-beta:enterprise:ENTERPRISE-7644:7644",
+        "payload": {
+            "base_sha": "1234500aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+    },
+    {
+        "id": "mock-binding-delta-5008",
+        "key": "auto-sweep-delta:enterprise_ng:jspilman/image_dedupe_flow:5008",
+        "payload": {
+            "base_sha": "1234500bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        },
+    },
+    {
+        "id": "mock-binding-delta-5009",
+        "key": "auto-sweep-delta:enterprise_ng:jspilman/image_dedupe_flow:5009",
+        "payload": {
+            "base_sha": "4444444ddddddddddddddddddddddddddddddddd",
+        },
+    },
+]
+
+SWEEP_WORKTREE_REVIEW_STATE = [
+    {
+        "id": "mock-review-state-beta-7644",
+        "key": "anchore/enterprise:7644",
+        "payload": {
+            "title": "Refine ENTERPRISE-7644 release branch plumbing",
+            "body": "Keeps enterprise branch metadata visible in review mode.",
+            "state": "open",
+            "head_sha": "3333333ccccccccccccccccccccccccccccccccc",
+            "base_sha": "1234500aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "base_branch": "main",
+            "provider": "github",
+            "url": "https://example.test/anchore/enterprise/pull/7644",
+            "checks": [
+                {"id": "beta-ci", "label": "CI", "status": "pass"},
+            ],
+        },
+    },
+    {
+        "id": "mock-review-state-delta-5008",
+        "key": "anchore/enterprise_ng:5008",
+        "payload": {
+            "title": "feat(job_framework): add suspend_timeout primitives",
+            "body": "Introduces suspend_timeout and the first stacked PR slice.",
+            "state": "open",
+            "head_sha": "4444444ddddddddddddddddddddddddddddddddd",
+            "base_sha": "1234500bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "base_branch": "main",
+            "provider": "github",
+            "url": "https://example.test/anchore/enterprise_ng/pull/5008",
+            "checks": [
+                {"id": "delta-5008-ci", "label": "CI", "status": "pass"},
+                {"id": "delta-5008-lint", "label": "Lint", "status": "pass"},
+            ],
+        },
+    },
+    {
+        "id": "mock-review-state-delta-5009",
+        "key": "anchore/enterprise_ng:5009",
+        "payload": {
+            "title": "feat(job_framework): reconcile suspended resolve-image jobs",
+            "body": "Stacks on #5008 and carries queue plumbing into resolve-image jobs.",
+            "state": "open",
+            "head_sha": "6666666fffffffffffffffffffffffffffffffff",
+            "base_sha": "4444444ddddddddddddddddddddddddddddddddd",
+            "base_branch": "main",
+            "provider": "github",
+            "url": "https://example.test/anchore/enterprise_ng/pull/5009",
+            "checks": [
+                {"id": "delta-5009-ci", "label": "CI", "status": "running"},
+            ],
+        },
+    },
+]
 
 
 # Search results fixture (auto-kvka6). Each row is a flat per-excerpt result
@@ -1817,6 +2002,7 @@ def _build_fixture() -> dict:
         "worktrees": SWEEP_WORKTREE_ROWS,
         "worktree_commit_details": SWEEP_WORKTREE_COMMIT_DETAILS,
         "worktree_changes_details": SWEEP_WORKTREE_CHANGES_DETAILS,
+        "worktree_integrated_diff_details": SWEEP_WORKTREE_INTEGRATED_DIFF_DETAILS,
         # auto-24a60 — diff overlay endpoint backing fixture, keyed by run_id.
         "dispatch_run_commit_details": SWEEP_DISPATCH_RUN_COMMIT_DETAILS,
         "beads": SWEEP_BEADS + [SWEEP_BEAD_DISPATCHED],
@@ -1860,6 +2046,12 @@ def _build_fixture() -> dict:
             # registered at boot via ``register_schema``).
             "dashboard.harness.usage": {
                 "_orgs": {"autonomy": SWEEP_HARNESS_USAGE_AUTONOMY},
+            },
+            "autonomy.worktree.review_binding": {
+                "_orgs": {"autonomy": SWEEP_WORKTREE_REVIEW_BINDINGS},
+            },
+            "autonomy.source_control.review_state": {
+                "_orgs": {"autonomy": SWEEP_WORKTREE_REVIEW_STATE},
             },
         },
     }
@@ -2886,10 +3078,24 @@ WORKTREES_PAGE_CHECKS = """(async () => {
         var buttons = Array.from((root || document).querySelectorAll('button'));
         return buttons.find(function(btn) { return btn.textContent.trim() === text; }) || null;
     };
+    var textOf = function(el) {
+        return el ? el.textContent.replace(/\\s+/g, ' ').trim() : '';
+    };
+    var cardBySession = function(sessionName) {
+        return Array.from(document.querySelectorAll('[data-testid="worktree-commit-card"]')).find(function(card) {
+            return card.textContent.indexOf(sessionName) !== -1;
+        }) || null;
+    };
+    var badgeTexts = function(root, testid) {
+        if (!root) return [];
+        return Array.from(root.querySelectorAll('[data-testid="' + testid + '"]')).map(function(el) {
+            return textOf(el);
+        });
+    };
 
     r.has_page = !!document.querySelector('[data-testid="worktrees-page"]');
     await waitFor(function() {
-        return document.querySelectorAll('[data-testid="worktree-commit-card"]').length >= 2;
+        return document.querySelectorAll('[data-testid="worktree-commit-card"]').length >= 3;
     }, 3000);
 
     var bodyText = document.body.innerText;
@@ -2906,8 +3112,19 @@ WORKTREES_PAGE_CHECKS = """(async () => {
         return last ? last.textContent.trim() : '';
     });
 
-    var firstReview = document.querySelector('[data-testid="review-commit-button"]');
-    if (firstReview) firstReview.click();
+    var alphaCard = cardBySession('auto-sweep-alpha');
+    var betaCard = cardBySession('auto-sweep-beta');
+    var deltaCard = cardBySession('auto-sweep-delta');
+    r.alpha_has_empty_state = !!(alphaCard && alphaCard.querySelector('[data-testid="pr-empty-state-cta"]'));
+    r.alpha_pr_badge_count = alphaCard ? alphaCard.querySelectorAll('[data-testid="pr-badge"]').length : -1;
+    r.beta_pr_badges = badgeTexts(betaCard, 'pr-badge');
+    r.beta_has_empty_state = !!(betaCard && betaCard.querySelector('[data-testid="pr-empty-state-cta"]'));
+    r.delta_pr_badges = badgeTexts(deltaCard, 'pr-badge');
+    r.delta_has_empty_state = !!(deltaCard && deltaCard.querySelector('[data-testid="pr-empty-state-cta"]'));
+    r.delta_navigator_pr_rows = deltaCard ? deltaCard.querySelectorAll('[data-testid="pr-navigator-pr-row"]').length : -1;
+
+    var alphaReview = alphaCard ? alphaCard.querySelector('[data-testid="review-commit-button"]') : null;
+    if (alphaReview) alphaReview.click();
     await waitFor(function() {
         return !!document.querySelector('[data-testid="worktree-commit-detail"]');
     }, 3000);
@@ -2923,6 +3140,57 @@ WORKTREES_PAGE_CHECKS = """(async () => {
     r.commit_detail_stable = !!document.querySelector('[data-testid="worktree-commit-detail"]');
     var commitClose = commitDetail ? findButtonByText(commitDetail, 'Close') : null;
     if (commitClose) commitClose.click();
+    await waitFor(function() {
+        return !document.querySelector('[data-testid="worktree-commit-detail"]');
+    }, 2000);
+
+    var deltaReview = deltaCard ? deltaCard.querySelector('[data-testid="review-commit-button"]') : null;
+    if (deltaReview) deltaReview.click();
+    await waitFor(function() {
+        return !!document.querySelector('[data-testid="review-pr-badge"]');
+    }, 3000);
+    await sleep(250);
+
+    var prDetail = document.querySelector('[data-testid="worktree-commit-detail"]');
+    r.delta_pr_review_open = !!prDetail;
+    r.delta_pr_review_badge = textOf(document.querySelector('[data-testid="review-pr-badge"]'));
+    r.delta_pr_review_title = prDetail ? textOf(prDetail.querySelector('h3')) : '';
+    r.delta_pr_review_has_pr_heading = prDetail
+        ? prDetail.textContent.indexOf('Files in this PR') !== -1
+        : false;
+    r.delta_pr_review_path_visible = prDetail
+        ? prDetail.textContent.indexOf('enterprise/jobs/directives.py') !== -1
+        : false;
+
+    var overlayRefresh = document.querySelector('[data-testid="review-overlay-refresh-button"]');
+    if (overlayRefresh) overlayRefresh.click();
+    await waitFor(function() {
+        return textOf(document.querySelector('[data-testid="review-pr-badge"]')).indexOf('PR #5008') !== -1;
+    }, 3000);
+    await sleep(250);
+    r.delta_pr_review_after_refresh_badge = textOf(document.querySelector('[data-testid="review-pr-badge"]'));
+    var prClose = prDetail ? findButtonByText(prDetail, 'Close') : null;
+    if (prClose) prClose.click();
+    await waitFor(function() {
+        return !document.querySelector('[data-testid="worktree-commit-detail"]');
+    }, 2000);
+    r.delta_pr_badges_after_refresh = badgeTexts(deltaCard, 'pr-badge');
+
+    var deltaPrRows = deltaCard ? deltaCard.querySelectorAll('[data-testid="pr-navigator-pr-row"]') : [];
+    if (deltaPrRows.length > 1) deltaPrRows[1].click();
+    await waitFor(function() {
+        return !!document.querySelector('[data-testid="review-pr-stale-banner"]');
+    }, 3000);
+    await sleep(250);
+
+    var staleBanner = document.querySelector('[data-testid="review-pr-stale-banner"]');
+    r.delta_stale_banner_visible = !!staleBanner;
+    r.delta_stale_banner_text = textOf(staleBanner);
+    r.delta_stale_pr_badge = textOf(document.querySelector('[data-testid="review-pr-badge"]'));
+
+    var staleClose = document.querySelector('[data-testid="worktree-commit-detail"]');
+    staleClose = staleClose ? findButtonByText(staleClose, 'Close') : null;
+    if (staleClose) staleClose.click();
     await waitFor(function() {
         return !document.querySelector('[data-testid="worktree-commit-detail"]');
     }, 2000);
@@ -4694,18 +4962,18 @@ class TestWorktreesPageBehavior:
         """User sees populated worktree cards instead of the empty pre-init shell."""
         c = self._checks
         assert c.get("has_page"), "No worktrees page root found"
-        assert c.get("commit_card_count") == 2, (
-            f"Expected 2 commit-stack cards, got {c.get('commit_card_count')}"
+        assert c.get("commit_card_count") == 3, (
+            f"Expected 3 commit-stack cards, got {c.get('commit_card_count')}"
         )
         assert c.get("refresh_label") == "Refresh", (
             f"Refresh button rendered oddly: {c.get('refresh_label')!r}"
         )
-        assert c.get("summary_counts") == ["3", "2", "2"], (
+        assert c.get("summary_counts") == ["6", "2", "2"], (
             f"Unexpected summary counts: {c.get('summary_counts')}"
         )
 
     def test_commit_cards_show_fixture_titles(self):
-        """User sees the stacked commit headlines from the fixture rows."""
+        """Unbound and single-PR rows still show their commit headlines."""
         titles = " ".join(self._checks.get("commit_titles", []))
         assert "Fix worktree review sticky headers" in titles, (
             f"Missing alpha commit title in {self._checks.get('commit_titles')}"
@@ -4713,6 +4981,25 @@ class TestWorktreesPageBehavior:
         assert "Refine ENTERPRISE-7644 release branch plumbing" in titles, (
             f"Missing beta commit title in {self._checks.get('commit_titles')}"
         )
+
+    def test_binding_driven_rows_render_without_losing_unbound_state(self):
+        """Unbound rows keep the CTA while bound rows compose PR badges from Settings fixtures."""
+        c = self._checks
+        assert c.get("alpha_has_empty_state"), "Unbound alpha row lost its PR empty-state CTA"
+        assert c.get("alpha_pr_badge_count") == 0, (
+            f"Unbound alpha row unexpectedly rendered PR badges: {c.get('alpha_pr_badge_count')}"
+        )
+        assert c.get("beta_pr_badges") == ["PR #7644"], (
+            f"Single bound beta row badges regressed: {c.get('beta_pr_badges')}"
+        )
+        assert not c.get("beta_has_empty_state"), "Bound beta row still showed the empty-state CTA"
+        assert c.get("delta_pr_badges") == ["PR #5008", "PR #5009"], (
+            f"Stacked delta row badges regressed: {c.get('delta_pr_badges')}"
+        )
+        assert c.get("delta_navigator_pr_rows") == 2, (
+            f"Stacked delta navigator rows regressed: {c.get('delta_navigator_pr_rows')}"
+        )
+        assert not c.get("delta_has_empty_state"), "Stacked delta row still showed the empty-state CTA"
 
     def test_commit_review_opens_and_stays_open(self):
         """Opening Review shows the full-screen commit view and it remains mounted."""
@@ -4724,6 +5011,39 @@ class TestWorktreesPageBehavior:
         )
         assert "Merge 1111111 into main" in c.get("commit_merge_label", ""), (
             f"Unexpected merge label: {c.get('commit_merge_label')!r}"
+        )
+
+    def test_bound_pr_review_opens_and_refresh_preserves_bindings(self):
+        """Stacked PR rows should open PR-mode Review and keep their bindings after Refresh."""
+        c = self._checks
+        assert c.get("delta_pr_review_open"), "Stacked delta PR review never opened"
+        assert c.get("delta_pr_review_badge") == "PR #5008", (
+            f"Unexpected default PR review badge: {c.get('delta_pr_review_badge')!r}"
+        )
+        assert "suspend_timeout primitives" in (c.get("delta_pr_review_title") or ""), (
+            f"Unexpected default PR review title: {c.get('delta_pr_review_title')!r}"
+        )
+        assert c.get("delta_pr_review_has_pr_heading"), "PR-mode review lost the 'FILES IN THIS PR' heading"
+        assert c.get("delta_pr_review_path_visible"), "PR-mode review did not render the bound diff payload"
+        assert c.get("delta_pr_review_after_refresh_badge") == "PR #5008", (
+            f"Refresh lost PR review context: {c.get('delta_pr_review_after_refresh_badge')!r}"
+        )
+        assert c.get("delta_pr_badges_after_refresh") == ["PR #5008", "PR #5009"], (
+            f"Refresh mutated stacked bindings on the card: {c.get('delta_pr_badges_after_refresh')}"
+        )
+
+    def test_stale_pr_diff_surfaces_refresh_required_banner(self):
+        """A stale bound /pr-diff should stay in PR review mode and show the refresh-required banner."""
+        c = self._checks
+        assert c.get("delta_stale_banner_visible"), "Stale bound PR review never surfaced the stale banner"
+        assert c.get("delta_stale_pr_badge") == "PR #5009", (
+            f"Unexpected stale PR review badge: {c.get('delta_stale_pr_badge')!r}"
+        )
+        assert "Refresh required" in (c.get("delta_stale_banner_text") or ""), (
+            f"Stale banner copy regressed: {c.get('delta_stale_banner_text')!r}"
+        )
+        assert "Cached review SHAs no longer exist" in (c.get("delta_stale_banner_text") or ""), (
+            f"Stale banner reason regressed: {c.get('delta_stale_banner_text')!r}"
         )
 
     def test_changes_mode_shows_dirty_cards(self):
