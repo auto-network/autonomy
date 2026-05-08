@@ -985,12 +985,16 @@ class TestWorktreePage:
         affordance after the top-level refresh became local-git only.
         """
         template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
+        shared_overlay = (TEMPLATE_DIR / "partials" / "worktree-review-overlays.html").read_text()
         js = (JS_DIR / "pages" / "worktrees.js").read_text()
 
-        # Button rendered + disabled-while-loading wired.
+        # Button rendered in both overlay entry paths + disabled-while-loading wired.
         assert 'data-testid="review-overlay-refresh-button"' in template
+        assert 'data-testid="review-overlay-refresh-button"' in shared_overlay
         assert 'rowRefreshing' in template
+        assert 'rowRefreshing' in shared_overlay
         assert "@click=\"refreshSelectedRow()\"" in template
+        assert "@click=\"refreshSelectedRow()\"" in shared_overlay
 
         # JS handler exists and POSTs to the per-row endpoint.
         assert "refreshSelectedRow()" in js
