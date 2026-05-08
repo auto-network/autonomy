@@ -1055,11 +1055,13 @@ class TestWorktreePage:
         assert 'data-testid="pr-navigator-pr-row"' in template
         assert 'data-testid="pr-navigator-commit-row"' in template
         assert 'data-testid="pr-navigator-commit-stats"' in template
+        assert 'data-testid="pr-navigator-merge-summary"' in template
         assert 'data-testid="pr-navigator-unlinked-row"' in template
         # Groups come from rowReviewGroups (one PR section per binding,
         # plus an optional Unlinked commits section).
         assert 'x-if="rowPrs(item.row).length"' in template
         assert 'x-for="group in rowReviewGroups(item.row)"' in template
+        assert 'x-for="entry in groupCardEntries(item.row, group)"' in template
         assert '@click="openReviewPr(item.row, group.pr)"' in template
         assert '@click="openReviewCommit(item.row, entry.index)"' in template
         # Both rows render the icon disc strip with checkIconClass coloring.
@@ -1076,7 +1078,11 @@ class TestWorktreePage:
         assert "stackedCardCountLabel(row, total) {" in js
         assert "stackedCardSummary(row) {" in js
         assert "commitStatsSummary(commit) {" in js
+        assert "isMergeCommit(commit) {" in js
+        assert "mergeEntryBadge(entry) {" in js
+        assert "mergeEntrySummary(entry) {" in js
         assert "rowReviewGroups(row) {" in js
+        assert "groupCardEntries(row, group) {" in js
         assert "rowPrChecks(row, pr)" in js
         assert "reviewCommitChecks(_commit)" in js  # Returns [] until per-commit data lands.
         assert "checkIconClass(status) {" in js
@@ -1116,6 +1122,20 @@ class TestWorktreePage:
         assert "return prCount + ' PRs · ' + total + ' commits';" in js
         assert "return prCount + ' ' + prLabel + ' stacked across ' + commitCount + ' ' + commitLabel;" in js
         assert "return files + ' ' + fileLabel + ' +' + additions + ' -' + deletions;" in js
+
+    def test_stacked_merge_commits_collapse_into_subdued_summary_rows(self):
+        """Stacked cards should stop rendering merge commits as full-weight
+        commit rows. Consecutive merge commits collapse into a subdued
+        summary entry keyed off the commit subject we already have."""
+        template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+
+        assert "return /^merge(\\b|:)/i.test(subject);" in js
+        assert "kind: 'merge'" in js
+        assert "mergeCluster.push(entry);" in js
+        assert "mergeEntrySummary(entry)" in template
+        assert "mergeEntryBadge(entry)" in template
+        assert "entry.kind === 'merge'" in template
 
     def test_default_review_entry_prefers_pr_review(self):
         """Default review entry should land on PR status when review
