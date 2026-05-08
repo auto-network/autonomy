@@ -1,6 +1,7 @@
 """HTTP and wiring tests for the Worktrees dashboard page."""
 
 import asyncio
+import json
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -2622,6 +2623,7 @@ class TestWorktreeReviewBindings:
 
         monkeypatch.setattr(github_probe, "probe_v1", fake_probe)
         monkeypatch.setattr(wm, "source_control_review_read_v1", fake_review_read)
+        monkeypatch.setattr(wm, "_seed_bindings_from_legacy_reviews", lambda *_args, **_kwargs: None)
 
         row = _row(session="auto-x", repo="autonomy", live=True)
         snapshot = asyncio.run(wm._fetch_source_control(row, [row]))
@@ -2631,6 +2633,98 @@ class TestWorktreeReviewBindings:
         assert snapshot["reviews"][0]["number"] == 7
         # Back-compat alias also present.
         assert snapshot["review"]["number"] == 7
+
+    def test_legacy_path_auto_seeds_bindings_and_review_cache(
+        self, monkeypatch, isolated_settings_db,
+    ):
+        """First observation through the legacy branch-discovery path
+        should seed both review bindings and the persistent review cache."""
+        from agents.capabilities.github import probe as github_probe
+        from agents.capabilities.github import service as wg
+        from tools.dashboard import worktree_monitor as wm
+        from tools.graph import settings_ops
+
+        head100 = "1000000000000000000000000000000000000100"
+        head101 = "1010000000000000000000000000000000000101"
+        base000 = "0000000000000000000000000000000000000001"
+
+        async def fake_probe(_session, *, timeout=3):
+            return github_probe.ProbeResult(state=github_probe.STATE_READY, reason=None)
+
+        raw = json.dumps([
+            {
+                "number": 100,
+                "title": "Stack base",
+                "body": "",
+                "state": "OPEN",
+                "url": "https://github.com/x/y/pull/100",
+                "headRefName": "session/auto-x",
+                "headRefOid": head100,
+                "baseRefName": "main",
+                "isDraft": False,
+                "statusCheckRollup": [],
+                "commits": [{"oid": head100}],
+            },
+            {
+                "number": 101,
+                "title": "Stack top",
+                "body": "",
+                "state": "OPEN",
+                "url": "https://github.com/x/y/pull/101",
+                "headRefName": "session/auto-x",
+                "headRefOid": head101,
+                "baseRefName": "main",
+                "isDraft": False,
+                "statusCheckRollup": [],
+                "commits": [{"oid": head101}],
+            },
+        ])
+
+        async def fake_review_read(*args, **kwargs):
+            return wg.WorktreeGithubExecResult(
+                operation=wg.OP_REVIEW_READ,
+                session_name=kwargs.get("session_name") or "auto-x",
+                repo_name="autonomy",
+                ok=True,
+                stdout=raw,
+            )
+
+        monkeypatch.setattr(github_probe, "probe_v1", fake_probe)
+        monkeypatch.setattr(wm, "source_control_review_read_v1", fake_review_read)
+        monkeypatch.setattr(wm, "derive_repo_slug", lambda _p: "owner/repo")
+        monkeypatch.setattr(wm, "_default_binding_base_sha", lambda _row: base000)
+
+        row = _row(
+            session="auto-x",
+            repo="autonomy",
+            live=True,
+            ahead=2,
+            commits=[
+                _commit(head100, "Stack base commit"),
+                _commit(head101, "Stack top commit"),
+            ],
+        )
+        snapshot = asyncio.run(wm._fetch_source_control(row, [row]))
+
+        assert snapshot["state"] == "ready"
+        assert [review["number"] for review in snapshot["reviews"]] == [100, 101]
+
+        bindings = settings_ops.read_set(
+            "autonomy.worktree.review_binding",
+            prefix="auto-x:autonomy:session/auto-x",
+            org="autonomy",
+        ).to_dict()
+        assert bindings["auto-x:autonomy:session/auto-x:100"].payload["base_sha"] == base000
+        assert bindings["auto-x:autonomy:session/auto-x:101"].payload["base_sha"] == head100
+
+        cache_rows = settings_ops.read_set(
+            "autonomy.source_control.review_state",
+            prefix="owner/repo",
+            org="autonomy",
+        ).to_dict()
+        assert cache_rows["owner/repo:100"].payload["head_sha"] == head100
+        assert cache_rows["owner/repo:101"].payload["head_sha"] == head101
+        assert cache_rows["owner/repo:100"].payload["checks"] == []
 
     def test_binding_present_composes_from_cache_with_zero_gh_calls(
         self, isolated_settings_db, monkeypatch,
@@ -2686,6 +2780,51 @@ class TestWorktreeReviewBindings:
         assert review["base_sha"] == "fa12cd34"
         # Running disc bubbles up from the cached check entries.
         assert review["running"] is True
+
+    def test_background_refresh_rehydrates_bound_snapshot_from_settings_after_restart(
+        self, isolated_settings_db, monkeypatch,
+    ):
+        """A monitor restart should rebuild the visible source_control block
+        from persistent bindings + review_state without requiring a force refresh."""
+        from tools.graph import settings_ops
+        from tools.dashboard import worktree_monitor as wm
+
+        settings_ops.add_setting(
+            "autonomy.worktree.review_binding", 1,
+            "auto-x:autonomy:session/auto-x:42",
+            {"base_sha": "fa12cd34"},
+            org="autonomy",
+        )
+        settings_ops.add_setting(
+            "autonomy.source_control.review_state", 1,
+            "owner/repo:42",
+            {
+                "title": "Cached PR", "body": "from cache",
+                "state": "open", "head_sha": "head456", "base_sha": "real-base",
+                "base_branch": "main", "is_draft": False, "provider": "github",
+                "url": "https://example/pull/42",
+                "checks": [
+                    {"id": "build", "label": "build", "status": "pass"},
+                ],
+            },
+            org="autonomy",
+        )
+
+        async def boom(*args, **kwargs):
+            raise AssertionError("restart rehydrate should not hit gh")
+
+        monkeypatch.setattr(wm, "source_control_review_read_v1", boom)
+        monkeypatch.setattr(wm, "derive_repo_slug", lambda _p: "owner/repo")
+
+        row = _row(session="auto-x", repo="autonomy", live=True)
+        monitor = wm.WorktreeMonitor()
+        asyncio.run(monitor._refresh_source_control([row]))
+
+        snapshot = monitor.get_source_control("auto-x", "autonomy")
+        assert snapshot is not None
+        assert snapshot["state"] == "ready"
+        assert snapshot["reviews"][0]["number"] == 42
+        assert snapshot["reviews"][0]["title"] == "Cached PR"
 
     def test_stacked_pr_bindings_compose_into_ordered_list(
         self, isolated_settings_db, monkeypatch,

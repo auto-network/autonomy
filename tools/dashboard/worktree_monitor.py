@@ -25,6 +25,7 @@ from agents.capabilities.github.service import (
     FAILURE_RATE_LIMITED,
     WorktreeGithubExecResult,
     derive_repo_slug,
+    normalize_review_stack,
     normalize_review_payload,
     parse_check_runs_response,
     parse_pull_response,
@@ -32,7 +33,12 @@ from agents.capabilities.github.service import (
     source_control_review_read_by_id_v1,
     source_control_review_read_v1,
 )
-from agents.workspace_manager import WorktreeState, scan_all_worktrees
+from agents.workspace_manager import (
+    WorktreeState,
+    _git_output,
+    _worktree_dashboard_base_ref,
+    scan_all_worktrees,
+)
 from tools.graph import settings_ops
 from tools.graph.schemas.source_control_review_state import (
     SCHEMA_REVISION as REVIEW_STATE_REVISION,
@@ -40,6 +46,7 @@ from tools.graph.schemas.source_control_review_state import (
     SourceControlReviewStateV1,
 )
 from tools.graph.schemas.worktree_review_binding import (
+    SCHEMA_REVISION as REVIEW_BINDING_REVISION,
     SET_ID as REVIEW_BINDING_SET_ID,
     parse_binding_key,
 )
@@ -461,6 +468,98 @@ def _compose_bound_snapshot(
     return _ready_snapshot(reviews, watch_mode=watch_mode, stale=any_stale)
 
 
+def _default_binding_base_sha(row: WorktreeState) -> str:
+    """Resolve the first seeded binding's base SHA from the local worktree.
+
+    The legacy ``gh pr list --head`` path does not expose ``baseRefOid``
+    for the first PR on a branch, so auto-seeding must fill it from the
+    dashboard's own review base ref.
+    """
+    try:
+        base_ref = _worktree_dashboard_base_ref(row.worktree_path, row.repo_name)
+    except Exception:
+        return ""
+    if not base_ref:
+        return ""
+    rc, out, _err = _git_output(
+        ["rev-parse", "--verify", base_ref],
+        row.worktree_path,
+        timeout=15,
+    )
+    if rc != 0:
+        return ""
+    return out.strip()
+
+
+def _cache_payload_from_review(review) -> dict:
+    """Convert a normalized ReviewPayload into review_state schema shape."""
+    checks: list[dict] = []
+    for check in getattr(review, "checks", ()) or ():
+        entry = {
+            "id": str(getattr(check, "id", "") or ""),
+            "label": str(getattr(check, "label", "") or ""),
+            "status": str(getattr(check, "status", "") or ""),
+        }
+        detail = getattr(check, "detail", None)
+        if detail:
+            entry["detail"] = str(detail)
+        checks.append(entry)
+    return {
+        "title": review.title,
+        "body": review.body,
+        "state": review.state,
+        "head_sha": review.head_sha,
+        "base_sha": review.base_sha,
+        "base_branch": review.base_branch,
+        "is_draft": review.is_draft,
+        "provider": "github",
+        "checks": checks,
+        "url": review.url,
+    }
+
+
+def _seed_bindings_from_legacy_reviews(row: WorktreeState, reviews) -> None:
+    """Promote legacy branch-discovered reviews into binding/cache rows.
+
+    Seed-only-when-missing for bindings: we never overwrite an existing
+    operator-declared binding key. The review-state cache is safe to
+    upsert because it is explicitly an evolving pull-through cache.
+    """
+    if not row.branch or not reviews:
+        return
+    repo_slug = derive_repo_slug(row.managed_clone) or ""
+    first_base_sha = _default_binding_base_sha(row)
+    for review in reviews:
+        number = getattr(review, "number", None)
+        if number is None:
+            continue
+        review_id = str(number)
+        base_sha = str(getattr(review, "base_sha", "") or "")
+        if not base_sha:
+            base_sha = first_base_sha
+        if not base_sha:
+            continue
+
+        binding_key = f"{row.session_name}:{row.repo_name}:{row.branch}:{review_id}"
+        if settings_ops.resolve_set_key(REVIEW_BINDING_SET_ID, binding_key, org="autonomy") is None:
+            settings_ops.add_setting(
+                REVIEW_BINDING_SET_ID,
+                REVIEW_BINDING_REVISION,
+                binding_key,
+                {"base_sha": base_sha},
+                org="autonomy",
+            )
+
+        if repo_slug:
+            settings_ops.upsert_by_key(
+                REVIEW_STATE_SET_ID,
+                REVIEW_STATE_REVISION,
+                f"{repo_slug}:{review_id}",
+                _cache_payload_from_review(review),
+                org="autonomy",
+            )
+
+
 def _details_from_op_result(op_result: WorktreeGithubExecResult) -> dict:
     """Pull operator-actionable diagnostics out of a failed gh op.
 
@@ -546,9 +645,28 @@ async def _fetch_source_control(
             details=_details_from_op_result(op_result),
         )
 
-    review = normalize_review_payload(op_result.stdout)
-    review_dict = review.to_dict() if review is not None else None
-    reviews = [review_dict] if review_dict is not None else []
+    local_commit_shas = tuple(
+        commit.sha for commit in (row.commits or [])
+        if getattr(commit, "sha", None)
+    )
+    review_stack = normalize_review_stack(
+        op_result.stdout,
+        local_commit_shas=local_commit_shas,
+    )
+    if review_stack:
+        try:
+            _seed_bindings_from_legacy_reviews(row, review_stack)
+        except Exception:
+            logger.warning(
+                "worktree_monitor: auto-seed bindings failed for %s/%s",
+                row.session_name,
+                row.repo_name,
+                exc_info=True,
+            )
+    else:
+        review = normalize_review_payload(op_result.stdout)
+        review_stack = (review,) if review is not None else ()
+    reviews = [review.to_dict() for review in review_stack]
     return _ready_snapshot(reviews, watch_mode=watch_mode)
 
 
@@ -1192,10 +1310,22 @@ class WorktreeMonitor:
             if self._should_poll_in_background(key, cached, now):
                 rows_to_fetch.append(row)
                 continue
+            if cached is None:
+                bindings = _read_bindings(row)
+                if bindings:
+                    # Restart resilience: rebuild the visible row from
+                    # persistent bindings + review_state cache instead
+                    # of forcing the operator to click Refresh after
+                    # every dashboard process restart.
+                    carried[key] = _compose_bound_snapshot(
+                        row,
+                        bindings=bindings,
+                        watch_mode=self.get_nag_mode(*key),
+                    )
+                    continue
             # Default background path: keep the cached snapshot
-            # untouched. Rows with no cache stay absent from the
-            # snapshot map — UI shows no source_control block for
-            # them until an operator refresh seeds it.
+            # untouched. Unbound rows with no cache stay absent from
+            # the snapshot map until an operator refresh seeds them.
             if cached is not None:
                 carried[key] = cached
 
