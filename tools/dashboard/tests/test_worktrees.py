@@ -658,37 +658,6 @@ class TestWorktreeAPI:
         }
         assert fake.refresh_count == 0
 
-    def test_request_rebase_endpoint_syncs_clone_then_sends_dashboard_ui_crosstalk(self, test_client, monkeypatch):
-        server, fake = _install_fake_monitor(monkeypatch, [_row(ff=False, live=True)])
-        called = {}
-
-        def fake_info(session_name, repo_name, *, sync_managed_clone_target=False):
-            called["info"] = (session_name, repo_name, sync_managed_clone_target)
-            return {
-                "target_branch": "master",
-                "commits_behind": 2,
-                "fork_sha": "2d10a47deadbeef",
-                "session_live": True,
-                "commit": "abcdef1234567890",
-                "is_dirty": False,
-            }
-
-        async def fake_send(target_session, message):
-            called["send"] = (target_session, message)
-
-        monkeypatch.setattr(server, "get_session_worktree_rebase_info", fake_info)
-        monkeypatch.setattr(server, "_send_dashboard_ui_crosstalk", fake_send)
-
-        resp = test_client.post("/api/worktrees/auto-test/autonomy/request-rebase")
-
-        assert resp.status_code == 200
-        assert resp.json() == {"ok": True, "session": "auto-test"}
-        assert called["info"] == ("auto-test", "autonomy", True)
-        assert called["send"][0] == "auto-test"
-        assert "Dashboard UI" not in called["send"][1]
-        assert "git rebase master" in called["send"][1]
-        assert fake.refresh_count == 1
-
     def test_cleanup_endpoint_calls_workspace_cleanup_and_refreshes(self, test_client, monkeypatch):
         server, fake = _install_fake_monitor(monkeypatch, [_row()])
         called = {}
@@ -792,7 +761,8 @@ class TestWorktreePage:
         assert "if (item.row.is_dirty) return 'Uncommitted changes are present in this worktree';" not in js
         assert "'/api/worktrees/' + encodeURIComponent(row.session_name)" in js
         assert "'/sync-base'" in js
-        assert "'/request-rebase'" in js
+        assert "dashboard.session.crosstalk.worktree.rebase" in js
+        assert "'/request-rebase'" not in js
         assert "rebase_required" in js
         assert "canDiscardDirtyRow(row)" in js
         assert "fitPath(path, el)" in js

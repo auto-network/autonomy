@@ -66,7 +66,6 @@ from agents.workspace_manager import (
     get_session_worktree_commit_detail,
     get_session_worktree_dirty_detail,
     get_session_worktree_integrated_diff,
-    get_session_worktree_rebase_info,
     cherry_pick_session_worktree,
     merge_session_worktree,
     merge_session_worktree_commit,
@@ -7086,45 +7085,6 @@ async def api_session_request_identity_refresh(request):
     return JSONResponse({"ok": True, "session": tmux_name})
 
 
-async def api_worktree_request_rebase(request):
-    session_name = request.path_params["session"]
-    repo_name = request.path_params["repo"]
-
-    try:
-        info = await asyncio.to_thread(
-            get_session_worktree_rebase_info,
-            session_name,
-            repo_name,
-            sync_managed_clone_target=True,
-        )
-    except WorkspaceError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=409)
-
-    if not info.get("session_live"):
-        return JSONResponse({"error": f"session is not live: {session_name}"}, status_code=409)
-
-    target_branch = str(info["target_branch"])
-    commits_behind = int(info["commits_behind"])
-    fork_sha = str(info["fork_sha"])[:7]
-    noun = "commit" if commits_behind == 1 else "commits"
-    message = (
-        "Rebase required before your commit can be merged via the dashboard.\n"
-        f"{target_branch} has advanced {commits_behind} {noun} beyond your fork point ({fork_sha}).\n\n"
-        "Run in your worktree:\n"
-        f"git rebase {target_branch}\n"
-    )
-    if info.get("is_dirty"):
-        message += "\nIf you have uncommitted changes, stash or commit them before rebasing.\n"
-    message += "\nThen refresh the Worktrees page — the updated commit will be ff-eligible."
-
-    try:
-        await _send_dashboard_ui_crosstalk(session_name, message)
-    except WorkspaceError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=409)
-
-    await worktree_monitor.refresh()
-    return JSONResponse({"ok": True, "session": session_name})
-
 async def api_worktree_cleanup(request):
     session_name = request.path_params["session"]
     force = False
@@ -12422,7 +12382,6 @@ routes = [
     Route("/api/worktrees/{session}/{repo}/commits/{sha}/merge", api_worktree_commit_merge, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/refresh", api_worktree_refresh, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/sync-base", api_worktree_sync_base, methods=["POST"]),
-    Route("/api/worktrees/{session}/{repo}/request-rebase", api_worktree_request_rebase, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/watch", api_worktree_watch_set, methods=["PUT"]),
     Route("/api/worktrees/{session}/{repo}/merge", api_worktree_merge, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/cherry-pick", api_worktree_cherry_pick, methods=["POST"]),
