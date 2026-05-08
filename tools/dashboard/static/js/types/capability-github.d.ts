@@ -32,6 +32,8 @@ export interface CheckEntryV1 {
 export interface ReviewPayloadV1 {
   /** GitHub PR number (None for synthesized non-PR branches) */
   number?: number;
+  /** GitHub node ID / subscribable ID for PR-level subscription */
+  node_id: string;
   /** Canonical web URL of the PR */
   url: string;
   /** PR title */

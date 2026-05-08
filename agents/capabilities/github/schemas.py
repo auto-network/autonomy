@@ -82,6 +82,10 @@ class ReviewPayloadV1(SettingSchema):
         required=False,
         description="GitHub PR number (None for synthesized non-PR branches)",
     )
+    node_id: str = field(
+        required=True,
+        description="GitHub node ID / subscribable ID for PR-level subscription",
+    )
     url: str = field(required=True, description="Canonical web URL of the PR")
     title: str = field(required=True, description="PR title")
     body: str = field(required=True, description="PR description body")

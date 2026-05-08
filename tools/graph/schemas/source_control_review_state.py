@@ -115,6 +115,10 @@ class SourceControlReviewStateV1(SettingSchema):
         enum=list(VALID_REVIEW_STATES),
         description="Review lifecycle state",
     )
+    node_id: str = field(
+        required=False,
+        description="GitHub node ID / subscribable ID for PR-level subscription",
+    )
     head_sha: str = field(
         required=True,
         description="Latest commit SHA on the review's head branch",
@@ -224,7 +228,7 @@ class SourceControlReviewStateV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'is_draft' must be a bool"
             )
-        for opt in ("provider_state", "etag", "url"):
+        for opt in ("provider_state", "etag", "url", "node_id"):
             if opt in payload and payload[opt] is not None \
                     and not isinstance(payload[opt], str):
                 raise SchemaValidationError(

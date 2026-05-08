@@ -512,6 +512,7 @@
         return {
           number: review.number,
           review_id: review.review_id || (review.number != null ? String(review.number) : ''),
+          node_id: review.node_id || '',
           url: review.url,
           title: review.title,
           body: review.body,

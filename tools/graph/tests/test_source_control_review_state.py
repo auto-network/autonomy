@@ -84,9 +84,15 @@ def test_rejects_invalid_state_enum():
 
 def test_accepts_etag_and_url():
     SourceControlReviewStateV1.validate(_payload(
+        node_id="PR_kwD123",
         etag='W/"abc123"',
         url="https://github.com/o/r/pull/1",
     ))
+
+
+def test_rejects_non_string_node_id():
+    with pytest.raises(SchemaValidationError, match="node_id"):
+        SourceControlReviewStateV1.validate(_payload(node_id=42))
 
 
 def test_rejects_non_string_etag():

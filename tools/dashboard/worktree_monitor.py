@@ -412,6 +412,7 @@ def _compose_review_payload(
         return {
             "number": int(review_id) if review_id.isdigit() else None,
             "review_id": review_id,
+            "node_id": "",
             "url": "",
             "title": "",
             "body": "",
@@ -442,6 +443,7 @@ def _compose_review_payload(
     return {
         "number": int(review_id) if review_id.isdigit() else None,
         "review_id": review_id,
+        "node_id": cache.get("node_id") or "",
         "url": cache.get("url") or "",
         "title": cache.get("title") or "",
         "body": cache.get("body") or "",
@@ -541,6 +543,7 @@ def _cache_payload_from_review(review) -> dict:
     return {
         "title": review.title,
         "body": review.body,
+        "node_id": review.node_id,
         "state": review.state,
         "head_sha": review.head_sha,
         "base_sha": review.base_sha,
