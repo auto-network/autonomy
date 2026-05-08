@@ -24,6 +24,7 @@ parsing free-form stderr.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import subprocess
 from dataclasses import dataclass, field
@@ -761,8 +762,8 @@ def _pr_view_args(branch: str, repo_slug: str) -> list[str]:
     ]
 
 
-def _pr_watch_set_args(repo_slug: str, mode: str) -> list[str]:
-    """Fixed gh argv template for watch_set.
+def _repo_watch_set_args(repo_slug: str, mode: str) -> list[str]:
+    """Legacy repo-scoped gh argv template for watch_set.
 
     Substrate-level note: ``gh`` has no first-class "watch a single PR"
     primitive. The closest fixed-template invocation is the GitHub
@@ -785,6 +786,31 @@ def _pr_watch_set_args(repo_slug: str, mode: str) -> list[str]:
         ]
     # default: clear the subscription
     return ["api", "-X", "DELETE", f"/repos/{repo_slug}/subscription"]
+
+
+def _pr_watch_set_args(review_node_ids: list[str], mode: str) -> list[str]:
+    """PR-scoped gh argv template for watch_set.
+
+    When the caller supplies one or more PR ``node_id`` values, mutate
+    each PR's ``Subscribable`` state directly via GraphQL
+    ``updateSubscription``. This keeps stacked rows PR-scoped instead of
+    widening a single toggle to the whole repo.
+    """
+    state = {
+        PR_WATCH_SUBSCRIBED: "SUBSCRIBED",
+        PR_WATCH_IGNORED: "IGNORED",
+        PR_WATCH_DEFAULT: "UNSUBSCRIBED",
+    }[mode]
+    unique_ids = list(dict.fromkeys(node_id for node_id in review_node_ids if node_id))
+    selections = []
+    for index, node_id in enumerate(unique_ids):
+        selections.append(
+            f"pr{index}: updateSubscription("
+            f"input: {{subscribableId: {json.dumps(node_id)}, state: {state}}}"
+            f") {{ subscribable {{ id viewerSubscription }} }}"
+        )
+    query = "mutation { " + " ".join(selections) + " }"
+    return ["api", "graphql", "-f", f"query={query}"]
 
 
 async def _execute_op(
@@ -965,15 +991,29 @@ async def source_control_gates_watch_set_v1(
     mode: str,
     *,
     rows: list[WorktreeState],
+    review_node_ids: list[str] | None = None,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> WorktreeGithubExecResult:
-    """Set the merge-gate watch mode for the worktree's repo.
+    """Set the merge-gate watch mode for the worktree's current PRs.
 
     Implementation of ``source_control.gates.watch_set``. ``mode`` must
     be one of :data:`PR_WATCH_MODES` — ``"subscribed"``, ``"ignored"``,
-    or ``"default"``. See :func:`_pr_watch_set_args` for the fixed gh
-    template.
+    or ``"default"``. When ``review_node_ids`` are supplied the op
+    targets those PRs directly via GraphQL ``updateSubscription``. When
+    omitted, legacy callers fall back to the repo-scoped REST
+    subscription endpoint for backward compatibility.
     """
+
+    explicit_node_ids = list(dict.fromkeys(
+        node_id for node_id in (review_node_ids or []) if node_id
+    ))
+    if review_node_ids and not explicit_node_ids:
+        logger.info(
+            "github watch_set: review_node_ids for %s/%s were empty; "
+            "falling back to repo-scoped subscription",
+            session_name,
+            repo_name,
+        )
 
     def _args(*, row, repo_slug, mode):  # noqa: ARG001
         if mode not in PR_WATCH_MODES:
@@ -982,7 +1022,9 @@ async def source_control_gates_watch_set_v1(
                 f"invalid PR watch mode: {mode!r}; "
                 f"expected one of {sorted(PR_WATCH_MODES)}",
             )
-        return _pr_watch_set_args(repo_slug, mode)
+        if explicit_node_ids:
+            return _pr_watch_set_args(explicit_node_ids, mode)
+        return _repo_watch_set_args(repo_slug, mode)
 
     # Validate before resolution so a bad mode short-circuits without
     # touching docker — the caller likely passed a typo'd UI value.

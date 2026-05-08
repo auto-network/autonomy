@@ -1501,6 +1501,67 @@ class TestWorktreePRRefresh:
 
 class TestWorktreePRWatchSet:
     @pytest.mark.parametrize(
+        ("mode", "expected_state"),
+        [
+            ("subscribed", "SUBSCRIBED"),
+            ("ignored", "IGNORED"),
+            ("default", "UNSUBSCRIBED"),
+        ],
+    )
+    def test_watch_set_uses_pr_level_graphql_when_node_ids_are_supplied(
+        self, monkeypatch, mode, expected_state,
+    ):
+        wg, recorder, rows = _install_github_stubs(
+            monkeypatch,
+            rows=[_live_row()],
+            gh_results=[("", "", 0, False)],
+        )
+
+        result = asyncio.run(
+            wg.source_control_gates_watch_set_v1(
+                "auto-test",
+                "autonomy",
+                mode,
+                rows=rows,
+                review_node_ids=["PR_kwDOA1", "PR_kwDOA2"],
+            )
+        )
+
+        assert result.ok is True
+        assert result.operation == wg.OP_GATES_WATCH_SET
+        gh_call = recorder.calls[1]
+        gh_text = " ".join(gh_call)
+        assert gh_call[:4] == ["docker", "exec", "auto-test", "gh"]
+        assert "graphql" in gh_call
+        assert "updateSubscription" in gh_text
+        assert "PR_kwDOA1" in gh_text
+        assert "PR_kwDOA2" in gh_text
+        assert f"state: {expected_state}" in gh_text
+
+    def test_watch_set_empty_node_ids_falls_back_to_repo_subscription(self, monkeypatch):
+        wg, recorder, rows = _install_github_stubs(
+            monkeypatch,
+            rows=[_live_row()],
+            gh_results=[("", "", 0, False)],
+        )
+
+        result = asyncio.run(
+            wg.source_control_gates_watch_set_v1(
+                "auto-test",
+                "autonomy",
+                "subscribed",
+                rows=rows,
+                review_node_ids=["", ""],
+            )
+        )
+
+        assert result.ok is True
+        gh_call = recorder.calls[1]
+        assert "graphql" not in gh_call
+        assert "/repos/anchore/autonomy/subscription" in gh_call
+        assert "subscribed=true" in gh_call
+
+    @pytest.mark.parametrize(
         ("mode", "expected_subscribed", "expected_ignored", "expected_method"),
         [
             ("subscribed", "subscribed=true", "ignored=false", "PUT"),
