@@ -6751,6 +6751,7 @@ async def api_worktree_integrated_diff(request):
     if os.environ.get("DASHBOARD_MOCK"):
         detail = dao_sessions.get_worktree_integrated_diff_detail(
             session_name, repo_name,
+            review_id=request.query_params.get("review_id"),
         )
         if not detail:
             return JSONResponse(
