@@ -318,6 +318,7 @@
       // working — they're independent paths now (top-level is
       // local-git only; per-row is the operator's force-GET).
       rowRefreshing: false,
+      cardRefreshing: {},
       detailLoading: false,
       dirtyDetailLoading: false,
       error: '',
@@ -1551,6 +1552,48 @@
         }
       },
 
+      isCardRefreshing(row) {
+        return !!(row && this.cardRefreshing[this.rowKey(row)]);
+      },
+
+      async _refreshRowFromServer(row) {
+        const resp = await fetch(
+          '/api/worktrees/' + encodeURIComponent(row.session_name) + '/'
+            + encodeURIComponent(row.repo_name) + '/refresh',
+          { method: 'POST' },
+        );
+        const updatedRaw = await _jsonOrError(resp);
+        const [updated] = _normalizeRows([updatedRaw]);
+        const targetKey = this.rowKey(row);
+        const idx = this.rows.findIndex(r => this.rowKey(r) === targetKey);
+        if (idx >= 0) {
+          this.rows.splice(idx, 1, updated);
+        } else {
+          this.rows.push(updated);
+        }
+        this.lastUpdated = new Date().toLocaleTimeString();
+        this.queueBranchLayouts();
+        this.queuePathMeasurements();
+        this.queueCommitStickyOffsets();
+        this.queueReviewHeaderState();
+        return updated;
+      },
+
+      async refreshRowSourceControl(row) {
+        if (!row) return;
+        const key = this.rowKey(row);
+        if (this.cardRefreshing[key]) return;
+        this.cardRefreshing[key] = true;
+        try {
+          await this._refreshRowFromServer(row);
+          this.syncOverlayRows();
+        } catch (err) {
+          _toast('Per-row refresh failed: ' + (err.message || String(err)), 'error');
+        } finally {
+          delete this.cardRefreshing[key];
+        }
+      },
+
       // Per-row force-refresh button on the review overlay.
       // Posts to /api/worktrees/{session}/{repo}/refresh — the
       // operator-explicit force-GET path that bypasses the per-row
@@ -1566,22 +1609,7 @@
         const currentPr = prMode ? this.selectedCommit.pr : null;
         this.rowRefreshing = true;
         try {
-          const resp = await fetch(
-            '/api/worktrees/' + encodeURIComponent(row.session_name) + '/'
-              + encodeURIComponent(row.repo_name) + '/refresh',
-            { method: 'POST' },
-          );
-          const updatedRaw = await _jsonOrError(resp);
-          const [updated] = _normalizeRows([updatedRaw]);
-          // Splice the updated row back into this.rows in place so
-          // the cards page reflects the same fresh state.
-          const targetKey = this.rowKey(row);
-          const idx = this.rows.findIndex(r => this.rowKey(r) === targetKey);
-          if (idx >= 0) {
-            this.rows.splice(idx, 1, updated);
-          } else {
-            this.rows.push(updated);
-          }
+          const updated = await this._refreshRowFromServer(row);
           if (prMode) {
             const refreshedPr = this.matchingRowPr(updated, currentPr);
             if (refreshedPr) {
@@ -1592,7 +1620,6 @@
           } else {
             this.syncOverlayRows();
           }
-          this.lastUpdated = new Date().toLocaleTimeString();
         } catch (err) {
           _toast('Per-row refresh failed: ' + (err.message || String(err)), 'error');
         } finally {
