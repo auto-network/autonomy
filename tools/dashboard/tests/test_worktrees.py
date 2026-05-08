@@ -2114,6 +2114,64 @@ class TestWorktreeMonitorBackgroundFetchPolicy:
         # we hit the cap of 3 in the rolling window.
         assert call_count["n"] <= 3
 
+    def test_bound_nag_all_running_review_polls_via_rest(self, monkeypatch):
+        """Binding-backed ``nag_all`` rows must refresh via REST once
+        their running/TTL/budget gate clears; the cache-only binding
+        composer would otherwise leave the row stale forever."""
+        from tools.dashboard import worktree_monitor as wm_module
+        from tools.graph import settings_ops
+
+        monkeypatch.setattr(wm_module, "SOURCE_CONTROL_WATCH_TTL_SECONDS", 0.001)
+
+        settings_ops.add_setting(
+            "autonomy.worktree.review_binding", 1,
+            "auto-live:autonomy:session/auto-live:99",
+            {"base_sha": "fa9bcd"},
+            org="autonomy",
+        )
+
+        rows = [_row(session="auto-live", live=True)]
+        seen = {"rest": 0, "fetch": 0}
+        refreshed = {
+            "state": "ready",
+            "implementation": "autonomy/github",
+            "reason": None,
+            "reviews": [{"review_id": "99", "running": True, "checks": []}],
+            "review": None,
+            "watch": {"mode": "nag_all"},
+        }
+
+        async def fake_fetch(*_args, **_kwargs):
+            seen["fetch"] += 1
+            raise AssertionError("bound nag_all background poll should use REST")
+
+        async def fake_refresh_bindings(*_args, **_kwargs):
+            seen["rest"] += 1
+            return refreshed, False
+
+        monkeypatch.setattr(wm_module, "_fetch_source_control", fake_fetch)
+        monkeypatch.setattr(wm_module, "_refresh_bindings_via_rest", fake_refresh_bindings)
+        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: list(rows))
+
+        monitor = wm_module.WorktreeMonitor()
+        key = ("auto-live", "autonomy")
+        monitor.set_nag_mode(*key, "nag_all")
+        monitor._source_control_cache[key] = {
+            "state": "ready",
+            "implementation": "autonomy/github",
+            "reason": None,
+            "reviews": [{"review_id": "99", "running": True, "checks": []}],
+            "review": None,
+            "watch": {"mode": "nag_all"},
+        }
+        monitor._source_control_fetched_at[key] = time.monotonic() - 1.0
+
+        asyncio.run(monitor.refresh())
+
+        assert seen["rest"] == 1
+        assert seen["fetch"] == 0
+        assert monitor.get_source_control(*key) == refreshed
+
 
 class TestWorktreeMonitorRefreshOne:
     """``refresh_one`` is the operator-explicit force-GET path: scoped

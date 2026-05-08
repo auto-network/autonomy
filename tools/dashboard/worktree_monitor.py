@@ -1489,20 +1489,21 @@ class WorktreeMonitor:
                 carried[key] = cached
 
         # Fan out only the rows that actually need a fresh fetch.
-        # Rows armed under ``nag_done`` go through the REST path so
-        # cache-only binding rows actually get refreshed on their
-        # smart-cadence schedule; everything else uses the legacy
-        # cache-only ``_fetch_source_control`` path.
+        # Binding-backed watch rows must go through the REST path once
+        # they clear their polling gate; the cache-only binding
+        # composition path cannot move review/check state forward on
+        # its own. ``nag_done`` uses the smart cadence, ``nag_all``
+        # uses the legacy running/TTL/budget gate, and unbound rows
+        # stay on the legacy ``_fetch_source_control`` path.
         async def _fetch_for_row(row: WorktreeState):
             row_key = (row.session_name, row.repo_name)
             row_mode = self.get_nag_mode(*row_key)
-            if row_mode == NAG_WHEN_DONE:
-                bindings = _read_bindings(row)
-                if bindings:
-                    snapshot, _rl = await _refresh_bindings_via_rest(
-                        row, rows, bindings, watch_mode=row_mode,
-                    )
-                    return snapshot
+            bindings = _read_bindings(row)
+            if bindings and row_mode in (NAG_WHEN_DONE, NAG_ALL_CHANGES):
+                snapshot, _rl = await _refresh_bindings_via_rest(
+                    row, rows, bindings, watch_mode=row_mode,
+                )
+                return snapshot
             return await _fetch_source_control(
                 row, rows, watch_mode=row_mode,
             )
