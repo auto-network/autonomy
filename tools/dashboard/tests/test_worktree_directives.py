@@ -36,6 +36,7 @@ from tools.dashboard.worktree_directives import (
     WORKTREE_REBASE_STATUS_SET_ID,
     RebaseDirectiveV1,
     WorktreeDirective,
+    WorktreeStatusSchema,
     WorktreeRebaseStatusV1,
     render_rebase_prompt,
 )
@@ -78,6 +79,13 @@ def test_rebase_directive_set_id_composes_under_worktree_namespace():
         WORKTREE_REBASE_DIRECTIVE_REVISION,
         {"target_session": "auto-x", "repo": "autonomy"},
     )
+
+
+def test_worktree_status_namespace_root_is_abstract():
+    assert WorktreeStatusSchema.set_id == "dashboard.session.worktree"
+    assert "schema_revision" not in WorktreeStatusSchema.__dict__
+    assert WorktreeRebaseStatusV1.set_id == "dashboard.session.worktree.rebase_status"
+    assert WORKTREE_REBASE_STATUS_SET_ID == WorktreeRebaseStatusV1.set_id
 
 
 def test_render_rebase_prompt_matches_existing_copy():

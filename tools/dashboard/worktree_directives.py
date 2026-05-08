@@ -39,7 +39,7 @@ from tools.graph.schemas.registry import (
 )
 
 
-WORKTREE_REBASE_STATUS_SET_ID = "dashboard.session.worktree.rebase_status"
+WORKTREE_NAMESPACE = "dashboard.session.worktree"
 WORKTREE_REBASE_STATUS_REVISION = 1
 WORKTREE_REBASE_DIRECTIVE_REVISION = 1
 
@@ -141,8 +141,14 @@ class RebaseDirectiveV1(WorktreeDirective):
             )
 
 
+class WorktreeStatusSchema(SettingSchema):
+    """Abstract namespace root for dashboard.session.worktree.* status rows."""
+
+    set_id = WORKTREE_NAMESPACE
+
+
 @keyed_per_entity
-class WorktreeRebaseStatusV1(SettingSchema):
+class WorktreeRebaseStatusV1(WorktreeStatusSchema):
     """Agent-written rebase progress, watched by the worktree review UI.
 
     Key: ``<session_name>/<repo_name>`` — mirrors the dashboard's
@@ -154,7 +160,7 @@ class WorktreeRebaseStatusV1(SettingSchema):
     only reads + subscribes.
     """
 
-    set_id = WORKTREE_REBASE_STATUS_SET_ID
+    set_id_suffix = "rebase_status"
     schema_revision = WORKTREE_REBASE_STATUS_REVISION
 
     state: str = field(
@@ -202,3 +208,6 @@ class WorktreeRebaseStatusV1(SettingSchema):
                 f"{cls.__name__}: 'error' must be a string, "
                 f"got {type(error).__name__}"
             )
+
+
+WORKTREE_REBASE_STATUS_SET_ID = WorktreeRebaseStatusV1.set_id
