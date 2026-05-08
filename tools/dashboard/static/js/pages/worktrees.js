@@ -581,6 +581,22 @@
         return prs.length ? prs[0] : null;
       },
 
+      prIdentity(pr) {
+        if (!pr) return '';
+        if (pr.review_id) return 'review:' + pr.review_id;
+        if (pr.number != null) return 'number:' + String(pr.number);
+        if (pr.head_sha) return 'head:' + pr.head_sha;
+        return '';
+      },
+
+      matchingRowPr(row, pr) {
+        const prs = this.rowPrs(row);
+        if (!prs.length) return null;
+        const identity = this.prIdentity(pr);
+        if (!identity) return prs[0];
+        return prs.find(candidate => this.prIdentity(candidate) === identity) || null;
+      },
+
       prIsFlashing(pr) {
         return !!pr && !!pr.watch_active && !!pr.running;
       },
@@ -778,9 +794,9 @@
         };
       },
 
-      openReviewCommit(row, idx) {
+      async openReviewCommit(row, idx) {
         const item = this._itemForCommit(row, idx);
-        if (item) this.selectCommit(item);
+        if (item) await this.selectCommit(item);
       },
 
       // PR-mode review overlay (auto-r098a). Fetches the integrated
@@ -797,7 +813,7 @@
       async openReviewPr(row, pr) {
         if (!pr) pr = this.rowPr(row);
         if (!pr) {
-          this.openReviewCommit(row, 0);
+          await this.openReviewCommit(row, 0);
           return;
         }
 
@@ -876,12 +892,12 @@
         }
       },
 
-      openReviewDefault(row) {
+      async openReviewDefault(row) {
         const prs = this.rowPrs(row);
         if (prs.length) {
-          this.openReviewPr(row, prs[0]);
+          await this.openReviewPr(row, prs[0]);
         } else {
-          this.openReviewCommit(row, 0);
+          await this.openReviewCommit(row, 0);
         }
       },
 
@@ -1050,6 +1066,18 @@
           const row = this.rows.find(item => this.rowKey(item) === this.rowKey(this.selectedCommit.row));
           if (!row) {
             this.selectedCommit = null;
+          } else if (this.selectedCommit.prMode) {
+            const nextPr = this.matchingRowPr(row, this.selectedCommit.pr) || this.selectedCommit.pr;
+            this.selectedCommit = {
+              ...this.selectedCommit,
+              row,
+              pr: nextPr,
+              commit: {
+                ...this.selectedCommit.commit,
+                subject: (nextPr && nextPr.title) || this.selectedCommit.commit.subject,
+                body: (nextPr && nextPr.body) || this.selectedCommit.commit.body || '',
+              },
+            };
           } else {
             const commits = this.commitList(row);
             if (!commits.length) {
@@ -1265,9 +1293,14 @@
         await this.refresh(false);
         const matches = this.rows.filter((row) => row.session_name === sessionName);
         if (!matches.length) return false;
+        const withPrs = matches.find((row) => this.rowPrs(row).length > 0);
+        if (withPrs) {
+          await this.openReviewDefault(withPrs);
+          return true;
+        }
         const withCommits = matches.find((row) => (this.commitList(row) || []).length > 0);
         if (withCommits) {
-          await this.openCommitAt(withCommits, 0);
+          await this.openReviewDefault(withCommits);
           return true;
         }
         const dirtyMatch = matches.find((row) => row.is_dirty);
@@ -1335,6 +1368,8 @@
         if (!this.selectedCommit || !this.selectedCommit.row) return;
         if (this.rowRefreshing) return;
         const row = this.selectedCommit.row;
+        const prMode = !!this.selectedCommit.prMode;
+        const currentPr = prMode ? this.selectedCommit.pr : null;
         this.rowRefreshing = true;
         try {
           const resp = await fetch(
@@ -1353,7 +1388,16 @@
           } else {
             this.rows.push(updated);
           }
-          this.syncOverlayRows();
+          if (prMode) {
+            const refreshedPr = this.matchingRowPr(updated, currentPr);
+            if (refreshedPr) {
+              await this.openReviewPr(updated, refreshedPr);
+            } else {
+              this.syncOverlayRows();
+            }
+          } else {
+            this.syncOverlayRows();
+          }
           this.lastUpdated = new Date().toLocaleTimeString();
         } catch (err) {
           _toast('Per-row refresh failed: ' + (err.message || String(err)), 'error');
@@ -1866,15 +1910,20 @@
       // dirty-files when there are no commits. Multi-repo sessions:
       // take the first matching row; the operator can hop to
       // siblings via the in-page nav.
-      _handleDeeplink() {
+      async _handleDeeplink() {
         const params = new URLSearchParams(window.location.search);
         const target = params.get('session');
         if (!target) return;
         const matches = this.rows.filter((r) => r.session_name === target);
         if (!matches.length) return;
+        const withPrs = matches.find((r) => this.rowPrs(r).length > 0);
+        if (withPrs) {
+          await this.openReviewDefault(withPrs);
+          return;
+        }
         const withCommits = matches.find((r) => (this.commitList(r) || []).length > 0);
         if (withCommits) {
-          this.openCommitAt(withCommits, 0);
+          await this.openReviewDefault(withCommits);
           return;
         }
         const dirtyMatch = matches.find((r) => r.is_dirty);

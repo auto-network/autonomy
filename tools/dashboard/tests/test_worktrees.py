@@ -810,6 +810,8 @@ class TestWorktreePage:
         # the list view and the operator has to find their row.
         assert "_handleDeeplink()" in js
         assert "params.get('session')" in js
+        assert "const withPrs = matches.find((r) => this.rowPrs(r).length > 0);" in js
+        assert "await this.openReviewDefault(withPrs);" in js
 
     def test_spa_router_knows_worktrees_route(self):
         app_js = (JS_DIR.parent / "app.js").read_text()
@@ -1076,6 +1078,33 @@ class TestWorktreePage:
         assert "border-emerald-300/20 bg-emerald-300/12 text-emerald-100" in js
         assert "border-amber-300/20 bg-amber-300/12 text-amber-100" in js
         assert "border-rose-300/20 bg-rose-300/12 text-rose-100" in js
+
+    def test_default_review_entry_prefers_pr_review(self):
+        """Default review entry should land on PR status when review
+        data exists, whether the operator entered from the page button,
+        the session-viewer overlay, or the ?session= deeplink."""
+        template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+
+        assert '@click="openReviewDefault(item.row)"' in template
+        assert "async openReviewDefault(row) {" in js
+        assert "const withPrs = matches.find((row) => this.rowPrs(row).length > 0);" in js
+        assert "await this.openReviewDefault(withPrs);" in js
+        assert "const withPrs = matches.find((r) => this.rowPrs(r).length > 0);" in js
+        assert "await this.openReviewDefault(withPrs);" in js
+
+    def test_pr_mode_refresh_and_row_sync_preserve_pr_context(self):
+        """Refreshing or syncing a PR-mode overlay should keep the
+        operator centered on the selected PR instead of falling through
+        to commit 1."""
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+
+        assert "matchingRowPr(row, pr) {" in js
+        assert "if (this.selectedCommit.prMode) {" in js
+        assert "pr: nextPr," in js
+        assert "const currentPr = prMode ? this.selectedCommit.pr : null;" in js
+        assert "const refreshedPr = this.matchingRowPr(updated, currentPr);" in js
+        assert "await this.openReviewPr(updated, refreshedPr);" in js
 
 
 # ── Worktrees row-scoped GitHub operation surface (auto-ltibi) ─────────
