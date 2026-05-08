@@ -611,6 +611,35 @@
         return files + ' ' + fileLabel + ' +' + additions + ' -' + deletions;
       },
 
+      isMergeCommit(commit) {
+        const subject = ((commit && commit.subject) || '').trim();
+        return /^merge(\b|:)/i.test(subject);
+      },
+
+      mergeEntryBadge(entry) {
+        const count = Array.isArray(entry && entry.commits) ? entry.commits.length : 0;
+        return count > 1 ? (count + 'x merge') : 'merge';
+      },
+
+      mergeEntrySummary(entry) {
+        const commits = Array.isArray(entry && entry.commits) ? entry.commits : [];
+        const count = commits.length || 1;
+        let files = 0;
+        let additions = 0;
+        let deletions = 0;
+        commits.forEach((part) => {
+          const stats = (part && part.commit && part.commit.stats) || {};
+          files += Number.isFinite(stats.files)
+            ? stats.files
+            : ((((part && part.commit && part.commit.files) || []).length));
+          additions += Number.isFinite(stats.additions) ? stats.additions : 0;
+          deletions += Number.isFinite(stats.deletions) ? stats.deletions : 0;
+        });
+        const mergeLabel = count === 1 ? 'merge commit' : (count + ' merge commits');
+        const fileLabel = files === 1 ? 'file' : 'files';
+        return mergeLabel + ' · ' + files + ' ' + fileLabel + ' +' + additions + ' -' + deletions;
+      },
+
       rowReviewGroups(row) {
         const commits = this.commitList(row);
         const prs = this.rowPrs(row);
@@ -696,6 +725,50 @@
           });
         }
         return groups;
+      },
+
+      groupCardEntries(row, group) {
+        const commits = Array.isArray(group && group.commits) ? group.commits : [];
+        if (!this.hasStackedPrs(row)) {
+          return commits.map((entry) => ({
+            kind: 'commit',
+            key: 'commit:' + (entry.commit && entry.commit.sha),
+            commit: entry.commit,
+            index: entry.index,
+            commits: [entry],
+          }));
+        }
+
+        const entries = [];
+        let mergeCluster = [];
+        const flushMergeCluster = () => {
+          if (!mergeCluster.length) return;
+          entries.push({
+            kind: 'merge',
+            key: 'merge:' + mergeCluster.map((entry) => entry.commit.sha).join(','),
+            commit: mergeCluster[0].commit,
+            index: mergeCluster[0].index,
+            commits: mergeCluster.slice(),
+          });
+          mergeCluster = [];
+        };
+
+        commits.forEach((entry) => {
+          if (this.isMergeCommit(entry.commit)) {
+            mergeCluster.push(entry);
+            return;
+          }
+          flushMergeCluster();
+          entries.push({
+            kind: 'commit',
+            key: 'commit:' + (entry.commit && entry.commit.sha),
+            commit: entry.commit,
+            index: entry.index,
+            commits: [entry],
+          });
+        });
+        flushMergeCluster();
+        return entries;
       },
 
       prIdentity(pr) {

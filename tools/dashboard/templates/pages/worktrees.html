@@ -355,14 +355,20 @@
                                x-text="group.label"></div>
                         </template>
                         <div class="ml-4 border-l border-white/10 pl-3 sm:ml-5 sm:pl-4">
-                          <template x-for="entry in group.commits" :key="'card-' + rowKey(item.row) + '/' + entry.commit.sha">
+                          <template x-for="entry in groupCardEntries(item.row, group)" :key="'card-' + rowKey(item.row) + '/' + entry.key">
                             <button type="button"
                                     class="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-2 py-2 text-left transition hover:bg-white/[0.03]"
                                     @click="openReviewCommit(item.row, entry.index)"
                                     data-testid="pr-navigator-commit-row">
                               <span class="rounded-full border border-white/10 bg-slate-900 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-300"
-                                    x-text="entry.commit.short_sha || shortSha(entry.commit.sha)"></span>
-                              <template x-if="hasStackedPrs(item.row)">
+                                    :class="entry.kind === 'merge' ? 'border-white/5 bg-slate-950 text-slate-500 uppercase tracking-[0.18em]' : ''"
+                                    x-text="entry.kind === 'merge' ? mergeEntryBadge(entry) : (entry.commit.short_sha || shortSha(entry.commit.sha))"></span>
+                              <template x-if="hasStackedPrs(item.row) && entry.kind === 'merge'">
+                                <span class="min-w-0 truncate text-[11px] uppercase tracking-[0.16em] text-slate-500"
+                                      data-testid="pr-navigator-merge-summary"
+                                      x-text="mergeEntrySummary(entry)"></span>
+                              </template>
+                              <template x-if="hasStackedPrs(item.row) && entry.kind !== 'merge'">
                                 <span class="min-w-0 truncate font-mono text-[11px] text-slate-300"
                                       data-testid="pr-navigator-commit-stats"
                                       x-text="commitStatsSummary(entry.commit)"></span>
