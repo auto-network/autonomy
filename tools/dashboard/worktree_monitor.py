@@ -272,10 +272,60 @@ def _read_bindings(row: WorktreeState) -> list:
         prefix=prefix,
         org="autonomy",
     )
+    exact = sorted(members.members, key=lambda member: member.key)
     # Deterministic per-review ordering matters for stacked rows because
     # the UI falls back to the first review when no explicit review_id is
     # supplied (e.g. legacy single-PR overlay entry points).
-    return sorted(members.members, key=lambda member: member.key)
+    if exact:
+        return exact
+
+    repo_slug = derive_repo_slug(row.managed_clone) or ""
+    if not repo_slug:
+        return []
+    commit_shas = {
+        commit.sha for commit in (row.commits or [])
+        if getattr(commit, "sha", None)
+    }
+    if not commit_shas:
+        return []
+
+    members = settings_ops.read_set(
+        REVIEW_BINDING_SET_ID,
+        prefix=f"{row.session_name}:{row.repo_name}",
+        org="autonomy",
+    )
+    cache_map = _read_review_state_cache(repo_slug)
+    branch_groups: dict[str, dict] = {}
+    for member in members.members:
+        try:
+            _session, _repo, branch, review_id = parse_binding_key(member.key)
+        except ValueError:
+            logger.warning(
+                "worktree_monitor: malformed binding key %r — skipping",
+                member.key,
+            )
+            continue
+        group = branch_groups.setdefault(branch, {"branch": branch, "members": [], "matches": 0})
+        group["members"].append(member)
+        cache = cache_map.get(f"{repo_slug}:{review_id}")
+        head_sha = str((cache or {}).get("head_sha") or "")
+        if head_sha and head_sha in commit_shas:
+            group["matches"] += 1
+
+    candidates = [g for branch, g in branch_groups.items() if branch != row.branch and g["matches"] > 0]
+    if not candidates:
+        return []
+    chosen = max(candidates, key=lambda group: (group["matches"], len(group["members"])))
+    logger.info(
+        "worktree_monitor: binding fallback matched %s/%s branch %r via cached head shas from %r (%d/%d reviews)",
+        row.session_name,
+        row.repo_name,
+        row.branch,
+        chosen["branch"],
+        chosen["matches"],
+        len(chosen["members"]),
+    )
+    return sorted(chosen["members"], key=lambda member: member.key)
 
 
 def _read_review_state_cache(repo_slug: str | None) -> dict[str, dict]:

@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -2718,6 +2719,104 @@ class TestWorktreeReviewBindings:
         snapshot = asyncio.run(wm._fetch_source_control(row, [row]))
         ids = sorted(r["review_id"] for r in snapshot["reviews"])
         assert ids == ["100", "101"]
+
+    def test_branch_renamed_bindings_fall_back_by_cached_head_sha(
+        self, isolated_settings_db, monkeypatch,
+    ):
+        """If the branch name changed but the same stacked PR head SHAs
+        are still in the local commit list, the resolver should recover
+        the old binding set instead of dropping the whole PR surface."""
+        from tools.graph import settings_ops
+        from tools.dashboard import worktree_monitor as wm
+
+        head100 = "1000000000000000000000000000000000000100"
+        head101 = "1010000000000000000000000000000000000101"
+        settings_ops.add_setting(
+            "autonomy.worktree.review_binding", 1,
+            "auto-x:autonomy:feature/old-stack:100",
+            {"base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+            org="autonomy",
+        )
+        settings_ops.add_setting(
+            "autonomy.worktree.review_binding", 1,
+            "auto-x:autonomy:feature/old-stack:101",
+            {"base_sha": head100},
+            org="autonomy",
+        )
+        settings_ops.add_setting(
+            "autonomy.source_control.review_state", 1,
+            "owner/repo:100",
+            {
+                "title": "Recovered #100", "body": "",
+                "state": "open", "head_sha": head100,
+                "base_sha": "ignored", "base_branch": "main",
+                "is_draft": False, "provider": "github",
+            },
+            org="autonomy",
+        )
+        settings_ops.add_setting(
+            "autonomy.source_control.review_state", 1,
+            "owner/repo:101",
+            {
+                "title": "Recovered #101", "body": "",
+                "state": "open", "head_sha": head101,
+                "base_sha": "ignored", "base_branch": "main",
+                "is_draft": False, "provider": "github",
+            },
+            org="autonomy",
+        )
+
+        monkeypatch.setattr(wm, "derive_repo_slug", lambda _p: "owner/repo")
+        row = replace(_row(
+            session="auto-x",
+            repo="autonomy",
+            live=True,
+            ahead=2,
+            commits=[
+                _commit(head100, "Recovered commit one"),
+                _commit(head101, "Recovered commit two"),
+            ],
+        ), branch="feature/new-stack")
+        snapshot = asyncio.run(wm._fetch_source_control(row, [row]))
+        ids = sorted(r["review_id"] for r in snapshot["reviews"])
+        assert ids == ["100", "101"]
+
+    def test_branch_fallback_requires_cached_head_sha_match(
+        self, isolated_settings_db, monkeypatch,
+    ):
+        """Branch-scoped fallback must not bleed stale bindings onto an
+        unrelated branch when none of the cached PR heads exist locally."""
+        from tools.graph import settings_ops
+        from tools.dashboard import worktree_monitor as wm
+
+        oldhead = "2000000000000000000000000000000000000200"
+        settings_ops.add_setting(
+            "autonomy.worktree.review_binding", 1,
+            "auto-x:autonomy:feature/old-stack:100",
+            {"base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+            org="autonomy",
+        )
+        settings_ops.add_setting(
+            "autonomy.source_control.review_state", 1,
+            "owner/repo:100",
+            {
+                "title": "Stale #100", "body": "",
+                "state": "open", "head_sha": oldhead,
+                "base_sha": "ignored", "base_branch": "main",
+                "is_draft": False, "provider": "github",
+            },
+            org="autonomy",
+        )
+
+        monkeypatch.setattr(wm, "derive_repo_slug", lambda _p: "owner/repo")
+        row = replace(_row(
+            session="auto-x",
+            repo="autonomy",
+            live=True,
+            ahead=1,
+            commits=[_commit("9990000000000000000000000000000000000999", "Unrelated branch commit")],
+        ), branch="feature/new-stack")
+        assert wm._read_bindings(row) == []
 
     def test_binding_without_cache_marks_review_stale(
         self, isolated_settings_db, monkeypatch,
