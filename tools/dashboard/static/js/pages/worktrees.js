@@ -972,16 +972,7 @@
       // chosen commit. The bindings are faithful to the settled design so
       // the PR-mode overlay can replace these without template churn.
       _itemForCommit(row, idx) {
-        const commits = this.commitList(row);
-        const commit = commits[idx];
-        if (!commit) return null;
-        return {
-          row,
-          commit,
-          commitIndex: idx,
-          position: idx + 1,
-          total: commits.length,
-        };
+        return this.commitAt(row, idx);
       },
 
       async openReviewCommit(row, idx) {
@@ -1244,11 +1235,22 @@
         return {
           row,
           commit: commits[safeIndex],
+          pr: this.prForCommitIndex(row, safeIndex),
           commitIndex: safeIndex,
           position: safeIndex + 1,
           total: commits.length,
           patchFiles: {},
         };
+      },
+
+      prForCommitIndex(row, index) {
+        const groups = this.rowReviewGroups(row);
+        for (const group of groups) {
+          if (!group || !group.pr) continue;
+          const commits = Array.isArray(group.commits) ? group.commits : [];
+          if (commits.some((entry) => entry.index === index)) return group.pr;
+        }
+        return null;
       },
 
       syncOverlayRows() {
@@ -1275,10 +1277,12 @@
             } else {
               const nextIndex = Math.max(0, Math.min(this.selectedCommit.commitIndex || 0, commits.length - 1));
               const nextCommit = commits[nextIndex];
+              const nextPr = this.prForCommitIndex(row, nextIndex);
               const sameCommit = this.selectedCommit.commit && this.selectedCommit.commit.sha === nextCommit.sha;
               this.selectedCommit = {
                 ...this.selectedCommit,
                 row,
+                pr: nextPr,
                 commit: sameCommit
                   ? {
                     ...nextCommit,

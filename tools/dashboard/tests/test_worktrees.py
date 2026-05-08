@@ -1164,6 +1164,25 @@ class TestWorktreePage:
         assert "const refreshedPr = this.matchingRowPr(updated, currentPr);" in js
         assert "await this.openReviewPr(updated, refreshedPr);" in js
 
+    def test_commit_review_overlay_shows_owning_pr_and_keeps_it_on_sync(self):
+        """Commit-mode Review should keep the operator oriented inside a
+        stacked row by showing which PR owns the selected commit and
+        preserving that ownership across row syncs."""
+        page_template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
+        partial_template = (TEMPLATE_DIR / "partials" / "worktree-review-overlays.html").read_text()
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+
+        for template in (page_template, partial_template):
+            assert 'data-testid="review-commit-owning-pr-button"' in template
+            assert '@click="openReviewPr(selectedCommit.row, selectedCommit.pr)"' in template
+            assert "!isPrReview() && selectedCommit.pr" in template
+            assert "owning pr" in template
+
+        assert "prForCommitIndex(row, index) {" in js
+        assert "pr: this.prForCommitIndex(row, safeIndex)," in js
+        assert "const nextPr = this.prForCommitIndex(row, nextIndex);" in js
+        assert "pr: nextPr," in js
+
 
 # ── Worktrees row-scoped GitHub operation surface (auto-ltibi) ─────────
 
