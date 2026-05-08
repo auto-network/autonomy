@@ -50,6 +50,10 @@ from tools.graph.schemas.worktree_review_binding import (
     SET_ID as REVIEW_BINDING_SET_ID,
     parse_binding_key,
 )
+from tools.graph.schemas.worktree_watch import (
+    SCHEMA_REVISION as WATCH_REVISION,
+    SET_ID as WATCH_SET_ID,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +98,9 @@ _POLL_WINDOW_SECONDS = 3600.0
 
 # Nag modes for the source_control.watch block. The UI maps these onto
 # Silent / Nag All Changes / Nag When Done buttons (settled design
-# 3435e03f). Persistence is in-memory on the monitor for v1; CrossTalk
-# delivery (auto-f2quy-style) is a separate follow-up bead.
+# 3435e03f). The live timers stay in-memory on the monitor, but the
+# row's requested watch mode is persisted in Settings so a dashboard
+# restart can reconstruct the timer state.
 NAG_SILENT = "silent"
 NAG_ALL_CHANGES = "nag_all"
 NAG_WHEN_DONE = "nag_done"
@@ -112,6 +117,21 @@ NAG_MAX_DURATION_SECONDS = 14400.0      # 4-hour absolute ceiling
 # loop disarms automatically once this many seconds have elapsed since
 # the row was armed (per Jeremy 2026-04-30, never unlimited polling).
 NAG_DONE_TIMEOUT_SECONDS = 7200.0       # 2 hours
+
+
+def _watch_key(session_name: str, repo_name: str) -> str:
+    """Composite Settings key for one Worktrees row's watch state."""
+    return f"{session_name}:{repo_name}"
+
+
+def _read_watch_setting(session_name: str, repo_name: str):
+    """Read the persisted watch row for one Worktrees row, if any."""
+    key = _watch_key(session_name, repo_name)
+    members = settings_ops.read_set(
+        WATCH_SET_ID,
+        org="autonomy",
+    ).to_dict()
+    return members.get(key)
 
 
 def next_poll_delay(elapsed_seconds: float) -> float | None:
@@ -840,6 +860,10 @@ class WorktreeMonitor:
         self._capability_backoff_until: float = 0.0
         # Per-row (mode, expiry_monotonic) — silent has no entry.
         self._nag_modes: dict[tuple[str, str], tuple[str, float]] = {}
+        # Rows whose persisted watch Setting has already been consulted
+        # for this process lifetime. Avoids a DB read on every
+        # ``get_nag_mode`` miss for permanently-silent rows.
+        self._nag_settings_hydrated: set[tuple[str, str]] = set()
         # Per-row monotonic instant the row was armed for ``nag_done``.
         # The smart-cadence polling clock starts here. Cleared when the
         # row is moved off ``nag_done`` (silent or another mode).
@@ -867,6 +891,57 @@ class WorktreeMonitor:
         """Return the cached source_control snapshot for a row, if any."""
         return self._source_control_cache.get((session_name, repo_name))
 
+    def _clear_persisted_nag_mode(self, key: tuple[str, str]) -> None:
+        """Delete the persisted watch row for ``key`` if one exists."""
+        setting = settings_ops.resolve_set_key(
+            WATCH_SET_ID,
+            _watch_key(*key),
+            org="autonomy",
+        )
+        if setting is not None:
+            settings_ops.remove_setting(setting["id"], org="autonomy")
+
+    def _rehydrate_nag_mode(self, key: tuple[str, str]) -> tuple[str, float] | None:
+        """Load persisted watch state into the in-memory timers once.
+
+        The Setting stores wall-clock timestamps; this helper converts
+        them into the monotonic values the live poller uses.
+        """
+        if key in self._nag_settings_hydrated:
+            return self._nag_modes.get(key)
+        self._nag_settings_hydrated.add(key)
+
+        setting = _read_watch_setting(*key)
+        if setting is None or not isinstance(setting.payload, dict):
+            return None
+
+        payload = setting.payload
+        mode = str(payload.get("mode") or NAG_DEFAULT)
+        expires_at = payload.get("expires_at")
+        if mode not in NAG_MODES or not isinstance(expires_at, (int, float)):
+            self._clear_persisted_nag_mode(key)
+            return None
+
+        now_wall = time.time()
+        remaining = float(expires_at) - now_wall
+        if remaining <= 0.0 or mode == NAG_SILENT:
+            self._clear_persisted_nag_mode(key)
+            return None
+
+        now_mono = time.monotonic()
+        entry = (mode, now_mono + remaining)
+        self._nag_modes[key] = entry
+        if mode == NAG_WHEN_DONE:
+            armed_at = payload.get("armed_at")
+            if isinstance(armed_at, (int, float)):
+                elapsed = max(0.0, now_wall - float(armed_at))
+                self._armed_at[key] = now_mono - elapsed
+            else:
+                self._armed_at[key] = now_mono
+        else:
+            self._armed_at.pop(key, None)
+        return entry
+
     def get_nag_mode(self, session_name: str, repo_name: str) -> str:
         """Return the live nag mode for a row.
 
@@ -876,11 +951,17 @@ class WorktreeMonitor:
         have to know about expiry; the timer is invisible to the
         polling decision tree.
         """
-        entry = self._nag_modes.get((session_name, repo_name))
+        key = (session_name, repo_name)
+        entry = self._nag_modes.get(key)
+        if entry is None:
+            entry = self._rehydrate_nag_mode(key)
         if entry is None:
             return NAG_DEFAULT
         mode, expiry = entry
         if time.monotonic() >= expiry:
+            self._nag_modes.pop(key, None)
+            self._armed_at.pop(key, None)
+            self._clear_persisted_nag_mode(key)
             return NAG_DEFAULT
         return mode
 
@@ -890,10 +971,18 @@ class WorktreeMonitor:
         UI surfaces this as a countdown so the operator knows when the
         nag will lapse and can re-arm if they still want to be paged.
         """
-        entry = self._nag_modes.get((session_name, repo_name))
+        key = (session_name, repo_name)
+        entry = self._nag_modes.get(key)
+        if entry is None:
+            entry = self._rehydrate_nag_mode(key)
         if entry is None:
             return 0.0
         _mode, expiry = entry
+        if time.monotonic() >= expiry:
+            self._nag_modes.pop(key, None)
+            self._armed_at.pop(key, None)
+            self._clear_persisted_nag_mode(key)
+            return 0.0
         return max(0.0, expiry - time.monotonic())
 
     def set_nag_mode(
@@ -923,6 +1012,7 @@ class WorktreeMonitor:
                 f"invalid nag mode: {mode!r}; expected one of {sorted(NAG_MODES)}"
             )
         key = (session_name, repo_name)
+        self._nag_settings_hydrated.add(key)
 
         if mode == NAG_SILENT:
             # Silent doesn't need a timer — clear the entry so
@@ -930,6 +1020,7 @@ class WorktreeMonitor:
             self._nag_modes.pop(key, None)
             self._armed_at.pop(key, None)
             self._terminal_fired.pop(key, None)
+            self._clear_persisted_nag_mode(key)
             cached = self._source_control_cache.get(key)
             if cached is not None:
                 cached["watch"] = {"mode": NAG_SILENT}
@@ -945,19 +1036,32 @@ class WorktreeMonitor:
         # request gets capped here so the safety guarantee holds.
         duration_seconds = min(float(duration_seconds), NAG_MAX_DURATION_SECONDS)
         now = time.monotonic()
+        now_wall = time.time()
         expiry = now + duration_seconds
         self._nag_modes[key] = (mode, expiry)
+        payload = {
+            "mode": mode,
+            "expires_at": now_wall + duration_seconds,
+        }
         if mode == NAG_WHEN_DONE:
             # Reset the smart-cadence clock and clear any stale
             # fired-state so a re-arm re-notifies when checks
             # terminalize again at the current head_sha.
             self._armed_at[key] = now
             self._terminal_fired[key] = {}
+            payload["armed_at"] = now_wall
         else:
             # Other modes (currently nag_all) don't use the smart-cadence
             # clock; drop any leftover entry from a previous nag_done
             # cycle.
             self._armed_at.pop(key, None)
+        settings_ops.upsert_by_key(
+            WATCH_SET_ID,
+            WATCH_REVISION,
+            _watch_key(*key),
+            payload,
+            org="autonomy",
+        )
 
         cached = self._source_control_cache.get(key)
         if cached is not None:
