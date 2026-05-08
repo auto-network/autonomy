@@ -1511,6 +1511,104 @@
         return false;
       },
 
+      canRefreshSelectedRow() {
+        const row = this.selectedCommit && this.selectedCommit.row;
+        return !!(row && row.session_name && row.repo_name);
+      },
+
+      async openCommitOverlay(opts) {
+        const options = opts || {};
+        const runId = options.runId || '';
+        if (!runId) return false;
+
+        const syntheticRow = {
+          session_name: options.sessionName || '',
+          repo_name: options.repoName || '',
+          branch: options.branch || '',
+          target_branch: options.targetBranch || '',
+          session_live: !!(options.sessionName || ''),
+          session_project: '',
+          commits_ahead: 1,
+          is_dirty: false,
+          ff_eligible: false,
+          rebase_required: false,
+          cherry_pick_eligible: false,
+          clone_stale: false,
+          commits: [],
+        };
+        const requestKey = '_activity_/' + runId + '/' + Date.now();
+        const fallbackSubject = options.subject || 'Commit diff';
+
+        this.selectedDirtyRow = null;
+        this.confirmDiscardRow = null;
+        this.detailLoading = true;
+        this.mergeState = 'idle';
+        this.mergeBurstActive = false;
+        this.reviewTitlePinned = false;
+        this.showDiff = true;
+        this.selectedCommit = {
+          requestKey,
+          row: syntheticRow,
+          commit: {
+            sha: requestKey,
+            short_sha: '',
+            subject: fallbackSubject,
+            body: '',
+            author: '',
+            date: '',
+            files: [],
+            stats: { files: 0, additions: 0, deletions: 0 },
+            patch: '',
+            stale: false,
+            stale_reason: '',
+          },
+          pr: null,
+          commitIndex: 0,
+          position: 1,
+          total: 1,
+          patchFiles: {},
+          prMode: false,
+        };
+        this.queueCommitStickyOffsets();
+        this.queueBranchLayouts();
+        this.queuePathMeasurements();
+        this.queueReviewHeaderState();
+
+        try {
+          const resp = await fetch(
+            '/api/dispatch/runs/' + encodeURIComponent(runId) + '/commit-detail',
+          );
+          const detail = await _jsonOrError(resp);
+          if (!this.selectedCommit || this.selectedCommit.requestKey !== requestKey) {
+            return false;
+          }
+          this.selectedCommit = {
+            ...this.selectedCommit,
+            commit: {
+              ...this.selectedCommit.commit,
+              ...detail,
+              files: detail.files || [],
+              stats: _commitStats(detail),
+            },
+            patchFiles: _patchIndex(detail.patch || ''),
+          };
+          this.queueCommitStickyOffsets();
+          this.queueBranchLayouts();
+          this.queuePathMeasurements();
+          this.queueReviewHeaderState();
+          return true;
+        } catch (_err) {
+          if (this.selectedCommit && this.selectedCommit.requestKey === requestKey) {
+            this.selectedCommit = null;
+          }
+          return false;
+        } finally {
+          if (this.selectedCommit && this.selectedCommit.requestKey === requestKey) {
+            this.detailLoading = false;
+          }
+        }
+      },
+
       syncScrollLock() {
         const locked = this.hasOverlayOpen();
         document.documentElement.style.overflow = locked ? 'hidden' : '';
@@ -2185,5 +2283,12 @@
       return false;
     }
     return await window._worktreeReviewOverlay.openSessionOverlay(sessionName);
+  };
+
+  window.openCommitOverlay = async function (opts) {
+    if (!window._worktreeReviewOverlay || typeof window._worktreeReviewOverlay.openCommitOverlay !== 'function') {
+      return false;
+    }
+    return await window._worktreeReviewOverlay.openCommitOverlay(opts);
   };
 })();

@@ -506,6 +506,8 @@ SWEEP_DISPATCH_RUN_COMMIT_DETAILS = {
         "patch": (
             "diff --git a/tools/dashboard/templates/pages/worktrees.html "
             "b/tools/dashboard/templates/pages/worktrees.html\n"
+            "--- a/tools/dashboard/templates/pages/worktrees.html\n"
+            "+++ b/tools/dashboard/templates/pages/worktrees.html\n"
             "@@ -1,3 +1,3 @@\n"
             "-old line\n"
             "+new line\n"
@@ -2824,29 +2826,30 @@ ACTIVITY_PAGE_CHECKS = """(async () => {
         }
 
         // Diff overlay open/close. Click the Diff button on the ff card
-        // → modal appears, fetches commit-detail, renders patch. Esc
-        // dismisses; underlying activity tab + scroll are preserved.
+        // → the shared Worktrees commit-review overlay appears, renders
+        // markdown body text + hljs hunk lines. Esc dismisses;
+        // underlying activity tab stays selected.
         var ffDiffBtn = _wtDiffBtn(wtCardFf);
         if (ffDiffBtn) {
             ffDiffBtn.click();
             await tick();
             // Allow fetch + Alpine to settle.
             await waitFor(function(){
-                var ov = document.querySelector('[data-testid="tl-diff-overlay"]');
-                return !!ov && !!ov.querySelector('[data-testid="tl-diff-overlay-patch"]');
+                var ov = document.querySelector('[data-testid="worktree-commit-detail"]');
+                return !!ov && !!ov.querySelector('.worktree-diff-code.hljs');
             }, 3000);
-            var overlay = document.querySelector('[data-testid="tl-diff-overlay"]');
+            var overlay = document.querySelector('[data-testid="worktree-commit-detail"]');
             r.diff_overlay_open = !!overlay;
-            r.diff_overlay_has_patch = !!(overlay && overlay.querySelector('[data-testid="tl-diff-overlay-patch"]'));
-            var patchEl = overlay && overlay.querySelector('[data-testid="tl-diff-overlay-patch"]');
+            r.diff_overlay_has_patch = !!(overlay && overlay.querySelector('.worktree-diff-code.hljs'));
+            var patchEl = overlay && overlay.querySelector('.worktree-diff-code.hljs');
             r.diff_overlay_patch_text = patchEl ? patchEl.textContent.slice(0, 80) : '';
-            // Close via Escape — dispatch on window so the .window
-            // modifier on the overlay's @keydown.escape handler picks
-            // it up (document-level dispatch is silently ignored).
+            var bodyEl = overlay && overlay.querySelector('[data-testid="worktree-review-commit-body"]');
+            var bodyText = bodyEl ? bodyEl.textContent : '';
+            r.diff_overlay_body_has_literal_escapes = bodyText.indexOf('\\\\n\\\\n') !== -1;
+            r.diff_overlay_refresh_hidden = !(overlay && overlay.querySelector('[data-testid="review-overlay-refresh-button"]'));
             window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
             await tick();
-            r.diff_overlay_closed_after_esc = !document.querySelector('[data-testid="tl-diff-overlay"]');
-            // Tab selection preserved (we never clicked Attention).
+            r.diff_overlay_closed_after_esc = !document.querySelector('[data-testid="worktree-commit-detail"]');
             r.tab_after_overlay_close = data ? data.tab : '';
         }
 
@@ -3907,15 +3910,21 @@ class TestActivitySurfaceBehavior:
         )
 
     def test_worktree_merge_card_diff_overlay(self):
-        """auto-24a60: clicking [Diff →] opens a modal with the commit's
-        diff fetched lazily from /api/dispatch/runs/<id>/commit-detail.
+        """auto-24a60: clicking [Diff →] opens the shared Worktrees
+        commit-review overlay via /api/dispatch/runs/<id>/commit-detail.
         Esc dismisses; underlying activity tab stays selected.
         """
         c = self._timeline
         assert c.get("diff_overlay_open"), "Diff overlay did not open after click"
         assert c.get("diff_overlay_has_patch"), "Diff overlay missing patch content"
-        assert "diff --git" in (c.get("diff_overlay_patch_text") or ""), (
+        assert "old line" in (c.get("diff_overlay_patch_text") or ""), (
             f"Diff overlay patch text unexpected: {c.get('diff_overlay_patch_text')!r}"
+        )
+        assert not c.get("diff_overlay_body_has_literal_escapes"), (
+            "Shared overlay should render real commit-body newlines, not literal \\\\n escapes"
+        )
+        assert c.get("diff_overlay_refresh_hidden"), (
+            "Activity-launched commit review should not show the Worktrees row Refresh button"
         )
         assert c.get("diff_overlay_closed_after_esc"), (
             "Diff overlay still open after Escape"
