@@ -55,6 +55,7 @@ from . import workspace_capability_enable  # noqa: F401 — autonomy.workspace.c
 from . import worktree_review_binding  # noqa: F401 — autonomy.worktree.review_binding#1
 from . import source_control_review_state  # noqa: F401 — autonomy.source_control.review_state#1
 from . import worktree_watch  # noqa: F401 — dashboard.worktree.watch#1
+from . import worktree_terminal_fire  # noqa: F401 — dashboard.worktree.terminal_fire#1
 from . import turn_correction  # noqa: F401 — autonomy.workspace.turn_correction#1
 from . import claude_credentials  # noqa: F401 — dashboard.claude.credentials#1
 from . import claude_setup_tokens  # noqa: F401 — dashboard.claude.setup_tokens#1
