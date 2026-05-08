@@ -278,57 +278,68 @@
                     </div>
                   </div>
                   <div class="divide-y divide-white/10 border-y border-white/10">
-                    <template x-for="pr in rowPrs(item.row)" :key="'pr-nav-' + (pr.review_id || pr.number)">
-                      <button type="button"
-                              class="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-2 py-2 text-left transition hover:bg-white/[0.03]"
-                              @click="openReviewPr(item.row, pr)"
-                              data-testid="pr-navigator-pr-row">
-                        <span class="rounded-full border border-white/10 bg-slate-900 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-300"
-                              x-text="'PR #' + (pr.number != null ? pr.number : pr.review_id)"></span>
-                        <span class="min-w-0 truncate text-sm text-slate-200"
-                              x-text="pr.title || ('PR #' + (pr.number != null ? pr.number : pr.review_id))"></span>
-                        <span class="flex shrink-0 items-center gap-1.5">
-                          <template x-for="check in rowPrChecks(item.row, pr)" :key="'card-pr-' + (pr.review_id || pr.number) + '-' + check.id">
-                            <span class="inline-flex h-7 w-7 cursor-help items-center justify-center rounded-full border text-[10px] font-bold tracking-wide"
-                                  :class="checkIconClass(check.status)"
-                                  tabindex="0"
-                                  @mouseenter="showCheckTooltip($event, check)"
-                                  @mousemove="showCheckTooltip($event, check)"
-                                  @mouseleave="hideCheckTooltip()"
-                                  @focus="showCheckTooltip($event, check)"
-                                  @blur="hideCheckTooltip()"
-                                  @click.stop.prevent="toggleCheckTooltip($event, check)">
-                              <span x-text="check.icon"></span>
+                    <template x-for="group in rowReviewGroups(item.row)" :key="'pr-group-' + rowKey(item.row) + '/' + group.key">
+                      <div class="py-1">
+                        <template x-if="group.pr">
+                          <button type="button"
+                                  class="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-2 py-2 text-left transition hover:bg-white/[0.03]"
+                                  @click="openReviewPr(item.row, group.pr)"
+                                  data-testid="pr-navigator-pr-row">
+                            <span class="rounded-full border border-white/10 bg-slate-900 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-300"
+                                  x-text="'PR #' + (group.pr.number != null ? group.pr.number : group.pr.review_id)"></span>
+                            <span class="min-w-0 truncate text-sm text-slate-200"
+                                  x-text="group.pr.title || ('PR #' + (group.pr.number != null ? group.pr.number : group.pr.review_id))"></span>
+                            <span class="flex shrink-0 items-center gap-1.5">
+                              <template x-for="check in rowPrChecks(item.row, group.pr)" :key="'card-pr-' + (group.pr.review_id || group.pr.number) + '-' + check.id">
+                                <span class="inline-flex h-7 w-7 cursor-help items-center justify-center rounded-full border text-[10px] font-bold tracking-wide"
+                                      :class="checkIconClass(check.status)"
+                                      tabindex="0"
+                                      @mouseenter="showCheckTooltip($event, check)"
+                                      @mousemove="showCheckTooltip($event, check)"
+                                      @mouseleave="hideCheckTooltip()"
+                                      @focus="showCheckTooltip($event, check)"
+                                      @blur="hideCheckTooltip()"
+                                      @click.stop.prevent="toggleCheckTooltip($event, check)">
+                                  <span x-text="check.icon"></span>
+                                </span>
+                              </template>
                             </span>
+                          </button>
+                        </template>
+                        <template x-if="!group.pr">
+                          <div class="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500"
+                               data-testid="pr-navigator-unlinked-row"
+                               x-text="group.label"></div>
+                        </template>
+                        <div class="ml-4 border-l border-white/10 pl-3 sm:ml-5 sm:pl-4">
+                          <template x-for="entry in group.commits" :key="'card-' + rowKey(item.row) + '/' + entry.commit.sha">
+                            <button type="button"
+                                    class="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-2 py-2 text-left transition hover:bg-white/[0.03]"
+                                    @click="openReviewCommit(item.row, entry.index)"
+                                    data-testid="pr-navigator-commit-row">
+                              <span class="rounded-full border border-white/10 bg-slate-900 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-300"
+                                    x-text="entry.commit.short_sha || shortSha(entry.commit.sha)"></span>
+                              <span class="min-w-0 truncate text-sm text-slate-200"
+                                    x-text="entry.commit.subject"></span>
+                              <span class="flex shrink-0 items-center gap-1.5">
+                                <template x-for="check in reviewCommitChecks(entry.commit)" :key="'card-' + entry.commit.sha + '-' + check.id">
+                                  <span class="inline-flex h-7 w-7 cursor-help items-center justify-center rounded-full border text-[10px] font-bold tracking-wide"
+                                        :class="checkIconClass(check.status)"
+                                        tabindex="0"
+                                        @mouseenter="showCheckTooltip($event, check)"
+                                        @mousemove="showCheckTooltip($event, check)"
+                                        @mouseleave="hideCheckTooltip()"
+                                        @focus="showCheckTooltip($event, check)"
+                                        @blur="hideCheckTooltip()"
+                                        @click.stop.prevent="toggleCheckTooltip($event, check)">
+                                    <span x-text="check.icon"></span>
+                                  </span>
+                                </template>
+                              </span>
+                            </button>
                           </template>
-                        </span>
-                      </button>
-                    </template>
-                    <template x-for="(commit, idx) in commitList(item.row)" :key="'card-' + rowKey(item.row) + '/' + commit.sha">
-                      <button type="button"
-                              class="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-2 py-2 text-left transition hover:bg-white/[0.03]"
-                              @click="openReviewCommit(item.row, idx)"
-                              data-testid="pr-navigator-commit-row">
-                        <span class="rounded-full border border-white/10 bg-slate-900 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-300"
-                              x-text="commit.short_sha || shortSha(commit.sha)"></span>
-                        <span class="min-w-0 truncate text-sm text-slate-200"
-                              x-text="commit.subject"></span>
-                        <span class="flex shrink-0 items-center gap-1.5">
-                          <template x-for="check in reviewCommitChecks(commit)" :key="'card-' + commit.sha + '-' + check.id">
-                              <span class="inline-flex h-7 w-7 cursor-help items-center justify-center rounded-full border text-[10px] font-bold tracking-wide"
-                                  :class="checkIconClass(check.status)"
-                                  tabindex="0"
-                                  @mouseenter="showCheckTooltip($event, check)"
-                                  @mousemove="showCheckTooltip($event, check)"
-                                  @mouseleave="hideCheckTooltip()"
-                                  @focus="showCheckTooltip($event, check)"
-                                  @blur="hideCheckTooltip()"
-                                  @click.stop.prevent="toggleCheckTooltip($event, check)">
-                              <span x-text="check.icon"></span>
-                            </span>
-                          </template>
-                        </span>
-                      </button>
+                        </div>
+                      </div>
                     </template>
                   </div>
                 </div>

@@ -517,6 +517,7 @@
           state: aggregate,
           head_sha: review.head_sha,
           base_sha: review.base_sha,
+          commit_shas: Array.isArray(review.commit_shas) ? review.commit_shas.slice() : [],
           running: !!review.running,
           stale: !!review.stale,
           watch_active: mode !== 'silent',
@@ -579,6 +580,93 @@
       rowPr(row) {
         const prs = this.rowPrs(row);
         return prs.length ? prs[0] : null;
+      },
+
+      rowReviewGroups(row) {
+        const commits = this.commitList(row);
+        const prs = this.rowPrs(row);
+        if (!prs.length) return [];
+
+        const indexBySha = new Map();
+        commits.forEach((commit, index) => {
+          if (commit && commit.sha) indexBySha.set(commit.sha, index);
+        });
+
+        const ordered = prs
+          .map((pr, originalIndex) => {
+            const explicitShas = Array.isArray(pr.commit_shas) ? pr.commit_shas : [];
+            const explicitIndices = explicitShas
+              .map((sha) => indexBySha.get(sha))
+              .filter((index) => Number.isInteger(index))
+              .sort((a, b) => a - b);
+            const headIndex = Number.isInteger(indexBySha.get(pr.head_sha))
+              ? indexBySha.get(pr.head_sha)
+              : -1;
+            const baseIndex = Number.isInteger(indexBySha.get(pr.base_sha))
+              ? indexBySha.get(pr.base_sha)
+              : -1;
+            const score = explicitIndices.length
+              ? explicitIndices[explicitIndices.length - 1]
+              : headIndex;
+            return {
+              pr,
+              originalIndex,
+              explicitIndices,
+              headIndex,
+              baseIndex,
+              score,
+            };
+          })
+          .sort((a, b) => {
+            if (a.score < 0 && b.score < 0) return a.originalIndex - b.originalIndex;
+            if (a.score < 0) return 1;
+            if (b.score < 0) return -1;
+            if (a.score !== b.score) return a.score - b.score;
+            return a.originalIndex - b.originalIndex;
+          });
+
+        const claimed = new Set();
+        let lastClaimed = -1;
+        const groups = ordered.map((entry) => {
+          let indices = [];
+          if (entry.explicitIndices.length) {
+            indices = entry.explicitIndices.filter((index) => !claimed.has(index));
+          } else if (entry.headIndex >= 0) {
+            const start = Math.max(
+              lastClaimed + 1,
+              entry.baseIndex >= 0 ? entry.baseIndex + 1 : lastClaimed + 1,
+            );
+            if (entry.headIndex >= start) {
+              for (let index = start; index <= entry.headIndex; index += 1) {
+                if (!claimed.has(index)) indices.push(index);
+              }
+            }
+          }
+          indices.forEach((index) => claimed.add(index));
+          if (indices.length) lastClaimed = Math.max(lastClaimed, indices[indices.length - 1]);
+          return {
+            key: this.prIdentity(entry.pr) || ('pr-' + entry.originalIndex),
+            pr: entry.pr,
+            label: '',
+            commits: indices.map((index) => ({
+              commit: commits[index],
+              index,
+            })),
+          };
+        });
+
+        const unlinked = commits
+          .map((commit, index) => ({ commit, index }))
+          .filter(({ index }) => !claimed.has(index));
+        if (unlinked.length) {
+          groups.push({
+            key: 'unlinked',
+            pr: null,
+            label: 'Unlinked commits',
+            commits: unlinked,
+          });
+        }
+        return groups;
       },
 
       prIdentity(pr) {
