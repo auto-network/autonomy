@@ -668,13 +668,16 @@ def resolve_capabilities(
 def _workspaces_in_org(slug: str) -> dict[str, WorkspaceV1]:
     """Read every ``autonomy.workspace#1`` owned by *slug* + attach artifacts.
 
-    ``peers=[]`` is explicit — ``load_workspaces`` iterates the org
-    registry itself and stamps every workspace with its owning org
-    slug; pulling peer rows via cross-org here would double-attribute
-    shared workspaces to whichever org iterated first (auto-txg5.4).
+    ``peers=["personal"]`` whitelists personal.db so operators can layer
+    operator-local overrides (e.g. credential env values) on top of the
+    canonical workspace via standard ``graph set override --org personal``.
+    Personal.db is operator-local by definition and never owns workspaces,
+    so the auto-txg5.4 double-attribution concern (peer orgs both claiming
+    a shared workspace key) doesn't apply. PEER_VISIBLE_STATES still gates:
+    only published/canonical personal.db rows contribute.
     """
     members = ops.read_set(
-        WORKSPACE_SET_ID, org=slug, peers=[],
+        WORKSPACE_SET_ID, org=slug, peers=["personal"],
     ).members
     out: dict[str, WorkspaceV1] = {}
     for m in members:
