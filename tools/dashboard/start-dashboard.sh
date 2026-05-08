@@ -143,7 +143,11 @@ setsid bash -c "
   if [[ -f \"$REPO_ROOT/data/tls.crt\" && -f \"$REPO_ROOT/data/tls.key\" ]]; then
     SSL_ARGS=\"--ssl-certfile $REPO_ROOT/data/tls.crt --ssl-keyfile $REPO_ROOT/data/tls.key\"
   fi
-  \"$VENV\" -m uvicorn tools.dashboard.server:app \
+  AUTHBIND=()
+  if (( $PORT < 1024 )) && command -v authbind >/dev/null 2>&1; then
+    AUTHBIND=(authbind --deep)
+  fi
+  \"\${AUTHBIND[@]}\" \"$VENV\" -m uvicorn tools.dashboard.server:app \
     --host \"$HOST\" \
     --port \"$PORT\" \
     --reload \
