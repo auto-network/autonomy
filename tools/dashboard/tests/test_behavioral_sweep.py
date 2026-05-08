@@ -5137,20 +5137,22 @@ WORKTREES_REBASE_STATUS_CHECKS = """(async () => {
     // setting.changed handler refetches the payload), and the
     // openCommitAt vs refreshSelectedRow distinction (proves the
     // 'done' branch refetches the diff at the new SHA).
-    var postCount = 0;
-    var origFetch = window.fetch;
-    window.fetch = function(url, opts) {
-        if (typeof url === 'string' && url.indexOf('/request-rebase') !== -1) {
-            postCount++;
-            return Promise.resolve({
-                ok: true,
-                status: 200,
-                json: function() { return Promise.resolve({status: 'ok'}); },
-            });
-        }
-        return origFetch.apply(this, arguments);
+    var schemaOfCalls = 0;
+    var appendCalls = [];
+    var origSchema = window.Schema;
+    window.Schema = {
+        of: async function(setId) {
+            schemaOfCalls++;
+            return {
+                append: async function(payload) {
+                    appendCalls.push({ set_id: setId, payload: payload });
+                    return { ok: true };
+                },
+            };
+        },
     };
-    r.fetch_stubbed = true;
+    data._RebaseDirective = null;
+    r.directive_stubbed = true;
 
     // Stub schema proxy — no real subscription, just .read() returning
     // whatever payload we hand over for this assertion's transition.
@@ -5206,13 +5208,16 @@ WORKTREES_REBASE_STATUS_CHECKS = """(async () => {
     // ── Step 1: rapid double-click — only one optimistic awaiting ──
     // Two synchronous calls to requestRebase; the second must early-
     // return because rebaseRequesting is already true. Net effect:
-    // exactly one POST, exactly one rebaseStatus entry, state =
+    // exactly one directive append, exactly one rebaseStatus entry, state =
     // 'awaiting' + optimistic flag.
     var p1 = data.requestRebase(row);
     var p2 = data.requestRebase(row);
     await Promise.all([p1, p2]);
     await tick();
-    r.post_count_after_double_click = postCount;
+    r.directive_schema_of_calls = schemaOfCalls;
+    r.directive_append_count = appendCalls.length;
+    r.directive_set_id = appendCalls.length ? appendCalls[0].set_id : '';
+    r.directive_payload = appendCalls.length ? appendCalls[0].payload : null;
     var status = data.rebaseStatus[rowKey] || null;
     r.optimistic_state = status ? status.state : null;
     r.optimistic_flag = status ? !!status.optimistic : false;
@@ -5265,7 +5270,7 @@ WORKTREES_REBASE_STATUS_CHECKS = """(async () => {
     r.failed_toast_msg = lastErrToast ? lastErrToast.msg : '';
 
     // Cleanup: restore globals.
-    window.fetch = origFetch;
+    window.Schema = origSchema;
     if (origToast) window.showToast = origToast;
 
     return JSON.stringify(r);
@@ -5295,10 +5300,18 @@ class TestWorktreesRebaseStatusBehavior:
             "Request Rebase button should be visible after fixture mutation"
 
     def test_rapid_double_click_only_one_optimistic(self):
-        """Double-clicking Request Rebase fires one POST and stamps one optimistic state."""
+        """Double-clicking Request Rebase appends one directive row and stamps one optimistic state."""
         c = self._checks
-        assert c.get("post_count_after_double_click") == 1, \
-            f"Expected 1 POST from double-click, got {c.get('post_count_after_double_click')}"
+        assert c.get("directive_schema_of_calls") == 1, \
+            f"Expected 1 Schema.of bind, got {c.get('directive_schema_of_calls')}"
+        assert c.get("directive_append_count") == 1, \
+            f"Expected 1 directive append from double-click, got {c.get('directive_append_count')}"
+        assert c.get("directive_set_id") == "dashboard.session.crosstalk.worktree.rebase", \
+            f"Unexpected directive set_id: {c.get('directive_set_id')!r}"
+        payload = c.get("directive_payload") or {}
+        assert payload.get("target_session"), "Directive payload missing target_session"
+        assert payload.get("repo"), "Directive payload missing repo"
+        assert "body" not in payload, "Directive payload should not require a client-rendered body"
         assert c.get("optimistic_state") in ("awaiting", "in_progress"), (
             "After click + agent ack, status should be awaiting or in_progress; "
             f"got {c.get('optimistic_state')!r}"

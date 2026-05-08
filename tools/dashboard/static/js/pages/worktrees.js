@@ -351,7 +351,8 @@
       // ``{ state, error, optimistic }`` where ``state`` is one of
       // ``'awaiting' | 'in_progress' | 'done' | 'failed'``. ``awaiting``
       // is the optimistic local placeholder set when the operator clicks
-      // Request Rebase — it covers the gap between the dashboard POST and
+      // Request Rebase — it covers the gap between the dashboard
+      // directive append and
       // the agent's first ``WorktreeRebaseStatusV1`` write, then the
       // setting.changed callback overwrites it with the agent's true
       // state. ``optimistic`` flags an entry as locally-set so the
@@ -359,6 +360,7 @@
       rebaseStatus: {},
       _rebaseStatusUnsubs: [],
       _RebaseStatusSchema: null,
+      _RebaseDirective: null,
       cherryPicking: false,
       commitStickyTop: 0,
       commitFileRowStickyTop: 0,
@@ -1935,25 +1937,34 @@
         if (!row || this.rebaseRequesting) return;
         this.rebaseRequesting = true;
         // Optimistic local "awaiting" placeholder covers the gap between
-        // this POST and the agent's first WorktreeRebaseStatusV1 write.
+        // this directive append and the first WorktreeRebaseStatusV1 write.
         // The strict ``rebaseRequesting`` guard above already debounces
         // in-flight POSTs; this also prevents a second click from
         // double-stamping the row's status while one POST is in flight.
         const key = this.rowKey(row);
         this._setRebaseStatus(key, { state: 'awaiting', error: '', optimistic: true });
         try {
-          const resp = await fetch(
-            '/api/worktrees/' + encodeURIComponent(row.session_name) + '/' +
-              encodeURIComponent(row.repo_name) + '/request-rebase',
-            { method: 'POST' },
-          );
-          await _jsonOrError(resp);
+          if (!this._RebaseDirective) {
+            const Schema = (typeof window !== 'undefined') ? window.Schema : null;
+            if (!Schema || typeof Schema.of !== 'function') {
+              throw new Error('Schema.of unavailable');
+            }
+            this._RebaseDirective = await Schema.of(
+              'dashboard.session.crosstalk.worktree.rebase',
+            );
+          }
+          await this._RebaseDirective.append({
+            target_session: row.session_name,
+            repo: row.repo_name,
+          });
           _toast('Rebase request sent to ' + row.session_name, 'warning');
           this.rebaseRequiredDialog = null;
           await this.refresh(false);
         } catch (err) {
-          // POST itself failed — the agent will never write a status,
-          // so clear the optimistic awaiting placeholder.
+          // The directive write itself failed — no action handler will run,
+          // so clear the optimistic awaiting placeholder immediately.
+          // Delivery failures after a successful write flow back through
+          // WorktreeRebaseStatusV1 as ``failed``.
           this._clearRebaseStatus(key);
           _toast('Request Rebase failed: ' + (err.message || String(err)), 'error');
         } finally {
