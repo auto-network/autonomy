@@ -226,11 +226,27 @@ def create_worktree(
             _refresh_existing_worktree(managed_clone, worktree_dir, branch)
         return worktree_dir
     worktree_dir.parent.mkdir(parents=True, exist_ok=True)
-    base_ref = _repo_integration_base_ref(managed_clone)
-    _run_git(
-        ["worktree", "add", "-b", branch, str(worktree_dir), base_ref],
+    # If the session branch already exists in the managed clone — typically
+    # because a prior cleanup deleted its worktree but couldn't reach the
+    # _delete_branch step (rmtree EACCES on root-owned __pycache__) — attach
+    # a fresh worktree to the existing branch instead of failing with
+    # "branch already exists". The branch may carry committed work the
+    # operator wants to resume on top of; force-recreating would lose it.
+    rc, _, _ = _git_output(
+        ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
         cwd=managed_clone,
     )
+    if rc == 0:
+        _run_git(
+            ["worktree", "add", str(worktree_dir), branch],
+            cwd=managed_clone,
+        )
+    else:
+        base_ref = _repo_integration_base_ref(managed_clone)
+        _run_git(
+            ["worktree", "add", "-b", branch, str(worktree_dir), base_ref],
+            cwd=managed_clone,
+        )
     return worktree_dir
 
 
@@ -489,6 +505,60 @@ def _git_output(args: list[str], cwd: Path, *, timeout: int = 15) -> tuple[int, 
     except FileNotFoundError as e:
         return 127, "", str(e)
     return r.returncode, r.stdout, r.stderr
+
+
+def _force_rmtree(path: Path) -> None:
+    """Remove a tree, escalating via a root-uid container when host rm
+    can't unlink files written by container-root processes.
+
+    Dispatched containers that run tooling as root (tox/pytest/pip)
+    create on-disk artefacts — most often Python ``__pycache__/`` —
+    owned by host UID 0 because there's no userns-remap. The host user
+    running cleanup can't ``unlink`` those files, so ``shutil.rmtree``
+    fails with EACCES partway through, leaving a half-deleted worktree
+    that the next launch silently bind-mounts.
+
+    The escalation path mounts ``path``'s parent into an ``alpine``
+    container and runs ``rm -rf``. The docker daemon runs as host root,
+    and the container's UID 0 is the same UID realm that wrote the
+    files in the first place, so deletions that EACCES'd at the host
+    level succeed. The mount is scoped to the parent so the rm target
+    can only resolve to a single named child, not arbitrary host
+    paths.
+
+    Raises ``OSError`` if both paths fail or if the directory still
+    exists after the docker fallback.
+    """
+    try:
+        shutil.rmtree(path)
+        return
+    except PermissionError:
+        logger.info(
+            "workspace cleanup: host rmtree hit EACCES on %s; "
+            "escalating via docker rm", path,
+        )
+    parent = path.parent
+    name = path.name
+    try:
+        r = subprocess.run(
+            ["docker", "run", "--rm",
+             "-v", f"{parent}:/wt",
+             "alpine", "rm", "-rf", f"/wt/{name}"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        raise OSError(f"docker rmtree timed out for {path}") from None
+    except FileNotFoundError as e:
+        raise OSError(f"docker not on PATH for rmtree fallback: {e}") from None
+    if r.returncode != 0 or path.exists():
+        raise OSError(
+            f"docker rmtree failed for {path}: rc={r.returncode} "
+            f"stderr={r.stderr.strip()}"
+        )
+    logger.info(
+        "workspace cleanup: docker rm succeeded after host EACCES on %s",
+        path,
+    )
 
 
 def _find_managed_clone_for_worktree(worktree: Path) -> Path | None:
@@ -1468,7 +1538,7 @@ def cleanup_session_worktrees(
         if clone is None:
             # Stale worktree with no resolvable clone — remove the directory.
             try:
-                shutil.rmtree(entry)
+                _force_rmtree(entry)
                 _log_worktree_removed(entry, method="rmtree-no-clone")
                 result.removed.append(str(entry))
             except OSError as e:
@@ -1481,7 +1551,7 @@ def cleanup_session_worktrees(
             # out of sync with the filesystem; fall back to rmtree + prune.
             if entry.exists():
                 try:
-                    shutil.rmtree(entry)
+                    _force_rmtree(entry)
                     _log_worktree_removed(entry, method="rmtree-fallback")
                 except OSError as e:
                     result.errors.append((str(entry), f"remove failed: {err}; rmtree: {e}"))
@@ -1563,7 +1633,7 @@ def cleanup_session_worktree(
 
     if clone is None:
         try:
-            shutil.rmtree(entry)
+            _force_rmtree(entry)
             _log_worktree_removed(entry, method="rmtree-no-clone")
             result.removed.append(str(entry))
         except OSError as e:
@@ -1574,7 +1644,7 @@ def cleanup_session_worktree(
         if not ok:
             if entry.exists():
                 try:
-                    shutil.rmtree(entry)
+                    _force_rmtree(entry)
                     _log_worktree_removed(entry, method="rmtree-fallback")
                 except OSError as e:
                     result.errors.append((str(entry), f"remove failed: {err}; rmtree: {e}"))
