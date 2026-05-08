@@ -74,3 +74,6 @@ agents/backup.env
 
 # Local-only Design Studio test DB (auto-tfsc rename was experiments -> design)
 data/experiments.db
+
+# Run output dirs
+data/agent_runs/
