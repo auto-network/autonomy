@@ -3395,13 +3395,26 @@ class TestArmingNagWhenDone:
 
     def test_silent_clears_armed_at_and_fired(self):
         from tools.dashboard import worktree_monitor as wm
+        from tools.graph import settings_ops
 
         monitor = wm.WorktreeMonitor()
         monitor.set_nag_mode("auto-x", "autonomy", "nag_done")
         monitor._terminal_fired[("auto-x", "autonomy")]["42"] = "sha"
+        settings_ops.upsert_by_key(
+            "dashboard.worktree.terminal_fire",
+            1,
+            "auto-x:autonomy:42:sha",
+            {"fired_at": time.time()},
+            org="autonomy",
+        )
         monitor.set_nag_mode("auto-x", "autonomy", "silent")
         assert ("auto-x", "autonomy") not in monitor._armed_at
         assert ("auto-x", "autonomy") not in monitor._terminal_fired
+        assert settings_ops.resolve_set_key(
+            "dashboard.worktree.terminal_fire",
+            "auto-x:autonomy:42:sha",
+            org="autonomy",
+        ) is None
 
     def test_nag_all_does_not_set_armed_at(self):
         from tools.dashboard import worktree_monitor as wm
@@ -3410,6 +3423,26 @@ class TestArmingNagWhenDone:
         monitor.set_nag_mode("auto-x", "autonomy", "nag_all")
         # nag_all uses the legacy budget gate, not the smart cadence.
         assert ("auto-x", "autonomy") not in monitor._armed_at
+
+    def test_rearming_clears_persisted_terminal_fire_rows(self):
+        from tools.dashboard import worktree_monitor as wm
+        from tools.graph import settings_ops
+
+        settings_ops.upsert_by_key(
+            "dashboard.worktree.terminal_fire",
+            1,
+            "auto-x:autonomy:42:sha",
+            {"fired_at": time.time()},
+            org="autonomy",
+        )
+
+        monitor = wm.WorktreeMonitor()
+        monitor.set_nag_mode("auto-x", "autonomy", "nag_done")
+        assert settings_ops.resolve_set_key(
+            "dashboard.worktree.terminal_fire",
+            "auto-x:autonomy:42:sha",
+            org="autonomy",
+        ) is None
 
     def test_restart_restores_armed_at_for_nag_done(self):
         from tools.dashboard import worktree_monitor as wm
@@ -3719,6 +3752,33 @@ class TestFireTerminalTransitions:
         )
         assert len(sent) == 1
 
+    def test_restart_does_not_refire_same_head_sha(self):
+        from tools.dashboard import worktree_monitor as wm
+
+        first_sent = []
+        async def first_notifier(target, msg):
+            first_sent.append((target, msg))
+
+        first = wm.WorktreeMonitor()
+        first.set_terminal_notifier(first_notifier)
+        self._arm(first)
+        snapshot = self._ready([self._terminal_review(number=42, head="abc")])
+        asyncio.run(
+            first._fire_terminal_transitions(("auto-x", "autonomy"), snapshot),
+        )
+        assert len(first_sent) == 1
+
+        second_sent = []
+        async def second_notifier(target, msg):
+            second_sent.append((target, msg))
+
+        fresh = wm.WorktreeMonitor()
+        fresh.set_terminal_notifier(second_notifier)
+        asyncio.run(
+            fresh._fire_terminal_transitions(("auto-x", "autonomy"), snapshot),
+        )
+        assert second_sent == []
+
     def test_refires_after_new_head_sha(self):
         from tools.dashboard import worktree_monitor as wm
 
@@ -3738,6 +3798,30 @@ class TestFireTerminalTransitions:
         second = self._ready([self._terminal_review(number=42, head="def")])
         asyncio.run(
             monitor._fire_terminal_transitions(("auto-x", "autonomy"), second),
+        )
+        assert len(sent) == 2
+
+    def test_rearm_allows_same_head_sha_to_fire_again(self):
+        from tools.dashboard import worktree_monitor as wm
+
+        sent = []
+        async def fake(target, msg):
+            sent.append((target, msg))
+
+        first = wm.WorktreeMonitor()
+        first.set_terminal_notifier(fake)
+        self._arm(first)
+        snapshot = self._ready([self._terminal_review(number=42, head="abc")])
+        asyncio.run(
+            first._fire_terminal_transitions(("auto-x", "autonomy"), snapshot),
+        )
+        assert len(sent) == 1
+
+        fresh = wm.WorktreeMonitor()
+        fresh.set_terminal_notifier(fake)
+        fresh.set_nag_mode("auto-x", "autonomy", "nag_done")
+        asyncio.run(
+            fresh._fire_terminal_transitions(("auto-x", "autonomy"), snapshot),
         )
         assert len(sent) == 2
 
@@ -3780,6 +3864,7 @@ class TestFireTerminalTransitions:
 
     def test_notifier_failure_does_not_record_fire(self):
         from tools.dashboard import worktree_monitor as wm
+        from tools.graph import settings_ops
 
         async def boom(target, msg):
             raise RuntimeError("tmux dead")
@@ -3797,6 +3882,11 @@ class TestFireTerminalTransitions:
         # a working notifier) re-attempts at the same head_sha.
         fired = monitor._terminal_fired.get(("auto-x", "autonomy"), {})
         assert fired.get("42") != "abc"
+        assert settings_ops.resolve_set_key(
+            "dashboard.worktree.terminal_fire",
+            "auto-x:autonomy:42:abc",
+            org="autonomy",
+        ) is None
 
 
 class TestFormatTerminalMessage:

@@ -54,6 +54,10 @@ from tools.graph.schemas.worktree_watch import (
     SCHEMA_REVISION as WATCH_REVISION,
     SET_ID as WATCH_SET_ID,
 )
+from tools.graph.schemas.worktree_terminal_fire import (
+    SCHEMA_REVISION as TERMINAL_FIRE_REVISION,
+    SET_ID as TERMINAL_FIRE_SET_ID,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +136,16 @@ def _read_watch_setting(session_name: str, repo_name: str):
         org="autonomy",
     ).to_dict()
     return members.get(key)
+
+
+def _terminal_fire_key(
+    session_name: str,
+    repo_name: str,
+    review_id: str,
+    head_sha: str,
+) -> str:
+    """Composite Settings key for one fired terminal notification."""
+    return f"{session_name}:{repo_name}:{review_id}:{head_sha}"
 
 
 def next_poll_delay(elapsed_seconds: float) -> float | None:
@@ -901,6 +915,27 @@ class WorktreeMonitor:
         if setting is not None:
             settings_ops.remove_setting(setting["id"], org="autonomy")
 
+    def _clear_persisted_terminal_fires(self, key: tuple[str, str]) -> None:
+        """Delete all persisted terminal-fire ledger rows for ``key``."""
+        settings_ops.remove_settings_by_key_prefix(
+            TERMINAL_FIRE_SET_ID,
+            prefix=f"{key[0]}:{key[1]}",
+            org="autonomy",
+        )
+
+    def _has_persisted_terminal_fire(
+        self,
+        key: tuple[str, str],
+        review_id: str,
+        head_sha: str,
+    ) -> bool:
+        """True when this exact terminal PR head already fired once."""
+        return settings_ops.resolve_set_key(
+            TERMINAL_FIRE_SET_ID,
+            _terminal_fire_key(key[0], key[1], review_id, head_sha),
+            org="autonomy",
+        ) is not None
+
     def _rehydrate_nag_mode(self, key: tuple[str, str]) -> tuple[str, float] | None:
         """Load persisted watch state into the in-memory timers once.
 
@@ -1021,6 +1056,7 @@ class WorktreeMonitor:
             self._armed_at.pop(key, None)
             self._terminal_fired.pop(key, None)
             self._clear_persisted_nag_mode(key)
+            self._clear_persisted_terminal_fires(key)
             cached = self._source_control_cache.get(key)
             if cached is not None:
                 cached["watch"] = {"mode": NAG_SILENT}
@@ -1049,6 +1085,7 @@ class WorktreeMonitor:
             # terminalize again at the current head_sha.
             self._armed_at[key] = now
             self._terminal_fired[key] = {}
+            self._clear_persisted_terminal_fires(key)
             payload["armed_at"] = now_wall
         else:
             # Other modes (currently nag_all) don't use the smart-cadence
@@ -1253,6 +1290,9 @@ class WorktreeMonitor:
             head_sha = review.get("head_sha") or ""
             if fired.get(review_id) == head_sha:
                 continue
+            if head_sha and self._has_persisted_terminal_fire(key, review_id, head_sha):
+                fired[review_id] = head_sha
+                continue
             message = _format_terminal_message(review)
             try:
                 await notifier(session_name, message)
@@ -1264,6 +1304,21 @@ class WorktreeMonitor:
                 )
                 continue
             fired[review_id] = head_sha
+            if head_sha:
+                try:
+                    settings_ops.upsert_by_key(
+                        TERMINAL_FIRE_SET_ID,
+                        TERMINAL_FIRE_REVISION,
+                        _terminal_fire_key(session_name, _repo, review_id, head_sha),
+                        {"fired_at": time.time()},
+                        org="autonomy",
+                    )
+                except Exception:
+                    logger.warning(
+                        "worktree_monitor: terminal fire ledger write failed "
+                        "for %s/%s review=%s",
+                        session_name, _repo, review_id, exc_info=True,
+                    )
 
     def _watch_ttl_elapsed(self, key: tuple[str, str], now: float) -> bool:
         """True when the watch-active row's TTL window has lapsed."""
