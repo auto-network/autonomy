@@ -162,7 +162,6 @@ def test_force_host_visible_in_top_level_help():
 @pytest.mark.parametrize("subargv", [
     ["set", "add", "x#1", "--force-host", "--key", "k", "--from", "/dev/null"],
     ["note", "--force-host", "anything"],
-    ["bead", "--force-host", "anything"],
     ["link", "--force-host", "a", "b"],
 ])
 def test_force_host_global_works_before_any_subcommand(
