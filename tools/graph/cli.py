@@ -4770,13 +4770,62 @@ _SHARE_OUTPUT_ROOT = Path("/workspace/output")
 _SHARE_ATTACHMENTS_DIR = ".attachments"
 
 
-def cmd_share(args):
-    """Copy a file into /workspace/output/.attachments/<ts>-<sha8>/ and emit a
-    typed ``viewer_attachment`` event so the session viewer renders it as a
-    thumbnail tile bound to the current turn.
+def _resolve_share_output_root() -> Path | None:
+    """Return the directory `graph share` should write attachments under.
 
-    Storage stays on the host mount (``/workspace/output`` → host's
-    ``data/agent-runs/<tmux>-<ts>/``). The dashboard exposes the file via
+    Container path: the bind-mounted ``/workspace/output`` (which maps to
+    ``data/agent-runs/<tmux>-<ts>/`` on the host). Used as-is if present.
+
+    Host path: when ``/workspace/output`` does not exist (the command is
+    being invoked outside a session container, e.g. on a host monitor
+    session), resolve to ``data/agent-runs/<AUTONOMY_SESSION>-<ts>/`` —
+    reusing the most recent existing dir for that session, or creating a
+    fresh one if none exist. The dashboard's ``/api/session/<tmux>/output``
+    resolver picks the most recent ``<tmux>-*`` dir, so a single
+    create-on-first-share gets reused for the session's lifetime.
+
+    Returns ``None`` if neither path can be resolved (no container mount,
+    no ``AUTONOMY_SESSION`` env var, or no host ``data/agent-runs``).
+    """
+    import os
+    from datetime import datetime, timezone
+
+    if _SHARE_OUTPUT_ROOT.is_dir():
+        return _SHARE_OUTPUT_ROOT
+
+    session = os.environ.get("AUTONOMY_SESSION", "").strip()
+    if not session:
+        return None
+
+    # tools/graph/cli.py → repo_root is two parents up
+    repo_root = Path(__file__).resolve().parents[2]
+    agent_runs = repo_root / "data" / "agent-runs"
+    if not agent_runs.is_dir():
+        return None
+
+    existing = sorted(
+        (p for p in agent_runs.glob(f"{session}-*") if p.is_dir()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if existing:
+        return existing[0]
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    new_dir = agent_runs / f"{session}-{ts}"
+    new_dir.mkdir(parents=True, exist_ok=True)
+    return new_dir
+
+
+def cmd_share(args):
+    """Copy a file into ``<output_root>/.attachments/<ts>-<sha8>/`` and emit
+    a typed ``viewer_attachment`` event so the session viewer renders it as
+    a thumbnail tile bound to the current turn.
+
+    ``output_root`` is resolved by :func:`_resolve_share_output_root`:
+    container sessions use the bind-mounted ``/workspace/output``; host
+    sessions resolve to ``data/agent-runs/<AUTONOMY_SESSION>-<ts>/`` (created
+    on first share, reused thereafter). The dashboard exposes the file via
     ``/api/session/<tmux>/output/<rel_path>``; the JSON payload only carries
     the relative path so the viewer can resolve it through that route.
 
@@ -4800,10 +4849,12 @@ def cmd_share(args):
         print(f"share: not a regular file: {src}", file=sys.stderr)
         sys.exit(2)
 
-    if not _SHARE_OUTPUT_ROOT.is_dir():
+    output_root = _resolve_share_output_root()
+    if output_root is None:
         print(
-            f"share: {_SHARE_OUTPUT_ROOT} is not mounted — this command only"
-            " runs inside a session container.",
+            "share: cannot resolve output dir. In a container, "
+            f"{_SHARE_OUTPUT_ROOT} must be mounted. On the host, "
+            "AUTONOMY_SESSION must be set and data/agent-runs/ must exist.",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -4819,7 +4870,7 @@ def cmd_share(args):
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     sub = f"{ts}-{sha8}"
     rel_path = f"{_SHARE_ATTACHMENTS_DIR}/{sub}/{src.name}"
-    dst_dir = _SHARE_OUTPUT_ROOT / _SHARE_ATTACHMENTS_DIR / sub
+    dst_dir = output_root / _SHARE_ATTACHMENTS_DIR / sub
     dst = dst_dir / src.name
 
     dst_dir.mkdir(parents=True, exist_ok=True)

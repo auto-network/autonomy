@@ -1,6 +1,8 @@
 """Launch a visible stealth browser via Scrapling's StealthySession + HTTP REPL."""
 import json
+import shlex
 import threading
+import time
 import traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -100,9 +102,95 @@ def execute_command(cmd):
                 page.set_viewport_size({"width": int(parts[0]), "height": int(parts[1])})
                 buffer_write(f"Viewport set to {parts[0]}x{parts[1]}")
 
+        elif cmd.startswith("screenshot"):
+            # screenshot [path] [--full]
+            rest = cmd[len("screenshot"):].strip()
+            full = False
+            if "--full" in rest.split():
+                full = True
+                rest = " ".join(t for t in rest.split() if t != "--full").strip()
+            path = rest or f"/tmp/scrapling-{int(time.time())}.png"
+            if page:
+                page.screenshot(path=path, full_page=full)
+                buffer_write(f"Screenshot: {path} (full_page={full})")
+
+        elif cmd.startswith("attach "):
+            # attach <selector> <path>  — Playwright set_input_files
+            try:
+                tokens = shlex.split(cmd[len("attach "):].strip())
+            except ValueError as e:
+                buffer_write(f"Parse error: {e}")
+                return "OK"
+            if len(tokens) != 2:
+                buffer_write("Usage: attach <selector> <path>")
+                return "OK"
+            selector, path = tokens
+            if not Path(path).is_file():
+                buffer_write(f"File not found: {path}")
+                return "OK"
+            if page:
+                el = page.query_selector(selector)
+                if not el:
+                    buffer_write(f"No element matches: {selector}")
+                    return "OK"
+                el.set_input_files(path)
+                buffer_write(f"Attached {path} to {selector}")
+
+        elif cmd.startswith("click_role "):
+            # click_role <role> <name>
+            try:
+                tokens = shlex.split(cmd[len("click_role "):].strip())
+            except ValueError as e:
+                buffer_write(f"Parse error: {e}")
+                return "OK"
+            if len(tokens) < 2:
+                buffer_write("Usage: click_role <role> <name>")
+                return "OK"
+            role, name = tokens[0], tokens[1]
+            if page:
+                page.get_by_role(role, name=name).first.click()
+                buffer_write(f"Clicked role={role} name={name!r}")
+
+        elif cmd.startswith("hover_role "):
+            # hover_role <role> <name>
+            try:
+                tokens = shlex.split(cmd[len("hover_role "):].strip())
+            except ValueError as e:
+                buffer_write(f"Parse error: {e}")
+                return "OK"
+            if len(tokens) < 2:
+                buffer_write("Usage: hover_role <role> <name>")
+                return "OK"
+            role, name = tokens[0], tokens[1]
+            if page:
+                page.get_by_role(role, name=name).first.hover()
+                buffer_write(f"Hovered role={role} name={name!r}")
+
+        elif cmd.startswith("paste_file "):
+            # paste_file <selector> <path>  — fills via Playwright .fill (works for inputs and contenteditable)
+            try:
+                tokens = shlex.split(cmd[len("paste_file "):].strip())
+            except ValueError as e:
+                buffer_write(f"Parse error: {e}")
+                return "OK"
+            if len(tokens) != 2:
+                buffer_write("Usage: paste_file <selector> <path>")
+                return "OK"
+            selector, path = tokens
+            p = Path(path)
+            if not p.is_file():
+                buffer_write(f"File not found: {path}")
+                return "OK"
+            text = p.read_text()
+            if page:
+                loc = page.locator(selector).first
+                loc.click()
+                loc.fill(text)
+                buffer_write(f"Filled {selector} with {len(text)} chars from {path}")
+
         else:
             buffer_write(f"Unknown command: {cmd}")
-            buffer_write("Commands: goto, query, text, click, eval, url, title, tabs, html, viewport, quit")
+            buffer_write("Commands: goto, query, text, click, eval, url, title, tabs, html, viewport, screenshot, attach, click_role, hover_role, paste_file, quit")
 
     except Exception as e:
         buffer_write(f"Error: {e}")
