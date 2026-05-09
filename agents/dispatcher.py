@@ -48,6 +48,7 @@ from agents.dispatch_db import (
     get_currently_running, get_consecutive_failures,
     set_dispatcher_paused, is_paused as db_is_paused, get_pause_reason,
 )
+from agents.git_status import working_tree_clean_and_summary
 from agents.librarian_db import enqueue as enqueue_job, dequeue, complete_job, fail_job
 from agents.workspace_manager import WORKTREES_DIR, cleanup_session_worktrees
 from agents.workspace_settings import WorkspaceV1, load_workspaces
@@ -763,20 +764,7 @@ def check_working_tree_clean() -> tuple[bool, str]:
     Returns (is_clean, dirty_files_summary). If dirty, the summary lists
     modified/untracked files so the error message is actionable.
     """
-    result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        capture_output=True, text=True, timeout=10,
-        cwd=str(REPO_ROOT),
-    )
-    output = result.stdout.strip()
-    if not output:
-        return True, ""
-
-    lines = output.splitlines()
-    summary = "; ".join(lines[:10])
-    if len(lines) > 10:
-        summary += f" ... and {len(lines) - 10} more"
-    return False, summary
+    return working_tree_clean_and_summary(REPO_ROOT, untracked="normal", timeout=10)
 
 
 def merge_branch(branch: str, bead_id: str, reason: str) -> tuple[bool, str]:
