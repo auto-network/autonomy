@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from agents.git_status import has_working_tree_changes
 from agents.workspace_settings import (
     RepoMount,
     WorkspaceV1,
@@ -1337,13 +1338,12 @@ def _worktree_has_uncommitted_changes(worktree: Path) -> bool:
     worktrees that just have leftover runtime artifacts (data/agent-runs/,
     data/experiments.db, etc.) which neither side gitignores.
     """
-    rc, out, _ = _git_output(
-        ["status", "--porcelain", "--untracked-files=no"], worktree, timeout=15,
+    return has_working_tree_changes(
+        worktree,
+        untracked="no",
+        timeout=15,
+        error_is_dirty=True,
     )
-    if rc != 0:
-        # If status fails, treat as "dirty" — err on the side of preserving.
-        return True
-    return bool(out.strip())
 
 
 def _compute_cherry_pick_eligibility(
