@@ -290,6 +290,18 @@ describe('voice shell helpers', () => {
     );
   });
 
+  it('exposes the shared previewWords helper for cross-surface reuse', () => {
+    const h = loadVoiceShell();
+    assert.equal(typeof h.window.Autonomy.voice.shell.previewWords, 'function');
+    assert.equal(
+      h.window.Autonomy.voice.shell.previewWords(
+        'one two three four five six seven eight nine ten eleven twelve thirteen',
+        12
+      ),
+      'two three four five six seven eight nine ten eleven twelve thirteen'
+    );
+  });
+
   it('rebindCopy includes the bound session label when one is available', () => {
     const h = loadVoiceShell({
       sessionsStore: {

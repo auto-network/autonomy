@@ -95,11 +95,12 @@
     return !!(voice && voice.enabled === true && voice.pendingRebindTarget);
   }
 
-  function _captionPreview(text) {
+  function _previewWords(text, limit) {
     if (typeof text !== 'string') return '';
+    var size = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : CAPTION_PREVIEW_WORDS;
     var words = text.trim().split(/\s+/).filter(Boolean);
     if (!words.length) return '';
-    return words.slice(-CAPTION_PREVIEW_WORDS).join(' ');
+    return words.slice(-size).join(' ');
   }
 
   function _sendIcon() {
@@ -145,6 +146,7 @@
   window.Autonomy.voice = window.Autonomy.voice || {};
   window.Autonomy.voice.shell = {
     hideInlineComposer: _hideInlineComposer,
+    previewWords: _previewWords,
     create: function () {
       return {
         viewportWidth: _viewportWidth(),
@@ -214,7 +216,7 @@
 
         get captionText() {
           var voice = this.voice;
-          return _captionPreview((voice && voice.bufferText) || '');
+          return _previewWords((voice && voice.bufferText) || '', CAPTION_PREVIEW_WORDS);
         },
 
         get hasCaptionText() {
