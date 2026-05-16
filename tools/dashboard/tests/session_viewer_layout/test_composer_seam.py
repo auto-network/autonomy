@@ -13,6 +13,12 @@ def test_session_view_template_uses_inline_composer_gate(test_client):
     assert 'x-show="showInlineComposer && !window.Autonomy.voice.shell.hideInlineComposer()"' in html, (
         "session-view inline composer is not gated by showInlineComposer"
     )
+    assert 'x-show="showDesktopVoiceImport"' in html, (
+        "session-view desktop voice handoff pill is missing its visibility gate"
+    )
+    assert '@click="importVoiceBufferToComposer()"' in html, (
+        "session-view desktop voice handoff button is not wired to importVoiceBufferToComposer()"
+    )
     assert ':disabled="!canSendComposer || sending || uploading"' in html, (
         "session-view send button is not using the extracted canSendComposer guard"
     )
@@ -37,11 +43,16 @@ def test_session_viewer_js_exposes_composer_helpers(test_client):
     for snippet in (
         'resolveComposerMode()',
         'refreshViewportWidth()',
+        'getVoiceStore()',
         'getComposerStore()',
         'readComposerText()',
         'persistComposerDraft(text)',
         'writeComposerText(text)',
         'restoreComposerDraft()',
+        'writeComposerTextWithUndo(text)',
+        'showDesktopVoiceImport',
+        'desktopVoicePreview',
+        'importVoiceBufferToComposer()',
         'buildComposerBody(text)',
         'canSendComposerText(text)',
     ):

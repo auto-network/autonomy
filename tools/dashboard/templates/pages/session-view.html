@@ -321,6 +321,14 @@
              @dragleave.prevent="$el.classList.remove('drop-highlight')"
              @drop.prevent="$el.classList.remove('drop-highlight'); addFiles($event.dataTransfer.files)">
 
+          <div class="sv-voice-import" x-show="showDesktopVoiceImport">
+            <div class="sv-voice-import__preview"
+                 x-text="desktopVoicePreview"></div>
+            <button type="button"
+                    class="sv-voice-import__button"
+                    @click="importVoiceBufferToComposer()">Load Into Draft</button>
+          </div>
+
           <!-- Attachment preview strip -->
           <div class="sv-attach-strip" x-show="attachments.length > 0">
             <template x-for="att in attachments" :key="att.id">
