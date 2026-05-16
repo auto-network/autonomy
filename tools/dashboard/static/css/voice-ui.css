@@ -321,6 +321,14 @@
   color: #eff6ff;
 }
 
+.voice-capsule__send--pulse {
+  animation: voice-send-pulse 800ms ease-in-out infinite;
+  box-shadow:
+    0 0 0 1px rgba(245, 158, 11, 0.18),
+    0 0 22px rgba(245, 158, 11, 0.24),
+    0 0 46px rgba(245, 158, 11, 0.16);
+}
+
 .voice-capsule__type {
   background: rgba(30, 41, 59, 0.92);
 }
@@ -350,6 +358,23 @@
 .voice-sheet__send:active {
   transform: scale(0.96);
   opacity: 0.86;
+}
+
+@keyframes voice-send-pulse {
+  0%, 100% {
+    filter: brightness(1);
+    box-shadow:
+      0 0 0 1px rgba(245, 158, 11, 0.18),
+      0 0 18px rgba(245, 158, 11, 0.18),
+      0 0 36px rgba(245, 158, 11, 0.12);
+  }
+  50% {
+    filter: brightness(1.4);
+    box-shadow:
+      0 0 0 1px rgba(245, 158, 11, 0.32),
+      0 0 28px rgba(245, 158, 11, 0.34),
+      0 0 54px rgba(245, 158, 11, 0.22);
+  }
 }
 
 @media (min-width: 768px) {

@@ -1842,6 +1842,7 @@
            data-voice-action="send"
            :class="{
              'voice-capsule__action--pressed': capsulePressedAction === 'send',
+             'voice-capsule__send--pulse': sendPulse,
              'voice-capsule__send--disabled': !hasBufferText
            }"
            @keydown.enter.prevent="onCapsuleKey('send')"
