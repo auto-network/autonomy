@@ -290,6 +290,32 @@ describe('voice shell helpers', () => {
     );
   });
 
+  it('brightens Send only when vad_paused and the shared buffer is non-empty', () => {
+    const h = loadVoiceShell({
+      voiceStore: {
+        micMode: 'vad_paused',
+        bufferText: 'Keep the current transcript visible while silence holds.',
+      },
+    });
+    assert.equal(h.component.sendPulse, true);
+
+    const muted = loadVoiceShell({
+      voiceStore: {
+        micMode: 'muted',
+        bufferText: 'Keep the current transcript visible while silence holds.',
+      },
+    });
+    assert.equal(muted.component.sendPulse, false);
+
+    const empty = loadVoiceShell({
+      voiceStore: {
+        micMode: 'vad_paused',
+        bufferText: '   ',
+      },
+    });
+    assert.equal(empty.component.sendPulse, false);
+  });
+
   it('exposes the shared previewWords helper for cross-surface reuse', () => {
     const h = loadVoiceShell();
     assert.equal(typeof h.window.Autonomy.voice.shell.previewWords, 'function');

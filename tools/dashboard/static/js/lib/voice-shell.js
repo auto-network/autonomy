@@ -210,6 +210,11 @@
           return !!(voice && typeof voice.bufferText === 'string' && voice.bufferText.trim().length > 0);
         },
 
+        get sendPulse() {
+          var voice = this.voice;
+          return !!(voice && voice.micMode === 'vad_paused' && this.hasBufferText);
+        },
+
         get captionPlaceholder() {
           return 'Live captions';
         },
