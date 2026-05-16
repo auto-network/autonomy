@@ -41,8 +41,16 @@
     if (typeof window === 'undefined' || !window.Schema || typeof window.Schema.of !== 'function') {
       return Promise.reject(new Error('feature-flags: Schema.of is unavailable'));
     }
-    _proxyPromise = window.Schema.of(FEATURE_FLAGS_SET_ID, { revision: FEATURE_FLAGS_REVISION });
-    return _proxyPromise;
+    var attempt = window.Schema.of(FEATURE_FLAGS_SET_ID, { revision: FEATURE_FLAGS_REVISION });
+    _proxyPromise = attempt;
+    // Clear the cache on rejection so the next call retries Schema.of.
+    // The identity check guards against a stale .catch from an earlier
+    // failed attempt nuking a later successful proxy that's already
+    // taken the cache slot.
+    attempt.catch(function() {
+      if (_proxyPromise === attempt) _proxyPromise = null;
+    });
+    return attempt;
   }
 
   function _bindOnChange(proxy) {

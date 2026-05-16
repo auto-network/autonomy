@@ -231,6 +231,44 @@ describe('Alpine.store("flags") sync cache + live update', () => {
     assert.deepEqual(seen[0], { key: 'voice.client_enabled', flipped: true });
   });
 
+  it('_getProxy retries Schema.of after a transient failure (regression for codex F1)', async () => {
+    const rows = { 'voice.client_enabled': { enabled: true, description: 'x', owner: 'S5' } };
+    const h = makeHarness(rows);
+
+    let calls = 0;
+    h.window.Schema.of = async function(setId, opts) {
+      calls++;
+      if (calls === 1) throw new Error('transient');
+      return {
+        set_id: setId,
+        read: async function(k) {
+          if (!Object.prototype.hasOwnProperty.call(rows, k)) return null;
+          return { key: k, payload: rows[k] };
+        },
+        all: async function() {
+          return Object.keys(rows).map(function(k) { return { key: k, payload: rows[k] }; });
+        },
+        onChange: function() { return function() {}; },
+      };
+    };
+    h.window.Autonomy.flags._resetForTests();
+
+    // First call: rejects (Schema.of throws).
+    let firstErr = null;
+    try { await h.window.Autonomy.flags.get('voice.client_enabled'); }
+    catch (e) { firstErr = e; }
+    assert.ok(firstErr, 'first call must reject');
+    assert.equal(calls, 1);
+
+    // Wait for the .catch handler to clear the cached rejected promise.
+    await flush(); await flush();
+
+    // Second call: succeeds (Schema.of returns the fresh proxy).
+    const result = await h.window.Autonomy.flags.get('voice.client_enabled');
+    assert.equal(result, true);
+    assert.equal(calls, 2, 'Schema.of must be called a second time after the failure clears');
+  });
+
   it('store._load survives an underlying fetch failure without stalling consumers', async () => {
     const h = makeHarness({});
     // Replace Schema.of to throw.
