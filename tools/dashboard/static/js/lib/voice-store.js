@@ -128,6 +128,9 @@
         if (!this.enabled) return { ok: false, reason: 'disabled' };
         if (!_isLiveSession(opts)) return { ok: false, reason: 'dead' };
         if (!sessionId) return { ok: false, reason: 'missing_session' };
+        if (this.boundSessionId === sessionId) {
+          return { ok: true, reason: 'already_bound' };
+        }
         if (this.boundSessionId && this.boundSessionId !== sessionId) {
           this.pendingRebindTarget = sessionId;
           return { ok: false, reason: 'confirm' };

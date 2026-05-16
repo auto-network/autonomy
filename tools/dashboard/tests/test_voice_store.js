@@ -178,6 +178,21 @@ describe('voice store substrate', () => {
     assert.equal(h.store.micMode, 'listening');
   });
 
+  it('requestBind on the already-bound session is a no-op that preserves mute state', () => {
+    const h = loadVoiceStore({
+      initialStores: {
+        flags: { get() { return true; } },
+      },
+    });
+    h.store.requestBind('session-a', { isLive: true });
+    h.store.toggleMic();
+    const result = h.store.requestBind('session-a', { isLive: true });
+    assert.deepEqual(toPlain(result), { ok: true, reason: 'already_bound' });
+    assert.equal(h.store.boundSessionId, 'session-a');
+    assert.equal(h.store.micMode, 'muted');
+    assert.equal(h.store.awayEventSessionId, '');
+  });
+
   it('toggleMic cycles listening <-> muted and treats vad_paused as active listening', () => {
     const h = loadVoiceStore({
       initialStores: {
