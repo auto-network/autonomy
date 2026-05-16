@@ -315,7 +315,7 @@
       <!-- Row 3: Input bar (contenteditable, shown when linked to tmux) -->
       <template x-if="!showTerminal && isLive && _tmuxSession && (sessionType !== 'host' || _linked)">
         <div class="sv-input"
-             x-show="showInlineComposer"
+             x-show="showInlineComposer && !window.Autonomy.voice.shell.hideInlineComposer()"
              @dragenter.prevent="$el.classList.add('drop-highlight')"
              @dragover.prevent="$el.classList.add('drop-highlight')"
              @dragleave.prevent="$el.classList.remove('drop-highlight')"

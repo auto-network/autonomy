@@ -48,9 +48,19 @@
     return state === 'listening' || state === 'muted' || state === 'vad_paused';
   }
 
+  function _dotInteractionSuppressed(sessionId) {
+    var voice = _voiceStore();
+    return !!(
+      voice &&
+      voice.sheetOpen === true &&
+      voice.boundSessionId &&
+      voice.boundSessionId === sessionId
+    );
+  }
+
   function _buttonDisabled(sessionId, opts) {
     var state = _stateFor(sessionId, opts);
-    return state === 'dead' || state === 'flag_off';
+    return state === 'dead' || state === 'flag_off' || _dotInteractionSuppressed(sessionId);
   }
 
   function _buttonTitle(sessionId, opts) {
@@ -122,6 +132,7 @@
     }
     var state = _stateFor(sessionId, opts);
     if (state === 'dead' || state === 'flag_off') return false;
+    if (_dotInteractionSuppressed(sessionId)) return false;
     _markDiscoverabilitySeen();
     if (state === 'idle') {
       return voice.requestBind(sessionId, { isLive: true }).ok === true;
@@ -141,6 +152,7 @@
     var target = event && event.currentTarget;
     var voice = _voiceStore();
     if (!target || !voice) return false;
+    if (_dotInteractionSuppressed(sessionId)) return false;
     target._voiceHoldTriggered = false;
     _clearHold(target);
     target._voiceHoldTimer = window.setTimeout(function () {

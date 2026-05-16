@@ -15,6 +15,7 @@ function loadVoiceUi(initialVoiceStore) {
       micMode: 'idle',
       discoverabilitySeen: false,
       awayEventSessionId: '',
+      sheetOpen: false,
       requestBind(sessionId) {
         this.boundSessionId = sessionId;
         this.micMode = 'listening';
@@ -107,6 +108,19 @@ describe('voice dot UI helpers', () => {
     const event = { currentTarget: {} };
     assert.equal(h.ui.onClick(event, 'session-a', { isLive: true }), true);
     assert.equal(h.voice.micMode, 'muted');
+  });
+
+  it('treats the bound session dot as status-only while the compose sheet is open', () => {
+    const h = loadVoiceUi({
+      enabled: true,
+      boundSessionId: 'session-a',
+      micMode: 'listening',
+      sheetOpen: true,
+    });
+    const event = { currentTarget: {} };
+    assert.equal(h.ui.dotDisabled('session-a', { isLive: true }), true);
+    assert.equal(h.ui.onClick(event, 'session-a', { isLive: true }), false);
+    assert.equal(h.voice.micMode, 'listening');
   });
 
   it('uses tmux_session as the canonical cross-surface bind key for session rows', () => {
