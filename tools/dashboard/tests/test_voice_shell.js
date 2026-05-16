@@ -221,6 +221,7 @@ describe('voice shell helpers', () => {
       },
     });
     assert.equal(h.component.showCapsule, false);
+    assert.equal(h.component.showCaption, false);
   });
 
   it('shows the capsule on non-viewer mobile surfaces when voice is bound and the sheet is closed', () => {
@@ -232,6 +233,7 @@ describe('voice shell helpers', () => {
       },
     });
     assert.equal(h.component.showCapsule, true);
+    assert.equal(h.component.showCaption, true);
   });
 
   it('shows the sheet on non-viewer mobile surfaces when the sheet state is open', () => {
@@ -243,6 +245,49 @@ describe('voice shell helpers', () => {
       },
     });
     assert.equal(h.component.showSheet, true);
+    assert.equal(h.component.showCaption, false);
+  });
+
+  it('shows the caption on the viewer route once responsive collapse is enabled', () => {
+    const h = loadVoiceShell({
+      viewerPage: true,
+      voiceStore: {
+        boundSessionId: 'session-a',
+        sheetOpen: false,
+      },
+      flagsStore: {
+        get(name) {
+          if (name === 'voice.client_enabled') return true;
+          if (name === 'voice.responsive_collapse_enabled') return true;
+          return false;
+        },
+      },
+    });
+    assert.equal(h.component.showCaption, true);
+    assert.equal(h.component.showCapsule, true);
+  });
+
+  it('uses the Live captions placeholder when the buffer is empty', () => {
+    const h = loadVoiceShell({
+      voiceStore: {
+        bufferText: '',
+      },
+    });
+    assert.equal(h.component.hasCaptionText, false);
+    assert.equal(h.component.captionPlaceholder, 'Live captions');
+    assert.equal(h.component.captionText, '');
+  });
+
+  it('caps the caption preview to the last twelve words of the shared buffer', () => {
+    const h = loadVoiceShell({
+      voiceStore: {
+        bufferText: 'Use the actual session viewer control so the voice surfaces land on the real chrome with no more bubble drift.',
+      },
+    });
+    assert.equal(
+      h.component.captionText,
+      'voice surfaces land on the real chrome with no more bubble drift.'
+    );
   });
 
   it('rebindCopy includes the bound session label when one is available', () => {
@@ -288,7 +333,7 @@ describe('voice shell helpers', () => {
     h.winListeners.pointerup[0]({ clientX: 350, clientY: 690 });
     assert.equal(h.voiceStore._sendCalls, 0);
     assert.equal(h.voiceStore._setCapsuleCalls.length, 1);
-    assert.deepEqual(h.voiceStore._setCapsuleCalls[0], { x: 268, y: 716 });
+    assert.deepEqual(h.voiceStore._setCapsuleCalls[0], { x: 268, y: 664 });
   });
 
   it('sheet handle drag expands a partial sheet to full mode', () => {
@@ -309,5 +354,12 @@ describe('voice shell helpers', () => {
     assert.equal(h.component.startSheetGesture(handleEvent), true);
     h.winListeners.pointerup[0]({ clientY: 460 });
     assert.equal(h.voiceStore.sheetMode, 'full');
+  });
+
+  it('lifts the default capsule position above the reserved caption gutter', () => {
+    const h = loadVoiceShell();
+    const position = h.component._currentCapsulePosition(h.component.$refs.capsule);
+    assert.equal(position.x, 262);
+    assert.equal(position.y, 704);
   });
 });

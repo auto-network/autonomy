@@ -1,13 +1,16 @@
 /**
  * Shell-mounted voice compose surfaces.
  *
- * Owns the mobile floating capsule, rebind confirmation pill, and the
- * compose sheet wired to Alpine.store('voice'). The transcript gutter
- * and VAD strip land in S6; desktop handoff lands in S8.
+ * Owns the mobile floating capsule, passive caption gutter, rebind
+ * confirmation pill, and the compose sheet wired to Alpine.store('voice').
+ * Desktop handoff lands in S8.
  */
 (function () {
   var VOICE_COLLAPSE_FLAG = 'voice.responsive_collapse_enabled';
   var CAPSULE_DRAG_THRESHOLD = 6;
+  var CAPSULE_BOTTOM_GAP = 12;
+  var CAPTION_PREVIEW_WORDS = 12;
+  var CAPTION_RESERVED_HEIGHT = 72;
   var SHEET_EXPAND_THRESHOLD = -42;
   var SHEET_COLLAPSE_THRESHOLD = 56;
   var SHEET_DISMISS_THRESHOLD = 72;
@@ -79,9 +82,24 @@
     return true;
   }
 
+  function _captionVisible() {
+    var voice = _voiceStore();
+    if (!voice || voice.enabled !== true || !_isMobileViewport()) return false;
+    if (!voice.boundSessionId || voice.sheetOpen === true) return false;
+    if (_isViewerPage() && !_collapseEnabled()) return false;
+    return true;
+  }
+
   function _rebindVisible() {
     var voice = _voiceStore();
     return !!(voice && voice.enabled === true && voice.pendingRebindTarget);
+  }
+
+  function _captionPreview(text) {
+    if (typeof text !== 'string') return '';
+    var words = text.trim().split(/\s+/).filter(Boolean);
+    if (!words.length) return '';
+    return words.slice(-CAPTION_PREVIEW_WORDS).join(' ');
   }
 
   function _sendIcon() {
@@ -173,6 +191,10 @@
           return _capsuleVisible();
         },
 
+        get showCaption() {
+          return _captionVisible();
+        },
+
         get showSheet() {
           return _sheetVisible();
         },
@@ -186,14 +208,30 @@
           return !!(voice && typeof voice.bufferText === 'string' && voice.bufferText.trim().length > 0);
         },
 
+        get captionPlaceholder() {
+          return 'Live captions';
+        },
+
+        get captionText() {
+          var voice = this.voice;
+          return _captionPreview((voice && voice.bufferText) || '');
+        },
+
+        get hasCaptionText() {
+          return this.captionText.length > 0;
+        },
+
         get sheetMode() {
           var voice = this.voice;
           return (voice && voice.sheetMode) || 'partial';
         },
 
         get capsuleStyle() {
-          if (!this.capsulePosition) return '';
-          return 'left:' + this.capsulePosition.x + 'px;top:' + this.capsulePosition.y + 'px;right:auto;bottom:auto;';
+          var node = this.$refs && this.$refs.capsule;
+          var position = this.capsulePosition;
+          if (!position && !node) return '';
+          position = position ? this._clampCapsulePosition(position, node) : this._defaultCapsulePosition(node);
+          return 'left:' + position.x + 'px;top:' + position.y + 'px;right:auto;bottom:auto;';
         },
 
         get rebindCopy() {
@@ -272,15 +310,20 @@
           return false;
         },
 
+        _capsuleBottomInset() {
+          if (!this.showCaption) return 16;
+          return CAPTION_RESERVED_HEIGHT + CAPSULE_BOTTOM_GAP;
+        },
+
         _defaultCapsulePosition(node) {
           var rect = node && typeof node.getBoundingClientRect === 'function'
             ? node.getBoundingClientRect()
             : { width: 114, height: 54 };
           var width = rect.width || 114;
           var height = rect.height || 54;
-          var safeBottom = 16;
+          var safeBottom = this._capsuleBottomInset();
           var x = Math.max(8, this.viewportWidth - width - 14);
-          var y = Math.max(8, this.viewportHeight - height - safeBottom - 16);
+          var y = Math.max(8, this.viewportHeight - height - safeBottom);
           return { x: x, y: y };
         },
 
@@ -291,7 +334,7 @@
           var width = rect.width || 114;
           var height = rect.height || 54;
           var maxX = Math.max(8, this.viewportWidth - width - 8);
-          var maxY = Math.max(8, this.viewportHeight - height - 8);
+          var maxY = Math.max(8, this.viewportHeight - height - this._capsuleBottomInset());
           return {
             x: Math.min(maxX, Math.max(8, position.x)),
             y: Math.min(maxY, Math.max(8, position.y)),
