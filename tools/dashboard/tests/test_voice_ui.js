@@ -109,6 +109,19 @@ describe('voice dot UI helpers', () => {
     assert.equal(h.voice.micMode, 'muted');
   });
 
+  it('uses tmux_session as the canonical cross-surface bind key for session rows', () => {
+    const h = loadVoiceUi({ enabled: true });
+    const cardRow = {
+      session_id: 'u-123',
+      tmux_session: 'auto-0515-163913',
+      is_live: true,
+    };
+    const cardKey = h.ui.voiceBindKey(cardRow);
+    assert.equal(cardKey, 'auto-0515-163913');
+    h.voice.requestBind(cardKey, { isLive: true });
+    assert.equal(h.ui.sessionDotState('auto-0515-163913', { isLive: true }), 'listening');
+  });
+
   it('ends the active session on long press and suppresses the click follow-up', async () => {
     const h = loadVoiceUi({ enabled: true, boundSessionId: 'session-a', micMode: 'listening' });
     const target = {};

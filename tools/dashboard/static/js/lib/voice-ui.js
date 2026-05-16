@@ -28,6 +28,12 @@
     return !!(opts && opts.isLive === true);
   }
 
+  function _voiceBindKey(sessionLike) {
+    if (!sessionLike) return '';
+    if (typeof sessionLike === 'string') return sessionLike;
+    return sessionLike.tmux_session || sessionLike.sessionKey || sessionLike.session_id || sessionLike.id || '';
+  }
+
   function _stateFor(sessionId, opts) {
     var voice = _voiceStore();
     if (!_isLive(opts)) return 'dead';
@@ -161,6 +167,7 @@
   window.Autonomy = window.Autonomy || {};
   window.Autonomy.voice = window.Autonomy.voice || {};
   window.Autonomy.voice.ui = {
+    voiceBindKey: _voiceBindKey,
     sessionDotState: _stateFor,
     dotDisabled: _buttonDisabled,
     dotTitle: _buttonTitle,
