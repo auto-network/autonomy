@@ -298,6 +298,21 @@ describe('voice store substrate', () => {
     assert.equal(h.store.micMode, 'muted');
   });
 
+  it('openSheet treats vad_paused like active listening and restores listening on dismiss', () => {
+    const h = loadVoiceStore({
+      initialStores: {
+        flags: { get() { return true; } },
+      },
+    });
+    h.store.requestBind('session-a', { isLive: true });
+    h.store.setMicMode('vad_paused');
+    assert.equal(h.store.openSheet(), true);
+    assert.equal(h.store.micMode, 'muted');
+    assert.equal(h.store.sheetResumeListeningOnDismiss, true);
+    assert.equal(h.store.dismissSheet(), true);
+    assert.equal(h.store.micMode, 'listening');
+  });
+
   it('openSheet stays closed when voice is disabled or no session is bound', () => {
     const disabled = loadVoiceStore({
       initialStores: {
@@ -394,6 +409,30 @@ describe('voice store substrate', () => {
     assert.equal(h.store.bufferText, 'retry me');
     assert.equal(h.store.sheetError, 'Send failed. Session connection dropped. Retry after reconnecting or end voice on this session.');
     assert.equal(h.store.micMode, 'muted');
+  });
+
+  it('sendBuffer reports a session-ended message when the send API returns 404', async () => {
+    const h = loadVoiceStore({
+      initialStores: {
+        flags: { get() { return true; } },
+      },
+      fetchImpl: async function() {
+        return {
+          ok: false,
+          status: 404,
+          async json() {
+            return { error: 'missing' };
+          },
+        };
+      },
+    });
+    h.store.requestBind('session-a', { isLive: true });
+    h.store.setBufferText('retry me');
+    h.store.openSheet();
+    assert.equal(await h.store.sendBuffer(), false);
+    assert.equal(h.store.sheetOpen, true);
+    assert.equal(h.store.bufferText, 'retry me');
+    assert.equal(h.store.sheetError, 'Send failed. Session is no longer available.');
   });
 
   it('sendBuffer reports a session-ended error when no session is bound', async () => {

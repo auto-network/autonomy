@@ -116,6 +116,16 @@
     return Promise.reject(new Error('voice-store: fetch is unavailable'));
   }
 
+  function _sendErrorMessage(status) {
+    if (status === 401 || status === 403) {
+      return 'Send failed. Voice permission was revoked. Refresh and sign in again.';
+    }
+    if (status === 404) {
+      return 'Send failed. Session is no longer available.';
+    }
+    return 'Send failed. Session connection dropped. Retry after reconnecting or end voice on this session.';
+  }
+
   function _buildStore() {
     return {
       boundSessionId: '',
@@ -257,7 +267,8 @@
         this.sheetOpen = true;
         this.sheetMode = 'partial';
         this.sheetError = '';
-        this.sheetResumeListeningOnDismiss = this.micMode === 'listening';
+        this.sheetResumeListeningOnDismiss =
+          this.micMode === 'listening' || this.micMode === 'vad_paused';
         if (this.sheetResumeListeningOnDismiss) {
           this.micMode = 'muted';
         }
@@ -307,7 +318,7 @@
           });
           var data = await res.json();
           if (!res.ok || !data || data.ok !== true) {
-            this.sheetError = 'Send failed. Session connection dropped. Retry after reconnecting or end voice on this session.';
+            this.sheetError = _sendErrorMessage(res && typeof res.status === 'number' ? res.status : 0);
             return false;
           }
           this.bufferText = '';
@@ -320,7 +331,7 @@
           this.sheetResumeListeningOnDismiss = false;
           return true;
         } catch (_err) {
-          this.sheetError = 'Send failed. Session connection dropped. Retry after reconnecting or end voice on this session.';
+          this.sheetError = _sendErrorMessage(0);
           return false;
         }
       },
