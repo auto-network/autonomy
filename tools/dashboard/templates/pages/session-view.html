@@ -33,8 +33,35 @@
         <div class="sv-header-inner">
           <!-- Header row 1: status dot, role badge, indicator rail, terminal toggle, chevron -->
           <div class="sv-header-row1" style="display:flex;align-items:center;gap:12px;margin-top:3px;">
-            <span class="indicator-dot"
-                  :class="{ 'indicator--green': isLive, 'indicator--gray': !isLive, 'indicator-dot--working': isWorking }"></span>
+            <button type="button"
+                    class="indicator-dot voice-dot-button"
+                    :class="window.Autonomy.voice.ui.viewerDotClasses(sessionKey, { isLive: isLive, isWorking: isWorking })"
+                    :title="window.Autonomy.voice.ui.dotTitle(sessionKey, { isLive: isLive })"
+                    :aria-label="window.Autonomy.voice.ui.dotAriaLabel(sessionKey, { isLive: isLive })"
+                    :disabled="window.Autonomy.voice.ui.dotDisabled(sessionKey, { isLive: isLive })"
+                    @pointerdown.stop="window.Autonomy.voice.ui.onPointerDown($event, sessionKey, { isLive: isLive })"
+                    @pointerup.stop="window.Autonomy.voice.ui.onPointerUp($event)"
+                    @pointercancel.stop="window.Autonomy.voice.ui.onPointerCancel($event)"
+                    @click.stop="window.Autonomy.voice.ui.onClick($event, sessionKey, { isLive: isLive })"
+                    data-testid="voice-session-dot">
+              <svg x-show="window.Autonomy.voice.ui.showMicGlyph(sessionKey, { isLive: isLive })"
+                   class="voice-dot-glyph"
+                   viewBox="0 0 16 16"
+                   fill="none"
+                   stroke="currentColor"
+                   stroke-width="1.7"
+                   stroke-linecap="round"
+                   stroke-linejoin="round"
+                   aria-hidden="true">
+                <path d="M8 2.6a2 2 0 0 1 2 2v3.4a2 2 0 1 1-4 0V4.6a2 2 0 0 1 2-2Z"></path>
+                <path d="M4.8 7.8a3.2 3.2 0 0 0 6.4 0"></path>
+                <path d="M8 11v2.1"></path>
+                <path d="M6.2 13.1h3.6"></path>
+                <path x-show="window.Autonomy.voice.ui.showMuteSlash(sessionKey, { isLive: isLive })"
+                      class="voice-dot-glyph__slash"
+                      d="M3.4 12.6 12.6 3.4"></path>
+              </svg>
+            </button>
             <span class="sc-role sc-type-host"
                   x-show="sessionType === 'host'"
                   x-text="'HOST'"

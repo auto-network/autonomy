@@ -1,0 +1,69 @@
+.voice-dot-button {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  color: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  cursor: pointer;
+  position: relative;
+  overflow: visible;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+.voice-dot-button[disabled] {
+  cursor: default;
+}
+
+.voice-dot-button.voice-dot--bindable::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 999px;
+}
+
+.voice-dot-button.voice-dot--hint::before {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border: 1px solid rgba(74, 222, 128, 0.35);
+  border-radius: 999px;
+}
+
+.voice-dot-button.voice-dot--active {
+  width: 19px;
+  height: 19px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #3b82f6 0%, #1d4ed8 100%);
+  box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.26), 0 4px 12px rgba(29, 78, 216, 0.28);
+}
+
+.voice-dot-button.voice-dot--muted {
+  background: linear-gradient(180deg, #334155 0%, #1f2937 100%);
+  box-shadow: 0 0 0 1px rgba(100, 116, 139, 0.32);
+}
+
+.voice-dot-button.voice-dot--away {
+  animation: voice-dot-pulse 1.1s ease-in-out infinite;
+}
+
+.voice-dot-glyph {
+  width: 11px;
+  height: 11px;
+  color: #f8fafc;
+  pointer-events: none;
+}
+
+.voice-dot-glyph__slash {
+  stroke: #f8fafc;
+}
+
+@keyframes voice-dot-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
