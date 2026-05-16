@@ -106,6 +106,16 @@
     return typeof value === 'string' ? value : (value == null ? '' : String(value));
   }
 
+  function _sendFetch(path, opts) {
+    if (typeof window !== 'undefined' && window.Autonomy && typeof window.Autonomy.fetch === 'function') {
+      return window.Autonomy.fetch(path, opts);
+    }
+    if (typeof fetch === 'function') {
+      return fetch(path, opts);
+    }
+    return Promise.reject(new Error('voice-store: fetch is unavailable'));
+  }
+
   function _buildStore() {
     return {
       boundSessionId: '',
@@ -115,6 +125,10 @@
       pendingRebindTarget: '',
       discoverabilitySeen: _readBool(STORAGE_KEYS.discoverabilitySeen, false),
       awayEventSessionId: '',
+      sheetOpen: false,
+      sheetMode: 'partial',
+      sheetError: '',
+      sheetResumeListeningOnDismiss: false,
 
       get enabled() {
         return _isClientEnabled();
@@ -186,6 +200,7 @@
 
       clearBuffer() {
         this.bufferText = '';
+        this.sheetError = '';
       },
 
       pulseAwayEvent(sessionId) {
@@ -213,6 +228,10 @@
         this.bufferText = '';
         this.micMode = 'idle';
         this.awayEventSessionId = '';
+        this.sheetOpen = false;
+        this.sheetMode = 'partial';
+        this.sheetError = '';
+        this.sheetResumeListeningOnDismiss = false;
       },
 
       setCapsulePosition(position) {
@@ -231,6 +250,79 @@
       markDiscoverabilitySeen() {
         this.discoverabilitySeen = true;
         _writeBool(STORAGE_KEYS.discoverabilitySeen, true);
+      },
+
+      openSheet() {
+        if (!this.enabled || !this.boundSessionId) return false;
+        this.sheetOpen = true;
+        this.sheetMode = 'partial';
+        this.sheetError = '';
+        this.sheetResumeListeningOnDismiss = this.micMode === 'listening';
+        if (this.sheetResumeListeningOnDismiss) {
+          this.micMode = 'muted';
+        }
+        return true;
+      },
+
+      collapseSheet() {
+        if (!this.sheetOpen) return false;
+        this.sheetMode = 'partial';
+        return true;
+      },
+
+      dismissSheet() {
+        if (!this.sheetOpen) return false;
+        this.sheetOpen = false;
+        this.sheetMode = 'partial';
+        this.sheetError = '';
+        if (this.sheetResumeListeningOnDismiss && this.boundSessionId) {
+          this.micMode = 'listening';
+        }
+        this.sheetResumeListeningOnDismiss = false;
+        return true;
+      },
+
+      expandSheet() {
+        if (!this.sheetOpen) return false;
+        this.sheetMode = 'full';
+        return true;
+      },
+
+      async sendBuffer() {
+        if (!this.boundSessionId) {
+          this.sheetError = 'Send failed. Session is no longer available.';
+          return false;
+        }
+        var body = (this.bufferText || '').trim();
+        if (!body) return false;
+        this.sheetError = '';
+        try {
+          var res = await _sendFetch('/api/session/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              message: body,
+              tmux_session: this.boundSessionId,
+            }),
+          });
+          var data = await res.json();
+          if (!res.ok || !data || data.ok !== true) {
+            this.sheetError = 'Send failed. Session connection dropped. Retry after reconnecting or end voice on this session.';
+            return false;
+          }
+          this.bufferText = '';
+          this.sheetError = '';
+          this.sheetOpen = false;
+          this.sheetMode = 'partial';
+          if (this.sheetResumeListeningOnDismiss && this.boundSessionId) {
+            this.micMode = 'listening';
+          }
+          this.sheetResumeListeningOnDismiss = false;
+          return true;
+        } catch (_err) {
+          this.sheetError = 'Send failed. Session connection dropped. Retry after reconnecting or end voice on this session.';
+          return false;
+        }
       },
     };
   }
