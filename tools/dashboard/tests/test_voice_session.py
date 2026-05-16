@@ -155,12 +155,88 @@ def test_committing_rejects_actions_with_commit_in_flight(action):
     assert s.state == vs.COMMITTING
 
 
-def test_committing_accepts_end_transition():
+def test_committing_end_defers_until_commit_resolves():
+    """Regression for codex F1 on 1536e1d: spec graph://86fd1897-d4d
+    says 'end from committing → ended (after current commit returns)'.
+    The state machine must stay in COMMITTING when 'end' arrives so
+    the transport can still complete the in-flight tmux_send and emit
+    the final committed/commit_error frame. Without the deferral, an
+    operator clicking 'end' mid-commit would tear down the WS before
+    the result frame went out, swallowing the response and corrupting
+    the protocol."""
+    s = _new_session()
+    s.handle_control("start")
+    s.handle_control("commit")
+    assert s.state == vs.COMMITTING
+    frames = s.handle_control("end")
+    # No frames emitted on the deferred-end (the latch is silent).
+    assert frames == []
+    # State stays in COMMITTING so finish_commit is still callable.
+    assert s.state == vs.COMMITTING
+    # finish_commit honors the latch and transitions to ENDED.
+    finish_frames = s.finish_commit(success=True)
+    assert finish_frames == [{"type": "committed"}]
+    assert s.state == vs.ENDED
+
+
+def test_committing_end_defers_through_commit_error():
+    """The deferred-end transition fires whether the in-flight commit
+    succeeded or failed — operator's intent to end was registered
+    before the result, so we honor it either way."""
+    s = _new_session()
+    s.handle_control("start")
+    s.handle_control("commit")
+    s.handle_control("end")
+    finish_frames = s.finish_commit(
+        success=False,
+        error_code=vs.COMMIT_ERR_TMUX_FAILED,
+        error_message="tmux send raised",
+    )
+    assert finish_frames[0]["type"] == "commit_error"
+    assert s.state == vs.ENDED
+
+
+def test_committing_repeated_end_idempotent_during_commit():
+    """Multiple 'end' frames arriving while still committing must not
+    error — the latch is already set, so further 'end's are silent
+    no-ops. Without this, a jittery client could spam 'end' and
+    receive spurious error frames."""
     s = _new_session()
     s.handle_control("start")
     s.handle_control("commit")
     assert s.handle_control("end") == []
+    assert s.handle_control("end") == []
+    assert s.handle_control("end") == []
+    assert s.state == vs.COMMITTING
+    s.finish_commit(success=True)
     assert s.state == vs.ENDED
+
+
+def test_committing_end_then_finish_commit_still_resumes_correctly_without_latch():
+    """Sanity check: without the deferred-end latch, finish_commit
+    resumes to the prior active state as normal. Pinning the
+    no-latch branch separately from the latched branch ensures the
+    latch is genuinely opt-in rather than always-on."""
+    s = _new_session()
+    s.handle_control("start")
+    s.handle_control("commit")
+    # No 'end' frame here — finish_commit should resume LISTENING.
+    s.finish_commit(success=True)
+    assert s.state == vs.LISTENING
+
+
+def test_committing_end_latch_resets_after_finish_commit():
+    """If the operator starts a new session after a deferred-end ran
+    its course (e.g. fresh WS connection that reuses the same
+    in-memory test object), the latch must be cleared. force_end +
+    a fresh session is the production path; this test just pins that
+    finish_commit clears its own state."""
+    s = _new_session()
+    s.handle_control("start")
+    s.handle_control("commit")
+    s.handle_control("end")
+    s.finish_commit(success=True)
+    assert s._end_after_commit is False
 
 
 @pytest.mark.parametrize("action", ["start", "mute", "unmute", "commit", "discard"])

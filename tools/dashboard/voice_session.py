@@ -131,9 +131,14 @@ _TRANSITION_MATRIX: dict[tuple[str, str], _Transition] = {
     (MUTED, "discard"): _Transition(next_state=None),  # clear buffer in transport
     (MUTED, "end"): _Transition(next_state=ENDED),
 
-    # committing — every non-end action errors; end transitions but
-    # the transport must wait for the in-flight commit to resolve
-    # before fully tearing down.
+    # committing — every non-end action errors; end is a special case
+    # encoded separately in handle_control because it does NOT
+    # transition immediately. Per spec (graph://86fd1897-d4d), 'end'
+    # from committing transitions to ENDED only AFTER the current
+    # commit returns; transitioning immediately would let the
+    # transport tear down before the in-flight tmux_send / WhisperLive
+    # work resolves, swallowing the committed / commit_error result
+    # frame the client is waiting on.
     (COMMITTING, "start"): _Transition(
         None, _err(ERR_COMMIT_IN_FLIGHT, "commit in progress"),
     ),
@@ -149,7 +154,10 @@ _TRANSITION_MATRIX: dict[tuple[str, str], _Transition] = {
     (COMMITTING, "discard"): _Transition(
         None, _err(ERR_COMMIT_IN_FLIGHT, "commit in progress"),
     ),
-    (COMMITTING, "end"): _Transition(next_state=ENDED),
+    # Sentinel — the actual transition is deferred to finish_commit;
+    # handle_control short-circuits this cell. The matrix entry exists
+    # so the completeness regression test still passes.
+    (COMMITTING, "end"): _Transition(next_state=None),
 
     # ended — everything errors (terminal state)
     (ENDED, "start"): _Transition(
@@ -187,6 +195,15 @@ class VoiceSession:
     tmux_name: str
     state: str = IDLE
     _prior_active_state: str | None = field(default=None, init=False, repr=False)
+    # Latch set when 'end' arrives while in COMMITTING. The state
+    # machine intentionally stays in COMMITTING (per spec: "end →
+    # ended (after current commit returns)") so the transport can
+    # still complete the in-flight tmux_send and emit the final
+    # committed / commit_error frame. finish_commit consults this
+    # latch to decide whether to resume to the prior active state
+    # (normal commit completion) or transition to ENDED (operator
+    # asked us to end mid-commit; we honor it once the result is out).
+    _end_after_commit: bool = field(default=False, init=False, repr=False)
 
     def handle_control(self, frame_type: str) -> list[dict]:
         """Process one control frame. Returns the list of frames the
@@ -200,6 +217,16 @@ class VoiceSession:
         responsible for performing the actual commit work and calling
         :meth:`finish_commit` to emit the ``committed`` /
         ``commit_error`` frame.
+
+        Special-case: ``end`` from ``committing`` does NOT transition
+        immediately. The spec requires the transition to happen after
+        the in-flight commit resolves so the transport can still emit
+        the final committed / commit_error frame. This method latches
+        ``_end_after_commit`` and stays in ``committing``; the
+        eventual :meth:`finish_commit` reads the latch and transitions
+        to :data:`ENDED` instead of resuming to the prior active state.
+        Subsequent ``end`` frames received while still in
+        ``committing`` are idempotent — the latch is already set.
         """
         if frame_type not in CONTROL_TYPES:
             return [
@@ -208,6 +235,13 @@ class VoiceSession:
                     f"unknown control frame type {frame_type!r}",
                 )
             ]
+        # Special-case the deferred-end-during-commit cell before
+        # consulting the matrix. The matrix entry for (COMMITTING,
+        # 'end') is a sentinel (no transition, no response); the real
+        # behavior is the latch-set below.
+        if self.state == COMMITTING and frame_type == "end":
+            self._end_after_commit = True
+            return []
         cell = _TRANSITION_MATRIX[(self.state, frame_type)]
         if cell.next_state == COMMITTING and self.state in ACTIVE_STATES:
             # Remember which active state to resume in after the commit
@@ -255,9 +289,20 @@ class VoiceSession:
                 f"finish_commit called while state={self.state!r}; only "
                 "valid from 'committing'"
             )
-        resume_state = self._prior_active_state or LISTENING
+        # If 'end' arrived while we were committing, the spec defers
+        # the terminal transition until after this result frame goes
+        # out. Honor the deferred-end intent now: transition to ENDED
+        # rather than resuming to the prior active state. The result
+        # frame (committed / commit_error) is still emitted — the
+        # operator's view of the in-flight commit completes — and
+        # then the WS handler tears down on the next loop iteration
+        # because state is ENDED.
+        if self._end_after_commit:
+            self.state = ENDED
+        else:
+            self.state = self._prior_active_state or LISTENING
         self._prior_active_state = None
-        self.state = resume_state
+        self._end_after_commit = False
         if success:
             frame: dict = {"type": "committed"}
             if committed_text is not None:
