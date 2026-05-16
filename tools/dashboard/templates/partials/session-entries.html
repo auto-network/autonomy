@@ -49,14 +49,19 @@
               <template x-if="isGroupItemExpanded(dIdx, subIdx)">
                 <div @click.stop>
                   <div class="sc-detail-tabs" @click="toggleGroupItemView(dIdx, subIdx, item)">
+                    <span class="sc-detail-tab"
+                          :class="groupItemViewMode(dIdx, subIdx, item) === 'input' ? 'sc-detail-tab-active' : ''">Input</span>
                     <template x-if="hasOutput(item)">
                       <span class="sc-detail-tab"
                             :class="groupItemViewMode(dIdx, subIdx, item) === 'output' ? 'sc-detail-tab-active' : ''">Output</span>
                     </template>
-                    <span class="sc-detail-tab"
-                          :class="groupItemViewMode(dIdx, subIdx, item) === 'input' ? 'sc-detail-tab-active' : ''">Input</span>
                   </div>
-                  <pre class="sc-detail" x-text="groupItemExpandContent(item, dIdx, subIdx)"></pre>
+                  <template x-if="groupItemExpandIsDiff(item, dIdx, subIdx)">
+                    <pre class="sc-detail sc-detail-diff" x-html="groupItemExpandDiffHTML(item)"></pre>
+                  </template>
+                  <template x-if="!groupItemExpandIsDiff(item, dIdx, subIdx)">
+                    <pre class="sc-detail" x-text="groupItemExpandContent(item, dIdx, subIdx)"></pre>
+                  </template>
                 </div>
               </template>
             </div>
@@ -204,16 +209,21 @@
                     <template x-if="!hasTodoAnnotation(resolveEntry(dEntry))">
                       <div>
                         <div class="sc-detail-tabs" @click="toggleView(dIdx, resolveEntry(dEntry))">
+                          <span class="sc-detail-tab"
+                                :class="expandViewMode(dIdx, resolveEntry(dEntry)) === 'input' ? 'sc-detail-tab-active' : ''"
+                                >Input</span>
                           <template x-if="hasOutput(resolveEntry(dEntry))">
                             <span class="sc-detail-tab"
                                   :class="expandViewMode(dIdx, resolveEntry(dEntry)) === 'output' ? 'sc-detail-tab-active' : ''"
                                   >Output</span>
                           </template>
-                          <span class="sc-detail-tab"
-                                :class="expandViewMode(dIdx, resolveEntry(dEntry)) === 'input' ? 'sc-detail-tab-active' : ''"
-                                >Input</span>
                         </div>
-                        <pre class="sc-detail" x-text="expandContent(resolveEntry(dEntry), dIdx)"></pre>
+                        <template x-if="expandIsDiff(resolveEntry(dEntry), dIdx)">
+                          <pre class="sc-detail sc-detail-diff" x-html="expandDiffHTML(resolveEntry(dEntry), dIdx)"></pre>
+                        </template>
+                        <template x-if="!expandIsDiff(resolveEntry(dEntry), dIdx)">
+                          <pre class="sc-detail" x-text="expandContent(resolveEntry(dEntry), dIdx)"></pre>
+                        </template>
                       </div>
                     </template>
                   </div>

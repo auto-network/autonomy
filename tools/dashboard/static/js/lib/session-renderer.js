@@ -340,6 +340,44 @@
       return '';
     },
 
+    // Edit tool, Output tab: render a unified colorized diff of the
+    // actual change instead of the post-edit confirmation snippet.
+    _editEntryHasDiff(entry) {
+      if (!entry || entry.type !== 'tool_use' || entry.tool_name !== 'Edit') return false;
+      const inp = entry.input || {};
+      return !!(inp.old_string || inp.new_string);
+    },
+
+    expandIsDiff(entry, idx) {
+      if (!this._editEntryHasDiff(entry)) return false;
+      return this.expandViewMode(idx, entry) === 'output';
+    },
+
+    expandDiffHTML(entry, idx) {
+      if (!this._editEntryHasDiff(entry)) return '';
+      const inp = entry.input || {};
+      return window.SessionDiff.editDiffHTML(
+        inp.old_string || '',
+        inp.new_string || '',
+        { file_path: inp.file_path || '' }
+      );
+    },
+
+    groupItemExpandIsDiff(item, dIdx, subIdx) {
+      if (!this._editEntryHasDiff(item)) return false;
+      return this.groupItemViewMode(dIdx, subIdx, item) === 'output';
+    },
+
+    groupItemExpandDiffHTML(item) {
+      if (!this._editEntryHasDiff(item)) return '';
+      const inp = item.input || {};
+      return window.SessionDiff.editDiffHTML(
+        inp.old_string || '',
+        inp.new_string || '',
+        { file_path: inp.file_path || '' }
+      );
+    },
+
     _inputSummary(entry) {
       const inp = entry.input || {};
       const name = entry.tool_name || '';

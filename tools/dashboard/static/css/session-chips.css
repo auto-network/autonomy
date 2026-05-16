@@ -270,28 +270,59 @@
   border-radius: 0 4px 4px 4px;
 }
 
-/* Edit diff styling in detail panel */
-.sc-diff-old {
-  color: #f87171;
-  background: rgba(248, 113, 113, 0.1);
-  display: block;
-  padding: 2px 4px;
-  border-radius: 2px;
-  margin-bottom: 4px;
+/* ── Edit-tile unified diff (Output tab) ──────────────────────
+   Rendered by SessionDiff.editDiffHTML(); emitted into a <pre>
+   with .sc-detail-diff so column structure survives. Each line
+   is a block-level <span class="sc-diff-line ..."> with a
+   leading <span class="sc-diff-marker"> for the +/−/space rail. */
+.sc-detail-diff {
+  white-space: pre;
+  overflow-x: auto;
+  word-break: normal;
 }
-.sc-diff-new {
-  color: #4ade80;
-  background: rgba(74, 222, 128, 0.1);
-  display: block;
-  padding: 2px 4px;
-  border-radius: 2px;
-  margin-bottom: 4px;
+.sc-diff {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
-.sc-diff-label {
-  font-size: 0.625rem;
+.sc-diff-file {
+  color: #d1d5db;
   font-weight: 600;
-  opacity: 0.7;
-  margin-bottom: 2px;
+  margin-bottom: 4px;
+  opacity: 0.85;
+}
+.sc-diff-line {
+  display: block;
+  padding: 0 2px;
+}
+.sc-diff-marker {
+  color: rgba(255, 255, 255, 0.35);
+  padding-right: 6px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.sc-diff-ctx { color: #6b7280; }
+.sc-diff-del {
+  background: rgba(127, 29, 29, 0.32);
+  color: #fca5a5;
+}
+.sc-diff-add {
+  background: rgba(20, 83, 45, 0.32);
+  color: #86efac;
+}
+.sc-diff-hunk {
+  color: #7dd3fc;
+  opacity: 0.85;
+}
+.sc-diff-del .sc-diff-word {
+  background: rgba(127, 29, 29, 0.85);
+  color: #fee2e2;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.sc-diff-add .sc-diff-word {
+  background: rgba(20, 83, 45, 0.85);
+  color: #dcfce7;
+  border-radius: 2px;
+  padding: 0 1px;
 }
 
 /* ── Spacing rules ──────────────────────────────────────────── */
