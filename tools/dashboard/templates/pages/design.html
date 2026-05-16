@@ -314,7 +314,7 @@
             <template x-if="isLive && _tmuxSession">
               <div class="flex flex-col px-2 bg-gray-800 border-t border-gray-700 flex-shrink-0"
                    style="padding-top:6px; padding-bottom:6px;"
-                   x-show="showInlineComposer"
+                   x-show="showInlineComposer && !window.Autonomy.voice.shell.hideInlineComposer()"
                    @dragenter.prevent="$el.classList.add('drop-highlight')"
                    @dragover.prevent="$el.classList.add('drop-highlight')"
                    @dragleave.prevent="$el.classList.remove('drop-highlight')"

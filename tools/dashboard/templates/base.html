@@ -1759,6 +1759,96 @@
   </div>
   </div>
 
+  <div x-data="voiceShell()" x-cloak>
+    <div class="voice-rebind-confirm"
+         x-show="showRebindConfirm"
+         x-cloak
+         data-testid="voice-rebind-confirm">
+      <div class="voice-rebind-confirm__copy" x-text="rebindCopy"></div>
+      <div class="voice-rebind-confirm__actions">
+        <button type="button"
+                class="voice-rebind-confirm__switch"
+                @click="confirmRebind()">Switch</button>
+        <button type="button"
+                class="voice-rebind-confirm__cancel"
+                @click="cancelRebind()">Cancel</button>
+      </div>
+    </div>
+
+    <div class="voice-sheet-backdrop"
+         x-show="showSheet"
+         x-cloak
+         @click="dismissSheet()"></div>
+
+    <div class="voice-sheet"
+         data-testid="voice-compose-sheet"
+         x-show="showSheet"
+         x-cloak
+         :class="{
+           'voice-sheet--partial': sheetMode === 'partial',
+           'voice-sheet--full': sheetMode === 'full'
+         }">
+      <div class="voice-sheet__handle"
+           @pointerdown="startSheetGesture($event)">
+        <span></span>
+      </div>
+      <div class="voice-sheet__body">
+        <textarea class="voice-sheet__buffer"
+                  x-ref="sheetInput"
+                  x-model="$store.voice.bufferText"
+                  @input="onSheetInput()"
+                  spellcheck="false"></textarea>
+        <div class="voice-sheet__error"
+             x-show="$store.voice.sheetError"
+             x-text="$store.voice.sheetError"></div>
+      </div>
+      <div class="voice-sheet__actions">
+        <button type="button"
+                class="voice-sheet__clear"
+                @click="clearBuffer()">Clear</button>
+        <button type="button"
+                class="voice-sheet__send"
+                :class="{ 'voice-sheet__send--disabled': !hasBufferText }"
+                :disabled="!hasBufferText"
+                @click="sendBuffer()">Send</button>
+      </div>
+    </div>
+
+    <div class="voice-capsule"
+         x-show="showCapsule"
+         x-cloak
+         x-ref="capsule"
+         data-testid="voice-floating-capsule"
+         :style="capsuleStyle"
+         @pointerdown="onCapsulePointerDown($event)">
+      <div class="voice-capsule__action voice-capsule__send"
+           role="button"
+           tabindex="0"
+           aria-label="Send voice buffer"
+           title="Send voice buffer"
+           data-voice-action="send"
+           :class="{
+             'voice-capsule__action--pressed': capsulePressedAction === 'send',
+             'voice-capsule__send--disabled': !hasBufferText
+           }"
+           @keydown.enter.prevent="onCapsuleKey('send')"
+           @keydown.space.prevent="onCapsuleKey('send')">
+        <span class="voice-capsule__icon-wrap" x-html="capsuleIcon('send')"></span>
+      </div>
+      <div class="voice-capsule__action voice-capsule__type"
+           role="button"
+           tabindex="0"
+           aria-label="Open keyboard composer"
+           title="Open keyboard composer"
+           data-voice-action="type"
+           :class="{ 'voice-capsule__action--pressed': capsulePressedAction === 'type' }"
+           @keydown.enter.prevent="onCapsuleKey('type')"
+           @keydown.space.prevent="onCapsuleKey('type')">
+        <span class="voice-capsule__icon-wrap" x-html="capsuleIcon('type')"></span>
+      </div>
+    </div>
+  </div>
+
   <script src="/static/js/lib/fetch-progress.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/events.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/schemas.js?v=__STATIC_VERSION__"></script>
@@ -1767,6 +1857,7 @@
   <script src="/static/js/lib/feature-flags.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/voice-store.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/voice-ui.js?v=__STATIC_VERSION__"></script>
+  <script src="/static/js/lib/voice-shell.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/diag-collectors.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/session-display.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/session-diff.js?v=__STATIC_VERSION__"></script>

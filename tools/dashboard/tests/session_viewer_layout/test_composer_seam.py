@@ -10,7 +10,7 @@ def test_session_view_template_uses_inline_composer_gate(test_client):
     resp = test_client.get("/pages/session-view")
     assert resp.status_code == 200
     html = resp.text
-    assert 'x-show="showInlineComposer"' in html, (
+    assert 'x-show="showInlineComposer && !window.Autonomy.voice.shell.hideInlineComposer()"' in html, (
         "session-view inline composer is not gated by showInlineComposer"
     )
     assert ':disabled="!canSendComposer || sending || uploading"' in html, (
@@ -22,7 +22,7 @@ def test_design_panel_template_uses_inline_composer_gate(test_client):
     resp = test_client.get("/pages/design")
     assert resp.status_code == 200
     html = resp.text
-    assert 'x-show="showInlineComposer"' in html, (
+    assert 'x-show="showInlineComposer && !window.Autonomy.voice.shell.hideInlineComposer()"' in html, (
         "design panel composer is not gated by showInlineComposer"
     )
     assert ':disabled="!canSendComposer || sending"' in html, (
