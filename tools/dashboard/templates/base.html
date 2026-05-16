@@ -1117,6 +1117,50 @@
       gap: 7px;
       padding: 6px 0.5rem;
     }
+    .sv-voice-import {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 0.5rem 0;
+    }
+    .sv-voice-import__preview {
+      flex: 1;
+      min-width: 0;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(31, 41, 55, 0.84);
+      border: 1px solid rgba(75, 85, 99, 0.8);
+      color: #d1d5db;
+      font-size: 12px;
+      line-height: 1.35;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .sv-voice-import__button {
+      flex-shrink: 0;
+      min-height: 32px;
+      padding: 0 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(99, 102, 241, 0.55);
+      background: rgba(99, 102, 241, 0.16);
+      color: #c7d2fe;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.1s;
+    }
+    @media (hover: hover) and (pointer: fine) {
+      .sv-voice-import__button:hover {
+        background: rgba(99, 102, 241, 0.24);
+        border-color: rgba(129, 140, 248, 0.7);
+        color: #e0e7ff;
+      }
+    }
+    .sv-voice-import__button:active {
+      transform: scale(0.98);
+    }
 
     /* Contenteditable input + placeholder */
     .sv-editable {
