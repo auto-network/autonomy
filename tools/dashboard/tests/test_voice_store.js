@@ -11,6 +11,7 @@ function loadVoiceStore(opts) {
   const docListeners = {};
   const stores = Object.assign({}, (opts && opts.initialStores) || {});
   const storageData = Object.assign({}, (opts && opts.localStorage) || {});
+  const fetchCalls = [];
 
   const document = {
     addEventListener(name, cb) {
@@ -34,6 +35,9 @@ function loadVoiceStore(opts) {
     localStorage,
     Autonomy: {},
   };
+  const fetchImpl = (opts && opts.fetchImpl) || (async function() {
+    throw new Error('unexpected fetch');
+  });
 
   const Alpine = {
     store(name, obj) {
@@ -50,6 +54,10 @@ function loadVoiceStore(opts) {
     document,
     localStorage,
     Alpine,
+    fetch: async function(url, init) {
+      fetchCalls.push({ url, init: init || null });
+      return fetchImpl(url, init);
+    },
     console,
     JSON,
     Object,
@@ -66,6 +74,7 @@ function loadVoiceStore(opts) {
   };
   sandbox.window.document = document;
   sandbox.window.Alpine = Alpine;
+  sandbox.window.fetch = sandbox.fetch;
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(VOICE_STORE_JS, 'utf8'), sandbox, { filename: 'voice-store.js' });
 
@@ -76,6 +85,7 @@ function loadVoiceStore(opts) {
     stores,
     storageData,
     window: windowObj,
+    fetchCalls,
   };
 }
 
@@ -95,6 +105,10 @@ describe('voice store substrate', () => {
       'pendingRebindTarget',
       'discoverabilitySeen',
       'awayEventSessionId',
+      'sheetOpen',
+      'sheetMode',
+      'sheetError',
+      'sheetResumeListeningOnDismiss',
     ]) {
       assert.ok(Object.prototype.hasOwnProperty.call(h.store, field), field);
     }
@@ -253,5 +267,139 @@ describe('voice store substrate', () => {
     h.store.clearPendingRebindIfSessionEnded('session-b');
     assert.equal(h.store.boundSessionId, '');
     assert.equal(h.store.micMode, 'idle');
+  });
+
+  it('openSheet mutes active listening sessions and sets resume-on-dismiss state', () => {
+    const h = loadVoiceStore({
+      initialStores: {
+        flags: { get() { return true; } },
+      },
+    });
+    h.store.requestBind('session-a', { isLive: true });
+    assert.equal(h.store.openSheet(), true);
+    assert.equal(h.store.sheetOpen, true);
+    assert.equal(h.store.sheetMode, 'partial');
+    assert.equal(h.store.sheetResumeListeningOnDismiss, true);
+    assert.equal(h.store.micMode, 'muted');
+  });
+
+  it('openSheet preserves explicit muted state and dismissSheet does not unmute it', () => {
+    const h = loadVoiceStore({
+      initialStores: {
+        flags: { get() { return true; } },
+      },
+    });
+    h.store.requestBind('session-a', { isLive: true });
+    h.store.toggleMic();
+    assert.equal(h.store.micMode, 'muted');
+    assert.equal(h.store.openSheet(), true);
+    assert.equal(h.store.sheetResumeListeningOnDismiss, false);
+    assert.equal(h.store.dismissSheet(), true);
+    assert.equal(h.store.micMode, 'muted');
+  });
+
+  it('openSheet stays closed when voice is disabled or no session is bound', () => {
+    const disabled = loadVoiceStore({
+      initialStores: {
+        flags: { get() { return false; } },
+      },
+    });
+    assert.equal(disabled.store.openSheet(), false);
+    assert.equal(disabled.store.sheetOpen, false);
+
+    const unbound = loadVoiceStore({
+      initialStores: {
+        flags: { get() { return true; } },
+      },
+    });
+    assert.equal(unbound.store.openSheet(), false);
+    assert.equal(unbound.store.sheetOpen, false);
+  });
+
+  it('expandSheet and collapseSheet move the sheet mode without affecting buffer', () => {
+    const h = loadVoiceStore({
+      initialStores: {
+        flags: { get() { return true; } },
+      },
+    });
+    h.store.requestBind('session-a', { isLive: true });
+    h.store.setBufferText('dictated text');
+    h.store.openSheet();
+    assert.equal(h.store.expandSheet(), true);
+    assert.equal(h.store.sheetMode, 'full');
+    assert.equal(h.store.collapseSheet(), true);
+    assert.equal(h.store.sheetMode, 'partial');
+    assert.equal(h.store.bufferText, 'dictated text');
+  });
+
+  it('clearBuffer empties the shared buffer and clears sheet errors', () => {
+    const h = loadVoiceStore();
+    h.store.setBufferText('draft');
+    h.store.sheetError = 'Send failed';
+    h.store.clearBuffer();
+    assert.equal(h.store.bufferText, '');
+    assert.equal(h.store.sheetError, '');
+  });
+
+  it('sendBuffer posts through the existing session send API and restores listening on success', async () => {
+    const h = loadVoiceStore({
+      initialStores: {
+        flags: { get() { return true; } },
+      },
+      fetchImpl: async function() {
+        return {
+          ok: true,
+          async json() {
+            return { ok: true };
+          },
+        };
+      },
+    });
+    h.store.requestBind('session-a', { isLive: true });
+    h.store.setBufferText('  ship this  ');
+    h.store.openSheet();
+    assert.equal(await h.store.sendBuffer(), true);
+    assert.equal(h.fetchCalls.length, 1);
+    assert.equal(h.fetchCalls[0].url, '/api/session/send');
+    assert.equal(h.fetchCalls[0].init.method, 'POST');
+    assert.equal(JSON.parse(h.fetchCalls[0].init.body).message, 'ship this');
+    assert.equal(JSON.parse(h.fetchCalls[0].init.body).tmux_session, 'session-a');
+    assert.equal(h.store.bufferText, '');
+    assert.equal(h.store.sheetOpen, false);
+    assert.equal(h.store.sheetMode, 'partial');
+    assert.equal(h.store.sheetError, '');
+    assert.equal(h.store.micMode, 'listening');
+    assert.equal(h.store.sheetResumeListeningOnDismiss, false);
+  });
+
+  it('sendBuffer leaves the sheet open and preserves the buffer on API failure', async () => {
+    const h = loadVoiceStore({
+      initialStores: {
+        flags: { get() { return true; } },
+      },
+      fetchImpl: async function() {
+        return {
+          ok: false,
+          async json() {
+            return { error: 'dropped' };
+          },
+        };
+      },
+    });
+    h.store.requestBind('session-a', { isLive: true });
+    h.store.setBufferText('retry me');
+    h.store.openSheet();
+    assert.equal(await h.store.sendBuffer(), false);
+    assert.equal(h.store.sheetOpen, true);
+    assert.equal(h.store.bufferText, 'retry me');
+    assert.equal(h.store.sheetError, 'Send failed. Session connection dropped. Retry after reconnecting or end voice on this session.');
+    assert.equal(h.store.micMode, 'muted');
+  });
+
+  it('sendBuffer reports a session-ended error when no session is bound', async () => {
+    const h = loadVoiceStore();
+    h.store.setBufferText('retry me');
+    assert.equal(await h.store.sendBuffer(), false);
+    assert.equal(h.store.sheetError, 'Send failed. Session is no longer available.');
   });
 });
