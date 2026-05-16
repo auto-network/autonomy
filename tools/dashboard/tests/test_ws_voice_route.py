@@ -333,6 +333,51 @@ def test_ws_voice_cross_tab_supersede_kicks_prior_connection(voice_route_env):
             ws_b.send_text(json.dumps({"type": "end"}))
 
 
+def test_ws_voice_deferred_end_during_commit_still_releases_buffer(voice_route_env, monkeypatch):
+    """Regression for codex F1 on 02c4950: when 'end' arrives mid-
+    commit the state machine defers the terminal transition until
+    finish_commit (per eb02f95). The transport's finally block must
+    still call release() — not detach() — because the operator
+    explicitly intended to end. Without latching end_was_explicit
+    at the moment the 'end' frame arrives (independent of session
+    state), the deferred-end path would silently fall through to the
+    60s TTL grace, holding a buffer the operator wanted gone.
+
+    S3-3's commit stub is synchronous so this path isn't reachable
+    over a live WS without forcing finish_commit to leave the state
+    in COMMITTING; we patch it to a no-op and assert the route's
+    intent-latching logic still fires."""
+    from tools.dashboard import voice_session
+
+    # Patch finish_commit to a no-op that leaves state in COMMITTING
+    # (simulates the S3-5 async commit window where 'end' can arrive
+    # before tmux_send resolves).
+    monkeypatch.setattr(
+        voice_session.VoiceSession,
+        "finish_commit",
+        lambda self, **kwargs: [],
+    )
+
+    client = voice_route_env["client"]
+    mgr = voice_route_env["manager"]
+
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        mgr.append_final("auto-test-designer", "operator wants gone")
+        ws.send_text(json.dumps({"type": "commit"}))  # → committing, patched finish stays
+        ws.send_text(json.dumps({"type": "end"}))     # → deferred (state stays committing)
+        # Close from test side — finally runs; with the fix, release
+        # is called because end_was_explicit was latched at the
+        # 'end' frame regardless of state.
+
+    # After WS close, manager.release should have dropped the record
+    # entirely — NOT detach which would hold it for 60s.
+    assert not mgr.is_tracked("auto-test-designer"), (
+        "deferred-end via 'end' control frame should release the buffer "
+        "immediately (operator intent), not detach for TTL grace"
+    )
+
+
 def test_ws_voice_superseded_disconnect_does_not_clobber_new_owners_buffer(voice_route_env):
     """Regression for the cross-tab + buffer interaction: when ws_a
     is superseded, its finally block must NOT touch the buffer —
