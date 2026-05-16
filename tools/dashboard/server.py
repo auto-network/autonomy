@@ -6315,9 +6315,17 @@ async def ws_voice(websocket: WebSocket):
                         voice_buffer_mod.MANAGER.clear(bind)
                     for resp in finish:
                         await websocket.send_json(resp)
-                if frame_type == "end" and session.state == voice_mod.ENDED:
+                if frame_type == "end":
                     # Explicit operator 'end' — drop the buffer
-                    # immediately (no TTL grace).
+                    # immediately (no TTL grace), regardless of what
+                    # state the session ended up in. The state may
+                    # still be COMMITTING (deferred-end latch path
+                    # from eb02f95): when finish_commit eventually
+                    # transitions to ENDED, the finally block must
+                    # still see end_was_explicit=True so it calls
+                    # release(), not detach(). Latching here captures
+                    # operator intent at the moment they sent the
+                    # frame, independent of state-machine timing.
                     end_was_explicit = True
                 if session.state == voice_mod.ENDED:
                     break
