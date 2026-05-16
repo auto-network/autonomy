@@ -118,6 +118,7 @@ function loadVoiceShell(opts) {
     _stores: {
       voice: voiceStore,
       flags: flagsStore,
+      sessions: Object.assign({}, (opts && opts.sessionsStore) || {}),
     },
     store(name) {
       return this._stores[name];
@@ -242,6 +243,29 @@ describe('voice shell helpers', () => {
       },
     });
     assert.equal(h.component.showSheet, true);
+  });
+
+  it('rebindCopy includes the bound session label when one is available', () => {
+    const h = loadVoiceShell({
+      sessionsStore: {
+        'session-a': { label: 'My session' },
+      },
+      voiceStore: {
+        boundSessionId: 'session-a',
+        pendingRebindTarget: 'session-b',
+      },
+    });
+    assert.equal(h.component.rebindCopy, 'End voice on My session?');
+  });
+
+  it('rebindCopy falls back to the bound session id when no label is available', () => {
+    const h = loadVoiceShell({
+      voiceStore: {
+        boundSessionId: 'auto-0515-163913',
+        pendingRebindTarget: 'session-b',
+      },
+    });
+    assert.equal(h.component.rebindCopy, 'End voice on auto-0515-163913?');
   });
 
   it('routes the Type capsule action through voice.openSheet()', () => {

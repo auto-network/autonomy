@@ -114,6 +114,15 @@
     return (viewport && viewport.height) || (typeof window !== 'undefined' && window.innerHeight) || 0;
   }
 
+  function _sessionsStore() {
+    try {
+      if (typeof Alpine === 'undefined' || typeof Alpine.store !== 'function') return null;
+      return Alpine.store('sessions') || null;
+    } catch (_err) {
+      return null;
+    }
+  }
+
   window.Autonomy = window.Autonomy || {};
   window.Autonomy.voice = window.Autonomy.voice || {};
   window.Autonomy.voice.shell = {
@@ -188,7 +197,12 @@
         },
 
         get rebindCopy() {
-          return 'End voice on the current session and switch?';
+          var voice = this.voice;
+          if (!voice || !voice.boundSessionId) return 'End voice on the current session?';
+          var sessions = _sessionsStore();
+          var row = sessions && sessions[voice.boundSessionId];
+          var name = (row && row.label) || voice.boundSessionId;
+          return 'End voice on ' + name + '?';
         },
 
         capsuleIcon(action) {
