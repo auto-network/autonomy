@@ -1780,6 +1780,19 @@
          x-cloak
          @click="dismissSheet()"></div>
 
+    <div class="voice-caption"
+         x-show="showCaption"
+         x-cloak
+         data-testid="voice-caption-zone"
+         :class="{ 'voice-caption--empty': !hasCaptionText }">
+      <div class="voice-caption__placeholder"
+           x-show="!hasCaptionText"
+           x-text="captionPlaceholder"></div>
+      <div class="voice-caption__content"
+           x-show="hasCaptionText"
+           x-text="captionText"></div>
+    </div>
+
     <div class="voice-sheet"
          data-testid="voice-compose-sheet"
          x-show="showSheet"

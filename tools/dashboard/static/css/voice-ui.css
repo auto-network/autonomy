@@ -140,6 +140,50 @@
   backdrop-filter: blur(10px);
 }
 
+.voice-caption {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 69;
+  min-height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 24px calc(env(safe-area-inset-bottom, 0px) + 12px);
+  background: linear-gradient(180deg, rgba(15, 23, 34, 0) 0%, rgba(9, 12, 18, 0.68) 34%, rgba(4, 6, 9, 0.92) 74%, #000 100%);
+  color: #e5e7eb;
+  text-align: center;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.voice-caption--empty {
+  background: linear-gradient(180deg, rgba(15, 23, 34, 0) 0%, rgba(8, 11, 17, 0.58) 34%, rgba(3, 4, 6, 0.9) 72%, #000 100%);
+}
+
+.voice-caption__placeholder,
+.voice-caption__content {
+  display: -webkit-box;
+  width: 100%;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.32;
+  text-align: center;
+  text-wrap: pretty;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  text-shadow: 0 1px 14px rgba(0, 0, 0, 0.4);
+}
+
+.voice-caption__placeholder {
+  color: #7f8a9a;
+}
+
+.voice-caption__content {
+  color: #cbd5e1;
+}
+
 .voice-sheet {
   position: fixed;
   left: 0;
@@ -309,6 +353,7 @@
 }
 
 @media (min-width: 768px) {
+  .voice-caption,
   .voice-sheet-backdrop,
   .voice-sheet,
   .voice-capsule {
