@@ -6187,6 +6187,7 @@ async def ws_voice(websocket: WebSocket):
     and the error path; the success path becomes reachable in S3-5.
     """
     from tools.dashboard import voice_session as voice_mod
+    from tools.dashboard import voice_buffer as voice_buffer_mod
     from tools.dashboard import feature_flags
 
     await websocket.accept()
@@ -6222,10 +6223,43 @@ async def ws_voice(websocket: WebSocket):
         await websocket.close(code=1008, reason="voice.pipe_enabled disabled")
         return
 
+    # Cross-tab guard + buffer reattach. The evict callback closes
+    # THIS WS if a later connection for the same bind arrives. The
+    # superseded_event lets the finally block distinguish a normal
+    # disconnect (detach buffer for TTL grace) from being kicked
+    # (don't touch buffer; the new owner took it).
+    superseded_event = asyncio.Event()
+
+    async def _evict_me():
+        superseded_event.set()
+        try:
+            await websocket.close(code=1000, reason="superseded")
+        except Exception:
+            pass
+
+    acq = voice_buffer_mod.MANAGER.acquire(bind, evict_callback=_evict_me)
+
+    if acq.prior_evict_callback is not None:
+        # A prior WS owned this bind. Close it (code 1000 'superseded'
+        # per spec) before treating ourselves as the active owner.
+        try:
+            await acq.prior_evict_callback()
+        except Exception:
+            logger.exception("ws_voice: prior evict failed bind=%s", bind)
+
+    if acq.buffer_text:
+        # Restore the in-flight buffer that survived the disconnect.
+        # Sent BEFORE any subsequent server frame so the client's
+        # buffer state is correct before audio / transcripts resume.
+        await websocket.send_json(
+            voice_buffer_mod.buffer_state_frame(acq.buffer_text),
+        )
+
     session = voice_mod.VoiceSession(tmux_name=bind)
+    end_was_explicit = False
     logger.info(
-        "ws_voice: connected bind=%s state=%s",
-        bind, session.state,
+        "ws_voice: connected bind=%s state=%s restored_buffer_chars=%d",
+        bind, session.state, len(acq.buffer_text),
     )
 
     try:
@@ -6240,43 +6274,77 @@ async def ws_voice(websocket: WebSocket):
                     # parse_control_frame already built the error frame.
                     await websocket.send_json(payload)
                     continue
+                # 'discard' from an active state clears the buffer.
+                # Catch it BEFORE handle_control runs because the
+                # state machine intentionally treats discard as a
+                # no-op-from-its-perspective (state unchanged); the
+                # buffer-clearing side effect lives in the transport.
+                if frame_type == "discard" and session.state in voice_mod.ACTIVE_STATES:
+                    voice_buffer_mod.MANAGER.clear(bind)
                 responses = session.handle_control(frame_type)
                 for resp in responses:
                     await websocket.send_json(resp)
-                # S3-2 stub for the commit path: when the state machine
-                # transitioned into COMMITTING (i.e. the matrix accepted
-                # 'commit' from listening/muted), immediately resolve
-                # with a commit_error explaining the slice is still
-                # under construction. S3-3 wires the buffer manager,
-                # S3-5 wires the real tmux_send. Until then operators /
-                # frontend builders get a faithful protocol error
-                # rather than a silent half-success.
+                # S3-3 commit stub: the buffer manager is wired but
+                # tmux_send isn't (S3-5). Read the current buffer:
+                #   - empty → commit_error code=no_buffer (real now,
+                #     not a stub: this is the same error operators see
+                #     when they commit with nothing accumulated)
+                #   - non-empty → commit_error code=tmux_not_wired
+                #     (transient; goes away in S3-5 when the real
+                #     tmux_send call lands)
+                # Clear the buffer regardless so a repeat 'commit'
+                # doesn't double-report; tracks how the real path
+                # would behave (S3-5 clears on success).
                 if session.state == voice_mod.COMMITTING:
-                    finish = session.finish_commit(
-                        success=False,
-                        error_code=voice_mod.COMMIT_ERR_NO_BUFFER,
-                        error_message=(
-                            "buffer manager not yet wired (S3-2 stub); "
-                            "commit succeeds once S3-3 + S3-5 land"
-                        ),
-                    )
+                    pending_text = voice_buffer_mod.MANAGER.get_text(bind)
+                    if not pending_text:
+                        finish = session.finish_commit(
+                            success=False,
+                            error_code=voice_mod.COMMIT_ERR_NO_BUFFER,
+                            error_message="no buffer accumulated",
+                        )
+                    else:
+                        finish = session.finish_commit(
+                            success=False,
+                            error_code="tmux_not_wired",
+                            error_message=(
+                                "tmux_send integration lands in S3-5; "
+                                f"buffer captured ({len(pending_text)} chars)"
+                            ),
+                        )
+                        voice_buffer_mod.MANAGER.clear(bind)
                     for resp in finish:
                         await websocket.send_json(resp)
+                if frame_type == "end" and session.state == voice_mod.ENDED:
+                    # Explicit operator 'end' — drop the buffer
+                    # immediately (no TTL grace).
+                    end_was_explicit = True
                 if session.state == voice_mod.ENDED:
                     break
             elif "bytes" in msg and msg["bytes"] is not None:
-                # S3-2 stub: audio frames silently dropped (no
+                # S3-3 stub: audio frames silently dropped (no
                 # WhisperLive yet). handle_audio still returns whether
                 # to forward — once S3-4 lands, the True branch
-                # forwards to the WhisperLive client.
+                # forwards to the WhisperLive client and appends
+                # finals via voice_buffer_mod.MANAGER.append_final.
                 _should_forward = session.handle_audio(msg["bytes"])
-                # No-op for S3-2.
+                # No-op for S3-3.
     except WebSocketDisconnect:
         pass
     except Exception:
         logger.exception("ws_voice: unexpected error bind=%s", bind)
     finally:
         session.force_end()
+        if superseded_event.is_set():
+            # We were kicked by a later connection — that connection
+            # already owns the buffer. Don't detach (would clear the
+            # new owner's evict callback) or release (would drop
+            # their buffer). Just close our socket and return.
+            pass
+        elif end_was_explicit:
+            voice_buffer_mod.MANAGER.release(bind)
+        else:
+            voice_buffer_mod.MANAGER.detach(bind)
         try:
             await websocket.close()
         except Exception:
