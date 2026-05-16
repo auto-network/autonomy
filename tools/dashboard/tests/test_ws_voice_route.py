@@ -20,9 +20,10 @@ import pytest
 
 @pytest.fixture
 def voice_route_env(test_client, monkeypatch):
-    """Mock the two helpers the route depends on so tests don't need
-    a real tmux daemon and can flip the feature flag at will."""
-    from tools.dashboard import server, feature_flags
+    """Mock the route's external dependencies so tests don't need a
+    real tmux daemon, can flip the feature flag at will, and start
+    with a fresh in-memory buffer manager per test."""
+    from tools.dashboard import server, feature_flags, voice_buffer
 
     known_sessions = {"auto-test-designer", "auto-test-validator"}
 
@@ -37,10 +38,16 @@ def voice_route_env(test_client, monkeypatch):
     monkeypatch.setattr(server, "_tmux_session_exists", fake_tmux_exists)
     monkeypatch.setattr(feature_flags, "is_enabled", fake_is_enabled)
 
+    # Each test gets a clean buffer manager so cross-test state can't
+    # leak (e.g. a prior test's superseded-WS callback hanging around).
+    fresh_manager = voice_buffer.BufferManager()
+    monkeypatch.setattr(voice_buffer, "MANAGER", fresh_manager)
+
     return {
         "client": test_client,
         "known_sessions": known_sessions,
         "flag_state": flag_state,
+        "manager": fresh_manager,
     }
 
 
@@ -198,3 +205,157 @@ def test_ws_voice_discard_from_listening_is_silent_noop(voice_route_env):
         ws.send_text(json.dumps({"type": "start"}))
         ws.send_text(json.dumps({"type": "discard"}))
         ws.send_text(json.dumps({"type": "end"}))
+
+
+# ── Buffer manager integration (S3-3) ───────────────────────
+
+
+def test_ws_voice_reconnect_restores_buffer_via_buffer_state_frame(voice_route_env):
+    """Spec: 'Buffer survives WS disconnect for 60 seconds, restored
+    via buffer_state frame on reconnect.' We seed the manager with a
+    detached buffer, open a fresh WS for the same bind, and assert
+    the first server frame is the buffer_state restore."""
+    client = voice_route_env["client"]
+    mgr = voice_route_env["manager"]
+
+    # Seed the manager as if a prior WS connected, accumulated some
+    # finals, and disconnected without 'end'.
+    mgr.acquire("auto-test-designer", evict_callback=None)
+    mgr.append_final("auto-test-designer", "first transcript")
+    mgr.append_final("auto-test-designer", "second transcript")
+    mgr.detach("auto-test-designer")
+
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        # First server frame on a fresh connect with a restored buffer
+        # is the buffer_state restore.
+        first = ws.receive_json()
+        assert first["type"] == "buffer_state"
+        assert first["text"] == "first transcript second transcript"
+        assert first["word_count"] == 4
+        ws.send_text(json.dumps({"type": "end"}))
+
+
+def test_ws_voice_reconnect_with_no_prior_buffer_sends_no_buffer_state(voice_route_env):
+    """No buffer_state frame on a fresh connect with no prior
+    buffer — sending an empty buffer_state would be noise."""
+    client = voice_route_env["client"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        # Start the session — no preceding buffer_state means the
+        # first activity is whatever the operator sends.
+        ws.send_text(json.dumps({"type": "start"}))
+        ws.send_text(json.dumps({"type": "end"}))
+
+
+def test_ws_voice_explicit_end_releases_buffer_immediately(voice_route_env):
+    """An explicit 'end' control frame drops the buffer with no TTL
+    grace — operator-intended teardown is final."""
+    client = voice_route_env["client"]
+    mgr = voice_route_env["manager"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        # Seed buffer via direct manager call (no audio plumbing yet).
+        mgr.append_final("auto-test-designer", "released on end")
+        ws.send_text(json.dumps({"type": "end"}))
+    # After the WS closes via 'end', the manager has dropped the
+    # record entirely (release, not detach).
+    assert not mgr.is_tracked("auto-test-designer")
+
+
+def test_ws_voice_disconnect_without_end_detaches_with_ttl(voice_route_env):
+    """Closing the WS without sending 'end' starts the 60s TTL — the
+    buffer survives for a reconnect."""
+    client = voice_route_env["client"]
+    mgr = voice_route_env["manager"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        mgr.append_final("auto-test-designer", "survives blip")
+        # Exit context without 'end' — simulates network drop.
+    # Buffer record still tracked (in the TTL window), text preserved.
+    assert mgr.is_tracked("auto-test-designer")
+    assert mgr.get_text("auto-test-designer") == "survives blip"
+
+
+def test_ws_voice_commit_with_buffer_reports_tmux_not_wired_in_s33(voice_route_env):
+    """S3-3 stub: when the buffer has text at commit time, the
+    commit_error code is 'tmux_not_wired' (rather than 'no_buffer')
+    — distinguishes 'nothing to commit' from 'have something but
+    can't send yet'. Goes away in S3-5 when tmux_send lands."""
+    client = voice_route_env["client"]
+    mgr = voice_route_env["manager"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        mgr.append_final("auto-test-designer", "the buffer to be committed")
+        ws.send_text(json.dumps({"type": "commit"}))
+        err = ws.receive_json()
+        assert err["type"] == "commit_error"
+        assert err["code"] == "tmux_not_wired"
+        assert "buffer captured" in err["message"]
+        ws.send_text(json.dumps({"type": "end"}))
+
+
+def test_ws_voice_discard_clears_buffer_via_manager(voice_route_env):
+    """'discard' from an active state clears the buffer (operator
+    chose to throw it away). Subsequent commit reports no_buffer
+    rather than tmux_not_wired, proving the clear landed."""
+    client = voice_route_env["client"]
+    mgr = voice_route_env["manager"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        mgr.append_final("auto-test-designer", "to be discarded")
+        ws.send_text(json.dumps({"type": "discard"}))
+        ws.send_text(json.dumps({"type": "commit"}))
+        err = ws.receive_json()
+        assert err["type"] == "commit_error"
+        assert err["code"] == "no_buffer"
+        ws.send_text(json.dumps({"type": "end"}))
+
+
+def test_ws_voice_cross_tab_supersede_kicks_prior_connection(voice_route_env):
+    """Spec: 'only one WS connection per tmux_name at a time. New
+    connection kicks the old one (close code 1000, reason
+    superseded).'
+
+    We open WS A, then open WS B for the same bind. WS A's receive
+    must raise (the close arrived) and WS B should be a clean
+    connection ready to use."""
+    from starlette.websockets import WebSocketDisconnect
+
+    client = voice_route_env["client"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws_a:
+        ws_a.send_text(json.dumps({"type": "start"}))
+        # Open second connection same bind — should kick ws_a.
+        with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws_b:
+            # ws_a's next receive raises because it was closed (1000).
+            with pytest.raises((WebSocketDisconnect, Exception)):
+                ws_a.receive_text(timeout=1.0)
+            # ws_b is the active owner and can proceed normally.
+            ws_b.send_text(json.dumps({"type": "start"}))
+            ws_b.send_text(json.dumps({"type": "end"}))
+
+
+def test_ws_voice_superseded_disconnect_does_not_clobber_new_owners_buffer(voice_route_env):
+    """Regression for the cross-tab + buffer interaction: when ws_a
+    is superseded, its finally block must NOT touch the buffer —
+    the new owner (ws_b) is the legitimate holder. Without the
+    superseded_event guard, ws_a's detach/release would corrupt
+    ws_b's state."""
+    client = voice_route_env["client"]
+    mgr = voice_route_env["manager"]
+
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws_a:
+        ws_a.send_text(json.dumps({"type": "start"}))
+        # Seed buffer via manager (under ws_a's ownership).
+        mgr.append_final("auto-test-designer", "must survive supersede")
+
+        # Supersede.
+        with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws_b:
+            # ws_b should receive the buffer_state restore since the
+            # manager preserved the buffer across the supersede.
+            first = ws_b.receive_json()
+            assert first["type"] == "buffer_state"
+            assert first["text"] == "must survive supersede"
+            ws_b.send_text(json.dumps({"type": "end"}))
+
+    # After both ws close, the record is gone (ws_b released on end;
+    # ws_a was superseded and skipped detach/release).
+    assert not mgr.is_tracked("auto-test-designer")
