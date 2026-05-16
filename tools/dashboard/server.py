@@ -40,7 +40,7 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainT
 from starlette.routing import Route, Mount, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.templating import Jinja2Templates
-from starlette.websockets import WebSocket
+from starlette.websockets import WebSocket, WebSocketDisconnect
 from sse_starlette.sse import EventSourceResponse
 
 from agents.dispatch_db import (
@@ -6158,6 +6158,128 @@ async def ws_terminal(websocket: WebSocket):
         try:
             os.close(master_fd)
         except OSError:
+            pass
+
+
+async def ws_voice(websocket: WebSocket):
+    """WebSocket endpoint for the voice pipe canary (S3).
+
+    Spec: ``graph://86fd1897-d4d``. This commit (S3-2) lands the
+    connection-accept, gate enforcement, and the full control-frame
+    state machine. WhisperLive forwarding (S3-4), buffer state
+    (S3-3), and ``tmux_send`` integration on commit (S3-5) land
+    separately.
+
+    Query params:
+      bind — existing tmux session name (required)
+
+    Gate failures close the connection with WebSocket close code
+    1008 (Policy Violation):
+      - missing ``bind`` query param
+      - bound tmux session does not exist
+      - ``voice.pipe_enabled`` feature flag is disabled
+
+    Until WhisperLive (S3-4), binary audio frames are silently
+    dropped per spec. Until the buffer manager (S3-3) and
+    ``tmux_send`` integration (S3-5), ``commit`` actions resolve
+    with ``commit_error`` code ``no_buffer`` — operators wiring
+    frontends against this stub can exercise the full state machine
+    and the error path; the success path becomes reachable in S3-5.
+    """
+    from tools.dashboard import voice_session as voice_mod
+    from tools.dashboard import feature_flags
+
+    await websocket.accept()
+
+    bind = websocket.query_params.get("bind")
+    if not bind:
+        await websocket.send_json({
+            "type": "error",
+            "code": "missing_bind",
+            "message": "?bind=<tmux_session> query param is required",
+        })
+        await websocket.close(code=1008, reason="missing bind param")
+        return
+
+    if not _tmux_session_exists(bind):
+        await websocket.send_json({
+            "type": "error",
+            "code": "session_not_found",
+            "message": f"tmux session {bind!r} does not exist",
+        })
+        await websocket.close(code=1008, reason="bind session not found")
+        return
+
+    if not feature_flags.is_enabled("voice.pipe_enabled"):
+        await websocket.send_json({
+            "type": "error",
+            "code": "voice_pipe_disabled",
+            "message": (
+                "voice.pipe_enabled feature flag is off; enable it via the "
+                "Settings UI to use /ws/voice"
+            ),
+        })
+        await websocket.close(code=1008, reason="voice.pipe_enabled disabled")
+        return
+
+    session = voice_mod.VoiceSession(tmux_name=bind)
+    logger.info(
+        "ws_voice: connected bind=%s state=%s",
+        bind, session.state,
+    )
+
+    try:
+        while True:
+            msg = await websocket.receive()
+            msg_type = msg.get("type")
+            if msg_type == "websocket.disconnect":
+                break
+            if "text" in msg and msg["text"] is not None:
+                frame_type, payload = voice_mod.parse_control_frame(msg["text"])
+                if frame_type is None:
+                    # parse_control_frame already built the error frame.
+                    await websocket.send_json(payload)
+                    continue
+                responses = session.handle_control(frame_type)
+                for resp in responses:
+                    await websocket.send_json(resp)
+                # S3-2 stub for the commit path: when the state machine
+                # transitioned into COMMITTING (i.e. the matrix accepted
+                # 'commit' from listening/muted), immediately resolve
+                # with a commit_error explaining the slice is still
+                # under construction. S3-3 wires the buffer manager,
+                # S3-5 wires the real tmux_send. Until then operators /
+                # frontend builders get a faithful protocol error
+                # rather than a silent half-success.
+                if session.state == voice_mod.COMMITTING:
+                    finish = session.finish_commit(
+                        success=False,
+                        error_code=voice_mod.COMMIT_ERR_NO_BUFFER,
+                        error_message=(
+                            "buffer manager not yet wired (S3-2 stub); "
+                            "commit succeeds once S3-3 + S3-5 land"
+                        ),
+                    )
+                    for resp in finish:
+                        await websocket.send_json(resp)
+                if session.state == voice_mod.ENDED:
+                    break
+            elif "bytes" in msg and msg["bytes"] is not None:
+                # S3-2 stub: audio frames silently dropped (no
+                # WhisperLive yet). handle_audio still returns whether
+                # to forward — once S3-4 lands, the True branch
+                # forwards to the WhisperLive client.
+                _should_forward = session.handle_audio(msg["bytes"])
+                # No-op for S3-2.
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("ws_voice: unexpected error bind=%s", bind)
+    finally:
+        session.force_end()
+        try:
+            await websocket.close()
+        except Exception:
             pass
 
 
@@ -12511,6 +12633,7 @@ routes = [
 
     # WebSocket
     WebSocketRoute("/ws/terminal", ws_terminal),
+    WebSocketRoute("/ws/voice", ws_voice),
 
     # Events (SSE)
     Route("/api/events", api_events),
