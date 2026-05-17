@@ -84,3 +84,16 @@ def test_voice_smoke_page_exposes_operator_controls_and_readouts(test_client, mo
     assert "Committed buffer" in html
     assert "Live partial" in html
     assert "Event log" in html
+
+
+def test_voice_smoke_page_reads_last_message_from_active_session_rows(test_client, monkeypatch):
+    from tools.dashboard import feature_flags
+
+    monkeypatch.setattr(
+        feature_flags,
+        "is_enabled",
+        lambda name, **kwargs: True,
+    )
+
+    html = test_client.get("/_admin/voice-smoke").text
+    assert "row.last_message || row.latest" in html
