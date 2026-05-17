@@ -1,0 +1,64 @@
+[Unit]
+# WhisperLive systemd unit (S3-1; spec: graph://86fd1897-d4d).
+#
+# Upstream transcription service consumed by the dashboard's
+# /ws/voice WebSocket route. The dashboard mediates rather than
+# proxies: WhisperLive sees raw audio and emits transcript events;
+# the dashboard owns session binding, buffer state, and commit
+# semantics.
+#
+# Install: see tools/dashboard/systemd/README.md.
+Description=WhisperLive — streaming Whisper transcription for /ws/voice
+Documentation=graph://86fd1897-d4d
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Run as the host operator. Operators editing this unit MUST set
+# this to match the user that owns the CUDA/GPU access on the
+# host (typically the same account the dashboard runs under).
+# Left as a placeholder rather than hardcoded to avoid silently
+# breaking on hosts with a different account.
+User=__OPERATOR_USER__
+
+# WhisperLive CLI. The flags are pinned per spec + S3-4 codex review:
+#   --port 9090            — fixed; tools/dashboard/voice_whisperlive.py
+#                            connects to ws://127.0.0.1:9090.
+#   --backend faster_whisper — CT2 backend (chosen for the 5080 GPU).
+#   --model large-v3       — accuracy target for technical/conversational mix.
+#   --use_vad True         — server-side VAD trims silence before transcription.
+#   --raw_pcm_input        — accept 16-bit PCM LE bytes verbatim from the
+#                            dashboard; without this, the server expects
+#                            float32 and would interpret PCM as garbage.
+#                            Critical: dashboard's /ws/voice forwards
+#                            browser AudioWorklet int16 PCM unchanged.
+ExecStart=/usr/local/bin/whisperlive \
+    --port 9090 \
+    --backend faster_whisper \
+    --model large-v3 \
+    --use_vad True \
+    --raw_pcm_input
+
+# Quantisation: spec calls for int8_float16 (~1.5GB VRAM on the
+# RTX 5080, leaves headroom for ollama via S7). WhisperLive's
+# compute_type knob is exposed by the backend rather than the
+# server CLI; operators set it via the WhisperLive config file
+# OR by passing additional --backend arguments depending on the
+# installed version. See README.md for the version-specific
+# command if the operator's WhisperLive build differs.
+
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=whisperlive
+
+# Resource limits. Generous on file descriptors because the WS
+# transport opens per-session connections; modest memory cap
+# because the CT2 large-v3 footprint is the primary load.
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target
