@@ -100,15 +100,24 @@ def voice_route_env(test_client, monkeypatch):
     _StubWhisperLiveClient.instances = []
     monkeypatch.setattr(voice_whisperlive, "WhisperLiveClient", _StubWhisperLiveClient)
 
-    # Stub tmux_send so commit tests don't fire real tmux paste
-    # subprocesses. Calls are recorded for assertion access.
+    # Stub tmux_send_awaited so commit tests don't fire real tmux
+    # paste subprocesses. Calls are recorded for assertion access.
+    # NB: the route uses tmux_send_awaited (NOT the fire-and-forget
+    # tmux_send) per the S3-5 F1 fix — the awaited helper is the
+    # one that actually surfaces subprocess failures. The fixture
+    # also exposes the REAL helper reference so tests that want to
+    # exercise the subprocess seam (rather than the helper boundary)
+    # can re-patch it back.
     from tools.dashboard import tmux_send as tmux_send_mod
     tmux_send_calls: list[tuple[str, str]] = []
+    real_tmux_send_awaited = tmux_send_mod.tmux_send_awaited
 
-    async def fake_tmux_send(target, text):
+    async def fake_tmux_send_awaited(target, text):
         tmux_send_calls.append((target, text))
 
-    monkeypatch.setattr(tmux_send_mod, "tmux_send", fake_tmux_send)
+    monkeypatch.setattr(
+        tmux_send_mod, "tmux_send_awaited", fake_tmux_send_awaited,
+    )
 
     return {
         "client": test_client,
@@ -117,6 +126,7 @@ def voice_route_env(test_client, monkeypatch):
         "manager": fresh_manager,
         "stub_instances": _StubWhisperLiveClient.instances,
         "tmux_send_calls": tmux_send_calls,
+        "real_tmux_send_awaited": real_tmux_send_awaited,
     }
 
 
@@ -459,6 +469,69 @@ def test_ws_voice_deferred_end_during_commit_still_releases_buffer(voice_route_e
 # ── tmux_send commit path (S3-5) ─────────────────────────────
 
 
+def test_ws_voice_commit_uses_awaited_helper_not_fire_and_forget(
+    voice_route_env, monkeypatch,
+):
+    """Regression for codex F1 on f2f1895: the route must use
+    tmux_send_awaited (which actually waits for the paste and
+    raises on tmux subprocess failure), NOT the fire-and-forget
+    tmux_send (which only schedules a worker task and discards
+    subprocess outcomes).
+
+    Tests the REAL tmux_send_awaited path end-to-end by:
+      1. swapping the fixture's tmux stub out for the real helper
+      2. patching subprocess.run to force every tmux subprocess
+         to fail with rc=1
+      3. driving a commit
+
+    With the awaited helper, the failure surfaces as commit_error
+    code=tmux_failed and the buffer survives for retry. With the
+    old fire-and-forget tmux_send the route would have emitted
+    committed (the await returned before the paste was attempted)."""
+    import subprocess as _subprocess
+    from tools.dashboard import tmux_send as tmux_send_mod
+
+    real_run = _subprocess.run
+
+    def failing_tmux_run(cmd, *args, **kwargs):
+        if cmd and len(cmd) > 0 and cmd[0] == "tmux":
+            return _subprocess.CompletedProcess(
+                args=cmd,
+                returncode=1,
+                stdout=b"",
+                stderr=b"forced tmux failure",
+            )
+        return real_run(cmd, *args, **kwargs)
+
+    # Restore the REAL awaited helper (fixture exposes it for us).
+    monkeypatch.setattr(
+        tmux_send_mod,
+        "tmux_send_awaited",
+        voice_route_env["real_tmux_send_awaited"],
+    )
+    monkeypatch.setattr(_subprocess, "run", failing_tmux_run)
+
+    client = voice_route_env["client"]
+    mgr = voice_route_env["manager"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        mgr.append_final("auto-test-designer", "this should fail in tmux")
+        ws.send_text(json.dumps({"type": "commit"}))
+        err = ws.receive_json()
+        # Real seam test: this must NOT be 'committed'.
+        assert err["type"] == "commit_error", (
+            f"expected commit_error from forced tmux failure; got {err!r} — "
+            "route may be using fire-and-forget tmux_send again"
+        )
+        assert err["code"] == "tmux_failed"
+        # Buffer survives the failure for retry.
+        assert mgr.get_text("auto-test-designer") == "this should fail in tmux"
+        ws.send_text(json.dumps({"type": "end"}))
+
+
+
+
+
 def test_ws_voice_commit_failure_surfaces_tmux_failed(voice_route_env, monkeypatch):
     """When tmux_send raises (e.g. subprocess error, target session
     vanished mid-flight), the route emits commit_error code=
@@ -469,7 +542,7 @@ def test_ws_voice_commit_failure_surfaces_tmux_failed(voice_route_env, monkeypat
     async def failing_tmux_send(target, text):
         raise RuntimeError("tmux paste subprocess died")
 
-    monkeypatch.setattr(tmux_send_mod, "tmux_send", failing_tmux_send)
+    monkeypatch.setattr(tmux_send_mod, "tmux_send_awaited", failing_tmux_send)
 
     client = voice_route_env["client"]
     mgr = voice_route_env["manager"]
@@ -503,7 +576,7 @@ def test_ws_voice_commit_failure_does_not_clear_buffer(voice_route_env, monkeypa
             raise RuntimeError("transient failure")
         # Second attempt succeeds.
 
-    monkeypatch.setattr(tmux_send_mod, "tmux_send", flaky_tmux_send)
+    monkeypatch.setattr(tmux_send_mod, "tmux_send_awaited", flaky_tmux_send)
 
     client = voice_route_env["client"]
     mgr = voice_route_env["manager"]
