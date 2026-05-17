@@ -857,7 +857,7 @@
       function bindLabel(row) {
         const tmux = String(row.tmux_session || row.session_id || row.id || "").trim();
         const kind = String(row.type || "session").trim();
-        const latest = String(row.latest || "").trim();
+        const latest = String(row.last_message || row.latest || "").trim();
         const latestTail = latest ? " · " + latest.slice(0, 36) : "";
         return tmux + " · " + kind + latestTail;
       }
