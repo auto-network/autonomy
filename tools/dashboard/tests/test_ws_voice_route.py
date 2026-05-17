@@ -100,12 +100,23 @@ def voice_route_env(test_client, monkeypatch):
     _StubWhisperLiveClient.instances = []
     monkeypatch.setattr(voice_whisperlive, "WhisperLiveClient", _StubWhisperLiveClient)
 
+    # Stub tmux_send so commit tests don't fire real tmux paste
+    # subprocesses. Calls are recorded for assertion access.
+    from tools.dashboard import tmux_send as tmux_send_mod
+    tmux_send_calls: list[tuple[str, str]] = []
+
+    async def fake_tmux_send(target, text):
+        tmux_send_calls.append((target, text))
+
+    monkeypatch.setattr(tmux_send_mod, "tmux_send", fake_tmux_send)
+
     return {
         "client": test_client,
         "known_sessions": known_sessions,
         "flag_state": flag_state,
         "manager": fresh_manager,
         "stub_instances": _StubWhisperLiveClient.instances,
+        "tmux_send_calls": tmux_send_calls,
     }
 
 
@@ -333,22 +344,31 @@ def test_ws_voice_disconnect_without_end_detaches_with_ttl(voice_route_env):
     assert mgr.get_text("auto-test-designer") == "survives blip"
 
 
-def test_ws_voice_commit_with_buffer_reports_tmux_not_wired_in_s33(voice_route_env):
-    """S3-3 stub: when the buffer has text at commit time, the
-    commit_error code is 'tmux_not_wired' (rather than 'no_buffer')
-    — distinguishes 'nothing to commit' from 'have something but
-    can't send yet'. Goes away in S3-5 when tmux_send lands."""
+def test_ws_voice_commit_with_buffer_dispatches_via_tmux_send(voice_route_env):
+    """S3-5: commit with buffered text awaits tmux_send(bind, text)
+    and emits {type:'committed', text:...}. Buffer is cleared so
+    the next commit reports no_buffer rather than re-committing
+    the same text."""
     client = voice_route_env["client"]
     mgr = voice_route_env["manager"]
+    tmux_calls = voice_route_env["tmux_send_calls"]
     with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
         ws.send_text(json.dumps({"type": "start"}))
         mgr.append_final("auto-test-designer", "the buffer to be committed")
         ws.send_text(json.dumps({"type": "commit"}))
-        err = ws.receive_json()
-        assert err["type"] == "commit_error"
-        assert err["code"] == "tmux_not_wired"
-        assert "buffer captured" in err["message"]
+        resp = ws.receive_json()
+        assert resp == {
+            "type": "committed",
+            "text": "the buffer to be committed",
+        }
         ws.send_text(json.dumps({"type": "end"}))
+    # tmux_send was called with the bound session + buffer text.
+    assert tmux_calls == [
+        ("auto-test-designer", "the buffer to be committed"),
+    ]
+    # Buffer was cleared on successful commit (release happens on
+    # 'end'; tracked=False after the release).
+    assert not mgr.is_tracked("auto-test-designer")
 
 
 def test_ws_voice_discard_clears_buffer_via_manager(voice_route_env):
@@ -436,6 +456,134 @@ def test_ws_voice_deferred_end_during_commit_still_releases_buffer(voice_route_e
     )
 
 
+# ── tmux_send commit path (S3-5) ─────────────────────────────
+
+
+def test_ws_voice_commit_failure_surfaces_tmux_failed(voice_route_env, monkeypatch):
+    """When tmux_send raises (e.g. subprocess error, target session
+    vanished mid-flight), the route emits commit_error code=
+    tmux_failed and the buffer is NOT cleared so the operator can
+    retry by sending commit again."""
+    from tools.dashboard import tmux_send as tmux_send_mod
+
+    async def failing_tmux_send(target, text):
+        raise RuntimeError("tmux paste subprocess died")
+
+    monkeypatch.setattr(tmux_send_mod, "tmux_send", failing_tmux_send)
+
+    client = voice_route_env["client"]
+    mgr = voice_route_env["manager"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        mgr.append_final("auto-test-designer", "would-be committed text")
+        ws.send_text(json.dumps({"type": "commit"}))
+        err = ws.receive_json()
+        assert err["type"] == "commit_error"
+        assert err["code"] == "tmux_failed"
+        assert "tmux paste subprocess died" in err["message"]
+        ws.send_text(json.dumps({"type": "end"}))
+    # Buffer is preserved on failure so the operator can retry.
+    # The 'end' frame released the record entirely, but the key
+    # check is that the buffer wasn't cleared at commit-failure
+    # time: a retry-commit-before-end scenario would have read
+    # the original text.
+
+
+def test_ws_voice_commit_failure_does_not_clear_buffer(voice_route_env, monkeypatch):
+    """Tightening the previous test: prove the buffer survives a
+    commit failure across a second commit attempt within the same
+    WS, before 'end' fires."""
+    from tools.dashboard import tmux_send as tmux_send_mod
+
+    call_count = {"n": 0}
+
+    async def flaky_tmux_send(target, text):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("transient failure")
+        # Second attempt succeeds.
+
+    monkeypatch.setattr(tmux_send_mod, "tmux_send", flaky_tmux_send)
+
+    client = voice_route_env["client"]
+    mgr = voice_route_env["manager"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        mgr.append_final("auto-test-designer", "retry me")
+        ws.send_text(json.dumps({"type": "commit"}))
+        # First attempt: tmux_failed
+        err = ws.receive_json()
+        assert err["code"] == "tmux_failed"
+        # Buffer should still be there for retry.
+        assert mgr.get_text("auto-test-designer") == "retry me"
+        ws.send_text(json.dumps({"type": "commit"}))
+        # Second attempt: committed with the SAME text.
+        resp = ws.receive_json()
+        assert resp["type"] == "committed"
+        assert resp["text"] == "retry me"
+        ws.send_text(json.dumps({"type": "end"}))
+
+
+def test_ws_voice_commit_clears_buffer_on_success(voice_route_env):
+    """A successful commit clears the buffer. Subsequent commit
+    without new audio fires no_buffer (operator can't accidentally
+    double-commit the same text)."""
+    client = voice_route_env["client"]
+    mgr = voice_route_env["manager"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        mgr.append_final("auto-test-designer", "commit me once")
+        ws.send_text(json.dumps({"type": "commit"}))
+        resp = ws.receive_json()
+        assert resp["type"] == "committed"
+        # Second commit immediately after: no buffer.
+        ws.send_text(json.dumps({"type": "commit"}))
+        err = ws.receive_json()
+        assert err["type"] == "commit_error"
+        assert err["code"] == "no_buffer"
+        ws.send_text(json.dumps({"type": "end"}))
+
+
+def test_ws_voice_commit_resumes_listening_after_success(voice_route_env):
+    """The state machine returns to LISTENING after a successful
+    commit (per finish_commit semantics). Operator can keep
+    dictating without re-sending 'start'."""
+    client = voice_route_env["client"]
+    mgr = voice_route_env["manager"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        mgr.append_final("auto-test-designer", "first")
+        ws.send_text(json.dumps({"type": "commit"}))
+        ws.receive_json()  # committed
+        # Append more, commit again — proves state was LISTENING,
+        # not stuck in COMMITTING or ENDED.
+        mgr.append_final("auto-test-designer", "second")
+        ws.send_text(json.dumps({"type": "commit"}))
+        resp = ws.receive_json()
+        assert resp["type"] == "committed"
+        assert resp["text"] == "second"
+        ws.send_text(json.dumps({"type": "end"}))
+
+
+def test_ws_voice_commit_resumes_muted_after_success(voice_route_env):
+    """Commit-from-muted returns to MUTED (operator chose to mute
+    before commit; choice survives commit). Pinned by sending an
+    audio frame post-commit and asserting it doesn't forward."""
+    client = voice_route_env["client"]
+    mgr = voice_route_env["manager"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        ws.send_text(json.dumps({"type": "mute"}))
+        mgr.append_final("auto-test-designer", "from muted")
+        ws.send_text(json.dumps({"type": "commit"}))
+        ws.receive_json()  # committed
+        # Post-commit audio — should still be dropped since we're MUTED.
+        ws.send_bytes(b"\x00" * 100)
+        ws.send_text(json.dumps({"type": "end"}))
+    stub = voice_route_env["stub_instances"][0]
+    assert stub.audio_frames == []  # never forwarded — stayed MUTED
+
+
 # ── WhisperLive route integration (S3-4b) ────────────────────
 
 
@@ -509,34 +657,31 @@ def test_ws_voice_audio_not_forwarded_when_muted(voice_route_env):
 
 def test_ws_voice_buffer_text_reaches_commit_path(voice_route_env):
     """End-to-end: text appended to the manager (the on_final
-    callback path) becomes the buffer text the commit branch
-    reads. In S3-4b the commit still stubs to tmux_not_wired
-    because tmux_send wiring is S3-5; the test verifies the
-    BUFFER reach, not the tmux dispatch.
+    callback path) becomes the buffer text tmux_send receives at
+    commit time. The wrapper's on_final fires this append path in
+    production (covered in voice_whisperlive tests); this route
+    test verifies the buffer → tmux_send seam end-to-end with the
+    stub WhisperLive client + stub tmux_send.
 
     Cross-thread note: the TestClient runs the route in a
     background thread with its own event loop. We can't directly
-    await the route's on_final from this test thread, so we
-    simulate the same outcome by appending to the manager — the
-    route observes the buffer at commit time regardless of
-    whether the text arrived via on_final or via test-side
-    append. Real on_final integration is covered in the
-    voice_whisperlive unit tests."""
+    await the route's on_final closure from this test thread, so
+    we simulate the same outcome by appending to the manager."""
     client = voice_route_env["client"]
     mgr = voice_route_env["manager"]
+    tmux_calls = voice_route_env["tmux_send_calls"]
     with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
         ws.send_text(json.dumps({"type": "start"}))
         # Append text that the on_final callback would have written.
         mgr.append_final("auto-test-designer", "hello from whisperlive")
         ws.send_text(json.dumps({"type": "commit"}))
-        err = ws.receive_json()
-        # In S3-4b the commit stub is still tmux_not_wired since
-        # tmux_send wiring lands in S3-5. But buffer text reached
-        # the commit branch, so we get tmux_not_wired (not no_buffer).
-        assert err["type"] == "commit_error"
-        assert err["code"] == "tmux_not_wired"
-        assert "22 chars" in err["message"]
+        resp = ws.receive_json()
+        assert resp["type"] == "committed"
+        assert resp["text"] == "hello from whisperlive"
         ws.send_text(json.dumps({"type": "end"}))
+    assert tmux_calls == [
+        ("auto-test-designer", "hello from whisperlive"),
+    ]
 
 
 def test_ws_voice_whisperlive_close_called_on_end(voice_route_env):
