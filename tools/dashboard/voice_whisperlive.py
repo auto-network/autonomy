@@ -52,6 +52,16 @@ import websockets
 log = logging.getLogger(__name__)
 
 
+# Module-level production config. Tests replace these via
+# monkeypatch (or replace ``WhisperLiveClient`` outright with a
+# stub class) — keeps the route's client construction site
+# unchanged for both production and test paths.
+WHISPERLIVE_URL = "ws://127.0.0.1:9090"
+WHISPERLIVE_MODEL = "large-v3"
+WHISPERLIVE_LANGUAGE = "en"
+WHISPERLIVE_USE_VAD = True
+
+
 # Wrapper state enum. Single-line evolution: disconnected ->
 # connecting -> ready | unavailable. No back-edges; a wrapper that
 # went unavailable stays unavailable until the route discards it
