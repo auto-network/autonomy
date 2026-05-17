@@ -6416,17 +6416,29 @@ async def ws_voice(websocket: WebSocket):
                             error_message="no buffer accumulated",
                         )
                     else:
+                        # Use the AWAITED tmux helper, not the
+                        # fire-and-forget tmux_send. The latter only
+                        # schedules a worker task — awaiting it tells
+                        # us nothing about whether the paste actually
+                        # landed. tmux_send_awaited runs the paste +
+                        # first Enter inline and raises TmuxSendError
+                        # on any non-zero tmux returncode, so the
+                        # committed/commit_error frame reflects the
+                        # real outcome.
                         try:
-                            from tools.dashboard.tmux_send import tmux_send
-                            await tmux_send(bind, pending_text)
+                            from tools.dashboard.tmux_send import (
+                                tmux_send_awaited,
+                            )
+                            await tmux_send_awaited(bind, pending_text)
                         except Exception as exc:
                             logger.exception(
-                                "ws_voice: tmux_send failed bind=%s", bind,
+                                "ws_voice: tmux_send_awaited failed bind=%s",
+                                bind,
                             )
                             finish = session.finish_commit(
                                 success=False,
                                 error_code=voice_mod.COMMIT_ERR_TMUX_FAILED,
-                                error_message=f"tmux_send failed: {exc}",
+                                error_message=f"tmux send failed: {exc}",
                             )
                         else:
                             voice_buffer_mod.MANAGER.clear(bind)
