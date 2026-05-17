@@ -6392,17 +6392,21 @@ async def ws_voice(websocket: WebSocket):
                 # the session cleanly.
                 if frame_type == "start" and session.state == voice_mod.LISTENING:
                     await _ensure_whisperlive_connected()
-                # S3-3 commit stub: the buffer manager is wired but
-                # tmux_send isn't (S3-5). Read the current buffer:
-                #   - empty → commit_error code=no_buffer (real now,
-                #     not a stub: this is the same error operators see
-                #     when they commit with nothing accumulated)
-                #   - non-empty → commit_error code=tmux_not_wired
-                #     (transient; goes away in S3-5 when the real
-                #     tmux_send call lands)
-                # Clear the buffer regardless so a repeat 'commit'
-                # doesn't double-report; tracks how the real path
-                # would behave (S3-5 clears on success).
+                # Real commit path (S3-5): when the state machine
+                # transitioned into COMMITTING, read the accumulated
+                # buffer and dispatch via tmux_send.
+                #
+                # Empty buffer → commit_error code=no_buffer (no
+                # text to send; operator commit was a no-op).
+                #
+                # Non-empty buffer → await tmux_send(bind, text).
+                # tmux_send is fire-and-forget (schedules a worker
+                # task that paste-and-double-Enters); the await
+                # returns immediately. We then clear the buffer and
+                # emit committed. If tmux_send itself raises (e.g.
+                # subprocess error), surface as commit_error
+                # code=tmux_failed; the buffer is NOT cleared so
+                # the operator can retry by sending commit again.
                 if session.state == voice_mod.COMMITTING:
                     pending_text = voice_buffer_mod.MANAGER.get_text(bind)
                     if not pending_text:
@@ -6412,15 +6416,24 @@ async def ws_voice(websocket: WebSocket):
                             error_message="no buffer accumulated",
                         )
                     else:
-                        finish = session.finish_commit(
-                            success=False,
-                            error_code="tmux_not_wired",
-                            error_message=(
-                                "tmux_send integration lands in S3-5; "
-                                f"buffer captured ({len(pending_text)} chars)"
-                            ),
-                        )
-                        voice_buffer_mod.MANAGER.clear(bind)
+                        try:
+                            from tools.dashboard.tmux_send import tmux_send
+                            await tmux_send(bind, pending_text)
+                        except Exception as exc:
+                            logger.exception(
+                                "ws_voice: tmux_send failed bind=%s", bind,
+                            )
+                            finish = session.finish_commit(
+                                success=False,
+                                error_code=voice_mod.COMMIT_ERR_TMUX_FAILED,
+                                error_message=f"tmux_send failed: {exc}",
+                            )
+                        else:
+                            voice_buffer_mod.MANAGER.clear(bind)
+                            finish = session.finish_commit(
+                                success=True,
+                                committed_text=pending_text,
+                            )
                     for resp in finish:
                         await websocket.send_json(resp)
                 if frame_type == "end":
