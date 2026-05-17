@@ -6584,6 +6584,37 @@ async def page_test_input(request):
         )
 
 
+async def page_voice_smoke(request):
+    """Serve the standalone voice canary page at ``/_admin/voice-smoke``.
+
+    This is intentionally NOT part of the Alpine SPA shell. The page is a
+    self-contained admin canary for exercising the raw ``/ws/voice`` protocol
+    from a real browser / iOS PWA surface using ``getUserMedia`` +
+    ``AudioWorklet``. Keeping it standalone makes failures local and loud:
+    if the page breaks, it's the canary's own JS rather than shell/router
+    interference.
+
+    Visibility is gated two ways:
+      1. the dashboard's normal request auth surface (same as every other page)
+      2. ``voice.pipe_enabled`` Settings flag
+    """
+    from tools.dashboard import feature_flags
+
+    no_cache = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    }
+    if not feature_flags.is_enabled("voice.pipe_enabled"):
+        return PlainTextResponse(
+            "voice.pipe_enabled is disabled",
+            status_code=403,
+            headers=no_cache,
+        )
+    return HTMLResponse(
+        _load_template("admin/voice-smoke.html"),
+        headers=no_cache,
+    )
+
+
 _TEST_NO_CACHE = {
     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
     "Access-Control-Allow-Origin": "*",
@@ -12849,6 +12880,7 @@ routes = [
     Route("/session/{project}/{session_id}", page_session_view),
     Route("/pages/session-view", page_session_view_fragment),
     Route("/test/input", page_test_input),
+    Route("/_admin/voice-smoke", page_voice_smoke),
     Route("/api/test/debug", api_test_debug_get),
     Route("/api/test/debug", api_test_debug_post, methods=["POST"]),
     Route("/api/test/version", api_test_version_get),
