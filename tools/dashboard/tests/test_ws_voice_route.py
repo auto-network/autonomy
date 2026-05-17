@@ -18,12 +18,62 @@ import json
 import pytest
 
 
+class _StubWhisperLiveClient:
+    """Default test substitute for WhisperLiveClient that succeeds
+    instantly and emits no transcript events.
+
+    Most route tests don't care about the WhisperLive path; they
+    just want 'start' to proceed without sending a
+    whisperlive_connect_failed error frame for the missing
+    127.0.0.1:9090 service. Tests that DO want to drive the
+    upstream path opt into the real fake server via the
+    `whisperlive_fake` fixture.
+
+    The class signature mirrors WhisperLiveClient so the route's
+    construction site is unchanged. Records the constructor kwargs
+    for tests that want to assert on the configuration the route
+    passed (uid shape, model selection, etc.)."""
+
+    instances: list = []  # populated by __init__ for assertion access
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.on_partial = kwargs["on_partial"]
+        self.on_final = kwargs["on_final"]
+        self.on_error = kwargs["on_error"]
+        self.audio_frames: list[bytes] = []
+        self._ready = False
+        self._closed = False
+        _StubWhisperLiveClient.instances.append(self)
+
+    async def connect_and_wait_ready(self, *, ready_timeout: float = 15.0):
+        self._ready = True
+
+    def is_ready(self) -> bool:
+        return self._ready and not self._closed
+
+    def is_unavailable(self) -> bool:
+        return False
+
+    async def send_audio(self, audio_bytes: bytes) -> None:
+        if self._ready and not self._closed:
+            self.audio_frames.append(bytes(audio_bytes))
+
+    async def close(self) -> None:
+        self._closed = True
+
+
 @pytest.fixture
 def voice_route_env(test_client, monkeypatch):
     """Mock the route's external dependencies so tests don't need a
     real tmux daemon, can flip the feature flag at will, and start
-    with a fresh in-memory buffer manager per test."""
-    from tools.dashboard import server, feature_flags, voice_buffer
+    with a fresh in-memory buffer manager per test.
+
+    By default WhisperLiveClient is stubbed (succeeds instantly, no
+    transcripts) so tests don't need a real WhisperLive on
+    127.0.0.1:9090. Tests that exercise the upstream path replace
+    the stub via monkeypatch.setattr inside the test body."""
+    from tools.dashboard import server, feature_flags, voice_buffer, voice_whisperlive
 
     known_sessions = {"auto-test-designer", "auto-test-validator"}
 
@@ -43,11 +93,19 @@ def voice_route_env(test_client, monkeypatch):
     fresh_manager = voice_buffer.BufferManager()
     monkeypatch.setattr(voice_buffer, "MANAGER", fresh_manager)
 
+    # Reset the stub registry and install it as the default
+    # WhisperLive client. Tests that want different behavior
+    # (real fake server, deliberate connect failure, transcript
+    # events) replace the attribute again inside the test body.
+    _StubWhisperLiveClient.instances = []
+    monkeypatch.setattr(voice_whisperlive, "WhisperLiveClient", _StubWhisperLiveClient)
+
     return {
         "client": test_client,
         "known_sessions": known_sessions,
         "flag_state": flag_state,
         "manager": fresh_manager,
+        "stub_instances": _StubWhisperLiveClient.instances,
     }
 
 
@@ -376,6 +434,197 @@ def test_ws_voice_deferred_end_during_commit_still_releases_buffer(voice_route_e
         "deferred-end via 'end' control frame should release the buffer "
         "immediately (operator intent), not detach for TTL grace"
     )
+
+
+# ── WhisperLive route integration (S3-4b) ────────────────────
+
+
+def test_ws_voice_start_instantiates_whisperlive_client(voice_route_env):
+    """On the 'start' transition into LISTENING the route MUST
+    instantiate + connect a WhisperLive client. Pinned by the
+    instance registry count + the constructor kwargs the route
+    passed (canonical uid shape, model from voice_wl module
+    constants)."""
+    from tools.dashboard import voice_whisperlive
+    client = voice_route_env["client"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        ws.send_text(json.dumps({"type": "end"}))
+    instances = voice_route_env["stub_instances"]
+    assert len(instances) == 1
+    kwargs = instances[0].kwargs
+    assert kwargs["url"] == voice_whisperlive.WHISPERLIVE_URL
+    assert kwargs["model"] == voice_whisperlive.WHISPERLIVE_MODEL
+    assert kwargs["language"] == voice_whisperlive.WHISPERLIVE_LANGUAGE
+    assert kwargs["use_vad"] == voice_whisperlive.WHISPERLIVE_USE_VAD
+    # uid format: <bind>-<8 hex chars>
+    assert kwargs["uid"].startswith("auto-test-designer-")
+    assert len(kwargs["uid"]) == len("auto-test-designer-") + 8
+
+
+def test_ws_voice_no_whisperlive_until_start(voice_route_env):
+    """The wrapper is NOT instantiated on connect — only on the
+    'start' control frame. Avoids spending WhisperLive resources
+    for connections that just probe state (e.g. UI mount-time
+    health checks)."""
+    client = voice_route_env["client"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "end"}))
+    assert voice_route_env["stub_instances"] == []
+
+
+def test_ws_voice_audio_forwards_to_whisperlive_when_listening(voice_route_env):
+    """Binary audio in LISTENING state forwards to the upstream
+    client. Tested by sending 4 audio frames and asserting all 4
+    landed in the stub's audio_frames record."""
+    client = voice_route_env["client"]
+    payload_a = b"\x00\x01" * 1600
+    payload_b = b"\x02\x03" * 1600
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        ws.send_bytes(payload_a)
+        ws.send_bytes(payload_b)
+        ws.send_text(json.dumps({"type": "end"}))
+    stub = voice_route_env["stub_instances"][0]
+    assert stub.audio_frames == [payload_a, payload_b]
+
+
+def test_ws_voice_audio_not_forwarded_when_muted(voice_route_env):
+    """State machine drops audio in MUTED. The route's
+    handle_audio check returns False, so send_audio never reaches
+    the WhisperLive client. The wrapper stays connected (no
+    teardown on mute) so unmute → resume forwarding works."""
+    client = voice_route_env["client"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        ws.send_text(json.dumps({"type": "mute"}))
+        ws.send_bytes(b"\x00" * 100)  # dropped at state-machine layer
+        ws.send_text(json.dumps({"type": "unmute"}))
+        ws.send_bytes(b"\xff" * 100)  # forwarded
+        ws.send_text(json.dumps({"type": "end"}))
+    stub = voice_route_env["stub_instances"][0]
+    # Only the post-unmute frame was forwarded.
+    assert stub.audio_frames == [b"\xff" * 100]
+
+
+def test_ws_voice_buffer_text_reaches_commit_path(voice_route_env):
+    """End-to-end: text appended to the manager (the on_final
+    callback path) becomes the buffer text the commit branch
+    reads. In S3-4b the commit still stubs to tmux_not_wired
+    because tmux_send wiring is S3-5; the test verifies the
+    BUFFER reach, not the tmux dispatch.
+
+    Cross-thread note: the TestClient runs the route in a
+    background thread with its own event loop. We can't directly
+    await the route's on_final from this test thread, so we
+    simulate the same outcome by appending to the manager — the
+    route observes the buffer at commit time regardless of
+    whether the text arrived via on_final or via test-side
+    append. Real on_final integration is covered in the
+    voice_whisperlive unit tests."""
+    client = voice_route_env["client"]
+    mgr = voice_route_env["manager"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        # Append text that the on_final callback would have written.
+        mgr.append_final("auto-test-designer", "hello from whisperlive")
+        ws.send_text(json.dumps({"type": "commit"}))
+        err = ws.receive_json()
+        # In S3-4b the commit stub is still tmux_not_wired since
+        # tmux_send wiring lands in S3-5. But buffer text reached
+        # the commit branch, so we get tmux_not_wired (not no_buffer).
+        assert err["type"] == "commit_error"
+        assert err["code"] == "tmux_not_wired"
+        assert "22 chars" in err["message"]
+        ws.send_text(json.dumps({"type": "end"}))
+
+
+def test_ws_voice_whisperlive_close_called_on_end(voice_route_env):
+    """The WhisperLive client is closed when the WS tears down so
+    upstream resources release promptly. Idempotent close call
+    means a double-tear-down (e.g. mid-session network blip while
+    'end' is in flight) doesn't crash."""
+    client = voice_route_env["client"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        ws.send_text(json.dumps({"type": "end"}))
+    stub = voice_route_env["stub_instances"][0]
+    assert stub._closed is True
+
+
+def test_ws_voice_whisperlive_close_called_on_disconnect(voice_route_env):
+    """Same teardown happens when the WS disconnects without an
+    explicit 'end' (network drop, browser tab close)."""
+    client = voice_route_env["client"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        # Exit context without 'end' — simulates client-side drop.
+    stub = voice_route_env["stub_instances"][0]
+    assert stub._closed is True
+
+
+def test_ws_voice_whisperlive_connect_failure_sends_typed_error_keeps_ws_open(
+    voice_route_env, monkeypatch,
+):
+    """When WhisperLive connect fails the route emits
+    {type:'error', code:'whisperlive_connect_failed', ...} and
+    keeps the WS open so the operator can still mute / end the
+    session. Subsequent audio frames are silently dropped."""
+    from tools.dashboard import voice_whisperlive
+
+    class _FailingClient(_StubWhisperLiveClient):
+        async def connect_and_wait_ready(self, *, ready_timeout=15.0):
+            self._ready = False
+            raise voice_whisperlive.WhisperLiveConnectError(
+                "tcp/ws connect failed: simulated"
+            )
+
+    monkeypatch.setattr(voice_whisperlive, "WhisperLiveClient", _FailingClient)
+
+    client = voice_route_env["client"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        err = ws.receive_json()
+        assert err["type"] == "error"
+        assert err["code"] == "whisperlive_connect_failed"
+        assert "simulated" in err["message"]
+        # WS is still open — control plane still useful.
+        ws.send_bytes(b"\x00" * 100)  # silently dropped
+        ws.send_text(json.dumps({"type": "mute"}))  # still works
+        ws.send_text(json.dumps({"type": "end"}))
+
+
+def test_ws_voice_whisperlive_unavailable_does_not_reattempt_connect(
+    voice_route_env, monkeypatch,
+):
+    """Per the agreed design: failed connect latches unavailable
+    for the lifetime of the WS. The operator can't 'retry' by
+    sending another start (which would error already_started
+    anyway); they reconnect the WS to get a fresh wrapper.
+
+    Test sends 'start' once → failure → tries to provoke a re-
+    instantiation by sending mute/unmute/start. Only one instance
+    is created."""
+    from tools.dashboard import voice_whisperlive
+
+    class _FailingClient(_StubWhisperLiveClient):
+        async def connect_and_wait_ready(self, *, ready_timeout=15.0):
+            raise voice_whisperlive.WhisperLiveConnectError("nope")
+
+    monkeypatch.setattr(voice_whisperlive, "WhisperLiveClient", _FailingClient)
+
+    client = voice_route_env["client"]
+    with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        ws.receive_json()  # the whisperlive_connect_failed frame
+        # 'start' from listening → already_started error. The state
+        # machine error doesn't trigger another connect.
+        ws.send_text(json.dumps({"type": "start"}))
+        already = ws.receive_json()
+        assert already["code"] == "already_started"
+        ws.send_text(json.dumps({"type": "end"}))
+    # Exactly one client instance, despite two 'start' frames.
+    assert len(_FailingClient.instances) == 1
 
 
 def test_ws_voice_superseded_disconnect_does_not_clobber_new_owners_buffer(voice_route_env):

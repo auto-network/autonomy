@@ -20,6 +20,7 @@ import subprocess
 import sys
 import termios
 import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 from urllib import error as urllib_error, request as urllib_request
@@ -6164,11 +6165,15 @@ async def ws_terminal(websocket: WebSocket):
 async def ws_voice(websocket: WebSocket):
     """WebSocket endpoint for the voice pipe canary (S3).
 
-    Spec: ``graph://86fd1897-d4d``. This commit (S3-2) lands the
-    connection-accept, gate enforcement, and the full control-frame
-    state machine. WhisperLive forwarding (S3-4), buffer state
-    (S3-3), and ``tmux_send`` integration on commit (S3-5) land
-    separately.
+    Spec: ``graph://86fd1897-d4d``. As of S3-4b, the WhisperLive
+    audio pipeline is wired: on ``start`` the route opens an
+    upstream WhisperLive client (sync connect + SERVER_READY wait
+    so TCP/WS buffering absorbs operator audio that arrives during
+    the cold-start window), then on each binary frame in LISTENING
+    state forwards bytes to upstream. Transcript callbacks route
+    finals into :data:`voice_buffer.MANAGER` and surface
+    partial+final ``transcript`` frames back to the operator.
+    ``tmux_send`` integration on commit lands in S3-5.
 
     Query params:
       bind — existing tmux session name (required)
@@ -6188,6 +6193,7 @@ async def ws_voice(websocket: WebSocket):
     """
     from tools.dashboard import voice_session as voice_mod
     from tools.dashboard import voice_buffer as voice_buffer_mod
+    from tools.dashboard import voice_whisperlive as voice_wl
     from tools.dashboard import feature_flags
 
     await websocket.accept()
@@ -6257,6 +6263,99 @@ async def ws_voice(websocket: WebSocket):
 
     session = voice_mod.VoiceSession(tmux_name=bind)
     end_was_explicit = False
+    # WhisperLive client is created on the first 'start' frame
+    # (sync connect + SERVER_READY wait), then reused for the
+    # lifetime of this WS. If connect fails, whisperlive_unavailable
+    # latches True and subsequent 'start' attempts re-send a typed
+    # error frame rather than re-attempting connect — operators
+    # disconnect+reconnect to retry.
+    whisperlive_client: voice_wl.WhisperLiveClient | None = None
+    whisperlive_unavailable = False
+
+    async def _on_partial(text: str) -> None:
+        # Partials are operator-visible feedback but not persisted
+        # to the buffer (spec: only finals contribute). ts_ms is
+        # the wall-clock at callback time; sufficient for client
+        # ordering and not pretending to be a more authoritative
+        # timestamp than we actually have.
+        try:
+            await websocket.send_json({
+                "type": "transcript",
+                "kind": "partial",
+                "text": text,
+                "ts_ms": int(time.time() * 1000),
+            })
+        except Exception:
+            logger.debug("ws_voice: on_partial send failed bind=%s", bind)
+
+    async def _on_final(text: str) -> None:
+        # Finals contribute to the buffer (dedupe happened in the
+        # wrapper, so this is guaranteed-new text) AND surface to
+        # the operator as a transcript:final frame.
+        voice_buffer_mod.MANAGER.append_final(bind, text)
+        try:
+            await websocket.send_json({
+                "type": "transcript",
+                "kind": "final",
+                "text": text,
+                "ts_ms": int(time.time() * 1000),
+            })
+        except Exception:
+            logger.debug("ws_voice: on_final send failed bind=%s", bind)
+
+    async def _on_whisperlive_error(message: str) -> None:
+        nonlocal whisperlive_unavailable
+        whisperlive_unavailable = True
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "code": "whisperlive_session_error",
+                "message": message,
+            })
+        except Exception:
+            logger.debug("ws_voice: on_error send failed bind=%s", bind)
+
+    async def _ensure_whisperlive_connected() -> bool:
+        """Idempotent: instantiate + connect WhisperLive on the
+        first 'start'. Returns True on ready, False on failure
+        (typed error frame already sent to operator).
+
+        Subsequent calls on the same WS return whisperlive_client.
+        is_ready() — no re-attempt. Operators retry by reconnecting.
+        """
+        nonlocal whisperlive_client, whisperlive_unavailable
+        if whisperlive_client is not None:
+            return whisperlive_client.is_ready()
+        if whisperlive_unavailable:
+            return False
+        whisperlive_client = voice_wl.WhisperLiveClient(
+            url=voice_wl.WHISPERLIVE_URL,
+            uid=f"{bind}-{uuid.uuid4().hex[:8]}",
+            model=voice_wl.WHISPERLIVE_MODEL,
+            language=voice_wl.WHISPERLIVE_LANGUAGE,
+            use_vad=voice_wl.WHISPERLIVE_USE_VAD,
+            on_partial=_on_partial,
+            on_final=_on_final,
+            on_error=_on_whisperlive_error,
+        )
+        try:
+            await whisperlive_client.connect_and_wait_ready()
+        except voice_wl.WhisperLiveConnectError as exc:
+            whisperlive_unavailable = True
+            try:
+                await websocket.send_json({
+                    "type": "error",
+                    "code": "whisperlive_connect_failed",
+                    "message": str(exc),
+                })
+            except Exception:
+                pass
+            # Wrapper went to UNAVAILABLE inside connect_and_wait_ready;
+            # we leave the reference so close() in finally is a no-op
+            # rather than re-instantiating.
+            return False
+        return True
+
     logger.info(
         "ws_voice: connected bind=%s state=%s restored_buffer_chars=%d",
         bind, session.state, len(acq.buffer_text),
@@ -6284,6 +6383,15 @@ async def ws_voice(websocket: WebSocket):
                 responses = session.handle_control(frame_type)
                 for resp in responses:
                     await websocket.send_json(resp)
+                # 'start' from IDLE triggered the LISTENING
+                # transition — that's when we connect WhisperLive
+                # (sync wait for SERVER_READY so subsequent audio
+                # frames find the wrapper ready). Failure sends a
+                # typed error frame from inside the helper; the WS
+                # stays open so the operator can still mute / end
+                # the session cleanly.
+                if frame_type == "start" and session.state == voice_mod.LISTENING:
+                    await _ensure_whisperlive_connected()
                 # S3-3 commit stub: the buffer manager is wired but
                 # tmux_send isn't (S3-5). Read the current buffer:
                 #   - empty → commit_error code=no_buffer (real now,
@@ -6330,19 +6438,35 @@ async def ws_voice(websocket: WebSocket):
                 if session.state == voice_mod.ENDED:
                     break
             elif "bytes" in msg and msg["bytes"] is not None:
-                # S3-3 stub: audio frames silently dropped (no
-                # WhisperLive yet). handle_audio still returns whether
-                # to forward — once S3-4 lands, the True branch
-                # forwards to the WhisperLive client and appends
-                # finals via voice_buffer_mod.MANAGER.append_final.
-                _should_forward = session.handle_audio(msg["bytes"])
-                # No-op for S3-3.
+                should_forward = session.handle_audio(msg["bytes"])
+                if (
+                    should_forward
+                    and whisperlive_client is not None
+                    and whisperlive_client.is_ready()
+                ):
+                    await whisperlive_client.send_audio(msg["bytes"])
+                # else: state machine said no (muted / committing /
+                # ended) or wrapper not ready / unavailable.
+                # Silently drop — spec says audio outside LISTENING
+                # is dropped without an error frame, and the
+                # whisperlive_connect_failed / whisperlive_session_error
+                # frame already informed the operator if the upstream
+                # is the reason.
     except WebSocketDisconnect:
         pass
     except Exception:
         logger.exception("ws_voice: unexpected error bind=%s", bind)
     finally:
         session.force_end()
+        if whisperlive_client is not None:
+            # Idempotent; safe to call even if already torn down.
+            # Awaited so the recv-loop task finishes before the
+            # route returns and the test fixture's event loop can
+            # reach quiescence.
+            try:
+                await whisperlive_client.close()
+            except Exception:
+                logger.debug("ws_voice: whisperlive close failed bind=%s", bind)
         if superseded_event.is_set():
             # We were kicked by a later connection — that connection
             # already owns the buffer. Don't detach (would clear the
