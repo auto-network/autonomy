@@ -6,8 +6,12 @@ const pageTitle = document.getElementById('page-title');
 const statsSummary = document.getElementById('stats-summary');
 const harnessUsage = document.getElementById('harness-usage');
 const globalSearch = document.getElementById('global-search');
+const sessionViewLayer = document.getElementById('session-view-layer');
+const sessionViewHost = document.getElementById('session-view-host');
 const HARNESS_USAGE_SETTINGS_SET_ID = 'dashboard.harness.usage';
 const HARNESS_USAGE_STALE_MS = 15 * 60 * 1000;
+let _currentContentPath = null;
+let _sessionOverlayBasePath = null;
 
 // ── Screenshot Capture (Design Studio) ───────────────────────
 // Persistent MediaStream for tab capture; survives page navigations within SPA.
@@ -623,6 +627,7 @@ async function renderSessionsFragment() {
     _fragmentCache.set('/pages/sessions', html);
   }
   _replaceFragment(content, html);
+  _currentContentPath = '/sessions';
 }
 
 async function renderWorktreesFragment() {
@@ -639,8 +644,9 @@ async function renderWorktreesFragment() {
   _replaceFragment(content, html);
 }
 
-async function renderSessionViewFragment() {
+async function renderSessionViewFragment(host) {
   pageTitle.textContent = 'Session';
+  const target = host || content;
   let html;
   if (_fragmentCache.has('/pages/session-view')) {
     html = _fragmentCache.get('/pages/session-view');
@@ -649,7 +655,50 @@ async function renderSessionViewFragment() {
     html = await res.text();
     _fragmentCache.set('/pages/session-view', html);
   }
-  _replaceFragment(content, html);
+  _replaceFragment(target, html);
+  if (target === content) _currentContentPath = window.location.pathname;
+}
+
+function _isSessionPath(path) {
+  return /^\/session\/[^/]+\/.+$/.test(path || '');
+}
+
+function _sessionOverlayCanHandle(path) {
+  return !!(sessionViewLayer && sessionViewHost && _isSessionPath(path) && _currentContentPath === '/sessions');
+}
+
+function _showSessionOverlayChrome() {
+  if (!sessionViewLayer) return;
+  sessionViewLayer.classList.add('active');
+  sessionViewLayer.setAttribute('aria-hidden', 'false');
+}
+
+function _hideSessionOverlayChrome() {
+  if (!sessionViewLayer) return;
+  sessionViewLayer.classList.remove('active');
+  sessionViewLayer.setAttribute('aria-hidden', 'true');
+}
+
+function _destroySessionOverlay() {
+  if (!sessionViewHost || !window.Alpine) {
+    if (sessionViewHost) sessionViewHost.innerHTML = '';
+    return;
+  }
+  Array.from(sessionViewHost.children).forEach(child => Alpine.destroyTree(child));
+  sessionViewHost.innerHTML = '';
+}
+
+async function _openSessionOverlay(basePath) {
+  if (!sessionViewLayer || !sessionViewHost) return false;
+  _sessionOverlayBasePath = basePath || _sessionOverlayBasePath || '/sessions';
+  await renderSessionViewFragment(sessionViewHost);
+  _showSessionOverlayChrome();
+  return true;
+}
+
+function _closeSessionOverlay() {
+  _hideSessionOverlayChrome();
+  _destroySessionOverlay();
 }
 
 async function renderSourceFragment() {
@@ -1906,8 +1955,13 @@ async function renderPluginFragment(plugin) {
 
 function navigateTo(path) {
   if (path === window.location.pathname + window.location.search) return;
+  const fromPath = window.location.pathname;
   history.replaceState({ scrollY: window.scrollY }, '');
   history.pushState({}, '', path);
+  if (fromPath === '/sessions' && _sessionOverlayCanHandle(path)) {
+    _openSessionOverlay(fromPath);
+    return;
+  }
   route();
 }
 
@@ -1923,7 +1977,8 @@ async function route() {
   _renderSidebarPlugins();
   const path = window.location.pathname;
   const isTerminalPage = path === '/terminal' || path.startsWith('/terminal/');
-  const isSessionViewPage = /^\/session\/[^/]+\/.+$/.test(path);
+  const isSessionViewPage = _isSessionPath(path);
+  const handledBySessionOverlay = _sessionOverlayCanHandle(path);
 
   // Toggle between #content and persistent #terminal-page
   const termPage = document.getElementById('terminal-page');
@@ -1945,7 +2000,7 @@ async function route() {
   content.style.padding = isDesignPage ? '0' : '';
 
   // Fullscreen page mode: session viewer owns the viewport (hides sidebar + header)
-  document.body.classList.toggle('fullscreen-page', isSessionViewPage);
+  document.body.classList.toggle('fullscreen-page', isSessionViewPage && !handledBySessionOverlay);
 
   // Per-route body class — currently only used by /search to flush its
   // sticky filter strip against the global header (drops the 24px gap
@@ -1974,6 +2029,26 @@ async function route() {
     : path === '/worktrees' ? 'Search worktrees...'
     : path === '/streams' ? 'Search streams...'
     : 'Search graph...';
+
+  if (handledBySessionOverlay) {
+    await _openSessionOverlay(_sessionOverlayBasePath || '/sessions');
+    window.dispatchEvent(new CustomEvent('app:navigated', {
+      detail: { path: window.location.pathname },
+    }));
+    return;
+  }
+
+  if (!isSessionViewPage && _sessionOverlayBasePath) {
+    _sessionOverlayBasePath = null;
+    _closeSessionOverlay();
+    if (path === '/sessions' && _currentContentPath === '/sessions') {
+      pageTitle.textContent = 'Sessions';
+      window.dispatchEvent(new CustomEvent('app:navigated', {
+        detail: { path: window.location.pathname },
+      }));
+      return;
+    }
+  }
 
   // Plugin-aware routing — check the substrate before the legacy ladder.
   const matchedPlugin = window.Autonomy.matchPlugin(path);
@@ -2012,6 +2087,9 @@ async function route() {
     renderSearchFragment();
   } else {
     _replaceFragment(content, '<div class="text-gray-400">Page not found</div>');
+  }
+  if (!isTerminalPage) {
+    _currentContentPath = path;
   }
   // Notify persistent (un-cleared) header components that the SPA route
   // changed. Used by the agent-actions dropdown — its Alpine root lives

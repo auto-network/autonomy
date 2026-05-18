@@ -28,6 +28,7 @@ import json
 import logging
 import math
 import os
+import sqlite3
 import threading
 import time
 from collections import Counter
@@ -1782,22 +1783,32 @@ def read_set(
         if peer_db is None:
             continue
         placeholders = ",".join("?" for _ in PEER_VISIBLE_STATES)
-        rows = peer_db.conn.execute(
-            f"SELECT * FROM settings WHERE set_id = ? "
-            f"  AND deprecated = 0 "
-            f"  AND publication_state IN ({placeholders})"
-            f"{prefix_clause}",
-            (set_id, *PEER_VISIBLE_STATES, *prefix_params),
-        ).fetchall()
+        try:
+            rows = peer_db.conn.execute(
+                f"SELECT * FROM settings WHERE set_id = ? "
+                f"  AND deprecated = 0 "
+                f"  AND publication_state IN ({placeholders})"
+                f"{prefix_clause}",
+                (set_id, *PEER_VISIBLE_STATES, *prefix_params),
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table: settings" in str(exc).lower():
+                continue
+            raise
         for r in rows:
             raw_rows.append((peer, r))
-        dep_row = peer_db.conn.execute(
-            f"SELECT COUNT(*) AS n FROM settings WHERE set_id = ? "
-            f"  AND deprecated = 1 "
-            f"  AND publication_state IN ({placeholders})"
-            f"{prefix_clause}",
-            (set_id, *PEER_VISIBLE_STATES, *prefix_params),
-        ).fetchone()
+        try:
+            dep_row = peer_db.conn.execute(
+                f"SELECT COUNT(*) AS n FROM settings WHERE set_id = ? "
+                f"  AND deprecated = 1 "
+                f"  AND publication_state IN ({placeholders})"
+                f"{prefix_clause}",
+                (set_id, *PEER_VISIBLE_STATES, *prefix_params),
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table: settings" in str(exc).lower():
+                continue
+            raise
         if dep_row is not None:
             deprecated_filtered += int(dep_row["n"])
 

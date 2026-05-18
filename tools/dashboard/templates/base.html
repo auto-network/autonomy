@@ -161,6 +161,13 @@
     /* #live-panel-body is the .session-viewer[data-mode="overlay"] mount —
        its height/padding/background rules live below under that selector. */
     #live-panel.collapsed #live-panel-body { display: none; }
+    #session-view-layer {
+      position: fixed; inset: 0; z-index: 90;
+      display: none; background: #111827;
+    }
+    #session-view-layer.active { display: block; }
+    #session-view-host { height: 100%; }
+    #session-view-host > .session-viewer[data-mode="page"] { height: 100%; }
     .live-resume-btn {
       position: sticky; bottom: 0.5rem; align-self: center;
       padding: 0.25rem 1rem; background: #4f46e5; color: white;
@@ -651,6 +658,10 @@
       #live-panel {
         padding-bottom: env(safe-area-inset-bottom);
       }
+      #session-view-layer {
+        padding-top: env(safe-area-inset-top);
+        padding-bottom: env(safe-area-inset-bottom);
+      }
     }
     /* Prevent horizontal scrolling on mobile */
     html, body { overflow-x: hidden; overscroll-behavior: none; }
@@ -1011,6 +1022,24 @@
       background: #111827;
     }
     .sv-entries > .live-entry + .live-entry { margin-top: 0.75rem; }
+    .sv-history-load {
+      display: flex;
+      justify-content: center;
+      padding: 0 0 0.75rem;
+    }
+    .sv-history-load-btn {
+      border: 1px solid #374151;
+      background: rgba(31, 41, 55, 0.9);
+      color: #d1d5db;
+      border-radius: 9999px;
+      padding: 0.35rem 0.85rem;
+      font-size: 0.75rem;
+      line-height: 1;
+    }
+    .sv-history-load-btn:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
 
     /* Row 3 — Input bar (normal flow, NOT fixed) */
     .sv-input {
@@ -1561,6 +1590,13 @@
          x-data="worktreesPage({ mode: 'overlay' })"
          x-cloak>
       {% include "partials/worktree-review-overlays.html" %}
+    </div>
+
+    <!-- Persistent fullscreen session viewer overlay. Keeps the current page
+         mounted underneath so back-swipe can reveal the sessions list
+         instantly without re-rendering it. -->
+    <div id="session-view-layer" aria-hidden="true">
+      <div id="session-view-host"></div>
     </div>
   </div>
 

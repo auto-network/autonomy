@@ -54,6 +54,7 @@ document.addEventListener('alpine:init', function() {
         if (s.harness_token !== undefined) store.harnessToken = s.harness_token;
         if (s.harness_token_alias !== undefined) store.harnessTokenAlias = s.harness_token_alias;
       }
+      _emitSessionStoreChanged('seed');
     })
     .catch(function(e) { console.warn('[session-store] seed fetch error', e); });
 });
@@ -92,6 +93,8 @@ window.getSessionStore = function(sessionId) {
       model: null,                 // auto-ngis4: most-recent assistant-turn model id
       harnessToken: null,          // auto-08n3f: Anthropic org UUID (substrate key on dashboard.claude.credentials)
       harnessTokenAlias: null,     // auto-08n3f: friendly alias from dashboard.claude.credentials.alias (UI display)
+      olderBefore: null,           // reverse-tail cursor for older-history paging
+      hasMoreHistory: false,       // whether older-history paging can continue
       loaded: false,
       _loading: false,   // true during initial fetch — buffers SSE
       _pendingSSE: [],
@@ -105,6 +108,18 @@ window.getSessionStore = function(sessionId) {
   }
   return sessions[sessionId];
 };
+
+function _emitSessionStoreChanged(reason) {
+  if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function' || typeof CustomEvent !== 'function') return;
+  window.dispatchEvent(new CustomEvent('sessions:store-changed', {
+    detail: { reason: reason || 'update' },
+  }));
+}
+
+function _emitSessionRegistryChanged() {
+  if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function' || typeof CustomEvent !== 'function') return;
+  window.dispatchEvent(new CustomEvent('sessions:registry-changed'));
+}
 
 /**
  * Compute a stable identity key for an entry. Used to dedup entries when SSE
@@ -285,6 +300,40 @@ window.appendSessionEntries = function(store, data, provenance) {
       store._entriesViaSSECount = (store._entriesViaSSECount || 0) + added;
     }
     store._lastRenderTs = Date.now();
+    _emitSessionStoreChanged(provenance === 'fetch' ? 'fetch' : 'message');
+  }
+  return added;
+};
+
+window.prependSessionEntries = function(store, data, provenance) {
+  if (data.seq !== undefined) {
+    if (data.seq > store.seq) {
+      store.seq = data.seq;
+    } else if (store.seq > 1 && data.seq * 2 < store.seq) {
+      store.seq = data.seq;
+    }
+  }
+
+  if (data.is_live !== undefined) store.isLive = data.is_live;
+
+  if (!data.entries || data.entries.length === 0) return 0;
+
+  var added = 0;
+  var insertAt = 0;
+  for (var i = 0; i < data.entries.length; i++) {
+    if (_appendUniqueEntry(store, data.entries[i], insertAt)) {
+      added++;
+      insertAt++;
+    }
+  }
+  if (added > 0) {
+    if (provenance === 'fetch') {
+      store._entriesViaFetchCount = (store._entriesViaFetchCount || 0) + added;
+    } else {
+      store._entriesViaSSECount = (store._entriesViaSSECount || 0) + added;
+    }
+    store._lastRenderTs = Date.now();
+    _emitSessionStoreChanged(provenance === 'fetch' ? 'fetch-prepend' : 'prepend');
   }
   return added;
 };
@@ -349,6 +398,7 @@ window.ensureSessionMessages = function() {
     store._turnCorrections = store._turnCorrections || {};
     store._turnCorrections[correction.target_message_id] = correction;
     store._lastRenderTs = Date.now();
+    _emitSessionStoreChanged('turn_correction');
   });
 
   window.registerHandler('session:registry', function(registrySessions) {
@@ -391,6 +441,8 @@ window.ensureSessionMessages = function() {
         allSessions[id].isLive = false;
       }
     }
+    _emitSessionStoreChanged('registry');
+    _emitSessionRegistryChanged();
   });
 
   // Handle label_update events — update stored session's label field
@@ -400,6 +452,7 @@ window.ensureSessionMessages = function() {
     // Store key is tmux_name, which is the session_id
     if (sessions[data.session_id]) {
       sessions[data.session_id].label = data.label || '';
+      _emitSessionStoreChanged('label');
     }
   });
 };
