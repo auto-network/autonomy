@@ -663,8 +663,19 @@ function _isSessionPath(path) {
   return /^\/session\/[^/]+\/.+$/.test(path || '');
 }
 
+function _isMobileOverlayViewport() {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+  return window.matchMedia('(max-width: 767px)').matches;
+}
+
 function _sessionOverlayCanHandle(path) {
-  return !!(sessionViewLayer && sessionViewHost && _isSessionPath(path) && _currentContentPath === '/sessions');
+  return !!(
+    sessionViewLayer
+    && sessionViewHost
+    && _isMobileOverlayViewport()
+    && _isSessionPath(path)
+    && _currentContentPath === '/sessions'
+  );
 }
 
 function _showSessionOverlayChrome() {
@@ -1979,6 +1990,7 @@ async function route() {
   const isTerminalPage = path === '/terminal' || path.startsWith('/terminal/');
   const isSessionViewPage = _isSessionPath(path);
   const handledBySessionOverlay = _sessionOverlayCanHandle(path);
+  const isMobileOverlayViewport = _isMobileOverlayViewport();
 
   // Toggle between #content and persistent #terminal-page
   const termPage = document.getElementById('terminal-page');
@@ -2000,7 +2012,10 @@ async function route() {
   content.style.padding = isDesignPage ? '0' : '';
 
   // Fullscreen page mode: session viewer owns the viewport (hides sidebar + header)
-  document.body.classList.toggle('fullscreen-page', isSessionViewPage && !handledBySessionOverlay);
+  document.body.classList.toggle(
+    'fullscreen-page',
+    isSessionViewPage && !handledBySessionOverlay && isMobileOverlayViewport
+  );
 
   // Per-route body class — currently only used by /search to flush its
   // sticky filter strip against the global header (drops the 24px gap

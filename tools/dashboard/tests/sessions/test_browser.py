@@ -295,6 +295,43 @@ class TestSessionOverlayNavigation:
         assert back_state["markedCardStillMounted"], "Back should reveal the original sessions DOM instead of rebuilding it"
         assert back_state["overlayHostChildren"] == 0, "Overlay host should be cleared after closing"
 
+    def test_desktop_navigation_keeps_dashboard_chrome_visible(self, h):
+        ab_raw("set", "viewport", "1280", "900")
+        time.sleep(0.5)
+        try:
+            ab_eval("""
+                navigateTo('/session/autonomy/auto-test-alpha?tmux=auto-test-alpha');
+                return true;
+            """)
+            time.sleep(1.5)
+
+            desktop_state = ab_eval("""
+                var layer = document.getElementById('session-view-layer');
+                var viewer = document.querySelector('main#content .session-viewer');
+                return {
+                  path: window.location.pathname,
+                  overlayActive: !!(layer && layer.classList.contains('active')),
+                  fullscreen: document.body.classList.contains('fullscreen-page'),
+                  headerVisible: (function(){ var e=document.querySelector('header'); return !!(e && e.offsetParent !== null); })(),
+                  sidebarVisible: (function(){ var e=document.getElementById('sidebar'); return !!(e && e.offsetParent !== null); })(),
+                  viewerInContent: !!viewer,
+                };
+            """)
+            assert desktop_state["path"] == "/session/autonomy/auto-test-alpha"
+            assert not desktop_state["overlayActive"], "Desktop session open should not use the fullscreen overlay"
+            assert not desktop_state["fullscreen"], "Desktop session open should not toggle mobile fullscreen mode"
+            assert desktop_state["headerVisible"], "Desktop session view should keep the global header visible"
+            assert desktop_state["sidebarVisible"], "Desktop session view should keep the sidebar visible"
+            assert desktop_state["viewerInContent"], "Desktop session view should render in the main content area"
+        finally:
+            ab_eval("""
+                if (window.location.pathname !== '/sessions') navigateTo('/sessions');
+                return true;
+            """)
+            time.sleep(1.0)
+            ab_raw("set", "viewport", "430", "900")
+            time.sleep(0.5)
+
 
 class TestTopicsRender:
     """Topics from the API appear on session cards."""
