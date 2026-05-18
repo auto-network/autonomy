@@ -1183,12 +1183,19 @@
        scoping these to #worktree-review-layer avoids double padding when
        review opens from /worktrees itself. */
     #worktree-review-layer .worktree-review-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 120;
+      overflow-y: auto;
       overflow-x: hidden;
       overscroll-behavior-x: none;
+      background: #030712;
       padding-top: 0.75rem;
     }
     #worktree-review-layer .worktree-review-shell {
+      min-height: 100vh;
       max-width: 100%;
+      background: #030712;
     }
     #worktree-review-layer .worktree-diff-scroller {
       max-width: 100%;
