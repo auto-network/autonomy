@@ -66,6 +66,32 @@ class TestSessionTailAPI:
         assert "resolved" in data, f"Missing 'resolved' in tail response: {list(data.keys())}"
         assert data["resolved"] is True, "Mock sessions with entries should be resolved"
 
+    def test_reverse_tail_returns_recent_chunk_and_history_cursor(self, test_client):
+        data = test_client.get("/api/session/autonomy/auto-test-designer/tail?tail_lines=2").json()
+        entries = data.get("entries", [])
+        assert len(entries) <= 2, f"reverse tail should return a small trailing chunk, got {len(entries)}"
+        assert "older_before" in data, f"reverse tail missing older_before cursor: {data!r}"
+        assert "has_more" in data, f"reverse tail missing has_more flag: {data!r}"
+
+    def test_reverse_tail_older_page_is_monotonic(self, test_client):
+        first = test_client.get("/api/session/autonomy/auto-test-designer/tail?tail_lines=1").json()
+        before = first.get("older_before")
+        assert before is not None, f"reverse tail missing older_before cursor: {first!r}"
+        older = test_client.get(
+            f"/api/session/autonomy/auto-test-designer/tail?tail_lines=1&before={before}"
+        ).json()
+        assert "older_before" in older, f"older page missing older_before cursor: {older!r}"
+        older_before = older["older_before"]
+        if older.get("has_more"):
+            assert older_before < before, (
+                f"older page cursor must advance toward file start while history remains; "
+                f"got before={before} older={older!r}"
+            )
+        else:
+            assert older_before <= before, (
+                f"terminal older page cursor must not move forward; got before={before} older={older!r}"
+            )
+
     def test_nonexistent_session_handled(self, test_client):
         resp = test_client.get("/api/session/autonomy/doesnt-exist/tail?after=0")
         assert resp.status_code in (200, 400, 404), f"Unexpected: {resp.status_code}"

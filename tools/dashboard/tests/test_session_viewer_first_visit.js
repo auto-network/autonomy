@@ -103,7 +103,7 @@ function makeHarness(fetchHandlers) {
     if (url === '/api/dao/active_sessions') {
       return Promise.resolve({ json: () => Promise.resolve([]) });
     }
-    if (url.startsWith('/api/session/') && !url.endsWith('/tail?after=0')) {
+    if (url.startsWith('/api/session/') && !url.includes('/tail?')) {
       // Org-backfill probe (line 286 of session-viewer.js): be permissive.
       return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
     }
@@ -183,7 +183,7 @@ function entryAt(ts, content) {
 describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
   it('clears pre-fetch SSE entries so the chronological backlog renders in order', async () => {
     // Mock fetch to return entries chronologically older than the SSE one.
-    const tailUrl = '/api/session/autonomy/auto-test/tail?after=0';
+    const tailUrl = '/api/session/autonomy/auto-test/tail?tail_lines=200';
     const fetchedEntries = [
       entryAt('2026-01-01T09:55:00Z', 'fetch-old-1'),
       entryAt('2026-01-01T09:56:00Z', 'fetch-old-2'),
@@ -245,7 +245,7 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
   });
 
   it('drains pendingSSE arriving during the fetch and keeps chronology', async () => {
-    const tailUrl = '/api/session/autonomy/auto-test/tail?after=0';
+    const tailUrl = '/api/session/autonomy/auto-test/tail?tail_lines=200';
 
     // We need to inject an SSE event *while_fetchBacklog is awaiting*. Stash
     // a hook on the harness window; the fake fetch resolves on the next tick
@@ -314,7 +314,7 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
   });
 
   it('resets _seenIdentities so post-fetch entries are not deduped against pre-clear SSE writes', async () => {
-    const tailUrl = '/api/session/autonomy/auto-test/tail?after=0';
+    const tailUrl = '/api/session/autonomy/auto-test/tail?tail_lines=200';
     const toolEntry = {
       type: 'tool_use',
       tool_id: 'tool_abc',

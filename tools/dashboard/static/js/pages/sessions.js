@@ -379,6 +379,25 @@
         document.body.classList.remove('zoom-compact', 'zoom-normal', 'zoom-expanded');
         document.body.classList.add('zoom-' + level);
       },
+      _scheduleStoreSync() {
+        if (this._storeSyncQueued) return;
+        this._storeSyncQueued = true;
+        var self = this;
+        var raf = window.requestAnimationFrame || function(cb) { return setTimeout(cb, 0); };
+        raf(function() {
+          self._storeSyncQueued = false;
+          self._updateFromStore();
+        });
+      },
+      _scheduleRecentRefresh() {
+        if (this._recentRefreshQueued) return;
+        this._recentRefreshQueued = true;
+        var self = this;
+        setTimeout(function() {
+          self._recentRefreshQueued = false;
+          self._fetchRecent();
+        }, 150);
+      },
       init() {
         this.$watch('activeSort', (v) => localStorage.setItem('sessionsActiveSort', v));
         this.$watch('recentSort', (v) => {
@@ -393,13 +412,18 @@
         // Ensure global SSE handlers are registered
         window.ensureSessionMessages();
 
-        // Build session list from store (poll every 500ms)
+        // Build session list from the shared session store.
         this._updateFromStore();
-        this._storeWatcher = setInterval(() => this._updateFromStore(), 500);
+        var self = this;
+        this._onStoreChanged = function() { self._scheduleStoreSync(); };
+        window.addEventListener('sessions:store-changed', this._onStoreChanged);
 
-        // Fetch recent sessions (from graph.db, not monitor)
+        // Fetch recent sessions (from graph.db, not monitor). Registry churn
+        // invalidates the recent list; we refresh on that signal instead of
+        // polling every 30s.
         this._fetchRecent();
-        this._recentTimer = setInterval(() => this._fetchRecent(), 30000);
+        this._onRegistryChanged = function() { self._scheduleRecentRefresh(); };
+        window.addEventListener('sessions:registry-changed', this._onRegistryChanged);
 
         // Workspace-changes status per session (drives the ⌥ indicator
         // on each session card). Pushed live via the ``worktrees`` SSE
@@ -407,7 +431,6 @@
         // the cards paint immediately on mount, and updates flow
         // through the same path within ~5s of the backend monitor
         // detecting a change.
-        var self = this;
         this._workspaceHandler = function (rows) { self._applyWorkspaceRows(rows); };
         if (typeof window.registerHandler === 'function') {
           window.registerHandler('worktrees', this._workspaceHandler);
@@ -697,8 +720,8 @@
       },
 
       destroy() {
-        if (this._storeWatcher) clearInterval(this._storeWatcher);
-        if (this._recentTimer) clearInterval(this._recentTimer);
+        if (this._onStoreChanged) window.removeEventListener('sessions:store-changed', this._onStoreChanged);
+        if (this._onRegistryChanged) window.removeEventListener('sessions:registry-changed', this._onRegistryChanged);
         if (this._workspaceHandler && typeof window.unregisterHandler === 'function') {
           window.unregisterHandler('worktrees', this._workspaceHandler);
           this._workspaceHandler = null;

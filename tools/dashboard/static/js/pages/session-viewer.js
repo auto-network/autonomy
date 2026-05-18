@@ -15,6 +15,7 @@
  *   x-data="sessionViewerPage({mode:'overlay'})" — overlay mode
  */
 (function () {
+  var FAST_OPEN_TAIL_LINES = 200;
 
   function _formatProject(project) {
     const cleaned = project
@@ -126,6 +127,14 @@
         if (this.project) return _formatProject(this.project);
         return '';
       },
+      get olderBefore() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return s ? s.olderBefore : null;
+      },
+      get hasMoreHistory() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return !!(s && s.hasMoreHistory);
+      },
 
       // Workspace-changes indicator: derived from the cached
       // ``_workspaceStatus`` (populated by ``_refreshWorkspaceStatus``).
@@ -173,6 +182,7 @@
       // ── View-only state ─────────────────────────────────────────
       displayEntries: [],
       autoScroll: true,
+      loadingOlder: false,
       _workspaceStatus: null,
       _storeCleanups: [],
       _expanded: {},
@@ -474,6 +484,8 @@
           store.toolMap = {};
           store.resultMap = {};
           store._pendingSSE = [];
+          store.olderBefore = null;
+          store.hasMoreHistory = false;
 
           store._loading = true;
           window.ensureSessionMessages();
@@ -1020,12 +1032,24 @@
         if (data.type !== undefined) store.sessionType = data.type || '';
         if (data.role !== undefined) store.role = data.role || '';
         if (data.activity_state !== undefined) store.activityState = data.activity_state || 'idle';
+        if (data.older_before !== undefined) store.olderBefore = data.older_before;
+        if (data.has_more !== undefined) store.hasMoreHistory = !!data.has_more;
         if (data.seq !== undefined && (!data.entries || data.entries.length === 0)) {
           store.seq = data.seq;
         }
         if (data.entries && data.entries.length > 0) {
           window.appendSessionEntries(store, data, 'fetch');
         }
+      },
+
+      _initialTailUrl() {
+        return this._tailUrl + '?tail_lines=' + FAST_OPEN_TAIL_LINES;
+      },
+
+      _olderTailUrl(before) {
+        return this._tailUrl
+          + '?tail_lines=' + FAST_OPEN_TAIL_LINES
+          + '&before=' + encodeURIComponent(before);
       },
 
       // ── Scroll helpers ──────────────────────────────────────────
@@ -1043,6 +1067,55 @@
             });
           });
         });
+      },
+
+      async loadOlder() {
+        if (this.loadingOlder || !this.hasMoreHistory || this.olderBefore === null || !this._tailUrl) return;
+        var store = Alpine.store('sessions')[this.sessionKey];
+        if (!store) return;
+        var el = this.$refs.entriesContainer;
+        var prevHeight = el ? el.scrollHeight : 0;
+        var prevTop = el ? el.scrollTop : 0;
+        this.loadingOlder = true;
+        try {
+          var res = await fetch(this._olderTailUrl(this.olderBefore));
+          if (!res.ok) {
+            throw new Error('History fetch failed (' + res.status + ')');
+          }
+          var data = await res.json();
+          if (data.error) throw new Error(data.error);
+          if (data.offset !== undefined) store.offset = data.offset || store.offset || 0;
+          if (data.is_live !== undefined) store.isLive = !!data.is_live;
+          if (data.resolved !== undefined) store.resolved = !!data.resolved;
+          if (data.older_before !== undefined) store.olderBefore = data.older_before;
+          if (data.has_more !== undefined) store.hasMoreHistory = !!data.has_more;
+          if (data.entries && data.entries.length > 0) {
+            window.prependSessionEntries(store, data, 'fetch');
+            this._rebuildDisplay();
+            var self = this;
+            this.$nextTick(function() {
+              requestAnimationFrame(function() {
+                var scroller = self.$refs.entriesContainer;
+                if (!scroller) return;
+                var delta = scroller.scrollHeight - prevHeight;
+                scroller.scrollTop = prevTop + delta;
+              });
+            });
+          }
+        } catch (err) {
+          console.warn('[sessionViewer] older-history fetch failed', err);
+        } finally {
+          this.loadingOlder = false;
+        }
+      },
+
+      onScroll() {
+        window.SessionRenderer.onScroll.call(this);
+        var el = this.$refs.entriesContainer;
+        if (!el) return;
+        if (el.scrollTop < 80 && this.hasMoreHistory && !this.loadingOlder) {
+          this.loadOlder();
+        }
       },
 
       // ── Screenshot injection indicator ──────────────────────────
@@ -1481,11 +1554,10 @@
       // ── Backfill fetch ──────────────────────────────────────────
 
       async _fetchBacklog(store) {
-        var self = this;
         // Probe first: 404 means the session does not exist and the viewer
         // must surface an error state (auto-ylj6r test #19). We do a HEAD-
         // equivalent lightweight GET so we can inspect response.status.
-        var probe = await fetch(this._tailUrl + '?after=0');
+        var probe = await fetch(this._initialTailUrl());
         if (probe.status === 404) {
           var err = new Error('Session not found');
           err.missingSession = true;

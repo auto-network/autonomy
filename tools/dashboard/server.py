@@ -4013,7 +4013,30 @@ async def api_session_tail(request):
     """
     project = request.path_params["project"]
     session_id = request.path_params["session_id"]
-    after = int(request.query_params.get("after", "0"))
+    tail_lines_raw = request.query_params.get("tail_lines")
+    before_raw = request.query_params.get("before")
+    reverse_window = tail_lines_raw is not None
+    if reverse_window:
+        try:
+            tail_lines = int(tail_lines_raw or "0")
+        except ValueError:
+            return JSONResponse({"error": "invalid tail_lines"}, status_code=400)
+        if tail_lines <= 0:
+            return JSONResponse({"error": "tail_lines must be >= 1"}, status_code=400)
+        try:
+            before = int(before_raw) if before_raw is not None else None
+        except ValueError:
+            return JSONResponse({"error": "invalid before"}, status_code=400)
+        after = 0
+    else:
+        if before_raw is not None:
+            return JSONResponse(
+                {"error": "before requires tail_lines"},
+                status_code=400,
+            )
+        after = int(request.query_params.get("after", "0"))
+        tail_lines = 0
+        before = None
 
     # Mock mode: return fixture entries if available
     if os.environ.get("DASHBOARD_MOCK"):
@@ -4025,8 +4048,15 @@ async def api_session_tail(request):
             # defaults to True and dead-dispatch viewers render as live.
             mock_session = dao_sessions.get_session_by_id(session_id) or {}
             TaskStateTracker().enrich(session_id, entries)
+            if reverse_window:
+                end_idx = len(entries) if before is None else max(0, min(before, len(entries)))
+                start_idx = max(0, end_idx - tail_lines)
+                chunk_entries = entries[start_idx:end_idx]
+            else:
+                start_idx = 0
+                chunk_entries = entries
             resp = {
-                "entries": entries, "offset": len(entries),
+                "entries": chunk_entries, "offset": len(entries),
                 "is_live": bool(mock_session.get("is_live", True)),
                 "type": mock_session.get("type", ""),
                 "role": mock_session.get("role", ""),
@@ -4034,6 +4064,9 @@ async def api_session_tail(request):
                 "seq": len(entries),
                 "resolved": bool(mock_session.get("resolved", True)),
             }
+            if reverse_window:
+                resp["older_before"] = start_idx
+                resp["has_more"] = start_idx > 0
             return JSONResponse(resp)
 
     # First, try resolving via DB (session_id may be a tmux_name,
@@ -4156,16 +4189,19 @@ async def api_session_tail(request):
         base_resp["tmux_name"] = tmux_name
     if session_uuid:
         base_resp["session_uuid"] = session_uuid
-    if after >= file_size:
+    if not reverse_window and after >= file_size:
         return JSONResponse(base_resp)
 
     entries = []
-    with open(session_file, "rb") as f:
-        f.seek(after)
-        data = f.read()
-        new_offset = after + len(data)
+    if reverse_window:
+        data, window_start, window_end = _read_jsonl_tail_window(
+            session_file,
+            n=tail_lines,
+            before=before,
+        )
+        new_offset = file_size
         text = data.decode("utf-8", errors="replace")
-        for line in text.strip().split("\n"):
+        for line in text.split("\n"):
             line = line.strip()
             if not line:
                 continue
@@ -4176,6 +4212,23 @@ async def api_session_tail(request):
                 entries.extend(parsed)
             else:
                 entries.append(parsed)
+    else:
+        with open(session_file, "rb") as f:
+            f.seek(after)
+            data = f.read()
+            new_offset = after + len(data)
+            text = data.decode("utf-8", errors="replace")
+            for line in text.strip().split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                parsed = harness.parse_line(line)
+                if parsed is None:
+                    continue
+                if isinstance(parsed, list):
+                    entries.extend(parsed)
+                else:
+                    entries.append(parsed)
 
     entries = harness.postprocess_entries(
         entries,
@@ -4192,8 +4245,11 @@ async def api_session_tail(request):
             if entry.get("type") == "viewer_attachment":
                 entry["session"] = tmux_name
     # Task* tile annotations need full-history context to resolve taskId→subject.
-    # Partial polls (after>0) miss earlier TaskCreates, so replay from offset 0.
-    if after > 0:
+    # Partial forward polls (after>0) miss earlier TaskCreates, so replay from
+    # offset 0. Reverse-window fast-open intentionally skips that full-history
+    # pass to keep the initial payload cheap; older pages fill in context as the
+    # operator scrolls back.
+    if not reverse_window and after > 0:
         history: list = []
         with open(session_file, "rb") as f:
             history_data = f.read(after)
@@ -4223,6 +4279,9 @@ async def api_session_tail(request):
         resp["tmux_name"] = tmux_name
     if session_uuid:
         resp["session_uuid"] = session_uuid
+    if reverse_window:
+        resp["older_before"] = window_start
+        resp["has_more"] = window_start > 0
     return JSONResponse(resp)
 
 
@@ -7368,6 +7427,60 @@ def _read_jsonl_tail(path: Path, n: int = 10) -> list[dict]:
             }),
         })
     return tails
+
+
+def _read_jsonl_tail_window(
+    path: Path,
+    *,
+    n: int,
+    before: int | None = None,
+) -> tuple[bytes, int, int]:
+    """Return an approximate trailing JSONL window ending at ``before``.
+
+    The window is selected by raw line count, not by normalized viewer-entry
+    count. That keeps the read path cheap and intentionally approximate for the
+    session viewer's fast-open mode: we want "a recent chunk" immediately, not
+    exact tile accounting.
+
+    Returns ``(raw_bytes, start_offset, end_offset)`` where ``raw_bytes`` is a
+    newline-aligned slice of the file suitable for line-by-line JSONL parsing.
+    ``start_offset`` is the byte offset immediately before ``raw_bytes`` and is
+    used as the cursor for fetching older history.
+    """
+    if n <= 0:
+        return b"", 0, 0
+    try:
+        with open(path, "rb") as fh:
+            try:
+                fh.seek(0, 2)
+                size = fh.tell()
+            except OSError:
+                return b"", 0, 0
+            end = size if before is None else max(0, min(int(before), size))
+            if end <= 0:
+                return b"", 0, 0
+            chunk_size = 8192
+            buf = b""
+            offset = end
+            while offset > 0 and buf.count(b"\n") <= n:
+                read = min(chunk_size, offset)
+                offset -= read
+                fh.seek(offset)
+                buf = fh.read(read) + buf
+            if offset > 0:
+                nl = buf.find(b"\n")
+                if nl != -1:
+                    offset += nl + 1
+                    buf = buf[nl + 1:]
+            segments = [seg for seg in buf.splitlines(keepends=True) if seg.strip()]
+            if not segments:
+                return b"", end, end
+            selected = segments[-n:] if len(segments) > n else segments
+            raw = b"".join(selected)
+            start = end - len(raw)
+            return raw, start, end
+    except (FileNotFoundError, OSError, ValueError):
+        return b"", 0, 0
 
 
 def _count_lines_in_window(path: Path, *, head: bool, window: int = 1024) -> int | None:

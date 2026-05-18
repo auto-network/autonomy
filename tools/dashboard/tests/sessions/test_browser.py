@@ -243,6 +243,59 @@ class TestUserCanSeeSessions:
         assert "Builder" in text
 
 
+class TestSessionOverlayNavigation:
+    """Opening a session from the list should preserve the mounted list underneath."""
+
+    def test_open_and_back_preserve_sessions_dom(self, h):
+        ab_eval("""
+            var card = document.querySelector('[data-testid="session-card"][data-session-id="auto-test-alpha"]');
+            if (card) card.dataset.overlayMarker = 'keep';
+            navigateTo('/session/autonomy/auto-test-alpha?tmux=auto-test-alpha');
+            return true;
+        """)
+        time.sleep(1.5)
+
+        overlay_state = ab_eval("""
+            var layer = document.getElementById('session-view-layer');
+            var host = document.getElementById('session-view-host');
+            var marked = document.querySelector('#content [data-overlay-marker="keep"]');
+            return {
+              path: window.location.pathname,
+              overlayActive: !!(layer && layer.classList.contains('active')),
+              fullscreen: document.body.classList.contains('fullscreen-page'),
+              markedCardStillMounted: !!marked,
+              overlayHostChildren: host ? host.children.length : -1,
+            };
+        """)
+        assert overlay_state["path"] == "/session/autonomy/auto-test-alpha"
+        assert overlay_state["overlayActive"], "Session overlay should be active when opened from /sessions"
+        assert not overlay_state["fullscreen"], "Overlay navigation should not toggle body.fullscreen-page"
+        assert overlay_state["markedCardStillMounted"], "Sessions list should remain mounted underneath the overlay"
+        assert overlay_state["overlayHostChildren"] >= 1, "Overlay host should contain the mounted session viewer"
+
+        ab_eval("""
+            history.back();
+            return true;
+        """)
+        time.sleep(1.0)
+
+        back_state = ab_eval("""
+            var layer = document.getElementById('session-view-layer');
+            var host = document.getElementById('session-view-host');
+            var marked = document.querySelector('#content [data-overlay-marker="keep"]');
+            return {
+              path: window.location.pathname,
+              overlayActive: !!(layer && layer.classList.contains('active')),
+              markedCardStillMounted: !!marked,
+              overlayHostChildren: host ? host.children.length : -1,
+            };
+        """)
+        assert back_state["path"] == "/sessions"
+        assert not back_state["overlayActive"], "Overlay should close on Back"
+        assert back_state["markedCardStillMounted"], "Back should reveal the original sessions DOM instead of rebuilding it"
+        assert back_state["overlayHostChildren"] == 0, "Overlay host should be cleared after closing"
+
+
 class TestTopicsRender:
     """Topics from the API appear on session cards."""
 

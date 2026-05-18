@@ -253,6 +253,14 @@
            @scroll="onScroll()"
            onclick="var el = document.querySelector('.sv-editable'); if (el) el.blur()">
 
+        <div class="sv-history-load" x-show="hasMoreHistory || loadingOlder" style="display:none;">
+          <button type="button"
+                  class="sv-history-load-btn"
+                  :disabled="loadingOlder"
+                  @click="loadOlder()"
+                  x-text="loadingOlder ? 'Loading older…' : 'Load older'"></button>
+        </div>
+
         <!-- Empty state for new sessions with no entries yet -->
         <template x-if="entries.length === 0">
           <div style="display: flex; align-items: center; justify-content: center; height: 100%;">
