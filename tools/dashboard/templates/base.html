@@ -712,7 +712,10 @@
 
     /* When session viewer is active, main#content lets the viewer fill it */
     main#content:has(.session-viewer) {
-      overflow: visible;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
       padding: 0 !important;
     }
 
@@ -745,7 +748,8 @@
       overscroll-behavior: none;
     }
     .session-viewer[data-mode="page"] {
-      height: 100%;
+      flex: 1 1 auto;
+      height: auto;
       min-height: 0;
     }
     @media (max-width: 767px) {
