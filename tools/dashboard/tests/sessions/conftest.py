@@ -141,6 +141,45 @@ def sessions_page_fixture():
         "beads": [],
         "active_sessions": SESSIONS_PAGE_SESSIONS,
         "session_entries": entries,
+        "worktrees": [
+            {
+                "session_name": "auto-test-alpha",
+                "session_title": "Alpha — card redesign",
+                "repo_name": "autonomy",
+                "session_live": True,
+                "commits_ahead": 0,
+                "is_dirty": True,
+                "dirty_files": [
+                    {
+                        "status": "M",
+                        "path": "tools/dashboard/templates/base.html",
+                        "additions": 3,
+                        "deletions": 1,
+                    }
+                ],
+            }
+        ],
+        "worktree_changes_details": {
+            "auto-test-alpha/autonomy": {
+                "files": [
+                    {
+                        "status": "M",
+                        "path": "tools/dashboard/templates/base.html",
+                        "additions": 3,
+                        "deletions": 1,
+                    }
+                ],
+                "patch": (
+                    "diff --git a/tools/dashboard/templates/base.html "
+                    "b/tools/dashboard/templates/base.html\n"
+                    "--- a/tools/dashboard/templates/base.html\n"
+                    "+++ b/tools/dashboard/templates/base.html\n"
+                    "@@ -1,1 +1,1 @@\n"
+                    "-old line\n"
+                    "+new line\n"
+                ),
+            }
+        },
         "recent_sessions": RECENT_SESSIONS,
         "experiments": [make_experiment(TEST_EXPERIMENT_ID)],
     }

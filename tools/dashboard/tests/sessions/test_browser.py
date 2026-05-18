@@ -352,6 +352,57 @@ class TestSessionOverlayNavigation:
             ab_raw("set", "viewport", "430", "900")
             time.sleep(0.5)
 
+    def test_mobile_session_overlay_worktree_review_stacks_above_viewer(self, h):
+        ab_eval("""
+            navigateTo('/session/autonomy/auto-test-alpha?tmux=auto-test-alpha');
+            return true;
+        """)
+        time.sleep(1.5)
+        try:
+            open_state = ab_eval("""
+                var reviewBtn = document.querySelector('#session-view-layer [data-testid="session-worktree-review-button"]');
+                if (reviewBtn) reviewBtn.click();
+                return !!reviewBtn;
+            """)
+            assert open_state, "Mobile session overlay did not render the worktree review button"
+            time.sleep(1.0)
+
+            review_state = ab_eval("""
+                var detail = document.querySelector('[data-testid="worktree-commit-detail"]')
+                  || document.querySelector('[data-testid="worktree-dirty-detail"]');
+                var shell = detail ? detail.querySelector('.worktree-review-shell') : null;
+                var pointEl = document.elementFromPoint(Math.floor(window.innerWidth / 2), Math.min(window.innerHeight - 20, 120));
+                var topDetail = pointEl && pointEl.closest('[data-testid="worktree-commit-detail"], [data-testid="worktree-dirty-detail"]');
+                var wtZ = detail ? getComputedStyle(detail).zIndex : '';
+                var svLayer = document.getElementById('session-view-layer');
+                var svZ = svLayer ? getComputedStyle(svLayer).zIndex : '';
+                return {
+                  path: window.location.pathname,
+                  detailOpen: !!detail,
+                  shellVisible: !!(shell && shell.offsetParent !== null),
+                  topmostIsReview: !!topDetail,
+                  worktreeOverlayZ: wtZ,
+                  sessionLayerZ: svZ,
+                };
+            """)
+            assert review_state["path"] == "/session/autonomy/auto-test-alpha"
+            assert review_state["detailOpen"], "Worktree review did not open from the mobile session overlay"
+            assert review_state["shellVisible"], "Worktree review shell is not visible after opening"
+            assert review_state["topmostIsReview"], "Worktree review should stack above the fullscreen session viewer on mobile"
+            assert int(review_state["worktreeOverlayZ"] or 0) > int(review_state["sessionLayerZ"] or 0), (
+                "Worktree review overlay z-index must exceed the fullscreen session-view layer"
+            )
+        finally:
+            ab_eval("""
+                if (window._worktreeReviewOverlay) {
+                  window._worktreeReviewOverlay.selectedCommit = null;
+                  window._worktreeReviewOverlay.selectedDirtyRow = null;
+                }
+                if (window.location.pathname !== '/sessions') history.back();
+                return true;
+            """)
+            time.sleep(1.0)
+
 
 class TestTopicsRender:
     """Topics from the API appear on session cards."""
