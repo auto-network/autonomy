@@ -308,6 +308,7 @@ class TestSessionOverlayNavigation:
             desktop_state = ab_eval("""
                 var layer = document.getElementById('session-view-layer');
                 var viewer = document.querySelector('main#content .session-viewer');
+                var input = document.querySelector('main#content .sv-input');
                 return {
                   path: window.location.pathname,
                   overlayActive: !!(layer && layer.classList.contains('active')),
@@ -315,6 +316,7 @@ class TestSessionOverlayNavigation:
                   headerVisible: (function(){ var e=document.querySelector('header'); return !!(e && e.offsetParent !== null); })(),
                   sidebarVisible: (function(){ var e=document.getElementById('sidebar'); return !!(e && e.offsetParent !== null); })(),
                   viewerInContent: !!viewer,
+                  inputVisible: !!(input && input.offsetParent !== null),
                 };
             """)
             assert desktop_state["path"] == "/session/autonomy/auto-test-alpha"
@@ -323,6 +325,7 @@ class TestSessionOverlayNavigation:
             assert desktop_state["headerVisible"], "Desktop session view should keep the global header visible"
             assert desktop_state["sidebarVisible"], "Desktop session view should keep the sidebar visible"
             assert desktop_state["viewerInContent"], "Desktop session view should render in the main content area"
+            assert desktop_state["inputVisible"], "Desktop session view should keep the message composer visible"
         finally:
             ab_eval("""
                 if (window.location.pathname !== '/sessions') navigateTo('/sessions');
