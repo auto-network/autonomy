@@ -75,12 +75,11 @@ def test_session_stats_lib_served(test_client):
         assert fn in body, f"session-stats.js missing formatter: {fn}"
 
 
-def test_sv_input_rule_has_no_closed_state_safe_area_padding():
-    """The grid-shell composer must not reserve a closed-keyboard bottom gutter."""
+def test_sv_input_rule_uses_closed_state_safe_area_padding():
+    """The grid-shell composer should reserve the validated resting safe-area inset."""
     base_html = Path(__file__).resolve().parents[2] / "templates" / "base.html"
     css = base_html.read_text(encoding="utf-8")
     match = re.search(r"\.sv-input\s*\{(?P<body>.*?)\n\s*\}", css, re.S)
     assert match, "Could not locate .sv-input CSS rule in base.html"
     rule = match.group("body")
-    assert "safe-area-inset-bottom" not in rule
-    assert "var(--sab)" not in rule
+    assert "max(0px, calc(var(--sab) - 8px))" in rule
