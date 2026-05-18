@@ -307,8 +307,15 @@ class TestSessionOverlayNavigation:
 
             desktop_state = ab_eval("""
                 var layer = document.getElementById('session-view-layer');
+                var content = document.querySelector('main#content');
                 var viewer = document.querySelector('main#content .session-viewer');
+                var header = document.querySelector('main#content .sv-header');
                 var input = document.querySelector('main#content .sv-input');
+                var entries = document.querySelector('main#content .sv-entries');
+                var contentRect = content ? content.getBoundingClientRect() : null;
+                var headerRect = header ? header.getBoundingClientRect() : null;
+                var inputRect = input ? input.getBoundingClientRect() : null;
+                var entriesRect = entries ? entries.getBoundingClientRect() : null;
                 return {
                   path: window.location.pathname,
                   overlayActive: !!(layer && layer.classList.contains('active')),
@@ -317,6 +324,14 @@ class TestSessionOverlayNavigation:
                   sidebarVisible: (function(){ var e=document.getElementById('sidebar'); return !!(e && e.offsetParent !== null); })(),
                   viewerInContent: !!viewer,
                   inputVisible: !!(input && input.offsetParent !== null),
+                  inputInViewport: !!(inputRect && contentRect && inputRect.top >= contentRect.top && inputRect.bottom <= contentRect.bottom),
+                  entriesBounded: !!(
+                    entriesRect &&
+                    headerRect &&
+                    inputRect &&
+                    entriesRect.top >= (headerRect.bottom - 1) &&
+                    entriesRect.bottom <= (inputRect.top + 1)
+                  ),
                 };
             """)
             assert desktop_state["path"] == "/session/autonomy/auto-test-alpha"
@@ -326,6 +341,8 @@ class TestSessionOverlayNavigation:
             assert desktop_state["sidebarVisible"], "Desktop session view should keep the sidebar visible"
             assert desktop_state["viewerInContent"], "Desktop session view should render in the main content area"
             assert desktop_state["inputVisible"], "Desktop session view should keep the message composer visible"
+            assert desktop_state["inputInViewport"], "Desktop session composer must remain inside the viewport"
+            assert desktop_state["entriesBounded"], "Desktop transcript pane must stay bounded between the header and composer"
         finally:
             ab_eval("""
                 if (window.location.pathname !== '/sessions') navigateTo('/sessions');

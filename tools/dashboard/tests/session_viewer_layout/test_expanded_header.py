@@ -10,6 +10,9 @@ Verifies the three guarantees added by the expanded-header bead:
 Uses the test_client fixture from tests/conftest.py.
 """
 
+from pathlib import Path
+import re
+
 
 def test_title_not_contenteditable(test_client):
     """Compact-row title must be static text — no contenteditable, no blur handler."""
@@ -70,3 +73,14 @@ def test_session_stats_lib_served(test_client):
     assert 'window.SessionStats' in body
     for fn in ('turnsStr', 'ctxStr', 'ctxWarn', 'idleStr', 'recencyColor'):
         assert fn in body, f"session-stats.js missing formatter: {fn}"
+
+
+def test_sv_input_rule_has_no_closed_state_safe_area_padding():
+    """The grid-shell composer must not reserve a closed-keyboard bottom gutter."""
+    base_html = Path(__file__).resolve().parents[2] / "templates" / "base.html"
+    css = base_html.read_text(encoding="utf-8")
+    match = re.search(r"\.sv-input\s*\{(?P<body>.*?)\n\s*\}", css, re.S)
+    assert match, "Could not locate .sv-input CSS rule in base.html"
+    rule = match.group("body")
+    assert "safe-area-inset-bottom" not in rule
+    assert "var(--sab)" not in rule
