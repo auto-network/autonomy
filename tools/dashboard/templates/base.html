@@ -658,10 +658,6 @@
       #live-panel {
         padding-bottom: env(safe-area-inset-bottom);
       }
-      #session-view-layer {
-        padding-top: env(safe-area-inset-top);
-        padding-bottom: env(safe-area-inset-bottom);
-      }
     }
     /* Prevent horizontal scrolling on mobile */
     html, body { overflow-x: hidden; overscroll-behavior: none; }
@@ -1018,8 +1014,15 @@
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
       overscroll-behavior: contain;
+      -ms-overflow-style: none;
+      scrollbar-width: none;
       padding: 0.75rem;
       background: #111827;
+    }
+    .sv-entries::-webkit-scrollbar {
+      display: none;
+      width: 0;
+      height: 0;
     }
     .sv-entries > .live-entry + .live-entry { margin-top: 0.75rem; }
     .sv-history-load {
