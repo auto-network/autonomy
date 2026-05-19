@@ -258,11 +258,15 @@ class TestSessionOverlayNavigation:
         overlay_state = ab_eval("""
             var layer = document.getElementById('session-view-layer');
             var host = document.getElementById('session-view-host');
+            var stack = document.getElementById('page-stack');
             var marked = document.querySelector('#content [data-overlay-marker="keep"]');
             return {
               path: window.location.pathname,
               overlayActive: !!(layer && layer.classList.contains('active')),
               fullscreen: document.body.classList.contains('fullscreen-page'),
+              overlayBodyClass: document.body.classList.contains('session-overlay-active'),
+              overlayPosition: layer ? getComputedStyle(layer).position : null,
+              stackDisplay: stack ? getComputedStyle(stack).display : null,
               markedCardStillMounted: !!marked,
               overlayHostChildren: host ? host.children.length : -1,
             };
@@ -270,6 +274,9 @@ class TestSessionOverlayNavigation:
         assert overlay_state["path"] == "/session/autonomy/auto-test-alpha"
         assert overlay_state["overlayActive"], "Session overlay should be active when opened from /sessions"
         assert not overlay_state["fullscreen"], "Overlay navigation should not toggle body.fullscreen-page"
+        assert overlay_state["overlayBodyClass"], "Overlay navigation should toggle the stacked mobile overlay body class"
+        assert overlay_state["overlayPosition"] != "fixed", "Session overlay layer must not use position:fixed on mobile"
+        assert overlay_state["stackDisplay"] == "grid", "Page stack should keep the mounted sessions list and overlay in one grid shell"
         assert overlay_state["markedCardStillMounted"], "Sessions list should remain mounted underneath the overlay"
         assert overlay_state["overlayHostChildren"] >= 1, "Overlay host should contain the mounted session viewer"
 
@@ -286,12 +293,14 @@ class TestSessionOverlayNavigation:
             return {
               path: window.location.pathname,
               overlayActive: !!(layer && layer.classList.contains('active')),
+              overlayBodyClass: document.body.classList.contains('session-overlay-active'),
               markedCardStillMounted: !!marked,
               overlayHostChildren: host ? host.children.length : -1,
             };
         """)
         assert back_state["path"] == "/sessions"
         assert not back_state["overlayActive"], "Overlay should close on Back"
+        assert not back_state["overlayBodyClass"], "Closing the overlay should clear the mobile overlay body class"
         assert back_state["markedCardStillMounted"], "Back should reveal the original sessions DOM instead of rebuilding it"
         assert back_state["overlayHostChildren"] == 0, "Overlay host should be cleared after closing"
 

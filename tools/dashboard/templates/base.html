@@ -161,12 +161,28 @@
     /* #live-panel-body is the .session-viewer[data-mode="overlay"] mount —
        its height/padding/background rules live below under that selector. */
     #live-panel.collapsed #live-panel-body { display: none; }
+    #page-stack {
+      flex: 1 1 auto;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr);
+    }
+    #page-stack > main#content,
+    #page-stack > #terminal-page,
+    #page-stack > #session-view-layer {
+      grid-area: 1 / 1;
+      min-height: 0;
+    }
     #session-view-layer {
-      position: fixed; inset: 0; z-index: 90;
-      display: none; background: #111827;
+      display: none;
+      min-height: 0;
+      background: #111827;
+      z-index: 90;
+      overflow: hidden;
     }
     #session-view-layer.active { display: block; }
-    #session-view-host { height: 100%; }
+    #session-view-host { height: 100%; min-height: 0; }
     #session-view-host > .session-viewer[data-mode="page"] { height: 100%; }
     .live-resume-btn {
       position: sticky; bottom: 0.5rem; align-self: center;
@@ -704,6 +720,15 @@
       body.fullscreen-page > .flex-1 > header { display: none; }
       body.fullscreen-page #pinned-beads-strip { display: none !important; }
       body.fullscreen-page main#content { padding: 0 !important; margin: 0 !important; overflow: visible; height: 100%; }
+
+      body.session-overlay-active { display: block; margin: 0; overflow: hidden; }
+      body.session-overlay-active > nav#sidebar { display: none; }
+      body.session-overlay-active > .flex-1 { display: block; height: 100dvh; }
+      body.session-overlay-active > .flex-1.flex.flex-col { overflow: hidden; height: 100dvh; }
+      body.session-overlay-active > .flex-1 > header { display: none; }
+      body.session-overlay-active #pinned-beads-strip { display: none !important; }
+      body.session-overlay-active #page-stack { height: 100dvh; }
+      body.session-overlay-active main#content { overflow: hidden; }
     }
     @media (min-width: 768px) {
       body.fullscreen-page main#content { padding: 0 !important; overflow: hidden; }
@@ -783,6 +808,12 @@
     html.ios-standalone body.fullscreen-page,
     html.ios-standalone body.fullscreen-page > .flex-1.flex.flex-col,
     html.ios-standalone body.fullscreen-page main#content {
+      height: var(--app-height, 100dvh);
+    }
+    html.ios-standalone body.session-overlay-active,
+    html.ios-standalone body.session-overlay-active > .flex-1,
+    html.ios-standalone body.session-overlay-active > .flex-1.flex.flex-col,
+    html.ios-standalone body.session-overlay-active #page-stack {
       height: var(--app-height, 100dvh);
     }
 
@@ -1596,13 +1627,22 @@
       </template>
     </div>
 
-    <!-- Content -->
-    <main class="flex-1 overflow-auto pt-6 px-6" id="content">
-      <div class="text-gray-400">Loading...</div>
-    </main>
+    <div id="page-stack">
+      <!-- Content -->
+      <main class="flex-1 overflow-auto pt-6 px-6" id="content">
+        <div class="text-gray-400">Loading...</div>
+      </main>
 
-    <!-- Persistent terminal page (preserved across navigation) -->
-    <div id="terminal-page" class="flex-1 overflow-auto p-6" style="display:none;"></div>
+      <!-- Persistent terminal page (preserved across navigation) -->
+      <div id="terminal-page" class="flex-1 overflow-auto p-6" style="display:none;"></div>
+
+      <!-- Persistent fullscreen session viewer overlay. Keeps the current page
+           mounted underneath so back-swipe can reveal the sessions list
+           instantly without re-rendering it. -->
+      <div id="session-view-layer" aria-hidden="true">
+        <div id="session-view-host"></div>
+      </div>
+    </div>
 
     <!-- Persistent worktree review overlay. Keeps the current page mounted
          underneath so session-viewer diff review can close back in place. -->
@@ -1610,13 +1650,6 @@
          x-data="worktreesPage({ mode: 'overlay' })"
          x-cloak>
       {% include "partials/worktree-review-overlays.html" %}
-    </div>
-
-    <!-- Persistent fullscreen session viewer overlay. Keeps the current page
-         mounted underneath so back-swipe can reveal the sessions list
-         instantly without re-rendering it. -->
-    <div id="session-view-layer" aria-hidden="true">
-      <div id="session-view-host"></div>
     </div>
   </div>
 
