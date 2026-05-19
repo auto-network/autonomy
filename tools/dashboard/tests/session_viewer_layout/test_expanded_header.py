@@ -83,3 +83,15 @@ def test_sv_input_rule_uses_closed_state_safe_area_padding():
     assert match, "Could not locate .sv-input CSS rule in base.html"
     rule = match.group("body")
     assert "max(0px, calc(var(--sab) - 8px))" in rule
+
+
+def test_session_overlay_layer_is_not_fixed_or_safe_area_padded():
+    """The mobile fast-open shell must not reintroduce the fixed-overlay iPhone gutter bug."""
+    base_html = Path(__file__).resolve().parents[2] / "templates" / "base.html"
+    css = base_html.read_text(encoding="utf-8")
+    match = re.search(r"#session-view-layer\s*\{(?P<body>.*?)\n\s*\}", css, re.S)
+    assert match, "Could not locate #session-view-layer CSS rule in base.html"
+    rule = match.group("body")
+    assert "position: fixed" not in rule
+    assert "padding-top" not in rule
+    assert "padding-bottom" not in rule

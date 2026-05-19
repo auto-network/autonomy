@@ -682,12 +682,22 @@ function _showSessionOverlayChrome() {
   if (!sessionViewLayer) return;
   sessionViewLayer.classList.add('active');
   sessionViewLayer.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('session-overlay-active');
+  if (content) {
+    if ('inert' in content) content.inert = true;
+    content.setAttribute('aria-hidden', 'true');
+  }
 }
 
 function _hideSessionOverlayChrome() {
   if (!sessionViewLayer) return;
   sessionViewLayer.classList.remove('active');
   sessionViewLayer.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('session-overlay-active');
+  if (content) {
+    if ('inert' in content) content.inert = false;
+    content.removeAttribute('aria-hidden');
+  }
 }
 
 function _destroySessionOverlay() {
