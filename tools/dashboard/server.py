@@ -3166,6 +3166,42 @@ async def api_crosstalk_peers(request):
     return JSONResponse({"peers": [dict(r) for r in rows]})
 
 
+async def api_crosstalk_log(request):
+    """GET /api/crosstalk/log — list recent CrossTalk messages."""
+    from tools.graph.duration import parse_duration
+
+    _sender, err = _crosstalk_auth(request)
+    if err:
+        return err
+
+    try:
+        limit = int(request.query_params.get("limit", "30"))
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+    if limit <= 0:
+        return JSONResponse({"error": "limit must be positive"}, status_code=400)
+
+    session = request.query_params.get("session") or None
+    since = request.query_params.get("since")
+    since_epoch = None
+    if since:
+        try:
+            since_epoch = time.time() - parse_duration(since)
+        except ValueError:
+            return JSONResponse(
+                {"error": "since must be a duration like 30m, 1h, or 2d"},
+                status_code=400,
+            )
+
+    messages = await asyncio.to_thread(
+        auth_db.get_messages,
+        limit=limit,
+        since=since_epoch,
+        session=session,
+    )
+    return JSONResponse({"messages": messages})
+
+
 async def api_primer(request):
     bead_id = request.path_params["id"]
     if os.environ.get("DASHBOARD_MOCK"):
@@ -12567,6 +12603,7 @@ routes = [
     Route("/api/crosstalk/send", api_crosstalk_send, methods=["POST"]),
     Route("/api/crosstalk/broadcast", api_crosstalk_broadcast, methods=["POST"]),
     Route("/api/crosstalk/peers", api_crosstalk_peers, methods=["GET"]),
+    Route("/api/crosstalk/log", api_crosstalk_log, methods=["GET"]),
 
     # Monitor IPC — dispatcher registers dispatch/librarian sessions here so
     # inotify watches + SSE broadcasts are wired up in-process.

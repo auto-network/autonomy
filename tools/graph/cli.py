@@ -4663,26 +4663,69 @@ def cmd_crosstalk_broadcast(args):
 def cmd_crosstalk(args):
     """Display recent CrossTalk messages."""
     from datetime import datetime
+    import ssl
+    import urllib.error
+    import urllib.parse
+    import urllib.request
 
     auth_db_path = Path(__file__).resolve().parents[2] / "data" / "auth.db"
-    if not auth_db_path.exists():
-        print("auth.db not found — command not supported from containerized agents", file=sys.stderr)
-        return
+    messages = None
+    use_api = bool(os.environ.get("CROSSTALK_TOKEN")) or not auth_db_path.exists()
+    if use_api:
+        token = _resolve_crosstalk_token()
+        api_base = os.environ.get("GRAPH_API", "https://localhost:8080")
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        query = {"limit": args.limit}
+        if args.session:
+            query["session"] = args.session
+        if args.since:
+            query["since"] = args.since
+        url = f"{api_base}/api/crosstalk/log?{urllib.parse.urlencode(query)}"
+        req = urllib.request.Request(
+            url,
+            method="GET",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=30, context=ctx)
+            payload = json.loads(resp.read())
+            messages = payload.get("messages", [])
+        except urllib.error.HTTPError as e:
+            try:
+                err_body = json.loads(e.read())
+                error_msg = err_body.get("error", str(e))
+            except Exception:
+                error_msg = str(e)
+            print(f"  \u2717 Failed: {error_msg}", file=sys.stderr)
+            sys.exit(1)
+        except urllib.error.URLError as e:
+            print(f"  \u2717 Cannot reach dashboard: {e.reason}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        from tools.dashboard.dao import auth_db
+        if auth_db._conn is None:
+            auth_db.init_db(auth_db_path)
 
-    from tools.dashboard.dao import auth_db
-    if auth_db._conn is None:
-        auth_db.init_db(auth_db_path)
+        since_epoch = None
+        if args.since:
+            try:
+                secs = _parse_duration(args.since)
+            except (ValueError, argparse.ArgumentTypeError):
+                print(
+                    f"Error: invalid --since duration: {args.since!r} "
+                    "(use e.g. 30m, 1h, 2d)",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            since_epoch = time.time() - secs
 
-    since_epoch = None
-    if args.since:
-        secs = _parse_duration(args.since)
-        since_epoch = time.time() - secs
-
-    messages = auth_db.get_messages(
-        limit=args.limit,
-        since=since_epoch,
-        session=args.session,
-    )
+        messages = auth_db.get_messages(
+            limit=args.limit,
+            since=since_epoch,
+            session=args.session,
+        )
 
     if not messages:
         print("No CrossTalk messages found")
