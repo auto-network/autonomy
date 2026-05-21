@@ -65,10 +65,10 @@ ss -tlnp | grep 9090
 | Concern | Spec value | Where it lives |
 |---|---|---|
 | Port | 9090 | `--port 9090` in unit |
-| Audio format | 16-bit PCM LE, 16kHz mono | `--raw_pcm_input` in unit; dashboard forwards verbatim |
+| Audio format on the wire | float32 LE [-1,1] (pip 0.8.0) / int16 LE (upstream + --raw_pcm_input) | converted inside `tools/dashboard/voice_whisperlive.py` based on `WHISPERLIVE_WIRE_FORMAT` |
 | Backend | faster_whisper (CT2) | `--backend faster_whisper` in unit |
 | Model | large-v3 | `--model large-v3` in unit |
-| VAD | server-side, on | `--use_vad True` in unit |
+| VAD | server-side, on (per-client) | client handshake `use_vad=True` (not a server CLI flag) |
 | Quantisation | int8_float16 (~1.5GB VRAM) | NOT yet a flag in this unit — see below |
 
 ### Quantisation knob
@@ -87,11 +87,23 @@ and add it to `ExecStart`.
 
 ### Audio format alignment
 
-`--raw_pcm_input` is critical. Without it, WhisperLive expects
-float32 audio bytes; the dashboard forwards int16 PCM verbatim.
-Misalignment produces silent garbage transcripts that look like
-"server is working but transcribing nonsense". If you see that
-symptom, verify the flag is present.
+The dashboard's browser-side capture (AudioWorklet) emits int16 LE
+PCM for bandwidth efficiency. WhisperLive expects either int16 or
+float32 depending on how it was installed; the dashboard converts
+at the boundary based on
+`tools.dashboard.voice_whisperlive.WHISPERLIVE_WIRE_FORMAT`:
+
+| Install source | WhisperLive expects | Set `WHISPERLIVE_WIRE_FORMAT` to |
+|---|---|---|
+| `pip install whisper-live` (0.8.0+) | float32 LE [-1,1] | `"float32_le"` (default) |
+| Upstream GitHub + `--raw_pcm_input` | int16 LE | `"int16_le"` |
+
+Mismatch produces silent garbage transcripts that look like "server
+is working but transcribing nonsense". If you see that symptom,
+verify the `WHISPERLIVE_WIRE_FORMAT` constant matches your install
+path. Operator-changing this constant is a code edit + dashboard
+restart, not a runtime setting; if it becomes operator-frequent
+worth promoting to Settings.
 
 ## Lifecycle (S3 scope)
 
@@ -116,7 +128,7 @@ during heavy use.
 | `whisperlive` binary not found | install path differs from `/usr/local/bin/whisperlive` | `which whisperlive` on the host, edit `ExecStart` to match |
 | Service stays in `activating (auto-restart)` | likely CUDA / GPU access issue | `journalctl -t whisperlive -n 100`; verify the User= account owns `/dev/nvidia*` |
 | Connect from dashboard returns `whisperlive_connect_failed` | service not running OR port mismatch | `systemctl status whisperlive`; verify `--port 9090` matches `WHISPERLIVE_URL` in `tools/dashboard/voice_whisperlive.py` |
-| Connect succeeds but transcripts are nonsense | missing `--raw_pcm_input` | Add the flag, restart |
+| Connect succeeds but transcripts are nonsense | `WHISPERLIVE_WIRE_FORMAT` doesn't match installed server's expected format | Set to `"float32_le"` for pip 0.8.0, `"int16_le"` for upstream + `--raw_pcm_input`; restart dashboard |
 | Cold-start > 30s | model not pre-fetched on disk | first run downloads large-v3 (~3GB); subsequent restarts hit the cache |
 
 ## Uninstall

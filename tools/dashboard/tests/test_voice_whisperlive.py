@@ -262,7 +262,12 @@ async def test_connect_twice_raises_runtimeerror(fake_whisperlive):
 
 
 @pytest.mark.asyncio
-async def test_send_audio_forwards_bytes_verbatim(fake_whisperlive):
+async def test_send_audio_default_emits_one_frame_per_call(fake_whisperlive):
+    """Each send_audio call produces exactly one outbound frame.
+    The frame's content depends on wire_format (covered by the
+    dedicated conversion tests below); this test only pins the
+    1:1 send-to-emit ratio + that the wrapper is forwarding under
+    default config."""
     received = []
 
     async def on_connect(ws, init, fake):
@@ -278,10 +283,9 @@ async def test_send_audio_forwards_bytes_verbatim(fake_whisperlive):
     payload_b = b"\xff\xfe\xfd\xfc" * 400
     await client.send_audio(payload_a)
     await client.send_audio(payload_b)
-    # Give the server task a beat to drain.
     await asyncio.sleep(0.05)
     await client.close()
-    assert received == [payload_a, payload_b]
+    assert len(received) == 2  # 1:1 send-to-emit
 
 
 @pytest.mark.asyncio
@@ -714,3 +718,119 @@ def test_segment_dedupe_key_no_start_returns_none():
 
 def test_segment_dedupe_key_bad_start_returns_none():
     assert vwl._segment_dedupe_key({"start": "bogus", "text": "x"}) is None
+
+
+# ── Wire-format conversion ──────────────────────────────────
+
+
+import array  # noqa: E402  (test-local import, scoped to this section)
+
+
+def _samples_to_int16_bytes(samples):
+    """Build int16 little-endian bytes from a list of signed ints."""
+    return array.array("h", samples).tobytes()
+
+
+def _float32_bytes_to_floats(buf):
+    """Decode float32 little-endian bytes back to a list of floats."""
+    return list(array.array("f", buf))
+
+
+def test_convert_int16_to_float32_full_scale():
+    """Boundary values: +32767 → ~+1.0, -32768 → -1.0, 0 → 0.0.
+    Pinned because Whisper-family normalisation is the de-facto
+    standard; getting the scale wrong silently corrupts every
+    transcript."""
+    src = _samples_to_int16_bytes([0, 32767, -32768, 16384, -16384])
+    out = vwl._convert_int16_le_to_float32_le(src)
+    floats = _float32_bytes_to_floats(out)
+    assert len(floats) == 5
+    assert floats[0] == 0.0
+    assert floats[1] == pytest.approx(32767 / 32768.0, abs=1e-6)
+    assert floats[2] == pytest.approx(-1.0, abs=1e-6)
+    assert floats[3] == pytest.approx(0.5, abs=1e-6)
+    assert floats[4] == pytest.approx(-0.5, abs=1e-6)
+
+
+def test_convert_int16_to_float32_size():
+    """int16 is 2 bytes/sample; float32 is 4 bytes/sample. 100ms
+    16kHz mono = 1600 samples = 3200 in / 6400 out."""
+    src = _samples_to_int16_bytes([1] * 1600)
+    out = vwl._convert_int16_le_to_float32_le(src)
+    assert len(src) == 3200
+    assert len(out) == 6400
+
+
+def test_convert_int16_to_float32_empty():
+    assert vwl._convert_int16_le_to_float32_le(b"") == b""
+
+
+def test_convert_int16_to_float32_non_bytes():
+    """Defensive: a transport bug passing None / int / str must not
+    crash the conversion."""
+    assert vwl._convert_int16_le_to_float32_le(None) == b""
+    assert vwl._convert_int16_le_to_float32_le("nope") == b""
+
+
+def test_convert_int16_to_float32_accepts_bytearray():
+    src = bytearray(_samples_to_int16_bytes([16384]))
+    out = vwl._convert_int16_le_to_float32_le(src)
+    assert _float32_bytes_to_floats(out) == pytest.approx([0.5], abs=1e-6)
+
+
+def test_client_rejects_unknown_wire_format():
+    with pytest.raises(ValueError, match="wire_format"):
+        vwl.WhisperLiveClient(
+            url="ws://x", uid="u1", model="m1",
+            on_partial=_noop_async, on_final=_noop_async,
+            on_error=_noop_async,
+            wire_format="bogus",
+        )
+
+
+@pytest.mark.asyncio
+async def test_send_audio_converts_int16_to_float32_by_default(fake_whisperlive):
+    """Default wire_format is float32_le (matches pip whisper-live
+    0.8.0). Send int16 PCM; server should receive float32 bytes."""
+    received = []
+
+    async def on_connect(ws, init, fake):
+        await ws.send(json.dumps({"message": "SERVER_READY"}))
+        async for msg in ws:
+            if isinstance(msg, (bytes, bytearray)):
+                received.append(bytes(msg))
+
+    fake = await fake_whisperlive(on_connect)
+    client = _new_client(fake.url)  # default wire_format
+    await client.connect_and_wait_ready(ready_timeout=2.0)
+    src = _samples_to_int16_bytes([0, 16384, -16384, 32767])
+    await client.send_audio(src)
+    await asyncio.sleep(0.05)
+    await client.close()
+    assert len(received) == 1
+    floats = _float32_bytes_to_floats(received[0])
+    assert floats == pytest.approx([0.0, 0.5, -0.5, 32767/32768.0], abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_send_audio_preserves_int16_when_wire_format_is_int16(fake_whisperlive):
+    """For future upstream + --raw_pcm_input deployments the wrapper
+    is constructed with wire_format=WIRE_INT16_LE and the
+    conversion is skipped. Bytes flow through unchanged (modulo
+    the bytes(...) defensive copy)."""
+    received = []
+
+    async def on_connect(ws, init, fake):
+        await ws.send(json.dumps({"message": "SERVER_READY"}))
+        async for msg in ws:
+            if isinstance(msg, (bytes, bytearray)):
+                received.append(bytes(msg))
+
+    fake = await fake_whisperlive(on_connect)
+    client = _new_client(fake.url, wire_format=vwl.WIRE_INT16_LE)
+    await client.connect_and_wait_ready(ready_timeout=2.0)
+    src = _samples_to_int16_bytes([0, 16384, -16384, 32767])
+    await client.send_audio(src)
+    await asyncio.sleep(0.05)
+    await client.close()
+    assert received == [src]
