@@ -6448,6 +6448,7 @@ async def ws_voice(websocket: WebSocket):
             model=voice_wl.WHISPERLIVE_MODEL,
             language=voice_wl.WHISPERLIVE_LANGUAGE,
             use_vad=voice_wl.WHISPERLIVE_USE_VAD,
+            wire_format=voice_wl.WHISPERLIVE_WIRE_FORMAT,
             on_partial=_on_partial,
             on_final=_on_final,
             on_error=_on_whisperlive_error,

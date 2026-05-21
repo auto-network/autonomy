@@ -40,6 +40,7 @@ upstream server. S3-4b wires the wrapper into ``ws_voice`` in
 
 from __future__ import annotations
 
+import array
 import asyncio
 import json
 import logging
@@ -60,6 +61,54 @@ WHISPERLIVE_URL = "ws://127.0.0.1:9090"
 WHISPERLIVE_MODEL = "large-v3"
 WHISPERLIVE_LANGUAGE = "en"
 WHISPERLIVE_USE_VAD = True
+
+# Wire format the dashboard sends on the WhisperLive WS.
+#
+# - ``float32_le``: float32 little-endian in [-1.0, 1.0]. This is
+#   what pip ``whisper-live`` 0.8.0 reads unconditionally
+#   (upstream server.py:319 does ``np.frombuffer(frame_data,
+#   dtype=np.float32)``). The ``--raw_pcm_input`` flag that would
+#   switch the server to int16 only exists in upstream GitHub's
+#   ``run_server.py`` wrapper, not in the pip release.
+# - ``int16_le``: bandwidth-efficient on the browser → dashboard
+#   leg. Operators install upstream + --raw_pcm_input to skip the
+#   server-side conversion.
+#
+# Default ``float32_le`` matches the pip 0.8.0 deployment the
+# operator's host is running today.
+WHISPERLIVE_WIRE_FORMAT = "float32_le"
+
+
+# Wire-format constants exported for use as ``wire_format`` kwarg
+# on :class:`WhisperLiveClient`. Kept as string literals (not an
+# enum) to match the module-level config constant shape.
+WIRE_FLOAT32_LE = "float32_le"
+WIRE_INT16_LE = "int16_le"
+
+
+def _convert_int16_le_to_float32_le(audio_bytes: bytes) -> bytes:
+    """Convert int16 little-endian PCM bytes to float32 little-endian
+    in [-1.0, 1.0].
+
+    Uses the stdlib ``array`` module rather than numpy (which isn't
+    in the dashboard image). For a 100ms 16kHz mono frame (1600
+    samples / 3200 bytes int16 → 6400 bytes float32) the conversion
+    cost is ~1600 float divisions per frame; well under the 10
+    frames/sec audio rate.
+
+    Returns float32_le bytes ready to forward to a WhisperLive
+    server that expects ``np.frombuffer(..., dtype=np.float32)``.
+
+    Normalises via division by 32768.0 for both signs — equivalent
+    to the de-facto Whisper-family int16→float32 normalisation
+    pattern (numpy's ``.astype(np.float32) / 32768.0``).
+    """
+    if not isinstance(audio_bytes, (bytes, bytearray)) or not audio_bytes:
+        return b""
+    samples = array.array("h")  # 'h' = signed short (int16)
+    samples.frombytes(bytes(audio_bytes))
+    floats = array.array("f", (s / 32768.0 for s in samples))
+    return floats.tobytes()
 
 
 # Wrapper state enum. Single-line evolution: disconnected ->
@@ -154,6 +203,12 @@ class WhisperLiveClient:
     on_error: Callable[[str], Awaitable[None]]
     language: str = "en"
     use_vad: bool = True
+    # Wire format the wrapper produces on the WhisperLive WS. Default
+    # ``float32_le`` matches the pip whisper-live 0.8.0 deployment
+    # (unconditional np.float32 read in upstream server.py:319);
+    # ``int16_le`` is for future upstream+--raw_pcm_input installs.
+    # send_audio converts browser-int16 frames to this on the wire.
+    wire_format: str = WIRE_FLOAT32_LE
     state: str = field(default=DISCONNECTED, init=False)
     _ws: Any = field(default=None, init=False, repr=False)
     _recv_task: asyncio.Task | None = field(default=None, init=False, repr=False)
@@ -170,6 +225,11 @@ class WhisperLiveClient:
             )
         if not isinstance(self.uid, str) or not self.uid:
             raise ValueError("WhisperLiveClient requires a non-empty `uid`")
+        if self.wire_format not in (WIRE_FLOAT32_LE, WIRE_INT16_LE):
+            raise ValueError(
+                f"WhisperLiveClient.wire_format must be {WIRE_FLOAT32_LE!r} "
+                f"or {WIRE_INT16_LE!r}; got {self.wire_format!r}"
+            )
 
     # ── Public API ──────────────────────────────────────────
 
@@ -277,18 +337,34 @@ class WhisperLiveClient:
         impossible because of the sync connect-and-wait; this
         guard is a defensive net for the unavailable branch).
 
+        The browser forwards int16 little-endian PCM as the
+        bandwidth-efficient on-the-wire format from browser →
+        dashboard. This method converts to ``wire_format`` before
+        sending to WhisperLive — by default ``float32_le`` to match
+        pip ``whisper-live`` 0.8.0 (which reads
+        ``np.frombuffer(..., dtype=np.float32)`` unconditionally).
+        For future upstream+--raw_pcm_input deployments the wrapper
+        is constructed with ``wire_format=WIRE_INT16_LE`` and the
+        conversion is skipped.
+
         Logs only byte counts, never content, per spec privacy rule.
         """
         if self.state != READY or self._ws is None:
             return
         if not isinstance(audio_bytes, (bytes, bytearray)) or not audio_bytes:
             return
+        if self.wire_format == WIRE_FLOAT32_LE:
+            payload = _convert_int16_le_to_float32_le(audio_bytes)
+        else:
+            payload = bytes(audio_bytes)
         try:
-            await self._ws.send(audio_bytes)
+            await self._ws.send(payload)
         except Exception as exc:
             log.warning(
-                "WhisperLiveClient[%s] send_audio failed bytes=%d: %s",
-                self.uid, len(audio_bytes), exc,
+                "WhisperLiveClient[%s] send_audio failed bytes_in=%d "
+                "bytes_out=%d wire=%s: %s",
+                self.uid, len(audio_bytes), len(payload),
+                self.wire_format, exc,
             )
             self.state = UNAVAILABLE
             await self.on_error(f"upstream send failed: {exc}")

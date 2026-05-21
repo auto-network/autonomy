@@ -23,23 +23,29 @@ Type=simple
 # breaking on hosts with a different account.
 User=__OPERATOR_USER__
 
-# WhisperLive CLI. The flags are pinned per spec + S3-4 codex review:
-#   --port 9090            — fixed; tools/dashboard/voice_whisperlive.py
-#                            connects to ws://127.0.0.1:9090.
-#   --backend faster_whisper — CT2 backend (chosen for the 5080 GPU).
-#   --model large-v3       — accuracy target for technical/conversational mix.
-#   --use_vad True         — server-side VAD trims silence before transcription.
-#   --raw_pcm_input        — accept 16-bit PCM LE bytes verbatim from the
-#                            dashboard; without this, the server expects
-#                            float32 and would interpret PCM as garbage.
-#                            Critical: dashboard's /ws/voice forwards
-#                            browser AudioWorklet int16 PCM unchanged.
+# WhisperLive CLI. Flags vary by installation source — pip
+# ``whisper-live`` (0.8.0) and upstream GitHub diverge:
+#
+# - pip 0.8.0 has NO --raw_pcm_input flag and reads ``np.float32``
+#   unconditionally from the WS. The dashboard's
+#   :data:`tools.dashboard.voice_whisperlive.WHISPERLIVE_WIRE_FORMAT`
+#   defaults to ``float32_le`` to match this deployment.
+# - upstream GitHub's run_server.py wrapper exposes --raw_pcm_input
+#   to accept int16 LE bytes verbatim. Operators on that build
+#   flip WHISPERLIVE_WIRE_FORMAT to ``int16_le``.
+# - use_vad is set per-client via the WS handshake options dict in
+#   both deployments (upstream server.py reads options.get('use_vad'),
+#   not a CLI flag). Wrapper already sends use_vad=True in
+#   _build_init_payload.
+#
+# The ExecStart below targets the pip 0.8.0 deployment — minimal
+# flags, no --raw_pcm_input, no --use_vad. Operators on upstream
+# can append --raw_pcm_input and update WHISPERLIVE_WIRE_FORMAT in
+# voice_whisperlive.py to match.
 ExecStart=/usr/local/bin/whisperlive \
     --port 9090 \
     --backend faster_whisper \
-    --model large-v3 \
-    --use_vad True \
-    --raw_pcm_input
+    --model large-v3
 
 # Quantisation: spec calls for int8_float16 (~1.5GB VRAM on the
 # RTX 5080, leaves headroom for ollama via S7). WhisperLive's
