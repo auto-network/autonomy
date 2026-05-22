@@ -73,6 +73,14 @@
                   <span class="sv-term-escape-label">ESC</span>
                 </button>
               </template>
+              <template x-if="_tmuxSession && isLive && isClaudeHarness">
+                <button class="sv-term-toggle sv-term-background"
+                        @click.stop="background()"
+                        aria-label="Send Ctrl-B"
+                        title="Send Ctrl-B to background">
+                  <span class="sv-term-background-label">^B</span>
+                </button>
+              </template>
               <template x-if="_tmuxSession && isLive">
                 <button class="sv-term-toggle"
                         :class="{ 'active': showTerminal }"

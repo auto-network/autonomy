@@ -4401,6 +4401,36 @@ async def api_session_interrupt(request):
     return JSONResponse({"ok": True})
 
 
+async def api_session_background(request):
+    """Send Ctrl-B to a tmux session to background a running task.
+
+    Claude harness reads Ctrl-B as "background the running tool" rather than
+    cancelling it (which is what Escape does via api_session_interrupt).
+
+    POST /api/session/{tmux_name}/background
+    Returns: {"ok": true}
+    """
+    tmux_name = request.path_params["tmux_name"]
+    try:
+        exists = _tmux_session_exists(tmux_name)
+    except FileNotFoundError:
+        return JSONResponse(
+            {"error": "tmux is not available in this environment"},
+            status_code=503,
+        )
+    if not exists:
+        return JSONResponse(
+            {"error": f"tmux session '{tmux_name}' not found"},
+            status_code=404,
+        )
+    subprocess.run(
+        ["tmux", "send-keys", "-t", tmux_name, "C-b"],
+        capture_output=True,
+    )
+    logger.warning("[session-background] tmux=%r", tmux_name)
+    return JSONResponse({"ok": True})
+
+
 async def api_terminal_unclaimed(request):
     """Return unclaimed host tmux sessions — those with no jsonl_path yet.
 
@@ -12555,6 +12585,7 @@ routes = [
     Route("/api/session/{tmux_name}/output/{path:path}", api_session_output, methods=["GET"]),
     Route("/api/session/{tmux_name}/request-identity-refresh", api_session_request_identity_refresh, methods=["POST"]),
     Route("/api/session/{tmux_name}/interrupt", api_session_interrupt, methods=["POST"]),
+    Route("/api/session/{tmux_name}/background", api_session_background, methods=["POST"]),
     Route("/api/session/{tmux_name}/label", api_session_label, methods=["PUT"]),
     Route("/api/session/{tmux_name}/topics", api_session_topics, methods=["PUT"]),
     Route("/api/session/{tmux_name}/role", api_session_role, methods=["PUT"]),
