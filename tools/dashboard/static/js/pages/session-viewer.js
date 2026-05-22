@@ -80,6 +80,10 @@
         var s = Alpine.store('sessions')[this.sessionKey];
         return s ? s.sessionType : '';
       },
+      get isClaudeHarness() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return !!(s && s.harness === 'claude');
+      },
       get role() {
         var s = Alpine.store('sessions')[this.sessionKey];
         return s ? (s.role || '') : '';
@@ -1351,6 +1355,22 @@
           });
         } catch (e) {
           console.warn('[sessionViewer] interrupt failed:', e);
+        }
+      },
+
+      // ── Background (Ctrl-B) — Claude harness only ───────────────
+      // Claude reads Ctrl-B as "background the running tool" rather
+      // than cancelling it (which is what Escape does).
+
+      async background() {
+        var tmux = this._tmuxSession;
+        if (!tmux) return;
+        try {
+          await fetch('/api/session/' + encodeURIComponent(tmux) + '/background', {
+            method: 'POST',
+          });
+        } catch (e) {
+          console.warn('[sessionViewer] background failed:', e);
         }
       },
 

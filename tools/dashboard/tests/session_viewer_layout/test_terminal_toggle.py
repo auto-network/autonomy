@@ -33,6 +33,35 @@ def test_toggle_button_rendered_when_tmux_present(test_client):
     assert 'showTerminal' in html
 
 
+def test_header_background_button_rendered_for_claude_harness(test_client):
+    """Claude harness sessions get a Ctrl-B header button next to ESC.
+
+    Sends C-b via tmux to background the running Claude tool instead of
+    cancelling it (which is what ESC does).
+    """
+    resp = test_client.get("/pages/session-view")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'sv-term-background' in html, \
+        "Header Ctrl-B button missing from template"
+    assert 'background()' in html, \
+        "Header Ctrl-B button is not wired to background()"
+    assert 'isClaudeHarness' in html, \
+        "Header Ctrl-B button must be gated on isClaudeHarness"
+
+
+def test_tile_background_button_rendered_for_claude_harness(test_client):
+    """Running tool tiles in Claude harness sessions get a Ctrl-B button next
+    to the existing Esc interrupt button."""
+    resp = test_client.get("/pages/session-view")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'sc-background-btn' in html, \
+        "Per-tile Ctrl-B button missing from session-entries template"
+    assert 'Ctrl-B' in html, \
+        "Per-tile Ctrl-B button label missing"
+
+
 def test_terminal_container_div_present(test_client):
     """Template includes x-ref='termContainer' mounting div."""
     resp = test_client.get("/pages/session-view")
