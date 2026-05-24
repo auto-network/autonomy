@@ -270,13 +270,14 @@
         }
         case 'Edit': {
           const inp = entry.input || {};
-          if (inp.new_string) {
-            const added = this._countLines(inp.new_string);
-            badges.push({ text: '+' + added, cls: 'sc-meta-green' });
+          const delta = window.AutonomyDiffLines.lineDiffCounts(
+            inp.old_string || '', inp.new_string || ''
+          );
+          if (delta.added > 0) {
+            badges.push({ text: '+' + delta.added, cls: 'sc-meta-green' });
           }
-          if (inp.old_string) {
-            const removed = this._countLines(inp.old_string);
-            badges.push({ text: '\u2212' + removed, cls: 'sc-meta-red' });
+          if (delta.removed > 0) {
+            badges.push({ text: '\u2212' + delta.removed, cls: 'sc-meta-red' });
           }
           break;
         }
@@ -508,8 +509,11 @@
           let added = 0, removed = 0;
           for (const item of group.items) {
             const inp = item.input || {};
-            if (inp.new_string) added += this._countLines(inp.new_string);
-            if (inp.old_string) removed += this._countLines(inp.old_string);
+            const delta = window.AutonomyDiffLines.lineDiffCounts(
+              inp.old_string || '', inp.new_string || ''
+            );
+            added += delta.added;
+            removed += delta.removed;
           }
           if (added) badges.push({ text: '+' + added, cls: 'sc-meta-green' });
           if (removed) badges.push({ text: '\u2212' + removed, cls: 'sc-meta-red' });
