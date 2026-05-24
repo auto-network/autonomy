@@ -1217,6 +1217,12 @@ class SessionMonitor:
                 "resolved": bool(s.get("jsonl_path")) or (
                     bool(s.get("session_uuids")) and s["session_uuids"] != "[]"
                 ),
+                # auto-a1jco: two-dimension lifecycle phase. Frontends
+                # compute the derived "ready" flag locally:
+                #   ready = setup_phase=='setup_complete'
+                #           and harness_phase=='composer_ready'
+                "setup_phase": s.get("setup_phase") or "pending",
+                "harness_phase": s.get("harness_phase") or "pending",
             }
             entry["org"] = resolve_session_org(entry)
             out.append(entry)
@@ -1533,6 +1539,20 @@ class SessionMonitor:
             "session_monitor: discovered %s → %s (first file — resolved)",
             tmux_name, jsonl_path.name,
         )
+
+        # auto-a1jco: JSONL appearance is the canonical
+        # ``harness_phase = first_turn_written`` signal. Adapters with
+        # working screen-reading (``auto-eerfx``) later advance to
+        # ``composer_ready``; adapters with stubbed screen-reading
+        # (Codex initially) return ``composer_ready=True`` from the
+        # first poll so the transition is immediate.
+        try:
+            update_tail_state(tmux_name, harness_phase="first_turn_written")
+        except Exception:
+            logger.exception(
+                "session_monitor: failed to advance harness_phase for %s",
+                tmux_name,
+            )
 
         # Schedule a registry broadcast if we're inside a running loop.
         # Sync startup paths (_init_inotify, _recover_unresolved_sessions)
