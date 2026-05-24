@@ -104,6 +104,40 @@ class SessionHarness(Protocol):
     ) -> dict[str, Any] | None:
         """Return updated harness-specific session state, or ``current_state``."""
 
+    def read_screen_state(
+        self,
+        pane_text: str,
+        current_state: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], list[dict]]:
+        """Inspect a tmux capture-pane snapshot — return state + keystrokes.
+
+        auto-eerfx. The session monitor's screen-poll loop calls this
+        every 2s for sessions in the harness_starting / first_turn_written
+        phase window. The harness adapter decides WHAT to send (e.g. an
+        Enter to confirm a trust dialog); the poller decides WHEN to
+        send it via tmux_send_keys.
+
+        Returns:
+          - new_state: dict to merge into harness_state. Documented keys:
+            * composer_ready (bool)         — harness will accept input
+            * confirming_trust_prompt (bool) — trust dialog detected AND
+                                              a confirm keystroke sent
+            * in_planning_mode (bool)       — planning-mode banner visible
+            * blocking_modal (str | None)   — name of any other blocking
+                                              modal
+            Adapters may add their own keys; consumers must not assume
+            keys beyond the documented schema.
+          - keystrokes: list of {"kind": "key"|"literal", "value": str}
+            dicts to inject in order via tmux_send_keys.
+
+        Adapters without screen-reading inference (Codex initially) MUST
+        return ``composer_ready=True`` from this method as soon as
+        ``current_state`` is non-empty (the first JSONL turn has been
+        written) — otherwise sessions running that harness never reach
+        ``harness_phase=composer_ready`` and the derived ``ready`` flag
+        never fires.
+        """
+
 
 class ClaudeSessionHarness:
     """Adapter over the current Claude-only implementation."""
@@ -257,6 +291,13 @@ class ClaudeSessionHarness:
         updated_state = _update_last_user_message_at(raw_entry, current_state)
         return current_state if updated_state == (current_state or {}) else updated_state
 
+    def read_screen_state(
+        self,
+        pane_text: str,
+        current_state: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], list[dict]]:
+        return _claude_read_screen_state(pane_text, current_state)
+
 
 CLAUDE_HARNESS = ClaudeSessionHarness()
 
@@ -360,6 +401,26 @@ class CodexSessionHarness:
         current_state: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
         return extract_codex_harness_state(raw_entry, current_state)
+
+    def read_screen_state(
+        self,
+        pane_text: str,
+        current_state: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], list[dict]]:
+        # auto-eerfx: Codex screen-reading is deferred to a follow-up
+        # bead. The stub returns composer_ready=True unconditionally so
+        # Codex sessions can reach harness_phase=composer_ready (and
+        # thus the derived 'ready' state) without waiting on a
+        # screen-state signal this adapter doesn't yet produce.
+        return (
+            {
+                "composer_ready": True,
+                "confirming_trust_prompt": False,
+                "in_planning_mode": False,
+                "blocking_modal": None,
+            },
+            [],
+        )
 
 
 CODEX_HARNESS = CodexSessionHarness()
@@ -2273,6 +2334,89 @@ def extract_codex_harness_state(
         "windows": windows,
     })
     return current_state if updated_state == current_state else updated_state
+
+
+# auto-eerfx: Claude TUI screen-state inference.
+#
+# These patterns are matched against the rectangular pane snapshot
+# returned by ``tmux capture-pane -p``. The width is configurable
+# (server.py defaults the terminal to -x 120 -y 40) so the patterns
+# must regex on glyph shape, never absolute column position.
+_CLAUDE_TRUST_DIALOG_RE = re.compile(
+    r"trust this (?:directory|folder)|trust the files in this directory|"
+    r"do you trust the files in this folder",
+    re.IGNORECASE,
+)
+_CLAUDE_TRUST_CORNER_RE = re.compile(r"╭[─━]+╮")
+_CLAUDE_PLANNING_RE = re.compile(
+    r"(?:^|\n)\s*(?:plan mode|planning|Planning)\b",
+    re.IGNORECASE,
+)
+_CLAUDE_AUTH_RE = re.compile(
+    r"please run /login|/login to authenticate|invalid api key|"
+    r"authentication required",
+    re.IGNORECASE,
+)
+_CLAUDE_COMPOSER_PROMPT_RE = re.compile(
+    # The composer renders as a `> ` prompt on a near-bottom line, often
+    # inside a rounded box (╭ … ╰). Two heuristics: an unboxed `> ` at
+    # line start, OR `>` at the start of a content line bracketed by ╭╰.
+    r"(?:^|\n)\s*>\s",
+)
+
+
+def _claude_read_screen_state(
+    pane_text: str,
+    current_state: dict[str, Any] | None,
+) -> tuple[dict[str, Any], list[dict]]:
+    """auto-eerfx: detect trust dialog / planning mode / composer-ready.
+
+    See the docstring on the Protocol method for the contract.
+    """
+    prev = dict(current_state or {})
+    new_state = dict(prev)
+    keystrokes: list[dict] = []
+
+    text = pane_text or ""
+
+    trust_visible = bool(
+        _CLAUDE_TRUST_DIALOG_RE.search(text)
+        and _CLAUDE_TRUST_CORNER_RE.search(text)
+    )
+    new_state["confirming_trust_prompt"] = bool(prev.get("confirming_trust_prompt"))
+    if trust_visible and not prev.get("confirming_trust_prompt"):
+        # Newly-detected dialog. Send the confirm keystroke and flip
+        # the flag so a re-poll while the keystroke is in flight does
+        # not re-send. The fallback default-selected option in Claude's
+        # TUI is "Yes, trust this directory" — Enter on that option
+        # accepts. Empirical verification required: a sandbox test
+        # spawning a real harness and asserting that this single
+        # Enter clears the dialog within one poll interval.
+        keystrokes.append({"kind": "key", "value": "C-m"})
+        new_state["confirming_trust_prompt"] = True
+    elif not trust_visible and prev.get("confirming_trust_prompt"):
+        # Dialog cleared since last poll — confirm worked.
+        new_state["confirming_trust_prompt"] = False
+
+    new_state["in_planning_mode"] = bool(_CLAUDE_PLANNING_RE.search(text))
+
+    if _CLAUDE_AUTH_RE.search(text):
+        new_state["blocking_modal"] = "auth_required"
+    else:
+        new_state["blocking_modal"] = None
+
+    # composer_ready is the cleanest single signal that the harness
+    # will accept user input. The `> ` prompt is visible only when
+    # Claude is at idle waiting for input — not during model thinking,
+    # not during tool use, not when a dialog is up.
+    composer_visible = bool(_CLAUDE_COMPOSER_PROMPT_RE.search(text))
+    new_state["composer_ready"] = (
+        composer_visible
+        and not trust_visible
+        and not new_state["blocking_modal"]
+    )
+
+    return new_state, keystrokes
 
 
 HARNESSES: dict[str, SessionHarness] = {

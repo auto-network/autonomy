@@ -82,3 +82,56 @@ def _tmux_enter(target: str) -> None:
     subprocess.run(
         ["tmux", "send-keys", "-t", target, "\r"], capture_output=True
     )
+
+
+# auto-eerfx: raw key-event injection for TUI overlays (trust dialog,
+# planning-mode toggles, etc.). The paste-buffer + double-Enter dance
+# above is sized for *message bodies*; it can't deliver Enter alone, an
+# arrow key, or a single digit. tmux_send_keys is the dedicated helper
+# for control sequences. Shares the per-session lock with tmux_send so a
+# user-typed message can't interleave with an in-flight confirm.
+
+# Each keystroke is a dict: {"kind": "key"|"literal", "value": str}.
+#  - kind="key"     → ``tmux send-keys -t <target> <value>`` (e.g. "C-m"
+#                     for Enter, "Down" for an arrow, "Escape" for ESC).
+#                     Standard tmux key syntax.
+#  - kind="literal" → ``tmux send-keys -t <target> -l <value>`` (literal
+#                     bytes, no interpretation; for digits, letters,
+#                     short strings).
+async def tmux_send_keys(target: str, keystrokes: list[dict]) -> None:
+    """Inject a sequence of raw key events into a tmux session.
+
+    Returns immediately. The work runs under the same per-session lock
+    as ``tmux_send`` so message-body paste cannot interleave with a
+    confirm-sequence injection mid-stream.
+    """
+    asyncio.create_task(_tmux_send_keys_worker(target, list(keystrokes)))
+
+
+async def _tmux_send_keys_worker(target: str, keystrokes: list[dict]) -> None:
+    lock = _session_locks.setdefault(target, asyncio.Lock())
+    async with lock:
+        for ks in keystrokes:
+            _tmux_send_one_key(target, ks)
+            # Small inter-key gap matches the cadence of a human pressing
+            # keys in a TUI; some terminals coalesce overly-tight input.
+            await asyncio.sleep(0.05)
+
+
+def _tmux_send_one_key(target: str, keystroke: dict) -> None:
+    kind = (keystroke or {}).get("kind")
+    value = (keystroke or {}).get("value")
+    if not value:
+        return
+    if kind == "literal":
+        subprocess.run(
+            ["tmux", "send-keys", "-t", target, "-l", value],
+            capture_output=True,
+        )
+    else:
+        # Default to non-literal — tmux's standard key syntax (C-m,
+        # Down, Escape, etc.). Includes the explicit "key" kind.
+        subprocess.run(
+            ["tmux", "send-keys", "-t", target, value],
+            capture_output=True,
+        )
