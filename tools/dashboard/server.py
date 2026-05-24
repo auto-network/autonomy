@@ -6171,24 +6171,88 @@ async def page_session_view_fragment(request):
 async def page_session_view_by_name(request):
     """Resolve /session/{session_id} → /session/{project}/{session_id}.
 
-    Journal entries (auto-fjfki) link to /session/<source_session_id> with no
-    project segment. Look up the project from the registered session, or fall
-    back to the sessions index when the name is unknown.
+    Three-tier lookup (auto-eik9g):
+      1. dashboard_db.get_session(name) — live sessions in the
+         tmux_sessions table. Existing behaviour preserved.
+      2. tools.graph.ops.get_session(name) — dead sessions ingested into
+         the graph DB. The session source row carries metadata.project,
+         so a dead session that was once ingested can still be navigated
+         to its proper viewer URL.
+      3. None of the above — render a 404 with a back-link instead of
+         redirecting to /sessions?session=… (which was a no-op on the
+         index page; the cause of the broken search → source → viewer
+         workflow).
+
+    Journal entries (auto-fjfki) link to /session/<source_session_id>
+    with no project segment; the same /session/<tmux_session> chip on
+    the source viewer also hits this route.
     """
     session_id = request.path_params["session_id"]
     if os.environ.get("DASHBOARD_MOCK"):
         return HTMLResponse(_load_template("base.html"))
+
+    # Tier 1: live session in tmux_sessions.
     session = dashboard_db.get_session(session_id)
     project = (session or {}).get("project")
-    if not project:
+    if project:
         return RedirectResponse(
-            url=f"/sessions?session={session_id}",
+            url=f"/session/{project}/{session_id}",
             status_code=302,
         )
-    return RedirectResponse(
-        url=f"/session/{project}/{session_id}",
-        status_code=302,
+
+    # Tier 2: dead session in the graph DB. The graph source's metadata
+    # carries the project so the viewer can render with the right org
+    # scope and pull historical entries via the existing tail endpoint.
+    try:
+        from tools.graph import ops as _graph_ops
+        graph_session = _graph_ops.get_session(session_id, org=None)
+    except Exception:
+        logger.warning(
+            "page_session_view_by_name: graph.get_session(%s) failed",
+            session_id, exc_info=True,
+        )
+        graph_session = None
+
+    if graph_session:
+        metadata = graph_session.get("metadata") or {}
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except Exception:
+                metadata = {}
+        project = (
+            metadata.get("project")
+            or metadata.get("graph_project")
+            or graph_session.get("project")
+        )
+        if project:
+            return RedirectResponse(
+                url=f"/session/{project}/{session_id}",
+                status_code=302,
+            )
+
+    # Tier 3: genuinely not found. Render a 404 with a back-link via the
+    # Referer header (typically the originating source viewer) so the
+    # operator has a recovery path. NOT a redirect to /sessions — that
+    # was the broken behaviour this bead fixes.
+    referer = request.headers.get("referer") or "/sessions"
+    body = (
+        '<!doctype html><html><head><title>Session not found</title>'
+        '<style>body{background:#0b0d12;color:#e5e7eb;'
+        'font-family:-apple-system,BlinkMacSystemFont,sans-serif;'
+        'padding:64px;max-width:640px;margin:0 auto;}'
+        'a{color:#818cf8;text-decoration:none;}a:hover{color:#a5b4fc;}'
+        'code{background:#1f2937;padding:2px 6px;border-radius:4px;'
+        'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}'
+        '</style></head><body>'
+        '<h1>Session not found</h1>'
+        f'<p>No session with id <code>{session_id}</code> exists in the '
+        'dashboard or the graph database. It may have been deleted, or '
+        'the link may be stale.</p>'
+        f'<p><a href="{referer}">← Back</a></p>'
+        '</body></html>'
     )
+    return HTMLResponse(body, status_code=404)
 
 
 async def page_test_input(request):
