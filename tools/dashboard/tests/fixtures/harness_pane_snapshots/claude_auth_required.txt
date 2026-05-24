@@ -1,0 +1,6 @@
+Claude Code (1.0.0)
+
+  ⚠ Authentication required.
+
+  Please run /login to authenticate, or set
+  CLAUDE_CODE_OAUTH_TOKEN in your environment.

@@ -1,0 +1,11 @@
+╭─────────────────────────────────────────────────────────────────╮
+│ Do you trust the files in this folder?                         │
+│                                                                 │
+│   /workspace/<workspace>                                        │
+│                                                                 │
+│ Claude Code may read files in this folder. Reading untrusted    │
+│ files may lead Claude Code to behave in unexpected ways.        │
+│                                                                 │
+│ ▸ 1. Yes, trust this directory                                  │
+│   2. No, exit                                                   │
+╰─────────────────────────────────────────────────────────────────╯

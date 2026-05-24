@@ -1,0 +1,8 @@
+  Assistant: I've finished the analysis. Three files changed:
+    - tools/dashboard/server.py
+    - tools/dashboard/static/app.js
+    - tools/dashboard/templates/base.html
+
+  Tests: 17/17 passing.
+
+> _

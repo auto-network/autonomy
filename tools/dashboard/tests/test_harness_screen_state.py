@@ -14,6 +14,7 @@ Tests cover:
 """
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -21,32 +22,31 @@ import pytest
 from tools.dashboard.session_harness import CLAUDE_HARNESS, CODEX_HARNESS
 
 
-# ── Pane snapshot fixtures (kept inline to avoid filesystem coupling)
+# ── Pane snapshot fixtures loaded from disk
+#
+# auto-eerfx: real pane captures live under
+# ``tests/fixtures/harness_pane_snapshots/`` so they're versionable
+# regression artifacts rather than inline-string approximations. The
+# detection regexes match on glyph patterns (box-drawing corners,
+# banner text, prompt shapes) — not absolute column positions — so
+# fixture line lengths can vary without breaking matches.
 
-PANE_TRUST_DIALOG = """\
-╭──────────────────────────────────────╮
-│ Do you trust the files in this folder? │
-│ 1. Yes, trust this directory          │
-│ 2. No, don't trust                    │
-╰──────────────────────────────────────╯
-"""
+_FIXTURE_DIR = (
+    Path(__file__).parent / "fixtures" / "harness_pane_snapshots"
+)
 
-PANE_PLANNING_MODE = """\
-> tell me about this repo
-  Planning…
-  ⏵ thinking about the structure
-"""
 
-PANE_COMPOSER_READY = """\
-  Assistant: How can I help today?
+def _load(name: str) -> str:
+    return (_FIXTURE_DIR / name).read_text()
 
-> _
-"""
 
-PANE_AUTH_REQUIRED = """\
-Authentication required. Please run /login to authenticate.
-"""
+PANE_TRUST_DIALOG = _load("claude_trust_dialog.txt")
+PANE_TRUST_CLEARED = _load("claude_trust_dialog_cleared.txt")
+PANE_PLANNING_MODE = _load("claude_planning_mode.txt")
+PANE_COMPOSER_READY = _load("claude_composer_ready.txt")
+PANE_AUTH_REQUIRED = _load("claude_auth_required.txt")
 
+# Synthetic — represents a session mid-tool-use with no prompt visible.
 PANE_BUSY = """\
   Tool use: bash
   ⏵ running command…
