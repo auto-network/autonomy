@@ -104,10 +104,13 @@ def test_route_genuinely_missing_returns_404_not_sessions_redirect(app_client):
     assert "location" not in r.headers
 
 
-def test_route_404_uses_referer_as_back_link(app_client):
-    """The 404 page's Back link prefers the Referer header (typically the
-    originating source viewer) when present, so the operator has a
-    contextual recovery path."""
+def test_route_404_back_link_is_fixed_safe_target(app_client):
+    """The 404 page's Back link points at a fixed safe destination
+    (``/sessions``), not the Referer header. Originally the route used
+    the Referer for a contextual back-link, but using attacker-influenced
+    header text in an href is a defense-in-depth red flag — and the
+    security review for this branch flagged it. Fixed target keeps the
+    affordance without the surface."""
     with patch(
         "tools.dashboard.server.dashboard_db.get_session",
         return_value=None,
@@ -121,7 +124,73 @@ def test_route_404_uses_referer_as_back_link(app_client):
             follow_redirects=False,
         )
     assert r.status_code == 404
-    assert 'href="/graph/abc123-source-id"' in r.text
+    assert 'href="/sessions"' in r.text
+    # The Referer is NOT reflected anywhere in the body.
+    assert "abc123-source-id" not in r.text
+
+
+def test_route_404_escapes_session_id_against_xss(app_client):
+    """auto-0524-000705 security review (HIGH): the 404 branch
+    interpolates the URL path parameter ``session_id`` into the response
+    HTML. Starlette's default ``str`` path converter accepts arbitrary
+    percent-encoded characters including ``<``, ``>``, ``"``. Without
+    escaping this is reflected XSS — an attacker visits
+    ``/session/%3Cscript%3Ealert(1)%3C%2Fscript%3E`` and the injected
+    script runs on the dashboard origin.
+
+    Fix: ``html.escape(session_id)`` before interpolating into the
+    response body. This test asserts the fix is in place by sending an
+    XSS-shaped session id and verifying the raw `<script>` tag is NOT
+    present in the response body."""
+    # NOTE: the decoded form must NOT contain a literal '/' or the
+    # request matches the two-segment ``/session/{project}/{session_id}``
+    # route instead of the single-segment route under test. Use a
+    # payload without slashes that still proves the escape contract.
+    with patch(
+        "tools.dashboard.server.dashboard_db.get_session",
+        return_value=None,
+    ), patch(
+        "tools.graph.ops.get_session",
+        return_value=None,
+    ):
+        r = app_client.get(
+            "/session/%3Cscript%3Ealert(1)%3C%21--",  # <script>alert(1)<!--
+            follow_redirects=False,
+        )
+    assert r.status_code == 404, (
+        f"expected 404, got {r.status_code} — payload may have matched "
+        "a different route"
+    )
+    # The raw injection MUST NOT appear in the response body.
+    assert "<script>alert(1)" not in r.text, (
+        "reflected XSS regression — session_id was not HTML-escaped"
+    )
+    # The escaped form should be there (proves the value reached the
+    # template and was escaped rather than dropped or filtered upstream).
+    assert "&lt;script&gt;alert(1)" in r.text
+
+
+def test_route_404_escapes_quotes_in_session_id(app_client):
+    """Additional XSS coverage: a session id containing a double quote
+    should land as ``&quot;`` in the body, never as a raw ``"`` that
+    could break out of an attribute context. The current 404 uses a
+    ``<code>`` element rather than an attribute, so quote escaping is
+    defense-in-depth, but the contract is "every interpolated value
+    is escaped" and worth pinning."""
+    with patch(
+        "tools.dashboard.server.dashboard_db.get_session",
+        return_value=None,
+    ), patch(
+        "tools.graph.ops.get_session",
+        return_value=None,
+    ):
+        r = app_client.get(
+            '/session/%22onerror%3Dalert(1)',  # "onerror=alert(1)
+            follow_redirects=False,
+        )
+    assert r.status_code == 404
+    assert '"onerror=alert(1)' not in r.text
+    assert "&quot;onerror=alert(1)" in r.text
 
 
 def test_route_graph_lookup_failure_treated_as_miss(app_client):
