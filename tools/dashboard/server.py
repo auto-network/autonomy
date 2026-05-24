@@ -132,6 +132,7 @@ from tools.dashboard.plugin_api import loader as plugin_loader  # noqa: E402
 from tools.dashboard import settings_mediator as _settings_mediator  # noqa: E402, F401
 from tools.dashboard import harness_usage_settings as _harness_usage_settings  # noqa: E402, F401
 from tools.dashboard import session_upload_settings as _session_upload  # noqa: E402, F401
+from tools.dashboard import session_orientation_settings as _session_orientation_settings  # noqa: E402, F401
 from tools.dashboard import worktree_directives as _worktree_directives  # noqa: E402, F401
 from tools.dashboard import claude_credentials_refresh as _claude_credentials_refresh  # noqa: E402
 from tools.graph import settings_ops  # noqa: E402
@@ -5374,17 +5375,38 @@ async def api_session_create(request):
         )
 
     # ── Resolve primer (container only) ─────────────────────────
+    # Primer URL takes precedence over the orientation Setting. When no
+    # primer is supplied, the per-workspace
+    # ``dashboard.session.orientation`` Setting is rendered into the
+    # first injected user turn (auto-inhm3). The default template carries
+    # session id + workspace + timestamp; operators tune it via
+    # ``graph set add dashboard.session.orientation <workspace_id>``.
     first_message: str | None = None
     primer_error: str | None = None
     if is_container:
-        first_message = "Hello"
         if primer_url:
             resolved = await _resolve_primer(primer_url)
             if resolved:
                 first_message = resolved
             else:
-                primer_error = f"Could not resolve primer {primer_url!r}, falling back to hello"
+                primer_error = f"Could not resolve primer {primer_url!r}, falling back to orientation"
                 logger.warning("api_session_create: %s", primer_error)
+        if first_message is None:
+            from tools.dashboard.session_orientation import render_orientation
+            try:
+                first_message = render_orientation(
+                    tmux_name=tmux_name,
+                    workspace_id=(proj.id if proj else ""),
+                    workspace_name=(proj.name if proj else "default"),
+                    org=(proj.graph_project if proj else "autonomy"),
+                )
+            except Exception:
+                logger.warning(
+                    "api_session_create: orientation render failed for %s; "
+                    "falling back to literal Hello",
+                    tmux_name, exc_info=True,
+                )
+                first_message = "Hello"
 
     if first_message:
         async def _inject_first_message():
