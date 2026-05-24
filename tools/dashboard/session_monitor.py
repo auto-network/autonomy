@@ -1687,6 +1687,45 @@ class SessionMonitor:
             except Exception:
                 logger.exception("session_monitor: entry_enricher failed for %s", tmux_name)
         if new_entries and self._event_bus:
+            # auto-rsvzk: match user-typed echoes back to the original
+            # client_id stashed by api_session_send. The optimistic
+            # frontend uses the round-tripped id to dedup its locally-
+            # rendered "sending" entry (it promotes to "confirmed"
+            # instead of appending a duplicate row). User-turns that
+            # were never sent through the API path (typed directly into
+            # tmux) carry no client_id and the frontend renders them
+            # normally.
+            try:
+                from tools.dashboard import pending_outbound
+                for entry in new_entries:
+                    if entry.get("type") != "user":
+                        continue
+                    if entry.get("client_id"):
+                        continue
+                    # Extract the operator's typed text. Different
+                    # harnesses store it differently; try the common
+                    # shapes before giving up.
+                    text = entry.get("text") or entry.get("content") or ""
+                    if isinstance(text, list):
+                        text = "".join(
+                            block.get("text", "")
+                            for block in text
+                            if isinstance(block, dict)
+                        )
+                    text = text.strip() if isinstance(text, str) else ""
+                    if not text:
+                        continue
+                    matched = pending_outbound.match_and_consume(
+                        tmux_name, text,
+                    )
+                    if matched:
+                        entry["client_id"] = matched
+            except Exception:
+                logger.exception(
+                    "session_monitor: pending_outbound match failed for %s",
+                    tmux_name,
+                )
+
             ts.broadcast_seq += 1
             ts.last_broadcast_ts = time.time()
             updated = get_session(tmux_name)

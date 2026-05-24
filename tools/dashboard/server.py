@@ -4327,17 +4327,29 @@ async def api_session_send(request):
 
     POST /api/session/send
     POST /api/session/{project}/{session_id}/send  (project/session_id ignored)
-    Body: {"tmux_session": "auto-t2", "message": "text"}
+    Body: {"tmux_session": "auto-t2", "message": "text", "client_id": "..." (optional)}
 
     Only works for tmux-managed sessions (terminal, chatwith, dispatch agents).
     Host interactive sessions have no stdin injection path — returns 404.
     Returns 400 if tmux_session or message is not provided.
     Returns 404 if the tmux session does not exist.
     Returns 503 if tmux is not available in this environment.
+
+    auto-rsvzk: when ``client_id`` is supplied, the message is stashed in
+    the per-session ``pending_outbound`` ring before tmux_send fires.
+    The inotify tailer matches the echo back to the client_id and
+    attaches it to the broadcast ``session:messages`` payload so the
+    frontend can promote its locally-rendered "sending" entry to
+    "confirmed" without appending a duplicate row.
+
+    Retries posting the same ``client_id`` short-circuit with
+    ``{status: "in_flight"}`` and do NOT re-paste into tmux — that's
+    the gate that makes the optimistic-outbound retry path idempotent.
     """
     body = await request.json()
     message = (body.get("message") or "")
     tmux_session = (body.get("tmux_session") or "").strip()
+    client_id = (body.get("client_id") or "").strip()
 
     if not tmux_session:
         return JSONResponse(
@@ -4362,6 +4374,25 @@ async def api_session_send(request):
             status_code=404,
         )
 
+    # auto-rsvzk: idempotent retry — if this client_id is already
+    # pending an echo, do not re-paste into the harness. The original
+    # send's echo will land on session:messages with this client_id
+    # attached, promoting the frontend's "sending" entry to "confirmed"
+    # without a duplicate row.
+    if client_id:
+        from tools.dashboard import pending_outbound
+        if pending_outbound.is_in_flight(tmux_session, client_id):
+            logger.info(
+                "[session-send] dedup in-flight  tmux=%s  client_id=%s",
+                tmux_session, client_id,
+            )
+            return JSONResponse({
+                "ok": True,
+                "tmux_session": tmux_session,
+                "status": "in_flight",
+            })
+        pending_outbound.record_send(tmux_session, client_id, message)
+
     # Inject via unified tmux_send (per-session lock + double-Enter retry)
     logger.warning("[session-send] tmux=%r message=%r", tmux_session, message)
     try:
@@ -4372,7 +4403,10 @@ async def api_session_send(request):
             status_code=503,
         )
 
-    return JSONResponse({"ok": True, "tmux_session": tmux_session})
+    resp: dict[str, Any] = {"ok": True, "tmux_session": tmux_session}
+    if client_id:
+        resp["client_id"] = client_id
+    return JSONResponse(resp)
 
 
 async def api_session_interrupt(request):
