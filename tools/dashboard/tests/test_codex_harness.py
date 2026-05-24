@@ -758,6 +758,68 @@ def test_postprocess_codex_exec_completion_from_function_call_output_is_complete
     assert tool_results[0]["is_error"] is False
 
 
+def test_postprocess_codex_graph_share_output_emits_viewer_attachment(tmp_path):
+    session_dir = tmp_path / "graph-share-output"
+    session_dir.mkdir()
+    share_json = json.dumps({
+        "type": "viewer_attachment",
+        "version": 1,
+        "rel_path": ".attachments/20260524-110144-8ba30d04/session-startup-ui-concept.png",
+        "filename": "session-startup-ui-concept.png",
+        "mime": "image/png",
+        "size": 1361638,
+        "sha8": "8ba30d04",
+        "alt": "Session startup UI raster concept",
+        "caption": "Existing Session Card startup concept",
+    })
+    parsed = []
+    for raw in (
+        {
+            "timestamp": "2026-05-24T11:01:43.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps({
+                    "cmd": "graph share /workspace/output/session-startup-ui-concept.png",
+                    "workdir": "/workspace/repo",
+                }),
+                "call_id": "call_share_1",
+            },
+        },
+        {
+            "timestamp": "2026-05-24T11:01:44.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_share_1",
+                "output": (
+                    "Chunk ID: 4cd6d8\n"
+                    "Wall time: 0.8852 seconds\n"
+                    "Process exited with code 0\n"
+                    "Original token count: 99\n"
+                    "Output:\n"
+                    f"{share_json}\n"
+                ),
+            },
+        },
+    ):
+        parsed_entry = parse_codex_log_line(_line(raw))
+        if isinstance(parsed_entry, list):
+            parsed.extend(parsed_entry)
+        elif parsed_entry:
+            parsed.append(parsed_entry)
+
+    entries = CODEX_HARNESS.postprocess_entries(parsed, session_dir=session_dir)
+
+    attachments = [entry for entry in entries if entry["type"] == "viewer_attachment"]
+    assert len(attachments) == 1
+    assert attachments[0]["tool_id"] == "call_share_1"
+    assert attachments[0]["rel_path"] == ".attachments/20260524-110144-8ba30d04/session-startup-ui-concept.png"
+    assert attachments[0]["filename"] == "session-startup-ui-concept.png"
+    assert attachments[0]["mime"] == "image/png"
+
+
 def test_parse_codex_user_and_agent_event_messages():
     user = parse_codex_log_line(_line({
         "timestamp": TS,

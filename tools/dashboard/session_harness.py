@@ -1430,6 +1430,13 @@ def postprocess_codex_entries(
                         if progress.get("status") != "running":
                             completed_tools.add(tool_id)
                         normalized.append(progress)
+                        va = _upconvert_viewer_attachment(
+                            str(progress.get("stdout") or progress.get("content") or ""),
+                            str(progress.get("timestamp") or ""),
+                            tool_id=tool_id,
+                        )
+                        if va:
+                            normalized.append(va)
                     continue
                 write_session_id = str(write_calls.get(tool_id) or "")
                 if write_session_id:
