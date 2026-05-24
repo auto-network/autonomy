@@ -1255,6 +1255,8 @@ class SessionMonitor:
         self._tailer_task = asyncio.create_task(self._inotify_tailer_loop())
         self._liveness_task = asyncio.create_task(self._liveness_loop())
         self._reconciliation_task = asyncio.create_task(self._reconciliation_loop())
+        # auto-eerfx: per-2s tmux capture-pane poll for harness state.
+        self._screen_poll_task = asyncio.create_task(self._screen_poll_loop())
         logger.info("session_monitor: background tasks started (mode=inotify)")
         # Re-scan unresolved container sessions from prior server lifetime
         await self._recover_unresolved_sessions()
@@ -1702,6 +1704,121 @@ class SessionMonitor:
                 },
                 dedup=False,
             )
+
+        # ── auto-eerfx screen-state poller ────────────────────────────
+
+    SCREEN_POLL_INTERVAL_S = 2.0
+
+    async def _screen_poll_loop(self) -> None:
+        """auto-eerfx: per-2s tmux capture-pane → harness.read_screen_state.
+
+        Drives harness_phase progression from first_turn_written →
+        composer_ready, detects + auto-confirms the Claude trust dialog,
+        surfaces planning mode + blocking modals to the registry SSE.
+
+        Targets sessions whose harness_phase is in
+        {harness_starting, first_turn_written} — past container ready
+        but not yet known-good-input. Sessions in composer_ready or any
+        failed state are skipped (no transition expected).
+        """
+        import subprocess as _subprocess
+        from tools.dashboard.tmux_send import tmux_send_keys
+        while True:
+            try:
+                await asyncio.sleep(self.SCREEN_POLL_INTERVAL_S)
+                rows = get_live_sessions()
+                for row in rows:
+                    tmux_name = row["tmux_name"]
+                    harness_phase = row.get("harness_phase") or "pending"
+                    if harness_phase not in (
+                        "harness_starting", "first_turn_written"
+                    ):
+                        continue
+                    harness = resolve_harness_for_session_row(row)
+                    try:
+                        result = await asyncio.to_thread(
+                            _subprocess.run,
+                            ["tmux", "capture-pane", "-p", "-t", tmux_name],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "screen_poll: capture-pane failed for %s",
+                            tmux_name, exc_info=True,
+                        )
+                        continue
+                    if result.returncode != 0:
+                        # Pane gone (session dead). Liveness sweep handles
+                        # the dead transition; we just skip.
+                        continue
+                    pane_text = result.stdout or ""
+
+                    current_state_str = row.get("harness_state") or "{}"
+                    try:
+                        current_state = json.loads(current_state_str)
+                        if not isinstance(current_state, dict):
+                            current_state = {}
+                    except (json.JSONDecodeError, TypeError):
+                        current_state = {}
+
+                    try:
+                        new_state, keystrokes = harness.read_screen_state(
+                            pane_text, current_state,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "screen_poll: read_screen_state failed for %s",
+                            tmux_name,
+                        )
+                        continue
+
+                    # Inject any keystrokes the adapter asked for (e.g.
+                    # the trust-dialog confirm). Fire and forget — the
+                    # next poll observes the result.
+                    if keystrokes:
+                        try:
+                            await tmux_send_keys(tmux_name, keystrokes)
+                        except Exception:
+                            logger.exception(
+                                "screen_poll: tmux_send_keys failed for %s",
+                                tmux_name,
+                            )
+
+                    # Persist state delta + advance harness_phase if
+                    # composer_ready flipped true.
+                    changed = (new_state != current_state)
+                    advance = (
+                        bool(new_state.get("composer_ready"))
+                        and harness_phase != "composer_ready"
+                    )
+                    if changed or advance:
+                        kwargs: dict[str, Any] = {}
+                        if changed:
+                            kwargs["harness_state"] = json.dumps(new_state)
+                        if advance:
+                            kwargs["harness_phase"] = "composer_ready"
+                        try:
+                            update_tail_state(tmux_name, **kwargs)
+                        except Exception:
+                            logger.exception(
+                                "screen_poll: update_tail_state failed for %s",
+                                tmux_name,
+                            )
+                            continue
+                        if self._event_bus:
+                            try:
+                                await self._event_bus.broadcast(
+                                    "session:registry", self.get_registry(),
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "screen_poll: broadcast failed for %s",
+                                    tmux_name,
+                                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("screen_poll: loop iteration failed")
 
     # ── inotify tailer ────────────────────────────────────────────
 
