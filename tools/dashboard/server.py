@@ -5374,6 +5374,63 @@ async def api_session_create(request):
             _watch_for_host_session_jsonl(projects_dir, tmux_name),
         )
 
+    # auto-a1jco: write the initial lifecycle-phase transitions. The
+    # tmux session is created and the container is now starting; the
+    # harness exec is about to fire inside the entrypoint. Subsequent
+    # transitions are driven by the session monitor's signal watchers
+    # (JSONL appearance, .setup-exit) and the screen-reading poller
+    # (auto-eerfx).
+    try:
+        dashboard_db.update_tail_state(
+            tmux_name,
+            setup_phase="container_starting",
+            harness_phase="harness_starting",
+        )
+        await event_bus.broadcast("session:registry", session_monitor.get_registry())
+    except Exception:
+        logger.warning(
+            "api_session_create: failed to write initial phases for %s",
+            tmux_name, exc_info=True,
+        )
+
+    # auto-a1jco: per-session .setup-exit watcher. /startup.sh in the
+    # container backgrounds itself and writes its exit code into
+    # /workspace/output/.setup-exit (mounted to data/agent-runs/<name>-<ts>/
+    # on the host). When the file appears, advance setup_phase to
+    # setup_complete or setup_failed. Polls at 1Hz for up to 10 minutes
+    # — long enough for poetry install + container image pulls on a
+    # cold cache, short enough that abandoned sessions don't leak tasks.
+    if is_container and run_dirs:
+        run_dir = run_dirs[0]
+        async def _watch_setup_exit():
+            setup_exit = run_dir / ".setup-exit"
+            deadline = time.time() + 600  # 10 min
+            while time.time() < deadline:
+                if setup_exit.exists():
+                    try:
+                        exit_code = setup_exit.read_text().strip()
+                        phase = "setup_complete" if exit_code == "0" else "setup_failed"
+                        dashboard_db.update_tail_state(tmux_name, setup_phase=phase)
+                        await event_bus.broadcast(
+                            "session:registry", session_monitor.get_registry()
+                        )
+                        logger.info(
+                            "auto-a1jco: %s setup_phase=%s (exit=%s)",
+                            tmux_name, phase, exit_code,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "auto-a1jco: failed to read .setup-exit for %s",
+                            tmux_name, exc_info=True,
+                        )
+                    return
+                await asyncio.sleep(1)
+            logger.info(
+                "auto-a1jco: .setup-exit watcher for %s timed out (10 min)",
+                tmux_name,
+            )
+        asyncio.create_task(_watch_setup_exit())
+
     # ── Resolve primer (container only) ─────────────────────────
     # Primer URL takes precedence over the orientation Setting. When no
     # primer is supplied, the per-workspace
