@@ -6322,11 +6322,25 @@ async def page_session_view_by_name(request):
                 status_code=302,
             )
 
-    # Tier 3: genuinely not found. Render a 404 with a back-link via the
-    # Referer header (typically the originating source viewer) so the
-    # operator has a recovery path. NOT a redirect to /sessions — that
-    # was the broken behaviour this bead fixes.
-    referer = request.headers.get("referer") or "/sessions"
+    # Tier 3: genuinely not found. Render a 404 with a back-link.
+    # NOT a redirect to /sessions — that was the broken behaviour this
+    # bead fixes.
+    #
+    # SECURITY (caught during auto-0524-000705 security review):
+    # session_id is the URL path parameter and reaches this branch as
+    # arbitrary text (Starlette's default ``str`` converter accepts
+    # any percent-encoded characters including ``<>"'``). Interpolating
+    # it un-escaped into HTML is reflected XSS — an attacker can craft
+    # a URL whose injected script runs on the dashboard origin with
+    # full access to the cookieless same-origin POSTs that mutate
+    # session state. ``html.escape()`` is the fix.
+    #
+    # The Referer header is NOT used as a back-link target — browsers
+    # do encode quote/angle characters, but a fixed safe destination
+    # (``/sessions``) sidesteps any future surprise from header sources
+    # we don't yet understand. The "back" affordance still works.
+    import html as _html
+    safe_session_id = _html.escape(session_id)
     body = (
         '<!doctype html><html><head><title>Session not found</title>'
         '<style>body{background:#0b0d12;color:#e5e7eb;'
@@ -6337,10 +6351,10 @@ async def page_session_view_by_name(request):
         'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}'
         '</style></head><body>'
         '<h1>Session not found</h1>'
-        f'<p>No session with id <code>{session_id}</code> exists in the '
+        f'<p>No session with id <code>{safe_session_id}</code> exists in the '
         'dashboard or the graph database. It may have been deleted, or '
         'the link may be stale.</p>'
-        f'<p><a href="{referer}">← Back</a></p>'
+        '<p><a href="/sessions">← Back to sessions</a></p>'
         '</body></html>'
     )
     return HTMLResponse(body, status_code=404)
