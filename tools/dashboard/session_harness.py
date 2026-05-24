@@ -1430,13 +1430,7 @@ def postprocess_codex_entries(
                         if progress.get("status") != "running":
                             completed_tools.add(tool_id)
                         normalized.append(progress)
-                        va = _upconvert_viewer_attachment(
-                            str(progress.get("stdout") or progress.get("content") or ""),
-                            str(progress.get("timestamp") or ""),
-                            tool_id=tool_id,
-                        )
-                        if va:
-                            normalized.append(va)
+                        _append_codex_exec_sidecars(normalized, progress)
                     continue
                 write_session_id = str(write_calls.get(tool_id) or "")
                 if write_session_id:
@@ -1451,6 +1445,7 @@ def postprocess_codex_entries(
                             if progress.get("status") != "running":
                                 completed_tools.add(parent_tool_id)
                             normalized.append(progress)
+                            _append_codex_exec_sidecars(normalized, progress)
                         continue
                     continue
 
@@ -1711,8 +1706,15 @@ def _parse_codex_tool_output_metadata(output: str) -> dict:
     data: dict[str, Any] = {}
     if not text:
         return data
-    session_match = _CODEX_TOOL_OUTPUT_SESSION_RE.search(text)
-    exit_match = _CODEX_TOOL_OUTPUT_EXIT_RE.search(text)
+    body = text
+    body_split = _CODEX_TOOL_OUTPUT_BODY_RE.split(text, maxsplit=1)
+    if len(body_split) == 2:
+        header, body = body_split
+    else:
+        header = text
+
+    session_match = _CODEX_TOOL_OUTPUT_SESSION_RE.search(header)
+    exit_match = _CODEX_TOOL_OUTPUT_EXIT_RE.search(header)
     if session_match:
         data["process_id"] = session_match.group(1)
         if not exit_match:
@@ -1723,16 +1725,12 @@ def _parse_codex_tool_output_metadata(output: str) -> dict:
         except ValueError:
             pass
         data["status"] = "completed"
-    time_match = _CODEX_TOOL_OUTPUT_TIME_RE.search(text)
+    time_match = _CODEX_TOOL_OUTPUT_TIME_RE.search(header)
     if time_match:
         try:
             data["duration_seconds"] = float(time_match.group(1))
         except ValueError:
             pass
-    body = text
-    body_split = _CODEX_TOOL_OUTPUT_BODY_RE.split(text, maxsplit=1)
-    if len(body_split) == 2:
-        body = body_split[1]
     data["stdout"] = body
     return data
 
@@ -1862,6 +1860,25 @@ def _build_codex_exec_progress_result(
         "stderr": "",
         "process_id": process_id,
     }
+
+
+def _append_codex_exec_sidecars(out: list[dict], progress: dict) -> None:
+    """Emit typed entries hidden inside Codex exec progress output.
+
+    Codex often reports short exec results as ``function_call_output`` rather
+    than a later ``exec_command_end`` envelope. Keep the raw tool_result, but
+    also surface graph-share / turn-correction JSON so viewer overlays do not
+    depend on the provider choosing the final-envelope path.
+    """
+    content = str(progress.get("stdout") or progress.get("content") or "")
+    timestamp = str(progress.get("timestamp") or "")
+    tool_id = str(progress.get("tool_id") or "")
+    tc = _upconvert_turn_correction(content, timestamp, tool_id=tool_id)
+    if tc:
+        out.append(tc)
+    va = _upconvert_viewer_attachment(content, timestamp, tool_id=tool_id)
+    if va:
+        out.append(va)
 
 
 def _codex_command_text(payload: dict, inp: dict | None = None) -> str:
