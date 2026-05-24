@@ -1325,6 +1325,20 @@
       background: transparent;
       color: inherit;
     }
+    /* auto-f58ca: gutter cells (line number, +/- marker) must be
+       non-selectable so plain-text copy from a diff selection includes
+       only the code, not "67\n\n+\n\ncontent\n" per-cell joining.
+       The class .select-none is referenced from the partial as a
+       Tailwind utility, but the precompiled tailwind.css build does
+       not include it (the build only carries classes scanned from
+       templates at build time, and select-none wasn't previously used
+       anywhere). This explicit rule covers production until the
+       Tailwind build is regenerated. */
+    .select-none,
+    #worktree-review-layer .grid > span.select-none {
+      user-select: none;
+      -webkit-user-select: none;
+    }
     @supports (padding-top: env(safe-area-inset-top)) {
       #worktree-review-layer .worktree-review-overlay {
         padding-top: calc(0.75rem + env(safe-area-inset-top));
