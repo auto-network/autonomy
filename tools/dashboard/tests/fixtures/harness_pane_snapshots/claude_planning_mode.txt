@@ -1,0 +1,7 @@
+  > tell me about this repo
+
+  Planning…
+    ⏵ thinking about the structure
+    ⏵ identifying key modules
+
+  shift+tab to exit planning mode
