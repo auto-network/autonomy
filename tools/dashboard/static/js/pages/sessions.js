@@ -538,7 +538,13 @@
             dispatch_nag_enabled: s.dispatchNagEnabled || false,
             activity_state: s.activityState || 'idle',
             org: s.org || null,
-            resumable: false,
+            // Live sessions are not "resumable" in the same sense as
+            // dead-and-ingested sessions; they are already alive. The
+            // store row carries no JSONL-path concept for the resumable
+            // check. Dead recent sessions get their resumable flag from
+            // the server-side DAO (dao_sessions.get_recent_sessions
+            // computes it from file_path existence).
+            resumable: s.resumable === true,
             // auto-ngis4: harness + model from session store
             // (graph://553c7437-036 icon-rail).
             harness: s.harness || null,
