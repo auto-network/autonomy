@@ -4660,19 +4660,39 @@ async def api_session_label(request):
     Body: {"label": "Dashboard auth design"}
     Returns: {"ok": true}
     """
+    t0 = time.monotonic()
     tmux_name = request.path_params["tmux_name"]
     body = await request.json()
+    t_json = time.monotonic()
     label = body.get("label", "").strip()
     if os.environ.get("DASHBOARD_MOCK"):
         await event_bus.broadcast("session:registry", dao_sessions.get_active_sessions())
         return JSONResponse({"ok": True})
     dashboard_db.update_label(tmux_name, label)
+    t_update = time.monotonic()
     # Also update graph source title if the session has been ingested
     session_row = dashboard_db.get_session(tmux_name)
+    t_get = time.monotonic()
+    graph_source_id = session_row.get("graph_source_id") if session_row else None
     if session_row and session_row.get("graph_source_id"):
         graph_ops.update_source_title(session_row["graph_source_id"], label)
+    t_graph = time.monotonic()
     # Broadcast via SSE so all clients update
     await event_bus.broadcast("session:registry", session_monitor.get_registry())
+    t_broadcast = time.monotonic()
+    logger.info(
+        "session_label.timings tmux=%s graph_source_id=%s "
+        "json=%.1fms update_label=%.1fms get_session=%.1fms "
+        "update_source_title=%.1fms broadcast=%.1fms total=%.1fms",
+        tmux_name,
+        graph_source_id or "",
+        (t_json - t0) * 1000,
+        (t_update - t_json) * 1000,
+        (t_get - t_update) * 1000,
+        (t_graph - t_get) * 1000,
+        (t_broadcast - t_graph) * 1000,
+        (t_broadcast - t0) * 1000,
+    )
     return JSONResponse({"ok": True})
 
 
