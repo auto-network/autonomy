@@ -77,6 +77,11 @@ logger = logging.getLogger(__name__)
 
 _TURN_CORRECTION_HISTORY_WINDOW_SECONDS = 5 * 60
 _TURN_CORRECTION_RECENT_USER_MSG_LIMIT = 5
+_TURN_CORRECTION_SEED_LINE_LIMIT = 200
+_TURN_CORRECTION_HISTORY_LINE_LIMIT = 2_000
+_TURN_CORRECTION_HISTORY_USER_LIMIT = 100
+_TURN_CORRECTION_ACCEPT_SIMILARITY = 0.55
+_TURN_CORRECTION_HISTORY_SIMILARITY = 0.85
 _TURN_CORRECTION_TOKEN_RE = re.compile(r"(\s+|\S+)")
 
 # inotify — optional, falls back to polling if unavailable
@@ -438,7 +443,7 @@ def _turn_correction_metrics(raw_text: str, corrected_text: str) -> dict[str, An
     total_len = max(len(raw_text) + len(corrected_text), 1)
     edit_chars = delete_chars + insert_chars
     edit_ratio = edit_chars / total_len
-    acceptable = char_similarity >= 0.25
+    acceptable = char_similarity >= _TURN_CORRECTION_ACCEPT_SIMILARITY
     return {
         "fragments": fragments,
         "same_chars": same_chars,
@@ -800,6 +805,52 @@ def _read_harness_token_from_meta(
     return None
 
 
+def _user_turns_from_jsonl_tail(
+    jsonl_path: str | None,
+    *,
+    line_limit: int,
+    user_limit: int | None = None,
+) -> list[dict[str, Any]]:
+    if not jsonl_path:
+        return []
+    try:
+        path = Path(jsonl_path)
+        lines = path.read_text(errors="replace").splitlines()[-line_limit:]
+    except OSError:
+        return []
+
+    try:
+        harness = resolve_harness_for_path(path)
+    except Exception:
+        harness = CLAUDE_HARNESS
+
+    users: list[dict[str, Any]] = []
+    for raw in lines:
+        try:
+            parsed = harness.parse_line(raw)
+        except Exception:
+            parsed = None
+        parsed_entries = parsed if isinstance(parsed, list) else [parsed] if parsed else []
+        for entry in parsed_entries:
+            if not isinstance(entry, dict) or entry.get("type") != "user":
+                continue
+            message_id = entry.get("message_id")
+            content = entry.get("content")
+            if not isinstance(message_id, str) or not message_id:
+                continue
+            if not isinstance(content, str) or not content:
+                continue
+            users.append({
+                "message_id": message_id,
+                "content": content,
+                "timestamp": entry.get("timestamp", "") or "",
+            })
+
+    if user_limit is not None and len(users) > user_limit:
+        return users[-user_limit:]
+    return users
+
+
 def _seed_recent_user_turns_from_jsonl(
     ts: _TailState,
     jsonl_path: str | None,
@@ -820,58 +871,18 @@ def _seed_recent_user_turns_from_jsonl(
     exactly the pre-fix behavior — the matcher will still skip and log
     the skip. We never raise out of this function.
 
-    Field-shape note: the matcher reads ``entry["message_id"]`` and
-    ``entry["content"]`` (string). Raw JSONL stores those as ``uuid``
-    and ``message.content`` (which can be a list of typed blocks for
-    multi-block user turns). We map at read time so the seeded entries
-    are interchangeable with what ``_remember_user_entry`` produces
-    live.
+    Field-shape note: the matcher reads normalized ``user`` entries
+    (``message_id`` / ``content`` / ``timestamp``). JSONL shape differs
+    by harness, so this goes through the session harness parser instead
+    of decoding Claude-only or Codex-only wire fields here.
     """
-    if not jsonl_path:
-        return
-    try:
-        # Bound the cost — JSONLs grow large but only the last few user
-        # turns matter for matching. The deque has its own maxlen, so
-        # any excess seeded entries fall off the front naturally.
-        tail_lines = (
-            Path(jsonl_path).read_text(errors="replace").splitlines()[-200:]
-        )
-    except OSError:
-        return
-
-    for raw in tail_lines:
-        try:
-            entry = json.loads(raw)
-        except (ValueError, TypeError):
-            continue
-        if entry.get("type") != "user":
-            continue
-        message_id = entry.get("uuid")
-        if not isinstance(message_id, str) or not message_id:
-            continue
-
-        # Claude's wire format puts the user body under message.content,
-        # which may be a string OR a list of typed blocks. The matcher's
-        # similarity scorer only handles strings, so flatten list-shaped
-        # content to the joined text payload.
-        msg = entry.get("message")
-        content = msg.get("content") if isinstance(msg, dict) else None
-        if isinstance(content, list):
-            content = "".join(
-                block.get("text", "")
-                for block in content
-                if isinstance(block, dict) and block.get("type") == "text"
-            )
-        if not isinstance(content, str) or not content:
-            continue
-
+    for user in _user_turns_from_jsonl_tail(
+        jsonl_path,
+        line_limit=_TURN_CORRECTION_SEED_LINE_LIMIT,
+    ):
         # Append in chronological order; deque maxlen handles eviction.
         # Mirrors _remember_user_entry's stored shape exactly.
-        ts.recent_user_turns.append({
-            "message_id": message_id,
-            "content": content,
-            "timestamp": entry.get("timestamp", "") or "",
-        })
+        ts.recent_user_turns.append(user)
 
 
 class SessionMonitor:
@@ -2204,38 +2215,74 @@ class SessionMonitor:
             evaluated: list[dict[str, Any]] = []
             winner: dict[str, Any] | None = None
 
-            for order, user in enumerate(reversed(recent_users)):
-                if not _candidate_available(user):
-                    continue
-                candidate_epoch = _parse_iso_timestamp(str(user.get("timestamp") or ""))
-                if not _candidate_is_recent(correction_epoch, candidate_epoch):
-                    continue
-                candidate = dict(user)
-                candidate["source"] = "recent_user_deque"
-                candidate["candidate_epoch"] = candidate_epoch
-                metrics = _turn_correction_metrics(str(candidate.get("content") or ""), corrected_text)
-                age_seconds = None
-                if (
-                    correction_epoch is not None
-                    and candidate.get("candidate_epoch") is not None
-                ):
-                    age_seconds = round(correction_epoch - float(candidate["candidate_epoch"]), 3)
-                rec = {
-                    **candidate,
-                    "order": order,
-                    "age_seconds": age_seconds,
-                    "metrics": metrics,
-                }
-                evaluated.append(rec)
-                if not metrics["acceptable"]:
-                    continue
-                if winner is None:
-                    winner = rec
-                    continue
-                winner_key = winner["metrics"]["score_key"] + (winner["order"],)
-                candidate_key = metrics["score_key"] + (order,)
-                if candidate_key < winner_key:
-                    winner = rec
+            def _consider_users(
+                users: list[dict[str, Any]],
+                *,
+                source: str,
+                require_recent: bool,
+                min_similarity: float,
+                order_offset: int = 0,
+            ) -> None:
+                nonlocal winner
+                for order, user in enumerate(reversed(users), start=order_offset):
+                    if not _candidate_available(user):
+                        continue
+                    candidate_epoch = _parse_iso_timestamp(str(user.get("timestamp") or ""))
+                    if require_recent and not _candidate_is_recent(correction_epoch, candidate_epoch):
+                        continue
+                    candidate = dict(user)
+                    candidate["source"] = source
+                    candidate["candidate_epoch"] = candidate_epoch
+                    metrics = _turn_correction_metrics(
+                        str(candidate.get("content") or ""),
+                        corrected_text,
+                    )
+                    age_seconds = None
+                    if (
+                        correction_epoch is not None
+                        and candidate.get("candidate_epoch") is not None
+                    ):
+                        age_seconds = round(correction_epoch - float(candidate["candidate_epoch"]), 3)
+                    rec = {
+                        **candidate,
+                        "order": order,
+                        "age_seconds": age_seconds,
+                        "metrics": metrics,
+                    }
+                    evaluated.append(rec)
+                    if (
+                        not metrics["acceptable"]
+                        or float(metrics["char_similarity"]) < min_similarity
+                    ):
+                        continue
+                    if winner is None:
+                        winner = rec
+                        continue
+                    winner_key = winner["metrics"]["score_key"] + (winner["order"],)
+                    candidate_key = metrics["score_key"] + (order,)
+                    if candidate_key < winner_key:
+                        winner = rec
+
+            _consider_users(
+                recent_users,
+                source="recent_user_deque",
+                require_recent=True,
+                min_similarity=_TURN_CORRECTION_ACCEPT_SIMILARITY,
+            )
+
+            if winner is None:
+                history_users = _user_turns_from_jsonl_tail(
+                    row.get("jsonl_path"),
+                    line_limit=_TURN_CORRECTION_HISTORY_LINE_LIMIT,
+                    user_limit=_TURN_CORRECTION_HISTORY_USER_LIMIT,
+                )
+                _consider_users(
+                    history_users,
+                    source="jsonl_history_tail",
+                    require_recent=False,
+                    min_similarity=_TURN_CORRECTION_HISTORY_SIMILARITY,
+                    order_offset=len(recent_users),
+                )
 
             debug_payload = {
                 "correction_ts": correction_ts,

@@ -4214,10 +4214,13 @@ async def api_session_tail(request):
     role = db_row.get("role", "") if db_row else ""
     activity_state = db_row.get("activity_state", "idle") if db_row else "idle"
     session_uuid = db_row.get("session_uuid", "") if db_row else ""
+    ts_obj = session_monitor._tail_states.get(tmux_name) if tmux_name else None
+    pending_tool_ids = sorted(ts_obj.pending_tool_ids) if ts_obj else []
     harness = resolve_harness_for_session_row(db_row)
     base_resp = {"entries": [], "offset": file_size, "is_live": is_live,
                  "type": session_type, "role": role,
                  "activity_state": activity_state,
+                 "pending_tool_ids": pending_tool_ids,
                  "seq": seq, "resolved": resolved}
     if tmux_name:
         base_resp["session_id"] = tmux_name
@@ -4308,6 +4311,7 @@ async def api_session_tail(request):
     resp = {"entries": entries, "offset": new_offset, "is_live": is_live,
             "type": session_type, "role": role,
             "activity_state": activity_state,
+            "pending_tool_ids": pending_tool_ids,
             "seq": seq, "resolved": resolved}
     if tmux_name:
         resp["session_id"] = tmux_name
