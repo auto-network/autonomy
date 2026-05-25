@@ -1036,6 +1036,13 @@
         if (data.type !== undefined) store.sessionType = data.type || '';
         if (data.role !== undefined) store.role = data.role || '';
         if (data.activity_state !== undefined) store.activityState = data.activity_state || 'idle';
+        if (data.pending_tool_ids !== undefined) {
+          var ptids = {};
+          for (var p = 0; p < data.pending_tool_ids.length; p++) {
+            ptids[data.pending_tool_ids[p]] = true;
+          }
+          store.pendingToolIds = ptids;
+        }
         if (data.older_before !== undefined) store.olderBefore = data.older_before;
         if (data.has_more !== undefined) store.hasMoreHistory = !!data.has_more;
         if (data.seq !== undefined && (!data.entries || data.entries.length === 0)) {

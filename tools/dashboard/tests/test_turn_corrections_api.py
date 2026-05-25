@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
@@ -750,6 +751,17 @@ def test_turn_correction_metrics_rejects_unrelated_message():
     assert metrics["char_similarity"] < 0.25
 
 
+def test_turn_correction_metrics_rejects_weak_recent_overlap():
+    from tools.dashboard.session_monitor import _turn_correction_metrics
+
+    raw = "Try it see if it works to repro the issue."
+    corrected = "Ok so what’s current state and next steps?"
+
+    metrics = _turn_correction_metrics(raw, corrected)
+    assert metrics["acceptable"] is False
+    assert metrics["char_similarity"] < 0.55
+
+
 def test_turn_correction_metrics_prefers_related_long_message_over_unrelated_short_one():
     from tools.dashboard.session_monitor import _turn_correction_metrics
 
@@ -963,6 +975,63 @@ def test_session_monitor_limits_matching_to_last_five_live_user_messages(test_ap
     )
 
     assert dashboard_db.list_turn_corrections(SESSION_UUID) == []
+
+
+def test_session_monitor_matches_delayed_codex_correction_from_history_tail(
+    test_app,
+    tmp_path: Path,
+):
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
+
+    jsonl = tmp_path / "rollout-2026-05-24T05-52-30-test.jsonl"
+    target_raw = "Ok so what’s current state and next stros"
+    target_corrected = "Ok so what’s current state and next steps?"
+    rows = [
+        {
+            "timestamp": "2026-05-25T03:31:11.164Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": target_raw},
+        },
+    ]
+    for idx in range(12):
+        rows.append({
+            "timestamp": f"2026-05-25T04:0{idx % 10}:00.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": f"Recent unrelated instruction {idx}",
+            },
+        })
+    jsonl.write_text("\n".join(json.dumps(row) for row in rows))
+
+    row = {
+        "session_uuid": SESSION_UUID,
+        "tmux_name": TMUX_NAME,
+        "jsonl_path": str(jsonl),
+    }
+    ts = _TailState()
+    SessionMonitor._persist_turn_corrections(row, ts, [
+        {
+            "type": "user",
+            "content": "Try it see if it works to repro the issue.",
+            "message_id": "recent-wrong",
+            "timestamp": "2026-05-25T04:07:52.426Z",
+        },
+    ])
+    SessionMonitor._persist_turn_corrections(row, ts, [{
+        "type": "turn_correction",
+        "corrected_text": target_corrected,
+        "timestamp": "2026-05-25T04:11:14.217Z",
+    }])
+
+    wrong = dashboard_db.get_turn_correction(SESSION_UUID, "recent-wrong")
+    assert wrong is None
+    rows = dashboard_db.list_turn_corrections(SESSION_UUID)
+    assert len(rows) == 1
+    stored = rows[0]
+    assert stored["target_message_id"].startswith("codex-user:")
+    assert stored["original_sha256"] == _sha(target_raw)
+    assert stored["corrected_text"] == target_corrected
 
 
 def test_session_monitor_history_replay_does_not_warm_live_user_deque(test_app):

@@ -77,6 +77,32 @@ def test_seed_skips_non_user_entries(tmp_path: Path) -> None:
     assert [e["message_id"] for e in ts.recent_user_turns] == ["u1"]
 
 
+def test_seed_populates_from_codex_event_messages(tmp_path: Path) -> None:
+    """Codex user messages are normalized through the harness parser."""
+    jsonl = tmp_path / "rollout-2026-05-24T05-52-30-abc.jsonl"
+    _write_jsonl(jsonl, [
+        {
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": "Ok so what’s current state and next stros",
+            },
+        },
+        {
+            "timestamp": "2026-01-01T00:00:01.000Z",
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "Working"},
+        },
+    ])
+    ts = _TailState()
+    _seed_recent_user_turns_from_jsonl(ts, str(jsonl))
+    seeded = list(ts.recent_user_turns)
+    assert len(seeded) == 1
+    assert seeded[0]["message_id"].startswith("codex-user:")
+    assert seeded[0]["content"] == "Ok so what’s current state and next stros"
+
+
 def test_seed_skips_user_entry_with_no_uuid(tmp_path: Path) -> None:
     """Defensive: a malformed user entry with no uuid is skipped, not crashed."""
     jsonl = tmp_path / "session.jsonl"
