@@ -304,6 +304,7 @@ class WorkspaceV1:
     image: str
     graph_project: str
     harness: str = "claude"
+    model: str | None = None
     repos: tuple[RepoMount, ...] = ()
     working_dir: str | None = None
     startup: str | None = None
@@ -385,6 +386,8 @@ def _workspace_from_setting(
         raise WorkspaceSettingsError(
             f"workspace {workspace_id!r}: invalid harness {harness!r}"
         )
+    model_raw = setting_payload.get("model")
+    model = model_raw if isinstance(model_raw, str) and model_raw else None
     return WorkspaceV1(
         id=workspace_id,
         name=str(setting_payload.get("name") or workspace_id),
@@ -392,6 +395,7 @@ def _workspace_from_setting(
         image=image,
         graph_project=graph_project,
         harness=harness,
+        model=model,
         repos=repos,
         working_dir=(setting_payload.get("working_dir") or None),
         startup=(setting_payload.get("startup") or None),
