@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_IMAGE = "autonomy-agent:dashboard"
-DEFAULT_OPUS_MODEL = "claude-opus-4-7[1m]"
+DEFAULT_OPUS_MODEL = "claude-opus-4-8[1m]"
 
 
 # ── Capability materialization ────────────────────────────────────────────────

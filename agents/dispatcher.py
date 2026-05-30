@@ -59,7 +59,7 @@ LAUNCH_SCRIPT = Path(__file__).parent / "launch.sh"
 DISPATCH_STATE_PATH = REPO_ROOT / "data" / "dispatch.state"
 
 DEFAULT_IMAGE = "autonomy-agent"
-DEFAULT_OPUS_MODEL = "claude-opus-4-7[1m]"
+DEFAULT_OPUS_MODEL = "claude-opus-4-8[1m]"
 DEFAULT_SONNET_MODEL = "claude-sonnet-4-6"
 
 # Deferred restart flag — set by _maybe_restart_dispatcher(), executed at end of cycle
@@ -1920,7 +1920,8 @@ def start_librarian(job: dict) -> RunningLibrarian | None:
         image=_rig_image,
         harness=harness,
         output_dir=output_dir,
-        model=DEFAULT_SONNET_MODEL if harness == "claude" else None,
+        model=(workspace.model if workspace and workspace.model else
+               (DEFAULT_SONNET_MODEL if harness == "claude" else None)),
     )
     if not container_id:
         return None

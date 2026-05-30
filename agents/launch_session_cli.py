@@ -28,6 +28,24 @@ import sys
 from pathlib import Path
 
 from agents.session_launcher import launch_session, DEFAULT_IMAGE, DEFAULT_OPUS_MODEL, REPO_ROOT
+from agents.workspace_settings import load_workspaces
+
+
+def _workspace_model(graph_project: str) -> str | None:
+    """Return the model declared on the workspace owning ``graph_project``.
+
+    Returns None when ``graph_project`` is empty or no matching workspace
+    declares one — callers chain through their own hardcoded fallback.
+    """
+    if not graph_project:
+        return None
+    try:
+        for ws in load_workspaces().values():
+            if ws.graph_project == graph_project:
+                return ws.model
+    except Exception:
+        return None
+    return None
 
 
 def main() -> int:
@@ -81,6 +99,8 @@ def main() -> int:
 
     output_dir = args.output_dir if args.output_dir else None
 
+    workspace_model = _workspace_model(args.graph_project)
+
     if args.detach:
         container_id = launch_session(
             session_type=args.session_type,
@@ -92,7 +112,7 @@ def main() -> int:
             image=args.image,
             output_dir=output_dir,
             harness=args.harness,
-            model=args.model or None,
+            model=args.model or workspace_model or None,
         )
         if not container_id:
             return 1
@@ -195,7 +215,7 @@ def main() -> int:
             cmd.extend(["-v", f"{host_path}:{container_spec}"])
         cmd.extend(["-w", "/workspace/repo"])
 
-        resolved_model = args.model or (
+        resolved_model = args.model or workspace_model or (
             DEFAULT_OPUS_MODEL if args.harness == "claude" else ""
         )
 

@@ -110,6 +110,7 @@ class WorkspaceV1(SettingSchema):
     _optional_types: dict[str, type | tuple[type, ...]] = {
         "description": str,
         "harness": str,
+        "model": str,
         "working_dir": str,
         "startup": str,
         "dind": bool,
@@ -141,6 +142,13 @@ class WorkspaceV1(SettingSchema):
             "description": "Agent CLI to launch inside the container",
             "enum": sorted(_VALID_HARNESSES),
             "default": "claude",
+        },
+        "model": {
+            "type": "string",
+            "description": (
+                "Harness model id (e.g. 'claude-opus-4-8[1m]'). When unset, "
+                "the launcher falls back to its hardcoded default."
+            ),
         },
         "working_dir": {
             "type": "string",
