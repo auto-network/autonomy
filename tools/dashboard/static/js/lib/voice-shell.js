@@ -338,6 +338,12 @@
           return !!(voice && typeof voice.bufferText === 'string' && voice.bufferText.trim().length > 0);
         },
 
+        // Drives the sheet Send button: enabled with transcript text OR a
+        // landed attachment, disabled while any upload is in flight.
+        get canSendVoice() {
+          return !!(this.voice && this.voice.canSend);
+        },
+
         // Live word count of the capture buffer — the operator's "it's working"
         // proof while speaking (operator feedback c6e038a4: visible evidence
         // capture is live). Rendered as a small badge on the capsule Send action.
@@ -414,6 +420,28 @@
           }
         },
 
+        openVoiceFilePicker() {
+          if (this.$refs && this.$refs.voiceFileInput &&
+              typeof this.$refs.voiceFileInput.click === 'function') {
+            this.$refs.voiceFileInput.click();
+          }
+          return true;
+        },
+
+        onVoicePickFiles(event) {
+          if (!this.voice || typeof this.voice.addAttachmentFiles !== 'function') return false;
+          var input = event && event.target;
+          if (input && input.files) this.voice.addAttachmentFiles(input.files);
+          if (input) input.value = '';   // allow re-picking the same file
+          return true;
+        },
+
+        removeVoiceAttachment(id) {
+          if (!this.voice || typeof this.voice.removeAttachment !== 'function') return false;
+          this.voice.removeAttachment(id);
+          return true;
+        },
+
         clearBuffer() {
           if (!this.voice || typeof this.voice.clearBuffer !== 'function') return false;
           this.voice.clearBuffer();
@@ -458,10 +486,18 @@
             var s = window.getSessionStore(voice.boundSessionId);
             if (s && s.outbox && s.outbox.source === 'voice' &&
                 s.outbox.state === 'capturing') {
-              if (!(voice.bufferText || '').trim()) return false;
-              s.outbox.text = voice.bufferText;
+              if (voice.attachmentsPending) {
+                voice.sheetError = 'Attachment still uploading…';
+                return false;
+              }
+              var body = typeof voice._buildSendBody === 'function'
+                ? voice._buildSendBody()
+                : (voice.bufferText || '').trim();
+              if (!body) return false;
+              s.outbox.text = body;
               s.outbox.state = 'sending';
               if (typeof voice.clearBuffer === 'function') voice.clearBuffer();
+              if (typeof voice.clearAttachments === 'function') voice.clearAttachments();
               return true;
             }
           }

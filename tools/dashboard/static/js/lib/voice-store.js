@@ -140,6 +140,8 @@
       sheetError: '',
       sheetOpenedAt: 0,
       sheetResumeListeningOnDismiss: false,
+      attachments: [],
+      _nextAttachId: 0,
 
       get enabled() {
         return _isClientEnabled();
@@ -147,6 +149,21 @@
 
       get active() {
         return !!this.boundSessionId && this.micMode !== 'idle';
+      },
+
+      // True while any attachment's upload is still in flight (no path yet).
+      // Send is blocked until every staged file has a server path, so the
+      // outgoing body can never reference an attachment that didn't land.
+      get attachmentsPending() {
+        return this.attachments.some(function (a) { return !a.path; });
+      },
+
+      // Send is allowed when there's transcript text OR at least one
+      // fully-uploaded attachment, and nothing is mid-upload.
+      get canSend() {
+        if (this.attachmentsPending) return false;
+        if ((this.bufferText || '').trim()) return true;
+        return this.attachments.some(function (a) { return !!a.path; });
       },
 
       requestBind(sessionId, opts) {
@@ -305,12 +322,99 @@
         return true;
       },
 
+      // Upload each picked file to the bound session's workspace and stage a
+      // chip in the sheet. Mirrors the keyboard composer's addFiles: the same
+      // /api/upload endpoint (which routes host sessions to a readable host
+      // path and container sessions to a docker-cp'd /tmp path), passing the
+      // bound session so the file lands where that agent can open it.
+      addAttachmentFiles(fileList) {
+        if (!fileList || !this.boundSessionId) return;
+        var tmux = this.boundSessionId;
+        var self = this;
+        for (var i = 0; i < fileList.length; i++) {
+          var file = fileList[i];
+          var id = ++this._nextAttachId;
+          var isImage = !!(file.type && file.type.indexOf('image/') === 0);
+          var att = {
+            id: id, name: file.name || 'upload', isImage: isImage,
+            dataUrl: null, path: null, rel_path: null, mime: null, size: null,
+          };
+          this.attachments.push(att);
+
+          if (isImage && typeof FileReader === 'function') {
+            (function (attId, f) {
+              var reader = new FileReader();
+              reader.onload = function (e) {
+                var found = self.attachments.find(function (a) { return a.id === attId; });
+                if (found) found.dataUrl = e.target.result;
+              };
+              reader.readAsDataURL(f);
+            })(id, file);
+          }
+
+          var form = new FormData();
+          form.append('file', file);
+          form.append('tmux_session', tmux);
+          (function (attId) {
+            _sendFetch('/api/upload', { method: 'POST', body: form })
+              .then(function (r) { return r.json(); })
+              .then(function (data) {
+                var found = self.attachments.find(function (a) { return a.id === attId; });
+                if (!found) return;
+                if (data && data.ok) {
+                  var meta = (data.files && data.files[0]) || data;
+                  found.path = meta.path;
+                  found.rel_path = meta.rel_path || '';
+                  found.mime = meta.mime || '';
+                  found.size = meta.size || 0;
+                } else {
+                  self.removeAttachment(attId);
+                  self.sheetError = 'Attachment upload failed.';
+                }
+              })
+              .catch(function () {
+                self.removeAttachment(attId);
+                self.sheetError = 'Attachment upload failed.';
+              });
+          })(id);
+        }
+      },
+
+      removeAttachment(id) {
+        this.attachments = this.attachments.filter(function (a) { return a.id !== id; });
+      },
+
+      clearAttachments() {
+        this.attachments = [];
+      },
+
+      // Compose attachment path(s) + transcript into one body, matching the
+      // keyboard composer's buildComposerBody: paths first (one per line), a
+      // blank line, then the text — so the viewer's user-turn renderer can
+      // surface inline thumbnails for path lines and the agent receives both.
+      _buildSendBody() {
+        var trimmed = (this.bufferText || '').trim();
+        var lines = [];
+        for (var i = 0; i < this.attachments.length; i++) {
+          if (this.attachments[i].path) lines.push(this.attachments[i].path);
+        }
+        if (trimmed) {
+          if (lines.length) lines.push('');
+          lines.push(trimmed);
+        }
+        return lines.join('\n');
+      },
+
       async sendBuffer() {
         if (!this.boundSessionId) {
           this.sheetError = 'Send failed. Session is no longer available.';
           return false;
         }
-        var body = (this.bufferText || '').trim();
+        if (this.attachmentsPending) {
+          this.sheetError = 'Attachment still uploading…';
+          return false;
+        }
+        var body = this._buildSendBody();
         if (!body) return false;
         this.sheetError = '';
         try {
@@ -328,6 +432,7 @@
             return false;
           }
           this.bufferText = '';
+          this.clearAttachments();
           this.sheetError = '';
           this.sheetOpen = false;
           this.sheetMode = 'partial';
