@@ -65,38 +65,62 @@
     return "pending";
   }
 
-  // ── Phase chip label + tone (per the design's 14 fixture states) ──
+  // ── Phase chip label + tone (per design rev 63542418 fixtures) ──
+  //
+  // Strings come straight from the design's fixture payload. The L1
+  // test pins them so accidental drift surfaces in CI. Two deliberate
+  // deviations from the fixture, both flagged here for the next
+  // reader:
+  //
+  //   1. ``ready`` returns "" (suppress) rather than the design's
+  //      "Ready" green pill. A persistent badge on every healthy
+  //      session is visual noise; the green is signal-by-absence.
+  //      Approved as an explicit deviation by host-0531-020038
+  //      (turn 71) — not a design match.
+  //   2. ``harness_starting`` label is "Booting " + capitalized
+  //      ``s.harness`` (or "harness" fallback). The design hardcodes
+  //      "Booting Claude" which mis-labels Codex sessions; the
+  //      dynamic form is host-approved (turn 71).
   var _STATE_CHIP_LABEL = {
-    pending: "Starting…",
+    pending: "Queued",
     container_starting: "Starting container",
-    entrypoint: "Running entrypoint",
+    entrypoint: "Preparing workspace",
     dind_ready: "Docker ready",
-    setup_running: "Installing dependencies",
-    harness_starting: "Booting harness",
-    first_turn_written: "Almost ready",
-    ready: "",
-    ready_with_confirming_trust: "Confirming trust…",
+    setup_running: "Setup running",
+    // harness_starting handled in phaseChip() — dynamic over s.harness
+    first_turn_written: "Verifying input",
+    ready: "",                              // deliberate deviation, see comment above
+    ready_with_confirming_trust: "Confirming trust",
     ready_with_planning: "Planning",
     setup_failed: "Setup failed",
-    dead_resumable: "",
-    dead_not_resumable: "",
+    dead_resumable: "Ended",
+    dead_not_resumable: "Ended",
   };
 
   // Tone modifier class for .sc-phase-chip. "" (default) = sky-blue
   // active startup pulse; "ready" = static green; "failed" = static
-  // amber; "dead" = static slate. Returned as a className string so
-  // the template can drop it directly into :class.
+  // amber; "dead" = static slate. Returned as a className string the
+  // template drops directly into :class.
   var _STATE_CHIP_TONE = {
-    ready: "ready",
-    ready_with_confirming_trust: "",      // amber-like overlay; keep active pulse for visibility
-    ready_with_planning: "ready",          // teal-via-design uses ready tone with planning label
+    ready: "ready",                         // moot — chip is suppressed
+    ready_with_confirming_trust: "failed",  // amber attention state per design
+    ready_with_planning: "",                // sky-blue default per design
     setup_failed: "failed",
     dead_resumable: "dead",
     dead_not_resumable: "dead",
   };
 
   function phaseChip(s) {
-    return _STATE_CHIP_LABEL[lifecycleState(s)] || "";
+    var state = lifecycleState(s);
+    if (state === "harness_starting") {
+      // Dynamic over s.harness so Codex sessions don't mis-render as
+      // "Booting Claude" (the design's hardcoded text). Capitalize
+      // the first letter for readability.
+      var h = (s && s.harness) || "harness";
+      var label = h.charAt(0).toUpperCase() + h.slice(1);
+      return "Booting " + label;
+    }
+    return _STATE_CHIP_LABEL[state] || "";
   }
 
   function phaseTone(s) {
@@ -158,34 +182,31 @@
     ];
   }
 
-  // The 4-lane caption row beneath the track. Each lane is a
-  // ``{label, value}`` pair the template renders verbatim.
+  // The 4-lane caption row beneath the track. Lane labels are fixed
+  // per the design — request / setup / harness / input — and the
+  // values come straight from the fixture per state. Table-driven so
+  // the design's exact text appears verbatim on each card; falls
+  // through to a sensible default for unmapped (live but pre-broadcast)
+  // states so a stale store row never renders blanks.
+  var _STATE_LANE_VALUES = {
+    pending:             ["allocating", "waiting",    "pending", "queued"],
+    container_starting:  ["created",    "container",  "pending", "queued"],
+    entrypoint:          ["created",    "entrypoint", "pending", "queued"],
+    dind_ready:          ["created",    "docker",     "pending", "queued"],
+    setup_running:       ["created",    "running",    "booting", "queued"],
+    harness_starting:    ["created",    "complete",   "booting", "queued"],
+    first_turn_written:  ["created",    "complete",   "jsonl",   "checking"],
+    setup_failed:        ["created",    "failed",     "blocked", "held"],
+  };
+
   function lifecycleLanes(s) {
     var state = lifecycleState(s);
-    var setupPhase = (s && s.setup_phase) || "pending";
-    var harnessPhase = (s && s.harness_phase) || "pending";
-
-    function setupLabel() {
-      if (setupPhase === "setup_failed") return "failed";
-      if (setupPhase === "setup_complete") return "complete";
-      if (setupPhase === "setup_running") return "running";
-      if (setupPhase === "dind_ready") return "dind ready";
-      if (setupPhase === "entrypoint_running") return "entrypoint";
-      if (setupPhase === "container_starting") return "starting";
-      return "—";
-    }
-    function harnessLabel() {
-      if (harnessPhase === "composer_ready") return "ready";
-      if (harnessPhase === "first_turn_written") return "1st turn";
-      if (harnessPhase === "harness_starting") return "booting";
-      return "—";
-    }
-
+    var values = _STATE_LANE_VALUES[state] || ["—", "—", "—", "—"];
     return [
-      { label: "container", value: state === "pending" ? "queued" : "up" },
-      { label: "setup", value: setupLabel() },
-      { label: "harness", value: harnessLabel() },
-      { label: "ready", value: state === "ready" || state === "ready_with_confirming_trust" || state === "ready_with_planning" ? "yes" : "no" },
+      { label: "request", value: values[0] },
+      { label: "setup",   value: values[1] },
+      { label: "harness", value: values[2] },
+      { label: "input",   value: values[3] },
     ];
   }
 
