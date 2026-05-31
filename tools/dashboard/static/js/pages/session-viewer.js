@@ -99,6 +99,16 @@
         var s = Alpine.store('sessions')[this.sessionKey];
         return s ? s.resolved : false;
       },
+      // Authoritative signal for "this viewer's bottom composer surface is
+      // active" — the EXACT condition the composer (.sv-input) renders under
+      // (session-view.html:289). The pending/outbox tile mounts in this same
+      // surface, so this is the single source of truth the voice side keys
+      // BOTH its caption-suppression and its send-path branch on (mirrored to
+      // document.body via _syncComposerSignal). See contract note cbb8497c-a1f.
+      get _composerActive() {
+        return !this.showTerminal && this.isLive && !!this._tmuxSession &&
+               (this.sessionType !== 'host' || this._linked);
+      },
       get contextTokens() {
         var s = Alpine.store('sessions')[this.sessionKey];
         return s ? s.contextTokens : 0;
@@ -791,6 +801,14 @@
           if (!now) this.selectedDrawerTab = 'topics';
         });
 
+        // Publish the authoritative "composer surface active" signal to
+        // document.body so the voice side branches caption-suppression and its
+        // send path on the IDENTICAL condition where the outbox tile mounts
+        // (contract note cbb8497c-a1f). One source of truth → we can't disagree.
+        this._syncComposerSignal();
+        this.$watch('_composerActive', () => this._syncComposerSignal());
+        this.$watch('_tmuxSession', () => this._syncComposerSignal());
+
         // Keyboard padding toggle — applies to whichever .sv-input is present in the DOM.
         // Harmless when no .sv-input exists (e.g. overlay mode, pre-ready state).
         if (window.visualViewport && !window._svKeyboardListener) {
@@ -857,12 +875,35 @@
         });
       },
 
+      // Mirror _composerActive onto document.body as the cross-component
+      // signal (class + dataset sid). Guarded so we only clear the flag when
+      // it's ours, never stomping another mounted viewer's signal.
+      _syncComposerSignal() {
+        if (typeof document === 'undefined' || !document.body) return;
+        var sid = this._tmuxSession || '';
+        if (this._composerActive) {
+          document.body.classList.add('sv-viewer-composer-active');
+          document.body.dataset.svComposerSession = sid;
+        } else if (document.body.dataset.svComposerSession === sid) {
+          document.body.classList.remove('sv-viewer-composer-active');
+          delete document.body.dataset.svComposerSession;
+        }
+      },
+
       destroy() {
         // Do NOT unregister SSE — store keeps accumulating outside component lifecycle
         for (var i = 0; i < this._storeCleanups.length; i++) {
           if (typeof this._storeCleanups[i] === 'function') this._storeCleanups[i]();
         }
         this._storeCleanups = [];
+        // Drop the composer-active body signal if it's ours, so the voice side
+        // doesn't keep suppressing the caption / branching its send path after
+        // we've left the viewer (stale-flag bug those branches must avoid).
+        if (typeof document !== 'undefined' && document.body &&
+            document.body.dataset.svComposerSession === (this._tmuxSession || '')) {
+          document.body.classList.remove('sv-viewer-composer-active');
+          delete document.body.dataset.svComposerSession;
+        }
         if (this._mode === 'page' && window._diagFocusedViewerId === this.sessionKey) {
           window._diagFocusedViewerId = null;
         }
