@@ -5884,7 +5884,24 @@ class TestSessionViewerPreReadyLoadingChip:
                 var tmux = data.sessionKey;
                 r.tmux = tmux;
 
+                // Capture original Alpine + store state so we can
+                // restore at the end — this browser fixture is
+                // module-scoped, so leaving the viewer in 'loading'
+                // poisons the next test class that navigates to the
+                // same fixture URL.
                 var store = window.getSessionStore(tmux);
+                var saved = {
+                    state: data.state,
+                    loadProgress: data.loadProgress,
+                    errorMsg: data.errorMsg,
+                    isLive: store.isLive,
+                    harness: store.harness,
+                    setupPhase: store.setupPhase,
+                    harnessPhase: store.harnessPhase,
+                    harnessState: store.harnessState,
+                    resumable: store.resumable,
+                };
+
                 store.isLive = true;
                 store.harness = 'claude';
                 store.setupPhase = 'container_starting';
@@ -5936,6 +5953,21 @@ class TestSessionViewerPreReadyLoadingChip:
                 // edge can't be force-triggered without remounting
                 // the whole viewer; the cost of that test outweighs
                 // the value given the load order is enforced.)
+
+                // Restore the viewer + store to the values we captured
+                // before our state-forcing began. The L2.B browser is
+                // module-scoped, so the NEXT test class navigating to
+                // this same fixture URL must see a clean ready state.
+                store.isLive = saved.isLive;
+                store.harness = saved.harness;
+                store.setupPhase = saved.setupPhase;
+                store.harnessPhase = saved.harnessPhase;
+                store.harnessState = saved.harnessState;
+                store.resumable = saved.resumable;
+                data.state = saved.state;
+                data.loadProgress = saved.loadProgress;
+                data.errorMsg = saved.errorMsg;
+                await sleep(60);
 
                 return JSON.stringify(r);
             })()"""
