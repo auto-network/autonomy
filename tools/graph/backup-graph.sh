@@ -16,7 +16,7 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 DEST="${BACKUP_DIR}/${PREFIX}${STAMP}"
 
 # Use sqlite3 .backup for a consistent snapshot (safe even during writes)
-/home/jeremy/miniconda3/bin/sqlite3 "$DB" ".backup '${DEST}'"
+sqlite3 "$DB" ".backup '${DEST}'"
 
 # Prune old hourly backups beyond the rolling buffer
 ls -1t "${BACKUP_DIR}"/${PREFIX}* 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -f
