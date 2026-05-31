@@ -24,6 +24,21 @@
     starting: false,
   };
 
+  // TEMP visible diagnostic overlay (host can't see the browser console).
+  var _finalCount = 0;
+  function _diag(msg) {
+    try {
+      var el = document.getElementById('voice-capture-diag');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'voice-capture-diag';
+        el.style.cssText = 'position:fixed;left:4px;bottom:4px;z-index:2147483647;background:rgba(0,0,0,.82);color:#6f6;font:11px/1.35 ui-monospace,monospace;padding:5px 7px;max-width:92vw;border-radius:5px;pointer-events:none;white-space:pre-wrap;';
+        (document.body || document.documentElement).appendChild(el);
+      }
+      el.textContent = 'VOICE ⟶ ' + msg;
+    } catch (_e) {}
+  }
+
   function store() {
     try { return (typeof Alpine !== 'undefined' && Alpine.store) ? (Alpine.store('voice') || null) : null; }
     catch (_e) { return null; }
@@ -41,9 +56,13 @@
 
   function appendFinal(clean) {
     var st = store();
-    if (!st || typeof st.setBufferText !== 'function') return;
+    if (!st || typeof st.setBufferText !== 'function') {
+      _diag('rx#' + _finalCount + ' but NO STORE — text="' + clean + '"');
+      return;
+    }
     var prev = st.bufferText || '';
     st.setBufferText(prev ? (prev + ' ' + clean) : clean);
+    _diag('rx#' + _finalCount + ' store.buf="' + (st.bufferText || '').slice(-55) + '"');
   }
 
   function attachSocket(ws, bind) {
@@ -51,6 +70,7 @@
     ws.addEventListener('open', function () {
       if (ws !== s.ws) return;
       s.wsOpen = true; s.started = false; s.requiresReconnect = false;
+      _diag('socket OPEN → ' + bind);
     });
     ws.addEventListener('message', function (event) {
       if (ws !== s.ws) return;
@@ -60,7 +80,7 @@
       if (type === 'transcript') {
         if (frame.kind === 'final') {
           var clean = String(frame.text || '').trim();
-          if (clean) appendFinal(clean);
+          if (clean) { _finalCount++; appendFinal(clean); }
         }
         return;
       }
@@ -71,6 +91,7 @@
       }
       if (type === 'error') {
         var code = String(frame.code || '');
+        _diag('server ERROR: ' + code + ' ' + String(frame.message || ''));
         if (code === 'whisperlive_connect_failed' || code === 'whisperlive_session_error') {
           s.requiresReconnect = true;
           var st2 = store();
@@ -140,6 +161,9 @@
             if (!s.started) { if (sendControl('start')) s.started = true; }
             else { sendControl('unmute'); }
             s.talkActive = true;
+            _diag('mic ready + START sent — streaming, awaiting transcripts…');
+          } else {
+            _diag('FAILED: socket never opened after 5s');
           }
           s.starting = false;
           return;
