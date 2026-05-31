@@ -165,6 +165,24 @@ def _worktree_basename(url: str) -> str:
     return path.rsplit("/", 1)[-1]
 
 
+def _worktree_metadata_name(worktree_dir: Path) -> str:
+    """Return the bare clone's metadata-dir name for this worktree.
+
+    The worktree's ``.git`` file is a pointer of the form ``gitdir: <path>``
+    where ``<path>`` ends in ``<clone>/.git/worktrees/<name>``. ``<name>`` is
+    usually the worktree path's basename but git appends a numeric suffix on
+    collisions (e.g. ``enterprise_ng14``), so we read it back from disk
+    rather than recomputing it.
+    """
+    git_file = (worktree_dir / ".git").read_text().strip()
+    if not git_file.startswith("gitdir:"):
+        raise RuntimeError(
+            f"worktree {worktree_dir} has unexpected .git contents: {git_file[:120]!r}"
+        )
+    gitdir = git_file.split(":", 1)[1].strip()
+    return Path(gitdir).name
+
+
 def _refresh_existing_worktree(
     managed_clone: Path,
     worktree_dir: Path,
@@ -369,6 +387,21 @@ def prepare_session_mounts(
             # write the worktree's per-worktree git state (index, refs) that
             # lives at ``<clone>/.git/worktrees/<name>/``.
             mounts[str(clone)] = str(clone)
+            # Protect the bare clone's shared worktree metadata from cross-
+            # container corruption (e.g. an in-container ``git worktree prune``
+            # that decides every sibling session's host path is missing).
+            # The parent ``.git/worktrees/`` is bind-mounted read-only on top
+            # of the clone mount; the container's own session metadata subdir
+            # is then bind-mounted read-write on top of that, so normal git
+            # ops in this worktree (``add``/``commit`` writing index/HEAD/refs
+            # into ``<clone>/.git/worktrees/<name>/``) still work while
+            # ``prune``/``add``/``remove`` against siblings fails with EACCES.
+            git_worktrees_dir = clone / ".git" / "worktrees"
+            own_metadata_name = _worktree_metadata_name(worktree)
+            mounts[str(git_worktrees_dir)] = f"{git_worktrees_dir}:ro"
+            mounts[str(git_worktrees_dir / own_metadata_name)] = str(
+                git_worktrees_dir / own_metadata_name
+            )
         else:
             _update_readonly_clone(clone)
             mounts[str(clone)] = f"{repo.mount}:ro"
