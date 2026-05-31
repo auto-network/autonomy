@@ -149,7 +149,7 @@
         if (!o || o.state !== 'sending') return;
         if (o.localId === this._committedLocalId) return;
         this._committedLocalId = o.localId;
-        this._durableSend(o.text, o.localId);
+        return this._durableSend(o.text, o.localId);
       },
       // Publish 'sv-outbox-tile-present' on body EXACTLY while the tile is
       // rendered (composer active AND a pending message exists). The voice
