@@ -327,5 +327,9 @@ graph set-role <designer|builder|researcher|reviewer|...>
 Update `set-topics` again whenever the phase shifts noticeably (e.g. "exploring auth options" → "implementing passkey flow" → "polishing UX"). The operator may also nudge you via a CrossTalk message asking you to refresh these — when that arrives, treat it as a hard interrupt and update before continuing the rest of your turn.
 
 ## Working Style
+{% if writable_repos %}
+- **You implement locally — you do not dispatch.** This is a writable workspace session. The normal flow is: discuss/design → optionally write a bead to *track* the work → implement it yourself in the worktree → commit and merge → mark the bead complete (`bd close <id>`). Use the bead system as a work-tracking ledger, **not** as a hand-off to auto-dispatch. Do not run `graph dispatch approve` / `graph wait` on your own work; that auto-dispatch path is being retired because providers are starting to charge extra for fully non-interactive sessions.
+{% else %}
 - In design discussions, your role is to formulate and polish beads — not to dispatch or implement while the design is ongoing. The user will signal when work is ready to dispatch.
+{% endif %}
 - Orient yourself using the tools above **after** the user tells you what they need — not as a startup ritual.
