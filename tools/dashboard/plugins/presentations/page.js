@@ -3,7 +3,10 @@
 
   function parsePresentPath(pathname) {
     var parts = String(pathname || '').split('/').filter(Boolean);
-    if (parts[0] !== 'present') {
+    if (parts[0] !== 'present' && parts[0] !== 'presentations') {
+      return { mode: 'library', designId: '', slideIndex: 0 };
+    }
+    if (parts[0] === 'presentations' && !parts[1]) {
       return { mode: 'library', designId: '', slideIndex: 0 };
     }
     if (!parts[1]) {
@@ -94,7 +97,8 @@
 
   function setPath(designId, index) {
     if (!designId) return;
-    var path = '/present/' + encodeURIComponent(designId) + '/' + (Number(index || 0) + 1);
+    var base = window.location.pathname.indexOf('/presentations/') === 0 ? '/presentations/' : '/present/';
+    var path = base + encodeURIComponent(designId) + '/' + (Number(index || 0) + 1);
     if (window.location.pathname !== path) {
       history.replaceState(history.state || {}, '', path);
     }
@@ -232,7 +236,7 @@
 
         openDeck: function (deck) {
           var id = deck && (deck.design_id || deck.key);
-          if (id) navigateTo('/present/' + encodeURIComponent(id));
+          if (id) navigateTo('/presentations/' + encodeURIComponent(id));
         },
 
         openDesign: function (deck) {

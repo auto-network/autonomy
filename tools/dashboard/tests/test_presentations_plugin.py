@@ -139,6 +139,10 @@ assert.deepStrictEqual(
   {{ mode: 'deck', designId: 'deck-1', slideIndex: 2 }}
 );
 assert.deepStrictEqual(
+  helpers.parsePresentPath('/presentations/deck-1/3'),
+  {{ mode: 'deck', designId: 'deck-1', slideIndex: 2 }}
+);
+assert.deepStrictEqual(
   helpers.parsePresentPath('/presentations'),
   {{ mode: 'library', designId: '', slideIndex: 0 }}
 );
