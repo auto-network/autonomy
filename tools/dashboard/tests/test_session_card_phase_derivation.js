@@ -136,6 +136,79 @@ check('startupVisible(resolved+pending) is false (no strip rendered)',
 check('phaseChip(resolved+pending) is "" (no chip rendered, ready is suppressed)',
       L.phaseChip({is_live:true, resolved:true, setup_phase:'pending', harness_phase:'pending'}) === '');
 
+// ── COMPOSER_READY GUARD (post-launch fix, second iteration) ──
+// Real-data verification of the first fix (commit abf8ff8) caught one
+// straggler in the live registry: auto-0531-152256 — a session that
+// reached harness_phase=composer_ready but never had a first prompt
+// typed, so its JSONL is empty (resolved=false). The setup-exit
+// watcher also wasn't re-armed on the most recent dashboard restart,
+// so setup_phase is frozen at 'container_starting'. Result: card
+// shows "Starting container" on a session that's been idle at a ready
+// composer for 77 minutes. The harness_phase=composer_ready signal is
+// the second authoritative "startup is over" claim — bypass on it too.
+//
+// The verbatim row shape from the live registry is pinned below so
+// the test fails if a future change to the bypass re-introduces the
+// regression.
+check('STRAGGLER: composer_ready + container_starting + resolved=false → ready',
+      L.lifecycleState({
+        // verbatim shape from live row auto-0531-152256
+        is_live: true, resolved: false,
+        setup_phase: 'container_starting',
+        harness_phase: 'composer_ready',
+        entry_count: 0,
+      }) === 'ready');
+check('STRAGGLER: chip suppressed for composer_ready straggler',
+      L.phaseChip({
+        is_live: true, resolved: false,
+        setup_phase: 'container_starting',
+        harness_phase: 'composer_ready',
+      }) === '');
+check('STRAGGLER: lifecycle strip hidden for composer_ready straggler',
+      L.startupVisible({
+        is_live: true, resolved: false,
+        setup_phase: 'container_starting',
+        harness_phase: 'composer_ready',
+      }) === false);
+
+// composer_ready + overlays still surface as the right overlay states
+check('composer_ready + confirming_trust → ready_with_confirming_trust (bypass keeps overlay)',
+      L.lifecycleState({is_live:true, resolved:false, setup_phase:'container_starting',
+                        harness_phase:'composer_ready',
+                        harness_state:{confirming_trust_prompt:true}}) === 'ready_with_confirming_trust');
+check('composer_ready + planning → ready_with_planning (bypass keeps overlay)',
+      L.lifecycleState({is_live:true, resolved:false, setup_phase:'container_starting',
+                        harness_phase:'composer_ready',
+                        harness_state:{in_planning_mode:true}}) === 'ready_with_planning');
+
+// FEATURE-PRESERVATION CASES (the bypass must NOT defeat the chrome
+// for genuinely-new starting sessions that haven't reached
+// composer_ready and don't have a JSONL yet).
+check('PRESERVED: container_starting + harness_starting + resolved=false → container_starting',
+      L.lifecycleState({is_live:true, resolved:false,
+                        setup_phase:'container_starting',
+                        harness_phase:'harness_starting'}) === 'container_starting');
+check('PRESERVED: pending + pending + resolved=false → pending (brand-new, no signal yet)',
+      L.lifecycleState({is_live:true, resolved:false,
+                        setup_phase:'pending',
+                        harness_phase:'pending'}) === 'pending');
+check('PRESERVED: first_turn_written + resolved=false → first_turn_written (between JSONL appear and screen-read)',
+      L.lifecycleState({is_live:true, resolved:false,
+                        setup_phase:'setup_complete',
+                        harness_phase:'first_turn_written'}) === 'first_turn_written');
+
+// setup_failed must still win, even when composer_ready is set on
+// the same row (weird but possible). The failed check fires before
+// the bypass.
+check('setup_failed wins over composer_ready bypass',
+      L.lifecycleState({is_live:true, resolved:false,
+                        setup_phase:'setup_failed',
+                        harness_phase:'composer_ready'}) === 'setup_failed');
+check('setup_failed wins over resolved bypass',
+      L.lifecycleState({is_live:true, resolved:true,
+                        setup_phase:'setup_failed',
+                        harness_phase:'pending'}) === 'setup_failed');
+
 // ── phaseChip matches design (static states) ──
 for (const [name, expected] of Object.entries(DESIGN_CHIP)) {
   const actual = L.phaseChip(PHASE_PAIR[name]);
