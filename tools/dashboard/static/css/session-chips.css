@@ -567,3 +567,64 @@
   object-fit: contain;
   cursor: zoom-out;
 }
+
+/* ── Pending / outbox tile (auto-xkdoi) ──────────────────────────────────────
+   Pinned bottom surface above the composer. Reuses the .sc-entry-user visual
+   language; adds capturing/sending/unconfirmed skins. Contract: cbb8497c-a1f. */
+.sv-pending {
+  border-top: 1px solid #1f2937;
+  background: rgba(17, 24, 39, 0.55);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  padding: 8px 14px 6px;
+}
+.sv-pending-tile {
+  border-left: 3px solid #f59e0b;
+  border-radius: 0 14px 14px 0;
+  padding: 6px 10px 7px 10px;
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.07), rgba(245, 158, 11, 0.012));
+}
+.sv-pending-tile.is-capturing {
+  border-left-color: #34d399;
+  background: linear-gradient(90deg, rgba(16, 185, 129, 0.08), rgba(16, 185, 129, 0.015));
+}
+.sv-pending-tile.is-unconfirmed {
+  border-left-color: #ef4444;
+  background: linear-gradient(90deg, rgba(239, 68, 68, 0.10), rgba(239, 68, 68, 0.015));
+}
+.sv-pending-tile.is-sending { animation: sv-pending-pulse 1.6s ease-in-out infinite; }
+@keyframes sv-pending-pulse {
+  0%, 100% { border-left-color: #f59e0b; }
+  50%      { border-left-color: #fcd34d; }
+}
+.sv-pending-head { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+.sv-pending-label { color: #f59e0b; font-size: 0.75rem; font-weight: 700; letter-spacing: .02em; }
+.is-capturing .sv-pending-label { color: #6ee7b7; }
+.is-unconfirmed .sv-pending-label { color: #f87171; }
+.sv-pending-status { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; flex-shrink: 0; }
+.sv-pending-status .txt { font-size: 0.625rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.is-sending .sv-pending-status .txt { color: #fcd34d; }
+.is-capturing .sv-pending-status .txt { color: #6ee7b7; }
+.is-unconfirmed .sv-pending-status .txt { color: #fca5a5; }
+.sv-spin {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid rgba(252, 211, 77, 0.25); border-top-color: #fcd34d;
+  animation: sv-spin-rot 0.7s linear infinite;
+}
+@keyframes sv-spin-rot { to { transform: rotate(360deg); } }
+.sv-pending-tile .sv-pending-content {
+  color: #f3f4f6; font-size: 0.875rem; line-height: 1.4;
+  white-space: pre-wrap; max-height: 96px; overflow-y: auto;
+}
+.sv-pending-foot { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.sv-pending-hint { font-size: 0.625rem; color: #9ca3af; }
+.sv-resend {
+  all: unset; box-sizing: border-box; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 999px;
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  background: rgba(127, 29, 29, 0.22); color: #fecaca;
+  font-size: 0.625rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+}
+.sv-resend:hover { background: rgba(127, 29, 29, 0.34); border-color: rgba(248, 113, 113, 0.6); }
+.sv-resend svg { width: 12px; height: 12px; }

@@ -916,7 +916,11 @@
     .sv-ready {
       height: 100%;
       display: grid;
-      grid-template-rows: auto minmax(0, 1fr) auto;
+      /* header / transcript / pending-outbox tile / composer. The tile row is
+         `auto` so it collapses to 0 height when no message is pending; the
+         transcript (minmax(0,1fr)) auto-shrinks to reserve the tile's height
+         when it appears — no padding-bottom hack needed (contract cbb8497c-a1f). */
+      grid-template-rows: auto minmax(0, 1fr) auto auto;
       /* min width 0 on the column so a long title (or any unbreakable child)
          cannot push the grid wider than its container. */
       grid-template-columns: minmax(0, 1fr);
