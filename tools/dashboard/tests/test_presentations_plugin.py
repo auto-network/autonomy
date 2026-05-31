@@ -230,3 +230,64 @@ assert(topbar.includes('Owner'));
 assert(topbar.includes('2 / 3'));
 """
     subprocess.run([node, "-e", script], check=True)
+
+
+def test_present_runtime_reveals_second_slide_after_scroll():
+    """Regression for iPhone blank slide 2.
+
+    Design Studio decks commonly hide slide text until the slide gets an
+    ``.in`` reveal class. On iOS, the deck's own IntersectionObserver can
+    miss updates inside Present's iframe scroller; Present must reveal the
+    active slide when its own scroll runtime observes slide 2.
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not available")
+
+    script = f"""
+const assert = require('assert');
+const fs = require('fs');
+const vm = require('vm');
+global.window = {{
+  Alpine: {{ data(name, factory) {{ window.__factory = factory; }} }},
+  addEventListener() {{}},
+}};
+global.document = {{ addEventListener() {{}} }};
+global.history = {{ replaceState() {{}} }};
+vm.runInThisContext(fs.readFileSync({str(PLUGIN_DIR / 'page.js')!r}, 'utf8'));
+const helpers = window.PresentationsTest;
+const doc = helpers.iframeDocument({{
+  variants: [{{ html: `
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body {{ margin: 0; height: 100%; background: #020617; color: white; }}
+  .slide {{ min-height: 100svh; display: grid; place-items: center; }}
+  .slide:not(.in) .r {{ opacity: 0; }}
+  .slide.in .r {{ opacity: 1; }}
+</style>
+</head>
+<body>
+  <section class="slide in"><h1 class="r">First visible slide</h1></section>
+  <section class="slide"><h1 class="r">Second must reveal</h1></section>
+</body>
+</html>
+` }}],
+}}, 1);
+assert(doc.includes('Second must reveal'));
+assert(
+  doc.includes('function reveal(index)'),
+  'Present runtime must define reveal(index) so slide 2 content is not left opacity-hidden',
+);
+assert(
+  doc.includes('reveal(index);post("present:active"'),
+  'scroll reporting must reveal the active slide before updating the topbar/page indicator',
+);
+assert(
+  doc.includes('reveal(index);var el=slides[index]'),
+  'programmatic navigation to slide 2 must reveal the target slide before scrolling',
+);
+"""
+    subprocess.run([node, "-e", script], check=True)
