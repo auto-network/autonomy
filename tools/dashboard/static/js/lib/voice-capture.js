@@ -258,6 +258,19 @@
   document.addEventListener('alpine:init', function () {
     if (typeof Alpine === 'undefined' || typeof Alpine.effect !== 'function') return;
     Alpine.effect(react);
+    // When the buffer is cleared externally (operator pressed Send), reset our
+    // accumulator AND tell the server to drop the committed audio — otherwise
+    // the old finals re-render into the box and the operator sends duplicates.
+    Alpine.effect(function () {
+      var st = store();
+      if (!st) return;
+      var buf = st.bufferText;
+      if (buf === '' && s.finals) {
+        s.finals = '';
+        sendControl('discard');
+        _diag('sent → buffer cleared');
+      }
+    });
   });
 
   window.Autonomy = window.Autonomy || {};
