@@ -250,9 +250,9 @@
                         <template x-for="(line, idx) in patchLinesForFile(selectedCommit, file)" :key="file.path + '-' + idx">
                           <div class="grid min-w-full w-max grid-cols-[2rem_2rem_0.75rem_max-content] items-start gap-0 font-mono text-[11px] leading-5"
                                :class="line.kind === 'add' ? 'bg-emerald-300/[0.08]' : (line.kind === 'del' ? 'bg-rose-300/[0.08]' : 'bg-transparent')">
-                            <span class="border-r border-white/10 px-1.5 text-right text-slate-500" x-text="line.oldNo"></span>
-                            <span class="border-r border-white/10 px-1.5 text-right text-slate-500" x-text="line.newNo"></span>
-                            <span class="border-r border-white/10 text-center"
+                            <span class="select-none border-r border-white/10 px-1.5 text-right text-slate-500" x-text="line.oldNo"></span>
+                            <span class="select-none border-r border-white/10 px-1.5 text-right text-slate-500" x-text="line.newNo"></span>
+                            <span class="select-none border-r border-white/10 text-center"
                                   :class="line.kind === 'add' ? 'text-emerald-300' : (line.kind === 'del' ? 'text-rose-300' : 'text-slate-600')"
                                   x-text="diffMarker(line.kind)"></span>
                             <span class="worktree-diff-code hljs whitespace-pre px-2 pr-3"
@@ -455,9 +455,9 @@
                         <template x-for="(line, idx) in patchLinesForFile(selectedDirtyRow, file)" :key="file.path + '-' + idx">
                           <div class="grid min-w-full w-max grid-cols-[2rem_2rem_0.75rem_max-content] items-start gap-0 font-mono text-[11px] leading-5"
                                :class="line.kind === 'add' ? 'bg-emerald-300/[0.08]' : (line.kind === 'del' ? 'bg-rose-300/[0.08]' : 'bg-transparent')">
-                            <span class="border-r border-white/10 px-1.5 text-right text-slate-500" x-text="line.oldNo"></span>
-                            <span class="border-r border-white/10 px-1.5 text-right text-slate-500" x-text="line.newNo"></span>
-                            <span class="border-r border-white/10 text-center"
+                            <span class="select-none border-r border-white/10 px-1.5 text-right text-slate-500" x-text="line.oldNo"></span>
+                            <span class="select-none border-r border-white/10 px-1.5 text-right text-slate-500" x-text="line.newNo"></span>
+                            <span class="select-none border-r border-white/10 text-center"
                                   :class="line.kind === 'add' ? 'text-emerald-300' : (line.kind === 'del' ? 'text-rose-300' : 'text-slate-600')"
                                   x-text="diffMarker(line.kind)"></span>
                             <span class="worktree-diff-code hljs whitespace-pre px-2 pr-3"

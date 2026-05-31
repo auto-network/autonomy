@@ -1228,6 +1228,12 @@ class SessionMonitor:
                 "resolved": bool(s.get("jsonl_path")) or (
                     bool(s.get("session_uuids")) and s["session_uuids"] != "[]"
                 ),
+                # auto-a1jco: two-dimension lifecycle phase. Frontends
+                # compute the derived "ready" flag locally:
+                #   ready = setup_phase=='setup_complete'
+                #           and harness_phase=='composer_ready'
+                "setup_phase": s.get("setup_phase") or "pending",
+                "harness_phase": s.get("harness_phase") or "pending",
             }
             entry["org"] = resolve_session_org(entry)
             out.append(entry)
@@ -1260,6 +1266,8 @@ class SessionMonitor:
         self._tailer_task = asyncio.create_task(self._inotify_tailer_loop())
         self._liveness_task = asyncio.create_task(self._liveness_loop())
         self._reconciliation_task = asyncio.create_task(self._reconciliation_loop())
+        # auto-eerfx: per-2s tmux capture-pane poll for harness state.
+        self._screen_poll_task = asyncio.create_task(self._screen_poll_loop())
         logger.info("session_monitor: background tasks started (mode=inotify)")
         # Re-scan unresolved container sessions from prior server lifetime
         await self._recover_unresolved_sessions()
@@ -1545,6 +1553,20 @@ class SessionMonitor:
             tmux_name, jsonl_path.name,
         )
 
+        # auto-a1jco: JSONL appearance is the canonical
+        # ``harness_phase = first_turn_written`` signal. Adapters with
+        # working screen-reading (``auto-eerfx``) later advance to
+        # ``composer_ready``; adapters with stubbed screen-reading
+        # (Codex initially) return ``composer_ready=True`` from the
+        # first poll so the transition is immediate.
+        try:
+            update_tail_state(tmux_name, harness_phase="first_turn_written")
+        except Exception:
+            logger.exception(
+                "session_monitor: failed to advance harness_phase for %s",
+                tmux_name,
+            )
+
         # Schedule a registry broadcast if we're inside a running loop.
         # Sync startup paths (_init_inotify, _recover_unresolved_sessions)
         # don't have a loop; their callers broadcast after they return.
@@ -1676,6 +1698,45 @@ class SessionMonitor:
             except Exception:
                 logger.exception("session_monitor: entry_enricher failed for %s", tmux_name)
         if new_entries and self._event_bus:
+            # auto-rsvzk: match user-typed echoes back to the original
+            # client_id stashed by api_session_send. The optimistic
+            # frontend uses the round-tripped id to dedup its locally-
+            # rendered "sending" entry (it promotes to "confirmed"
+            # instead of appending a duplicate row). User-turns that
+            # were never sent through the API path (typed directly into
+            # tmux) carry no client_id and the frontend renders them
+            # normally.
+            try:
+                from tools.dashboard import pending_outbound
+                for entry in new_entries:
+                    if entry.get("type") != "user":
+                        continue
+                    if entry.get("client_id"):
+                        continue
+                    # Extract the operator's typed text. Different
+                    # harnesses store it differently; try the common
+                    # shapes before giving up.
+                    text = entry.get("text") or entry.get("content") or ""
+                    if isinstance(text, list):
+                        text = "".join(
+                            block.get("text", "")
+                            for block in text
+                            if isinstance(block, dict)
+                        )
+                    text = text.strip() if isinstance(text, str) else ""
+                    if not text:
+                        continue
+                    matched = pending_outbound.match_and_consume(
+                        tmux_name, text,
+                    )
+                    if matched:
+                        entry["client_id"] = matched
+            except Exception:
+                logger.exception(
+                    "session_monitor: pending_outbound match failed for %s",
+                    tmux_name,
+                )
+
             ts.broadcast_seq += 1
             ts.last_broadcast_ts = time.time()
             updated = get_session(tmux_name)
@@ -1693,6 +1754,121 @@ class SessionMonitor:
                 },
                 dedup=False,
             )
+
+        # ── auto-eerfx screen-state poller ────────────────────────────
+
+    SCREEN_POLL_INTERVAL_S = 2.0
+
+    async def _screen_poll_loop(self) -> None:
+        """auto-eerfx: per-2s tmux capture-pane → harness.read_screen_state.
+
+        Drives harness_phase progression from first_turn_written →
+        composer_ready, detects + auto-confirms the Claude trust dialog,
+        surfaces planning mode + blocking modals to the registry SSE.
+
+        Targets sessions whose harness_phase is in
+        {harness_starting, first_turn_written} — past container ready
+        but not yet known-good-input. Sessions in composer_ready or any
+        failed state are skipped (no transition expected).
+        """
+        import subprocess as _subprocess
+        from tools.dashboard.tmux_send import tmux_send_keys
+        while True:
+            try:
+                await asyncio.sleep(self.SCREEN_POLL_INTERVAL_S)
+                rows = get_live_sessions()
+                for row in rows:
+                    tmux_name = row["tmux_name"]
+                    harness_phase = row.get("harness_phase") or "pending"
+                    if harness_phase not in (
+                        "harness_starting", "first_turn_written"
+                    ):
+                        continue
+                    harness = resolve_harness_for_session_row(row)
+                    try:
+                        result = await asyncio.to_thread(
+                            _subprocess.run,
+                            ["tmux", "capture-pane", "-p", "-t", tmux_name],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "screen_poll: capture-pane failed for %s",
+                            tmux_name, exc_info=True,
+                        )
+                        continue
+                    if result.returncode != 0:
+                        # Pane gone (session dead). Liveness sweep handles
+                        # the dead transition; we just skip.
+                        continue
+                    pane_text = result.stdout or ""
+
+                    current_state_str = row.get("harness_state") or "{}"
+                    try:
+                        current_state = json.loads(current_state_str)
+                        if not isinstance(current_state, dict):
+                            current_state = {}
+                    except (json.JSONDecodeError, TypeError):
+                        current_state = {}
+
+                    try:
+                        new_state, keystrokes = harness.read_screen_state(
+                            pane_text, current_state,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "screen_poll: read_screen_state failed for %s",
+                            tmux_name,
+                        )
+                        continue
+
+                    # Inject any keystrokes the adapter asked for (e.g.
+                    # the trust-dialog confirm). Fire and forget — the
+                    # next poll observes the result.
+                    if keystrokes:
+                        try:
+                            await tmux_send_keys(tmux_name, keystrokes)
+                        except Exception:
+                            logger.exception(
+                                "screen_poll: tmux_send_keys failed for %s",
+                                tmux_name,
+                            )
+
+                    # Persist state delta + advance harness_phase if
+                    # composer_ready flipped true.
+                    changed = (new_state != current_state)
+                    advance = (
+                        bool(new_state.get("composer_ready"))
+                        and harness_phase != "composer_ready"
+                    )
+                    if changed or advance:
+                        kwargs: dict[str, Any] = {}
+                        if changed:
+                            kwargs["harness_state"] = json.dumps(new_state)
+                        if advance:
+                            kwargs["harness_phase"] = "composer_ready"
+                        try:
+                            update_tail_state(tmux_name, **kwargs)
+                        except Exception:
+                            logger.exception(
+                                "screen_poll: update_tail_state failed for %s",
+                                tmux_name,
+                            )
+                            continue
+                        if self._event_bus:
+                            try:
+                                await self._event_bus.broadcast(
+                                    "session:registry", self.get_registry(),
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "screen_poll: broadcast failed for %s",
+                                    tmux_name,
+                                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("screen_poll: loop iteration failed")
 
     # ── inotify tailer ────────────────────────────────────────────
 

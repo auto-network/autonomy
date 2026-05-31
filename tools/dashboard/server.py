@@ -133,6 +133,7 @@ from tools.dashboard.plugin_api import loader as plugin_loader  # noqa: E402
 from tools.dashboard import settings_mediator as _settings_mediator  # noqa: E402, F401
 from tools.dashboard import harness_usage_settings as _harness_usage_settings  # noqa: E402, F401
 from tools.dashboard import session_upload_settings as _session_upload  # noqa: E402, F401
+from tools.dashboard import session_orientation_settings as _session_orientation_settings  # noqa: E402, F401
 from tools.dashboard import worktree_directives as _worktree_directives  # noqa: E402, F401
 from tools.dashboard import claude_credentials_refresh as _claude_credentials_refresh  # noqa: E402
 from tools.graph import settings_ops  # noqa: E402
@@ -4331,17 +4332,29 @@ async def api_session_send(request):
 
     POST /api/session/send
     POST /api/session/{project}/{session_id}/send  (project/session_id ignored)
-    Body: {"tmux_session": "auto-t2", "message": "text"}
+    Body: {"tmux_session": "auto-t2", "message": "text", "client_id": "..." (optional)}
 
     Only works for tmux-managed sessions (terminal, chatwith, dispatch agents).
     Host interactive sessions have no stdin injection path — returns 404.
     Returns 400 if tmux_session or message is not provided.
     Returns 404 if the tmux session does not exist.
     Returns 503 if tmux is not available in this environment.
+
+    auto-rsvzk: when ``client_id`` is supplied, the message is stashed in
+    the per-session ``pending_outbound`` ring before tmux_send fires.
+    The inotify tailer matches the echo back to the client_id and
+    attaches it to the broadcast ``session:messages`` payload so the
+    frontend can promote its locally-rendered "sending" entry to
+    "confirmed" without appending a duplicate row.
+
+    Retries posting the same ``client_id`` short-circuit with
+    ``{status: "in_flight"}`` and do NOT re-paste into tmux — that's
+    the gate that makes the optimistic-outbound retry path idempotent.
     """
     body = await request.json()
     message = (body.get("message") or "")
     tmux_session = (body.get("tmux_session") or "").strip()
+    client_id = (body.get("client_id") or "").strip()
 
     if not tmux_session:
         return JSONResponse(
@@ -4366,6 +4379,25 @@ async def api_session_send(request):
             status_code=404,
         )
 
+    # auto-rsvzk: idempotent retry — if this client_id is already
+    # pending an echo, do not re-paste into the harness. The original
+    # send's echo will land on session:messages with this client_id
+    # attached, promoting the frontend's "sending" entry to "confirmed"
+    # without a duplicate row.
+    if client_id:
+        from tools.dashboard import pending_outbound
+        if pending_outbound.is_in_flight(tmux_session, client_id):
+            logger.info(
+                "[session-send] dedup in-flight  tmux=%s  client_id=%s",
+                tmux_session, client_id,
+            )
+            return JSONResponse({
+                "ok": True,
+                "tmux_session": tmux_session,
+                "status": "in_flight",
+            })
+        pending_outbound.record_send(tmux_session, client_id, message)
+
     # Inject via unified tmux_send (per-session lock + double-Enter retry)
     logger.warning("[session-send] tmux=%r message=%r", tmux_session, message)
     try:
@@ -4376,7 +4408,10 @@ async def api_session_send(request):
             status_code=503,
         )
 
-    return JSONResponse({"ok": True, "tmux_session": tmux_session})
+    resp: dict[str, Any] = {"ok": True, "tmux_session": tmux_session}
+    if client_id:
+        resp["client_id"] = client_id
+    return JSONResponse(resp)
 
 
 async def api_session_interrupt(request):
@@ -5417,18 +5452,96 @@ async def api_session_create(request):
             _watch_for_host_session_jsonl(projects_dir, tmux_name),
         )
 
+    # auto-a1jco: write the initial lifecycle-phase transitions. The
+    # tmux session is created and the container is now starting; the
+    # harness exec is about to fire inside the entrypoint. Subsequent
+    # transitions are driven by the session monitor's signal watchers
+    # (JSONL appearance, .setup-exit) and the screen-reading poller
+    # (auto-eerfx).
+    try:
+        dashboard_db.update_tail_state(
+            tmux_name,
+            setup_phase="container_starting",
+            harness_phase="harness_starting",
+        )
+        await event_bus.broadcast("session:registry", session_monitor.get_registry())
+    except Exception:
+        logger.warning(
+            "api_session_create: failed to write initial phases for %s",
+            tmux_name, exc_info=True,
+        )
+
+    # auto-a1jco: per-session .setup-exit watcher. /startup.sh in the
+    # container backgrounds itself and writes its exit code into
+    # /workspace/output/.setup-exit (mounted to data/agent-runs/<name>-<ts>/
+    # on the host). When the file appears, advance setup_phase to
+    # setup_complete or setup_failed. Polls at 1Hz for up to 10 minutes
+    # — long enough for poetry install + container image pulls on a
+    # cold cache, short enough that abandoned sessions don't leak tasks.
+    if is_container and run_dirs:
+        run_dir = run_dirs[0]
+        async def _watch_setup_exit():
+            setup_exit = run_dir / ".setup-exit"
+            deadline = time.time() + 600  # 10 min
+            while time.time() < deadline:
+                if setup_exit.exists():
+                    try:
+                        exit_code = setup_exit.read_text().strip()
+                        phase = "setup_complete" if exit_code == "0" else "setup_failed"
+                        dashboard_db.update_tail_state(tmux_name, setup_phase=phase)
+                        await event_bus.broadcast(
+                            "session:registry", session_monitor.get_registry()
+                        )
+                        logger.info(
+                            "auto-a1jco: %s setup_phase=%s (exit=%s)",
+                            tmux_name, phase, exit_code,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "auto-a1jco: failed to read .setup-exit for %s",
+                            tmux_name, exc_info=True,
+                        )
+                    return
+                await asyncio.sleep(1)
+            logger.info(
+                "auto-a1jco: .setup-exit watcher for %s timed out (10 min)",
+                tmux_name,
+            )
+        asyncio.create_task(_watch_setup_exit())
+
     # ── Resolve primer (container only) ─────────────────────────
+    # Primer URL takes precedence over the orientation Setting. When no
+    # primer is supplied, the per-workspace
+    # ``dashboard.session.orientation`` Setting is rendered into the
+    # first injected user turn (auto-inhm3). The default template carries
+    # session id + workspace + timestamp; operators tune it via
+    # ``graph set add dashboard.session.orientation <workspace_id>``.
     first_message: str | None = None
     primer_error: str | None = None
     if is_container:
-        first_message = "Hello"
         if primer_url:
             resolved = await _resolve_primer(primer_url)
             if resolved:
                 first_message = resolved
             else:
-                primer_error = f"Could not resolve primer {primer_url!r}, falling back to hello"
+                primer_error = f"Could not resolve primer {primer_url!r}, falling back to orientation"
                 logger.warning("api_session_create: %s", primer_error)
+        if first_message is None:
+            from tools.dashboard.session_orientation import render_orientation
+            try:
+                first_message = render_orientation(
+                    tmux_name=tmux_name,
+                    workspace_id=(proj.id if proj else ""),
+                    workspace_name=(proj.name if proj else "default"),
+                    org=(proj.graph_project if proj else "autonomy"),
+                )
+            except Exception:
+                logger.warning(
+                    "api_session_create: orientation render failed for %s; "
+                    "falling back to literal Hello",
+                    tmux_name, exc_info=True,
+                )
+                first_message = "Hello"
 
     if first_message:
         async def _inject_first_message():
@@ -6543,24 +6656,102 @@ async def page_session_view_fragment(request):
 async def page_session_view_by_name(request):
     """Resolve /session/{session_id} → /session/{project}/{session_id}.
 
-    Journal entries (auto-fjfki) link to /session/<source_session_id> with no
-    project segment. Look up the project from the registered session, or fall
-    back to the sessions index when the name is unknown.
+    Three-tier lookup (auto-eik9g):
+      1. dashboard_db.get_session(name) — live sessions in the
+         tmux_sessions table. Existing behaviour preserved.
+      2. tools.graph.ops.get_session(name) — dead sessions ingested into
+         the graph DB. The session source row carries metadata.project,
+         so a dead session that was once ingested can still be navigated
+         to its proper viewer URL.
+      3. None of the above — render a 404 with a back-link instead of
+         redirecting to /sessions?session=… (which was a no-op on the
+         index page; the cause of the broken search → source → viewer
+         workflow).
+
+    Journal entries (auto-fjfki) link to /session/<source_session_id>
+    with no project segment; the same /session/<tmux_session> chip on
+    the source viewer also hits this route.
     """
     session_id = request.path_params["session_id"]
     if os.environ.get("DASHBOARD_MOCK"):
         return HTMLResponse(_load_template("base.html"))
+
+    # Tier 1: live session in tmux_sessions.
     session = dashboard_db.get_session(session_id)
     project = (session or {}).get("project")
-    if not project:
+    if project:
         return RedirectResponse(
-            url=f"/sessions?session={session_id}",
+            url=f"/session/{project}/{session_id}",
             status_code=302,
         )
-    return RedirectResponse(
-        url=f"/session/{project}/{session_id}",
-        status_code=302,
+
+    # Tier 2: dead session in the graph DB. The graph source's metadata
+    # carries the project so the viewer can render with the right org
+    # scope and pull historical entries via the existing tail endpoint.
+    try:
+        from tools.graph import ops as _graph_ops
+        graph_session = _graph_ops.get_session(session_id, org=None)
+    except Exception:
+        logger.warning(
+            "page_session_view_by_name: graph.get_session(%s) failed",
+            session_id, exc_info=True,
+        )
+        graph_session = None
+
+    if graph_session:
+        metadata = graph_session.get("metadata") or {}
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except Exception:
+                metadata = {}
+        project = (
+            metadata.get("project")
+            or metadata.get("graph_project")
+            or graph_session.get("project")
+        )
+        if project:
+            return RedirectResponse(
+                url=f"/session/{project}/{session_id}",
+                status_code=302,
+            )
+
+    # Tier 3: genuinely not found. Render a 404 with a back-link.
+    # NOT a redirect to /sessions — that was the broken behaviour this
+    # bead fixes.
+    #
+    # SECURITY (caught during auto-0524-000705 security review):
+    # session_id is the URL path parameter and reaches this branch as
+    # arbitrary text (Starlette's default ``str`` converter accepts
+    # any percent-encoded characters including ``<>"'``). Interpolating
+    # it un-escaped into HTML is reflected XSS — an attacker can craft
+    # a URL whose injected script runs on the dashboard origin with
+    # full access to the cookieless same-origin POSTs that mutate
+    # session state. ``html.escape()`` is the fix.
+    #
+    # The Referer header is NOT used as a back-link target — browsers
+    # do encode quote/angle characters, but a fixed safe destination
+    # (``/sessions``) sidesteps any future surprise from header sources
+    # we don't yet understand. The "back" affordance still works.
+    import html as _html
+    safe_session_id = _html.escape(session_id)
+    body = (
+        '<!doctype html><html><head><title>Session not found</title>'
+        '<style>body{background:#0b0d12;color:#e5e7eb;'
+        'font-family:-apple-system,BlinkMacSystemFont,sans-serif;'
+        'padding:64px;max-width:640px;margin:0 auto;}'
+        'a{color:#818cf8;text-decoration:none;}a:hover{color:#a5b4fc;}'
+        'code{background:#1f2937;padding:2px 6px;border-radius:4px;'
+        'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}'
+        '</style></head><body>'
+        '<h1>Session not found</h1>'
+        f'<p>No session with id <code>{safe_session_id}</code> exists in the '
+        'dashboard or the graph database. It may have been deleted, or '
+        'the link may be stale.</p>'
+        '<p><a href="/sessions">← Back to sessions</a></p>'
+        '</body></html>'
     )
+    return HTMLResponse(body, status_code=404)
 
 
 async def page_test_input(request):

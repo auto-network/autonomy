@@ -2843,6 +2843,49 @@ ACTIVITY_PAGE_CHECKS = """(async () => {
             r.diff_overlay_has_patch = !!(overlay && overlay.querySelector('.worktree-diff-code.hljs'));
             var patchEl = overlay && overlay.querySelector('.worktree-diff-code.hljs');
             r.diff_overlay_patch_text = patchEl ? patchEl.textContent.slice(0, 80) : '';
+            // auto-f58ca: diff-viewer copy must strip line-number gutters.
+            // Select a multi-cell diff region and assert the serialized
+            // selection contains only content cells — no line numbers,
+            // no `+`/`-` markers, no blank-line padding between cells.
+            try {
+                var rows = overlay.querySelectorAll('.grid.min-w-full.w-max');
+                if (rows.length >= 2) {
+                    var range = document.createRange();
+                    range.setStartBefore(rows[0]);
+                    range.setEndAfter(rows[1]);
+                    var sel = window.getSelection();
+                    sel.removeAllRanges();
+                    sel.addRange(range);
+                    var copyText = sel.toString();
+                    r.diff_copy_text_len = copyText.length;
+                    r.diff_copy_text_sample = copyText.slice(0, 120);
+                    // Per-line-number gutter cells carry select-none. If
+                    // any gutter character (digit at line start) leaked
+                    // into the selection, the fix regressed.
+                    var lines = copyText.split('\\n').filter(function(s) { return s.length > 0; });
+                    var leakedGutters = 0;
+                    for (var i = 0; i < lines.length; i++) {
+                        if (/^\\d+$/.test(lines[i])) leakedGutters++;
+                    }
+                    r.diff_copy_gutter_leaks = leakedGutters;
+                    // Pasting should not produce a blank line between every
+                    // content row. Count consecutive blank lines.
+                    var consecutiveBlanks = 0;
+                    var maxBlanks = 0;
+                    for (var j = 0; j < copyText.split('\\n').length; j++) {
+                        if (copyText.split('\\n')[j].trim() === '') {
+                            consecutiveBlanks++;
+                            if (consecutiveBlanks > maxBlanks) maxBlanks = consecutiveBlanks;
+                        } else {
+                            consecutiveBlanks = 0;
+                        }
+                    }
+                    r.diff_copy_max_consecutive_blank_lines = maxBlanks;
+                    sel.removeAllRanges();
+                }
+            } catch (selErr) {
+                r.diff_copy_error = selErr.message;
+            }
             var bodyEl = overlay && overlay.querySelector('[data-testid="worktree-review-commit-body"]');
             var bodyText = bodyEl ? bodyEl.textContent : '';
             r.diff_overlay_body_has_literal_escapes = bodyText.indexOf('\\\\n\\\\n') !== -1;
@@ -3932,6 +3975,46 @@ class TestActivitySurfaceBehavior:
         # Underlying tab unchanged (no history push, no nav).
         assert c.get("tab_after_overlay_close") == "feed", (
             f"Tab changed after overlay close: {c.get('tab_after_overlay_close')!r}"
+        )
+
+    def test_diff_viewer_copy_strips_gutters(self):
+        """auto-f58ca: selecting across rows of the diff overlay and
+        serializing via window.getSelection().toString() must NOT include
+        line-number gutter cells or +/- marker cells. The gutter spans
+        carry the ``select-none`` Tailwind class so the browser's
+        plain-text selection joins only the actual content cells.
+
+        Skips cleanly if the bundle didn't have ≥2 diff rows to select
+        across (e.g. the fixture diff was empty)."""
+        c = self._timeline
+        if c.get("diff_copy_text_len") is None:
+            pytest.skip("diff overlay had fewer than 2 rows in the fixture")
+        if c.get("diff_copy_error"):
+            pytest.fail(
+                f"selection eval errored: {c['diff_copy_error']}"
+            )
+        # The selected text should be non-trivial — at least one content
+        # character. If it's empty/whitespace the overlay didn't actually
+        # have selectable content.
+        assert c.get("diff_copy_text_len", 0) > 0, (
+            "diff overlay selection produced no text"
+        )
+        # No line-number-only lines should appear in the selection. A
+        # line-number gutter cell that wasn't select-none would render
+        # as ``\\n12\\n`` after serialization; we count any pure-digit
+        # lines as leaks.
+        assert c.get("diff_copy_gutter_leaks", 0) == 0, (
+            f"line-number gutter leaked into selection "
+            f"({c.get('diff_copy_gutter_leaks')} digit-only lines) — "
+            f"sample: {c.get('diff_copy_text_sample')!r}"
+        )
+        # No more than one consecutive blank line between content rows.
+        # Pre-fix, every grid cell joined with \\n produced 4-5 blank
+        # lines between each content row.
+        assert c.get("diff_copy_max_consecutive_blank_lines", 0) <= 1, (
+            f"diff copy has {c.get('diff_copy_max_consecutive_blank_lines')} "
+            f"consecutive blank lines between content rows — sample: "
+            f"{c.get('diff_copy_text_sample')!r}"
         )
 
 
