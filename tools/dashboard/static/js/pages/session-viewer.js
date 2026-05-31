@@ -390,6 +390,11 @@
         this.hasContent = normalized.trim().length > 0;
         var s = this.getComposerStore();
         if (s) s.draftText = normalized;
+        // Mirror to localStorage so the draft survives full reload and iOS
+        // backgrounding/eviction, not just soft SPA navigation (auto-xkdoi).
+        // saveDraft removes the key on empty text, so clearComposer() also
+        // clears the persisted draft for free.
+        if (window.saveDraft) window.saveDraft(this.sessionKey, normalized);
       },
 
       writeComposerText(text) {
@@ -405,7 +410,12 @@
 
       restoreComposerDraft() {
         var s = this.getComposerStore();
-        this.writeComposerText(s ? (s.draftText || '') : '');
+        // Prefer the in-memory draft (survives soft SPA nav); fall back to the
+        // localStorage mirror, which survives full reload and iOS eviction
+        // where the in-memory store is gone (auto-xkdoi).
+        var draft = (s && s.draftText) ? s.draftText
+                  : (window.loadDraft ? window.loadDraft(this.sessionKey) : '');
+        this.writeComposerText(draft || '');
       },
 
       _selectComposerContents(el, collapseToEnd) {

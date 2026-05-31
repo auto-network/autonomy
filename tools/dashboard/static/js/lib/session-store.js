@@ -59,6 +59,39 @@ document.addEventListener('alpine:init', function() {
     .catch(function(e) { console.warn('[session-store] seed fetch error', e); });
 });
 
+// ── Draft durability ─────────────────────────────────────────────────────
+// The in-memory store survives SPA navigation but is lost on full page
+// reload and — critically on mobile — when iOS Safari evicts a backgrounded
+// page from memory. That silently destroys a composed-but-unsent draft when
+// the user swipes away and comes back. Mirror every draft to localStorage so
+// it survives reload, backgrounding, and swipe-away. localStorage is the
+// durable backing; the in-memory store stays the hot-path read.
+var _DRAFT_PREFIX = 'sessionDraft:';
+
+window.saveDraft = function(sessionId, text) {
+  if (!sessionId) return;
+  try {
+    if (text && text.length) {
+      window.localStorage.setItem(_DRAFT_PREFIX + sessionId, text);
+    } else {
+      window.localStorage.removeItem(_DRAFT_PREFIX + sessionId);
+    }
+  } catch (e) { /* private mode / quota — in-memory draft still works */ }
+};
+
+window.loadDraft = function(sessionId) {
+  if (!sessionId) return '';
+  try {
+    return window.localStorage.getItem(_DRAFT_PREFIX + sessionId) || '';
+  } catch (e) { return ''; }
+};
+
+window.clearDraft = function(sessionId) {
+  if (!sessionId) return;
+  try { window.localStorage.removeItem(_DRAFT_PREFIX + sessionId); }
+  catch (e) { /* ignore */ }
+};
+
 window.getSessionStore = function(sessionId) {
   var sessions = Alpine.store('sessions');
   if (!sessions[sessionId]) {
