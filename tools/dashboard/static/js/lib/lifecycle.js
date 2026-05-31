@@ -35,21 +35,40 @@
 
     if (setupPhase === "setup_failed") return "setup_failed";
 
-    // MIGRATION-ARTIFACT GUARD (post-launch fix). Pre-existing live
-    // sessions that were running BEFORE the schema migration ran have
-    // setup_phase + harness_phase defaulted to 'pending' from the
-    // migration's column defaults — they never went through the
-    // api_session_create path that writes container_starting →
-    // setup_complete. Without this guard those long-running sessions
-    // render as "Queued" with the full startup strip.
+    // STARTUP-OVER GUARDS (post-launch fixes). The setup_phase column
+    // is unreliable for two real reasons, both surfaced by live-data
+    // verification against the real registry:
     //
-    // ``resolved`` is the existing authoritative signal for "this
-    // session has a JSONL backing on disk" — i.e. the harness has
-    // already produced output, so by definition startup is past us.
-    // Treat any live + resolved session as ready, regardless of what
-    // the phase columns happen to say. The harness-state overlays
-    // (confirming trust / planning) still apply on top.
-    if (s.resolved === true) {
+    //   1. Pre-existing sessions that were running BEFORE the schema
+    //      migration ran have setup_phase + harness_phase defaulted
+    //      to 'pending' by the column defaults — they never went
+    //      through the api_session_create path. (25 of 27 live rows
+    //      in the first merge attempt.)
+    //
+    //   2. The setup-exit watcher isn't re-armed on dashboard restart,
+    //      so an idle session that booted before the last restart can
+    //      have setup_phase stuck at 'container_starting' forever even
+    //      though the harness is fully ready. (1 of 27 in the same
+    //      verification — auto-0531-152256: idle 77min at composer_ready
+    //      but setup_phase frozen at container_starting because nobody
+    //      ever sent a first prompt + the watcher didn't pick up the
+    //      old .setup-exit file after the dashboard restart.)
+    //
+    // Two independent signals authoritatively say "startup is over":
+    //
+    //   • ``resolved === true`` — the harness has produced JSONL output
+    //     (covers case 1 — long-running sessions have data on disk).
+    //
+    //   • ``harness_phase === "composer_ready"`` — the harness screen-
+    //     reader has explicitly observed the composer prompt (covers
+    //     case 2 — idle sessions that never typed anything but ARE
+    //     past their boot screen).
+    //
+    // Either-or bypasses to ready. setup_failed still wins because the
+    // failed check above this block fires first — "setup script failed"
+    // is a state the operator MUST see regardless of whether the
+    // harness happens to be at composer_ready.
+    if (s.resolved === true || harnessPhase === "composer_ready") {
       var hsResolved = s.harness_state || {};
       if (hsResolved.confirming_trust_prompt) return "ready_with_confirming_trust";
       if (hsResolved.in_planning_mode) return "ready_with_planning";
