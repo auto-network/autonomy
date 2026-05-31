@@ -6406,6 +6406,7 @@ async def ws_voice(websocket: WebSocket):
         # wrapper, so this is guaranteed-new text) AND surface to
         # the operator as a transcript:final frame.
         voice_buffer_mod.MANAGER.append_final(bind, text)
+        logger.info("ws_voice DIAG: FINAL transcript bind=%s text=%r", bind, text)
         try:
             await websocket.send_json({
                 "type": "transcript",
@@ -6451,9 +6452,11 @@ async def ws_voice(websocket: WebSocket):
             on_final=_on_final,
             on_error=_on_whisperlive_error,
         )
+        logger.info("ws_voice DIAG: 'start' received → connecting WhisperLive bind=%s url=%s", bind, voice_wl.WHISPERLIVE_URL)
         try:
             await whisperlive_client.connect_and_wait_ready()
         except voice_wl.WhisperLiveConnectError as exc:
+            logger.warning("ws_voice DIAG: WhisperLive connect FAILED bind=%s err=%s", bind, exc)
             whisperlive_unavailable = True
             try:
                 await websocket.send_json({
@@ -6467,12 +6470,14 @@ async def ws_voice(websocket: WebSocket):
             # we leave the reference so close() in finally is a no-op
             # rather than re-instantiating.
             return False
+        logger.info("ws_voice DIAG: WhisperLive READY bind=%s", bind)
         return True
 
     logger.info(
         "ws_voice: connected bind=%s state=%s restored_buffer_chars=%d",
         bind, session.state, len(acq.buffer_text),
     )
+    _audio_frames = 0
 
     try:
         while True:
@@ -6494,6 +6499,7 @@ async def ws_voice(websocket: WebSocket):
                 if frame_type == "discard" and session.state in voice_mod.ACTIVE_STATES:
                     voice_buffer_mod.MANAGER.clear(bind)
                 responses = session.handle_control(frame_type)
+                logger.info("ws_voice DIAG: ctrl=%s → state=%s bind=%s", frame_type, session.state, bind)
                 for resp in responses:
                     await websocket.send_json(resp)
                 # 'start' from IDLE triggered the LISTENING
@@ -6577,6 +6583,13 @@ async def ws_voice(websocket: WebSocket):
                     break
             elif "bytes" in msg and msg["bytes"] is not None:
                 should_forward = session.handle_audio(msg["bytes"])
+                _audio_frames += 1
+                if _audio_frames % 50 == 1:
+                    logger.info(
+                        "ws_voice DIAG: audio frame #%d forward=%s wl_ready=%s bind=%s",
+                        _audio_frames, should_forward,
+                        (whisperlive_client.is_ready() if whisperlive_client else None), bind,
+                    )
                 if (
                     should_forward
                     and whisperlive_client is not None
