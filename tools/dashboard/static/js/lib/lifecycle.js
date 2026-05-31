@@ -35,6 +35,27 @@
 
     if (setupPhase === "setup_failed") return "setup_failed";
 
+    // MIGRATION-ARTIFACT GUARD (post-launch fix). Pre-existing live
+    // sessions that were running BEFORE the schema migration ran have
+    // setup_phase + harness_phase defaulted to 'pending' from the
+    // migration's column defaults — they never went through the
+    // api_session_create path that writes container_starting →
+    // setup_complete. Without this guard those long-running sessions
+    // render as "Queued" with the full startup strip.
+    //
+    // ``resolved`` is the existing authoritative signal for "this
+    // session has a JSONL backing on disk" — i.e. the harness has
+    // already produced output, so by definition startup is past us.
+    // Treat any live + resolved session as ready, regardless of what
+    // the phase columns happen to say. The harness-state overlays
+    // (confirming trust / planning) still apply on top.
+    if (s.resolved === true) {
+      var hsResolved = s.harness_state || {};
+      if (hsResolved.confirming_trust_prompt) return "ready_with_confirming_trust";
+      if (hsResolved.in_planning_mode) return "ready_with_planning";
+      return "ready";
+    }
+
     // Ready = setup_complete + composer_ready. Within ready, harness_state
     // flags expose the in-flight overlay (confirming trust, planning).
     if (

@@ -106,6 +106,36 @@ for (const [name, row] of Object.entries(PHASE_PAIR)) {
   check(`lifecycleState(${name})`, actual === name, `got ${actual}`);
 }
 
+// ── MIGRATION-ARTIFACT GUARD (post-launch fix) ──
+// Pre-existing live sessions that were running BEFORE the schema
+// migration ran have setup_phase + harness_phase defaulted to 'pending'
+// from the migration. ``resolved=true`` is the existing authoritative
+// signal that the harness already produced JSONL — by definition past
+// startup. The derivation must short-circuit to ready (and the
+// harness-state overlays still apply) regardless of the phase columns.
+check('resolved+pending bypasses to ready',
+      L.lifecycleState({is_live:true, resolved:true, setup_phase:'pending', harness_phase:'pending'}) === 'ready');
+check('resolved+pending+confirming_trust → ready_with_confirming_trust',
+      L.lifecycleState({is_live:true, resolved:true, setup_phase:'pending', harness_phase:'pending', harness_state:{confirming_trust_prompt:true}}) === 'ready_with_confirming_trust');
+check('resolved+pending+planning → ready_with_planning',
+      L.lifecycleState({is_live:true, resolved:true, setup_phase:'pending', harness_phase:'pending', harness_state:{in_planning_mode:true}}) === 'ready_with_planning');
+// setup_failed wins over resolved (the JSONL backing doesn't change
+// the fact that the script failed — operator still needs to see it).
+check('resolved+setup_failed stays failed',
+      L.lifecycleState({is_live:true, resolved:true, setup_phase:'setup_failed', harness_phase:'pending'}) === 'setup_failed');
+// Brand-new sessions don't have a JSONL yet so resolved=false; the
+// normal startup derivation drives the chip.
+check('not-yet-resolved container_starting → container_starting (no bypass)',
+      L.lifecycleState({is_live:true, resolved:false, setup_phase:'container_starting', harness_phase:'harness_starting'}) === 'container_starting');
+check('resolved=undefined treated as not-resolved (no bypass)',
+      L.lifecycleState({is_live:true, setup_phase:'container_starting', harness_phase:'harness_starting'}) === 'container_starting');
+check("dead session ignores resolved (resolved doesn't override is_live=false)",
+      L.lifecycleState({is_live:false, resolved:true, resumable:true}) === 'dead_resumable');
+check('startupVisible(resolved+pending) is false (no strip rendered)',
+      L.startupVisible({is_live:true, resolved:true, setup_phase:'pending', harness_phase:'pending'}) === false);
+check('phaseChip(resolved+pending) is "" (no chip rendered, ready is suppressed)',
+      L.phaseChip({is_live:true, resolved:true, setup_phase:'pending', harness_phase:'pending'}) === '');
+
 // ── phaseChip matches design (static states) ──
 for (const [name, expected] of Object.entries(DESIGN_CHIP)) {
   const actual = L.phaseChip(PHASE_PAIR[name]);
