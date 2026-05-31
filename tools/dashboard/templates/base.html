@@ -1954,15 +1954,49 @@
         <div class="voice-sheet__error"
              x-show="$store.voice.sheetError"
              x-text="$store.voice.sheetError"></div>
+        <div class="voice-sheet__chips"
+             x-show="$store.voice.attachments.length"
+             x-cloak>
+          <template x-for="att in $store.voice.attachments" :key="att.id">
+            <div class="voice-sheet__chip"
+                 :class="{ 'voice-sheet__chip--pending': !att.path }">
+              <img class="voice-sheet__chip-thumb"
+                   x-show="att.dataUrl"
+                   :src="att.dataUrl"
+                   alt="">
+              <span class="voice-sheet__chip-name" x-text="att.name"></span>
+              <span class="voice-sheet__chip-spin"
+                    x-show="!att.path"
+                    aria-label="Uploading"></span>
+              <button type="button"
+                      class="voice-sheet__chip-x"
+                      x-show="att.path"
+                      @click="removeVoiceAttachment(att.id)"
+                      aria-label="Remove attachment">&times;</button>
+            </div>
+          </template>
+        </div>
       </div>
       <div class="voice-sheet__actions">
+        <input type="file"
+               multiple
+               x-ref="voiceFileInput"
+               class="voice-sheet__file"
+               @change="onVoicePickFiles($event)"
+               aria-hidden="true"
+               tabindex="-1">
+        <button type="button"
+                class="voice-sheet__attach"
+                @click="openVoiceFilePicker()"
+                aria-label="Add attachment"
+                title="Add attachment">+</button>
         <button type="button"
                 class="voice-sheet__clear"
                 @click="clearBuffer()">Clear</button>
         <button type="button"
                 class="voice-sheet__send"
-                :class="{ 'voice-sheet__send--disabled': !hasBufferText }"
-                :disabled="!hasBufferText"
+                :class="{ 'voice-sheet__send--disabled': !canSendVoice }"
+                :disabled="!canSendVoice"
                 @click="sendBuffer()">Send</button>
       </div>
     </div>

@@ -71,6 +71,7 @@ function loadVoiceStore(opts) {
     parseFloat,
     setTimeout,
     clearTimeout,
+    FormData,
   };
   sandbox.window.document = document;
   sandbox.window.Alpine = Alpine;
@@ -447,5 +448,100 @@ describe('voice store substrate', () => {
     h.store.setBufferText('retry me');
     assert.equal(await h.store.sendBuffer(), false);
     assert.equal(h.store.sheetError, 'Send failed. Session is no longer available.');
+  });
+});
+
+describe('voice store attachments', () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  function boundStore(fetchImpl) {
+    const h = loadVoiceStore({
+      initialStores: { flags: { get() { return true; } } },
+      fetchImpl,
+    });
+    h.store.requestBind('session-a', { isLive: true });
+    return h;
+  }
+
+  it('uploads a picked file to /api/upload with the bound session and stores the returned path', async () => {
+    const h = boundStore(async function (url) {
+      if (url === '/api/upload') {
+        return { ok: true, async json() {
+          return { ok: true, files: [{ path: '/tmp/shot.png', rel_path: '.uploads/shot.png', mime: 'image/png', size: 42 }] };
+        } };
+      }
+      throw new Error('unexpected url ' + url);
+    });
+    h.store.addAttachmentFiles([{ name: 'shot.png', type: 'text/plain' }]);
+    // Pending immediately: chip staged, no path yet -> blocks send.
+    assert.equal(h.store.attachments.length, 1);
+    assert.equal(h.store.attachmentsPending, true);
+    assert.equal(h.store.canSend, false);
+    await flush();
+    const up = h.fetchCalls.find((c) => c.url === '/api/upload');
+    assert.ok(up, 'posted to /api/upload');
+    assert.equal(up.init.method, 'POST');
+    assert.equal(up.init.body.get('tmux_session'), 'session-a');
+    assert.equal(h.store.attachments[0].path, '/tmp/shot.png');
+    assert.equal(h.store.attachments[0].rel_path, '.uploads/shot.png');
+    assert.equal(h.store.attachmentsPending, false);
+    assert.equal(h.store.canSend, true);   // landed attachment, no text needed
+  });
+
+  it('drops the chip and surfaces an error when the upload fails', async () => {
+    const h = boundStore(async function () {
+      return { ok: true, async json() { return { ok: false, error: 'nope' }; } };
+    });
+    h.store.addAttachmentFiles([{ name: 'bad.png', type: 'text/plain' }]);
+    await flush();
+    assert.equal(h.store.attachments.length, 0);
+    assert.equal(h.store.sheetError, 'Attachment upload failed.');
+  });
+
+  it('_buildSendBody composes paths above text, matching the keyboard composer', () => {
+    const h = boundStore();
+    h.store.attachments = [{ id: 1, path: '/tmp/a.png' }, { id: 2, path: '/tmp/b.png' }];
+    h.store.setBufferText('look at these');
+    assert.equal(h.store._buildSendBody(), '/tmp/a.png\n/tmp/b.png\n\nlook at these');
+    h.store.setBufferText('');
+    assert.equal(h.store._buildSendBody(), '/tmp/a.png\n/tmp/b.png');   // attachment-only
+    h.store.attachments = [];
+    h.store.setBufferText('text only');
+    assert.equal(h.store._buildSendBody(), 'text only');
+  });
+
+  it('sendBuffer blocks while an attachment is still uploading', async () => {
+    const h = boundStore(async function () { throw new Error('must not send'); });
+    h.store.attachments = [{ id: 1, path: null, name: 'wip.png' }];   // pending
+    h.store.setBufferText('with a file');
+    assert.equal(await h.store.sendBuffer(), false);
+    assert.equal(h.store.sheetError, 'Attachment still uploading…');
+    assert.equal(h.fetchCalls.length, 0);
+  });
+
+  it('sendBuffer posts the composed body and clears attachments on success', async () => {
+    const h = boundStore(async function (url) {
+      if (url === '/api/session/send') {
+        return { ok: true, async json() { return { ok: true }; } };
+      }
+      throw new Error('unexpected url ' + url);
+    });
+    h.store.attachments = [{ id: 1, path: '/tmp/pic.png', name: 'pic.png' }];
+    h.store.setBufferText('ship it');
+    h.store.openSheet();
+    assert.equal(await h.store.sendBuffer(), true);
+    const send = h.fetchCalls.find((c) => c.url === '/api/session/send');
+    assert.equal(JSON.parse(send.init.body).message, '/tmp/pic.png\n\nship it');
+    assert.equal(h.store.attachments.length, 0);   // cleared after send
+  });
+
+  it('removeAttachment and clearAttachments drop staged files', () => {
+    const h = boundStore();
+    h.store.attachments = [{ id: 1, path: '/tmp/a' }, { id: 2, path: '/tmp/b' }];
+    h.store.removeAttachment(1);
+    assert.equal(h.store.attachments.length, 1);
+    assert.equal(h.store.attachments[0].id, 2);
+    h.store.clearAttachments();
+    assert.equal(h.store.attachments.length, 0);
   });
 });

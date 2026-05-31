@@ -400,4 +400,31 @@ describe('voice shell helpers', () => {
     assert.equal(position.x, 262);
     assert.equal(position.y, 704);
   });
+
+  it('canSendVoice mirrors the store canSend flag (drives the sheet Send button)', () => {
+    const yes = loadVoiceShell({ voiceStore: { canSend: true } });
+    assert.equal(yes.component.canSendVoice, true);
+    const no = loadVoiceShell({ voiceStore: { canSend: false } });
+    assert.equal(no.component.canSendVoice, false);
+  });
+
+  it('onVoicePickFiles forwards picked files to the store and resets the input', () => {
+    const calls = [];
+    const h = loadVoiceShell({
+      voiceStore: { addAttachmentFiles(files) { calls.push(files); } },
+    });
+    const input = { files: ['f1', 'f2'], value: 'C:/fakepath' };
+    assert.equal(h.component.onVoicePickFiles({ target: input }), true);
+    assert.deepEqual(calls, [['f1', 'f2']]);
+    assert.equal(input.value, '');   // reset so the same file can be re-picked
+  });
+
+  it('removeVoiceAttachment forwards the id to the store', () => {
+    const removed = [];
+    const h = loadVoiceShell({
+      voiceStore: { removeAttachment(id) { removed.push(id); } },
+    });
+    assert.equal(h.component.removeVoiceAttachment(7), true);
+    assert.deepEqual(removed, [7]);
+  });
 });
