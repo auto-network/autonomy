@@ -19,6 +19,7 @@
   <link rel="stylesheet" href="/static/css/session-chips.css?v=__STATIC_VERSION__">
   <link rel="stylesheet" href="/static/css/action-sheet.css?v=__STATIC_VERSION__">
   <link rel="stylesheet" href="/static/css/session-cards.css?v=__STATIC_VERSION__">
+  <link rel="stylesheet" href="/static/css/voice-ui.css?v=__STATIC_VERSION__">
   <link rel="stylesheet" href="/static/css/dropdown-toggle.css?v=__STATIC_VERSION__">
   <link rel="stylesheet" href="/static/css/agent-actions.css?v=__STATIC_VERSION__">
   <link rel="stylesheet" href="/static/css/surface-presence.css?v=__STATIC_VERSION__">
@@ -1116,6 +1117,50 @@
       gap: 7px;
       padding: 6px 0.5rem;
     }
+    .sv-voice-import {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 0.5rem 0;
+    }
+    .sv-voice-import__preview {
+      flex: 1;
+      min-width: 0;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(31, 41, 55, 0.84);
+      border: 1px solid rgba(75, 85, 99, 0.8);
+      color: #d1d5db;
+      font-size: 12px;
+      line-height: 1.35;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .sv-voice-import__button {
+      flex-shrink: 0;
+      min-height: 32px;
+      padding: 0 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(99, 102, 241, 0.55);
+      background: rgba(99, 102, 241, 0.16);
+      color: #c7d2fe;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.1s;
+    }
+    @media (hover: hover) and (pointer: fine) {
+      .sv-voice-import__button:hover {
+        background: rgba(99, 102, 241, 0.24);
+        border-color: rgba(129, 140, 248, 0.7);
+        color: #e0e7ff;
+      }
+    }
+    .sv-voice-import__button:active {
+      transform: scale(0.98);
+    }
 
     /* Contenteditable input + placeholder */
     .sv-editable {
@@ -1758,12 +1803,119 @@
   </div>
   </div>
 
+  <div x-data="voiceShell()" x-cloak>
+    <div class="voice-rebind-confirm"
+         x-show="showRebindConfirm"
+         x-cloak
+         data-testid="voice-rebind-confirm">
+      <div class="voice-rebind-confirm__copy" x-text="rebindCopy"></div>
+      <div class="voice-rebind-confirm__actions">
+        <button type="button"
+                class="voice-rebind-confirm__switch"
+                @click="confirmRebind()">Switch</button>
+        <button type="button"
+                class="voice-rebind-confirm__cancel"
+                @click="cancelRebind()">Cancel</button>
+      </div>
+    </div>
+
+    <div class="voice-sheet-backdrop"
+         x-show="showSheet"
+         x-cloak
+         @click="dismissSheet()"></div>
+
+    <div class="voice-caption"
+         x-show="showCaption"
+         x-cloak
+         data-testid="voice-caption-zone"
+         :class="{ 'voice-caption--empty': !hasCaptionText }">
+      <div class="voice-caption__placeholder"
+           x-show="!hasCaptionText"
+           x-text="captionPlaceholder"></div>
+      <div class="voice-caption__content"
+           x-show="hasCaptionText"
+           x-text="captionText"></div>
+    </div>
+
+    <div class="voice-sheet"
+         data-testid="voice-compose-sheet"
+         x-show="showSheet"
+         x-cloak
+         :class="{
+           'voice-sheet--partial': sheetMode === 'partial',
+           'voice-sheet--full': sheetMode === 'full'
+         }">
+      <div class="voice-sheet__handle"
+           @pointerdown="startSheetGesture($event)">
+        <span></span>
+      </div>
+      <div class="voice-sheet__body">
+        <textarea class="voice-sheet__buffer"
+                  x-ref="sheetInput"
+                  x-model="$store.voice.bufferText"
+                  @input="onSheetInput()"
+                  spellcheck="false"></textarea>
+        <div class="voice-sheet__error"
+             x-show="$store.voice.sheetError"
+             x-text="$store.voice.sheetError"></div>
+      </div>
+      <div class="voice-sheet__actions">
+        <button type="button"
+                class="voice-sheet__clear"
+                @click="clearBuffer()">Clear</button>
+        <button type="button"
+                class="voice-sheet__send"
+                :class="{ 'voice-sheet__send--disabled': !hasBufferText }"
+                :disabled="!hasBufferText"
+                @click="sendBuffer()">Send</button>
+      </div>
+    </div>
+
+    <div class="voice-capsule"
+         x-show="showCapsule"
+         x-cloak
+         x-ref="capsule"
+         data-testid="voice-floating-capsule"
+         :style="capsuleStyle"
+         @pointerdown="onCapsulePointerDown($event)">
+      <div class="voice-capsule__action voice-capsule__send"
+           role="button"
+           tabindex="0"
+           aria-label="Send voice buffer"
+           title="Send voice buffer"
+           data-voice-action="send"
+           :class="{
+             'voice-capsule__action--pressed': capsulePressedAction === 'send',
+             'voice-capsule__send--pulse': sendPulse,
+             'voice-capsule__send--disabled': !hasBufferText
+           }"
+           @keydown.enter.prevent="onCapsuleKey('send')"
+           @keydown.space.prevent="onCapsuleKey('send')">
+        <span class="voice-capsule__icon-wrap" x-html="capsuleIcon('send')"></span>
+      </div>
+      <div class="voice-capsule__action voice-capsule__type"
+           role="button"
+           tabindex="0"
+           aria-label="Open keyboard composer"
+           title="Open keyboard composer"
+           data-voice-action="type"
+           :class="{ 'voice-capsule__action--pressed': capsulePressedAction === 'type' }"
+           @keydown.enter.prevent="onCapsuleKey('type')"
+           @keydown.space.prevent="onCapsuleKey('type')">
+        <span class="voice-capsule__icon-wrap" x-html="capsuleIcon('type')"></span>
+      </div>
+    </div>
+  </div>
+
   <script src="/static/js/lib/fetch-progress.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/events.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/schemas.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/surface-presence.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/session-store.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/feature-flags.js?v=__STATIC_VERSION__"></script>
+  <script src="/static/js/lib/voice-store.js?v=__STATIC_VERSION__"></script>
+  <script src="/static/js/lib/voice-ui.js?v=__STATIC_VERSION__"></script>
+  <script src="/static/js/lib/voice-shell.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/diag-collectors.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/session-display.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/session-diff.js?v=__STATIC_VERSION__"></script>

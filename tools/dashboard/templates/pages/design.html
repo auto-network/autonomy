@@ -314,6 +314,7 @@
             <template x-if="isLive && _tmuxSession">
               <div class="flex flex-col px-2 bg-gray-800 border-t border-gray-700 flex-shrink-0"
                    style="padding-top:6px; padding-bottom:6px;"
+                   x-show="showInlineComposer && !window.Autonomy.voice.shell.hideInlineComposer()"
                    @dragenter.prevent="$el.classList.add('drop-highlight')"
                    @dragover.prevent="$el.classList.add('drop-highlight')"
                    @dragleave.prevent="$el.classList.remove('drop-highlight')"
@@ -363,7 +364,7 @@
                             ontouchend="event.preventDefault(); Alpine.$data(this.closest('[x-data]')).sendMessage()"
                             @click="sendMessage()"
                             onmousedown="event.preventDefault()"
-                            :disabled="(attachments.length === 0 && !hasContent) || sending">
+                            :disabled="!canSendComposer || sending">
                       <template x-if="!sending">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M3.478 2.405a.75.75 0 00-.926.94l2.432 7.905H13.5a.75.75 0 010 1.5H4.984l-2.432 7.905a.75.75 0 00.926.94l18.04-8.5a.75.75 0 000-1.38l-18.04-8.5z"/></svg>
                       </template>

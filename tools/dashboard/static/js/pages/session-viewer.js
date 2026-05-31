@@ -139,6 +139,15 @@
         var s = Alpine.store('sessions')[this.sessionKey];
         return !!(s && s.hasMoreHistory);
       },
+      get viewportMode() {
+        return this.viewportWidth < 768 ? 'mobile' : 'desktop';
+      },
+      get showInlineComposer() {
+        return this.resolveComposerMode() === 'inline';
+      },
+      get canSendComposer() {
+        return this.attachments.length > 0 || this.hasContent;
+      },
 
       // Workspace-changes indicator: derived from the cached
       // ``_workspaceStatus`` (populated by ``_refreshWorkspaceStatus``).
@@ -209,12 +218,14 @@
       totalMB: '0',
 
       // Input (Tier 3) — contenteditable, no v-model
+      viewportWidth: (window.visualViewport && window.visualViewport.width) || window.innerWidth || 0,
       hasContent: false,
       _draftTimer: null,
       sending: false,
       uploading: false,
       attachments: [],
       _nextAttachId: 0,
+      _viewportResizeHandler: null,
 
       _uploadProxy: null,
       _uploadUnsub: null,
@@ -338,6 +349,173 @@
         if (!s.isLive) return 'complete';
         if (s.resolved) return 'live';
         return 'unresolved';
+      },
+
+      resolveComposerMode() {
+        if (this.viewportMode === 'desktop') return 'inline';
+        return 'inline';
+      },
+
+      refreshViewportWidth() {
+        this.viewportWidth = (window.visualViewport && window.visualViewport.width) || window.innerWidth || 0;
+      },
+
+      getVoiceStore() {
+        try {
+          if (typeof Alpine === 'undefined' || typeof Alpine.store !== 'function') return null;
+          return Alpine.store('voice') || null;
+        } catch (_err) {
+          return null;
+        }
+      },
+
+      getComposerStore() {
+        if (!this.sessionKey || !window.getSessionStore) return null;
+        return window.getSessionStore(this.sessionKey);
+      },
+
+      readComposerTextFromElement(el) {
+        return el ? el.innerText : '';
+      },
+
+      readComposerText() {
+        var el = this.$refs.messageInput;
+        if (el) return this.readComposerTextFromElement(el);
+        var s = this.getComposerStore();
+        return s ? (s.draftText || '') : '';
+      },
+
+      persistComposerDraft(text) {
+        var normalized = text || '';
+        this.hasContent = normalized.trim().length > 0;
+        var s = this.getComposerStore();
+        if (s) s.draftText = normalized;
+      },
+
+      writeComposerText(text) {
+        var normalized = text || '';
+        var el = this.$refs.messageInput;
+        if (el && el.innerText !== normalized) el.innerText = normalized;
+        this.persistComposerDraft(normalized);
+      },
+
+      clearComposer() {
+        this.writeComposerText('');
+      },
+
+      restoreComposerDraft() {
+        var s = this.getComposerStore();
+        this.writeComposerText(s ? (s.draftText || '') : '');
+      },
+
+      _selectComposerContents(el, collapseToEnd) {
+        if (!el || typeof document === 'undefined' || typeof document.createRange !== 'function') return false;
+        if (typeof window.getSelection !== 'function') return false;
+        var sel = window.getSelection();
+        if (!sel) return false;
+        var range = document.createRange();
+        range.selectNodeContents(el);
+        if (collapseToEnd) range.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(range);
+        return true;
+      },
+
+      focusComposerAtEnd() {
+        var el = this.$refs.messageInput;
+        if (!el) return false;
+        if (typeof el.focus === 'function') el.focus();
+        this._selectComposerContents(el, true);
+        return true;
+      },
+
+      writeComposerTextWithUndo(text) {
+        var normalized = text || '';
+        var el = this.$refs.messageInput;
+        if (!el) {
+          this.writeComposerText(normalized);
+          return true;
+        }
+        if (typeof el.focus === 'function') el.focus();
+        var usedExec = false;
+        try {
+          if (typeof document !== 'undefined' &&
+              typeof document.execCommand === 'function' &&
+              this._selectComposerContents(el, false)) {
+            usedExec = document.execCommand('insertText', false, normalized) === true;
+          }
+        } catch (_err) {
+          usedExec = false;
+        }
+        if (!usedExec) {
+          this.writeComposerText(normalized);
+        } else {
+          this.persistComposerDraft(this.readComposerTextFromElement(el));
+        }
+        this.focusComposerAtEnd();
+        return true;
+      },
+
+      canSendComposerText(text) {
+        return this.attachments.length > 0 || !!((text || '').trim());
+      },
+
+      get showDesktopVoiceImport() {
+        var voice = this.getVoiceStore();
+        return !!(
+          this._mode === 'page' &&
+          this.viewportMode === 'desktop' &&
+          this._tmuxSession &&
+          voice &&
+          voice.enabled === true &&
+          voice.boundSessionId === this._tmuxSession &&
+          typeof voice.bufferText === 'string' &&
+          voice.bufferText.trim().length > 0
+        );
+      },
+
+      get desktopVoicePreview() {
+        var voice = this.getVoiceStore();
+        var shell = window.Autonomy && window.Autonomy.voice && window.Autonomy.voice.shell;
+        if (!shell || typeof shell.previewWords !== 'function') return '';
+        return shell.previewWords((voice && voice.bufferText) || '', 12);
+      },
+
+      importVoiceBufferToComposer() {
+        if (!this.showDesktopVoiceImport) return false;
+        var voice = this.getVoiceStore();
+        if (!voice) return false;
+        var snapshot = typeof voice.bufferText === 'string' ? voice.bufferText : '';
+        if (!snapshot.trim()) return false;
+        var composerStore = this.getComposerStore();
+        var draftText = composerStore ? (composerStore.draftText || '') : this.readComposerText();
+        var currentDraft = this.readComposerText();
+        var nextDraft = draftText.trim() === '' ? snapshot : ((currentDraft || draftText) + '\n\n' + snapshot);
+        if (typeof voice.setMicMode === 'function' &&
+            (voice.micMode === 'listening' || voice.micMode === 'vad_paused')) {
+          voice.setMicMode('muted');
+        }
+        this.writeComposerTextWithUndo(nextDraft);
+        if (typeof voice.clearBuffer === 'function') {
+          voice.clearBuffer();
+        } else if (typeof voice.setBufferText === 'function') {
+          voice.setBufferText('');
+        }
+        return true;
+      },
+
+      buildComposerBody(text) {
+        var trimmed = (text || '').trim();
+        var lines = [];
+        for (var ai = 0; ai < this.attachments.length; ai++) {
+          var att = this.attachments[ai];
+          if (att.path) lines.push(att.path);
+        }
+        if (trimmed) {
+          if (lines.length) lines.push('');
+          lines.push(trimmed);
+        }
+        return lines.join('\n');
       },
 
       // ── Configure ───────────────────────────────────────────────
@@ -563,11 +741,7 @@
         this.$nextTick(function() {
           var el = self.$refs.messageInput;
           if (!el) return;
-          var s = window.getSessionStore(self.sessionKey);
-          if (s && s.draftText) {
-            el.innerText = s.draftText;
-            self.hasContent = el.innerText.trim().length > 0;
-          }
+          self.restoreComposerDraft();
           // Capture file pastes (text pastes handled by inline onpaste)
           el.addEventListener('paste', function(e) {
             var items = e.clipboardData && e.clipboardData.items;
@@ -587,6 +761,19 @@
       // ── Lifecycle ───────────────────────────────────────────────
 
       init() {
+        this.refreshViewportWidth();
+        if (!this._viewportResizeHandler) {
+          var self = this;
+          this._viewportResizeHandler = function() {
+            self.refreshViewportWidth();
+          };
+          if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', this._viewportResizeHandler);
+          } else {
+            window.addEventListener('resize', this._viewportResizeHandler);
+          }
+        }
+
         // Auto-reset the drawer tab to 'topics' whenever the session's todo
         // list empties out. Without this, clearing the final todo would leave
         // the viewer stuck on an empty Todos panel after the tab strip hides.
@@ -696,6 +883,14 @@
         if (this._uploadUnsub) {
           try { this._uploadUnsub(); } catch (_) {}
           this._uploadUnsub = null;
+        }
+        if (this._viewportResizeHandler) {
+          if (window.visualViewport) {
+            window.visualViewport.removeEventListener('resize', this._viewportResizeHandler);
+          } else {
+            window.removeEventListener('resize', this._viewportResizeHandler);
+          }
+          this._viewportResizeHandler = null;
         }
         // Dispose terminal WS + xterm if the toggle was active. Leaking these
         // holds a server-side tmux attach and exhausts WebSocket slots.
@@ -1227,17 +1422,14 @@
       // debounce wasn't buying anything. _draftTimer is now unused but left
       // in place to avoid churning the data-fields block.
       onInput(el) {
-        var text = el.innerText;
-        this.hasContent = text.trim().length > 0;
-        var s = window.getSessionStore(this.sessionKey);
-        if (s) s.draftText = text;
+        this.persistComposerDraft(this.readComposerTextFromElement(el));
       },
 
       async sendMessage() {
         var el = this.$refs.messageInput;
         if (!el) return;
-        var text = el.innerText.trim();
-        if ((this.attachments.length === 0 && !text) || this.sending) return;
+        var text = this.readComposerText();
+        if (!this.canSendComposerText(text) || this.sending) return;
         // Block if any attachment upload is still in flight — sending now
         // would post a body without paths and skip the substrate write.
         if (this.uploading) return;
@@ -1259,16 +1451,7 @@
           // previous N+1 turns (one per attachment, one for the text). The
           // viewer's user-turn renderer detects ``/tmp/<filename>.<ext>``
           // lines in the body and surfaces inline thumbnails for each.
-          var lines = [];
-          for (var ai = 0; ai < this.attachments.length; ai++) {
-            var att = this.attachments[ai];
-            if (att.path) lines.push(att.path);
-          }
-          if (text) {
-            if (lines.length) lines.push('');   // blank line between paths and prose
-            lines.push(text);
-          }
-          var body = lines.join('\n');
+          var body = this.buildComposerBody(text);
           if (body) {
             var data = await _send(body);
             if (!data.ok) {
@@ -1301,10 +1484,7 @@
             }
           }
 
-          el.innerText = '';
-          this.hasContent = false;
-          var s = window.getSessionStore(this.sessionKey);
-          if (s) s.draftText = '';
+          this.clearComposer();
           this.clearAttachments();
           el.blur();
         } catch (e) {
