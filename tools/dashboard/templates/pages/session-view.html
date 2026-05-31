@@ -1,7 +1,12 @@
 <div x-data="sessionViewerPage()" class="session-viewer" data-mode="page"
      x-effect="$el.setAttribute('data-mode', _mode)">
 
-  <!-- Loading -->
+  <!-- Loading. auto-7v712 PART 1: the pre-ready slot renders the same
+       phase chip + label as the list card (window.Autonomy.lifecycle.*
+       derivation, design rev 63542418). When the registry SSE hasn't
+       populated the store yet, fall back to the legacy "Connecting..."
+       text. The byte-progress branch (loadProgress > 0) is a separate
+       signal about JSONL download progress and stays unchanged. -->
   <template x-if="state === 'loading'">
     <div class="sv-loading">
       <template x-if="loadProgress > 0">
@@ -12,7 +17,17 @@
         </span>
       </template>
       <template x-if="loadProgress === 0">
-        <span>Connecting to session...</span>
+        <template x-if="window.Autonomy && window.Autonomy.lifecycle && loadingPhaseRow && window.Autonomy.lifecycle.phaseChip(loadingPhaseRow)">
+          <span class="sc-phase-chip"
+                :class="window.Autonomy.lifecycle.phaseTone(loadingPhaseRow)"
+                data-testid="sv-loading-phase-chip">
+            <span class="sc-phase-dot"></span>
+            <span x-text="window.Autonomy.lifecycle.phaseChip(loadingPhaseRow)"></span>
+          </span>
+        </template>
+        <template x-if="!(window.Autonomy && window.Autonomy.lifecycle && loadingPhaseRow && window.Autonomy.lifecycle.phaseChip(loadingPhaseRow))">
+          <span>Connecting to session...</span>
+        </template>
       </template>
     </div>
   </template>

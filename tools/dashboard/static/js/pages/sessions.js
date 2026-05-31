@@ -549,6 +549,19 @@
             // (graph://553c7437-036 icon-rail).
             harness: s.harness || null,
             model: s.model || null,
+            // auto-yfcoc: startup-phase fields. The store carries
+            // camelCase; the partial expects snake_case so we map
+            // here. Defaults match the store-creation defaults so
+            // missing fields don't break the lifecycle derivation.
+            // ``resolved`` (carried as-is from the registry payload)
+            // is the migration-artifact guard for pre-existing
+            // sessions whose setup_phase + harness_phase columns
+            // defaulted to 'pending' from the schema migration —
+            // see lifecycle.js for the bypass.
+            setup_phase: s.setupPhase || 'pending',
+            harness_phase: s.harnessPhase || 'pending',
+            harness_state: s.harnessState || {},
+            resolved: s.resolved === true,
             _hasData: !!hasData,
           });
         }
@@ -647,6 +660,19 @@
               // cards still render the icon-rail badge.
               harness: r.harness || null,
               model: r.model || null,
+              // auto-yfcoc — dead recent rows carry setup_phase /
+              // harness_phase from the DAO; passthrough so the
+              // lifecycle derivation correctly classifies them as
+              // dead_resumable / dead_not_resumable. The chip
+              // self-suppresses on dead rows; the inline Resume
+              // action renders when resumable=true. Dead rows always
+              // have a JSONL on disk (that's how they were ingested),
+              // so resolved=true here is correct — irrelevant to dead
+              // classification but mirrors the live path's shape.
+              setup_phase: r.setup_phase || 'pending',
+              harness_phase: r.harness_phase || 'pending',
+              harness_state: r.harness_state || {},
+              resolved: true,
             };
           }).filter(function(x) { return x !== null; });
         } catch (e) {

@@ -172,6 +172,13 @@ window.getSessionStore = function(sessionId) {
       model: null,                 // auto-ngis4: most-recent assistant-turn model id
       harnessToken: null,          // auto-08n3f: Anthropic org UUID (substrate key on dashboard.claude.credentials)
       harnessTokenAlias: null,     // auto-08n3f: friendly alias from dashboard.claude.credentials.alias (UI display)
+      // auto-yfcoc: startup-phase fields, additive. Defaults match the
+      // backend's INSERT defaults so the derivation reads sensible
+      // values even before the first session:registry broadcast lands.
+      setupPhase: 'pending',
+      harnessPhase: 'pending',
+      resumable: false,
+      harnessState: {},
       olderBefore: null,           // reverse-tail cursor for older-history paging
       hasMoreHistory: false,       // whether older-history paging can continue
       loaded: false,
@@ -512,6 +519,15 @@ window.ensureSessionMessages = function() {
       if (s.model !== undefined) store.model = s.model;
       if (s.harness_token !== undefined) store.harnessToken = s.harness_token;
       if (s.harness_token_alias !== undefined) store.harnessTokenAlias = s.harness_token_alias;
+      // auto-yfcoc: startup-phase fields. Additive — the lifecycle
+      // derivation reads these off the row, never the store, so the
+      // partial works against either the raw registry shape or the
+      // populated store entry. Defaults applied at store-creation time
+      // so a missing field never confuses the derivation.
+      if (s.setup_phase !== undefined) store.setupPhase = s.setup_phase;
+      if (s.harness_phase !== undefined) store.harnessPhase = s.harness_phase;
+      if (s.resumable !== undefined) store.resumable = !!s.resumable;
+      if (s.harness_state !== undefined) store.harnessState = s.harness_state;
     }
     // Mark removed sessions as dead
     var allSessions = Alpine.store('sessions');

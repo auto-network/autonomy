@@ -5848,6 +5848,172 @@ class TestSessionViewerTodoTiles:
             "Later TaskUpdate tile should display the renamed subject"
 
 
+class TestSessionViewerPreReadyLoadingChip:
+    """auto-7v712 PART 1: the pre-ready loading slot renders the same
+    startup-phase chip as the list card.
+
+    The viewer's session-view.html `state === 'loading'` block previously
+    showed a flat "Connecting to session..." string. After this slice
+    lands, the slot renders a `.sc-phase-chip` driven by
+    window.Autonomy.lifecycle.phaseChip(loadingPhaseRow) — visual parity
+    with the sessions-page card so operators get the same signal on
+    both surfaces.
+
+    Test pattern: navigate to an existing sweep session URL, then force
+    Alpine into `state: 'loading'` with a seeded store row that
+    represents a mid-startup session. Assert the chip renders with the
+    derivation's text + tone.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        _navigate_and_check("/session/autonomy/auto-sweep-alpha", "", wait_ms=2000)
+        result = _run_async_eval(
+            """(async () => {
+                var r = {};
+                var sleep = function(ms) { return new Promise(function(resolve) { setTimeout(resolve, ms); }); };
+
+                // The viewer mounts and the sweep fixture data resolves it
+                // straight to state='ready' — to test the pre-ready slot
+                // we force the Alpine state back to 'loading' with a
+                // seeded store row in a mid-startup phase.
+                var root = document.querySelector('.session-viewer');
+                r.viewer_mounted = !!root;
+                if (!root) return JSON.stringify(r);
+                var data = Alpine.$data(root);
+                var tmux = data.sessionKey;
+                r.tmux = tmux;
+
+                // Capture original Alpine + store state so we can
+                // restore at the end — this browser fixture is
+                // module-scoped, so leaving the viewer in 'loading'
+                // poisons the next test class that navigates to the
+                // same fixture URL.
+                var store = window.getSessionStore(tmux);
+                var saved = {
+                    state: data.state,
+                    loadProgress: data.loadProgress,
+                    errorMsg: data.errorMsg,
+                    isLive: store.isLive,
+                    harness: store.harness,
+                    setupPhase: store.setupPhase,
+                    harnessPhase: store.harnessPhase,
+                    harnessState: store.harnessState,
+                    resumable: store.resumable,
+                };
+
+                store.isLive = true;
+                store.harness = 'claude';
+                store.setupPhase = 'container_starting';
+                store.harnessPhase = 'harness_starting';
+                store.harnessState = {};
+                store.resumable = false;
+
+                data.state = 'loading';
+                data.loadProgress = 0;
+                data.errorMsg = '';
+                await sleep(120);
+
+                // Container-starting chip + default sky tone.
+                var chip = document.querySelector('[data-testid="sv-loading-phase-chip"]');
+                r.chip_present_container = !!chip;
+                r.chip_text_container = chip ? chip.textContent.trim() : null;
+                r.chip_classes_container = chip ? chip.className : null;
+                r.chip_visible_container = !!(chip && chip.offsetParent !== null);
+
+                // Verify the legacy "Connecting to session..." text is
+                // NOT in the body when the chip is rendering.
+                r.has_legacy_text_container = (document.body.textContent || '').indexOf('Connecting to session...') !== -1;
+
+                // Flip to setup_failed and re-assert — chip should now
+                // carry the failed tone class + amber styling.
+                store.setupPhase = 'setup_failed';
+                store.harnessPhase = 'pending';
+                await sleep(120);
+                chip = document.querySelector('[data-testid="sv-loading-phase-chip"]');
+                r.chip_text_failed = chip ? chip.textContent.trim() : null;
+                r.chip_classes_failed = chip ? chip.className : null;
+
+                // Flip to harness_starting with codex harness — chip
+                // text should be the dynamic "Booting Codex".
+                store.setupPhase = 'setup_complete';
+                store.harnessPhase = 'harness_starting';
+                store.harness = 'codex';
+                await sleep(120);
+                chip = document.querySelector('[data-testid="sv-loading-phase-chip"]');
+                r.chip_text_codex = chip ? chip.textContent.trim() : null;
+
+                // (Fallback-to-legacy-text edge case is deliberately
+                // NOT covered by L2.B. The template's
+                // ``window.Autonomy && window.Autonomy.lifecycle``
+                // guard is belt-and-suspenders against a script-load-
+                // order race that base.html prevents at the source —
+                // lifecycle.js lands before app.js. The Alpine x-if
+                // doesn't track non-reactive globals so the runtime
+                // edge can't be force-triggered without remounting
+                // the whole viewer; the cost of that test outweighs
+                // the value given the load order is enforced.)
+
+                // Restore the viewer + store to the values we captured
+                // before our state-forcing began. The L2.B browser is
+                // module-scoped, so the NEXT test class navigating to
+                // this same fixture URL must see a clean ready state.
+                store.isLive = saved.isLive;
+                store.harness = saved.harness;
+                store.setupPhase = saved.setupPhase;
+                store.harnessPhase = saved.harnessPhase;
+                store.harnessState = saved.harnessState;
+                store.resumable = saved.resumable;
+                data.state = saved.state;
+                data.loadProgress = saved.loadProgress;
+                data.errorMsg = saved.errorMsg;
+                await sleep(60);
+
+                return JSON.stringify(r);
+            })()"""
+        )
+        request.cls._checks = result
+
+    def test_container_starting_chip_visible(self):
+        c = self._checks
+        assert c.get("viewer_mounted"), "session-viewer root did not mount"
+        assert c.get("chip_present_container"), \
+            "sv-loading-phase-chip not rendered for container_starting"
+        assert c.get("chip_visible_container"), \
+            "sv-loading-phase-chip has offsetParent === null"
+        assert c.get("chip_text_container") == "Starting container", \
+            f"Expected 'Starting container', got {c.get('chip_text_container')!r}"
+
+    def test_container_starting_default_sky_tone(self):
+        c = self._checks
+        cls = c.get("chip_classes_container") or ""
+        # Sky-blue active is the default — no tone modifier class.
+        assert "sc-phase-chip" in cls, \
+            f"Missing base .sc-phase-chip class: {cls!r}"
+        assert "failed" not in cls and "dead" not in cls and "ready" not in cls, \
+            f"Container-starting should have no tone modifier: {cls!r}"
+
+    def test_legacy_connecting_text_replaced_when_chip_renders(self):
+        c = self._checks
+        assert c.get("has_legacy_text_container") is False, (
+            "Legacy 'Connecting to session...' text still visible "
+            "even though the phase chip rendered — both branches drew"
+        )
+
+    def test_setup_failed_uses_failed_tone(self):
+        c = self._checks
+        assert c.get("chip_text_failed") == "Setup failed", \
+            f"Expected 'Setup failed' chip text, got {c.get('chip_text_failed')!r}"
+        cls = c.get("chip_classes_failed") or ""
+        assert "failed" in cls, \
+            f"setup_failed chip missing .failed tone class: {cls!r}"
+
+    def test_dynamic_harness_label_for_codex(self):
+        c = self._checks
+        assert c.get("chip_text_codex") == "Booting Codex", \
+            (f"harness_starting label is not dynamic over s.harness — "
+             f"expected 'Booting Codex', got {c.get('chip_text_codex')!r}")
+
 class TestSessionViewerWorktreeOverlay:
     """Session-viewer worktree review opens as an overlay without route churn."""
 

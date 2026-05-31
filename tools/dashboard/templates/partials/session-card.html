@@ -12,6 +12,13 @@
      id, label, session_type, is_live, project, topics, latest,
      entry_count, context_tokens, last_activity, created_at,
      tmux_session, nag_enabled, dispatch_nag_enabled, role, resumable, bead_id
+
+   Startup-phase fields (auto-yfcoc; design rev 63542418):
+     setup_phase, harness_phase, harness_state — drive the .sc-phase-chip
+     in both the compact + stats rows, the optional .sc-lifecycle strip
+     gated on startup_visible, the inline .sc-action-inline button, and
+     the .sc-message tone. Derivation lives in
+     window.Autonomy.lifecycle.* — pure functions over the row shape.
 #}
 <div class="session-card-wrap">
   <div class="session-card" :class="borderCls(s.session_type)">
@@ -63,6 +70,19 @@
       <span x-data="{ harness: s.harness }">
         {% include 'partials/session-harness-badge.html' %}
       </span>
+      <!-- Startup-phase chip (auto-yfcoc; design rev 63542418). Visible
+           whenever the lifecycle derivation has a chip label for this
+           session — covers every active startup state plus the ready/
+           planning/confirming-trust overlays. Hidden for ``ready`` and
+           dead states (the chrome below the chip handles those). -->
+      <template x-if="window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.phaseChip(s)">
+        <span class="sc-phase-chip"
+              :class="window.Autonomy.lifecycle.phaseTone(s)"
+              data-testid="sc-phase-chip">
+          <span class="sc-phase-dot"></span>
+          <span x-text="window.Autonomy.lifecycle.phaseChip(s)"></span>
+        </span>
+      </template>
       <!-- Workspace-changes indicator. Same shape as the page-mode
            header anchor; shows when this session has commits-ahead
            or dirty files in any of its worktrees. Optional helpers —
@@ -149,6 +169,18 @@
       <span x-data="{ harness: s.harness }">
         {% include 'partials/session-harness-badge.html' %}
       </span>
+      <!-- Startup-phase chip mirrored on the stats row (auto-yfcoc).
+           Same chrome + derivation as the compact-row chip; both rows
+           render it so the chip survives zoom modes via the existing
+           row-hiding rules. -->
+      <template x-if="window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.phaseChip(s)">
+        <span class="sc-phase-chip"
+              :class="window.Autonomy.lifecycle.phaseTone(s)"
+              data-testid="sc-phase-chip">
+          <span class="sc-phase-dot"></span>
+          <span x-text="window.Autonomy.lifecycle.phaseChip(s)"></span>
+        </span>
+      </template>
       <!-- Workspace-changes indicator. Same shape as the page-mode
            header anchor; shows when this session has commits-ahead
            or dirty files in any of its worktrees. Optional helpers —
@@ -203,6 +235,28 @@
       </template>
     </div>
 
+    <!-- Lifecycle strip (auto-yfcoc). 4-segment track + 4-lane caption
+         row. Rendered when the derivation marks startup_visible=true:
+         every active startup state plus setup_failed (so the operator
+         sees which segment failed). Hidden for ready + dead states. -->
+    <template x-if="window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.startupVisible(s)">
+      <div class="sc-lifecycle" data-testid="sc-lifecycle">
+        <div class="sc-lifecycle-track">
+          <template x-for="seg in window.Autonomy.lifecycle.lifecycleStages(s)" :key="seg.key">
+            <span class="sc-lifecycle-seg" :class="seg.state"></span>
+          </template>
+        </div>
+        <div class="sc-lifecycle-row">
+          <template x-for="lane in window.Autonomy.lifecycle.lifecycleLanes(s)" :key="lane.label">
+            <div>
+              <div class="sc-lifecycle-label" x-text="lane.label"></div>
+              <div class="sc-lifecycle-value" x-text="lane.value"></div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+
     <!-- Topics -->
     <template x-if="s.topics && s.topics.length > 0">
       <div class="sc-topics">
@@ -211,9 +265,14 @@
         </template>
       </div>
     </template>
-    <!-- Last message -->
+    <!-- Last message. auto-yfcoc adds a tone class (.sc-startup-message
+         while a session is mid-startup, .sc-failed-message when setup
+         failed) on top of the existing .sc-message styling — empty
+         string when no tone shift applies. -->
     <template x-if="s.latest">
-      <div class="sc-message" x-text="s.latest"></div>
+      <div class="sc-message"
+           :class="window.Autonomy && window.Autonomy.lifecycle ? window.Autonomy.lifecycle.messageTone(s) : ''"
+           x-text="s.latest"></div>
     </template>
 
     <!-- Footer (normal + expanded only, hidden in compact via CSS) -->
@@ -255,6 +314,22 @@
           <span class="sc-footer-label">token</span>
           <span class="sc-footer-value" x-text="s.harness_token_alias || s.harness_token"></span>
         </div>
+      </template>
+      <!-- Inline action (auto-yfcoc). Resume on dead-resumable rows,
+           Retry on setup_failed; margin-left:auto right-aligns inside
+           the existing .sc-footer flex. Resume reuses the existing
+           page-level resumeSession() helper; Retry on the LIST is a
+           re-create rather than a resume — defer the click handler to
+           a follow-up if the host wants explicit retry wiring. For now
+           the chip is rendered, click is a no-op-with-stopPropagation
+           so it doesn't accidentally trigger the card's outer @click. -->
+      <template x-if="window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.inlineAction(s)">
+        <button class="sc-action-inline"
+                :class="window.Autonomy.lifecycle.inlineAction(s).kind"
+                @click.prevent.stop="(window.Autonomy.lifecycle.inlineAction(s).kind === 'resume' && typeof resumeSession === 'function') ? resumeSession(s, $event) : null"
+                data-testid="sc-action-inline"
+                x-text="window.Autonomy.lifecycle.inlineAction(s).label">
+        </button>
       </template>
     </div>
 
