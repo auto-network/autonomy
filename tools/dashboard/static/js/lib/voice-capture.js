@@ -23,7 +23,38 @@
     stream: null, ctx: null, sourceNode: null, workletNode: null, sinkNode: null, micGranted: false,
     starting: false,
     finals: '',
+    wakeLock: null,
   };
+
+  // Keep the screen awake while capturing (iOS auto-lock cuts off dictation).
+  function _acquireWakeLock() {
+    try {
+      if (navigator.wakeLock && typeof navigator.wakeLock.request === 'function' && !s.wakeLock) {
+        navigator.wakeLock.request('screen').then(function (sentinel) {
+          s.wakeLock = sentinel;
+          if (sentinel && typeof sentinel.addEventListener === 'function') {
+            sentinel.addEventListener('release', function () { s.wakeLock = null; });
+          }
+        }).catch(function () {});
+      }
+    } catch (_e) {}
+  }
+  function _releaseWakeLock() {
+    try { if (s.wakeLock) { s.wakeLock.release(); s.wakeLock = null; } } catch (_e) {}
+  }
+
+  // On returning to the foreground (screen unlock / tab refocus): re-acquire the
+  // wake lock and resume the suspended AudioContext so capture survives a lock.
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState !== 'visible') return;
+      if (!(s.talkActive || (s.bind && s.ws))) return;
+      _acquireWakeLock();
+      if (s.ctx && s.ctx.state === 'suspended' && typeof s.ctx.resume === 'function') {
+        s.ctx.resume().then(function () { _diag('resumed after unlock'); }).catch(function () {});
+      }
+    });
+  }
 
   // TEMP visible diagnostic overlay (host can't see the browser console).
   var _finalCount = 0;
@@ -170,7 +201,8 @@
             if (!s.started) { if (sendControl('start')) s.started = true; }
             else { sendControl('unmute'); }
             s.talkActive = true;
-            _diag('mic ready + START sent — streaming, awaiting transcripts…');
+            _acquireWakeLock();
+            _diag('mic ready + START sent — streaming (screen locked OPEN)…');
           } else {
             _diag('FAILED: socket never opened after 5s');
           }
@@ -200,6 +232,7 @@
 
   function teardown() {
     s.talkActive = false;
+    _releaseWakeLock();
     try { if (s.ws) s.ws.close(1000, 'end'); } catch (_e) {}
     s.ws = null; s.wsOpen = false; s.started = false; s.bind = ''; s.starting = false; s.finals = '';
     try { if (s.stream) s.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (_e) {}
