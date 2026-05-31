@@ -132,6 +132,11 @@ window.getSessionStore = function(sessionId) {
       lastActivity: 0,
       lastMessage: '',
       draftText: '',
+      // Pending/optimistic outbox message (auto-xkdoi). null when idle; else
+      // { localId, state:'capturing'|'sending'|'unconfirmed', source, text, ts }.
+      // Declared here so it's a reactive property from store creation — the
+      // voice side writes to it and the viewer's pending tile reads it.
+      outbox: null,
       resolved: false,
       toolMap: {},       // tool_id -> { tool_name }
       resultMap: {},     // tool_id -> tool_result entry

@@ -124,6 +124,41 @@ describe('composer-active signal (_composerActive + _syncComposerSignal)', () =>
     assert.equal(v._composerActive, true);
   });
 
+  it('outbox getter reflects the store; tile-present flag tracks render condition', () => {
+    store.isLive = true; store.sessionType = 'container';
+    const v = h.makeViewer('auto-test');
+    // idle: no outbox, no tile-present even though composer is active
+    assert.equal(v.outbox, null);
+    v._syncTilePresent();
+    assert.equal(h.body.classList.contains('sv-outbox-tile-present'), false);
+    // a pending message appears (e.g. voice sets capturing)
+    store.outbox = { localId: 'ob_1', state: 'capturing', source: 'voice', text: 'hel', ts: 1 };
+    assert.equal(v.outbox.state, 'capturing');
+    assert.equal(v.outboxTileClass(), 'is-capturing');
+    v._syncTilePresent();
+    assert.equal(h.body.classList.contains('sv-outbox-tile-present'), true);
+    // message clears (merged into log) → tile-present drops
+    store.outbox = null;
+    v._syncTilePresent();
+    assert.equal(h.body.classList.contains('sv-outbox-tile-present'), false);
+  });
+
+  it('tile-present is false when composer inactive even if outbox set', () => {
+    store.isLive = false; store.sessionType = 'container';
+    store.outbox = { localId: 'ob_2', state: 'sending', source: 'manual', text: 'x', ts: 1 };
+    const v = h.makeViewer('auto-test');
+    v._syncTilePresent();
+    assert.equal(h.body.classList.contains('sv-outbox-tile-present'), false);
+  });
+
+  it('resendOutbox flips state back to sending', () => {
+    store.isLive = true; store.sessionType = 'container';
+    store.outbox = { localId: 'ob_3', state: 'unconfirmed', source: 'manual', text: 'x', ts: 1 };
+    const v = h.makeViewer('auto-test');
+    v.resendOutbox();
+    assert.equal(h.stores.sessions['auto-test'].outbox.state, 'sending');
+  });
+
   it('does not stomp another viewer\'s signal when clearing', () => {
     // viewer B owns the signal; viewer A (inactive) must not clear it.
     h.body.classList.add('sv-viewer-composer-active');
