@@ -59,6 +59,12 @@
                     @pointercancel.stop="window.Autonomy.voice.ui.onPointerCancel($event)"
                     @click.stop="window.Autonomy.voice.ui.onClick($event, sessionKey, { isLive: isLive })"
                     data-testid="voice-session-dot">
+              <!-- Pending-message ring overlay (auto-xkdoi) — mirrors the card dot. -->
+              <span class="sc-pending-ring"
+                    x-show="!!window.outboxPendingState(sessionKey)"
+                    :class="window.outboxPendingState(sessionKey) === 'unconfirmed' ? 'sc-pending-ring--unconfirmed' : 'sc-pending-ring--sending'"
+                    data-testid="session-pending-ring"
+                    aria-hidden="true"></span>
               <svg x-show="window.Autonomy.voice.ui.showMicGlyph(sessionKey, { isLive: isLive })"
                    class="voice-dot-glyph"
                    viewBox="0 0 16 16"
