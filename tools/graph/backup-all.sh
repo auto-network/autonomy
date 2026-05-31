@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-SQLITE3="/home/jeremy/miniconda3/bin/sqlite3"
+SQLITE3="$(command -v sqlite3)"
 DOLT="/home/jeremy/go/bin/dolt"
 ROOT="/home/jeremy/workspace/autonomy"
 BACKUP_ROOT="${ROOT}/data/backups"
