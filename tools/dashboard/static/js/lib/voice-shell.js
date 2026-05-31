@@ -113,7 +113,12 @@
   // this is INERT (no caption gap, no regression) until the handoff target
   // truly exists in the DOM. Send-path branching keys on the composer-active
   // flag alone, not this.
-  function _viewerTileActive() {
+  // True when the durability session's viewer composer surface is active for
+  // the bound session (the body flag set by session-viewer.js + session match).
+  // This is the gate for FEEDING the outbox tile (capturing) and for the
+  // send-flip — NOT tile-present, because the tile-present flag is driven by
+  // s.outbox, so requiring it before we set s.outbox would be circular.
+  function _viewerComposerActive() {
     if (typeof document === 'undefined' || !document.body) return false;
     var voice = _voiceStore();
     var bound = voice && voice.boundSessionId;
@@ -123,10 +128,22 @@
       return !!(
         body.classList &&
         body.classList.contains('sv-viewer-composer-active') &&
-        body.classList.contains('sv-outbox-tile-present') &&
         body.dataset &&
         body.dataset.svComposerSession === bound
       );
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  // True only once the outbox tile is actually MOUNTED (composer active AND
+  // sv-outbox-tile-present). Used for caption suppression so the gutter only
+  // hands off when the tile truly exists — inert until then.
+  function _viewerTileActive() {
+    if (!_viewerComposerActive()) return false;
+    try {
+      return !!(document.body.classList &&
+        document.body.classList.contains('sv-outbox-tile-present'));
     } catch (_err) {
       return false;
     }
@@ -245,6 +262,42 @@
                 var ta = self.$refs && self.$refs.sheetInput;
                 if (ta) ta.scrollTop = ta.scrollHeight;
               });
+            });
+            // Feed live dictation into the durability outbox tile (auto-0530's
+            // pinned tile) when inside the viewer for the bound session — the
+            // CAPTURING state upstream of SENDING. bufferText streams into
+            // s.outbox.text; the tile renders + sets sv-outbox-tile-present,
+            // which suppresses our floating caption gutter. Cleared when the
+            // buffer empties or we leave the viewer composer surface.
+            Alpine.effect(function () {
+              var voice = _voiceStore();
+              if (!voice) return;
+              var bound = voice.boundSessionId;
+              var text = voice.bufferText;  // track for reactivity
+              if (typeof window === 'undefined' ||
+                  typeof window.getSessionStore !== 'function') return;
+              if (!bound || !_viewerComposerActive()) return;
+              var s = window.getSessionStore(bound);
+              if (!s) return;
+              var trimmed = (text || '').trim();
+              if (trimmed) {
+                if (!s.outbox) {
+                  s.outbox = {
+                    localId: (typeof window.newOutboxId === 'function')
+                      ? window.newOutboxId() : ('ob_' + bound),
+                    state: 'capturing',
+                    source: 'voice',
+                    text: text,
+                    ts: (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0,
+                  };
+                } else if (s.outbox.source === 'voice' &&
+                           s.outbox.state === 'capturing') {
+                  s.outbox.text = text;
+                }
+              } else if (s.outbox && s.outbox.source === 'voice' &&
+                         s.outbox.state === 'capturing') {
+                s.outbox = null;  // dictation cleared → collapse the tile
+              }
             });
           }
         },
@@ -389,9 +442,35 @@
           return this.dismissSheet();
         },
 
+        // Commit the dictation. Inside the viewer with an active outbox tile,
+        // hand off to the durability path: set the final text, flip the outbox
+        // to 'sending' (auto-0530's watcher owns the POST + reconcile), and
+        // clear the voice buffer — NO direct POST (no double-send). The
+        // capturing effect gates on state==='capturing', so it won't touch the
+        // flipped outbox, and clearing the buffer still drives the WhisperLive
+        // cutoff via the existing send-clear effect. Outside the viewer, or
+        // with no tile, fall back to the direct send.
+        _commitBuffer() {
+          var voice = this.voice;
+          if (!voice) return false;
+          if (_viewerComposerActive() && typeof window !== 'undefined' &&
+              typeof window.getSessionStore === 'function' && voice.boundSessionId) {
+            var s = window.getSessionStore(voice.boundSessionId);
+            if (s && s.outbox && s.outbox.source === 'voice' &&
+                s.outbox.state === 'capturing') {
+              if (!(voice.bufferText || '').trim()) return false;
+              s.outbox.text = voice.bufferText;
+              s.outbox.state = 'sending';
+              if (typeof voice.clearBuffer === 'function') voice.clearBuffer();
+              return true;
+            }
+          }
+          return voice.sendBuffer();
+        },
+
         async sendBuffer() {
-          if (!this.voice || typeof this.voice.sendBuffer !== 'function') return false;
-          var ok = await this.voice.sendBuffer();
+          if (!this.voice) return false;
+          var ok = await this._commitBuffer();
           if (!ok && this.$refs && this.$refs.sheetInput) this.$refs.sheetInput.focus();
           return ok;
         },
@@ -423,7 +502,7 @@
             return this.voice.openSheet();
           }
           if (action === 'send' && typeof this.voice.sendBuffer === 'function') {
-            return this.voice.sendBuffer();
+            return this._commitBuffer();
           }
           return false;
         },
