@@ -18,12 +18,35 @@
 
     <!-- Compact-only row: dot + bell + type badge + role badge + merged org/actions + resume -->
     <div class="sc-compact-row">
-      <span class="sc-dot"
-            :class="{
-              'sc-dot-live': s.is_live,
-              'sc-dot-dead': !s.is_live,
-              'sc-dot--working': s.is_live && s.activity_state && s.activity_state !== 'idle'
-            }"></span>
+      <button type="button"
+              class="sc-dot voice-dot-button"
+              :class="window.Autonomy.voice.ui.cardDotClasses(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live, isWorking: !!(s.is_live && s.activity_state && s.activity_state !== 'idle') })"
+              :title="window.Autonomy.voice.ui.dotTitle(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+              :aria-label="window.Autonomy.voice.ui.dotAriaLabel(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+              :disabled="window.Autonomy.voice.ui.dotDisabled(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+              @pointerdown.stop="window.Autonomy.voice.ui.onPointerDown($event, window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+              @pointerup.stop="window.Autonomy.voice.ui.onPointerUp($event)"
+              @pointercancel.stop="window.Autonomy.voice.ui.onPointerCancel($event)"
+              @click.stop="window.Autonomy.voice.ui.onClick($event, window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+              data-testid="voice-session-dot">
+        <svg x-show="window.Autonomy.voice.ui.showMicGlyph(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+             class="voice-dot-glyph"
+             viewBox="0 0 16 16"
+             fill="none"
+             stroke="currentColor"
+             stroke-width="1.7"
+             stroke-linecap="round"
+             stroke-linejoin="round"
+             aria-hidden="true">
+          <path d="M8 2.6a2 2 0 0 1 2 2v3.4a2 2 0 1 1-4 0V4.6a2 2 0 0 1 2-2Z"></path>
+          <path d="M4.8 7.8a3.2 3.2 0 0 0 6.4 0"></path>
+          <path d="M8 11v2.1"></path>
+          <path d="M6.2 13.1h3.6"></path>
+          <path x-show="window.Autonomy.voice.ui.showMuteSlash(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+                class="voice-dot-glyph__slash"
+                d="M3.4 12.6 12.6 3.4"></path>
+        </svg>
+      </button>
       <span class="sc-nag"
             :class="{
               'sc-nag-off':       !s.nag_enabled && !s.dispatch_nag_enabled,
@@ -81,12 +104,35 @@
 
     <!-- Stats row: dot + bell + type badge + role badge + T3 + merged org/actions -->
     <div class="sc-stats">
-      <span class="sc-dot"
-            :class="{
-              'sc-dot-live': s.is_live,
-              'sc-dot-dead': !s.is_live,
-              'sc-dot--working': s.is_live && s.activity_state && s.activity_state !== 'idle'
-            }"></span>
+      <button type="button"
+              class="sc-dot voice-dot-button"
+              :class="window.Autonomy.voice.ui.cardDotClasses(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live, isWorking: !!(s.is_live && s.activity_state && s.activity_state !== 'idle') })"
+              :title="window.Autonomy.voice.ui.dotTitle(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+              :aria-label="window.Autonomy.voice.ui.dotAriaLabel(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+              :disabled="window.Autonomy.voice.ui.dotDisabled(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+              @pointerdown.stop="window.Autonomy.voice.ui.onPointerDown($event, window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+              @pointerup.stop="window.Autonomy.voice.ui.onPointerUp($event)"
+              @pointercancel.stop="window.Autonomy.voice.ui.onPointerCancel($event)"
+              @click.stop="window.Autonomy.voice.ui.onClick($event, window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+              data-testid="voice-session-dot">
+        <svg x-show="window.Autonomy.voice.ui.showMicGlyph(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+             class="voice-dot-glyph"
+             viewBox="0 0 16 16"
+             fill="none"
+             stroke="currentColor"
+             stroke-width="1.7"
+             stroke-linecap="round"
+             stroke-linejoin="round"
+             aria-hidden="true">
+          <path d="M8 2.6a2 2 0 0 1 2 2v3.4a2 2 0 1 1-4 0V4.6a2 2 0 0 1 2-2Z"></path>
+          <path d="M4.8 7.8a3.2 3.2 0 0 0 6.4 0"></path>
+          <path d="M8 11v2.1"></path>
+          <path d="M6.2 13.1h3.6"></path>
+          <path x-show="window.Autonomy.voice.ui.showMuteSlash(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
+                class="voice-dot-glyph__slash"
+                d="M3.4 12.6 12.6 3.4"></path>
+        </svg>
+      </button>
       <span class="sc-nag"
             :class="{
               'sc-nag-off':       !s.nag_enabled && !s.dispatch_nag_enabled,
