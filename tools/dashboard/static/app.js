@@ -6,6 +6,8 @@ const pageTitle = document.getElementById('page-title');
 const statsSummary = document.getElementById('stats-summary');
 const harnessUsage = document.getElementById('harness-usage');
 const globalSearch = document.getElementById('global-search');
+const globalSearchIcon = document.getElementById('global-search-icon');
+const appTopbarSlot = document.getElementById('app-topbar-slot');
 const sessionViewLayer = document.getElementById('session-view-layer');
 const sessionViewHost = document.getElementById('session-view-host');
 const HARNESS_USAGE_SETTINGS_SET_ID = 'dashboard.harness.usage';
@@ -109,6 +111,19 @@ function _withOrgHeader(opts) {
 
 window.Autonomy.fetch = function (path, opts) {
   return fetch(path, _withOrgHeader(opts));
+};
+
+window.Autonomy.resetTopbar = function () {
+  const header = document.querySelector('header');
+  if (header) header.classList.remove('app-topbar-active');
+  if (appTopbarSlot) appTopbarSlot.innerHTML = '';
+};
+
+window.Autonomy.setTopbar = function (opts) {
+  const header = document.querySelector('header');
+  if (!header || !appTopbarSlot) return;
+  appTopbarSlot.innerHTML = opts && opts.html ? opts.html : '';
+  header.classList.add('app-topbar-active');
 };
 
 // ── Badge Helpers ────────────────────────────────────────────
@@ -2015,14 +2030,19 @@ async function route() {
     content.style.display = '';
   }
 
+  window.Autonomy.resetTopbar();
+
   // Hide global header on design pages (control strip replaces it)
   const isDesignPage = path.startsWith('/design/');
+  const isPresentDeckPage = path.startsWith('/present/')
+    || /^\/presentations\/[^/]+/.test(path);
   const globalHeader = document.querySelector('header');
   if (globalHeader) {
     globalHeader.style.display = isDesignPage ? 'none' : '';
   }
-  // Remove content padding for full-bleed design
-  content.style.padding = isDesignPage ? '0' : '';
+  // Remove content padding for full-bleed design and app-owned deck stages.
+  content.style.padding = (isDesignPage || isPresentDeckPage) ? '0' : '';
+  content.style.overflow = isPresentDeckPage ? 'hidden' : '';
 
   // Fullscreen page mode: session viewer owns the viewport (hides sidebar + header)
   document.body.classList.toggle(
@@ -2034,6 +2054,7 @@ async function route() {
   // sticky filter strip against the global header (drops the 24px gap
   // caused by main's pt-6 baseline). See bead auto-kvka6 §7.
   document.body.classList.toggle('route-search', path === '/search');
+  document.body.classList.toggle('route-present-deck', isPresentDeckPage);
 
   // Clear header action buttons from previous page
   const headerActions = document.getElementById('header-actions');
@@ -2164,6 +2185,12 @@ globalSearch.addEventListener('keydown', (e) => {
   if (!q) return;
   navigateTo('/search?q=' + encodeURIComponent(q));
 });
+
+if (globalSearchIcon) {
+  globalSearchIcon.addEventListener('click', () => {
+    navigateTo('/search');
+  });
+}
 
 // Client-side nav (no full page reload)
 document.addEventListener('click', (e) => {

@@ -1,5 +1,5 @@
 .present-page {
-  min-height: calc(100dvh - 8rem);
+  min-height: 100%;
   padding-bottom: env(safe-area-inset-bottom, 0);
   color: #e5e7eb;
 }
@@ -10,6 +10,16 @@
   min-height: calc(100dvh - 8rem);
   flex-direction: column;
   gap: 1rem;
+}
+
+.present-page-deck,
+.present-page-deck .present-deck-view {
+  height: 100%;
+  min-height: 0;
+}
+
+.present-page-deck .present-deck-view {
+  gap: 0;
 }
 
 .present-toolbar,
@@ -130,43 +140,6 @@
   min-width: 0;
 }
 
-.present-stagebar {
-  min-height: 2.25rem;
-}
-
-.present-stage-title {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  flex-direction: column;
-  text-align: center;
-}
-
-.present-stage-title span,
-.present-stage-title small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.present-stage-title span {
-  color: #f9fafb;
-  font-size: 0.875rem;
-  font-weight: 650;
-}
-
-.present-stage-title small {
-  font-size: 0.6875rem;
-}
-
-.present-count {
-  min-width: 3.75rem;
-  color: #a7f3d0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.75rem;
-  text-align: right;
-}
-
 .present-stage {
   position: relative;
   flex: 1 1 auto;
@@ -177,6 +150,13 @@
   background: #020617;
 }
 
+.present-page-deck .present-stage {
+  min-height: 0;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+}
+
 .present-iframe {
   display: block;
   width: 100%;
@@ -184,6 +164,11 @@
   min-height: min(72dvh, 48rem);
   border: 0;
   background: #020617;
+}
+
+.present-page-deck .present-iframe {
+  height: 100%;
+  min-height: 0;
 }
 
 .present-progress {
@@ -211,6 +196,90 @@
   background: #34d399;
 }
 
+.present-topbar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.625rem;
+  width: 100%;
+  min-width: 0;
+}
+
+.present-topbar-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border: 1px solid #374151;
+  border-radius: 0.5rem;
+  color: #d1d5db;
+  background: #111827;
+}
+
+.present-topbar-back:hover {
+  border-color: #64748b;
+  color: #f9fafb;
+}
+
+.present-topbar-title {
+  min-width: 0;
+}
+
+.present-topbar-title strong,
+.present-topbar-title span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.present-topbar-title strong {
+  color: #f9fafb;
+  font-size: 0.875rem;
+  line-height: 1.15;
+}
+
+.present-topbar-title span {
+  margin-top: 0.125rem;
+  color: #9ca3af;
+  font-size: 0.6875rem;
+  line-height: 1.1;
+}
+
+.present-topbar-count {
+  color: #a7f3d0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
+.present-topbar-side {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.625rem;
+  min-width: 0;
+}
+
+.present-topbar-presence {
+  flex-shrink: 0;
+}
+
+.present-topbar-presence > .present-topbar-avatar.present-topbar-owner {
+  box-shadow: 0 0 0 2px #1f2937, 0 0 0 4px rgba(148, 163, 184, 0.75);
+}
+
+.present-topbar-presence > .present-topbar-avatar.present-topbar-owner.is-live {
+  box-shadow: 0 0 0 2px #1f2937, 0 0 0 4px rgba(52, 211, 153, 0.85);
+}
+
+.present-topbar-presence > .present-topbar-avatar.present-topbar-owner.is-offline {
+  filter: grayscale(0.85);
+  opacity: 0.55;
+  box-shadow: 0 0 0 2px #1f2937, 0 0 0 4px rgba(107, 114, 128, 0.8);
+}
+
 @media (max-width: 639px) {
   .present-page,
   .present-library,
@@ -223,15 +292,25 @@
     align-items: flex-start;
   }
 
-  .present-stage-title {
-    text-align: left;
+  .present-library {
+    padding: 1rem;
   }
 
-  .present-stage {
-    min-height: 30rem;
+  .present-page-deck,
+  .present-page-deck .present-deck-view {
+    min-height: 0;
   }
 
-  .present-iframe {
-    min-height: min(76dvh, 48rem);
+  .present-topbar {
+    gap: 0.5rem;
+  }
+
+  .present-topbar-side {
+    gap: 0.5rem;
+  }
+
+  .present-topbar-presence > .nx-avatar:not(.present-topbar-owner),
+  .present-topbar-presence > .nx-avatar-overflow {
+    display: none;
   }
 }

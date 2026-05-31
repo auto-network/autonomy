@@ -1,6 +1,17 @@
 (function () {
   'use strict';
 
+  function resolvePresenceRuntime() {
+    if (typeof window !== 'undefined' && window.Presence) return window.Presence;
+    if (typeof require === 'function') {
+      try { return require('../../static/js/surface-presence.js'); }
+      catch (_) { return null; }
+    }
+    return null;
+  }
+
+  var _presenceRuntime = resolvePresenceRuntime();
+
   function parsePresentPath(pathname) {
     var parts = String(pathname || '').split('/').filter(Boolean);
     if (parts[0] !== 'present' && parts[0] !== 'presentations') {
@@ -26,11 +37,105 @@
     return Number.isFinite(num) && num > 0 ? num - 1 : 0;
   }
 
+  function presentSurfaceId(pathname) {
+    var route = parsePresentPath(pathname);
+    return route.mode === 'deck' && route.designId
+      ? 'presentations:' + route.designId
+      : 'presentations:library';
+  }
+
   function selectedVariant(design) {
     var variants = (design && design.variants) || [];
     if (!variants.length) return null;
     var selected = variants.filter(function (variant) { return !!variant.selected; });
     return selected.length ? selected[selected.length - 1] : variants[variants.length - 1];
+  }
+
+  function escapeHtml(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, function (ch) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch];
+    });
+  }
+
+  function extractHtmlParts(html) {
+    html = html || '';
+    if (!/(<!doctype|<html|<body|<head)/i.test(html)) {
+      return { head: '', body: html };
+    }
+    if (typeof DOMParser === 'undefined') {
+      var headMatch = html.match(/<head[^>]*>([\s\S]*?)<\/head>/i);
+      var bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+      return {
+        head: headMatch ? headMatch[1] : '',
+        body: bodyMatch ? bodyMatch[1] : html,
+      };
+    }
+    try {
+      var doc = new DOMParser().parseFromString(html, 'text/html');
+      return {
+        head: doc.head ? doc.head.innerHTML : '',
+        body: doc.body ? doc.body.innerHTML : html,
+      };
+    } catch (_) {
+      return { head: '', body: html };
+    }
+  }
+
+  function participantColor(participantId) {
+    if (_presenceRuntime && typeof _presenceRuntime.participantColor === 'function') {
+      return _presenceRuntime.participantColor(participantId);
+    }
+    return 'hsl(0 70% 60%)';
+  }
+
+  function participantInitial(participant) {
+    var label = (participant && (participant.participant_label || participant.participant_id)) || '?';
+    return String(label).trim().charAt(0).toUpperCase() || '?';
+  }
+
+  function topbarPresenceHtml(participants, ownerPresence) {
+    var rows = Array.isArray(participants) ? participants.filter(Boolean) : [];
+    if (ownerPresence && ownerPresence.participant_id) {
+      rows = [ownerPresence].concat(rows.filter(function (p) {
+        return p && p.participant_id !== ownerPresence.participant_id;
+      }));
+    }
+    if (!rows.length) return '';
+    var visible = rows.slice(0, 4);
+    var html = '<div class="nx-avatar-stack present-topbar-presence" data-testid="present-topbar-presence">';
+    for (var i = 0; i < visible.length; i += 1) {
+      var p = visible[i] || {};
+      var id = p.participant_id || '';
+      var liveText = p.is_owner ? (p.is_live ? (p.is_active ? 'active owner' : 'live owner') : 'owner offline') : (p.state || 'present');
+      var title = (p.participant_label || id || 'participant') + ' — ' + liveText;
+      if (p.intent) title += ' — ' + p.intent;
+      var classes = 'nx-avatar present-topbar-avatar';
+      if (p.is_owner) classes += ' present-topbar-owner';
+      if (p.is_owner && p.is_live) classes += ' is-live';
+      if (p.is_owner && !p.is_live) classes += ' is-offline';
+      html += '<span class="' + classes + '" style="background:' + escapeHtml(participantColor(id)) + '" title="' +
+        escapeHtml(title) + '">' + escapeHtml(participantInitial(p)) + '</span>';
+    }
+    if (rows.length > visible.length) {
+      html += '<span class="nx-avatar-overflow">+' + String(rows.length - visible.length) + '</span>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function topbarHtml(deck, activeSlide, slideCount, participants, ownerPresence) {
+    deck = deck || {};
+    var subtitle = deck.subtitle ? '<span>' + escapeHtml(deck.subtitle) + '</span>' : '';
+    return '<div class="present-topbar">' +
+      '<a href="/presentations" class="present-topbar-back" title="Deck library" aria-label="Deck library">' +
+      '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>' +
+      '</a>' +
+      '<div class="present-topbar-title"><strong>' + escapeHtml(deck.name || 'Untitled deck') + '</strong>' + subtitle + '</div>' +
+      '<div class="present-topbar-side">' +
+      topbarPresenceHtml(participants, ownerPresence) +
+      '<div class="present-topbar-count">' + String(Number(activeSlide || 0) + 1) + ' / ' + String(slideCount || 1) + '</div>' +
+      '</div>' +
+      '</div>';
   }
 
   function fixtureScript(design) {
@@ -80,8 +185,10 @@
   function iframeDocument(design, initialIndex) {
     var variant = selectedVariant(design);
     var html = (variant && variant.html) || '<main></main>';
+    var parts = extractHtmlParts(html);
     return '<!DOCTYPE html><html><head><meta charset="utf-8">' +
       '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">' +
+      parts.head +
       '<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"><\/script>' +
       '<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"><\/script>' +
       '<style>' +
@@ -92,7 +199,7 @@
       '*{box-sizing:border-box;}' +
       '</style>' +
       fixtureScript(design) +
-      '</head><body><main id="present-scroll-root">' + html + '</main>' + runtimeScript(initialIndex) + '</body></html>';
+      '</head><body><main id="present-scroll-root">' + parts.body + '</main>' + runtimeScript(initialIndex) + '</body></html>';
   }
 
   function setPath(designId, index) {
@@ -107,17 +214,21 @@
   function maybeRegisterAlpine() {
     if (!window.Alpine || !window.Alpine.data) return false;
     window.Alpine.data('presentationsPage', function () {
-      return {
+      var state = {
         mode: 'library',
         loading: false,
         error: '',
         decks: [],
         deck: {},
+        ownerPresence: null,
         design: null,
         activeSlide: 0,
         slideCount: 1,
         _messageHandler: null,
         _keydownHandler: null,
+
+        participantColor: participantColor,
+        participantInitial: participantInitial,
 
         get slideIndexes() {
           return Array.from({ length: Math.max(1, this.slideCount) }, function (_, idx) { return idx; });
@@ -165,9 +276,11 @@
             var data = await response.json();
             if (!response.ok) throw new Error(data.error || 'Deck not found');
             this.deck = data.deck || {};
+            this.ownerPresence = data.owner_presence || null;
             this.design = data.design || null;
             this.slideCount = Math.max(1, Number(this.deck.slide_count) || 1);
             await this.$nextTick();
+            this.updateTopbar();
             this.injectIframe(this.activeSlide);
             window.Autonomy.fetch('/api/presentations/deck/' + encodeURIComponent(designId) + '/shown', { method: 'POST' });
           } catch (err) {
@@ -188,9 +301,11 @@
             var data = event.data || {};
             if (data.type === 'present:ready') {
               self.slideCount = Math.max(1, Number(data.count) || self.slideCount);
+              self.updateTopbar();
             } else if (data.type === 'present:active') {
               self.slideCount = Math.max(1, Number(data.count) || self.slideCount);
               self.activeSlide = Math.max(0, Math.min(self.slideCount - 1, Number(data.index) || 0));
+              self.updateTopbar();
               setPath(self.deck.design_id, self.activeSlide);
             }
           };
@@ -224,6 +339,20 @@
             }
           }
           if (!opts || !opts.skipUrl) setPath(this.deck.design_id, next);
+          this.updateTopbar();
+        },
+
+        updateTopbar: function () {
+          if (!window.Autonomy || typeof window.Autonomy.setTopbar !== 'function') return;
+          window.Autonomy.setTopbar({
+            html: topbarHtml(
+              this.deck,
+              this.activeSlide,
+              this.slideCount,
+              this.participants,
+              this.ownerPresence,
+            ),
+          });
         },
 
         nextSlide: function () {
@@ -249,16 +378,33 @@
         },
 
         creatorLabel: function (deck) {
-          return (deck && (deck.creator_session_label || deck.creator_session_id)) || 'unknown session';
+          return (deck && (deck.creator_session_label || deck.creator_session_id)) || '';
         },
 
         formatDate: function (value) {
           if (!value) return 'not shown';
-          var date = new Date(value);
+          var raw = String(value);
+          var date = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(raw) ? raw : raw.replace(' ', 'T') + 'Z');
           if (Number.isNaN(date.getTime())) return value;
-          return date.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+          return date.toLocaleString([], {
+            month: 'short',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+            timeZone: 'UTC',
+            timeZoneName: 'short',
+          });
         },
       };
+      if (_presenceRuntime && typeof _presenceRuntime.alpine === 'function') {
+        return _presenceRuntime.alpine({
+          surfaceId: presentSurfaceId(window.location && window.location.pathname),
+          onParticipantChange: function () {
+            this.updateTopbar();
+          },
+        }, state);
+      }
+      return state;
     });
     return true;
   }
@@ -270,6 +416,9 @@
   window.PresentationsTest = {
     parsePresentPath: parsePresentPath,
     parseSlideIndex: parseSlideIndex,
+    presentSurfaceId: presentSurfaceId,
     iframeDocument: iframeDocument,
+    extractHtmlParts: extractHtmlParts,
+    topbarHtml: topbarHtml,
   };
 })();

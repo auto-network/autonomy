@@ -84,6 +84,22 @@
     .nav-badge-green { background: #16a34a; color: white; }
     .nav-badge-amber { background: #d97706; color: white; }
     .nav-badge-gray { background: #4b5563; color: #d1d5db; }
+    header.app-topbar-active #global-search {
+      display: none;
+    }
+    header.app-topbar-active #global-search-icon {
+      display: inline-flex;
+    }
+    header.app-topbar-active #app-topbar-slot {
+      display: flex;
+    }
+    header.app-topbar-active #page-title {
+      display: none;
+    }
+    #app-topbar-slot {
+      min-width: 0;
+      flex: 1 1 auto;
+    }
     .dispatch-badges { display: flex; gap: 0.25rem; }
     .badge { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
     .ft-badge { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: 9999px; font-size: 0.6875rem; font-weight: 600; }
@@ -1448,9 +1464,17 @@
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
         </svg>
       </button>
+      <button type="button" id="global-search-icon"
+              class="hidden bg-gray-800 p-2 rounded-lg border border-gray-700 flex-shrink-0 text-gray-300 hover:text-white hover:border-gray-500"
+              aria-label="Search" title="Search">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-4.35-4.35M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z"/>
+        </svg>
+      </button>
       <input type="text" id="global-search" placeholder="Search..."
              class="bg-gray-700 text-gray-100 px-3 md:px-4 py-2 rounded-lg flex-1 max-w-xl text-sm
                     focus:outline-none focus:ring-2 focus:ring-indigo-500">
+      <div id="app-topbar-slot" class="hidden items-center gap-2"></div>
       <span class="text-sm text-gray-400 hidden md:inline" id="page-title"></span>
       {# Persistent slot for the agentic-actions dropdown — never cleared by the SPA
          router. Sibling of #header-actions, which IS cleared per page nav for

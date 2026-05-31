@@ -71,6 +71,70 @@ def _read_deck_members(org: str) -> list[dict]:
     return [m.to_dict() for m in members]
 
 
+def _active_sessions() -> list[dict]:
+    if os.environ.get("DASHBOARD_MOCK"):
+        from tools.dashboard.dao import mock as dao_sessions
+        return dao_sessions.get_active_sessions()
+    from tools.dashboard.dao import sessions as dao_sessions
+    return dao_sessions.get_active_sessions()
+
+
+def _session_matches(row: dict, session_id: str) -> bool:
+    if not session_id:
+        return False
+    candidates = {
+        row.get("session_id"),
+        row.get("tmux_session"),
+        row.get("session_uuid"),
+        row.get("graph_source_id"),
+    }
+    return session_id in {str(c) for c in candidates if c}
+
+
+def _owner_presence(deck: dict) -> dict | None:
+    owner_id = (
+        deck.get("author_session_id")
+        or deck.get("creator_session_id")
+        or ""
+    )
+    if not owner_id:
+        return None
+    owner_label = (
+        deck.get("author_session_label")
+        or deck.get("creator_session_label")
+        or owner_id
+    )
+    matched = next((s for s in _active_sessions() if _session_matches(s, owner_id)), None)
+    age = matched.get("age_seconds") if matched else None
+    active = bool(
+        matched
+        and (
+            matched.get("active") is True
+            or matched.get("activity_state") in {"active", "working", "streaming"}
+            or (isinstance(age, (int, float)) and age < 60)
+        )
+    )
+    live = bool(matched and matched.get("is_live", True))
+    label = (matched or {}).get("label") or owner_label
+    return {
+        "surface_id": f"presentations:{deck.get('design_id') or ''}",
+        "participant_kind": "agent",
+        "participant_id": owner_id,
+        "participant_label": label,
+        "accepts_pings": bool(matched),
+        "state": "working" if active else "present",
+        "position_kind": "label",
+        "position_value": "deck-owner",
+        "intent": "listening for slide dictation" if live else "owner session not live",
+        "heartbeat_at": "",
+        "last_ping_id": "",
+        "is_owner": True,
+        "is_live": live,
+        "is_active": active,
+        "session": matched or None,
+    }
+
+
 def _upsert_deck(key: str, payload: dict, org: str) -> None:
     if os.environ.get("DASHBOARD_MOCK"):
         from tools.dashboard.dao import mock as dao_mock
@@ -163,9 +227,11 @@ async def get_deck(request: Request) -> JSONResponse:
     design = _get_design_by_revision_or_design_id(raw_id)
     if not design:
         return JSONResponse({"error": "design not found"}, status_code=404)
+    deck = _deck_payload(design)
     return JSONResponse({
-        "deck": _deck_payload(design),
+        "deck": deck,
         "design": design,
+        "owner_presence": _owner_presence(deck),
     })
 
 
