@@ -41,7 +41,15 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     label               TEXT DEFAULT '',
     topics              TEXT DEFAULT '[]',
     role                TEXT DEFAULT '',
-    harness_token       TEXT
+    harness_token       TEXT,
+    -- auto-a1jco: two independent lifecycle dimensions.
+    -- ``setup_phase`` tracks ``/startup.sh`` progress (DinD workspaces);
+    -- ``harness_phase`` tracks the ``exec claude`` boot. They progress
+    -- in parallel — a single scalar can't represent both because the
+    -- entrypoint backgrounds the setup script and exec's the harness
+    -- concurrently. See graph://18c9a9e9-efb for the full state machine.
+    setup_phase         TEXT NOT NULL DEFAULT 'pending',
+    harness_phase       TEXT NOT NULL DEFAULT 'pending'
 );
 
 CREATE TABLE IF NOT EXISTS turn_corrections (
@@ -210,6 +218,13 @@ def init_db(db_path: Path | None = None) -> None:
         _conn.execute("SELECT model FROM tmux_sessions LIMIT 0")
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN model TEXT DEFAULT NULL")
+        _conn.commit()
+    # Migrate: add setup_phase + harness_phase columns (auto-a1jco — startup phase model)
+    try:
+        _conn.execute("SELECT setup_phase FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN setup_phase TEXT NOT NULL DEFAULT 'pending'")
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN harness_phase TEXT NOT NULL DEFAULT 'pending'")
         _conn.commit()
     # Migrate: harness_token column (auto-ghhdg — rename from claude_token_alias;
     # auto-08n3f — values switched from operator alias strings to Anthropic
@@ -602,8 +617,15 @@ def update_tail_state(
     context_tokens: int | None = None,
     model: str | None = None,
     harness_state: str | None = None,
+    setup_phase: str | None = None,
+    harness_phase: str | None = None,
 ) -> None:
-    """TAIL step: update read position and latest content."""
+    """TAIL step: update read position and latest content.
+
+    ``setup_phase`` and ``harness_phase`` (auto-a1jco) track the two
+    independent lifecycle dimensions of a starting session — see
+    graph://18c9a9e9-efb.
+    """
     conn = get_conn()
     parts = []
     vals: list[Any] = []
@@ -628,6 +650,12 @@ def update_tail_state(
     if harness_state is not None:
         parts.append("harness_state=?")
         vals.append(harness_state)
+    if setup_phase is not None:
+        parts.append("setup_phase=?")
+        vals.append(setup_phase)
+    if harness_phase is not None:
+        parts.append("harness_phase=?")
+        vals.append(harness_phase)
     if not parts:
         return
     vals.append(tmux_name)

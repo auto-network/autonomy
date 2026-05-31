@@ -1,0 +1,8 @@
+codex 0.10.0
+
+  Working directory: /workspace/<workspace>
+  Model: gpt-5.5
+
+  Type your message and press Enter to send.
+
+  >

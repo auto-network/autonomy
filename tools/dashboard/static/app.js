@@ -328,6 +328,36 @@ function attachHarnessUsageInteractions(items) {
       }
     });
   });
+
+  // Chevron nav (auto-j0udw) — desktop affordance for mouse users.
+  // Buttons only render when hasMulti so we don't need a count check.
+  const goToPage = (pageIndex) => {
+    const clamped = clampHarnessUsagePage(pageIndex, items.length);
+    if (clamped !== _harnessUsagePage) {
+      _harnessUsagePage = clamped;
+      updateHarnessUsageState(items);
+      syncHarnessUsageScroll('smooth');
+    }
+  };
+  harnessUsage.querySelectorAll('.harness-strip-nav').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const direction = Number(btn.dataset.direction || 0) || 0;
+      goToPage(_harnessUsagePage + direction);
+    });
+  });
+
+  // Dot clicks (auto-j0udw) — wire .harness-strip-dot[data-index] so
+  // operators can jump directly to a page. Dots already render with
+  // the data-index attribute; this just hooks the click handler.
+  harnessUsage.querySelectorAll('.harness-strip-dot').forEach((dot) => {
+    dot.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      goToPage(Number(dot.dataset.index || 0));
+    });
+  });
 }
 
 function normalizeLegacyHarnessUsageItem(item) {
@@ -390,8 +420,11 @@ function renderHarnessUsage(data) {
   }
   _harnessUsagePage = clampHarnessUsagePage(_harnessUsagePage, items.length);
   harnessUsage.classList.add('has-tiles');
+  const hasMulti = items.length > 1;
+  const navAria = (label) => `aria-label="${_esc(label)}"`;
   harnessUsage.innerHTML = `
-    <div class="harness-strip">
+    <div class="harness-strip${hasMulti ? ' has-multi' : ''}">
+      ${hasMulti ? `<button type="button" class="harness-strip-nav harness-strip-nav-prev" data-direction="-1" ${navAria('Previous identity')}>&lsaquo;</button>` : ''}
       <div class="harness-strip-scroller">
         ${items.map((item, index) => {
           const windows = item.windows || {};
@@ -414,6 +447,7 @@ function renderHarnessUsage(data) {
           </div>`;
         }).join('')}
       </div>
+      ${hasMulti ? `<button type="button" class="harness-strip-nav harness-strip-nav-next" data-direction="1" ${navAria('Next identity')}>&rsaquo;</button>` : ''}
     </div>`;
   attachHarnessUsageInteractions(items);
   updateHarnessUsageState(items);

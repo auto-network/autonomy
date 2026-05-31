@@ -1,0 +1,8 @@
+Claude Code (1.0.0)
+
+  Welcome back!
+
+  Loaded /workspace/<workspace>/CLAUDE.md
+  Loaded ~/.claude/CLAUDE.md
+
+> _

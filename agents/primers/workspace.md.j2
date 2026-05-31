@@ -46,6 +46,23 @@ git rebase hostsync/master
 
 The sync action is non-destructive — pure ref-update on the managed clone. Safe to call any time.
 {% endif %}
+
+## Output Files — `/workspace/output` vs `/tmp`
+
+Two filesystem locations, two very different lifetimes:
+
+- **`/workspace/output/`** — stable output. Bind-mounted to the host at
+  `$REPO_ROOT/data/agent-runs/$AUTONOMY_SESSION[-TIMESTAMP]/`. Files written here
+  **persist** after the container exits and are reachable from host-side tools.
+  This is where bead drafts, generated artifacts, screenshots you want to share,
+  diff bundles, anything you'd hand off to the operator or another agent goes.
+- **`/tmp/`** — throwaway only. Container-local; wiped when the container exits.
+  Use for intermediate files, scratch buffers, transient downloads — anything you
+  don't need to outlive the session.
+
+**Rule:** if a future you or a future operator might want the file, write it to
+`/workspace/output/`. If it's a stepping stone you'll delete in this session
+anyway, `/tmp/` is fine. Default to `/workspace/output/` when in doubt.
 {% if config.startup %}
 
 ## Background Setup

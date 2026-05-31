@@ -389,6 +389,9 @@
       padding-top: 0.52rem;
       border-top: 1px solid rgba(30, 41, 59, 0.75);
     }
+    .harness-strip {
+      position: relative;
+    }
     .harness-strip-scroller {
       display: flex;
       overflow-x: auto;
@@ -399,6 +402,64 @@
       -ms-overflow-style: none;
     }
     .harness-strip-scroller::-webkit-scrollbar { display: none; }
+    /* Desktop-only navigation affordances (auto-j0udw). Mouse users
+       can't swipe and the original dots were 0.24rem with no hover —
+       effectively unscrollable. On pointer:fine devices we
+       (a) enlarge + brighten the dots with a hover/cursor affordance,
+       (b) expose previous/next chevrons flanking the scroller,
+       (c) show a thin scrollbar as a fallback for power users. */
+    @media (hover: hover) and (pointer: fine) {
+      .harness-strip-scroller {
+        scrollbar-width: thin;
+        -ms-overflow-style: auto;
+      }
+      .harness-strip-scroller::-webkit-scrollbar {
+        display: block;
+        height: 4px;
+      }
+      .harness-strip-scroller::-webkit-scrollbar-thumb {
+        background: rgba(100, 116, 139, 0.4);
+        border-radius: 2px;
+      }
+      .harness-strip-scroller::-webkit-scrollbar-thumb:hover {
+        background: rgba(148, 163, 184, 0.65);
+      }
+    }
+    .harness-strip-nav {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 1.1rem;
+      height: 1.5rem;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid rgba(100, 116, 139, 0.45);
+      border-radius: 0.25rem;
+      color: #94a3b8;
+      cursor: pointer;
+      font-size: 0.7rem;
+      line-height: 1;
+      padding: 0;
+      transition: background 0.16s ease, color 0.16s ease, opacity 0.16s ease;
+      z-index: 1;
+    }
+    .harness-strip-nav-prev { left: -0.35rem; }
+    .harness-strip-nav-next { right: -0.35rem; }
+    .harness-strip-nav:hover { background: rgba(30, 41, 59, 0.95); color: #e2e8f0; }
+    .harness-strip-nav[disabled] {
+      opacity: 0.35;
+      cursor: default;
+      pointer-events: none;
+    }
+    /* Show chevrons only on pointer:fine devices and only when there
+       is more than one page (the JS sets .has-multi on the wrapper). */
+    @media (hover: hover) and (pointer: fine) {
+      .harness-strip.has-multi .harness-strip-nav {
+        display: inline-flex;
+      }
+    }
     .harness-strip-page {
       flex: 0 0 100%;
       min-width: 100%;
@@ -447,6 +508,23 @@
     .harness-strip-dot.is-active {
       background: #475569;
       transform: scale(1.15);
+    }
+    /* Desktop: dots get larger + a hover affordance + cursor:pointer
+       (auto-j0udw). They're clickable on both mobile + desktop, but
+       the original 0.24rem size was undiscoverable for mouse users. */
+    @media (hover: hover) and (pointer: fine) {
+      .harness-strip-dot {
+        width: 0.5rem;
+        height: 0.5rem;
+        background: rgba(100, 116, 139, 0.45);
+        cursor: pointer;
+      }
+      .harness-strip-dot:hover {
+        background: rgba(148, 163, 184, 0.7);
+      }
+      .harness-strip-dot.is-active {
+        background: #94a3b8;
+      }
     }
     .harness-strip-bars {
       display: grid;
@@ -1308,6 +1386,20 @@
       background: transparent;
       color: inherit;
     }
+    /* auto-f58ca: gutter cells (line number, +/- marker) must be
+       non-selectable so plain-text copy from a diff selection includes
+       only the code, not "67\n\n+\n\ncontent\n" per-cell joining.
+       The class .select-none is referenced from the partial as a
+       Tailwind utility, but the precompiled tailwind.css build does
+       not include it (the build only carries classes scanned from
+       templates at build time, and select-none wasn't previously used
+       anywhere). This explicit rule covers production until the
+       Tailwind build is regenerated. */
+    .select-none,
+    #worktree-review-layer .grid > span.select-none {
+      user-select: none;
+      -webkit-user-select: none;
+    }
     @supports (padding-top: env(safe-area-inset-top)) {
       #worktree-review-layer .worktree-review-overlay {
         padding-top: calc(0.75rem + env(safe-area-inset-top));
@@ -1919,6 +2011,7 @@
   <script src="/static/js/lib/diag-collectors.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/session-display.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/session-diff.js?v=__STATIC_VERSION__"></script>
+  <script src="/static/js/lib/diff-lines.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/session-renderer.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/session-stats.js?v=__STATIC_VERSION__"></script>
   <script src="/static/js/lib/screenshot.js?v=__STATIC_VERSION__"></script>
