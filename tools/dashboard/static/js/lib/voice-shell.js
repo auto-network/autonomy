@@ -11,6 +11,7 @@
   var CAPSULE_BOTTOM_GAP = 12;
   var CAPTION_PREVIEW_WORDS = 12;
   var CAPTION_RESERVED_HEIGHT = 72;
+  var SHEET_BACKDROP_GUARD_MS = 300;
   var SHEET_EXPAND_THRESHOLD = -42;
   var SHEET_COLLAPSE_THRESHOLD = 56;
   var SHEET_DISMISS_THRESHOLD = 72;
@@ -39,6 +40,26 @@
     return width < 768;
   }
 
+  // env(safe-area-inset-top) in px — the iOS notch/status-bar band. Measured
+  // once via a probe element and cached. The capsule clamp keeps the capsule
+  // below this so it can't be dragged under the status bar where it becomes
+  // ungrabbable.
+  var _cachedSafeTop = null;
+  function _safeAreaInsetTop() {
+    if (_cachedSafeTop !== null) return _cachedSafeTop;
+    _cachedSafeTop = 0;
+    try {
+      if (typeof document !== 'undefined' && document.body) {
+        var probe = document.createElement('div');
+        probe.style.cssText = 'position:fixed;top:0;left:0;width:0;height:env(safe-area-inset-top,0px);visibility:hidden;pointer-events:none;';
+        document.body.appendChild(probe);
+        _cachedSafeTop = probe.getBoundingClientRect().height || 0;
+        if (probe.parentNode) probe.parentNode.removeChild(probe);
+      }
+    } catch (_e) { _cachedSafeTop = 0; }
+    return _cachedSafeTop;
+  }
+
   function _collapseEnabled() {
     var flags = _flagsStore();
     if (!flags || typeof flags.get !== 'function') return false;
@@ -56,13 +77,17 @@
 
   function _hideInlineComposer() {
     var voice = _voiceStore();
+    // On a mobile viewer, once voice is bound the floating capsule/caption ARE
+    // the composer — the inline keyboard text box must drop so the viewer is
+    // voice-first (state-matrix: MOBILE_* states hide the inline composer).
+    // The old condition also required sheetOpen + the responsive_collapse flag,
+    // which were effectively never both true, so the text box never hid and the
+    // operator was stuck dictating into it. Bound + mobile is the right gate.
     return !!(
       voice &&
       voice.enabled === true &&
-      voice.sheetOpen === true &&
       voice.boundSessionId &&
-      _isMobileViewport() &&
-      _collapseEnabled()
+      _isMobileViewport()
     );
   }
 
@@ -70,7 +95,6 @@
     var voice = _voiceStore();
     if (!voice || voice.enabled !== true || !_isMobileViewport()) return false;
     if (!voice.boundSessionId || voice.sheetOpen === true) return false;
-    if (_isViewerPage() && !_collapseEnabled()) return false;
     return true;
   }
 
@@ -78,15 +102,43 @@
     var voice = _voiceStore();
     if (!voice || voice.enabled !== true || !_isMobileViewport()) return false;
     if (!voice.boundSessionId || voice.sheetOpen !== true) return false;
-    if (_isViewerPage() && !_collapseEnabled()) return false;
     return true;
+  }
+
+  // True when the durability session's pinned outbox tile is actually mounted
+  // in the viewer for the bound session (both body flags set + session match,
+  // owned/set by session-viewer.js). When true the tile owns the bottom
+  // surface, so the floating caption gutter hands off and hides there. The
+  // sv-outbox-tile-present flag is false until that tile component ships, so
+  // this is INERT (no caption gap, no regression) until the handoff target
+  // truly exists in the DOM. Send-path branching keys on the composer-active
+  // flag alone, not this.
+  function _viewerTileActive() {
+    if (typeof document === 'undefined' || !document.body) return false;
+    var voice = _voiceStore();
+    var bound = voice && voice.boundSessionId;
+    if (!bound) return false;
+    try {
+      var body = document.body;
+      return !!(
+        body.classList &&
+        body.classList.contains('sv-viewer-composer-active') &&
+        body.classList.contains('sv-outbox-tile-present') &&
+        body.dataset &&
+        body.dataset.svComposerSession === bound
+      );
+    } catch (_err) {
+      return false;
+    }
   }
 
   function _captionVisible() {
     var voice = _voiceStore();
     if (!voice || voice.enabled !== true || !_isMobileViewport()) return false;
     if (!voice.boundSessionId || voice.sheetOpen === true) return false;
-    if (_isViewerPage() && !_collapseEnabled()) return false;
+    // Inside the viewer, once the pinned outbox tile is mounted it owns the
+    // bottom surface — hand the live text to it and hide this floating gutter.
+    if (_viewerTileActive()) return false;
     return true;
   }
 
@@ -172,6 +224,29 @@
           if (window.visualViewport && typeof window.visualViewport.addEventListener === 'function') {
             window.visualViewport.addEventListener('resize', this._resizeHandler);
           }
+          // Reflect caption visibility as a <body> class so scrollable page
+          // content (.sv-entries) can reserve the bottom gutter the fixed
+          // caption occupies — otherwise the last entries scroll underneath it.
+          var self = this;
+          if (typeof Alpine !== 'undefined' && typeof Alpine.effect === 'function') {
+            Alpine.effect(function () {
+              document.body.classList.toggle('voice-caption-active', !!self.showCaption);
+            });
+            // Keep the latest dictated text visible in the open sheet: as the
+            // transcript grows, scroll the editor to the bottom. Deferred via
+            // rAF so x-model has written the new value before we scroll.
+            Alpine.effect(function () {
+              var st = _voiceStore();
+              if (!st) return;
+              var _buf = st.bufferText;  // track the transcript for reactivity
+              if (!self.showSheet) return;
+              if (typeof requestAnimationFrame !== 'function') return;
+              requestAnimationFrame(function () {
+                var ta = self.$refs && self.$refs.sheetInput;
+                if (ta) ta.scrollTop = ta.scrollHeight;
+              });
+            });
+          }
         },
 
         destroy() {
@@ -210,6 +285,16 @@
           return !!(voice && typeof voice.bufferText === 'string' && voice.bufferText.trim().length > 0);
         },
 
+        // Live word count of the capture buffer — the operator's "it's working"
+        // proof while speaking (operator feedback c6e038a4: visible evidence
+        // capture is live). Rendered as a small badge on the capsule Send action.
+        get bufferWordCount() {
+          var voice = this.voice;
+          var t = (voice && typeof voice.bufferText === 'string' ? voice.bufferText : '').trim();
+          if (!t) return 0;
+          return t.split(/\s+/).filter(Boolean).length;
+        },
+
         get sendPulse() {
           var voice = this.voice;
           return !!(voice && voice.micMode === 'vad_paused' && this.hasBufferText);
@@ -236,9 +321,19 @@
         get capsuleStyle() {
           var node = this.$refs && this.$refs.capsule;
           var position = this.capsulePosition;
-          if (!position && !node) return '';
+          if (!position && !node) return {};
           position = position ? this._clampCapsulePosition(position, node) : this._defaultCapsulePosition(node);
-          return 'left:' + position.x + 'px;top:' + position.y + 'px;right:auto;bottom:auto;';
+          // Return an OBJECT, not a style string. A string sets the entire
+          // style attribute and clobbers the `display:none` that
+          // x-show="showCapsule" writes — which is why the capsule was always
+          // display:flex (visible) even unbound. An object is merged per
+          // property by Alpine and leaves display (x-show's) untouched.
+          return {
+            left: position.x + 'px',
+            top: position.y + 'px',
+            right: 'auto',
+            bottom: 'auto',
+          };
         },
 
         get rebindCopy() {
@@ -269,13 +364,29 @@
         clearBuffer() {
           if (!this.voice || typeof this.voice.clearBuffer !== 'function') return false;
           this.voice.clearBuffer();
-          if (this.$refs && this.$refs.sheetInput) this.$refs.sheetInput.focus();
+          // Do NOT focus the editor — focusing pops the iOS keyboard, and the
+          // operator wants Clear to just empty the buffer, not start typing.
           return true;
         },
 
         dismissSheet() {
           if (!this.voice || typeof this.voice.dismissSheet !== 'function') return false;
           return this.voice.dismissSheet();
+        },
+
+        onSheetBackdrop() {
+          // Tap-outside dismiss. Bound to @click (not @pointerdown) so the
+          // backdrop stays present through the whole tap — the click targets
+          // the backdrop and cannot fall through to the session card beneath
+          // (the navigation regression). The open-time guard ignores the
+          // trailing synthesized click from the tap that just opened the sheet.
+          var voice = this.voice;
+          var openedAt = voice && voice.sheetOpenedAt;
+          if (openedAt && typeof Date !== 'undefined' && Date.now &&
+              (Date.now() - openedAt) < SHEET_BACKDROP_GUARD_MS) {
+            return false;
+          }
+          return this.dismissSheet();
         },
 
         async sendBuffer() {
@@ -340,11 +451,14 @@
             : { width: 114, height: 54 };
           var width = rect.width || 114;
           var height = rect.height || 54;
+          // Keep the capsule below the iOS status bar/notch so it can't be
+          // dragged under it and become ungrabbable (operator-reported).
+          var minY = Math.max(8, _safeAreaInsetTop() + 8);
           var maxX = Math.max(8, this.viewportWidth - width - 8);
-          var maxY = Math.max(8, this.viewportHeight - height - this._capsuleBottomInset());
+          var maxY = Math.max(minY, this.viewportHeight - height - this._capsuleBottomInset());
           return {
             x: Math.min(maxX, Math.max(8, position.x)),
-            y: Math.min(maxY, Math.max(8, position.y)),
+            y: Math.min(maxY, Math.max(minY, position.y)),
           };
         },
 
@@ -359,6 +473,16 @@
           if (!this.showCapsule || !this.$refs || !this.$refs.capsule) return false;
           if (event && typeof event.preventDefault === 'function') event.preventDefault();
           var node = this.$refs.capsule;
+          // Pointer capture is what makes the WHOLE surface reliably draggable.
+          // Without it, pointermove is delivered by hit-testing each frame, so
+          // the moment the finger crosses another element mid-drag iOS stops
+          // sending move events and the drag dies — the "sometimes it works,
+          // sometimes it doesn't" bug. Capturing the pointer routes every
+          // move/up for THIS finger to the capsule until release, no matter
+          // where it travels.
+          if (event && event.pointerId != null && typeof node.setPointerCapture === 'function') {
+            try { node.setPointerCapture(event.pointerId); } catch (_e) {}
+          }
           var actionNode = event && event.target && typeof event.target.closest === 'function'
             ? event.target.closest('[data-voice-action]')
             : null;
@@ -426,6 +550,14 @@
             ? event.target.closest('.voice-sheet__handle')
             : null;
           if (!handle || !this.voice) return false;
+          // preventDefault + pointer capture so the swipe-up reliably produces
+          // a pointerup with the right clientY even as the finger travels up
+          // the screen — without these iOS treats it as a scroll and the
+          // expand never fires (same fix as the capsule drag).
+          if (event && typeof event.preventDefault === 'function') event.preventDefault();
+          if (event && event.pointerId != null && typeof handle.setPointerCapture === 'function') {
+            try { handle.setPointerCapture(event.pointerId); } catch (_e) {}
+          }
           var initialMode = this.sheetMode;
           this._sheetGesture = {
             startY: event.clientY,

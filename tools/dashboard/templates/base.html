@@ -1914,7 +1914,7 @@
     <div class="voice-sheet-backdrop"
          x-show="showSheet"
          x-cloak
-         @click="dismissSheet()"></div>
+         @click.stop="onSheetBackdrop()"></div>
 
     <div class="voice-caption"
          x-show="showCaption"
@@ -1984,6 +1984,10 @@
            @keydown.enter.prevent="onCapsuleKey('send')"
            @keydown.space.prevent="onCapsuleKey('send')">
         <span class="voice-capsule__icon-wrap" x-html="capsuleIcon('send')"></span>
+        <span class="voice-capsule__count"
+              x-show="bufferWordCount > 0"
+              x-text="bufferWordCount"
+              data-testid="voice-buffer-count"></span>
       </div>
       <div class="voice-capsule__action voice-capsule__type"
            role="button"

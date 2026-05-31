@@ -132,8 +132,10 @@ def test_client_requires_non_empty_uid():
 
 
 def test_init_payload_shape():
-    """Pinned per S3-4 design: uid, language, task, model, use_vad
-    explicitly. Skips upstream defaults that the design didn't pin."""
+    """Pinned per S3-4 design: uid, language, task, model, use_vad, plus the
+    silence-hallucination gating (no_speech_thresh + vad_parameters) sent so
+    WhisperLive doesn't run on its lenient defaults (the constants are the
+    defaults #29's graph setting will later override)."""
     client = _new_client("ws://x", uid="u1", model="large-v3")
     payload = client._build_init_payload()
     assert payload == {
@@ -142,6 +144,8 @@ def test_init_payload_shape():
         "task": "transcribe",
         "model": "large-v3",
         "use_vad": True,
+        "no_speech_thresh": vwl.WHISPERLIVE_NO_SPEECH_THRESH,
+        "vad_parameters": {"threshold": vwl.WHISPERLIVE_VAD_THRESHOLD},
     }
 
 
@@ -834,3 +838,102 @@ async def test_send_audio_preserves_int16_when_wire_format_is_int16(fake_whisper
     await asyncio.sleep(0.05)
     await client.close()
     assert received == [src]
+
+
+@pytest.mark.asyncio
+async def test_set_cutoff_seals_to_audio_clock_not_transcript_clock():
+    """A Send/Clear cutoff must drop audio spoken before the click even when
+    WhisperLive hasn't emitted a segment for it yet. Sealing only to the last
+    EMITTED segment (transcript clock) misses that in-flight audio; sealing to
+    the AUDIO clock (bytes forwarded) covers it. Regression: only segment
+    A(start=0) is emitted at click time, but a later pre-click segment
+    B(start=2000) would otherwise repopulate the buffer.
+    """
+    finals: list[str] = []
+
+    async def on_final(text):
+        finals.append(text)
+
+    async def on_noop(*_a):
+        pass
+
+    client = vwl.WhisperLiveClient(
+        url="ws://unused",
+        uid="cutoff-test",
+        model="m",
+        on_partial=on_noop,
+        on_final=on_final,
+        on_error=on_noop,
+    )
+
+    class _FakeWS:
+        async def send(self, _payload):
+            pass
+
+    client._ws = _FakeWS()
+    client.state = vwl.READY
+
+    # ~2100 ms of audio forwarded to WhisperLive (16kHz mono int16 -> 32 B/ms).
+    await client.send_audio(b"\x00" * (2100 * 32))
+    assert int(client._audio_sent_ms) == 2100
+
+    # WhisperLive has only emitted segment A(start=0) so far.
+    await client._dispatch_segments(
+        [{"start": 0.0, "text": "A", "completed": True}]
+    )
+
+    # Operator hits Send/Clear -> seal to the AUDIO clock (2100), not 1 ms.
+    client.set_cutoff()
+    assert client._cutoff_ms == 2100
+
+    # WhisperLive later emits B(start=2000) for the pre-click audio and
+    # C(start=2200) for post-click speech. B must be dropped, C must pass.
+    await client._dispatch_segments(
+        [
+            {"start": 2.0, "text": "B pre-click", "completed": True},
+            {"start": 2.2, "text": "C post-click", "completed": True},
+        ]
+    )
+    assert finals == ["A", "C post-click"], finals
+
+
+@pytest.mark.asyncio
+async def test_send_audio_malformed_frame_routes_to_unavailable():
+    """An odd/truncated int16 frame fails the int16->float32 conversion
+    (np.frombuffer needs an even length). That failure must flow to the same
+    UNAVAILABLE + on_error path as a send failure, not escape uncaught — the
+    conversion is inside the try. The audio clock must not advance on failure.
+    """
+    errors: list[str] = []
+
+    async def on_error(msg):
+        errors.append(msg)
+
+    async def on_noop(*_a):
+        pass
+
+    client = vwl.WhisperLiveClient(
+        url="ws://unused",
+        uid="malformed-test",
+        model="m",
+        on_partial=on_noop,
+        on_final=on_noop,
+        on_error=on_error,
+        wire_format=vwl.WIRE_FLOAT32_LE,
+    )
+
+    class _FakeWS:
+        async def send(self, _payload):
+            pass
+
+        async def close(self):
+            pass
+
+    client._ws = _FakeWS()
+    client.state = vwl.READY
+
+    await client.send_audio(b"\x00" * 3)  # odd length -> conversion ValueError
+
+    assert client.state == vwl.UNAVAILABLE
+    assert errors and "send failed" in errors[0]
+    assert int(client._audio_sent_ms) == 0  # never advanced past the failure

@@ -59,6 +59,11 @@ class _StubWhisperLiveClient:
         if self._ready and not self._closed:
             self.audio_frames.append(bytes(audio_bytes))
 
+    def set_cutoff(self) -> None:
+        # Mirrors WhisperLiveClient.set_cutoff (sync no-op for the stub);
+        # the route calls this on discard/commit to seal the audio timeline.
+        self.cutoff_calls = getattr(self, "cutoff_calls", 0) + 1
+
     async def close(self) -> None:
         self._closed = True
 

@@ -62,6 +62,16 @@ WHISPERLIVE_MODEL = "large-v3"
 WHISPERLIVE_LANGUAGE = "en"
 WHISPERLIVE_USE_VAD = True
 
+# Silence-hallucination gating. Whisper invents filler ("thank you", "you",
+# noise like "CH-H-H", "Mm-hmm") during silence/faint noise — a known failure
+# mode (trained on captioned video where silence maps to those phrases).
+# WhisperLive's defaults are lenient (no_speech_thresh 0.45, Silero VAD
+# threshold 0.5). Tighten both: a higher VAD threshold keeps faint noise from
+# being treated as speech before the model, and a higher no_speech_thresh
+# discards segments the model itself marks as likely-silence. Tunable.
+WHISPERLIVE_NO_SPEECH_THRESH = 0.6
+WHISPERLIVE_VAD_THRESHOLD = 0.6
+
 # Wire format the dashboard sends on the WhisperLive WS.
 #
 # - ``float32_le``: float32 little-endian in [-1.0, 1.0]. This is
@@ -203,6 +213,11 @@ class WhisperLiveClient:
     on_error: Callable[[str], Awaitable[None]]
     language: str = "en"
     use_vad: bool = True
+    # Silence-hallucination gating, sent in the init payload. Default to the
+    # tuned module constants; #29 will pass operator-set values from the
+    # dashboard.voice graph setting at connect time.
+    no_speech_thresh: float = WHISPERLIVE_NO_SPEECH_THRESH
+    vad_threshold: float = WHISPERLIVE_VAD_THRESHOLD
     # Wire format the wrapper produces on the WhisperLive WS. Default
     # ``float32_le`` matches the pip whisper-live 0.8.0 deployment
     # (unconditional np.float32 read in upstream server.py:319);
@@ -216,6 +231,17 @@ class WhisperLiveClient:
     _emitted_finals: list[_EmittedFinal] = field(default_factory=list, init=False, repr=False)
     _connect_error: str | None = field(default=None, init=False, repr=False)
     _connect_factory: Any = field(default=None, init=False, repr=False)
+    # Audio-timeline cutoff (ms). Segments whose start is < _cutoff_ms are
+    # dropped in _dispatch_segments — they're WhisperLive re-emitting audio
+    # already consumed by a Send/Clear/Rebind. set_cutoff() seals to the
+    # AUDIO clock (_audio_sent_ms: total audio forwarded to WhisperLive), NOT
+    # the transcript clock — audio already sent but not yet emitted as a
+    # segment at click time must still be sealed, or it repopulates the buffer
+    # when WhisperLive transcribes it a beat later. _max_start_ms (latest
+    # emitted segment start) is kept as a belt-and-braces lower bound.
+    _cutoff_ms: int = field(default=0, init=False, repr=False)
+    _max_start_ms: int = field(default=0, init=False, repr=False)
+    _audio_sent_ms: float = field(default=0.0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.model, str) or not self.model:
@@ -258,6 +284,12 @@ class WhisperLiveClient:
             "task": "transcribe",
             "model": self.model,
             "use_vad": self.use_vad,
+            # Silence-hallucination gating (see constants). These are the
+            # DEFAULTS that the planned dashboard.voice graph setting (#29)
+            # will override at connect time once it's wired; hard-coded here
+            # for now so the operator gets immediate relief.
+            "no_speech_thresh": self.no_speech_thresh,
+            "vad_parameters": {"threshold": self.vad_threshold},
         }
 
     async def connect_and_wait_ready(self, *, ready_timeout: float = 15.0) -> None:
@@ -353,12 +385,23 @@ class WhisperLiveClient:
             return
         if not isinstance(audio_bytes, (bytes, bytearray)) or not audio_bytes:
             return
-        if self.wire_format == WIRE_FLOAT32_LE:
-            payload = _convert_int16_le_to_float32_le(audio_bytes)
-        else:
-            payload = bytes(audio_bytes)
+        # Conversion is INSIDE the try: an odd/truncated frame fails the
+        # int16->float32 conversion (np.frombuffer needs an even length), and
+        # that must flow to the same UNAVAILABLE/on_error path as a send
+        # failure rather than escaping uncaught. payload is pre-bound so the
+        # error log's len(payload) can't NameError when conversion is what threw.
+        payload = b""
         try:
+            if self.wire_format == WIRE_FLOAT32_LE:
+                payload = _convert_int16_le_to_float32_le(audio_bytes)
+            else:
+                payload = bytes(audio_bytes)
             await self._ws.send(payload)
+            # Advance the audio clock by this frame's duration. Browser PCM is
+            # 16kHz mono int16 → 2 bytes/sample, 16 samples/ms → 32 bytes/ms.
+            # set_cutoff() seals to this so audio sent before a Send/Clear but
+            # transcribed after it still gets dropped.
+            self._audio_sent_ms += len(audio_bytes) / 32.0
         except Exception as exc:
             log.warning(
                 "WhisperLiveClient[%s] send_audio failed bytes_in=%d "
@@ -494,18 +537,47 @@ class WhisperLiveClient:
         if isinstance(segments, list):
             await self._dispatch_segments(segments)
 
+    def set_cutoff(self) -> None:
+        """Seal everything transcribed so far as consumed.
+
+        WhisperLive re-transcribes a sliding window and re-emits segments
+        for audio already spoken; after a Send/Clear/Rebind that re-emit
+        repopulates the operator's box with text they already sent or
+        cleared. Seals to the AUDIO clock (total audio forwarded to
+        WhisperLive), so audio spoken before the click but not yet emitted as
+        a segment is also covered — the case the transcript clock alone would
+        miss. The latest emitted segment start is a belt-and-braces lower
+        bound. Makes :meth:`_dispatch_segments` drop any later segment at or
+        before that audio position. Idempotent; only ever advances.
+        """
+        self._cutoff_ms = max(
+            self._cutoff_ms,
+            int(self._audio_sent_ms),
+            self._max_start_ms + 1,
+        )
+
     async def _dispatch_segments(self, segments: list) -> None:
         """Process a segment array from upstream. Completed segments
         that we haven't already emitted fire on_final and get added
         to the dedupe table. The trailing in-progress segment (if
         any) fires on_partial — there's only one in-flight at a
         time per upstream contract.
+
+        Segments whose start is before the active cutoff (set by a
+        Send/Clear/Rebind) are dropped — they are WhisperLive
+        re-emitting already-consumed audio and would otherwise
+        repopulate the operator's buffer.
         """
         for seg in segments:
             if not isinstance(seg, dict):
                 continue
             key = _segment_dedupe_key(seg)
             if key is None:
+                continue
+            if key[0] > self._max_start_ms:
+                self._max_start_ms = key[0]
+            if key[0] < self._cutoff_ms:
+                # Re-emitted audio from before a Send/Clear/Rebind cutoff.
                 continue
             if _is_completed(seg):
                 if any(

@@ -191,28 +191,28 @@ function actionTarget(action) {
 }
 
 describe('voice shell helpers', () => {
-  it('hides the inline composer only on mobile when the sheet is open and responsive collapse is enabled', () => {
-    const h = loadVoiceShell({
+  it('hides the inline composer on mobile whenever voice is bound (voice-first viewer)', () => {
+    // Pinned behavior: a bound voice session on mobile always replaces the
+    // keyboard composer with the voice UI — no longer gated on sheetOpen +
+    // the (now-vestigial) voice.responsive_collapse_enabled flag.
+    const bound = loadVoiceShell({
       viewerPage: true,
-      voiceStore: { sheetOpen: true },
-      flagsStore: {
-        get(name) {
-          if (name === 'voice.client_enabled') return true;
-          if (name === 'voice.responsive_collapse_enabled') return true;
-          return false;
-        },
-      },
+      voiceStore: { boundSessionId: 'session-a' },
     });
-    assert.equal(h.window.Autonomy.voice.shell.hideInlineComposer(), true);
+    assert.equal(bound.window.Autonomy.voice.shell.hideInlineComposer(), true);
 
-    const off = loadVoiceShell({
+    // Not bound -> the keyboard composer stays (still a way to type when voice
+    // is idle).
+    const unbound = loadVoiceShell({
       viewerPage: true,
-      voiceStore: { sheetOpen: true },
+      voiceStore: { boundSessionId: '' },
     });
-    assert.equal(off.window.Autonomy.voice.shell.hideInlineComposer(), false);
+    assert.equal(unbound.window.Autonomy.voice.shell.hideInlineComposer(), false);
   });
 
-  it('keeps the capsule hidden on the viewer route until responsive collapse is enabled', () => {
+  it('shows the capsule + caption on the viewer route when voice is bound on mobile', () => {
+    // Pinned behavior: the capsule/caption appear in the viewer when voice is
+    // bound on mobile, regardless of the responsive_collapse flag (vestigial).
     const h = loadVoiceShell({
       viewerPage: true,
       voiceStore: {
@@ -220,8 +220,8 @@ describe('voice shell helpers', () => {
         sheetOpen: false,
       },
     });
-    assert.equal(h.component.showCapsule, false);
-    assert.equal(h.component.showCaption, false);
+    assert.equal(h.component.showCapsule, true);
+    assert.equal(h.component.showCaption, true);
   });
 
   it('shows the capsule on non-viewer mobile surfaces when voice is bound and the sheet is closed', () => {
