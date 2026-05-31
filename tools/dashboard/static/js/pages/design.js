@@ -39,9 +39,14 @@
       '});' +
       '<\/script>';
 
-    return '<div id="fixture-state-picker" style="position:fixed;bottom:12px;left:50%;transform:translateX(-50%);' +
+    // Pinned to the TOP of the iframe, not the bottom. The bottom band is
+    // owned by realistic designs (composer / .sv-input) and, on mobile, by the
+    // voice live-caption gutter — both of which buried this picker and made it
+    // untappable. z-index is maxed so no overlay (caption gutter included) can
+    // cover it.
+    return '<div id="fixture-state-picker" style="position:fixed;top:12px;left:50%;transform:translateX(-50%);' +
       'display:flex;align-items:center;gap:2px;background:#0f172a;border:1px solid #1e293b;' +
-      'border-radius:10px;padding:3px;box-shadow:0 4px 24px rgba(0,0,0,0.5);z-index:100;">' +
+      'border-radius:10px;padding:3px;box-shadow:0 4px 24px rgba(0,0,0,0.5);z-index:2147483000;">' +
       pills + '</div>' + script;
   }
 

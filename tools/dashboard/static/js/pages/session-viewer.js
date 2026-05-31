@@ -99,6 +99,163 @@
         var s = Alpine.store('sessions')[this.sessionKey];
         return s ? s.resolved : false;
       },
+      // Authoritative signal for "this viewer's bottom composer surface is
+      // active" — the EXACT condition the composer (.sv-input) renders under
+      // (session-view.html:289). The pending/outbox tile mounts in this same
+      // surface, so this is the single source of truth the voice side keys
+      // BOTH its caption-suppression and its send-path branch on (mirrored to
+      // document.body via _syncComposerSignal). See contract note cbb8497c-a1f.
+      get _composerActive() {
+        return !this.showTerminal && this.isLive && !!this._tmuxSession &&
+               (this.sessionType !== 'host' || this._linked);
+      },
+      // Pending/optimistic message for this session (auto-xkdoi). null when idle.
+      get outbox() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return (s && s.outbox) || null;
+      },
+      // Skin class for the pending tile, by state.
+      outboxTileClass() {
+        var o = this.outbox;
+        if (!o) return '';
+        if (o.state === 'capturing') return 'is-capturing';
+        if (o.state === 'unconfirmed') return 'is-unconfirmed';
+        return 'is-sending';
+      },
+      // Re-attempt a message that never reached the log.
+      resendOutbox() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        if (!s || !s.outbox) return;
+        s.outbox = Object.assign({}, s.outbox, { state: 'sending' });
+        this._committedLocalId = s.outbox.localId;
+        this._durableSend(s.outbox.text, s.outbox.localId);
+      },
+      // Watch keys: send-key fires when an outbox enters 'sending' (the voice
+      // path flips state without going through sendMessage); tail-key fires as
+      // entries arrive so we can reconcile the optimistic tile against the log.
+      get _outboxSendKey() {
+        var o = this.outbox;
+        return (o && o.state === 'sending') ? o.localId : null;
+      },
+      get _entryTailKey() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return s && s.entries ? s.entries.length : 0;
+      },
+      // Commit an outbox that entered 'sending' externally (voice send-flip).
+      // Manual sends and resend commit directly and pre-claim _committedLocalId,
+      // so this no-ops for them — no double send.
+      _onOutboxSendKey() {
+        var o = this.outbox;
+        if (!o || o.state !== 'sending') return;
+        if (o.localId === this._committedLocalId) return;
+        this._committedLocalId = o.localId;
+        this._durableSend(o.text, o.localId);
+      },
+      // Publish 'sv-outbox-tile-present' on body EXACTLY while the tile is
+      // rendered (composer active AND a pending message exists). The voice
+      // side gates caption-suppression on this so the caption only hands off
+      // once the tile is truly in the DOM (contract cbb8497c-a1f). Guarded so
+      // it only clears its own sid.
+      _syncTilePresent() {
+        if (typeof document === 'undefined' || !document.body) return;
+        var sid = this._tmuxSession || '';
+        if (this._composerActive && this.outbox) {
+          document.body.classList.add('sv-outbox-tile-present');
+          document.body.dataset.svComposerSession = sid;
+        } else if (document.body.dataset.svComposerSession === sid) {
+          document.body.classList.remove('sv-outbox-tile-present');
+        }
+      },
+
+      // ── Durable send + reconciliation (auto-xkdoi Phase 2) ────────────────
+      // The "never into the ether" engine. A message is NOT cleared on HTTP
+      // 200 (that only means tmux accepted the paste); it stays in the outbox
+      // (persisted to localStorage) until the JSONL log echoes it back via
+      // SSE. If the echo never comes within the window, it parks in
+      // 'unconfirmed' — recoverable, never silently dropped.
+      _OUTBOX_CONFIRM_MS: 9000,
+
+      // POST the body and keep the outbox alive until confirmed/timed out.
+      async _durableSend(body, localId) {
+        var sid = this.sessionKey;
+        var tmux = this._tmuxSession;
+        var s = window.getSessionStore(sid);
+        if (window.saveOutbox && s) window.saveOutbox(sid, s.outbox);  // persist BEFORE network
+        var ok = false;
+        try {
+          var res = await fetch('/api/session/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: body, tmux_session: tmux }),
+          });
+          var data = await res.json();
+          ok = !!(data && data.ok);
+        } catch (e) { ok = false; }
+        if (!ok) {
+          // Paste never even accepted — park as unconfirmed, text preserved.
+          this._markOutboxUnconfirmed(localId);
+          return false;
+        }
+        // Accepted by tmux; await the log echo (reconcile) or time out.
+        this._armOutboxTimeout(localId);
+        return true;
+      },
+
+      _armOutboxTimeout(localId) {
+        var self = this;
+        if (this._outboxTimer) { clearTimeout(this._outboxTimer); this._outboxTimer = null; }
+        this._outboxTimer = setTimeout(function () {
+          self._markOutboxUnconfirmed(localId);
+        }, this._OUTBOX_CONFIRM_MS);
+      },
+
+      _markOutboxUnconfirmed(localId) {
+        var sid = this.sessionKey;
+        var s = window.getSessionStore(sid);
+        if (s && s.outbox && s.outbox.localId === localId && s.outbox.state === 'sending') {
+          s.outbox = Object.assign({}, s.outbox, { state: 'unconfirmed' });
+          if (window.saveOutbox) window.saveOutbox(sid, s.outbox);
+        }
+      },
+
+      // Clear the pending tile once the real log entry shows up. JSONL doesn't
+      // carry our localId, so match the newest user entries by text within a
+      // recency window.
+      _tryReconcileOutbox() {
+        var sid = this.sessionKey;
+        var s = window.getSessionStore(sid);
+        var o = s && s.outbox;
+        if (!o || (o.state !== 'sending' && o.state !== 'unconfirmed')) return;
+        var entries = (s && s.entries) || [];
+        var want = (o.text || '').trim();
+        if (!want) return;
+        // Scan the tail (most recent) for a user entry containing our text.
+        for (var i = entries.length - 1; i >= 0 && i >= entries.length - 8; i--) {
+          var e = entries[i];
+          if (e && e.type === 'user' && typeof e.content === 'string' &&
+              e.content.trim().indexOf(want) !== -1) {
+            // Confirmed in the log — merge: drop the optimistic tile.
+            if (this._outboxTimer) { clearTimeout(this._outboxTimer); this._outboxTimer = null; }
+            s.outbox = null;
+            if (window.clearOutbox) window.clearOutbox(sid);
+            return;
+          }
+        }
+      },
+
+      // Restore a mid-flight outbox after a reload/eviction and re-arm.
+      _restoreOutbox() {
+        var sid = this.sessionKey;
+        if (!sid || !window.loadOutbox) return;
+        var saved = window.loadOutbox(sid);
+        if (!saved) return;
+        var s = window.getSessionStore(sid);
+        if (!s || s.outbox) return;   // don't clobber a live one
+        s.outbox = saved;
+        // Maybe it already landed while we were gone; else keep waiting.
+        this._tryReconcileOutbox();
+        if (s.outbox && s.outbox.state === 'sending') this._armOutboxTimeout(s.outbox.localId);
+      },
       get contextTokens() {
         var s = Alpine.store('sessions')[this.sessionKey];
         return s ? s.contextTokens : 0;
@@ -390,6 +547,11 @@
         this.hasContent = normalized.trim().length > 0;
         var s = this.getComposerStore();
         if (s) s.draftText = normalized;
+        // Mirror to localStorage so the draft survives full reload and iOS
+        // backgrounding/eviction, not just soft SPA navigation (auto-xkdoi).
+        // saveDraft removes the key on empty text, so clearComposer() also
+        // clears the persisted draft for free.
+        if (window.saveDraft) window.saveDraft(this.sessionKey, normalized);
       },
 
       writeComposerText(text) {
@@ -405,7 +567,12 @@
 
       restoreComposerDraft() {
         var s = this.getComposerStore();
-        this.writeComposerText(s ? (s.draftText || '') : '');
+        // Prefer the in-memory draft (survives soft SPA nav); fall back to the
+        // localStorage mirror, which survives full reload and iOS eviction
+        // where the in-memory store is gone (auto-xkdoi).
+        var draft = (s && s.draftText) ? s.draftText
+                  : (window.loadDraft ? window.loadDraft(this.sessionKey) : '');
+        this.writeComposerText(draft || '');
       },
 
       _selectComposerContents(el, collapseToEnd) {
@@ -781,6 +948,26 @@
           if (!now) this.selectedDrawerTab = 'topics';
         });
 
+        // Publish the authoritative "composer surface active" signal to
+        // document.body so the voice side branches caption-suppression and its
+        // send path on the IDENTICAL condition where the outbox tile mounts
+        // (contract note cbb8497c-a1f). One source of truth → we can't disagree.
+        this._syncComposerSignal();
+        this.$watch('_composerActive', () => this._syncComposerSignal());
+        this.$watch('_tmuxSession', () => this._syncComposerSignal());
+
+        // Durable outbox wiring (auto-xkdoi Phase 2): commit on external
+        // send-flip (voice), reconcile the optimistic tile as log entries
+        // arrive, and restore a mid-flight outbox after reload/eviction.
+        this.$watch('_outboxSendKey', () => this._onOutboxSendKey());
+        this.$watch('_entryTailKey', () => this._tryReconcileOutbox());
+        this.$watch('sessionKey', () => {
+          if (!this._outboxRestored) { this._outboxRestored = true; this._restoreOutbox(); }
+        });
+        if (this.sessionKey && !this._outboxRestored) {
+          this._outboxRestored = true; this._restoreOutbox();
+        }
+
         // Keyboard padding toggle — applies to whichever .sv-input is present in the DOM.
         // Harmless when no .sv-input exists (e.g. overlay mode, pre-ready state).
         if (window.visualViewport && !window._svKeyboardListener) {
@@ -847,18 +1034,46 @@
         });
       },
 
+      // Mirror _composerActive onto document.body as the cross-component
+      // signal (class + dataset sid). Guarded so we only clear the flag when
+      // it's ours, never stomping another mounted viewer's signal.
+      _syncComposerSignal() {
+        if (typeof document === 'undefined' || !document.body) return;
+        var sid = this._tmuxSession || '';
+        if (this._composerActive) {
+          document.body.classList.add('sv-viewer-composer-active');
+          document.body.dataset.svComposerSession = sid;
+        } else if (document.body.dataset.svComposerSession === sid) {
+          document.body.classList.remove('sv-viewer-composer-active');
+          delete document.body.dataset.svComposerSession;
+        }
+      },
+
       destroy() {
         // Do NOT unregister SSE — store keeps accumulating outside component lifecycle
         for (var i = 0; i < this._storeCleanups.length; i++) {
           if (typeof this._storeCleanups[i] === 'function') this._storeCleanups[i]();
         }
         this._storeCleanups = [];
+        // Drop the composer-active body signal if it's ours, so the voice side
+        // doesn't keep suppressing the caption / branching its send path after
+        // we've left the viewer (stale-flag bug those branches must avoid).
+        if (typeof document !== 'undefined' && document.body &&
+            document.body.dataset.svComposerSession === (this._tmuxSession || '')) {
+          document.body.classList.remove('sv-viewer-composer-active');
+          document.body.classList.remove('sv-outbox-tile-present');
+          delete document.body.dataset.svComposerSession;
+        }
         if (this._mode === 'page' && window._diagFocusedViewerId === this.sessionKey) {
           window._diagFocusedViewerId = null;
         }
         if (this._pollInterval) {
           clearInterval(this._pollInterval);
           this._pollInterval = null;
+        }
+        if (this._outboxTimer) {
+          clearTimeout(this._outboxTimer);
+          this._outboxTimer = null;
         }
         if (this._screenshotTimer) {
           clearTimeout(this._screenshotTimer);
@@ -1436,15 +1651,6 @@
         this.sending = true;
         var tmux = this._tmuxSession;
         try {
-          var _send = async function(msg) {
-            var res = await fetch('/api/session/send', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ message: msg, tmux_session: tmux }),
-            });
-            return res.json();
-          };
-
           // Compose attachments + text into one tmux paste so the agent's
           // transcript records a single user turn whose content is the
           // image path(s) plus the operator's description, instead of the
@@ -1452,19 +1658,29 @@
           // viewer's user-turn renderer detects ``/tmp/<filename>.<ext>``
           // lines in the body and surfaces inline thumbnails for each.
           var body = this.buildComposerBody(text);
-          if (body) {
-            var data = await _send(body);
-            if (!data.ok) {
-              console.warn('[sessionViewer] send error:', data.error);
-              return;
-            }
-          }
+          if (!body) return;
 
-          // Substrate write fires *here* — on send commit — so the
-          // viewer tile only appears for attachments the operator
-          // actually sent. Removing a file from the preview before
-          // sending leaves nothing in the timeline.
-          if (this._uploadProxy && tmux) {
+          // Durable optimistic send: stage the message in the outbox (shows the
+          // pending tile + persists to localStorage), clear the composer right
+          // away (the text is now safely held in the outbox, never the ether),
+          // then run the durable send. The composer clears on STAGING, not on
+          // HTTP 200 — confirmation is the JSONL log echo (reconciliation), and
+          // a failed/timed-out send parks the tile in 'unconfirmed', recoverable.
+          var sid = this.sessionKey;
+          var s = window.getSessionStore(sid);
+          var localId = window.newOutboxId ? window.newOutboxId() : ('ob_' + (s ? (s.seq || 0) : 0));
+          this._committedLocalId = localId;   // claim it so the voice watcher won't double-send
+          if (s) {
+            s.outbox = { localId: localId, state: 'sending', source: 'manual', text: body, ts: Date.now() };
+          }
+          this.clearComposer();   // text safely staged in outbox; also clears the persisted draft
+          el.blur();
+
+          var ok = await this._durableSend(body, localId);
+
+          // Substrate write fires only after a tmux-accepted send — so the
+          // viewer tile only appears for attachments actually sent.
+          if (ok && this._uploadProxy && tmux) {
             var ts = new Date().toISOString();
             for (var si = 0; si < this.attachments.length; si++) {
               var sa = this.attachments[si];
@@ -1483,10 +1699,7 @@
               }
             }
           }
-
-          this.clearComposer();
           this.clearAttachments();
-          el.blur();
         } catch (e) {
           console.warn('[sessionViewer] send failed:', e);
         } finally {
