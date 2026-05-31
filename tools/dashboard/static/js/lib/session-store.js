@@ -92,6 +92,21 @@ window.clearDraft = function(sessionId) {
   catch (e) { /* ignore */ }
 };
 
+// ── Outbox identity (auto-xkdoi Phase 2 / voice #28 contract) ──────────────
+// Stable client-side id for a pending message across its whole lifecycle
+// (capturing → sending → confirmed/unconfirmed). It is the dedup key the
+// viewer uses to reconcile the optimistic tile against the JSONL log entry.
+// The voice path calls this at the START of a capturing tile so the id is
+// stable from first word through send — no placeholder swap on send.
+var _outboxSeq = 0;
+window.newOutboxId = function() {
+  _outboxSeq += 1;
+  // No Math.random/Date.now dependency required for uniqueness within a tab:
+  // a monotonic counter plus the store's load epoch is enough, and stays
+  // deterministic for tests. Epoch keeps ids distinct across reloads.
+  return 'ob_' + (window._outboxEpoch || (window._outboxEpoch = (window.performance && performance.now ? Math.floor(performance.now()) : 0))) + '_' + _outboxSeq;
+};
+
 window.getSessionStore = function(sessionId) {
   var sessions = Alpine.store('sessions');
   if (!sessions[sessionId]) {
