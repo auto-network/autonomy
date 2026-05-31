@@ -99,6 +99,25 @@
         var s = Alpine.store('sessions')[this.sessionKey];
         return s ? s.resolved : false;
       },
+      // auto-7v712 PART 1: build a row-shape compatible with the
+      // window.Autonomy.lifecycle.* helpers from the current store
+      // entry. Used by the pre-ready loading slot (session-view.html:5-18)
+      // to render the SAME phase chip + tone as the list card —
+      // visual parity, single derivation source. Returns null when the
+      // store hasn't received a registry broadcast yet (the template
+      // falls through to the legacy "Connecting to session..." text).
+      get loadingPhaseRow() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        if (!s) return null;
+        return {
+          is_live: s.isLive,
+          harness: s.harness,
+          setup_phase: s.setupPhase,
+          harness_phase: s.harnessPhase,
+          harness_state: s.harnessState,
+          resumable: s.resumable,
+        };
+      },
       // Authoritative signal for "this viewer's bottom composer surface is
       // active" — the EXACT condition the composer (.sv-input) renders under
       // (session-view.html:289). The pending/outbox tile mounts in this same
