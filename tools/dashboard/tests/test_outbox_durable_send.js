@@ -156,3 +156,56 @@ describe('outbox durable send + reconciliation', () => {
     if (v._outboxTimer) clearTimeout(v._outboxTimer);
   });
 });
+
+// End-to-end lifecycle against the contract (cbb8497c-a1f): the exact sequence
+// the voice side drives, walked in order through the real engine.
+describe('contract lifecycle end-to-end (cbb8497c-a1f)', () => {
+  let h, store, v;
+  beforeEach(() => {
+    h = harness();
+    store = h.windowObj.getSessionStore('auto-test');
+    store.isLive = true; store.sessionType = 'container'; store.entries = [];
+    v = h.makeViewer('auto-test');
+  });
+
+  it('voice capturing -> send-flip -> watcher commits -> reconcile on log echo', async () => {
+    // 1. CAPTURING — voice sets the outbox live (newOutboxId at capture start).
+    const id = h.windowObj.newOutboxId();
+    store.outbox = { localId: id, state: 'capturing', source: 'voice', text: 'scan the new', ts: 1 };
+    assert.equal(v.outbox.state, 'capturing');
+    assert.equal(v.outboxTileClass(), 'is-capturing');
+
+    // 2. SEND-FLIP — voice finalizes text + flips state (NO direct POST). The
+    //    _outboxSendKey watcher would fire _onOutboxSendKey; drive it directly.
+    store.outbox = Object.assign({}, store.outbox, { state: 'sending', text: 'scan the new vuln set' });
+    await v._onOutboxSendKey();
+
+    // The viewer owned the POST; outbox is NOT cleared on 200 (persisted, sending).
+    assert.ok(h.fetchCalls.some((c) => c.url === '/api/session/send'
+      && JSON.parse(c.opts.body).message === 'scan the new vuln set'), 'viewer POSTs the final text');
+    assert.ok(store.outbox && store.outbox.state === 'sending', 'still pending after 200');
+    assert.ok(h.windowObj.loadOutbox('auto-test'), 'persisted to localStorage');
+
+    // 3. RECONCILE — the JSONL log echoes the user turn via SSE; tile merges away.
+    store.entries.push({ type: 'user', content: 'scan the new vuln set' });
+    v._tryReconcileOutbox();
+    assert.equal(store.outbox, null, 'log echo clears the optimistic tile (merge)');
+    assert.equal(h.windowObj.loadOutbox('auto-test'), null, 'localStorage cleared on merge');
+  });
+
+  it('send -> no log echo -> timeout parks unconfirmed -> Resend re-sends', async () => {
+    const id = h.windowObj.newOutboxId();
+    store.outbox = { localId: id, state: 'sending', source: 'voice', text: 'never echoed', ts: 1 };
+    await v._onOutboxSendKey();
+    if (v._outboxTimer) clearTimeout(v._outboxTimer);   // simulate the window elapsing
+    v._markOutboxUnconfirmed(id);
+    assert.equal(store.outbox.state, 'unconfirmed', 'no echo within window -> unconfirmed, not dropped');
+    assert.equal(store.outbox.text, 'never echoed', 'text preserved for recovery');
+
+    const before = h.fetchCalls.length;
+    v.resendOutbox();
+    assert.equal(store.outbox.state, 'sending');
+    assert.ok(h.fetchCalls.length > before, 'Resend re-POSTs');
+    if (v._outboxTimer) clearTimeout(v._outboxTimer);
+  });
+});

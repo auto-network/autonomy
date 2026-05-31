@@ -576,7 +576,10 @@
   background: rgba(17, 24, 39, 0.55);
   -webkit-backdrop-filter: blur(16px);
   backdrop-filter: blur(16px);
-  padding: 8px 14px 6px;
+  /* Bottom offset respects the iOS home-indicator safe area and never sits
+     flush to the screen edge when the tile is the bottom-most element (e.g.
+     during dictation, when the composer is replaced by the voice surface). */
+  padding: 8px 14px max(12px, calc(var(--sab, 0px) + 4px));
 }
 .sv-pending-tile {
   border-left: 3px solid #f59e0b;
