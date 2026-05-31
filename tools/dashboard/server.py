@@ -6499,6 +6499,11 @@ async def ws_voice(websocket: WebSocket):
                 # buffer-clearing side effect lives in the transport.
                 if frame_type == "discard" and session.state in voice_mod.ACTIVE_STATES:
                     voice_buffer_mod.MANAGER.clear(bind)
+                    # Seal the audio timeline at the current position so
+                    # WhisperLive's re-emitted segments for already-spoken
+                    # audio can't repopulate the just-cleared/just-sent buffer.
+                    if whisperlive_client is not None:
+                        whisperlive_client.set_cutoff()
                 responses = session.handle_control(frame_type)
                 logger.info("ws_voice DIAG: ctrl=%s → state=%s bind=%s", frame_type, session.state, bind)
                 for resp in responses:
@@ -6562,6 +6567,10 @@ async def ws_voice(websocket: WebSocket):
                             )
                         else:
                             voice_buffer_mod.MANAGER.clear(bind)
+                            # Seal the timeline so re-emitted segments for the
+                            # just-committed audio don't repopulate the buffer.
+                            if whisperlive_client is not None:
+                                whisperlive_client.set_cutoff()
                             finish = session.finish_commit(
                                 success=True,
                                 committed_text=pending_text,

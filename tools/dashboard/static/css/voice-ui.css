@@ -73,7 +73,7 @@
   left: 50%;
   bottom: calc(env(safe-area-inset-bottom, 0px) + 20px);
   transform: translateX(-50%);
-  z-index: 70;
+  z-index: 110;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -135,9 +135,11 @@
 .voice-sheet-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 68;
-  background: rgba(2, 6, 23, 0.52);
-  backdrop-filter: blur(10px);
+  z-index: 108;
+  /* No blur: the operator wants to see the session behind a half-height sheet,
+     not a frosted top half. A light dim is enough to signal the overlay and
+     give a tap-to-dismiss target. */
+  background: rgba(2, 6, 23, 0.34);
 }
 
 .voice-caption {
@@ -145,7 +147,7 @@
   left: 0;
   right: 0;
   bottom: 0;
-  z-index: 69;
+  z-index: 109;
   min-height: 60px;
   display: flex;
   align-items: center;
@@ -189,7 +191,7 @@
   left: 0;
   right: 0;
   bottom: 0;
-  z-index: 69;
+  z-index: 109;
   display: flex;
   flex-direction: column;
   gap: 0;
@@ -291,7 +293,7 @@
   position: fixed;
   right: 14px;
   bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
-  z-index: 70;
+  z-index: 110;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -314,11 +316,37 @@
   border-radius: 14px;
   color: #dbe7fb;
   transition: transform 120ms ease, background-color 120ms ease, opacity 120ms ease;
+  /* touch-action does NOT inherit: without this, a finger landing on the
+     send/type buttons (which cover almost the whole capsule) uses the default
+     touch-action:auto, so iOS treats the drag as a scroll and fires
+     pointercancel — killing the drag gesture before it starts. Taps still
+     work; drags don't. Match the capsule body so the whole surface drags. */
+  touch-action: none;
 }
 
 .voice-capsule__send {
+  position: relative;
   background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
   color: #eff6ff;
+}
+
+/* Live buffer word-count badge — "it's working" proof while speaking. */
+.voice-capsule__count {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  background: #f59e0b;
+  color: #1a1206;
+  font: 600 11px/1 ui-monospace, monospace;
+  box-shadow: 0 1px 4px rgba(2, 6, 23, 0.5);
+  pointer-events: none;
 }
 
 .voice-capsule__send--pulse {
@@ -384,4 +412,13 @@
   .voice-capsule {
     display: none !important;
   }
+}
+
+/* When the live caption owns the bottom gutter (voice bound, caption showing),
+   reserve that band at the end of the scrollable session entries so the last
+   entries clear it instead of scrolling underneath. The +env() covers the iOS
+   home-indicator zone the caption sits over. Scoped via the body class so this
+   space is only reserved while the caption is actually visible. */
+body.voice-caption-active .sv-entries {
+  padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px));
 }

@@ -269,7 +269,10 @@ describe('voice store substrate', () => {
     assert.equal(h.store.micMode, 'idle');
   });
 
-  it('openSheet mutes active listening sessions and sets resume-on-dismiss state', () => {
+  it('openSheet keeps active listening live (no implicit mute) so the transcript streams into the sheet', () => {
+    // Pinned behavior (operator directive): opening the sheet must NOT mute —
+    // the full transcript streams live into the visible editor. Overrides the
+    // old spec L127 "opening the sheet implicitly mutes capture".
     const h = loadVoiceStore({
       initialStores: {
         flags: { get() { return true; } },
@@ -279,8 +282,8 @@ describe('voice store substrate', () => {
     assert.equal(h.store.openSheet(), true);
     assert.equal(h.store.sheetOpen, true);
     assert.equal(h.store.sheetMode, 'partial');
-    assert.equal(h.store.sheetResumeListeningOnDismiss, true);
-    assert.equal(h.store.micMode, 'muted');
+    assert.equal(h.store.sheetResumeListeningOnDismiss, false);
+    assert.equal(h.store.micMode, 'listening');
   });
 
   it('openSheet preserves explicit muted state and dismissSheet does not unmute it', () => {
@@ -298,7 +301,9 @@ describe('voice store substrate', () => {
     assert.equal(h.store.micMode, 'muted');
   });
 
-  it('openSheet treats vad_paused like active listening and restores listening on dismiss', () => {
+  it('openSheet keeps vad_paused capture live (no implicit mute) and leaves it unchanged', () => {
+    // Same pinned behavior: vad_paused is a listening sub-state; opening the
+    // sheet no longer mutes it, and dismiss leaves it as-is (no resume needed).
     const h = loadVoiceStore({
       initialStores: {
         flags: { get() { return true; } },
@@ -307,10 +312,10 @@ describe('voice store substrate', () => {
     h.store.requestBind('session-a', { isLive: true });
     h.store.setMicMode('vad_paused');
     assert.equal(h.store.openSheet(), true);
-    assert.equal(h.store.micMode, 'muted');
-    assert.equal(h.store.sheetResumeListeningOnDismiss, true);
+    assert.equal(h.store.micMode, 'vad_paused');
+    assert.equal(h.store.sheetResumeListeningOnDismiss, false);
     assert.equal(h.store.dismissSheet(), true);
-    assert.equal(h.store.micMode, 'listening');
+    assert.equal(h.store.micMode, 'vad_paused');
   });
 
   it('openSheet stays closed when voice is disabled or no session is bound', () => {
@@ -408,7 +413,9 @@ describe('voice store substrate', () => {
     assert.equal(h.store.sheetOpen, true);
     assert.equal(h.store.bufferText, 'retry me');
     assert.equal(h.store.sheetError, 'Send failed. Session connection dropped. Retry after reconnecting or end voice on this session.');
-    assert.equal(h.store.micMode, 'muted');
+    // openSheet no longer mutes (live-capture directive), so the session stays
+    // listening through the sheet and a failed send.
+    assert.equal(h.store.micMode, 'listening');
   });
 
   it('sendBuffer reports a session-ended message when the send API returns 404', async () => {

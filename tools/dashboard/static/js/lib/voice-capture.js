@@ -44,31 +44,50 @@
   }
 
   // On returning to the foreground (screen unlock / tab refocus): re-acquire the
-  // wake lock and resume the suspended AudioContext so capture survives a lock.
-  if (typeof document !== 'undefined') {
-    document.addEventListener('visibilitychange', function () {
-      if (document.visibilityState !== 'visible') return;
-      if (!(s.talkActive || (s.bind && s.ws))) return;
-      _acquireWakeLock();
-      if (s.ctx && s.ctx.state === 'suspended' && typeof s.ctx.resume === 'function') {
-        s.ctx.resume().then(function () { _diag('resumed after unlock'); }).catch(function () {});
+  // wake lock, and — critically — detect whether the mic track DIED while we
+  // were backgrounded. iOS *ends* the MediaStreamTrack on screen-lock; resuming
+  // the AudioContext can't revive a dead track, so the UI still shows "listening"
+  // but no audio flows (the operator had to switch sessions to recover). We check
+  // the track once on wake and do a single clean restart if it's dead. Listen on
+  // visibilitychange + focus + pageshow because iOS fires these inconsistently
+  // across Safari tabs vs standalone PWA.
+  function _onWake() {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+    var st = store();
+    var wantsListening = !!(st && st.boundSessionId && st.micMode === 'listening');
+    if (!(s.talkActive || (s.bind && s.ws) || wantsListening)) return;
+    _acquireWakeLock();
+    var dead = false;
+    try {
+      if (s.stream) {
+        s.stream.getTracks().forEach(function (t) { if (t.readyState === 'ended') dead = true; });
+      } else if (s.micGranted) {
+        dead = true; // mic was granted earlier but the stream is gone
       }
-    });
+    } catch (_e) {}
+    if (dead) {
+      var bind = s.bind || (st && st.boundSessionId) || '';
+      _diag('mic stream died while locked — restarting capture');
+      teardown();
+      if (bind && wantsListening) startListening(bind);
+      return;
+    }
+    if (s.ctx && s.ctx.state === 'suspended' && typeof s.ctx.resume === 'function') {
+      s.ctx.resume().then(function () { _diag('resumed after unlock'); }).catch(function () {});
+    }
+  }
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', _onWake);
+    window.addEventListener('focus', _onWake);
+    window.addEventListener('pageshow', _onWake);
   }
 
-  // TEMP visible diagnostic overlay (host can't see the browser console).
+  // Silent console-only trace. The earlier on-screen overlay was removed —
+  // it covered the live caption. Re-enable a visible overlay only for local
+  // debugging; never ship it on top of the caption.
   var _finalCount = 0;
   function _diag(msg) {
-    try {
-      var el = document.getElementById('voice-capture-diag');
-      if (!el) {
-        el = document.createElement('div');
-        el.id = 'voice-capture-diag';
-        el.style.cssText = 'position:fixed;left:4px;bottom:4px;z-index:2147483647;background:rgba(0,0,0,.82);color:#6f6;font:11px/1.35 ui-monospace,monospace;padding:5px 7px;max-width:92vw;border-radius:5px;pointer-events:none;white-space:pre-wrap;';
-        (document.body || document.documentElement).appendChild(el);
-      }
-      el.textContent = 'VOICE ⟶ ' + msg;
-    } catch (_e) {}
+    try { if (window.console && console.debug) console.debug('VOICE ⟶ ' + msg); } catch (_e) {}
   }
 
   function store() {
@@ -180,6 +199,14 @@
         sourceNode.connect(workletNode);
         workletNode.connect(sinkNode);
         sinkNode.connect(ctx.destination);
+        // If iOS ends the track (screen-lock), the queued 'ended' event fires
+        // the instant we're foregrounded — recover immediately rather than
+        // waiting on the visibility check.
+        try {
+          stream.getTracks().forEach(function (t) {
+            t.addEventListener('ended', function () { _diag('mic track ended'); _onWake(); });
+          });
+        } catch (_e) {}
         s.stream = stream; s.ctx = ctx; s.sourceNode = sourceNode;
         s.workletNode = workletNode; s.sinkNode = sinkNode; s.micGranted = true;
       });
