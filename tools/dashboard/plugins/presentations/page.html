@@ -2,7 +2,8 @@
 <div data-testid="presentations-fragment-root"
      x-data="presentationsPage()"
      x-init="init()"
-     class="present-page pb-safe">
+     class="present-page pb-safe"
+     :class="{ 'present-page-deck': mode === 'deck' }">
 
   <template x-if="mode === 'library'">
     <section class="present-library" data-testid="present-library">
@@ -29,11 +30,11 @@
           <article class="present-deck-card" data-testid="present-deck-card">
             <button type="button" class="present-deck-main" @click="openDeck(deck)">
               <span class="present-deck-name" x-text="deck.name || 'Untitled deck'"></span>
-              <span class="present-deck-subtitle" x-text="deck.subtitle || 'Design Studio deck'"></span>
+              <span class="present-deck-subtitle" x-show="deck.subtitle" x-text="deck.subtitle"></span>
             </button>
             <div class="present-deck-meta">
               <span x-text="formatDate(deck.last_shown_at || deck.created_at)"></span>
-              <span x-text="creatorLabel(deck)"></span>
+              <span x-show="creatorLabel(deck)" x-text="creatorLabel(deck)"></span>
               <span x-text="(deck.slide_count || 1) + ' slides'"></span>
             </div>
             <div class="present-deck-links">
@@ -49,17 +50,6 @@
 
   <template x-if="mode === 'deck'">
     <section class="present-deck-view" data-testid="present-deck-view">
-      <div class="present-stagebar">
-        <button type="button" class="present-back" @click="navigateTo('/presentations')" title="Back to decks" aria-label="Back to decks">
-          Back
-        </button>
-        <div class="present-stage-title">
-          <span x-text="deck.name || 'Untitled deck'"></span>
-          <small x-text="deck.subtitle || ''"></small>
-        </div>
-        <div class="present-count" x-text="(activeSlide + 1) + ' / ' + slideCount"></div>
-      </div>
-
       <div class="present-stage" data-testid="present-stage">
         <iframe id="present-iframe"
                 title="Presentation deck"

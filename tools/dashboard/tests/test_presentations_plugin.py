@@ -63,14 +63,27 @@ def test_presentation_deck_schema_validates_payload():
 def test_presentations_api_reads_design_and_records_shown(tmp_path, monkeypatch):
     fixture_path = tmp_path / "fixture.json"
     fixture = {
-        "active_sessions": [],
+        "active_sessions": [
+            {
+                "session_id": "auto-present-owner",
+                "label": "Present owner",
+                "type": "container",
+                "is_live": True,
+                "active": True,
+                "age_seconds": 3,
+            }
+        ],
         "beads": [],
         "experiments": [
-            make_experiment(
-                TEST_EXPERIMENT_ID,
-                title="Roadmap Deck",
-                html="<section>One</section><section>Two</section>",
-            )
+            {
+                **make_experiment(
+                    TEST_EXPERIMENT_ID,
+                    title="Roadmap Deck",
+                    html="<section>One</section><section>Two</section>",
+                ),
+                "creator_session_id": "auto-present-owner",
+                "creator_session_label": "Present owner",
+            }
         ],
         "settings": {},
     }
@@ -89,11 +102,17 @@ def test_presentations_api_reads_design_and_records_shown(tmp_path, monkeypatch)
 
     assert deck_response.status_code == 200
     deck = deck_response.json()["deck"]
+    owner_presence = deck_response.json()["owner_presence"]
     assert deck["design_id"] == TEST_EXPERIMENT_ID
     assert deck["latest_revision_id"] == TEST_EXPERIMENT_ID
     assert deck["name"] == "Roadmap Deck"
     assert deck["slide_count"] == 2
     assert deck["slide_ids"] == ["slide-1", "slide-2"]
+    assert owner_presence["participant_id"] == "auto-present-owner"
+    assert owner_presence["participant_label"] == "Present owner"
+    assert owner_presence["is_owner"] is True
+    assert owner_presence["is_live"] is True
+    assert owner_presence["is_active"] is True
 
     assert shown_response.status_code == 200
     assert shown_response.json()["deck"]["last_shown_at"].endswith("Z")
@@ -157,5 +176,23 @@ assert(doc.includes('<section>Right</section>'));
 assert(!doc.includes('<section>Wrong</section>'));
 assert(doc.includes('scroll-snap-type:y mandatory'));
 assert(doc.includes('window.FIXTURE_STATES'));
+const fullDoc = helpers.iframeDocument({{
+  variants: [{{ html: '<!doctype html><html><head><style>.x{{color:red}}</style></head><body><section>Full</section></body></html>' }}],
+}}, 0);
+assert(fullDoc.includes('<style>.x{{color:red}}</style>'));
+assert(fullDoc.includes('<main id="present-scroll-root"><section>Full</section></main>'));
+assert(!fullDoc.includes('<main id="present-scroll-root"><!doctype html>'));
+assert.equal(helpers.presentSurfaceId('/presentations/deck-1/3'), 'presentations:deck-1');
+const topbar = helpers.topbarHtml(
+  {{ name: 'Deck', subtitle: 'Sub' }},
+  1,
+  3,
+  [{{ participant_id: 'listener', participant_label: 'Listener', state: 'present' }}],
+  {{ participant_id: 'owner', participant_label: 'Owner', is_owner: true, is_live: true, is_active: true, intent: 'listening' }},
+);
+assert(topbar.includes('present-topbar-presence'));
+assert(topbar.includes('present-topbar-owner is-live'));
+assert(topbar.includes('Owner'));
+assert(topbar.includes('2 / 3'));
 """
     subprocess.run([node, "-e", script], check=True)
