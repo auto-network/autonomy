@@ -186,6 +186,15 @@
   color: #cbd5e1;
 }
 
+/* In the session viewer the pinned outbox tile owns the bottom surface, so the
+   floating caption gutter must hide there. CSS-gated on the composer-active
+   body flag (set by session-viewer.js) so it reacts the instant the viewer
+   composer is active — no Alpine re-eval needed (a JS getter can't reactively
+   track a body-class change). !important beats x-show's inline display. */
+body.sv-viewer-composer-active .voice-caption {
+  display: none !important;
+}
+
 .voice-sheet {
   position: fixed;
   left: 0;
