@@ -25,9 +25,74 @@ import time
 _session_locks: dict[str, asyncio.Lock] = {}
 
 
+class TmuxSendError(Exception):
+    """Raised by :func:`tmux_send_awaited` when one of the underlying
+    tmux subprocesses returns a non-zero exit code.
+
+    Carries the named operation (``load-buffer`` / ``paste-buffer`` /
+    ``delete-buffer`` / ``send-keys``), the subprocess returncode,
+    and the captured stderr so the caller can render an actionable
+    error to the operator (e.g. ``/ws/voice`` surfacing a
+    ``commit_error`` frame with the underlying tmux failure).
+
+    The classic fire-and-forget :func:`tmux_send` never raises this
+    — it intentionally drops subprocess outcomes on the floor.
+    """
+
+    def __init__(self, op: str, returncode: int, stderr: str):
+        self.op = op
+        self.returncode = returncode
+        self.stderr = stderr
+        super().__init__(
+            f"tmux {op} failed (returncode={returncode}): "
+            f"{stderr or '<no stderr>'}"
+        )
+
+
 async def tmux_send(target: str, text: str) -> None:
-    """Queue a paste+Enter to a tmux session.  Returns immediately."""
+    """Queue a paste+Enter to a tmux session.  Returns immediately.
+
+    The actual paste runs in a background task; this function does
+    NOT block on completion and does NOT raise on tmux failure.
+    For callers that need success/failure to surface (the
+    ``/ws/voice`` commit path, for instance), use
+    :func:`tmux_send_awaited` instead.
+    """
     asyncio.create_task(_tmux_send_worker(target, text))
+
+
+async def tmux_send_awaited(target: str, text: str) -> None:
+    """Synchronous paste+Enter that awaits the actual subprocess
+    completion AND raises :class:`TmuxSendError` on any non-zero
+    tmux return code.
+
+    Same per-session locking and double-Enter retry as
+    :func:`tmux_send`; the difference is the success boundary.
+    With ``tmux_send`` the boundary is "we scheduled a worker";
+    with ``tmux_send_awaited`` the boundary is "tmux accepted the
+    paste and the first enter landed without error". Use this
+    where the operator-visible success of the operation depends
+    on the actual tmux outcome (``/ws/voice`` commit) rather than
+    on a fire-and-forget delivery promise.
+
+    Note: the retry enter is best-effort — if the first enter
+    succeeded (returncode 0) we don't surface a failure from the
+    retry. The retry exists to unstick a missed first enter, not
+    to be an independent reliability signal.
+    """
+    lock = _session_locks.setdefault(target, asyncio.Lock())
+    async with lock:
+        _tmux_paste_checked(target, text)
+        await asyncio.sleep(0.3)
+        _tmux_enter_checked(target)
+        await asyncio.sleep(0.5)
+        # Retry enter — best-effort, do not raise even on failure.
+        # If the first enter succeeded, this hits an empty prompt;
+        # if it failed, we already raised above.
+        try:
+            _tmux_enter_checked(target)
+        except TmuxSendError:
+            pass
 
 
 async def _tmux_send_worker(target: str, text: str) -> None:
@@ -56,7 +121,13 @@ def tmux_send_sync(target: str, text: str) -> None:
 
 
 def _tmux_paste(target: str, text: str) -> None:
-    """Load text into a unique tmux buffer and paste with bracketed-paste mode."""
+    """Load text into a unique tmux buffer and paste with bracketed-paste mode.
+
+    Subprocess outcomes are intentionally dropped — paired with
+    :func:`tmux_send` / :func:`tmux_send_sync` which are
+    fire-and-forget by contract. Callers that need failure
+    detection use :func:`_tmux_paste_checked` instead (paired
+    with :func:`tmux_send_awaited`)."""
     buf = f"inject_{secrets.token_hex(4)}"
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", delete=False, encoding="utf-8"
@@ -79,6 +150,74 @@ def _tmux_paste(target: str, text: str) -> None:
 
 
 def _tmux_enter(target: str) -> None:
+    """Fire an Enter to the tmux target. Subprocess outcome dropped
+    — see :func:`_tmux_paste`'s docstring."""
     subprocess.run(
         ["tmux", "send-keys", "-t", target, "\r"], capture_output=True
+    )
+
+
+def _check_subprocess(op: str, result: subprocess.CompletedProcess) -> None:
+    """Raise :class:`TmuxSendError` if ``result.returncode != 0``.
+
+    Extracted helper so both ``_tmux_paste_checked`` and
+    ``_tmux_enter_checked`` raise with identical shape (named op +
+    returncode + decoded stderr). The stderr decode is lossy on
+    purpose — operator-readable matters more than byte-fidelity
+    here."""
+    if result.returncode == 0:
+        return
+    stderr = ""
+    if result.stderr:
+        try:
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        except Exception:
+            stderr = repr(result.stderr)[:200]
+    raise TmuxSendError(op, result.returncode, stderr)
+
+
+def _tmux_paste_checked(target: str, text: str) -> None:
+    """Like :func:`_tmux_paste` but raises :class:`TmuxSendError`
+    on any non-zero subprocess returncode. Used by
+    :func:`tmux_send_awaited`."""
+    buf = f"inject_{secrets.token_hex(4)}"
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(text)
+        tmp_path = f.name
+    try:
+        _check_subprocess(
+            "load-buffer",
+            subprocess.run(
+                ["tmux", "load-buffer", "-b", buf, tmp_path],
+                capture_output=True,
+            ),
+        )
+        _check_subprocess(
+            "paste-buffer",
+            subprocess.run(
+                ["tmux", "paste-buffer", "-p", "-b", buf, "-t", target],
+                capture_output=True,
+            ),
+        )
+        # delete-buffer is best-effort cleanup; tmux may have
+        # already discarded the buffer in some race cases. Don't
+        # raise on its failure — the paste already landed.
+        subprocess.run(
+            ["tmux", "delete-buffer", "-b", buf], capture_output=True
+        )
+    finally:
+        os.unlink(tmp_path)
+
+
+def _tmux_enter_checked(target: str) -> None:
+    """Like :func:`_tmux_enter` but raises :class:`TmuxSendError`
+    on non-zero returncode. Used by :func:`tmux_send_awaited`."""
+    _check_subprocess(
+        "send-keys",
+        subprocess.run(
+            ["tmux", "send-keys", "-t", target, "\r"],
+            capture_output=True,
+        ),
     )
