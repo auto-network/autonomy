@@ -451,11 +451,10 @@ body.zoom-expanded .sc-card-list { gap: 8px; }
   color: #fca5a5;
 }
 
-/* Compact-zoom collapses the lifecycle strip + footer entirely; the
- * existing chrome handles the rest of the density shift. The phase
- * chip narrows so it doesn't push other compact-row content off. */
-body.zoom-compact .sc-lifecycle,
-body.zoom-compact .sc-footer {
+/* Compact-zoom collapses the lifecycle strip; .sc-footer already gets
+ * display:none from an existing zoom-compact rule above. The phase
+ * chip narrows so it doesn't push other compact-row content off-screen. */
+body.zoom-compact .sc-lifecycle {
   display: none !important;
 }
 body.zoom-compact .sc-phase-chip {
