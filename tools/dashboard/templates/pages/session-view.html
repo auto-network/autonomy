@@ -336,7 +336,10 @@
               </template>
             </span>
           </div>
-          <div class="sv-pending-content" x-text="outbox ? outbox.text : ''"></div>
+          <div class="sv-pending-content"
+               x-text="outbox ? outbox.text : ''"
+               x-init="$nextTick(() => { $el.scrollTop = $el.scrollHeight; })"
+               x-effect="(outbox && outbox.text), $nextTick(() => { if ($el) $el.scrollTop = $el.scrollHeight; })"></div>
           <div class="sv-pending-foot" x-show="outbox && outbox.state === 'unconfirmed'">
             <button class="sv-resend" type="button" @click="resendOutbox()">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
