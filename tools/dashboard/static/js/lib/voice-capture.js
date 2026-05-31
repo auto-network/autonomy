@@ -22,6 +22,7 @@
     bind: '',
     stream: null, ctx: null, sourceNode: null, workletNode: null, sinkNode: null, micGranted: false,
     starting: false,
+    finals: '',
   };
 
   // TEMP visible diagnostic overlay (host can't see the browser console).
@@ -54,15 +55,13 @@
     try { s.ws.send(JSON.stringify({ type: type })); return true; } catch (_e) { return false; }
   }
 
-  function appendFinal(clean) {
+  function _renderBuffer(text) {
     var st = store();
     if (!st || typeof st.setBufferText !== 'function') {
-      _diag('rx#' + _finalCount + ' but NO STORE — text="' + clean + '"');
+      _diag('NO STORE — text="' + (text || '').slice(-40) + '"');
       return;
     }
-    var prev = st.bufferText || '';
-    st.setBufferText(prev ? (prev + ' ' + clean) : clean);
-    _diag('rx#' + _finalCount + ' store.buf="' + (st.bufferText || '').slice(-55) + '"');
+    st.setBufferText(text);
   }
 
   function attachSocket(ws, bind) {
@@ -78,15 +77,25 @@
       try { frame = JSON.parse(event.data); } catch (_e) { return; }
       var type = String(frame.type || '');
       if (type === 'transcript') {
+        var t = String(frame.text || '').trim();
         if (frame.kind === 'final') {
-          var clean = String(frame.text || '').trim();
-          if (clean) { _finalCount++; appendFinal(clean); }
+          if (t) {
+            _finalCount++;
+            s.finals = s.finals ? (s.finals + ' ' + t) : t;
+            _renderBuffer(s.finals);
+            _diag('final#' + _finalCount + ': ' + t.slice(-38));
+          }
+        } else if (frame.kind === 'partial') {
+          if (t) {
+            _renderBuffer(s.finals ? (s.finals + ' ' + t) : t);
+            _diag('live: ' + t.slice(-44));
+          }
         }
         return;
       }
       if (type === 'buffer_state') {
-        var st = store();
-        if (st && typeof st.setBufferText === 'function') st.setBufferText(String(frame.text || ''));
+        s.finals = String(frame.text || '');
+        _renderBuffer(s.finals);
         return;
       }
       if (type === 'error') {
@@ -192,7 +201,7 @@
   function teardown() {
     s.talkActive = false;
     try { if (s.ws) s.ws.close(1000, 'end'); } catch (_e) {}
-    s.ws = null; s.wsOpen = false; s.started = false; s.bind = ''; s.starting = false;
+    s.ws = null; s.wsOpen = false; s.started = false; s.bind = ''; s.starting = false; s.finals = '';
     try { if (s.stream) s.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (_e) {}
     try { if (s.ctx && typeof s.ctx.close === 'function') s.ctx.close(); } catch (_e) {}
     s.stream = null; s.ctx = null; s.sourceNode = null; s.workletNode = null; s.sinkNode = null; s.micGranted = false;
