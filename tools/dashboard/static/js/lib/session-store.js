@@ -98,6 +98,32 @@ window.clearDraft = function(sessionId) {
 // viewer uses to reconcile the optimistic tile against the JSONL log entry.
 // The voice path calls this at the START of a capturing tile so the id is
 // stable from first word through send — no placeholder swap on send.
+var _OUTBOX_PREFIX = 'sessionOutbox:';
+
+// Persist the pending message so it survives a full reload / iOS eviction
+// MID-SEND — the whole point of the outbox: a sent-but-unconfirmed message is
+// never lost, even if the page dies before the log echoes it back. On the next
+// mount the viewer restores it and re-arms reconciliation.
+window.saveOutbox = function(sessionId, outbox) {
+  if (!sessionId) return;
+  try {
+    if (outbox) window.localStorage.setItem(_OUTBOX_PREFIX + sessionId, JSON.stringify(outbox));
+    else window.localStorage.removeItem(_OUTBOX_PREFIX + sessionId);
+  } catch (e) { /* private mode / quota — in-memory outbox still works */ }
+};
+window.loadOutbox = function(sessionId) {
+  if (!sessionId) return null;
+  try {
+    var raw = window.localStorage.getItem(_OUTBOX_PREFIX + sessionId);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+};
+window.clearOutbox = function(sessionId) {
+  if (!sessionId) return;
+  try { window.localStorage.removeItem(_OUTBOX_PREFIX + sessionId); }
+  catch (e) { /* ignore */ }
+};
+
 var _outboxSeq = 0;
 window.newOutboxId = function() {
   _outboxSeq += 1;
