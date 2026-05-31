@@ -1,0 +1,83 @@
+<link rel="stylesheet" href="/static/plugins/presentations/page.css">
+<div data-testid="presentations-fragment-root"
+     x-data="presentationsPage()"
+     x-init="init()"
+     class="present-page pb-safe">
+
+  <template x-if="mode === 'library'">
+    <section class="present-library" data-testid="present-library">
+      <div class="present-toolbar">
+        <div>
+          <h1>Decks</h1>
+          <p x-text="decks.length + ' shown'"></p>
+        </div>
+        <button type="button" class="present-refresh" @click="loadLibrary()" title="Refresh" data-testid="present-refresh">
+          Refresh
+        </button>
+      </div>
+
+      <template x-if="loading">
+        <div class="present-empty" data-testid="present-loading">Loading decks...</div>
+      </template>
+
+      <template x-if="!loading && decks.length === 0">
+        <div class="present-empty" data-testid="present-empty">No decks have been shown yet.</div>
+      </template>
+
+      <div class="present-deck-list" x-show="!loading && decks.length > 0" data-testid="present-deck-list">
+        <template x-for="deck in decks" :key="deck.design_id || deck.key">
+          <article class="present-deck-card" data-testid="present-deck-card">
+            <button type="button" class="present-deck-main" @click="openDeck(deck)">
+              <span class="present-deck-name" x-text="deck.name || 'Untitled deck'"></span>
+              <span class="present-deck-subtitle" x-text="deck.subtitle || 'Design Studio deck'"></span>
+            </button>
+            <div class="present-deck-meta">
+              <span x-text="formatDate(deck.last_shown_at || deck.created_at)"></span>
+              <span x-text="creatorLabel(deck)"></span>
+              <span x-text="(deck.slide_count || 1) + ' slides'"></span>
+            </div>
+            <div class="present-deck-links">
+              <button type="button" @click="openDeck(deck)">Open</button>
+              <button type="button" @click="openDesign(deck)">Design</button>
+              <button type="button" x-show="deck.creator_session_id" @click="openSession(deck)">Session</button>
+            </div>
+          </article>
+        </template>
+      </div>
+    </section>
+  </template>
+
+  <template x-if="mode === 'deck'">
+    <section class="present-deck-view" data-testid="present-deck-view">
+      <div class="present-stagebar">
+        <button type="button" class="present-back" @click="navigateTo('/presentations')" title="Back to decks" aria-label="Back to decks">
+          Back
+        </button>
+        <div class="present-stage-title">
+          <span x-text="deck.name || 'Untitled deck'"></span>
+          <small x-text="deck.subtitle || ''"></small>
+        </div>
+        <div class="present-count" x-text="(activeSlide + 1) + ' / ' + slideCount"></div>
+      </div>
+
+      <div class="present-stage" data-testid="present-stage">
+        <iframe id="present-iframe"
+                title="Presentation deck"
+                data-testid="present-iframe"
+                class="present-iframe"></iframe>
+        <div class="present-progress" aria-hidden="true">
+          <template x-for="idx in slideIndexes" :key="idx">
+            <button type="button"
+                    :class="{ active: idx === activeSlide }"
+                    @click="goToSlide(idx)"
+                    :aria-label="'Go to slide ' + (idx + 1)"></button>
+          </template>
+        </div>
+      </div>
+    </section>
+  </template>
+
+  <template x-if="error">
+    <div class="present-error" data-testid="present-error" x-text="error"></div>
+  </template>
+</div>

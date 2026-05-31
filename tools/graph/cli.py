@@ -3965,6 +3965,9 @@ def cmd_ui_design(args):
         "title": args.title,
         "variants": [{"id": vid, "html": html} for vid, html in variants.items()],
     }
+    creator_session_id = os.environ.get("AUTONOMY_SESSION", "").strip()
+    if creator_session_id:
+        exp_data["creator_session_id"] = creator_session_id
     if args.design:
         exp_data["design_id"] = args.design
     if fixture:
@@ -4044,6 +4047,8 @@ def cmd_ui_design(args):
                 "design_id": design_id,
                 "variants": [{"id": vid, "html": html} for vid, html in variants.items()],
             }
+            if creator_session_id:
+                exp_data["creator_session_id"] = creator_session_id
             if fixture:
                 exp_data["fixture"] = fixture
 

@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS designs (
   status TEXT NOT NULL DEFAULT 'pending',
   design_id TEXT,
   revision_seq INTEGER,
+  creator_session_id TEXT,
+  creator_session_label TEXT,
   created_at DATETIME DEFAULT (datetime('now'))
 )
 """
@@ -103,6 +105,8 @@ def _migrate_from_experiments(conn: sqlite3.Connection) -> None:
         "ALTER TABLE experiments ADD COLUMN series_id TEXT",
         "ALTER TABLE experiments ADD COLUMN series_seq INTEGER",
         "ALTER TABLE experiments ADD COLUMN alpine INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE experiments ADD COLUMN creator_session_id TEXT",
+        "ALTER TABLE experiments ADD COLUMN creator_session_label TEXT",
     ]:
         try:
             conn.execute(stmt)
@@ -123,8 +127,12 @@ def _migrate_from_experiments(conn: sqlite3.Connection) -> None:
 
     # Copy data: series_id → design_id, series_seq → revision_seq
     conn.execute("""\
-        INSERT OR IGNORE INTO designs (id, title, description, fixture, status, design_id, revision_seq, created_at, alpine)
-        SELECT id, title, description, fixture, status, series_id, series_seq, created_at, alpine
+        INSERT OR IGNORE INTO designs (
+            id, title, description, fixture, status, design_id, revision_seq,
+            created_at, alpine, creator_session_id, creator_session_label
+        )
+        SELECT id, title, description, fixture, status, series_id, series_seq,
+            created_at, alpine, creator_session_id, creator_session_label
         FROM experiments
     """)
 
@@ -159,6 +167,14 @@ def init_db() -> None:
             conn.execute("ALTER TABLE designs ADD COLUMN alpine INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass
+        try:
+            conn.execute("ALTER TABLE designs ADD COLUMN creator_session_id TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE designs ADD COLUMN creator_session_label TEXT")
+        except sqlite3.OperationalError:
+            pass
         # Backfill standalone designs
         conn.execute(
             "UPDATE designs SET design_id = id, revision_seq = 1 WHERE design_id IS NULL"
@@ -176,6 +192,8 @@ def create_design(
     variants: list[dict],
     design_id: str | None = None,
     alpine: bool = False,
+    creator_session_id: str | None = None,
+    creator_session_label: str | None = None,
 ) -> str:
     """Create a design revision with variants. Returns the revision UUID.
 
@@ -196,9 +214,13 @@ def create_design(
             design_id = rev_id
             revision_seq = 1
         conn.execute(
-            "INSERT INTO designs (id, title, description, fixture, design_id, revision_seq, alpine)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (rev_id, title, description, fixture, design_id, revision_seq, int(alpine)),
+            "INSERT INTO designs (id, title, description, fixture, design_id, revision_seq, alpine, "
+            "creator_session_id, creator_session_label)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                rev_id, title, description, fixture, design_id, revision_seq,
+                int(alpine), creator_session_id, creator_session_label,
+            ),
         )
         for v in variants:
             conn.execute(

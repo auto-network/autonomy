@@ -375,7 +375,17 @@ def resolve_design_prefix(partial_id: str) -> tuple[str | None, list[str] | None
     return None, None
 
 
-def create_design(*, title, description=None, fixture=None, variants=None, design_id=None, alpine=False):
+def create_design(
+    *,
+    title,
+    description=None,
+    fixture=None,
+    variants=None,
+    design_id=None,
+    alpine=False,
+    creator_session_id=None,
+    creator_session_label=None,
+):
     """No-op in mock mode — designs are defined in fixture file."""
     import uuid
     return str(uuid.uuid4())
