@@ -1,0 +1,1344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+  >
+  <title>Voice Pipe Canary</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #06070b;
+      --panel: rgba(11, 16, 26, 0.86);
+      --panel-strong: rgba(15, 24, 38, 0.96);
+      --line: rgba(115, 142, 171, 0.18);
+      --line-hot: rgba(86, 235, 189, 0.48);
+      --text: #eef4ff;
+      --muted: #8da0ba;
+      --accent: #67f3d0;
+      --accent-warm: #f5bf72;
+      --danger: #ff8b9d;
+      --ok: #79f2a4;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+      --display-font: "Iowan Old Style", "Palatino Linotype", "URW Palladio L", "Book Antiqua", Georgia, serif;
+      --body-font: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+      --mono-font: "SFMono-Regular", "IBM Plex Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    html,
+    body {
+      margin: 0;
+      min-height: 100%;
+      background:
+        radial-gradient(circle at top left, rgba(102, 242, 208, 0.14), transparent 32%),
+        radial-gradient(circle at top right, rgba(245, 191, 114, 0.14), transparent 28%),
+        linear-gradient(180deg, #09101a 0%, #050609 48%, #040507 100%);
+      color: var(--text);
+      font-family: var(--body-font);
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        linear-gradient(rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.02)),
+        repeating-linear-gradient(
+          0deg,
+          transparent 0,
+          transparent 27px,
+          rgba(105, 129, 153, 0.06) 28px
+        );
+      mix-blend-mode: screen;
+      opacity: 0.42;
+    }
+
+    .smoke-shell {
+      position: relative;
+      min-height: 100vh;
+      padding:
+        max(24px, calc(env(safe-area-inset-top, 0px) + 18px))
+        max(18px, calc(env(safe-area-inset-right, 0px) + 18px))
+        max(28px, calc(env(safe-area-inset-bottom, 0px) + 24px))
+        max(18px, calc(env(safe-area-inset-left, 0px) + 18px));
+    }
+
+    .smoke-frame {
+      max-width: 1280px;
+      margin: 0 auto;
+      display: grid;
+      gap: 22px;
+    }
+
+    .smoke-hero {
+      position: relative;
+      overflow: hidden;
+      padding: 26px 28px 22px;
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background:
+        linear-gradient(145deg, rgba(8, 14, 24, 0.96), rgba(10, 11, 16, 0.92)),
+        linear-gradient(90deg, rgba(103, 243, 208, 0.12), transparent 45%);
+      box-shadow: var(--shadow);
+    }
+
+    .smoke-hero::after {
+      content: "";
+      position: absolute;
+      inset: auto -10% 0 auto;
+      width: 280px;
+      height: 280px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(103, 243, 208, 0.17), transparent 72%);
+      filter: blur(12px);
+      pointer-events: none;
+    }
+
+    .smoke-overline {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+      color: var(--accent);
+      font-family: var(--mono-font);
+      font-size: 0.72rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    .smoke-overline::before {
+      content: "";
+      width: 28px;
+      height: 1px;
+      background: currentColor;
+      opacity: 0.72;
+    }
+
+    .smoke-title {
+      margin: 0;
+      font-family: var(--display-font);
+      font-size: clamp(2.35rem, 5vw, 4.45rem);
+      line-height: 0.94;
+      letter-spacing: -0.04em;
+      max-width: 12ch;
+    }
+
+    .smoke-copy {
+      max-width: 72ch;
+      margin: 14px 0 0;
+      color: #c8d5e9;
+      font-size: 1rem;
+      line-height: 1.58;
+    }
+
+    .smoke-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .smoke-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
+      padding: 0 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(111, 136, 164, 0.22);
+      background: rgba(15, 24, 37, 0.68);
+      color: #b7cae6;
+      font-family: var(--mono-font);
+      font-size: 0.78rem;
+    }
+
+    .smoke-chip strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .smoke-grid {
+      display: grid;
+      grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+      gap: 22px;
+      align-items: start;
+    }
+
+    .smoke-panel {
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+      overflow: hidden;
+    }
+
+    .smoke-panel-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 18px 20px 12px;
+      border-bottom: 1px solid rgba(115, 142, 171, 0.12);
+    }
+
+    .smoke-panel-title {
+      margin: 0;
+      font-family: var(--display-font);
+      font-size: 1.35rem;
+      letter-spacing: -0.02em;
+    }
+
+    .smoke-panel-kicker {
+      color: var(--muted);
+      font-family: var(--mono-font);
+      font-size: 0.76rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .smoke-controls {
+      padding: 18px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .smoke-card {
+      border: 1px solid rgba(115, 142, 171, 0.14);
+      border-radius: 18px;
+      background: var(--panel-strong);
+      padding: 14px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .smoke-label {
+      display: block;
+      color: var(--muted);
+      font-family: var(--mono-font);
+      font-size: 0.72rem;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+
+    .smoke-field-row {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .smoke-input,
+    .smoke-select,
+    .smoke-button {
+      width: 100%;
+      min-width: 0;
+      border-radius: 16px;
+      border: 1px solid rgba(122, 149, 180, 0.18);
+      background: rgba(8, 13, 21, 0.92);
+      color: var(--text);
+      font: inherit;
+    }
+
+    .smoke-input,
+    .smoke-select {
+      min-height: 52px;
+      padding: 0 16px;
+      outline: none;
+    }
+
+    .smoke-input:focus,
+    .smoke-select:focus,
+    .smoke-button:focus-visible {
+      border-color: rgba(103, 243, 208, 0.72);
+      box-shadow: 0 0 0 3px rgba(103, 243, 208, 0.16);
+      outline: none;
+    }
+
+    .smoke-button {
+      min-height: 56px;
+      padding: 0 16px;
+      cursor: pointer;
+      font-family: var(--mono-font);
+      font-size: 0.78rem;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+      transition:
+        transform 0.14s ease,
+        border-color 0.18s ease,
+        background 0.18s ease,
+        color 0.18s ease,
+        box-shadow 0.18s ease;
+    }
+
+    .smoke-button:hover:not(:disabled) {
+      transform: translateY(-1px);
+      border-color: rgba(103, 243, 208, 0.46);
+    }
+
+    .smoke-button:active:not(:disabled),
+    .smoke-button[data-state="active"] {
+      transform: translateY(1px);
+    }
+
+    .smoke-button:disabled {
+      opacity: 0.42;
+      cursor: not-allowed;
+    }
+
+    .smoke-button--primary {
+      background:
+        linear-gradient(135deg, rgba(103, 243, 208, 0.22), rgba(36, 75, 94, 0.24)),
+        rgba(8, 13, 21, 0.96);
+      color: var(--accent);
+    }
+
+    .smoke-button--warm {
+      background:
+        linear-gradient(135deg, rgba(245, 191, 114, 0.22), rgba(92, 51, 23, 0.22)),
+        rgba(8, 13, 21, 0.96);
+      color: var(--accent-warm);
+    }
+
+    .smoke-button--danger {
+      background:
+        linear-gradient(135deg, rgba(255, 139, 157, 0.2), rgba(83, 22, 32, 0.18)),
+        rgba(8, 13, 21, 0.96);
+      color: var(--danger);
+    }
+
+    .smoke-button--hero {
+      min-height: 82px;
+      border-radius: 22px;
+      font-size: 0.92rem;
+      letter-spacing: 0.18em;
+      background:
+        linear-gradient(135deg, rgba(103, 243, 208, 0.44), rgba(47, 107, 126, 0.2)),
+        rgba(8, 13, 21, 0.98);
+      box-shadow: inset 0 0 0 1px rgba(124, 255, 221, 0.12);
+    }
+
+    .smoke-button--hero[data-state="active"] {
+      color: #04211c;
+      background:
+        linear-gradient(135deg, rgba(103, 243, 208, 0.96), rgba(182, 255, 232, 0.82)),
+        rgba(8, 13, 21, 0.98);
+      box-shadow:
+        0 0 0 1px rgba(124, 255, 221, 0.34),
+        0 0 42px rgba(103, 243, 208, 0.28);
+    }
+
+    .smoke-action-row,
+    .smoke-inline-actions {
+      display: grid;
+      gap: 10px;
+    }
+
+    .smoke-action-row {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .smoke-inline-actions {
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .smoke-manual-row {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .smoke-status-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .smoke-status-card {
+      padding: 12px 14px;
+      border-radius: 16px;
+      border: 1px solid rgba(115, 142, 171, 0.14);
+      background: rgba(8, 12, 19, 0.76);
+    }
+
+    .smoke-status-card dt {
+      margin: 0 0 8px;
+      color: var(--muted);
+      font-family: var(--mono-font);
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .smoke-status-card dd {
+      margin: 0;
+      font-family: var(--mono-font);
+      font-size: 0.95rem;
+      color: var(--text);
+      line-height: 1.3;
+      word-break: break-word;
+    }
+
+    .smoke-status-card dd[data-level="ok"] { color: var(--ok); }
+    .smoke-status-card dd[data-level="warm"] { color: var(--accent-warm); }
+    .smoke-status-card dd[data-level="danger"] { color: var(--danger); }
+    .smoke-status-card dd[data-level="accent"] { color: var(--accent); }
+
+    .smoke-transcript {
+      display: grid;
+      gap: 18px;
+      padding: 18px;
+    }
+
+    .smoke-ribbon {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
+      padding: 0 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(103, 243, 208, 0.2);
+      background: rgba(8, 13, 21, 0.88);
+      color: var(--muted);
+      font-family: var(--mono-font);
+      font-size: 0.76rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .smoke-ribbon-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 16px rgba(103, 243, 208, 0.48);
+    }
+
+    .smoke-buffer {
+      min-height: 248px;
+      padding: 18px;
+      border-radius: 22px;
+      border: 1px solid rgba(103, 243, 208, 0.16);
+      background:
+        linear-gradient(180deg, rgba(10, 15, 24, 0.96), rgba(6, 9, 14, 0.94)),
+        rgba(8, 13, 21, 0.94);
+      display: grid;
+      gap: 16px;
+      align-content: start;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .smoke-buffer::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(90deg, rgba(103, 243, 208, 0.05), transparent 35%),
+        linear-gradient(transparent, rgba(103, 243, 208, 0.02));
+      pointer-events: none;
+    }
+
+    .smoke-buffer-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .smoke-buffer-title {
+      margin: 0;
+      font-family: var(--mono-font);
+      font-size: 0.82rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .smoke-buffer-copy {
+      position: relative;
+      z-index: 1;
+      font-family: var(--display-font);
+      font-size: clamp(1.3rem, 2.6vw, 2.35rem);
+      line-height: 1.16;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-word;
+      min-height: 5lh;
+    }
+
+    .smoke-buffer-copy.is-empty {
+      color: rgba(180, 196, 220, 0.38);
+    }
+
+    .smoke-partial {
+      min-height: 64px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      border: 1px dashed rgba(245, 191, 114, 0.24);
+      background: rgba(31, 24, 13, 0.36);
+      color: #f9ddb0;
+      font-family: var(--mono-font);
+      font-size: 0.95rem;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .smoke-partial.is-empty {
+      color: rgba(245, 191, 114, 0.38);
+    }
+
+    .smoke-log {
+      display: grid;
+      gap: 8px;
+      max-height: 280px;
+      overflow: auto;
+      padding-right: 2px;
+    }
+
+    .smoke-log-entry {
+      display: grid;
+      grid-template-columns: auto auto minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      padding: 10px 12px;
+      border-radius: 14px;
+      border: 1px solid rgba(115, 142, 171, 0.12);
+      background: rgba(8, 13, 21, 0.74);
+      font-family: var(--mono-font);
+      font-size: 0.78rem;
+      line-height: 1.45;
+    }
+
+    .smoke-log-entry strong {
+      color: var(--text);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 0.66rem;
+    }
+
+    .smoke-log-entry[data-kind="ok"] strong { color: var(--ok); }
+    .smoke-log-entry[data-kind="warn"] strong { color: var(--accent-warm); }
+    .smoke-log-entry[data-kind="error"] strong { color: var(--danger); }
+    .smoke-log-entry[data-kind="final"] strong { color: var(--accent); }
+
+    .smoke-hint {
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.55;
+      margin: 0;
+    }
+
+    .smoke-footnote {
+      color: #9fb0c7;
+      font-size: 0.84rem;
+      line-height: 1.56;
+    }
+
+    @media (max-width: 960px) {
+      .smoke-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .smoke-shell {
+        padding-left: max(14px, calc(env(safe-area-inset-left, 0px) + 14px));
+        padding-right: max(14px, calc(env(safe-area-inset-right, 0px) + 14px));
+      }
+
+      .smoke-hero {
+        padding: 22px 20px 18px;
+      }
+
+      .smoke-title {
+        font-size: clamp(2rem, 13vw, 3.3rem);
+      }
+
+      .smoke-action-row,
+      .smoke-status-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .smoke-inline-actions,
+      .smoke-manual-row {
+        grid-template-columns: 1fr;
+      }
+
+      .smoke-log-entry {
+        grid-template-columns: 1fr;
+        gap: 4px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="smoke-shell" data-testid="voice-smoke-root">
+    <div class="smoke-frame">
+      <section class="smoke-hero" aria-labelledby="voice-smoke-title">
+        <div class="smoke-overline">Voice pipe canary</div>
+        <h1 id="voice-smoke-title" class="smoke-title">Raw mic capture into the real /ws/voice seam.</h1>
+        <p class="smoke-copy">
+          This page is the operator canary for the voice transport stack:
+          <code>getUserMedia</code>, <code>AudioWorklet</code>, raw 16kHz PCM frames,
+          <code>/ws/voice</code>, WhisperLive, buffer persistence, and commit into the bound tmux session.
+          It is intentionally standalone and loud about its own failures.
+        </p>
+        <div class="smoke-meta">
+          <div class="smoke-chip"><strong>Route</strong> <span>/ws/voice?bind=&lt;tmux_name&gt;</span></div>
+          <div class="smoke-chip"><strong>Capture</strong> <span>AudioWorklet • 16kHz PCM • mono</span></div>
+          <div class="smoke-chip"><strong>Cold start</strong> <span>First press may take 5–10s</span></div>
+        </div>
+      </section>
+
+      <div class="smoke-grid">
+        <section class="smoke-panel" aria-labelledby="voice-smoke-controls-title">
+          <div class="smoke-panel-head">
+            <h2 id="voice-smoke-controls-title" class="smoke-panel-title">Control rail</h2>
+            <div class="smoke-panel-kicker">bind · capture · commit</div>
+          </div>
+          <div class="smoke-controls">
+            <section class="smoke-card">
+              <div>
+                <label class="smoke-label" for="voice-session-select">Live tmux session</label>
+                <div class="smoke-inline-actions">
+                  <select
+                    id="voice-session-select"
+                    class="smoke-select"
+                    data-testid="voice-session-select"
+                  >
+                    <option value="">Loading active sessions…</option>
+                  </select>
+                  <button
+                    id="voice-refresh-sessions"
+                    type="button"
+                    class="smoke-button smoke-button--warm"
+                    data-testid="voice-refresh-sessions"
+                  >
+                    Refresh
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label class="smoke-label" for="voice-manual-bind">Manual tmux name</label>
+                <div class="smoke-manual-row">
+                  <input
+                    id="voice-manual-bind"
+                    class="smoke-input"
+                    data-testid="voice-manual-bind"
+                    placeholder="Optional override if the target is not in the list"
+                    autocapitalize="off"
+                    autocomplete="off"
+                    spellcheck="false"
+                  >
+                  <button
+                    id="voice-bind-button"
+                    type="button"
+                    class="smoke-button smoke-button--primary"
+                    data-testid="voice-bind-button"
+                  >
+                    Bind
+                  </button>
+                </div>
+              </div>
+              <p class="smoke-hint">
+                The selector uses <code>/api/dao/active_sessions</code>. If the target session is live but missing from
+                the list, paste its tmux name manually and bind directly.
+              </p>
+            </section>
+
+            <section class="smoke-card">
+              <div class="smoke-action-row">
+                <button
+                  id="voice-grant-button"
+                  type="button"
+                  class="smoke-button smoke-button--primary"
+                  data-testid="voice-grant-button"
+                >
+                  Grant Mic
+                </button>
+                <button
+                  id="voice-commit-button"
+                  type="button"
+                  class="smoke-button smoke-button--warm"
+                  data-testid="voice-commit-button"
+                >
+                  Commit
+                </button>
+                <button
+                  id="voice-discard-button"
+                  type="button"
+                  class="smoke-button"
+                  data-testid="voice-discard-button"
+                >
+                  Discard
+                </button>
+              </div>
+
+              <button
+                id="voice-ptt-button"
+                type="button"
+                class="smoke-button smoke-button--hero"
+                data-testid="voice-ptt-button"
+                aria-pressed="false"
+              >
+                Hold to talk
+              </button>
+
+              <button
+                id="voice-reset-button"
+                type="button"
+                class="smoke-button smoke-button--danger"
+                data-testid="voice-reset-button"
+              >
+                Reset
+              </button>
+
+              <p class="smoke-footnote">
+                Flow: bind a session, grant mic access, then hold to talk. The first press sends
+                <code>start</code>; later holds use <code>unmute</code> / <code>mute</code>. Reset ends the voice session,
+                clears local readouts, and lets you rebind cleanly after upstream failures.
+              </p>
+            </section>
+
+            <section class="smoke-card">
+              <div class="smoke-status-grid">
+                <dl class="smoke-status-card">
+                  <dt>Bind</dt>
+                  <dd id="voice-bind-readout" data-testid="voice-bind-readout">Unbound</dd>
+                </dl>
+                <dl class="smoke-status-card">
+                  <dt>WebSocket</dt>
+                  <dd id="voice-ws-readout" data-testid="voice-ws-readout">Closed</dd>
+                </dl>
+                <dl class="smoke-status-card">
+                  <dt>Capture</dt>
+                  <dd id="voice-capture-readout" data-testid="voice-capture-readout">Mic not granted</dd>
+                </dl>
+                <dl class="smoke-status-card">
+                  <dt>Upstream</dt>
+                  <dd id="voice-upstream-readout" data-testid="voice-upstream-readout">Idle</dd>
+                </dl>
+                <dl class="smoke-status-card">
+                  <dt>Buffer</dt>
+                  <dd id="voice-buffer-readout" data-testid="voice-buffer-readout">0 words</dd>
+                </dl>
+                <dl class="smoke-status-card">
+                  <dt>Last event</dt>
+                  <dd id="voice-last-readout" data-testid="voice-last-readout">Waiting</dd>
+                </dl>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="smoke-panel" aria-labelledby="voice-smoke-transcript-title">
+          <div class="smoke-panel-head">
+            <h2 id="voice-smoke-transcript-title" class="smoke-panel-title">Transcript scope</h2>
+            <div class="smoke-panel-kicker">partials · finals · event log</div>
+          </div>
+          <div class="smoke-transcript">
+            <div class="smoke-ribbon" data-testid="voice-mode-ribbon">
+              <span class="smoke-ribbon-dot" aria-hidden="true"></span>
+              <span id="voice-mode-ribbon-text">Idle</span>
+            </div>
+
+            <section class="smoke-buffer" data-testid="voice-buffer-panel">
+              <div class="smoke-buffer-head">
+                <h3 class="smoke-buffer-title">Committed buffer</h3>
+                <span id="voice-buffer-meta" class="smoke-panel-kicker">0 words</span>
+              </div>
+              <div id="voice-buffer-copy" class="smoke-buffer-copy smoke-buffer-copy is-empty">
+                Final transcript segments will accumulate here before commit.
+              </div>
+            </section>
+
+            <section>
+              <div class="smoke-buffer-head">
+                <h3 class="smoke-buffer-title">Live partial</h3>
+                <span class="smoke-panel-kicker">not persisted</span>
+              </div>
+              <div id="voice-partial-copy" class="smoke-partial smoke-partial is-empty" data-testid="voice-partial-copy">
+                Partial transcript frames appear here while you are holding the talk button.
+              </div>
+            </section>
+
+            <section>
+              <div class="smoke-buffer-head">
+                <h3 class="smoke-buffer-title">Event log</h3>
+                <span class="smoke-panel-kicker">most recent first</span>
+              </div>
+              <div id="voice-log" class="smoke-log" data-testid="voice-log"></div>
+            </section>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      const WORKLET_URL = "/static/js/lib/voice-smoke-worklet.js?v=__STATIC_VERSION__";
+      const SESSIONS_URL = "/api/dao/active_sessions";
+      const state = {
+        ws: null,
+        bind: "",
+        stream: null,
+        audioContext: null,
+        sourceNode: null,
+        workletNode: null,
+        sinkNode: null,
+        micGranted: false,
+        talkActive: false,
+        started: false,
+        wsOpen: false,
+        requiresReconnect: false,
+        upstreamState: "idle",
+        bufferText: "",
+        partialText: "",
+        lastEvent: "Waiting",
+        log: [],
+      };
+
+      const els = {
+        sessionSelect: document.getElementById("voice-session-select"),
+        manualBind: document.getElementById("voice-manual-bind"),
+        refreshSessions: document.getElementById("voice-refresh-sessions"),
+        bindButton: document.getElementById("voice-bind-button"),
+        grantButton: document.getElementById("voice-grant-button"),
+        commitButton: document.getElementById("voice-commit-button"),
+        discardButton: document.getElementById("voice-discard-button"),
+        pttButton: document.getElementById("voice-ptt-button"),
+        resetButton: document.getElementById("voice-reset-button"),
+        bindReadout: document.getElementById("voice-bind-readout"),
+        wsReadout: document.getElementById("voice-ws-readout"),
+        captureReadout: document.getElementById("voice-capture-readout"),
+        upstreamReadout: document.getElementById("voice-upstream-readout"),
+        bufferReadout: document.getElementById("voice-buffer-readout"),
+        lastReadout: document.getElementById("voice-last-readout"),
+        modeRibbon: document.getElementById("voice-mode-ribbon-text"),
+        bufferMeta: document.getElementById("voice-buffer-meta"),
+        bufferCopy: document.getElementById("voice-buffer-copy"),
+        partialCopy: document.getElementById("voice-partial-copy"),
+        log: document.getElementById("voice-log"),
+      };
+
+      function wordCount(text) {
+        return String(text || "").trim().split(/\s+/).filter(Boolean).length;
+      }
+
+      function log(kind, message) {
+        const ts = new Date().toISOString().slice(11, 19);
+        state.lastEvent = message;
+        state.log.unshift({ ts, kind, message });
+        state.log = state.log.slice(0, 40);
+        render();
+      }
+
+      function wsUrl(bind) {
+        const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+        return proto + "//" + window.location.host + "/ws/voice?bind=" + encodeURIComponent(bind);
+      }
+
+      function selectedBind() {
+        const manual = String(els.manualBind.value || "").trim();
+        return manual || String(els.sessionSelect.value || "").trim();
+      }
+
+      function bindLabel(row) {
+        const tmux = String(row.tmux_session || row.session_id || row.id || "").trim();
+        const kind = String(row.type || "session").trim();
+        const latest = String(row.last_message || row.latest || "").trim();
+        const latestTail = latest ? " · " + latest.slice(0, 36) : "";
+        return tmux + " · " + kind + latestTail;
+      }
+
+      function setReadoutLevel(el, level) {
+        el.dataset.level = level || "";
+      }
+
+      function renderBuffer() {
+        const text = String(state.bufferText || "").trim();
+        const count = wordCount(text);
+        els.bufferMeta.textContent = count + (count === 1 ? " word" : " words");
+        els.bufferReadout.textContent = count + (count === 1 ? " word" : " words");
+        if (!text) {
+          els.bufferCopy.textContent = "Final transcript segments will accumulate here before commit.";
+          els.bufferCopy.classList.add("is-empty");
+        } else {
+          els.bufferCopy.textContent = text;
+          els.bufferCopy.classList.remove("is-empty");
+        }
+      }
+
+      function renderPartial() {
+        const text = String(state.partialText || "").trim();
+        if (!text) {
+          els.partialCopy.textContent = "Partial transcript frames appear here while you are holding the talk button.";
+          els.partialCopy.classList.add("is-empty");
+        } else {
+          els.partialCopy.textContent = text;
+          els.partialCopy.classList.remove("is-empty");
+        }
+      }
+
+      function renderLog() {
+        els.log.innerHTML = "";
+        for (const row of state.log) {
+          const entry = document.createElement("div");
+          entry.className = "smoke-log-entry";
+          entry.dataset.kind = row.kind;
+          entry.innerHTML = `
+            <span>${row.ts}</span>
+            <strong>${row.kind}</strong>
+            <span>${row.message}</span>
+          `;
+          els.log.appendChild(entry);
+        }
+      }
+
+      function renderStatus() {
+        const wsState = state.wsOpen ? "Open" : "Closed";
+        els.bindReadout.textContent = state.bind || "Unbound";
+        els.wsReadout.textContent = wsState;
+        setReadoutLevel(els.wsReadout, state.wsOpen ? "accent" : "warm");
+
+        let captureLabel = "Mic not granted";
+        let captureLevel = "warm";
+        if (state.micGranted && state.talkActive) {
+          captureLabel = "Capturing live";
+          captureLevel = "ok";
+        } else if (state.micGranted) {
+          captureLabel = "Ready";
+          captureLevel = "accent";
+        }
+        els.captureReadout.textContent = captureLabel;
+        setReadoutLevel(els.captureReadout, captureLevel);
+
+        const upstreamMap = {
+          idle: ["Idle", "warm"],
+          warming: ["Warming", "warm"],
+          ready: ["Ready", "ok"],
+          unavailable: ["Unavailable", "danger"],
+        };
+        const upstream = upstreamMap[state.upstreamState] || ["Idle", "warm"];
+        els.upstreamReadout.textContent = upstream[0];
+        setReadoutLevel(els.upstreamReadout, upstream[1]);
+
+        els.lastReadout.textContent = state.lastEvent;
+        setReadoutLevel(
+          els.lastReadout,
+          state.lastEvent && state.lastEvent.toLowerCase().includes("failed") ? "danger" : "accent",
+        );
+
+        renderBuffer();
+        renderPartial();
+
+        const ribbonState = state.talkActive
+          ? "Live capture"
+          : state.requiresReconnect
+            ? "Reconnect required"
+            : state.started
+              ? "Bound / muted"
+              : "Idle";
+        els.modeRibbon.textContent = ribbonState;
+
+        els.grantButton.textContent = state.micGranted ? "Mic Ready" : "Grant Mic";
+        els.bindButton.textContent = state.wsOpen ? "Rebind" : "Bind";
+        els.pttButton.textContent = state.talkActive
+          ? "Release to mute"
+          : (state.started ? "Hold to talk again" : "Hold to talk");
+        els.pttButton.dataset.state = state.talkActive ? "active" : "idle";
+        els.pttButton.setAttribute("aria-pressed", state.talkActive ? "true" : "false");
+
+        const canBind = selectedBind().length > 0;
+        els.bindButton.disabled = !canBind;
+        els.pttButton.disabled = !state.wsOpen || !state.micGranted || state.requiresReconnect;
+        els.commitButton.disabled = !state.wsOpen;
+        els.discardButton.disabled = !state.wsOpen;
+      }
+
+      function render() {
+        renderStatus();
+        renderLog();
+      }
+
+      async function refreshSessions() {
+        els.refreshSessions.disabled = true;
+        try {
+          const resp = await fetch(SESSIONS_URL, { credentials: "same-origin" });
+          if (!resp.ok) {
+            throw new Error("active session fetch failed with " + resp.status);
+          }
+          const payload = await resp.json();
+          const rows = Array.isArray(payload) ? payload : [];
+          const previous = selectedBind();
+          const options = rows
+            .map((row) => ({
+              value: String(row.tmux_session || row.session_id || row.id || "").trim(),
+              label: bindLabel(row),
+              active: Boolean(row.active),
+            }))
+            .filter((row) => row.value);
+
+          options.sort((a, b) => {
+            if (a.active !== b.active) return a.active ? -1 : 1;
+            return a.value.localeCompare(b.value);
+          });
+
+          els.sessionSelect.innerHTML = "";
+          if (!options.length) {
+            const opt = document.createElement("option");
+            opt.value = "";
+            opt.textContent = "No live sessions found";
+            els.sessionSelect.appendChild(opt);
+          } else {
+            for (const row of options) {
+              const opt = document.createElement("option");
+              opt.value = row.value;
+              opt.textContent = row.label;
+              els.sessionSelect.appendChild(opt);
+            }
+            if (previous && options.some((row) => row.value === previous)) {
+              els.sessionSelect.value = previous;
+            }
+          }
+          log("ok", "Refreshed active session selector");
+        } catch (err) {
+          log("error", "Could not refresh active sessions: " + err.message);
+        } finally {
+          els.refreshSessions.disabled = false;
+          render();
+        }
+      }
+
+      function resetTranscript() {
+        state.bufferText = "";
+        state.partialText = "";
+      }
+
+      function attachSocket(ws, bind) {
+        state.ws = ws;
+        state.bind = bind;
+        ws.binaryType = "arraybuffer";
+        ws.addEventListener("open", () => {
+          if (ws !== state.ws) return;
+          state.wsOpen = true;
+          state.started = false;
+          state.requiresReconnect = false;
+          state.upstreamState = "idle";
+          log("ok", "Bound /ws/voice to " + bind);
+          render();
+        });
+        ws.addEventListener("message", (event) => {
+          if (ws !== state.ws) return;
+          let frame;
+          try {
+            frame = JSON.parse(event.data);
+          } catch (_err) {
+            log("warn", "Ignored non-JSON server frame");
+            return;
+          }
+          const type = String(frame.type || "");
+          if (type === "transcript") {
+            const text = String(frame.text || "");
+            if (frame.kind === "partial") {
+              state.partialText = text;
+            } else if (frame.kind === "final") {
+              state.partialText = "";
+              const clean = text.trim();
+              if (clean) {
+                state.bufferText = state.bufferText ? (state.bufferText + " " + clean) : clean;
+                log("final", "Final transcript: " + clean);
+              }
+            }
+            state.upstreamState = "ready";
+            render();
+            return;
+          }
+          if (type === "buffer_state") {
+            state.bufferText = String(frame.text || "");
+            state.partialText = "";
+            log("ok", "Restored buffered text from prior connection");
+            render();
+            return;
+          }
+          if (type === "committed") {
+            resetTranscript();
+            log("ok", "Committed buffer into " + bind);
+            render();
+            return;
+          }
+          if (type === "commit_error") {
+            log("error", frame.code + ": " + String(frame.message || "commit failed"));
+            render();
+            return;
+          }
+          if (type === "error") {
+            const code = String(frame.code || "unknown");
+            const message = String(frame.message || "server error");
+            log("error", code + ": " + message);
+            if (code === "whisperlive_connect_failed" || code === "whisperlive_session_error") {
+              state.requiresReconnect = true;
+              state.upstreamState = "unavailable";
+            }
+            render();
+            return;
+          }
+          log("warn", "Unhandled server frame: " + type);
+        });
+        ws.addEventListener("close", (event) => {
+          if (ws !== state.ws) return;
+          const reason = String(event.reason || "").trim();
+          state.wsOpen = false;
+          state.started = false;
+          state.talkActive = false;
+          state.ws = null;
+          state.upstreamState = state.requiresReconnect ? "unavailable" : "idle";
+          log("warn", "Voice socket closed" + (reason ? " (" + reason + ")" : ""));
+          render();
+        });
+        ws.addEventListener("error", () => {
+          if (ws !== state.ws) return;
+          log("error", "WebSocket transport error");
+          render();
+        });
+      }
+
+      function closeSocket() {
+        if (!state.ws) return;
+        try {
+          state.ws.close(1000, "reset");
+        } catch (_err) {
+          // best effort
+        }
+      }
+
+      async function bindSession() {
+        const bind = selectedBind();
+        if (!bind) {
+          log("warn", "Choose a tmux session before binding");
+          render();
+          return;
+        }
+        closeSocket();
+        resetTranscript();
+        state.requiresReconnect = false;
+        state.upstreamState = "idle";
+        state.started = false;
+        attachSocket(new WebSocket(wsUrl(bind)), bind);
+        render();
+      }
+
+      async function ensureMicReady() {
+        if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
+          throw new Error("getUserMedia is unavailable in this browser");
+        }
+        if (!window.AudioWorkletNode || !window.AudioContext) {
+          throw new Error("AudioWorklet is unavailable in this browser");
+        }
+        if (state.micGranted) {
+          if (state.audioContext && state.audioContext.state === "suspended") {
+            await state.audioContext.resume();
+          }
+          return;
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            sampleRate: 16000,
+            echoCancellation: true,
+          },
+          video: false,
+        });
+        const ctx = new AudioContext({ sampleRate: 16000, latencyHint: "interactive" });
+        await ctx.audioWorklet.addModule(WORKLET_URL);
+
+        const sourceNode = ctx.createMediaStreamSource(stream);
+        const workletNode = new AudioWorkletNode(ctx, "voice-smoke-pcm", {
+          processorOptions: {
+            targetSampleRate: 16000,
+            frameSamples: 1600,
+          },
+        });
+        const sinkNode = ctx.createGain();
+        sinkNode.gain.value = 0;
+
+        workletNode.port.onmessage = (event) => {
+          const payload = event.data || {};
+          if (payload.type !== "audio" || !(payload.buffer instanceof ArrayBuffer)) return;
+          if (!state.talkActive) return;
+          if (!state.wsOpen || !state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+          if (!state.started || state.requiresReconnect) return;
+          try {
+            state.ws.send(payload.buffer);
+          } catch (err) {
+            log("error", "Audio frame send failed: " + err.message);
+            render();
+          }
+        };
+
+        sourceNode.connect(workletNode);
+        workletNode.connect(sinkNode);
+        sinkNode.connect(ctx.destination);
+
+        state.stream = stream;
+        state.audioContext = ctx;
+        state.sourceNode = sourceNode;
+        state.workletNode = workletNode;
+        state.sinkNode = sinkNode;
+        state.micGranted = true;
+        log("ok", "Mic granted at " + ctx.sampleRate + "Hz");
+        render();
+      }
+
+      function sendControl(type) {
+        if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+          log("warn", "Voice socket is not open");
+          render();
+          return false;
+        }
+        state.ws.send(JSON.stringify({ type }));
+        return true;
+      }
+
+      async function grantMic() {
+        try {
+          await ensureMicReady();
+        } catch (err) {
+          log("error", "Mic grant failed: " + err.message);
+          render();
+        }
+      }
+
+      function beginTalk(event) {
+        if (event) {
+          event.preventDefault();
+          if (typeof els.pttButton.setPointerCapture === "function" && event.pointerId !== undefined) {
+            try {
+              els.pttButton.setPointerCapture(event.pointerId);
+            } catch (_err) {
+              // no-op
+            }
+          }
+        }
+        if (!state.wsOpen) {
+          log("warn", "Bind a tmux session before talking");
+          render();
+          return;
+        }
+        if (!state.micGranted) {
+          log("warn", "Grant mic access before talking");
+          render();
+          return;
+        }
+        if (state.requiresReconnect) {
+          log("warn", "Reset the voice session before retrying WhisperLive");
+          render();
+          return;
+        }
+        if (state.talkActive) return;
+        state.talkActive = true;
+        if (!state.started) {
+          if (sendControl("start")) {
+            state.started = true;
+            state.upstreamState = "warming";
+            log("warn", "Sent start; first warmup may take a few seconds");
+          }
+        } else {
+          sendControl("unmute");
+        }
+        render();
+      }
+
+      function endTalk(event) {
+        if (event) {
+          event.preventDefault();
+        }
+        if (!state.talkActive) return;
+        state.talkActive = false;
+        if (state.started && !state.requiresReconnect) {
+          sendControl("mute");
+        }
+        render();
+      }
+
+      function discardBuffer() {
+        if (sendControl("discard")) {
+          resetTranscript();
+          log("warn", "Discarded the local transcript buffer");
+          render();
+        }
+      }
+
+      function commitBuffer() {
+        if (sendControl("commit")) {
+          log("ok", "Sent commit request");
+          render();
+        }
+      }
+
+      function resetSession() {
+        if (state.wsOpen) {
+          sendControl("end");
+        }
+        closeSocket();
+        resetTranscript();
+        state.requiresReconnect = false;
+        state.started = false;
+        state.talkActive = false;
+        state.upstreamState = "idle";
+        log("warn", "Reset voice session state");
+        render();
+      }
+
+      els.refreshSessions.addEventListener("click", refreshSessions);
+      els.bindButton.addEventListener("click", bindSession);
+      els.grantButton.addEventListener("click", grantMic);
+      els.commitButton.addEventListener("click", commitBuffer);
+      els.discardButton.addEventListener("click", discardBuffer);
+      els.resetButton.addEventListener("click", resetSession);
+
+      els.pttButton.addEventListener("pointerdown", beginTalk);
+      els.pttButton.addEventListener("pointerup", endTalk);
+      els.pttButton.addEventListener("pointercancel", endTalk);
+      els.pttButton.addEventListener("lostpointercapture", endTalk);
+      els.pttButton.addEventListener("keydown", (event) => {
+        if ((event.key === " " || event.key === "Enter") && !event.repeat) {
+          beginTalk(event);
+        }
+      });
+      els.pttButton.addEventListener("keyup", (event) => {
+        if (event.key === " " || event.key === "Enter") {
+          endTalk(event);
+        }
+      });
+
+      window.addEventListener("beforeunload", () => {
+        closeSocket();
+        if (state.stream) {
+          for (const track of state.stream.getTracks()) {
+            track.stop();
+          }
+        }
+        if (state.audioContext) {
+          state.audioContext.close();
+        }
+      });
+
+      refreshSessions();
+      render();
+    })();
+  </script>
+</body>
+</html>
