@@ -141,6 +141,20 @@
       '</div>';
   }
 
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function progressIndexFromPosition(clientX, rect, slideCount) {
+    var count = Math.max(1, Number(slideCount) || 1);
+    if (count <= 1) return 0;
+    if (!rect || !Number.isFinite(rect.left) || !Number.isFinite(rect.width) || rect.width <= 0) {
+      return 0;
+    }
+    var ratio = clamp((Number(clientX) - rect.left) / rect.width, 0, 1);
+    return clamp(Math.round(ratio * (count - 1)), 0, count - 1);
+  }
+
   function fixtureScript(design) {
     var raw = (design && design.fixture) || '{}';
     var parsed = null;
@@ -230,6 +244,10 @@
         slideCount: 1,
         _messageHandler: null,
         _keydownHandler: null,
+        _progressScrubbing: false,
+        _progressPointerId: null,
+        _progressRect: null,
+        _lastHapticSlide: null,
 
         participantColor: participantColor,
         participantInitial: participantInitial,
@@ -333,6 +351,7 @@
 
         goToSlide: function (index, opts) {
           var next = Math.max(0, Math.min(this.slideCount - 1, Number(index) || 0));
+          var changed = next !== this.activeSlide;
           this.activeSlide = next;
           var iframe = document.getElementById('present-iframe');
           if (iframe && iframe.contentWindow) {
@@ -344,6 +363,58 @@
           }
           if (!opts || !opts.skipUrl) setPath(this.deck.design_id, next);
           this.updateTopbar();
+          if (changed && (!opts || opts.haptic !== false)) this.hapticTick(next);
+        },
+
+        hapticTick: function (index) {
+          if (this._lastHapticSlide === index) return;
+          this._lastHapticSlide = index;
+          try {
+            if (window.navigator && typeof window.navigator.vibrate === 'function') {
+              window.navigator.vibrate(8);
+            }
+          } catch (_) {}
+        },
+
+        startProgressScrub: function (event) {
+          var target = event.currentTarget;
+          this._progressScrubbing = true;
+          this._progressPointerId = event.pointerId;
+          this._progressRect = target && target.getBoundingClientRect
+            ? target.getBoundingClientRect()
+            : null;
+          if (target && typeof target.setPointerCapture === 'function') {
+            try { target.setPointerCapture(event.pointerId); } catch (_) {}
+          }
+          this.updateProgressScrub(event);
+        },
+
+        moveProgressScrub: function (event) {
+          if (!this._progressScrubbing) return;
+          if (this._progressPointerId != null && event.pointerId !== this._progressPointerId) return;
+          this.updateProgressScrub(event);
+        },
+
+        endProgressScrub: function (event) {
+          if (this._progressScrubbing
+              && (this._progressPointerId == null || event.pointerId === this._progressPointerId)) {
+            this.updateProgressScrub(event);
+          }
+          this._progressScrubbing = false;
+          this._progressPointerId = null;
+          this._progressRect = null;
+        },
+
+        updateProgressScrub: function (event) {
+          var rect = this._progressRect;
+          if (!rect) {
+            var progress = document.querySelector('.present-progress');
+            rect = progress && progress.getBoundingClientRect ? progress.getBoundingClientRect() : null;
+          }
+          var next = progressIndexFromPosition(event.clientX, rect, this.slideCount);
+          if (next !== this.activeSlide) {
+            this.goToSlide(next);
+          }
         },
 
         updateTopbar: function () {
@@ -421,6 +492,7 @@
     parsePresentPath: parsePresentPath,
     parseSlideIndex: parseSlideIndex,
     presentSurfaceId: presentSurfaceId,
+    progressIndexFromPosition: progressIndexFromPosition,
     iframeDocument: iframeDocument,
     extractHtmlParts: extractHtmlParts,
     topbarHtml: topbarHtml,

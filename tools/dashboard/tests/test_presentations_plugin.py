@@ -40,6 +40,10 @@ def test_presentations_manifest_declares_library_and_deck_paths():
         "tools.dashboard.plugins.presentations.entrypoints.schemas:PresentationDeckV1"
         in manifest.entrypoints.schemas
     )
+    page_html = (PLUGIN_DIR / "page.html").read_text()
+    assert '@pointerdown.prevent="startProgressScrub($event)"' in page_html
+    assert '@pointermove.window="moveProgressScrub($event)"' in page_html
+    assert 'aria-label="Slide navigation"' in page_html
 
 
 def test_presentation_deck_schema_validates_payload():
@@ -228,6 +232,11 @@ assert(topbar.includes('present-topbar-presence'));
 assert(topbar.includes('present-topbar-owner is-live'));
 assert(topbar.includes('Owner'));
 assert(topbar.includes('2 / 3'));
+assert.equal(helpers.progressIndexFromPosition(0, {{ left: 0, width: 100 }}, 11), 0);
+assert.equal(helpers.progressIndexFromPosition(49, {{ left: 0, width: 100 }}, 11), 5);
+assert.equal(helpers.progressIndexFromPosition(100, {{ left: 0, width: 100 }}, 11), 10);
+assert.equal(helpers.progressIndexFromPosition(-50, {{ left: 0, width: 100 }}, 11), 0);
+assert.equal(helpers.progressIndexFromPosition(150, {{ left: 0, width: 100 }}, 11), 10);
 """
     subprocess.run([node, "-e", script], check=True)
 

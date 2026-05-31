@@ -55,7 +55,13 @@
                 title="Presentation deck"
                 data-testid="present-iframe"
                 class="present-iframe"></iframe>
-        <div class="present-progress" aria-hidden="true">
+        <div class="present-progress"
+             role="group"
+             aria-label="Slide navigation"
+             @pointerdown.prevent="startProgressScrub($event)"
+             @pointermove.window="moveProgressScrub($event)"
+             @pointerup.window="endProgressScrub($event)"
+             @pointercancel.window="endProgressScrub($event)">
           <template x-for="idx in slideIndexes" :key="idx">
             <button type="button"
                     :class="{ active: idx === activeSlide }"
