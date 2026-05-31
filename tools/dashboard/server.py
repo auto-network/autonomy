@@ -134,6 +134,7 @@ from tools.dashboard import settings_mediator as _settings_mediator  # noqa: E40
 from tools.dashboard import harness_usage_settings as _harness_usage_settings  # noqa: E402, F401
 from tools.dashboard import session_upload_settings as _session_upload  # noqa: E402, F401
 from tools.dashboard import session_orientation_settings as _session_orientation_settings  # noqa: E402, F401
+from tools.dashboard import voice_transcription_settings as _voice_transcription_settings  # noqa: E402
 from tools.dashboard import worktree_directives as _worktree_directives  # noqa: E402, F401
 from tools.dashboard import claude_credentials_refresh as _claude_credentials_refresh  # noqa: E402
 from tools.graph import settings_ops  # noqa: E402
@@ -6442,12 +6443,20 @@ async def ws_voice(websocket: WebSocket):
             return whisperlive_client.is_ready()
         if whisperlive_unavailable:
             return False
+        # Resolve the live-tunable transcription knobs from the
+        # ``dashboard.voice.transcription`` graph setting, read fresh per mic
+        # connection (falls back to the voice_whisperlive module defaults if
+        # the row is absent — never raises). Lets the operator tune the
+        # silence-gating thresholds / language / VAD without a code change.
+        _tx_cfg = _voice_transcription_settings.resolve_transcription_config()
         whisperlive_client = voice_wl.WhisperLiveClient(
             url=voice_wl.WHISPERLIVE_URL,
             uid=f"{bind}-{uuid.uuid4().hex[:8]}",
-            model=voice_wl.WHISPERLIVE_MODEL,
-            language=voice_wl.WHISPERLIVE_LANGUAGE,
-            use_vad=voice_wl.WHISPERLIVE_USE_VAD,
+            model=_tx_cfg.model,
+            language=_tx_cfg.language,
+            use_vad=_tx_cfg.use_vad,
+            no_speech_thresh=_tx_cfg.no_speech_thresh,
+            vad_threshold=_tx_cfg.vad_threshold,
             wire_format=voice_wl.WHISPERLIVE_WIRE_FORMAT,
             on_partial=_on_partial,
             on_final=_on_final,
