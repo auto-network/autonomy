@@ -109,6 +109,40 @@
         return !this.showTerminal && this.isLive && !!this._tmuxSession &&
                (this.sessionType !== 'host' || this._linked);
       },
+      // Pending/optimistic message for this session (auto-xkdoi). null when idle.
+      get outbox() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        return (s && s.outbox) || null;
+      },
+      // Skin class for the pending tile, by state.
+      outboxTileClass() {
+        var o = this.outbox;
+        if (!o) return '';
+        if (o.state === 'capturing') return 'is-capturing';
+        if (o.state === 'unconfirmed') return 'is-unconfirmed';
+        return 'is-sending';
+      },
+      // Re-attempt a message that never reached the log. Flipping back to
+      // 'sending' re-enters the durable send path (Phase 2 watcher).
+      resendOutbox() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        if (s && s.outbox) s.outbox = Object.assign({}, s.outbox, { state: 'sending' });
+      },
+      // Publish 'sv-outbox-tile-present' on body EXACTLY while the tile is
+      // rendered (composer active AND a pending message exists). The voice
+      // side gates caption-suppression on this so the caption only hands off
+      // once the tile is truly in the DOM (contract cbb8497c-a1f). Guarded so
+      // it only clears its own sid.
+      _syncTilePresent() {
+        if (typeof document === 'undefined' || !document.body) return;
+        var sid = this._tmuxSession || '';
+        if (this._composerActive && this.outbox) {
+          document.body.classList.add('sv-outbox-tile-present');
+          document.body.dataset.svComposerSession = sid;
+        } else if (document.body.dataset.svComposerSession === sid) {
+          document.body.classList.remove('sv-outbox-tile-present');
+        }
+      },
       get contextTokens() {
         var s = Alpine.store('sessions')[this.sessionKey];
         return s ? s.contextTokens : 0;
@@ -902,6 +936,7 @@
         if (typeof document !== 'undefined' && document.body &&
             document.body.dataset.svComposerSession === (this._tmuxSession || '')) {
           document.body.classList.remove('sv-viewer-composer-active');
+          document.body.classList.remove('sv-outbox-tile-present');
           delete document.body.dataset.svComposerSession;
         }
         if (this._mode === 'page' && window._diagFocusedViewerId === this.sessionKey) {
