@@ -277,3 +277,196 @@ body.zoom-expanded .sc-card-list { gap: 8px; }
     max-width: 100%;
     -webkit-overflow-scrolling: touch;
 }
+
+/* ── Startup-phase UI (auto-yfcoc, design rev 63542418-40f2-40cd-972b-7ae1a50f41a3) ──
+ *
+ * Additive classes on top of the existing .session-card chrome. The
+ * tile renders a small phase chip (in .sc-compact-row and .sc-stats),
+ * an optional lifecycle strip (.sc-lifecycle gated on startup_visible),
+ * and per-state action affordances (.sc-action-inline).
+ *
+ * Tones (.ready / .failed / .dead) recolor the chip + dot without
+ * resizing or affecting the surrounding card chrome. Compact zoom
+ * hides .sc-lifecycle + .sc-footer entirely so the card collapses to
+ * its existing compact density.
+ *
+ * Honors prefers-reduced-motion: drops the dot pulse + lifecycle
+ * sweep animation while leaving the visual tones intact.
+ */
+@keyframes scPhaseSweep {
+  0% { transform: translateX(-120%); opacity: 0; }
+  20%, 75% { opacity: 1; }
+  100% { transform: translateX(120%); opacity: 0; }
+}
+@keyframes scPhasePulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+/* Phase chip — small pill rendered in the card's compact row and the
+ * stats row. Default tone is the "active startup" sky blue. */
+.sc-phase-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 168px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  background: rgba(56, 189, 248, 0.10);
+  color: #bae6fd;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+.sc-phase-chip span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sc-phase-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 999px;
+  background: #7dd3fc;
+  animation: scPhasePulse 1.35s ease-in-out infinite;
+}
+.sc-phase-chip.ready {
+  border-color: rgba(52, 211, 153, 0.28);
+  background: rgba(52, 211, 153, 0.10);
+  color: #bbf7d0;
+}
+.sc-phase-chip.ready .sc-phase-dot {
+  background: #34d399;
+  animation: none;
+}
+.sc-phase-chip.failed {
+  border-color: rgba(245, 158, 11, 0.34);
+  background: rgba(245, 158, 11, 0.12);
+  color: #fde68a;
+}
+.sc-phase-chip.failed .sc-phase-dot {
+  background: #f59e0b;
+  animation: none;
+}
+.sc-phase-chip.dead {
+  border-color: rgba(100, 116, 139, 0.55);
+  background: rgba(15, 23, 42, 0.72);
+  color: #94a3b8;
+}
+.sc-phase-chip.dead .sc-phase-dot {
+  background: #64748b;
+  animation: none;
+}
+
+/* Lifecycle strip — 4-segment track + 4-lane caption row. Only
+ * rendered when the derivation marks startup_visible=true (i.e. the
+ * session is mid-startup or in a terminal failed state). */
+.sc-lifecycle {
+  margin: 5px 0 2px;
+  padding: 6px 8px;
+  border: 1px solid rgba(30, 41, 59, 0.92);
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.36);
+}
+.sc-lifecycle-track {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 3px;
+  height: 3px;
+  margin-bottom: 5px;
+}
+.sc-lifecycle-seg {
+  position: relative;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #263246;
+}
+.sc-lifecycle-seg.done { background: rgba(34, 197, 94, 0.78); }
+.sc-lifecycle-seg.active { background: rgba(56, 189, 248, 0.34); }
+.sc-lifecycle-seg.active::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 65%;
+  background: linear-gradient(90deg, transparent, rgba(186, 230, 253, 0.35), transparent);
+  animation: scPhaseSweep 1.8s ease-in-out infinite;
+}
+.sc-lifecycle-seg.failed { background: rgba(245, 158, 11, 0.82); }
+.sc-lifecycle-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  font-size: 10px;
+  line-height: 1.25;
+}
+.sc-lifecycle-label {
+  color: #3f5067;
+  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 0.045em;
+}
+.sc-lifecycle-value {
+  margin-top: 1px;
+  color: #93a4ba;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Message-line tones that follow phase. The base .sc-message styling
+ * is unchanged; these classes apply on top of it. */
+.sc-startup-message {
+  color: #7e8fa6;
+}
+.sc-failed-message {
+  color: #fbbf24;
+}
+
+/* Inline action affordance (Resume / Retry / Stop) inside the card
+ * footer. Default tone is "resume" green; modifier classes recolor
+ * for retry (amber) and stop (red). */
+.sc-action-inline {
+  margin-left: auto;
+  border-radius: 5px;
+  border: 1px solid rgba(34, 197, 94, 0.36);
+  background: rgba(34, 197, 94, 0.10);
+  color: #86efac;
+  padding: 2px 7px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+.sc-action-inline.retry {
+  border-color: rgba(245, 158, 11, 0.38);
+  background: rgba(245, 158, 11, 0.10);
+  color: #fcd34d;
+}
+.sc-action-inline.stop {
+  border-color: rgba(239, 68, 68, 0.32);
+  background: rgba(239, 68, 68, 0.08);
+  color: #fca5a5;
+}
+
+/* Compact-zoom collapses the lifecycle strip + footer entirely; the
+ * existing chrome handles the rest of the density shift. The phase
+ * chip narrows so it doesn't push other compact-row content off. */
+body.zoom-compact .sc-lifecycle,
+body.zoom-compact .sc-footer {
+  display: none !important;
+}
+body.zoom-compact .sc-phase-chip {
+  max-width: 112px;
+}
+
+/* Accessibility — operators with reduced-motion preference keep the
+ * tones but drop the animations. */
+@media (prefers-reduced-motion: reduce) {
+  .sc-phase-dot,
+  .sc-lifecycle-seg.active::after {
+    animation: none;
+  }
+}
