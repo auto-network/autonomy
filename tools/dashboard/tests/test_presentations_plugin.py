@@ -125,6 +125,40 @@ def test_presentations_api_reads_design_and_records_shown(tmp_path, monkeypatch)
     assert persisted["_all"][0]["key"] == TEST_EXPERIMENT_ID
 
 
+def test_presentations_api_returns_offline_owner_presence_when_unowned(tmp_path, monkeypatch):
+    fixture_path = tmp_path / "fixture.json"
+    fixture = {
+        "active_sessions": [],
+        "beads": [],
+        "experiments": [
+            make_experiment(
+                TEST_EXPERIMENT_ID,
+                title="Legacy Deck",
+                html="<section>One</section>",
+            )
+        ],
+        "settings": {},
+    }
+    write_fixture(fixture, fixture_path)
+    monkeypatch.setenv("DASHBOARD_MOCK", str(fixture_path))
+
+    from tools.dashboard.dao import mock as dao_mock
+
+    monkeypatch.setattr(dao_mock, "FIXTURE_PATH", fixture_path)
+
+    app = Starlette(routes=present_api.routes)
+    with TestClient(app) as client:
+        response = client.get(f"/api/presentations/deck/{TEST_EXPERIMENT_ID}")
+
+    assert response.status_code == 200
+    owner_presence = response.json()["owner_presence"]
+    assert owner_presence["participant_label"] == "No owner session"
+    assert owner_presence["display_initial"] == "?"
+    assert owner_presence["is_owner"] is True
+    assert owner_presence["is_live"] is False
+    assert owner_presence["accepts_pings"] is False
+
+
 def test_present_routes_keep_plugin_shell_deep_links_available():
     from tools.dashboard import server
 

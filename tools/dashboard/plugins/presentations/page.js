@@ -89,6 +89,9 @@
   }
 
   function participantInitial(participant) {
+    if (participant && participant.display_initial) {
+      return String(participant.display_initial).trim().charAt(0).toUpperCase() || '?';
+    }
     var label = (participant && (participant.participant_label || participant.participant_id)) || '?';
     return String(label).trim().charAt(0).toUpperCase() || '?';
   }

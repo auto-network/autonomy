@@ -92,13 +92,31 @@ def _session_matches(row: dict, session_id: str) -> bool:
 
 
 def _owner_presence(deck: dict) -> dict | None:
+    surface_id = f"presentations:{deck.get('design_id') or ''}"
     owner_id = (
         deck.get("author_session_id")
         or deck.get("creator_session_id")
         or ""
     )
     if not owner_id:
-        return None
+        return {
+            "surface_id": surface_id,
+            "participant_kind": "agent",
+            "participant_id": f"{surface_id}:unowned",
+            "participant_label": "No owner session",
+            "display_initial": "?",
+            "accepts_pings": False,
+            "state": "present",
+            "position_kind": "label",
+            "position_value": "deck-owner",
+            "intent": "no active dictation listener is registered",
+            "heartbeat_at": "",
+            "last_ping_id": "",
+            "is_owner": True,
+            "is_live": False,
+            "is_active": False,
+            "session": None,
+        }
     owner_label = (
         deck.get("author_session_label")
         or deck.get("creator_session_label")
@@ -117,7 +135,7 @@ def _owner_presence(deck: dict) -> dict | None:
     live = bool(matched and matched.get("is_live", True))
     label = (matched or {}).get("label") or owner_label
     return {
-        "surface_id": f"presentations:{deck.get('design_id') or ''}",
+        "surface_id": surface_id,
         "participant_kind": "agent",
         "participant_id": owner_id,
         "participant_label": label,
