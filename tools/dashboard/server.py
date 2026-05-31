@@ -5174,6 +5174,25 @@ async def _resolve_primer(primer: str) -> str | None:
     return None
 
 
+_HOST_MODEL_FALLBACK = "claude-opus-4-8[1m]"
+
+
+def _resolve_host_session_model() -> str:
+    """Model id to pass to host `claude` invocations.
+
+    Reads ``autonomy.workspace#1[autonomy].model`` so the operator can
+    change the default in one place. Falls back to a constant when the
+    Setting is unset or unreadable.
+    """
+    try:
+        ws = workspace_settings.get_workspace("autonomy")
+        if ws.model:
+            return ws.model
+    except (KeyError, workspace_settings.WorkspaceSettingsError):
+        pass
+    return _HOST_MODEL_FALLBACK
+
+
 async def api_session_create(request):
     """Create a new session (container, project, or host) and return its tmux name.
 
@@ -5324,7 +5343,7 @@ async def api_session_create(request):
             )
         is_container = True
     elif session_type == "host":
-        model = "claude-opus-4-7[1m]"
+        model = _resolve_host_session_model()
         cmd_str = (
             f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
             f"claude --dangerously-skip-permissions --model {model}"
@@ -5571,7 +5590,9 @@ async def api_session_resume(request):
             import random
             tmux_name = f"resume-{time.strftime('%m%d-%H%M%S')}-{random.randint(10, 99)}"
 
-    model = "claude-opus-4-7[1m]"
+    # Default to the autonomy workspace's model; resume-into-workspace path
+    # below re-resolves from the dead session's project if applicable.
+    model = _resolve_host_session_model()
 
     if session_type == "container":
         # Derive output_dir (the run dir) by walking up to the "sessions" parent.
@@ -5592,6 +5613,8 @@ async def api_session_resume(request):
                 proj_for_resume = workspace_settings.get_workspace(dead_project)
             except (KeyError, workspace_settings.WorkspaceSettingsError):
                 proj_for_resume = None
+            if proj_for_resume is not None and proj_for_resume.model:
+                model = proj_for_resume.model
 
         if proj_for_resume is not None:
             missing_artifacts = workspace_settings.validate_artifacts(proj_for_resume)
