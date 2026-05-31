@@ -6307,6 +6307,8 @@ async def api_design_create(request):
     # Accept both new and legacy field names
     design_id = body.get("design_id") or body.get("series_id")
     alpine = bool(body.get("alpine"))  # inject Alpine.js runtime in iframe
+    creator_session_id = body.get("creator_session_id")
+    creator_session_label = body.get("creator_session_label")
 
     if not variants:
         return JSONResponse({"error": "At least one variant required"}, status_code=400)
@@ -6323,6 +6325,8 @@ async def api_design_create(request):
         variants=variants,
         design_id=design_id,
         alpine=alpine,
+        creator_session_id=creator_session_id,
+        creator_session_label=creator_session_label,
     )
 
     # Broadcast to SSE so gallery pages auto-update without refresh
@@ -12371,7 +12375,7 @@ def _make_plugin_fragment_handler(plugin_id: str, template_name: str):
 async def api_plugins(request):
     """Return enabled plugins with sidebar metadata + their effective org.
 
-    Shape: ``{plugins: [{id, label, path, badge_color, alpine_root, org}]}``
+    Shape: ``{plugins: [{id, label, path, paths, badge_color, alpine_root, org}]}``
     — one entry per currently-enabled plugin. Each plugin's toggle row
     is read from *its own* ``manifest.org``'s DB, so unscoped browser
     requests still see the canonical state (substrate v1.1 fix). The
@@ -12401,6 +12405,7 @@ async def api_plugins(request):
             "id": p.id,
             "label": p.nav_label,
             "path": p.paths[0],
+            "paths": p.paths,
             "badge_color": _plugin_badge_color(idx),
             "alpine_root": p.alpine_root,
             "org": effective_org,
@@ -12414,7 +12419,9 @@ def _build_plugin_routes() -> list:
     out: list = []
     for p in PLUGIN_REGISTRY:
         for path in p.paths:
-            out.append(Route(path, _make_plugin_page_handler(p.id)))
+            page_handler = _make_plugin_page_handler(p.id)
+            out.append(Route(path, page_handler))
+            out.append(Route(f"{path}/{{path:path}}", page_handler))
         out.append(Route(
             f"/pages/{p.id}",
             _make_plugin_fragment_handler(p.id, f"plugins/{p.id}/{p.template}"),

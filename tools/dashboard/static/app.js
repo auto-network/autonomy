@@ -1917,7 +1917,8 @@ window.Autonomy.refreshPlugins = async function () {
 window.Autonomy.matchPlugin = function (path) {
   const list = window.Autonomy.plugins || [];
   for (const p of list) {
-    if (path === p.path || path.startsWith(p.path + '/')) {
+    const paths = Array.isArray(p.paths) && p.paths.length ? p.paths : [p.path];
+    if (paths.some(pluginPath => path === pluginPath || path.startsWith(pluginPath + '/'))) {
       return p;
     }
   }
@@ -1933,6 +1934,8 @@ function _renderSidebarPlugins() {
     a.href = p.path;
     a.className = 'nav-link';
     a.dataset.page = p.id;
+    const paths = Array.isArray(p.paths) && p.paths.length ? p.paths : [p.path];
+    a.dataset.activeMatch = paths.map(path => String(path || '').replace(/^\//, '')).join(',');
     a.setAttribute('onclick', 'closeSidebar()');
     a.textContent = p.label + ' ';
     const badge = document.createElement('span');

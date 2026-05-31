@@ -1,0 +1,23 @@
+id: presentations
+api_version: 1
+org: autonomy
+
+paths:
+  - /presentations
+  - /present
+
+assets:
+  template: page.html
+  script: page.js
+  style: page.css
+
+nav:
+  label: Present
+
+frontend:
+  alpine_root: presentationsPage
+
+entrypoints:
+  api: tools.dashboard.plugins.presentations.entrypoints.api:routes
+  schemas:
+    - tools.dashboard.plugins.presentations.entrypoints.schemas:PresentationDeckV1
