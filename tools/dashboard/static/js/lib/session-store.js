@@ -124,6 +124,22 @@ window.clearOutbox = function(sessionId) {
   catch (e) { /* ignore */ }
 };
 
+// Pending-message state for the session-card / viewer activity dot (auto-xkdoi).
+// Returns '' | 'sending' | 'unconfirmed' — the "hasn't cleared yet" states that
+// warrant a glanceable indicator. 'capturing' is intentionally excluded (live
+// dictation: the user is right there, nothing is at risk). Read-only — never
+// creates a store, safe to call per-card in a render loop.
+window.outboxPendingState = function(sessionId) {
+  if (!sessionId) return '';
+  try {
+    var sessions = Alpine.store('sessions');
+    var s = sessions && sessions[sessionId];
+    var o = s && s.outbox;
+    if (o && (o.state === 'sending' || o.state === 'unconfirmed')) return o.state;
+  } catch (e) { /* store not ready */ }
+  return '';
+};
+
 var _outboxSeq = 0;
 window.newOutboxId = function() {
   _outboxSeq += 1;

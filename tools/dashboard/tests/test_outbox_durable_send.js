@@ -209,3 +209,31 @@ describe('contract lifecycle end-to-end (cbb8497c-a1f)', () => {
     if (v._outboxTimer) clearTimeout(v._outboxTimer);
   });
 });
+
+// The activity-dot signal: which outbox states light the pending ring.
+describe('outboxPendingState (activity-dot pending ring)', () => {
+  let h, store;
+  beforeEach(() => { h = harness(); store = h.windowObj.getSessionStore('auto-test'); });
+
+  it('empty when there is no pending message', () => {
+    assert.equal(h.windowObj.outboxPendingState('auto-test'), '');
+  });
+  it('EXCLUDES capturing (live dictation — user is right there)', () => {
+    store.outbox = { state: 'capturing', text: 'typing', localId: 'x', ts: 1 };
+    assert.equal(h.windowObj.outboxPendingState('auto-test'), '');
+  });
+  it("returns 'sending' for an in-flight message", () => {
+    store.outbox = { state: 'sending', text: 'x', localId: 'x', ts: 1 };
+    assert.equal(h.windowObj.outboxPendingState('auto-test'), 'sending');
+  });
+  it("returns 'unconfirmed' for a stuck message", () => {
+    store.outbox = { state: 'unconfirmed', text: 'x', localId: 'x', ts: 1 };
+    assert.equal(h.windowObj.outboxPendingState('auto-test'), 'unconfirmed');
+  });
+  it('empty for an unknown session id (read-only, no store created)', () => {
+    assert.equal(h.windowObj.outboxPendingState('never-seen'), '');
+  });
+  it('empty for a falsy id', () => {
+    assert.equal(h.windowObj.outboxPendingState(''), '');
+  });
+});
