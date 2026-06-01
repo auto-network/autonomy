@@ -5483,8 +5483,45 @@ async def api_session_create(request):
         run_dir = run_dirs[0]
         async def _watch_setup_exit():
             setup_exit = run_dir / ".setup-exit"
+            setup_phase_file = run_dir / ".setup_phase"
+            # Forward-only phase order. The intermediate markers
+            # (entrypoint_running / dind_ready / setup_running) are written
+            # by dind-entrypoint.sh into /workspace/output/.setup_phase; the
+            # terminal state comes from .setup-exit. Rendering the linear
+            # sequence is what closes the "phases trigger out of order or
+            # not at all" gap — without the markers the card jumps straight
+            # from container_starting to setup_complete.
+            order = {
+                "container_starting": 0,
+                "entrypoint_running": 1,
+                "dind_ready": 2,
+                "setup_running": 3,
+                "setup_complete": 4,
+                "setup_failed": 4,
+            }
+            last = "container_starting"
             deadline = time.time() + 600  # 10 min
             while time.time() < deadline:
+                # Intermediate marker from the entrypoint — advance forward
+                # only, broadcast on each real transition.
+                try:
+                    if setup_phase_file.exists():
+                        marker = setup_phase_file.read_text().strip()
+                        if marker in order and order[marker] > order.get(last, 0):
+                            last = marker
+                            dashboard_db.update_tail_state(tmux_name, setup_phase=marker)
+                            await event_bus.broadcast(
+                                "session:registry", session_monitor.get_registry()
+                            )
+                            logger.info(
+                                "auto-a1jco: %s setup_phase=%s (marker)",
+                                tmux_name, marker,
+                            )
+                except Exception:
+                    logger.debug(
+                        "auto-a1jco: .setup_phase marker read failed for %s",
+                        tmux_name, exc_info=True,
+                    )
                 if setup_exit.exists():
                     try:
                         exit_code = setup_exit.read_text().strip()

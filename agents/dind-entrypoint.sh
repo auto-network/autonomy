@@ -11,6 +11,21 @@
 #   3. exec the caller's command.
 set -e
 
+# auto-a1jco: emit a single-line setup-phase marker the host watcher reads
+# (mounted to data/agent-runs/<name>-<ts>/.setup_phase). Atomic via
+# tmp-then-mv; best-effort so a marker write never aborts the entrypoint.
+_setup_phase() {
+    if [ -d /workspace/output ]; then
+        printf '%s\n' "$1" > /workspace/output/.setup_phase.tmp 2>/dev/null \
+            && mv -f /workspace/output/.setup_phase.tmp /workspace/output/.setup_phase 2>/dev/null \
+            || true
+    fi
+}
+
+# The entrypoint is now running (past container_starting): SSH-agent setup,
+# then startup.sh kickoff, then exec the harness.
+_setup_phase entrypoint_running
+
 SSH_KEY=/etc/autonomy/artifacts/id_ed25519
 if [ -f "$SSH_KEY" ]; then
     eval "$(ssh-agent -s)" > /dev/null
@@ -25,6 +40,8 @@ fi
 
 if [ -f /startup.sh ]; then
     {
+        # Dependency install / image pulls begin now.
+        _setup_phase setup_running
         /startup.sh > /workspace/output/.setup.log 2>&1
         echo $? > /workspace/output/.setup-exit
     } &
