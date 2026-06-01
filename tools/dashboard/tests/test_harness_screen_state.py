@@ -44,6 +44,11 @@ PANE_TRUST_DIALOG = _load("claude_trust_dialog.txt")
 PANE_TRUST_CLEARED = _load("claude_trust_dialog_cleared.txt")
 PANE_PLANNING_MODE = _load("claude_planning_mode.txt")
 PANE_COMPOSER_READY = _load("claude_composer_ready.txt")
+# Real capture from Claude Code v2.1.158 — the "❯ " prompt glyph + the
+# "⏵⏵ … (shift+tab to cycle)" footer. Pins the CURRENT UI so the detector
+# can't silently rot against a TUI prompt-glyph change again (the "> "→"❯ "
+# switch is exactly what left every session stuck at harness_starting).
+PANE_COMPOSER_READY_V2_1 = _load("claude_composer_ready_v2_1.txt")
 PANE_AUTH_REQUIRED = _load("claude_auth_required.txt")
 
 # Synthetic — represents a session mid-tool-use with no prompt visible.
@@ -97,6 +102,21 @@ def test_claude_detects_composer_ready():
     state, keys = CLAUDE_HARNESS.read_screen_state(PANE_COMPOSER_READY, {})
     assert state["composer_ready"] is True
     assert state["confirming_trust_prompt"] is False
+
+
+def test_claude_detects_composer_ready_v2_1_glyph():
+    """Claude Code v2.1.158 renders the composer prompt as "❯ " (U+276F),
+    not "> ". This real-capture fixture must read composer_ready=True —
+    it is the regression that left every live session stuck at
+    harness_starting (card frozen on "Booting Claude") because the
+    detector only matched the legacy "> " glyph."""
+    state, keys = CLAUDE_HARNESS.read_screen_state(PANE_COMPOSER_READY_V2_1, {})
+    assert state["composer_ready"] is True, (
+        "v2.1.158 '❯ ' prompt must be recognized as composer_ready"
+    )
+    assert state["confirming_trust_prompt"] is False
+    assert state["in_planning_mode"] is False
+    assert state["blocking_modal"] is None
     assert state["in_planning_mode"] is False
     assert state["blocking_modal"] is None
     assert keys == []

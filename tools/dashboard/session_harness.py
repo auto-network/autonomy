@@ -2382,10 +2382,19 @@ _CLAUDE_AUTH_RE = re.compile(
     re.IGNORECASE,
 )
 _CLAUDE_COMPOSER_PROMPT_RE = re.compile(
-    # The composer renders as a `> ` prompt on a near-bottom line, often
-    # inside a rounded box (╭ … ╰). Two heuristics: an unboxed `> ` at
-    # line start, OR `>` at the start of a content line bracketed by ╭╰.
-    r"(?:^|\n)\s*>\s",
+    # The composer renders as a prompt glyph on a near-bottom line, often
+    # bracketed by ──── rules or a rounded box (╭ … ╰). The glyph has
+    # changed across Claude Code versions:
+    #   - older builds:        "> "
+    #   - Claude Code v2.1.x:  "❯ " (U+276F), occasionally "› " (U+203A)
+    # Match any of them at line start. Keying on the literal "> " alone
+    # silently broke composer_ready when the TUI switched to "❯ " — every
+    # session got stuck at harness_starting. The "⏵⏵ … (shift+tab to
+    # cycle)" permission-mode footer is an additional corroborating idle
+    # signal and is matched as a fallback so a blank prompt-line redraw
+    # frame still resolves.
+    r"(?:^|\n)[ \t]*[>❯›][ \t]"
+    r"|⏵⏵[^\n]*\(shift\+tab to cycle\)",
 )
 
 
