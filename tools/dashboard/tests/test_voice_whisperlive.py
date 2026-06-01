@@ -132,10 +132,12 @@ def test_client_requires_non_empty_uid():
 
 
 def test_init_payload_shape():
-    """Pinned per S3-4 design: uid, language, task, model, use_vad, plus the
-    silence-hallucination gating (no_speech_thresh + vad_parameters) sent so
-    WhisperLive doesn't run on its lenient defaults (the constants are the
-    defaults #29's graph setting will later override)."""
+    """Pinned per S3-4 design: uid, language, task, model, use_vad, the
+    silence-hallucination gating (no_speech_thresh + vad_parameters) so
+    WhisperLive doesn't run on its lenient defaults, and timestamp_granularities
+    ["word"] so straddling segments can be trimmed at the word boundary on a
+    mid-sentence Send/Clear (the threshold constants are the defaults the
+    dashboard.voice.transcription graph setting overrides per connection)."""
     client = _new_client("ws://x", uid="u1", model="large-v3")
     payload = client._build_init_payload()
     assert payload == {
@@ -146,6 +148,7 @@ def test_init_payload_shape():
         "use_vad": True,
         "no_speech_thresh": vwl.WHISPERLIVE_NO_SPEECH_THRESH,
         "vad_parameters": {"threshold": vwl.WHISPERLIVE_VAD_THRESHOLD},
+        "timestamp_granularities": ["word"],
     }
 
 
@@ -895,6 +898,73 @@ async def test_set_cutoff_seals_to_audio_clock_not_transcript_clock():
         ]
     )
     assert finals == ["A", "C post-click"], finals
+
+
+# ── Word-level cutoff trim (#27) ─────────────────────────────
+
+
+def test_trim_segment_keeps_post_cutoff_tail():
+    seg = {"start": 1.8, "text": "before after", "words": [
+        {"word": "before", "start": 1.8, "end": 2.0},
+        {"word": " after", "start": 2.3, "end": 2.6},
+    ]}
+    assert vwl._trim_segment_to_cutoff(seg, 2100) == (2300, "after")
+
+
+def test_trim_segment_none_without_word_data():
+    # No words[] (or empty) -> fall back to the whole-segment drop (None).
+    assert vwl._trim_segment_to_cutoff({"start": 1.0, "text": "x"}, 2100) is None
+    assert vwl._trim_segment_to_cutoff(
+        {"start": 1.0, "text": "x", "words": []}, 2100) is None
+
+
+def test_trim_segment_none_when_all_words_precede_cutoff():
+    seg = {"start": 0.0, "words": [
+        {"word": "all", "start": 0.1, "end": 0.4},
+        {"word": " old", "start": 0.5, "end": 0.9},
+    ]}
+    assert vwl._trim_segment_to_cutoff(seg, 2100) is None
+
+
+def test_trim_segment_skips_malformed_words():
+    seg = {"start": 1.0, "words": [
+        {"word": "ok", "start": 2.5, "end": 2.8},
+        {"start": 2.6},                  # no word text
+        "garbage",                       # not a dict
+        {"word": "bad", "start": "x"},   # unparseable start
+    ]}
+    assert vwl._trim_segment_to_cutoff(seg, 2100) == (2500, "ok")
+
+
+@pytest.mark.asyncio
+async def test_straddling_segment_keeps_post_cutoff_words():
+    """A segment that starts before the cutoff but whose per-word timestamps
+    show words spoken after a mid-sentence Send must keep that tail rather than
+    being dropped whole (the pre-word-timestamps behavior lost those words)."""
+    finals: list[str] = []
+
+    async def on_final(text):
+        finals.append(text)
+
+    async def on_noop(*_a):
+        pass
+
+    client = vwl.WhisperLiveClient(
+        url="ws://unused", uid="straddle", model="m",
+        on_partial=on_noop, on_final=on_final, on_error=on_noop,
+    )
+    client._cutoff_ms = 2100
+
+    # Segment starts at 1.8s (< cutoff) — old code dropped it whole — but
+    # "after" was spoken at 2.3s, past the tap. Keep just that tail.
+    await client._dispatch_segments([{
+        "start": 1.8, "text": "before after", "completed": True,
+        "words": [
+            {"word": "before", "start": 1.8, "end": 2.0},
+            {"word": " after", "start": 2.3, "end": 2.6},
+        ],
+    }])
+    assert finals == ["after"], finals
 
 
 @pytest.mark.asyncio
