@@ -1286,7 +1286,7 @@ class SessionMonitor:
             return
         tasks = [
             t for t in (self._tailer_task, self._liveness_task,
-                        self._reconciliation_task)
+                        self._reconciliation_task, self._screen_poll_task)
             if t and not t.done()
         ]
         for t in tasks:
@@ -1302,6 +1302,9 @@ class SessionMonitor:
         self._tailer_task = None
         self._liveness_task = None
         self._reconciliation_task = None
+        # auto-eerfx: the screen-poll task was started in start() but historically
+        # not cancelled here, so it leaked one running task per start/stop cycle.
+        self._screen_poll_task = None
         self._started = False
         logger.info("session_monitor: background tasks stopped")
 
@@ -1398,7 +1401,17 @@ class SessionMonitor:
             logger.info("session_monitor: inotify_simple not available, using polling")
             return
         try:
-            self._inotify = INotify()
+            # nonblocking=True hardens the inotify fd: the tailer runs read() in
+            # a to_thread worker, and when that task is cancelled at stop() the
+            # worker can be orphaned mid-read. On a blocking fd a concurrent-
+            # reader race makes the underlying os.read block forever ignoring its
+            # timeout (inotify_simple's own documented warning), which can wedge
+            # the event loop's shutdown_default_executor() at teardown. Non-
+            # blocking makes that racy read raise EAGAIN instead of blocking. Per
+            # inotify_simple's docs this does NOT change normal read() behaviour
+            # (read() is FIONREAD+poll gated), so the live single-reader monitor
+            # is unaffected and events deliver identically.
+            self._inotify = INotify(nonblocking=True)
             self._use_inotify = True
             # Add watches for sessions already in the DB
             for row in get_tailable_sessions():
