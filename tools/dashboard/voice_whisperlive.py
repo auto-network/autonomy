@@ -182,6 +182,49 @@ def _segment_dedupe_key(segment: dict) -> tuple[int, str] | None:
     return (start_ms, text.strip())
 
 
+def _trim_segment_to_cutoff(segment: dict, cutoff_ms: int) -> tuple[int, str] | None:
+    """Keep only the words of *segment* spoken at/after *cutoff_ms*.
+
+    A segment can straddle a Send/Clear/Rebind cutoff: it STARTS before
+    the cutoff (so the segment-level check would drop it whole) yet
+    contains words spoken *after* the operator tapped. With per-word
+    timestamps (``timestamp_granularities: ["word"]``) we can salvage that
+    tail — drop the pre-tap words, keep the rest — so the words said right
+    after a mid-sentence Send aren't lost.
+
+    Returns a ``(start_ms, text)`` key for the surviving tail (same shape
+    as :func:`_segment_dedupe_key`, so the caller can dedupe/emit it
+    uniformly), or ``None`` when nothing survives: no word data (graceful
+    fallback to the whole-segment drop), or every word predates the
+    cutoff. Word ``start`` is in seconds on the same audio timeline as the
+    cutoff, matching the segment ``start`` parsing.
+    """
+    words = segment.get("words")
+    if not isinstance(words, list) or not words:
+        return None
+    kept: list[tuple[int, str]] = []
+    for w in words:
+        if not isinstance(w, dict):
+            continue
+        w_text = w.get("word")
+        if not isinstance(w_text, str):
+            continue
+        try:
+            w_start_ms = int(float(w.get("start")) * 1000)
+        except (TypeError, ValueError):
+            continue
+        if w_start_ms >= cutoff_ms:
+            kept.append((w_start_ms, w_text))
+    if not kept:
+        return None
+    # faster-whisper words carry their own leading space, so a bare join
+    # reconstructs the natural spacing; strip the leading edge.
+    text = "".join(t for _, t in kept).strip()
+    if not text:
+        return None
+    return (kept[0][0], text)
+
+
 def _is_completed(segment: dict) -> bool:
     """Upstream uses ``completed: True`` on finalised segments.
     Defensive about absent / non-bool values: only ``is True``
@@ -284,12 +327,19 @@ class WhisperLiveClient:
             "task": "transcribe",
             "model": self.model,
             "use_vad": self.use_vad,
-            # Silence-hallucination gating (see constants). These are the
-            # DEFAULTS that the planned dashboard.voice graph setting (#29)
-            # will override at connect time once it's wired; hard-coded here
-            # for now so the operator gets immediate relief.
+            # Silence-hallucination gating. self.no_speech_thresh /
+            # self.vad_threshold are resolved per mic connection from the
+            # dashboard.voice.transcription graph setting (server.py) with the
+            # module constants as fallback — operator-tunable, no restart.
             "no_speech_thresh": self.no_speech_thresh,
             "vad_parameters": {"threshold": self.vad_threshold},
+            # Per-word timestamps so a mid-sentence Send/Clear can trim a
+            # straddling segment at the WORD boundary instead of dropping it
+            # whole (see _trim_segment_to_cutoff). whisper_live gates word
+            # timestamps on "word" being in timestamp_granularities
+            # (server.py:538) and then attaches a words[] array to each
+            # segment (server.py:570).
+            "timestamp_granularities": ["word"],
         }
 
     async def connect_and_wait_ready(self, *, ready_timeout: float = 15.0) -> None:
@@ -577,8 +627,15 @@ class WhisperLiveClient:
             if key[0] > self._max_start_ms:
                 self._max_start_ms = key[0]
             if key[0] < self._cutoff_ms:
-                # Re-emitted audio from before a Send/Clear/Rebind cutoff.
-                continue
+                # The segment starts before a Send/Clear/Rebind cutoff. If it
+                # straddles the cutoff (per-word timestamps show words spoken
+                # after the tap), salvage that tail; otherwise it's purely
+                # re-emitted pre-cutoff audio and is dropped. Falls back to a
+                # whole-segment drop when no word data is present.
+                trimmed = _trim_segment_to_cutoff(seg, self._cutoff_ms)
+                if trimmed is None:
+                    continue
+                key = trimmed
             if _is_completed(seg):
                 if any(
                     e.start_ms == key[0] and e.text == key[1]
