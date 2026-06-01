@@ -30,6 +30,38 @@
 .sc-dot-dead { background: #374151; }
 .sc-dot--working { animation: sv-dot-flash 0.8s ease-in-out infinite; }
 
+/* ── Pending-message ring (auto-xkdoi) ───────────────────────────────────────
+   A halo over the activity dot when a sent message hasn't cleared the log yet.
+   Orthogonal to the dot's own state — composes with live/working/voice-active.
+   A real overlay element (the voice module owns ::before/::after on the dot
+   button); sits at inset:-5px, OUTSIDE the voice pseudo rings at -4px, so it
+   reads as the clear outer ring with no concentric clash. pointer-events:none
+   so it never intercepts the dot's tap target. */
+.sc-pending-ring {
+  position: absolute;
+  inset: -5px;
+  border-radius: 999px;
+  pointer-events: none;
+}
+.sc-pending-ring--sending {
+  border: 1.5px solid rgba(245, 158, 11, 0.95);
+  box-shadow: 0 0 6px 1px rgba(245, 158, 11, 0.5);
+  animation: sc-pending-ring-amber 1.6s ease-in-out infinite;
+}
+.sc-pending-ring--unconfirmed {
+  border: 1.5px solid rgba(239, 68, 68, 1);
+  box-shadow: 0 0 8px 2px rgba(239, 68, 68, 0.6);
+  animation: sc-pending-ring-red 0.85s ease-in-out infinite;
+}
+@keyframes sc-pending-ring-amber {
+  0%, 100% { transform: scale(1);    opacity: 0.75; }
+  50%      { transform: scale(1.15); opacity: 1; }
+}
+@keyframes sc-pending-ring-red {
+  0%, 100% { transform: scale(1);    opacity: 0.85; }
+  50%      { transform: scale(1.22); opacity: 1; }
+}
+
 /* Nag bell (inline). Four visual states encode idle-nag × dispatch-nag. */
 .sc-nag {
   font-size: 9px; line-height: 1;

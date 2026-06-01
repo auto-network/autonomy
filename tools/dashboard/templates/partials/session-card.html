@@ -36,6 +36,13 @@
               @pointercancel.stop="window.Autonomy.voice.ui.onPointerCancel($event)"
               @click.stop="window.Autonomy.voice.ui.onClick($event, window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
               data-testid="voice-session-dot">
+        <!-- Pending-message ring overlay (auto-xkdoi). pointer-events:none, sits
+             outside the voice module's pseudo-rings; signal owned by session-store. -->
+        <span class="sc-pending-ring"
+              x-show="!!window.outboxPendingState(window.Autonomy.voice.ui.voiceBindKey(s))"
+              :class="window.outboxPendingState(window.Autonomy.voice.ui.voiceBindKey(s)) === 'unconfirmed' ? 'sc-pending-ring--unconfirmed' : 'sc-pending-ring--sending'"
+              data-testid="session-pending-ring"
+              aria-hidden="true"></span>
         <svg x-show="window.Autonomy.voice.ui.showMicGlyph(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
              class="voice-dot-glyph"
              viewBox="0 0 16 16"
@@ -135,6 +142,13 @@
               @pointercancel.stop="window.Autonomy.voice.ui.onPointerCancel($event)"
               @click.stop="window.Autonomy.voice.ui.onClick($event, window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
               data-testid="voice-session-dot">
+        <!-- Pending-message ring overlay (auto-xkdoi). pointer-events:none, sits
+             outside the voice module's pseudo-rings; signal owned by session-store. -->
+        <span class="sc-pending-ring"
+              x-show="!!window.outboxPendingState(window.Autonomy.voice.ui.voiceBindKey(s))"
+              :class="window.outboxPendingState(window.Autonomy.voice.ui.voiceBindKey(s)) === 'unconfirmed' ? 'sc-pending-ring--unconfirmed' : 'sc-pending-ring--sending'"
+              data-testid="session-pending-ring"
+              aria-hidden="true"></span>
         <svg x-show="window.Autonomy.voice.ui.showMicGlyph(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
              class="voice-dot-glyph"
              viewBox="0 0 16 16"
