@@ -65,3 +65,10 @@ TIER_DIR="${BACKUP_ROOT}/${TIER}"
 ls -1dt "${TIER_DIR}"/*/ 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -rf
 
 echo "$(date -Iseconds) ${TIER} backup complete: ${DEST}"
+
+# ── Tail-call offsite push (architecture note graph://34507c98-af7) ───
+# Idempotent — backup-offsite.sh exits 0 if agents/backup.env is absent.
+# Failure is non-fatal: the local backup above is the source of truth.
+if ! "${ROOT}/tools/graph/backup-offsite.sh" "$TIER"; then
+    echo "$(date -Iseconds) WARN: ${TIER} offsite push failed (non-fatal)"
+fi
