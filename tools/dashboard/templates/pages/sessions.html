@@ -83,6 +83,28 @@
     </div>
   </div>
 
+  <!-- Launching (booting sessions: optimistic tiles + sessions still in
+       startup) — pinned above Active so a booting session is always
+       reachable regardless of the Active sort. auto-yfcoc PART 2. -->
+  <section x-show="launching.length > 0" aria-label="Launching" class="mb-8" data-testid="launching-section">
+    <div class="flex items-center gap-3 mb-3 flex-wrap">
+      <h2 class="text-lg font-semibold text-sky-400 leading-none">
+        <span class="sc-phase-dot" style="display:inline-block;vertical-align:middle"></span>
+        Launching
+        <span class="text-gray-500 font-normal text-sm" x-text="'(' + launching.length + ')'"></span>
+      </h2>
+    </div>
+    <div class="sc-card-list" style="display:flex;flex-direction:column;gap:6px">
+      <template x-for="s in launching" :key="s.session_id">
+        <div @click="s._launching ? null : navigate(s)"
+             :style="s._launching ? 'cursor:default' : ''"
+             data-testid="session-card" :data-session-id="s.session_id">
+          {% include 'partials/session-card.html' %}
+        </div>
+      </template>
+    </div>
+  </section>
+
   <!-- Active Sessions (interactive: host, chatwith, terminal) -->
   <section aria-label="Active Sessions" class="mb-8" data-testid="active-sessions-section">
     <div class="flex items-center gap-3 mb-3 flex-wrap">
@@ -94,7 +116,7 @@
         {% include 'partials/dropdown-toggle.html' %}
       {% endwith %}
     </div>
-    <template x-if="interactive.length === 0">
+    <template x-if="activeInteractive.length === 0">
       <div class="text-gray-500 text-sm">No active sessions</div>
     </template>
     <div class="sc-card-list" style="display:flex;flex-direction:column;gap:6px">
