@@ -219,8 +219,29 @@
         return allowed.indexOf(saved) !== -1 ? saved : 'lastActivity';
       })(),
 
+      // Booting sessions: optimistic pending tiles + any live session the
+      // lifecycle derivation still marks as starting up (startupVisible).
+      // Rendered in a dedicated "Launching" section pinned to the top of
+      // the list, newest-first, so a booting session is always reachable
+      // regardless of the Active sort (turns/idle/ctx).
+      _isLaunching(s) {
+        if (s._launching) return true;
+        var L = window.Autonomy && window.Autonomy.lifecycle;
+        return !!(L && L.startupVisible(s));
+      },
+      get launching() {
+        var self = this;
+        var arr = this.interactive.filter(function(s) { return self._isLaunching(s); });
+        arr.sort(function(a, b) { return (b.created_at || 0) - (a.created_at || 0); });
+        return arr;
+      },
+      get activeInteractive() {
+        var self = this;
+        return this.interactive.filter(function(s) { return !self._isLaunching(s); });
+      },
+
       get sortedInteractive() {
-        var arr = this.interactive.slice();
+        var arr = this.activeInteractive.slice();
         var mode = this.activeSort;
         var now = Date.now() / 1000;
         arr.sort(function(a, b) {
@@ -454,6 +475,41 @@
         this._onCreateTerminal = async (e) => {
           var detail = e.detail || {};
           this._creating = true;
+          // ── Optimistic launching tile (auto-yfcoc PART 2) ──
+          // Render a tile the instant the workspace is picked — before the
+          // POST returns — so the operator gets immediate feedback and the
+          // session appears in the Launching section at the top of the list.
+          // Reconciled away in _updateFromStore when the real
+          // session:registry row for this workspace arrives, or expired
+          // after the TTL if creation failed.
+          var isHost = detail.type === 'host' && !detail.project;
+          var pendingId = 'pending-' + (
+            (window.crypto && crypto.randomUUID)
+              ? crypto.randomUUID()
+              : String(Date.now()) + '-' + Math.floor(Math.random() * 1e9)
+          );
+          try {
+            var org = null;
+            if (detail.project) {
+              for (var pi = 0; pi < (this.projects || []).length; pi++) {
+                if (this.projects[pi].graph_project === detail.project) {
+                  org = this.projects[pi].org || null; break;
+                }
+              }
+            }
+            var pstore = window.getSessionStore(pendingId);
+            pstore.isLive = true;
+            pstore.project = detail.project || '';
+            pstore.label = detail.label || (isHost ? 'New host session' : (detail.project || 'New session'));
+            pstore.sessionType = isHost ? 'host' : 'container';
+            pstore.startedAt = Date.now() / 1000;
+            pstore.setupPhase = 'pending';
+            pstore.harnessPhase = 'pending';
+            pstore.activityState = 'thinking';
+            pstore.org = org;
+            pstore._launching = true;
+            this._updateFromStore();
+          } catch (_) { /* optimistic tile is best-effort */ }
           try {
             var body = {};
             if (detail.project) body.project = detail.project;
@@ -469,6 +525,12 @@
             }
             await res.json();
           } catch (err) {
+            // Create failed — drop the optimistic tile immediately so it
+            // doesn't linger as a ghost in the Launching section.
+            try {
+              delete Alpine.store('sessions')[pendingId];
+              this._updateFromStore();
+            } catch (_) {}
             console.warn('[sessionsPage] create-terminal failed', err);
           } finally {
             this._creating = false;
@@ -507,6 +569,32 @@
 
       _updateFromStore() {
         var allSessions = Alpine.store('sessions');
+        // ── Reconcile / expire optimistic launching tiles (auto-yfcoc) ──
+        // Drop a pending tile once a real (non-pending) live session for the
+        // same workspace has arrived via registry, or after _LAUNCH_TTL_S
+        // if creation never produced one (failed POST, lost broadcast).
+        var _LAUNCH_TTL_S = 120;
+        var nowS = Date.now() / 1000;
+        var realByKey = {};
+        for (var rid in allSessions) {
+          if (rid.indexOf('pending-') === 0) continue;
+          var rs = allSessions[rid];
+          if (rs && rs.isLive) {
+            var rk = (rs.project || '') + '|' + (rs.sessionType || '');
+            var rst = rs.startedAt || 0;
+            if (realByKey[rk] === undefined || rst > realByKey[rk]) realByKey[rk] = rst;
+          }
+        }
+        for (var pid in allSessions) {
+          if (pid.indexOf('pending-') !== 0) continue;
+          var p = allSessions[pid];
+          var pk = (p.project || '') + '|' + (p.sessionType || '');
+          // A real session created at/after this tile (5s skew tolerance)
+          // means the launch resolved — retire the placeholder.
+          var matched = realByKey[pk] !== undefined && realByKey[pk] >= (p.startedAt || 0) - 5;
+          var expired = (nowS - (p.startedAt || 0)) > _LAUNCH_TTL_S;
+          if (matched || expired) delete allSessions[pid];
+        }
         var all = [];
         for (var id in allSessions) {
           var s = allSessions[id];
@@ -562,6 +650,10 @@
             harness_phase: s.harnessPhase || 'pending',
             harness_state: s.harnessState || {},
             resolved: s.resolved === true,
+            // auto-yfcoc PART 2: optimistic launching-tile marker. Drives
+            // placement into the Launching section (and the chip suppresses
+            // navigation until the real session reconciles in).
+            _launching: s._launching === true,
             _hasData: !!hasData,
           });
         }
