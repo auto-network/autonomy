@@ -903,6 +903,11 @@ class SessionMonitor:
         self._entry_enricher = None
         self._harness: SessionHarness = CLAUDE_HARNESS
         self._todo_snapshot = None
+        # auto-eerfx: per-session monotonic timestamp of when a session was
+        # first observed at harness_starting with setup already complete.
+        # Used by the screen-poll loop's grace fallback to promote
+        # composer_ready when the docker-bridged pane can't be screen-read.
+        self._harness_ready_grace: dict[str, float] = {}
         self._started = False
         self._last_pause_nag_sent: float = 0.0  # timestamp of last dispatch-pause nag
         self._last_orphan_prune: float = time.time()  # defer first prune one full interval
@@ -1758,6 +1763,17 @@ class SessionMonitor:
         # ── auto-eerfx screen-state poller ────────────────────────────
 
     SCREEN_POLL_INTERVAL_S = 2.0
+    # Grace before promoting harness_starting → composer_ready WITHOUT a
+    # screen-read confirmation. Container sessions run the harness inside
+    # docker; the host tmux pane bridges via attach and `capture-pane`
+    # frequently returns a blank/desynced grid, so screen-reading can
+    # never confirm composer_ready for them. Once setup_phase is complete
+    # the entrypoint has already exec'd the harness and it accepts input
+    # within a couple seconds — so after this grace we promote anyway.
+    # Without it, container cards stick on "Booting" forever (the exact
+    # symptom: session online + accepting input while the tile shows
+    # in-progress).
+    HARNESS_READY_GRACE_S = 12.0
 
     async def _screen_poll_loop(self) -> None:
         """auto-eerfx: per-2s tmux capture-pane → harness.read_screen_state.
@@ -1841,6 +1857,28 @@ class SessionMonitor:
                         bool(new_state.get("composer_ready"))
                         and harness_phase != "composer_ready"
                     )
+                    # Grace fallback for sessions whose pane can't be
+                    # screen-read (docker-bridged container panes return a
+                    # blank capture). Once setup is complete the harness is
+                    # exec'd and accepting input within seconds; if the
+                    # screen-read hasn't confirmed composer_ready within
+                    # HARNESS_READY_GRACE_S of first seeing the session in
+                    # this state, promote anyway so the card clears.
+                    if (
+                        not advance
+                        and harness_phase == "harness_starting"
+                        and row.get("setup_phase") == "setup_complete"
+                    ):
+                        first = self._harness_ready_grace.setdefault(
+                            tmux_name, time.monotonic()
+                        )
+                        if time.monotonic() - first >= self.HARNESS_READY_GRACE_S:
+                            advance = True
+                            if not new_state.get("composer_ready"):
+                                new_state["composer_ready"] = True
+                                changed = True
+                    else:
+                        self._harness_ready_grace.pop(tmux_name, None)
                     if changed or advance:
                         kwargs: dict[str, Any] = {}
                         if changed:
