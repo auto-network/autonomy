@@ -248,8 +248,16 @@
         var entries = (s && s.entries) || [];
         var want = (o.text || '').trim();
         if (!want) return;
-        // Scan the tail (most recent) for a user entry containing our text.
-        for (var i = entries.length - 1; i >= 0 && i >= entries.length - 8; i--) {
+        // Scan the FULL history newest-first, not just the last 8 entries. An
+        // agent's tool-use burst appends many assistant/tool_result entries
+        // right after the user turn, so the message falls out of any small
+        // tail window within seconds of being answered — proven against a real
+        // NG session where delivered messages had 8-20 entries after them. The
+        // old 8-entry bound is exactly why a delivered-AND-answered message
+        // stayed stuck on "Retry": reconciliation never saw it. This loop only
+        // runs while an outbox is pending (guarded above), so the full scan is
+        // cheap and bounded.
+        for (var i = entries.length - 1; i >= 0; i--) {
           var e = entries[i];
           if (e && e.type === 'user' && typeof e.content === 'string' &&
               e.content.trim().indexOf(want) !== -1) {
