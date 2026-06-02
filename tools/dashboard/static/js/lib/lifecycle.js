@@ -271,6 +271,43 @@
     return "";
   }
 
+  // ── [lc] timeline instrumentation ────────────────────────────────
+  //
+  // Single-arg JSON log line that the host's capture parser reads as
+  // `line[5:]` after matching the ``[lc] `` prefix. Transitions only —
+  // callers compute the (sid, surface) memo and decide when to emit so
+  // we never spam per-frame. Format coordinated with host-0531-020038
+  // turn 227.
+  function _emit(rec) {
+    try {
+      if (typeof console === "undefined" || !console.log) return;
+      var out = {
+        t: (typeof performance !== "undefined" && performance.now) ? performance.now() : null,
+        wallt: Date.now(),
+      };
+      for (var k in rec) {
+        if (Object.prototype.hasOwnProperty.call(rec, k)) out[k] = rec[k];
+      }
+      console.log("[lc]", JSON.stringify(out));
+    } catch (_) { /* best-effort */ }
+  }
+
+  // Snapshot of every lifecycle-derived property a caller needs to
+  // compare against the previous frame to decide whether anything
+  // material changed. Stable shape — append-only.
+  function summarize(s) {
+    return {
+      state: lifecycleState(s),
+      chip: phaseChip(s),
+      tone: phaseTone(s),
+      visible: startupVisible(s),
+      launching: !!(s && s._launching),
+      setup_phase: (s && s.setup_phase) || null,
+      harness_phase: (s && s.harness_phase) || null,
+      resolved: !!(s && s.resolved === true),
+    };
+  }
+
   // Expose the namespace. window.Autonomy may already be defined by
   // the voice helpers — coexist by extending it, never replacing.
   if (typeof window !== "undefined") {
@@ -284,6 +321,9 @@
       lifecycleLanes: lifecycleLanes,
       inlineAction: inlineAction,
       messageTone: messageTone,
+      // [lc] instrumentation — callers own the memo + emit decision.
+      emit: _emit,
+      summarize: summarize,
     };
   }
 })();

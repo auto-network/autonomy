@@ -211,6 +211,58 @@
           });
         }
       },
+      // [lc] viewer-loading slot emit helper. Logs a viewer-slot-render
+      // record whenever the *result* of the slot's render condition
+      // changes — distinguishes "state===loading but no row yet"
+      // (early-mount no-data) from "state===loading and chip rendering"
+      // from "state advanced past loading". Memoised on `this` so
+      // repeated getter calls within the same Alpine reactivity tick
+      // don't spam.
+      _lcEmitSlot: function (row, noRowReason) {
+        var L = window.Autonomy && window.Autonomy.lifecycle;
+        if (!L || !L.emit || !L.phaseChip) return;
+        var chip = row ? L.phaseChip(row) : null;
+        var tone = row ? L.phaseTone(row) : null;
+        var state = this.state;
+        var sig = state + '|' + (row ? '1' : '0') + '|' + (chip || '') + '|' + (tone || '');
+        if (this._lcSlotSig === sig) return;
+        var prevSig = this._lcSlotSig;
+        this._lcSlotSig = sig;
+        L.emit({
+          sid: this.sessionKey || this._tmuxSession || null,
+          surface: 'viewer-loading',
+          event: 'viewer-slot-render',
+          from: prevSig || null,
+          to: sig,
+          state: state,
+          has_row: !!row,
+          chip_label: chip,
+          chip_tone: tone,
+          setup_phase: row ? row.setup_phase : null,
+          harness_phase: row ? row.harness_phase : null,
+          resolved: row ? row.resolved : null,
+          reason: noRowReason || (state !== 'loading' ? 'state past loading' : null),
+        });
+      },
+      // [lc] state-machine transition helper. Wraps every ``this.state =``
+      // assignment so the timeline captures EVERY transition with the
+      // caller's reason. Single point so we never miss one.
+      _lcSetState: function (next, reason) {
+        var prev = this.state;
+        if (prev === next) return;
+        this.state = next;
+        var L = window.Autonomy && window.Autonomy.lifecycle;
+        if (L && L.emit) {
+          L.emit({
+            sid: this.sessionKey || this._tmuxSession || null,
+            surface: 'viewer-loading',
+            event: 'state-machine',
+            from: prev || null,
+            to: next,
+            reason: reason || null,
+          });
+        }
+      },
       // Authoritative signal for "this viewer's bottom composer surface is
       // active" — the EXACT condition the composer (.sv-input) renders under
       // (session-view.html:289). The pending/outbox tile mounts in this same
