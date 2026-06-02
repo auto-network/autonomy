@@ -344,6 +344,17 @@ async def run_cli_json(cmd: list[str], timeout: int = 30) -> list | dict:
 
 # ── API Endpoints ─────────────────────────────────────────────
 
+async def api_ping(request):
+    """Trivial liveness probe — zero work: no DB, no subprocess, no I/O.
+
+    Its round-trip latency is a direct measure of event-loop
+    responsiveness. Fast-polling /api/ping during a session launch is the
+    proof that the create/startup path isn't blocking the loop: if latency
+    stays flat while an NG container boots, the dashboard API is properly
+    async; if it spikes, something synchronous is hogging the loop.
+    """
+    return JSONResponse({"ok": True})
+
 async def api_beads_ready(request):
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse(dao_beads.get_open_beads())
@@ -5317,7 +5328,14 @@ async def api_session_create(request):
                 status_code=400,
             )
         try:
-            project_mounts = prepare_session_mounts(
+            # prepare_session_mounts runs a synchronous `git fetch origin
+            # --prune` on every workspace clone — for enterprise-ng that's 3
+            # repos, ~40s total, and it was running ON the event loop, which
+            # is what froze the whole dashboard API during NG startup (proven:
+            # /api/ping spiked to ~9.5s during the first fetch). Offload to a
+            # worker thread so the loop stays responsive while repos fetch.
+            project_mounts = await asyncio.to_thread(
+                prepare_session_mounts,
                 proj,
                 tmux_name,
                 refresh_existing_worktree=True,
@@ -5355,7 +5373,11 @@ async def api_session_create(request):
         global_claude_md = primer_path
         startup_script = (_REPO_ROOT / proj.startup) if proj.startup else None
         working_dir = proj.working_dir or "/workspace/repo"
-        cmd_str = launch_session(
+        # launch_session does heavy synchronous work (graph claude install,
+        # credential resolution, mount/auth setup) — offload to a worker
+        # thread so it doesn't freeze the event loop during launch.
+        cmd_str = await asyncio.to_thread(
+            launch_session,
             session_type="terminal",
             name=tmux_name,
             prompt=None,
@@ -5387,7 +5409,8 @@ async def api_session_create(request):
         )
         is_container = False
     else:
-        cmd_str = launch_session(
+        cmd_str = await asyncio.to_thread(
+            launch_session,
             session_type="terminal",
             name=tmux_name,
             prompt=None,
@@ -5405,9 +5428,26 @@ async def api_session_create(request):
     if not is_container:
         tmux_cmd += ["-c", str(_REPO_ROOT)]
     tmux_cmd.append(cmd_str)
-    result = subprocess.run(
-        tmux_cmd, env={**os.environ, "TERM": "xterm-256color"}, capture_output=True,
-    )
+
+    # The tmux launch + its tmux set-option follow-ups are synchronous
+    # subprocess calls. Run them in a worker thread so they never block the
+    # event loop — proven necessary: a synchronous create froze /api/ping for
+    # ~9s (see the fast-poll latency probe). The launch_session() calls above
+    # are likewise wrapped in to_thread for the same reason.
+    def _launch_tmux_sync():
+        r = subprocess.run(
+            tmux_cmd, env={**os.environ, "TERM": "xterm-256color"}, capture_output=True,
+        )
+        if r.returncode == 0:
+            for _opt, _val in (
+                ("set-clipboard", "on"), ("mouse", "on"), ("allow-passthrough", "on"),
+            ):
+                subprocess.run(
+                    ["tmux", "set-option", "-t", tmux_name, _opt, _val],
+                    capture_output=True,
+                )
+        return r
+    result = await asyncio.to_thread(_launch_tmux_sync)
     if result.returncode != 0:
         logger.error(
             "api_session_create: tmux new-session failed  tmux=%s  rc=%d  stderr=%s",
@@ -5417,11 +5457,6 @@ async def api_session_create(request):
             {"error": f"tmux creation failed: {result.stderr.decode().strip()}"},
             status_code=500,
         )
-
-    # Enable OSC 52 + mouse + passthrough for all sessions
-    subprocess.run(["tmux", "set-option", "-t", tmux_name, "set-clipboard", "on"], capture_output=True)
-    subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "on"], capture_output=True)
-    subprocess.run(["tmux", "set-option", "-t", tmux_name, "allow-passthrough", "on"], capture_output=True)
 
     # ── Register with session monitor ───────────────────────────
     if is_container:
@@ -13103,6 +13138,7 @@ def _plugin_asset_rev(plugin) -> str:
 # ── App ───────────────────────────────────────────────────────
 
 routes = [
+    Route("/api/ping", api_ping),
     # Pages
     Route("/", page_index),
     Route("/beads", page_beads),
