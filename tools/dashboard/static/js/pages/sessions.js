@@ -508,6 +508,18 @@
             pstore.activityState = 'thinking';
             pstore.org = org;
             pstore._launching = true;
+            // [lc] Optimistic insert. Emit BEFORE _updateFromStore so the
+            // timeline shows the synchronous handler boundary regardless
+            // of how fast the rebuild + Alpine reactivity downstream is.
+            var L = window.Autonomy && window.Autonomy.lifecycle;
+            if (L && L.emit) {
+              L.emit({
+                sid: pendingId, surface: 'list-card', event: 'optimistic-insert',
+                from: null, to: 'pending',
+                project: pstore.project, sessionType: pstore.sessionType,
+                reason: 'create-terminal handler synchronous insert',
+              });
+            }
             this._updateFromStore();
           } catch (_) { /* optimistic tile is best-effort */ }
           try {
@@ -585,6 +597,7 @@
             if (realByKey[rk] === undefined || rst > realByKey[rk]) realByKey[rk] = rst;
           }
         }
+        var _lcLib = window.Autonomy && window.Autonomy.lifecycle;
         for (var pid in allSessions) {
           if (pid.indexOf('pending-') !== 0) continue;
           var p = allSessions[pid];
@@ -593,7 +606,18 @@
           // means the launch resolved — retire the placeholder.
           var matched = realByKey[pk] !== undefined && realByKey[pk] >= (p.startedAt || 0) - 5;
           var expired = (nowS - (p.startedAt || 0)) > _LAUNCH_TTL_S;
-          if (matched || expired) delete allSessions[pid];
+          if (matched || expired) {
+            if (_lcLib && _lcLib.emit) {
+              _lcLib.emit({
+                sid: pid, surface: 'list-card', event: 'reconcile',
+                from: 'pending', to: null,
+                reason: matched ? 'real session arrived for ' + pk : 'TTL expired (' + _LAUNCH_TTL_S + 's)',
+                matched: matched, expired: expired,
+                pending_started_at: p.startedAt || 0,
+              });
+            }
+            delete allSessions[pid];
+          }
         }
         var all = [];
         for (var id in allSessions) {
@@ -665,6 +689,72 @@
             s.session_id && interactiveTypes.indexOf(s.type) !== -1
           );
           this.loading = false;
+
+          // [lc] phase-change + launching-membership transitions. We diff
+          // the lifecycle summary AND the _isLaunching verdict per
+          // session-id against the previous _updateFromStore pass so the
+          // capture timeline shows EXACTLY when the card moved phases or
+          // crossed the Launching/Active boundary. Memo is forgotten when
+          // a session leaves `interactive` (so re-entry logs a fresh
+          // baseline).
+          if (_lcLib && _lcLib.emit && _lcLib.summarize) {
+            if (!this._lcMemo) this._lcMemo = {};
+            var seen = {};
+            for (var ii = 0; ii < this.interactive.length; ii++) {
+              var ss = this.interactive[ii];
+              var sid = ss.session_id;
+              seen[sid] = true;
+              var cur = _lcLib.summarize(ss);
+              var launchingNow = !!ss._launching || cur.visible;
+              var prev = this._lcMemo[sid];
+              if (!prev) {
+                _lcLib.emit({
+                  sid: sid, surface: 'list-card', event: 'registry-update',
+                  from: null, to: cur.state,
+                  setup_phase: cur.setup_phase, harness_phase: cur.harness_phase,
+                  resolved: cur.resolved, chip_label: cur.chip, chip_tone: cur.tone,
+                  _launching: launchingNow,
+                  reason: 'first seen this session in interactive list',
+                });
+              } else {
+                if (prev.state !== cur.state) {
+                  _lcLib.emit({
+                    sid: sid, surface: 'list-card', event: 'phase-change',
+                    from: prev.state, to: cur.state,
+                    setup_phase: cur.setup_phase, harness_phase: cur.harness_phase,
+                    resolved: cur.resolved, chip_label: cur.chip, chip_tone: cur.tone,
+                  });
+                }
+                if (prev.chip !== cur.chip || prev.tone !== cur.tone) {
+                  _lcLib.emit({
+                    sid: sid, surface: 'list-card', event: 'chip-render',
+                    from: prev.chip || null, to: cur.chip || null,
+                    chip_tone: cur.tone,
+                  });
+                }
+                if (prev.launching !== launchingNow) {
+                  _lcLib.emit({
+                    sid: sid, surface: 'list-card', event: 'launching-membership',
+                    from: prev.launching ? 'launching' : 'active',
+                    to: launchingNow ? 'launching' : 'active',
+                    visible: cur.visible, _launching: !!ss._launching,
+                  });
+                }
+              }
+              cur.launching = launchingNow;
+              this._lcMemo[sid] = cur;
+            }
+            for (var msid in this._lcMemo) {
+              if (!seen[msid]) {
+                _lcLib.emit({
+                  sid: msid, surface: 'list-card', event: 'reconcile',
+                  from: this._lcMemo[msid].state, to: null,
+                  reason: 'left interactive list',
+                });
+                delete this._lcMemo[msid];
+              }
+            }
+          }
         }
       },
 
