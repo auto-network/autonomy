@@ -108,15 +108,76 @@
       // falls through to the legacy "Connecting to session..." text).
       get loadingPhaseRow() {
         var s = Alpine.store('sessions')[this.sessionKey];
-        if (!s) return null;
-        return {
+        if (!s) {
+          this._lcEmitSlot(null, 'no store row');
+          return null;
+        }
+        var row = {
           is_live: s.isLive,
           harness: s.harness,
           setup_phase: s.setupPhase,
           harness_phase: s.harnessPhase,
           harness_state: s.harnessState,
           resumable: s.resumable,
+          // resolved is the migration-artifact guard in the lifecycle
+          // bypass — without it a fully-booted RESUMED session would
+          // be classified as still-starting in the viewer.
+          resolved: s.resolved === true,
         };
+        this._lcEmitSlot(row, null);
+        return row;
+      },
+      // [lc] viewer-loading slot emit helper. Logs a viewer-slot-render
+      // record whenever the *result* of the slot's render condition
+      // changes — distinguishes "state===loading but no row yet"
+      // (early-mount no-data) from "state===loading and chip rendering"
+      // from "state advanced past loading". Memoised on `this` so
+      // repeated getter calls within the same Alpine reactivity tick
+      // don't spam.
+      _lcEmitSlot: function (row, noRowReason) {
+        var L = window.Autonomy && window.Autonomy.lifecycle;
+        if (!L || !L.emit || !L.phaseChip) return;
+        var chip = row ? L.phaseChip(row) : null;
+        var tone = row ? L.phaseTone(row) : null;
+        var state = this.state;
+        var sig = state + '|' + (row ? '1' : '0') + '|' + (chip || '') + '|' + (tone || '');
+        if (this._lcSlotSig === sig) return;
+        var prevSig = this._lcSlotSig;
+        this._lcSlotSig = sig;
+        L.emit({
+          sid: this.sessionKey || this._tmuxSession || null,
+          surface: 'viewer-loading',
+          event: 'viewer-slot-render',
+          from: prevSig || null,
+          to: sig,
+          state: state,
+          has_row: !!row,
+          chip_label: chip,
+          chip_tone: tone,
+          setup_phase: row ? row.setup_phase : null,
+          harness_phase: row ? row.harness_phase : null,
+          resolved: row ? row.resolved : null,
+          reason: noRowReason || (state !== 'loading' ? 'state past loading' : null),
+        });
+      },
+      // [lc] state-machine transition helper. Wraps every ``this.state =``
+      // assignment so the timeline captures EVERY transition with the
+      // caller's reason. Single point so we never miss one.
+      _lcSetState: function (next, reason) {
+        var prev = this.state;
+        if (prev === next) return;
+        this.state = next;
+        var L = window.Autonomy && window.Autonomy.lifecycle;
+        if (L && L.emit) {
+          L.emit({
+            sid: this.sessionKey || this._tmuxSession || null,
+            surface: 'viewer-loading',
+            event: 'state-machine',
+            from: prev || null,
+            to: next,
+            reason: reason || null,
+          });
+        }
       },
       // Authoritative signal for "this viewer's bottom composer surface is
       // active" — the EXACT condition the composer (.sv-input) renders under
@@ -677,10 +738,10 @@
         var draftText = composerStore ? (composerStore.draftText || '') : this.readComposerText();
         var currentDraft = this.readComposerText();
         var nextDraft = draftText.trim() === '' ? snapshot : ((currentDraft || draftText) + '\n\n' + snapshot);
-        if (typeof voice.setMicMode === 'function' &&
-            (voice.micMode === 'listening' || voice.micMode === 'vad_paused')) {
-          voice.setMicMode('muted');
-        }
+        // Do NOT auto-mute on import. Muting here forced the operator to click
+        // Unmute before dictating again — the third click in the desktop
+        // dictate->import->send->unmute slog. Leaving the mic live lets the next
+        // utterance keep flowing; Send folds in whatever's accumulated.
         this.writeComposerTextWithUndo(nextDraft);
         if (typeof voice.clearBuffer === 'function') {
           voice.clearBuffer();
@@ -717,7 +778,7 @@
         // ── RunDir path: fetch dispatch tail to resolve identity ──
         if (runDir && !sessionId) {
           this._runDir = runDir;
-          this.state = 'loading';
+          this._lcSetState('loading', 'configure: runDir path begin');
           try {
             var res = await fetch('/api/dispatch/tail/' + encodeURIComponent(runDir) + '?after=0');
             if (!res.ok) {
@@ -734,7 +795,7 @@
                   return;
                 }
               } catch (fallbackErr) {}
-              this.state = 'error';
+              this._lcSetState('error', 'configure: dispatch tail fetch failed');
               this.errorMsg = 'Failed to load dispatch run';
               return;
             }
@@ -769,7 +830,7 @@
             store.loaded = true;
 
             this._rebuildDisplay();
-            this.state = 'ready';
+            this._lcSetState('ready', 'configure: dispatch tail loaded');
             this._scrollToBottom();
 
             // Connect to SSE if session identity is known
@@ -806,7 +867,7 @@
                 return;
               }
             } catch (fallbackErr2) {}
-            this.state = 'error';
+            this._lcSetState('error', 'configure: dispatch tail catch');
             this.errorMsg = 'Failed to load: ' + (e.message || e);
             return;
           }
@@ -839,7 +900,7 @@
         if (store.loaded) {
           // Instant render from cache — zero network
           this._rebuildDisplay();
-          this.state = 'ready';
+          this._lcSetState('ready', 'configure: cache hit, no fetch');
           this._scrollToBottom();
         } else {
           // First visit — fetch is the authoritative initial render.
@@ -857,17 +918,30 @@
 
           store._loading = true;
           window.ensureSessionMessages();
+          try { console.log('[lc] '+JSON.stringify({event:'cfg-before-initUploads',wallt:Date.now()})); } catch(e){}
 
-          await this._initUploads();
+          // _initUploads only builds the attachments list — it's independent of
+          // the message backlog and SSE ordering, but it was awaiting ~4.8s of
+          // slow /api/graph/settings schema fetches and blocking the viewer
+          // settle for no reason. Run it in the background; attachments render
+          // when it resolves. (Verified: this await was ~4.8s of the ~7.5s
+          // pre-settle block.)
+          this._initUploads().catch(function () {});
+          try { console.log('[lc] '+JSON.stringify({event:'cfg-after-initUploads-bg',wallt:Date.now()})); } catch(e){}
 
-          try {
+          // Only fetch a backlog if one EXISTS. A brand-new/starting session has
+          // no JSONL (resolved=false) — nothing to back-fill, and all updates
+          // arrive via SSE — so skip the fetch entirely. It was ~2.6–5s of dead
+          // wait that blocked the viewer settle for no reason.
+          if (store.resolved) try {
             await this._fetchBacklog(store);
+            try { console.log('[lc] '+JSON.stringify({event:'cfg-after-fetchBacklog',wallt:Date.now()})); } catch(e){}
           } catch (e) {
             if (e && e.missingSession) {
               // Pruned or unknown session: surface as an explicit error.
               store._loading = false;
               this.errorMsg = (e && e.message) || 'Session not found';
-              this.state = 'error';
+              this._lcSetState('error', 'configure: messages fetch failed');
               return;
             }
             // New session with no JSONL yet — show empty ready state
@@ -875,11 +949,20 @@
               store._loading = false;
               store.loaded = true;
               this._rebuildDisplay();
-              this.state = 'ready';
+              // SUSPECTED BLANK-SCREEN BUG (IMG_1434 / IMG_1435): this
+              // flip happens unconditionally when a session has no JSONL
+              // yet — even if the container is still booting and the
+              // harness isn't actually ready. The viewer drops out of
+              // 'loading' so the pre-ready loading slot never gets a
+              // chance to render, and the empty-conversation empty state
+              // ("Session started / Send a message to begin") takes over.
+              // Logging it explicitly so the captured timeline shows the
+              // suspect transition with full context.
+              this._lcSetState('ready', 'configure: no JSONL yet — UNCONDITIONAL FLIP (suspected blank-screen bug)');
             } else {
               if (this.state === 'loading') {
                 this.errorMsg = 'Failed to connect to session';
-                this.state = 'error';
+                this._lcSetState('error', 'configure: no sessionKey after no-JSONL branch');
               }
               store._loading = false;
               return;
@@ -896,7 +979,9 @@
           }
 
           this._rebuildDisplay();
-          if (this.state === 'loading') this.state = 'ready';
+          if (this.state === 'loading') {
+            this._lcSetState('ready', 'configure: messages flushed, exiting loading');
+          }
           this._scrollToBottom();
         }
 
@@ -1036,7 +1121,7 @@
         var m = window.location.pathname.match(/^\/session\/([^/]+)\/(.+)$/);
         if (!m) {
           this.errorMsg = 'Invalid session URL';
-          this.state = 'error';
+          this._lcSetState('error', 'init: URL pattern mismatch');
           return;
         }
         this.project = decodeURIComponent(m[1]);
@@ -1662,6 +1747,14 @@
       async sendMessage() {
         var el = this.$refs.messageInput;
         if (!el) return;
+        // Desktop voice: fold any live dictation into the composer BEFORE
+        // reading it, so a single Send click captures speech + typed text. This
+        // removes the separate "import to box" click (and, with the auto-mute
+        // gone, the unmute click) — desktop dictation is now one click like
+        // mobile instead of import->send->unmute.
+        if (this.showDesktopVoiceImport) {
+          this.importVoiceBufferToComposer();
+        }
         var text = this.readComposerText();
         if (!this.canSendComposerText(text) || this.sending) return;
         // Block if any attachment upload is still in flight — sending now
@@ -2089,7 +2182,7 @@
         }
         this._disposeTerminal();
         // Reset view state
-        this.state = 'loading';
+        this._lcSetState('loading', '_reset: viewer dismounted/recycled');
         this.sessionKey = '';
         this.displayEntries = [];
         this._expanded = {};

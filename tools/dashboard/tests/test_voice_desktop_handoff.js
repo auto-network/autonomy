@@ -204,7 +204,7 @@ describe('desktop voice composer handoff', () => {
     }]);
   });
 
-  it('replaces a whitespace-only draft, mutes active capture, and clears the shared buffer after import', () => {
+  it('replaces a whitespace-only draft, LEAVES capture live, and clears the shared buffer after import', () => {
     const h = loadViewer({
       initialDraftText: '   ',
       initialEditorText: '   ',
@@ -217,7 +217,10 @@ describe('desktop voice composer handoff', () => {
     assert.equal(h.composerStore.draftText, 'Imported from voice');
     assert.equal(h.viewer.$refs.messageInput.innerText, 'Imported from voice');
     assert.equal(h.voiceStore.bufferText, '');
-    assert.equal(h.voiceStore.micMode, 'muted');
+    // No auto-mute: import no longer mutes, so the operator isn't forced to
+    // click Unmute before dictating again (removes a click from the desktop
+    // dictate->send flow). Capture stays in its prior mode.
+    assert.equal(h.voiceStore.micMode, 'vad_paused');
     assert.equal(h.voiceStore.sheetResumeListeningOnDismiss, false);
     assert.equal(h.viewer.$refs.messageInput.focusCalls > 0, true);
     assert.deepEqual(h.execCalls[0], {
