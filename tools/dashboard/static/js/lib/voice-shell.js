@@ -77,30 +77,30 @@
 
   function _hideInlineComposer() {
     var voice = _voiceStore();
-    // On a mobile viewer, once voice is bound the floating capsule/caption ARE
-    // the composer — the inline keyboard text box must drop so the viewer is
-    // voice-first (state-matrix: MOBILE_* states hide the inline composer).
-    // The old condition also required sheetOpen + the responsive_collapse flag,
-    // which were effectively never both true, so the text box never hid and the
-    // operator was stuck dictating into it. Bound + mobile is the right gate.
+    // Once voice is bound the floating capsule/caption/sheet ARE the composer —
+    // the inline keyboard text box drops so the surface is voice-first. This is
+    // NO LONGER gated on viewport: the operator wants desktop to behave exactly
+    // like mobile (capsule + dictation tile, one-click send), not the old
+    // desktop dictate->import->send slog. Bound + enabled is the gate.
     return !!(
       voice &&
       voice.enabled === true &&
-      voice.boundSessionId &&
-      _isMobileViewport()
+      voice.boundSessionId
     );
   }
 
   function _capsuleVisible() {
     var voice = _voiceStore();
-    if (!voice || voice.enabled !== true || !_isMobileViewport()) return false;
+    // Viewport-agnostic: show the capsule on desktop too (operator wants the
+    // mobile voice-first flow everywhere).
+    if (!voice || voice.enabled !== true) return false;
     if (!voice.boundSessionId || voice.sheetOpen === true) return false;
     return true;
   }
 
   function _sheetVisible() {
     var voice = _voiceStore();
-    if (!voice || voice.enabled !== true || !_isMobileViewport()) return false;
+    if (!voice || voice.enabled !== true) return false;
     if (!voice.boundSessionId || voice.sheetOpen !== true) return false;
     return true;
   }
@@ -151,7 +151,7 @@
 
   function _captionVisible() {
     var voice = _voiceStore();
-    if (!voice || voice.enabled !== true || !_isMobileViewport()) return false;
+    if (!voice || voice.enabled !== true) return false;
     if (!voice.boundSessionId || voice.sheetOpen === true) return false;
     // Inside the viewer, once the pinned outbox tile is mounted it owns the
     // bottom surface — hand the live text to it and hide this floating gutter.
@@ -445,6 +445,20 @@
         clearBuffer() {
           if (!this.voice || typeof this.voice.clearBuffer !== 'function') return false;
           this.voice.clearBuffer();
+          // Collapse the dictation tile too. The reactive capturing effect that
+          // normally nulls the outbox gates on _viewerComposerActive(), which can
+          // be false when the operator clears from a different view — leaving a
+          // stale tile showing the old text (operator-reported). Null the
+          // capturing voice outbox directly here so Clear always wipes the tile.
+          var bound = this.voice.boundSessionId;
+          if (bound && typeof window !== 'undefined' &&
+              typeof window.getSessionStore === 'function') {
+            var s = window.getSessionStore(bound);
+            if (s && s.outbox && s.outbox.source === 'voice' &&
+                s.outbox.state === 'capturing') {
+              s.outbox = null;
+            }
+          }
           // Do NOT focus the editor — focusing pops the iOS keyboard, and the
           // operator wants Clear to just empty the buffer, not start typing.
           return true;

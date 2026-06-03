@@ -427,4 +427,45 @@ describe('voice shell helpers', () => {
     assert.equal(h.component.removeVoiceAttachment(7), true);
     assert.deepEqual(removed, [7]);
   });
+
+  it('shows the voice-first surfaces on DESKTOP too when bound (no viewport gate)', () => {
+    // The operator wants desktop to behave exactly like mobile: capsule +
+    // caption + hidden inline composer when voice is bound, regardless of the
+    // 1280px-wide viewport (the old min-width:768 gate is gone).
+    const h = loadVoiceShell({
+      viewerPage: true,
+      width: 1280,
+      voiceStore: { boundSessionId: 'session-a', sheetOpen: false },
+    });
+    assert.equal(h.component.showCapsule, true);
+    assert.equal(h.component.showCaption, true);
+    assert.equal(h.window.Autonomy.voice.shell.hideInlineComposer(), true);
+
+    const sheet = loadVoiceShell({
+      width: 1280,
+      voiceStore: { boundSessionId: 'session-a', sheetOpen: true },
+    });
+    assert.equal(sheet.component.showSheet, true);
+  });
+
+  it('Clear collapses the capturing dictation tile (clear-tile bug)', () => {
+    const h = loadVoiceShell({
+      voiceStore: { boundSessionId: 'session-a', bufferText: 'old dictation' },
+    });
+    const sessionStore = { outbox: { source: 'voice', state: 'capturing', text: 'old dictation' } };
+    h.window.getSessionStore = function (sid) {
+      return sid === 'session-a' ? sessionStore : null;
+    };
+    h.component.clearBuffer();
+    assert.equal(sessionStore.outbox, null);
+  });
+
+  it('Clear leaves a non-capturing outbox (a pending send) intact', () => {
+    const h = loadVoiceShell({ voiceStore: { boundSessionId: 'session-a' } });
+    const sending = { source: 'voice', state: 'sending', text: 'in flight' };
+    const sessionStore = { outbox: sending };
+    h.window.getSessionStore = function () { return sessionStore; };
+    h.component.clearBuffer();
+    assert.equal(sessionStore.outbox, sending);
+  });
 });

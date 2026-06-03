@@ -173,22 +173,39 @@ function loadViewer(opts) {
   };
 }
 
-describe('desktop voice composer handoff', () => {
-  it('shows the desktop import pill only for the bound desktop viewer with a non-empty voice buffer', () => {
-    const ready = loadViewer();
-    assert.equal(ready.viewer.showDesktopVoiceImport, true);
-
-    const mobile = loadViewer({ width: 390 });
-    assert.equal(mobile.viewer.showDesktopVoiceImport, false);
-
-    const unbound = loadViewer({ voiceStore: { boundSessionId: 'session-b' } });
-    assert.equal(unbound.viewer.showDesktopVoiceImport, false);
-
-    const empty = loadViewer({ voiceStore: { bufferText: '   ' } });
-    assert.equal(empty.viewer.showDesktopVoiceImport, false);
+describe('desktop voice composer handoff (retired)', () => {
+  // The desktop "preview strip + import-to-box -> send -> unmute" flow is gone.
+  // Desktop now uses the SAME voice-first capsule + dictation tile as mobile
+  // (one-click send, mic stays live). These tests pin the retirement so the
+  // clunky strip can't silently return.
+  it('never shows the desktop import pill, on any viewport or buffer state', () => {
+    assert.equal(loadViewer().viewer.showDesktopVoiceImport, false);
+    assert.equal(loadViewer({ width: 390 }).viewer.showDesktopVoiceImport, false);
+    assert.equal(
+      loadViewer({ voiceStore: { boundSessionId: 'session-b' } }).viewer.showDesktopVoiceImport,
+      false
+    );
+    assert.equal(
+      loadViewer({ voiceStore: { bufferText: '   ' } }).viewer.showDesktopVoiceImport,
+      false
+    );
   });
 
-  it('derives the desktop preview from the shared shell preview helper', () => {
+  it('importVoiceBufferToComposer no-ops (returns false) and touches nothing', () => {
+    const h = loadViewer({
+      initialDraftText: '   ',
+      initialEditorText: '   ',
+      voiceStore: { bufferText: 'Imported from voice', micMode: 'vad_paused' },
+    });
+    assert.equal(h.viewer.importVoiceBufferToComposer(), false);
+    // Composer untouched, voice buffer preserved, mic mode unchanged.
+    assert.equal(h.viewer.$refs.messageInput.innerText, '   ');
+    assert.equal(h.voiceStore.bufferText, 'Imported from voice');
+    assert.equal(h.voiceStore.micMode, 'vad_paused');
+    assert.equal(h.execCalls.length, 0);
+  });
+
+  it('still derives the shared preview helper (used by other surfaces)', () => {
     const h = loadViewer({
       voiceStore: {
         bufferText: 'one two three four five six seven eight nine ten eleven twelve thirteen',
@@ -198,54 +215,5 @@ describe('desktop voice composer handoff', () => {
       h.viewer.desktopVoicePreview,
       'two three four five six seven eight nine ten eleven twelve thirteen'
     );
-    assert.deepEqual(h.previewCalls, [{
-      text: 'one two three four five six seven eight nine ten eleven twelve thirteen',
-      limit: 12,
-    }]);
-  });
-
-  it('replaces a whitespace-only draft, LEAVES capture live, and clears the shared buffer after import', () => {
-    const h = loadViewer({
-      initialDraftText: '   ',
-      initialEditorText: '   ',
-      voiceStore: {
-        bufferText: 'Imported from voice',
-        micMode: 'vad_paused',
-      },
-    });
-    assert.equal(h.viewer.importVoiceBufferToComposer(), true);
-    assert.equal(h.composerStore.draftText, 'Imported from voice');
-    assert.equal(h.viewer.$refs.messageInput.innerText, 'Imported from voice');
-    assert.equal(h.voiceStore.bufferText, '');
-    // No auto-mute: import no longer mutes, so the operator isn't forced to
-    // click Unmute before dictating again (removes a click from the desktop
-    // dictate->send flow). Capture stays in its prior mode.
-    assert.equal(h.voiceStore.micMode, 'vad_paused');
-    assert.equal(h.voiceStore.sheetResumeListeningOnDismiss, false);
-    assert.equal(h.viewer.$refs.messageInput.focusCalls > 0, true);
-    assert.deepEqual(h.execCalls[0], {
-      command: 'insertText',
-      value: 'Imported from voice',
-    });
-  });
-
-  it('appends the voice snapshot to an existing draft with a blank-line separator', () => {
-    const h = loadViewer({
-      initialDraftText: 'Existing desktop draft',
-      initialEditorText: 'Existing desktop draft',
-      voiceStore: {
-        bufferText: 'Fresh voice buffer',
-        micMode: 'muted',
-      },
-    });
-    assert.equal(h.viewer.importVoiceBufferToComposer(), true);
-    assert.equal(h.composerStore.draftText, 'Existing desktop draft\n\nFresh voice buffer');
-    assert.equal(h.viewer.$refs.messageInput.innerText, 'Existing desktop draft\n\nFresh voice buffer');
-    assert.equal(h.voiceStore.bufferText, '');
-    assert.equal(h.voiceStore.micMode, 'muted');
-    assert.deepEqual(h.execCalls[0], {
-      command: 'insertText',
-      value: 'Existing desktop draft\n\nFresh voice buffer',
-    });
   });
 });
