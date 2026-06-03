@@ -6585,6 +6585,19 @@ async def ws_voice(websocket: WebSocket):
                     # audio can't repopulate the just-cleared/just-sent buffer.
                     if whisperlive_client is not None:
                         whisperlive_client.set_cutoff()
+                    # Authoritative post-cutoff reset. The client clears its
+                    # local finals accumulator optimistically the instant the
+                    # box empties, but transcript frames already in flight for
+                    # the just-cleared audio arrive AFTER that and re-append,
+                    # repopulating the box (operator-reported Clear/Send "the
+                    # same text comes back"). WS delivery is FIFO, so a
+                    # buffer_state("") emitted here — after set_cutoff — lands
+                    # after those stragglers and wipes them; any genuinely new
+                    # post-cutoff utterance is transcribed later and re-appends
+                    # after this reset.
+                    await websocket.send_json(
+                        voice_buffer_mod.buffer_state_frame("")
+                    )
                 responses = session.handle_control(frame_type)
                 logger.info("ws_voice DIAG: ctrl=%s → state=%s bind=%s", frame_type, session.state, bind)
                 for resp in responses:

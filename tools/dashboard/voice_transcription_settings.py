@@ -66,18 +66,23 @@ class VoiceTranscriptionV1(SettingSchema):
     no_speech_thresh: float = field(
         default=_vw.WHISPERLIVE_NO_SPEECH_THRESH,
         description=(
-            "Discard segments the model marks as silence above this "
-            "probability (0.0-1.0). Higher = more aggressive silence drop, "
-            "fewer hallucinated 'thank you'/'mm-hmm' fillers on quiet "
-            "audio. Live: next mic connection."
+            "faster-whisper no_speech_threshold (0.0-1.0). A segment is "
+            "dropped as silence when its no_speech_prob EXCEEDS this value, "
+            "so LOWER = MORE aggressive silence drop (the opposite of the "
+            "intuitive reading). Note a high-logprob 'confident' segment is "
+            "kept regardless, so this lever alone won't kill a confident "
+            "'thank you' hallucination — raise vad_threshold for that. "
+            "Live: next mic connection."
         ),
     )
     vad_threshold: float = field(
         default=_vw.WHISPERLIVE_VAD_THRESHOLD,
         description=(
-            "Silero VAD speech-probability threshold (0.0-1.0). Higher = "
-            "stricter speech detection before audio reaches the model. "
-            "Live: next mic connection."
+            "Silero VAD speech-probability threshold (0.0-1.0). HIGHER = "
+            "stricter speech detection, so more silence/noise is filtered "
+            "BEFORE it reaches the model — the primary lever against "
+            "'thank you'/'mm-hmm' silence hallucinations. Live: next mic "
+            "connection."
         ),
     )
 

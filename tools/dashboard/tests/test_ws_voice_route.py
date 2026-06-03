@@ -283,11 +283,19 @@ def test_ws_voice_discard_from_idle_is_silent_noop(voice_route_env):
         ws.send_text(json.dumps({"type": "end"}))
 
 
-def test_ws_voice_discard_from_listening_is_silent_noop(voice_route_env):
+def test_ws_voice_discard_from_listening_emits_buffer_state_reset(voice_route_env):
+    """discard from an active state seals the audio cutoff AND emits an
+    authoritative buffer_state("") so transcript frames already in flight for
+    the just-cleared audio can't repopulate the client's optimistically-cleared
+    buffer (operator-reported Clear/Send "the same text comes back"). start is a
+    silent transition, so the buffer_state is the first frame after discard."""
     client = voice_route_env["client"]
     with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
         ws.send_text(json.dumps({"type": "start"}))
         ws.send_text(json.dumps({"type": "discard"}))
+        frame = ws.receive_json()
+        assert frame["type"] == "buffer_state"
+        assert frame["text"] == ""
         ws.send_text(json.dumps({"type": "end"}))
 
 
