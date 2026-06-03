@@ -65,12 +65,18 @@ WHISPERLIVE_USE_VAD = True
 # Silence-hallucination gating. Whisper invents filler ("thank you", "you",
 # noise like "CH-H-H", "Mm-hmm") during silence/faint noise — a known failure
 # mode (trained on captioned video where silence maps to those phrases).
-# WhisperLive's defaults are lenient (no_speech_thresh 0.45, Silero VAD
-# threshold 0.5). Tighten both: a higher VAD threshold keeps faint noise from
-# being treated as speech before the model, and a higher no_speech_thresh
-# discards segments the model itself marks as likely-silence. Tunable.
-WHISPERLIVE_NO_SPEECH_THRESH = 0.6
-WHISPERLIVE_VAD_THRESHOLD = 0.6
+#
+# Two levers, and the DIRECTIONS matter (a prior tuning had no_speech backwards):
+#   * vad_threshold — Silero VAD speech-probability gate applied BEFORE the
+#     model. HIGHER = stricter = more silence/noise filtered out. This is the
+#     PRIMARY lever: if silence never reaches the model it can't hallucinate.
+#   * no_speech_thresh — faster-whisper drops a segment when its no_speech_prob
+#     EXCEEDS this, so LOWER = MORE aggressive dropping (counter-intuitive). It's
+#     a secondary backstop: a high-logprob "confident" hallucination is kept
+#     regardless of no_speech_prob, so this can't catch every "thank you".
+# Both live-tunable via the dashboard.voice.transcription graph setting (#29).
+WHISPERLIVE_NO_SPEECH_THRESH = 0.45
+WHISPERLIVE_VAD_THRESHOLD = 0.7
 
 # Wire format the dashboard sends on the WhisperLive WS.
 #
