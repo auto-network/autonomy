@@ -708,17 +708,11 @@
       },
 
       get showDesktopVoiceImport() {
-        var voice = this.getVoiceStore();
-        return !!(
-          this._mode === 'page' &&
-          this.viewportMode === 'desktop' &&
-          this._tmuxSession &&
-          voice &&
-          voice.enabled === true &&
-          voice.boundSessionId === this._tmuxSession &&
-          typeof voice.bufferText === 'string' &&
-          voice.bufferText.trim().length > 0
-        );
+        // Superseded. Desktop now uses the same voice-first capsule + dictation
+        // tile as mobile (the inline composer is hidden when voice is bound), so
+        // the desktop "preview strip + import-to-box" flow no longer renders.
+        // Kept as a getter returning false so any remaining references no-op.
+        return false;
       },
 
       get desktopVoicePreview() {

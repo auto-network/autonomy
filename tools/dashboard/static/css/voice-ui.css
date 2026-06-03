@@ -521,14 +521,12 @@ body.sv-viewer-composer-active .voice-caption {
   }
 }
 
-@media (min-width: 768px) {
-  .voice-caption,
-  .voice-sheet-backdrop,
-  .voice-sheet,
-  .voice-capsule {
-    display: none !important;
-  }
-}
+/* The voice surfaces (capsule / sheet / caption) used to be hidden above 768px
+   so desktop kept its inline-composer flow. That flow was clunky (dictate ->
+   import-to-box -> send -> unmute); the operator wants desktop to use the same
+   voice-first capsule + dictation tile as mobile, so the desktop hide is gone.
+   x-show on each element (showCapsule / showSheet / showCaption, now viewport-
+   agnostic) is the single source of visibility truth. */
 
 /* When the live caption owns the bottom gutter (voice bound, caption showing),
    reserve that band at the end of the scrollable session entries so the last
