@@ -1356,3 +1356,71 @@ class TestReadImageUpconversion:
         imgs = [e for e in entries if e.get("type") == "read_image"]
         assert len(imgs) == 1, f"expected one read_image, got {[e.get('type') for e in entries]}"
         assert imgs[0]["data"] == "ABC123"
+
+
+# ── #34: queued_command attachment (mid-turn send) must not be dropped ────
+# When the operator sends a message/screenshot WHILE the assistant is working,
+# it lands as a top-level {type:"attachment", attachment:{type:"queued_command",
+# prompt:[...]}} record with the real payload (incl. base64 images) in prompt[].
+# The parser had no case for type:"attachment" → returned None → the whole record
+# (and the only copy of the image bytes) was dropped from the viewer.
+
+class TestQueuedCommandAttachment:
+    def _entries(self, fixture):
+        out = _parse_jsonl_entry(_line(fixture))
+        if out is None:
+            return []
+        return out if isinstance(out, list) else [out]
+
+    def test_queued_command_image_is_surfaced_not_dropped(self):
+        fixture = {
+            "parentUuid": "qc1", "isSidechain": False, "type": "attachment",
+            "attachment": {"type": "queued_command", "prompt": [
+                {"type": "text", "text": "[Image #53]"},
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": "image/jpeg", "data": "/9j/QUEUED",
+                }},
+            ]},
+            "timestamp": TS,
+        }
+        entries = self._entries(fixture)
+        assert entries, "queued_command must not be dropped to None"
+        imgs = [e for e in entries if e.get("type") == "read_image"]
+        assert len(imgs) == 1, f"expected the image, got {[e.get('type') for e in entries]}"
+        assert imgs[0]["data"] == "/9j/QUEUED"
+        assert imgs[0]["mime"] == "image/jpeg"
+
+    def test_queued_command_real_text_becomes_a_user_entry(self):
+        fixture = {
+            "parentUuid": "qc2", "isSidechain": False, "type": "attachment",
+            "attachment": {"type": "queued_command", "prompt": [
+                {"type": "text", "text": "look at this bug"},
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": "image/png", "data": "PNGDATA",
+                }},
+            ]},
+            "timestamp": TS,
+        }
+        entries = self._entries(fixture)
+        types = [e.get("type") for e in entries]
+        assert "read_image" in types
+        users = [e for e in entries if e.get("type") == "user"]
+        assert any("look at this bug" in (u.get("content") or "") for u in users), \
+            f"real typed text should survive as a user entry, got {entries}"
+
+    def test_queued_command_placeholder_only_text_is_not_a_user_tile(self):
+        # "[Image #N]" is a pure placeholder — it should not render as a user
+        # message (the image tile carries the meaning).
+        fixture = {
+            "parentUuid": "qc3", "isSidechain": False, "type": "attachment",
+            "attachment": {"type": "queued_command", "prompt": [
+                {"type": "text", "text": "[Image #53]"},
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": "image/png", "data": "X",
+                }},
+            ]},
+            "timestamp": TS,
+        }
+        entries = self._entries(fixture)
+        users = [e for e in entries if e.get("type") == "user"]
+        assert users == [], f"placeholder-only text must not become a user tile, got {users}"
