@@ -371,6 +371,25 @@
               </div>
             </template>
 
+            <!-- ── Read-of-image: the assistant Read an image → show it inline (#34) ─── -->
+            <template x-if="resolveEntry(dEntry).type === 'read_image' && readImageSrc(resolveEntry(dEntry))">
+              <div class="sc-va-tile" data-testid="read-image">
+                <div class="sc-line1">
+                  <span class="sc-chip sc-chip-read">Read</span>
+                  <span class="sc-meta sc-meta-gray">image</span>
+                  <span class="sc-timestamp"
+                        x-text="formatTime(resolveEntry(dEntry).timestamp)"></span>
+                </div>
+                <div class="sc-va-thumb-wrap">
+                  <img class="sc-va-thumb"
+                       :src="readImageSrc(resolveEntry(dEntry))"
+                       alt="Read image"
+                       loading="lazy"
+                       @click="openLightbox(readImageSrc(resolveEntry(dEntry)), 'Read image')">
+                </div>
+              </div>
+            </template>
+
           </div>
         </template>
 

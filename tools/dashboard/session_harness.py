@@ -660,6 +660,44 @@ def _upconvert_viewer_attachment(
     return entry
 
 
+def _extract_read_images(
+    result_content_raw: object,
+    timestamp: str,
+    *,
+    tool_id: str = "",
+) -> list[dict]:
+    """Surface image blocks inside a tool_result as ``read_image`` tiles.
+
+    When the assistant Reads an image file, the tool_result content is a list
+    whose blocks include ``{type:image, source:{type:base64, media_type, data}}``.
+    The text-only flattening elsewhere would discard these, so the picture never
+    reaches the viewer (it shows an empty Read chip). The base64 is already in the
+    log — we just pass it through as a typed entry the client renders inline
+    (#34). One entry per image block.
+    """
+    if not isinstance(result_content_raw, list):
+        return []
+    out: list[dict] = []
+    for block in result_content_raw:
+        if not isinstance(block, dict) or block.get("type") != "image":
+            continue
+        source = block.get("source") or {}
+        if not isinstance(source, dict) or source.get("type") != "base64":
+            continue
+        data = source.get("data") or ""
+        if not data:
+            continue
+        out.append({
+            "type": "read_image",
+            "role": "tool",
+            "tool_id": tool_id,
+            "mime": source.get("media_type") or "image/png",
+            "data": data,
+            "timestamp": timestamp,
+        })
+    return out
+
+
 def _upconvert_turn_correction_command(
     command: str,
     timestamp: str,
@@ -977,12 +1015,14 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
                 if btype == "text":
                     text += block.get("text", "")
                 elif btype == "tool_result":
-                    result_content = block.get("content", "")
-                    if isinstance(result_content, list):
+                    result_content_raw = block.get("content", "")
+                    if isinstance(result_content_raw, list):
                         result_content = "".join(
-                            b.get("text", "") for b in result_content
+                            b.get("text", "") for b in result_content_raw
                             if isinstance(b, dict) and b.get("type") == "text"
                         )
+                    else:
+                        result_content = result_content_raw
                     tool_use_id = block.get("tool_use_id", "")
                     tool_results.append({
                         "type": "tool_result",
@@ -992,6 +1032,11 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
                         "is_error": block.get("is_error", False),
                         "timestamp": timestamp,
                     })
+                    # Surface any images the assistant Read (#34) — the text-only
+                    # flatten above would otherwise drop them silently.
+                    tool_results.extend(
+                        _extract_read_images(result_content_raw, timestamp, tool_id=tool_use_id)
+                    )
                     tc = _upconvert_turn_correction(
                         result_content, timestamp, tool_id=tool_use_id,
                     )
@@ -1111,7 +1156,8 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
             for block in content_raw:
                 if isinstance(block, dict) and block.get("type") == "text":
                     result_content += block.get("text", "")
-        if not result_content:
+        read_imgs = _extract_read_images(content_raw, timestamp, tool_id=tool_id)
+        if not result_content and not read_imgs:
             return {
                 "type": "tool_result",
                 "role": "tool",
@@ -1139,6 +1185,7 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
         if sem:
             _enrich_semantic_tile(sem)
             out.append(sem)
+        out.extend(read_imgs)   # surface Read-of-image tiles (#34)
         return out if len(out) > 1 else base_result
 
     return None

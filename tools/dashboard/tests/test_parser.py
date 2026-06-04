@@ -1280,3 +1280,79 @@ class TestMessageIdentity:
         assert result["type"] == "tool_result"
         assert "message_id" not in result
         assert "parent_uuid" not in result
+
+
+# ── #34: image-bearing Read tool_result → inline image tile ──────────────
+# When the assistant Reads an image file, the tool_result content is a list
+# whose only block is {type:image, source:{type:base64,...}}. The parser used
+# to join ONLY text blocks, so the image was silently discarded and the Read
+# rendered as an empty chip. These records carry the bytes already; we surface
+# them as a `read_image` entry the viewer renders as a tile.
+
+class TestReadImageUpconversion:
+    def _entries(self, fixture):
+        out = _parse_jsonl_entry(_line(fixture))
+        if out is None:
+            return []
+        return out if isinstance(out, list) else [out]
+
+    def test_image_only_read_surfaces_read_image_entry(self):
+        fixture = {
+            "parentUuid": "img1", "isSidechain": False, "type": "user",
+            "message": {"role": "user", "content": [
+                {"tool_use_id": "toolu_img", "type": "tool_result", "content": [
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png",
+                        "data": "iVBORw0KGgoAAAANS",
+                    }},
+                ]},
+            ]},
+            "timestamp": TS,
+        }
+        entries = self._entries(fixture)
+        imgs = [e for e in entries if e.get("type") == "read_image"]
+        assert len(imgs) == 1, f"expected one read_image, got {[e.get('type') for e in entries]}"
+        assert imgs[0]["mime"] == "image/png"
+        assert imgs[0]["data"] == "iVBORw0KGgoAAAANS"
+        assert imgs[0]["tool_id"] == "toolu_img"
+
+    def test_read_with_text_and_image_keeps_both(self):
+        fixture = {
+            "parentUuid": "img2", "isSidechain": False, "type": "user",
+            "message": {"role": "user", "content": [
+                {"tool_use_id": "toolu_mix", "type": "tool_result", "content": [
+                    {"type": "text", "text": "Here is the screenshot"},
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/jpeg", "data": "/9j/4AAQ",
+                    }},
+                ]},
+            ]},
+            "timestamp": TS,
+        }
+        entries = self._entries(fixture)
+        types = [e.get("type") for e in entries]
+        assert "tool_result" in types
+        assert "read_image" in types
+        tr = next(e for e in entries if e["type"] == "tool_result")
+        assert tr["content"] == "Here is the screenshot"
+        img = next(e for e in entries if e["type"] == "read_image")
+        assert img["mime"] == "image/jpeg"
+        assert img["data"] == "/9j/4AAQ"
+
+    def test_top_level_tool_result_image_surfaces_too(self):
+        # The other shape: a top-level type:"tool_result" record (not wrapped
+        # in a user message) carrying an image.
+        fixture = {
+            "parentUuid": "img3", "isSidechain": False, "type": "tool_result",
+            "toolUseId": "toolu_top",
+            "message": {"role": "tool", "content": [
+                {"type": "image", "source": {
+                    "type": "base64", "media_type": "image/png", "data": "ABC123",
+                }},
+            ]},
+            "timestamp": TS,
+        }
+        entries = self._entries(fixture)
+        imgs = [e for e in entries if e.get("type") == "read_image"]
+        assert len(imgs) == 1, f"expected one read_image, got {[e.get('type') for e in entries]}"
+        assert imgs[0]["data"] == "ABC123"
