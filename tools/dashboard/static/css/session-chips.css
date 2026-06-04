@@ -631,3 +631,13 @@
 }
 .sv-resend:hover { background: rgba(127, 29, 29, 0.34); border-color: rgba(248, 113, 113, 0.6); }
 .sv-resend svg { width: 12px; height: 12px; }
+.sv-dismiss {
+  all: unset; box-sizing: border-box; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  background: rgba(51, 65, 85, 0.4); color: #cbd5e1;
+  font-size: 0.625rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+}
+.sv-dismiss:hover { background: rgba(71, 85, 105, 0.55); border-color: rgba(148, 163, 184, 0.5); }
+.sv-dismiss svg { width: 12px; height: 12px; }
