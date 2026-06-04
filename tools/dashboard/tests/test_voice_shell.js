@@ -78,6 +78,7 @@ function loadVoiceShell(opts) {
   };
   Object.assign(flagsStore, (opts && opts.flagsStore) || {});
 
+  const _bodyClasses = new Set();
   const document = {
     addEventListener(name, cb) {
       (docListeners[name] ||= []).push(cb);
@@ -87,6 +88,15 @@ function loadVoiceShell(opts) {
         return viewerPage ? { nodeType: 1 } : null;
       }
       return null;
+    },
+    body: {
+      dataset: {},
+      classList: {
+        add: (c) => _bodyClasses.add(c),
+        remove: (c) => _bodyClasses.delete(c),
+        toggle: (c, on) => { if (on) _bodyClasses.add(c); else _bodyClasses.delete(c); },
+        contains: (c) => _bodyClasses.has(c),
+      },
     },
   };
 
@@ -174,6 +184,7 @@ function loadVoiceShell(opts) {
     flagsStore,
     winListeners,
     window: windowObj,
+    document,
   };
 }
 
@@ -396,6 +407,43 @@ describe('voice shell helpers', () => {
     assert.equal(h.voiceStore.micMode, 'muted');
     assert.deepEqual(setMicModeCalls, ['listening', 'muted']);
     assert.equal(h.voiceStore._setCapsuleCalls.length, 1, 'the drag still persisted the new position');
+  });
+
+  it('long-press on the violet (cross-session) Send claims dictation to the viewed session', async () => {
+    const bindCalls = [];
+    const h = loadVoiceShell({ voiceStore: { bindSession(id) { bindCalls.push(id); } } });
+    h.document.body.classList.add('sv-cross-session-dictation');
+    h.document.body.dataset.svComposerSession = 'auto-viewed';
+    const down = { clientX: 320, clientY: 730, target: actionTarget('send'), preventDefault() {} };
+    assert.equal(h.component.onCapsulePointerDown(down), true);
+    await new Promise((r) => setTimeout(r, 650));   // past the CAPSULE_CLEAR_MS hold
+    h.winListeners.pointerup[0]({ clientX: 320, clientY: 730 });
+    assert.deepEqual(bindCalls, ['auto-viewed'], 'claimed to the viewed session');
+    assert.equal(h.voiceStore._sendCalls, 0, 'claim does not also send');
+  });
+
+  it('a quick tap on the violet Send still sends to the remote session (no claim)', () => {
+    const bindCalls = [];
+    const h = loadVoiceShell({ voiceStore: { bindSession(id) { bindCalls.push(id); } } });
+    h.document.body.classList.add('sv-cross-session-dictation');
+    h.document.body.dataset.svComposerSession = 'auto-viewed';
+    const down = { clientX: 320, clientY: 730, target: actionTarget('send'), preventDefault() {} };
+    h.component.onCapsulePointerDown(down);
+    h.winListeners.pointerup[0]({ clientX: 320, clientY: 730 });   // immediate release = tap
+    assert.deepEqual(bindCalls, []);
+    assert.equal(h.voiceStore._sendCalls, 1);
+  });
+
+  it('a hold on Send does NOT claim when not cross-session (no violet)', async () => {
+    const bindCalls = [];
+    const h = loadVoiceShell({ voiceStore: { bindSession(id) { bindCalls.push(id); } } });
+    // no sv-cross-session-dictation class → Send hold must not arm a claim
+    const down = { clientX: 320, clientY: 730, target: actionTarget('send'), preventDefault() {} };
+    h.component.onCapsulePointerDown(down);
+    await new Promise((r) => setTimeout(r, 650));
+    h.winListeners.pointerup[0]({ clientX: 320, clientY: 730 });
+    assert.deepEqual(bindCalls, [], 'no claim off the violet state');
+    assert.equal(h.voiceStore._sendCalls, 1, 'falls through to a normal send');
   });
 
   it('sheet handle drag expands a partial sheet to full mode', () => {
