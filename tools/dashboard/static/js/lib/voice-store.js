@@ -140,6 +140,10 @@
       pendingRebindTarget: '',
       discoverabilitySeen: _readBool(STORAGE_KEYS.discoverabilitySeen, false),
       awayEventSessionId: '',
+      // The session the operator is currently VIEWING (published by the active
+      // session viewer). When it differs from boundSessionId, input is going to a
+      // different session — the cross-session cue (#23) the capsule + sheet show.
+      viewedSessionId: '',
       sheetOpen: false,
       sheetMode: 'partial',
       sheetError: '',
@@ -234,6 +238,10 @@
         if (state !== 'ok' && state !== 'reconnecting' && state !== 'disconnected') return false;
         this.connState = state;
         return true;
+      },
+
+      setViewedSession(sessionId) {
+        this.viewedSessionId = sessionId || '';
       },
 
       setBufferText(text) {

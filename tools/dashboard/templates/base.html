@@ -1943,6 +1943,14 @@
            @pointerdown="startSheetGesture($event)">
         <span></span>
       </div>
+      <!-- Cross-session banner (#23): this keyboard is composing into a DIFFERENT
+           session than the one being viewed. Violet, consistent with the dictation
+           tile, so Send isn't a surprise. -->
+      <div class="voice-sheet__cross" x-show="sheetCrossSession" x-cloak>
+        <span class="voice-sheet__cross-arrow">→</span>
+        <span class="voice-sheet__cross-label">Sending to</span>
+        <span class="voice-sheet__cross-target" x-text="sheetCrossTargetTitle"></span>
+      </div>
       <div class="voice-sheet__body">
         <textarea class="voice-sheet__buffer"
                   x-ref="sheetInput"

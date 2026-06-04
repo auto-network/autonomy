@@ -127,6 +127,34 @@
         this._lcEmitSlot(row, null);
         return row;
       },
+      // The title-bar Resume affordance shows only for a terminated
+      // session whose JSONL still exists (mirrors the list card's
+      // dead_resumable gate). _resumeMeta.resumable is the authoritative
+      // backend signal fetched in configure().
+      get canResume() {
+        var m = this._resumeMeta;
+        return !this.isLive && !!(m && m.resumable);
+      },
+      // Lifecycle row for the in-viewer resume boot indicator. Identical
+      // to loadingPhaseRow EXCEPT resolved is pinned false: a resumed
+      // session has historical JSONL, so the registry reports
+      // resolved=true, which would short-circuit lifecycleState() straight
+      // to "ready" (lifecycle.js:71) and hide the boot phases entirely.
+      // Pinning resolved:false lets host-0531's derivation report the real
+      // container/harness phase as it actually boots.
+      get _resumePhaseRow() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        if (!s) return null;
+        return {
+          is_live: s.isLive,
+          harness: s.harness,
+          setup_phase: s.setupPhase,
+          harness_phase: s.harnessPhase,
+          harness_state: s.harnessState,
+          resumable: s.resumable,
+          resolved: false,
+        };
+      },
       // [lc] viewer-loading slot emit helper. Logs a viewer-slot-render
       // record whenever the *result* of the slot's render condition
       // changes — distinguishes "state===loading but no row yet"
@@ -601,6 +629,17 @@
       _resumeRefreshInFlight: null,
       _resumeHeartbeatInterval: null,
 
+      // ── Resume-from-viewer (terminated → starting → ready in place) ──
+      // Distinct from the _resume* connection-recovery fields above: this
+      // is the operator action that relaunches a dead session via
+      // /api/session/resume, the same call the session-list Resume button
+      // makes. _resumeMeta is fetched from /api/session/{name} on load and
+      // carries the identity + resumability needed to fire it.
+      _resumeMeta: null,        // {resumable, sourceId, sessionUuid, filePath}
+      resumeStarting: false,    // boot transition in flight (drives row-1 chip)
+      resumeStartErr: '',       // transient error surfaced under the button
+      _resumeStartTimer: null,  // polls lifecycle derivation until ready
+
       // API path
       _tailUrl: '',
 
@@ -787,6 +826,117 @@
         return lines.join('\n');
       },
 
+      // ── Resume from the viewer ──────────────────────────────────
+      // Relaunch a terminated session via the SAME /api/session/resume
+      // call the session-list Resume button makes (sessions.js). The
+      // difference is the operator is already watching this session, so
+      // we keep the conversation on screen and drive the
+      // terminated→starting→ready transition in place: prime the store so
+      // host-0531's lifecycle phase chip lights up in row 1, then poll the
+      // (resolved-neutralised) derivation until the harness reports ready.
+      async resumeFromViewer() {
+        if (this.resumeStarting) return;
+        var m = this._resumeMeta;
+        if (!m || !m.resumable) return;
+        this.resumeStarting = true;
+        this.resumeStartErr = '';
+
+        var body = m.sourceId
+          ? { source_id: m.sourceId }
+          : { session_uuid: m.sessionUuid, file_path: m.filePath };
+
+        try {
+          var res = await fetch('/api/session/resume', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) {
+            var err = await res.json().catch(function () { return {}; });
+            throw new Error(err.error || 'Resume failed');
+          }
+          var data = await res.json();
+
+          // A dead session found in dashboard.db is relaunched under its
+          // ORIGINAL tmux_name, so newKey usually equals sessionKey and the
+          // existing store entry simply starts receiving live registry +
+          // SSE updates. A generated name (dead row absent) re-points the
+          // viewer at the fresh session.
+          var newKey = data.tmux_name || this.sessionKey;
+          var store = window.getSessionStore(newKey);
+          // Deliberately DO NOT set store._resuming / store._launching here.
+          // Those are a crutch for the session-LIST create flow, which shows
+          // an optimistic ``pending-`` placeholder before any real session
+          // exists; the list's tile-expiry reconciler only ever clears flags
+          // off ``pending-`` keys (sessions.js). A resumed session is a REAL
+          // registry row under its own tmux_name, so pinning those sticky
+          // flags here desynced the list from the real lifecycle: the card
+          // stuck in LAUNCHING after boot (_launching || startupVisible never
+          // went false), became non-tappable (sessions.html gates tap on
+          // !_launching), and on Close showed "Launching + Ended + Resume"
+          // at once (is_live→false derived dead_resumable while _launching/
+          // _resuming kept it pinned in the Launching section). startupVisible
+          // + is_live already drive section membership correctly for a real
+          // session, so we let the registry own it. (Diagnosed by
+          // host-0531-020038 from Jeremy's live test.)
+          store.isLive = true;          // optimistic; registry confirms + drives phases
+          store.resolved = false;       // show boot phases, not the historical "ready"
+          if (!store.setupPhase || store.setupPhase === 'pending') {
+            store.setupPhase = 'container_starting';
+          }
+          store.harnessPhase = 'pending';
+          store.label = data.label || store.label || this._label;
+
+          if (newKey !== this.sessionKey) {
+            this.sessionKey = newKey;
+            this.sessionId = newKey;
+            if (this._mode === 'page') {
+              history.replaceState({}, '',
+                '/session/' + encodeURIComponent(this.project) + '/' + encodeURIComponent(newKey));
+            }
+            this._tailUrl = '/api/session/' + encodeURIComponent(this.project)
+              + '/' + encodeURIComponent(newKey) + '/tail';
+          }
+
+          // Button is now gated off (isLive true); resumeStarting drives the
+          // row-1 boot chip until the harness reports ready.
+          this._resumeMeta = { resumable: false, sourceId: m.sourceId,
+            sessionUuid: m.sessionUuid, filePath: m.filePath };
+
+          window.ensureSessionMessages();
+          this._setupWatchers();
+          this._armResumeReadyWatch();
+        } catch (e) {
+          this.resumeStarting = false;
+          this.resumeStartErr = (e && e.message) || 'Resume failed';
+          var self = this;
+          setTimeout(function () { self.resumeStartErr = ''; }, 4000);
+        }
+      },
+
+      // Clear resumeStarting once the relaunched harness is genuinely up.
+      // Drives off the resolved-neutralised _resumePhaseRow so the
+      // historical JSONL can't fake an early "ready"; a 120s safety net
+      // guarantees the boot chip never sticks if phase markers never land
+      // (e.g. a host session that doesn't emit setup_phase).
+      _armResumeReadyWatch() {
+        var self = this;
+        if (this._resumeStartTimer) clearInterval(this._resumeStartTimer);
+        var started = Date.now();
+        this._resumeStartTimer = setInterval(function () {
+          var L = window.Autonomy && window.Autonomy.lifecycle;
+          var row = self._resumePhaseRow;
+          var done = false;
+          if (L && row && self.isLive && L.lifecycleState(row) === 'ready') done = true;
+          if (Date.now() - started > 120000) done = true;
+          if (done) {
+            clearInterval(self._resumeStartTimer);
+            self._resumeStartTimer = null;
+            self.resumeStarting = false;
+          }
+        }, 500);
+      },
+
       // ── Configure ───────────────────────────────────────────────
       // Main entry point. Accepts {sessionId, runDir, project, tmuxSession}.
 
@@ -911,11 +1061,26 @@
 
         var store = window.getSessionStore(sessionId);
 
-        // Backfill org for dead sessions not seeded by /api/dao/active_sessions.
-        if (!store.org) {
+        // Backfill org + resume metadata for dead sessions not seeded by
+        // /api/dao/active_sessions. graph_source_id/session_uuid/file_path
+        // + resumable drive the title-bar Resume affordance; org keeps the
+        // legacy dead-session behaviour. Runs once per mount (guarded on
+        // _resumeMeta being unfetched) so cache-hit reopens don't refetch.
+        if (!store.org || this._resumeMeta === null) {
+          var self0 = this;
           fetch('/api/session/' + encodeURIComponent(sessionId))
             .then(function(r) { return r.ok ? r.json() : null; })
-            .then(function(data) { if (data && data.org) store.org = data.org; })
+            .then(function(data) {
+              if (!data) return;
+              if (data.org && !store.org) store.org = data.org;
+              if (data.resumable !== undefined) store.resumable = !!data.resumable;
+              self0._resumeMeta = {
+                resumable: !!data.resumable,
+                sourceId: data.graph_source_id || '',
+                sessionUuid: data.session_uuid || '',
+                filePath: data.file_path || '',
+              };
+            })
             .catch(function() {});
         }
 
@@ -951,11 +1116,20 @@
           this._initUploads().catch(function () {});
           try { console.log('[lc] '+JSON.stringify({event:'cfg-after-initUploads-bg',wallt:Date.now()})); } catch(e){}
 
-          // Only fetch a backlog if one EXISTS. A brand-new/starting session has
-          // no JSONL (resolved=false) — nothing to back-fill, and all updates
-          // arrive via SSE — so skip the fetch entirely. It was ~2.6–5s of dead
-          // wait that blocked the viewer settle for no reason.
-          if (store.resolved) try {
+          // Fetch a backlog whenever one might EXIST. store.resolved is the
+          // fast seeded signal (list/registry). But it defaults false, and a
+          // dead session opened COLD — direct URL, source-view crosslink, or
+          // the inactive-session list — is never seeded, so resolved stayed
+          // false and a session with thousands of turns rendered blank ("0
+          // entries / Send a message to begin"). The tail endpoint serves a
+          // dead session's history straight from the graph even when no JSONL
+          // path is recorded, so the right gate is "resolved OR not live":
+          //   • live + starting (isLive=true, resolved=false) → still skipped,
+          //     preserving the ~2.6–5s settle optimization (the ONLY case it
+          //     was ever meant to cover — a brand-new session has no backlog);
+          //   • dead (isLive=false) → fetch, and _fetchBacklog's 404 probe
+          //     degrades a genuinely-empty/pruned session to the empty state.
+          if (store.resolved || !store.isLive) try {
             await this._fetchBacklog(store);
             try { console.log('[lc] '+JSON.stringify({event:'cfg-after-fetchBacklog',wallt:Date.now()})); } catch(e){}
           } catch (e) {
@@ -1179,6 +1353,13 @@
         // Cross-session cue — CSS-gated body class so the capsule's send fill
         // reacts across navigation without per-component JS reactivity.
         document.body.classList.toggle('sv-cross-session-dictation', this._crossSessionDictation);
+        // Publish the viewed session into the voice store (reactive) so the
+        // keyboard sheet — which has no per-viewer context — can show the same
+        // cross-session "→ target" banner the dictation tile does (#23).
+        var voice = this.getVoiceStore();
+        if (voice && typeof voice.setViewedSession === 'function') {
+          voice.setViewedSession(this._composerActive ? sid : '');
+        }
       },
 
       destroy() {
@@ -1196,6 +1377,11 @@
           document.body.classList.remove('sv-outbox-tile-present');
           document.body.classList.remove('sv-cross-session-dictation');
           delete document.body.dataset.svComposerSession;
+          var voice = this.getVoiceStore();
+          if (voice && typeof voice.setViewedSession === 'function' &&
+              voice.viewedSessionId === (this._tmuxSession || '')) {
+            voice.setViewedSession('');
+          }
         }
         if (this._mode === 'page' && window._diagFocusedViewerId === this.sessionKey) {
           window._diagFocusedViewerId = null;
@@ -1223,6 +1409,10 @@
         if (this._resumeHeartbeatInterval) {
           clearInterval(this._resumeHeartbeatInterval);
           this._resumeHeartbeatInterval = null;
+        }
+        if (this._resumeStartTimer) {
+          clearInterval(this._resumeStartTimer);
+          this._resumeStartTimer = null;
         }
         if (this._workspaceHandler && typeof window.unregisterHandler === 'function') {
           window.unregisterHandler('worktrees', this._workspaceHandler);
