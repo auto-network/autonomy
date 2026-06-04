@@ -2015,6 +2015,7 @@
            :class="capsuleMicClass"
            @keydown.enter.prevent="onCapsuleKey('mic')"
            @keydown.space.prevent="onCapsuleKey('mic')">
+        <span class="voice-capsule__recon-ring" aria-hidden="true"></span>
         <span class="voice-capsule__icon-wrap" x-html="capsuleIcon('mic')"></span>
       </div>
       <div class="voice-capsule__action voice-capsule__send"

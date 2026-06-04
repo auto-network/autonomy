@@ -479,6 +479,36 @@ body.sv-viewer-composer-active .voice-caption {
   box-shadow: 0 0 0 2px rgba(251, 146, 60, 0.42), 0 0 26px rgba(234, 88, 12, 0.5);
   color: #1a1206;   /* dark glyph for contrast on orange */
 }
+/* Disconnected: never let the mic look alive when it isn't. */
+.voice-capsule__mic--reconnecting {
+  background: linear-gradient(180deg, #f87171 0%, #dc2626 100%);
+  color: #fff;
+  animation: voice-mic-recon 0.95s ease-in-out infinite;
+}
+.voice-capsule__mic--disconnected {
+  background: linear-gradient(180deg, #ef4444 0%, #991b1b 100%);
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.55);
+  color: #fff;
+}
+@keyframes voice-mic-recon {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.4), 0 0 16px rgba(220, 38, 38, 0.4); }
+  50% { box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.65), 0 0 34px rgba(220, 38, 38, 0.65); }
+}
+/* Spinning "radar" ring over the mic while it auto-reconnects. */
+.voice-capsule__recon-ring {
+  display: none;
+  position: absolute;
+  inset: -3px;
+  border-radius: 17px;
+  border: 2px solid transparent;
+  border-top-color: rgba(255, 255, 255, 0.85);
+  pointer-events: none;
+}
+.voice-capsule__mic--reconnecting .voice-capsule__recon-ring {
+  display: block;
+  animation: voice-recon-spin 0.8s linear infinite;
+}
+@keyframes voice-recon-spin { to { transform: rotate(360deg); } }
 
 /* Count badge poof on clear: scale up + fade as it leaves (Alpine x-transition). */
 .voice-capsule__count-leave { transition: transform 280ms ease, opacity 280ms ease; }
