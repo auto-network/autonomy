@@ -251,6 +251,14 @@
       clearBuffer() {
         this.bufferText = '';
         this.sheetError = '';
+        // Tactile confirmation that the buffer was wiped (#35). Clear-only — Send
+        // empties bufferText directly, not through here.
+        try {
+          if (typeof window !== 'undefined' && window.Autonomy &&
+              typeof window.Autonomy.haptic === 'function') {
+            window.Autonomy.haptic();
+          }
+        } catch (_e) {}
       },
 
       pulseAwayEvent(sessionId) {
