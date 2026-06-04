@@ -600,6 +600,17 @@
   0%, 100% { border-left-color: #f59e0b; }
   50%      { border-left-color: #fcd34d; }
 }
+/* Cross-session dictation tile (#23) — violet, distinct from the local amber/green/red
+   states so a relayed buffer is never mistaken for a message into THIS session. */
+.sv-pending-tile--cross {
+  border-left-color: #7c3aed;
+  background: linear-gradient(90deg, rgba(124, 58, 237, 0.16), rgba(124, 58, 237, 0.02));
+}
+.sv-pending-tile--cross .sv-pending-label { color: #c4b5fd; }
+.sv-pending-tile--cross .sv-pending-status .txt { color: #a78bfa; }
+.sv-cross-arrow { color: #a78bfa; margin: 0 2px; font-weight: 700; }
+.sv-cross-target { color: #ddd6fe; font-weight: 700; }
+
 .sv-pending-head { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
 .sv-pending-label { color: #f59e0b; font-size: 0.75rem; font-weight: 700; letter-spacing: .02em; }
 .is-capturing .sv-pending-label { color: #6ee7b7; }

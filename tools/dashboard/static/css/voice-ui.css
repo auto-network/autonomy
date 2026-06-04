@@ -464,6 +464,12 @@ body.sv-viewer-composer-active .voice-caption {
 }
 .voice-capsule__send .voice-capsule__icon-wrap { position: relative; z-index: 2; }
 .voice-capsule__count { z-index: 3; }
+/* Cross-session: dictating to a session OTHER than the one being viewed. The
+   Send fill turns violet (still drainable) so it can't be mistaken for local
+   input. Gated on a body class set by the active viewer. */
+body.sv-cross-session-dictation .voice-capsule__send-fill {
+  background: linear-gradient(180deg, #a78bfa 0%, #7c3aed 100%);
+}
 
 /* Mic button — gray (muted) / blue (listening) / orange (push-to-talk). */
 .voice-capsule__mic--muted {

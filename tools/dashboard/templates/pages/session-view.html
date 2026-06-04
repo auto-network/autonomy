@@ -380,6 +380,26 @@
         </div>
       </div>
 
+      <!-- Cross-session dictation tile — shown when the operator is dictating to a
+           DIFFERENT session than the one being viewed. Violet-tinted so it can't be
+           confused with a local pending message; the top line names the real target.
+           Read-only mirror of the live buffer (auto-xkdoi / #23). -->
+      <div class="sv-pending sv-pending--cross" x-show="_crossSessionDictation && _crossSessionText">
+        <div class="sv-pending-tile sv-pending-tile--cross">
+          <div class="sv-pending-head">
+            <span class="sv-pending-label">
+              USER · DICTATING
+              <span class="sv-cross-arrow">→</span>
+              <span class="sv-cross-target" x-text="_crossSessionTargetTitle"></span>
+            </span>
+            <span class="sv-pending-status"><span class="txt">Elsewhere</span></span>
+          </div>
+          <div class="sv-pending-content"
+               x-text="_crossSessionText"
+               x-effect="_crossSessionText, $nextTick(() => { if ($el) $el.scrollTop = $el.scrollHeight; })"></div>
+        </div>
+      </div>
+
       <!-- Row 3: Input bar (contenteditable, shown when linked to tmux) -->
       <template x-if="!showTerminal && isLive && _tmuxSession && (sessionType !== 'host' || _linked)">
         <div class="sv-input"
