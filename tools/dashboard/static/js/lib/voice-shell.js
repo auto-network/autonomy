@@ -437,6 +437,9 @@
           if (action === 'type') return _typeIcon();
           if (action === 'mic') {
             var voice = this.voice;
+            if (voice && (voice.connState === 'reconnecting' || voice.connState === 'disconnected')) {
+              return _micSlashIcon();   // not actually capturing — show it off
+            }
             var mode = voice ? voice.micMode : 'idle';
             var open = this.capsulePttActive || mode === 'listening' || mode === 'vad_paused';
             return open ? _micOnIcon() : _micSlashIcon();
@@ -448,6 +451,15 @@
         // while held). PTT is a transient UI flag, not a micMode value.
         get capsuleMicClass() {
           var voice = this.voice;
+          var pressed = this.capsulePressedAction === 'mic';
+          var conn = voice ? voice.connState : 'ok';
+          if (conn === 'reconnecting' || conn === 'disconnected') {
+            return {
+              'voice-capsule__mic--reconnecting': conn === 'reconnecting',
+              'voice-capsule__mic--disconnected': conn === 'disconnected',
+              'voice-capsule__action--pressed': pressed,
+            };
+          }
           var mode = voice ? voice.micMode : 'idle';
           var state = 'muted';
           if (this.capsulePttActive) state = 'ptt';
@@ -456,7 +468,7 @@
             'voice-capsule__mic--muted': state === 'muted',
             'voice-capsule__mic--listening': state === 'listening',
             'voice-capsule__mic--ptt': state === 'ptt',
-            'voice-capsule__action--pressed': this.capsulePressedAction === 'mic',
+            'voice-capsule__action--pressed': pressed,
           };
         },
 
@@ -648,8 +660,18 @@
 
         runCapsuleAction(action) {
           if (!this.voice) return false;
-          if (action === 'mic' && typeof this.voice.toggleMic === 'function') {
-            return this.voice.toggleMic();  // tap = mute ⇄ unmute
+          if (action === 'mic') {
+            var conn = this.voice.connState;
+            if (conn === 'disconnected' || conn === 'reconnecting') {
+              // Tap the red mic to retry the connection now.
+              if (typeof window !== 'undefined' && window.Autonomy && window.Autonomy.voiceCapture &&
+                  typeof window.Autonomy.voiceCapture.retryReconnect === 'function') {
+                window.Autonomy.voiceCapture.retryReconnect();
+              }
+              return true;
+            }
+            if (typeof this.voice.toggleMic === 'function') return this.voice.toggleMic();  // tap = mute ⇄ unmute
+            return false;
           }
           if (action === 'type' && typeof this.voice.openSheet === 'function') {
             return this.voice.openSheet();
@@ -735,7 +757,11 @@
           // Press-and-hold: mic → push-to-talk; keyboard → clear (the Send fill
           // drains over the hold, then the count poofs as the buffer clears).
           this._clearCapsuleHold();
-          if (action === 'mic' || action === 'type') {
+          // While the mic is red (reconnecting/disconnected) a hold is meaningless
+          // — only a tap retries — so don't arm the PTT timer for it.
+          var conn = this.voice ? this.voice.connState : 'ok';
+          var micHoldable = action === 'mic' && conn !== 'reconnecting' && conn !== 'disconnected';
+          if (micHoldable || action === 'type') {
             if (action === 'type') this._setSendFill(0, CAPSULE_CLEAR_MS);
             this._capsuleHoldTimer = setTimeout(function () {
               if (!self._capsuleGesture || self._capsuleGesture.dragging) return;

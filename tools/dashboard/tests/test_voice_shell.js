@@ -511,4 +511,38 @@ describe('voice shell helpers', () => {
     assert.equal(h.component.capsulePttActive, false);
     assert.deepEqual(modes, []);
   });
+
+  // ── auto-reconnect mic states (#32) ───────────────────────────────────
+  it('capsuleMicClass: red while reconnecting / disconnected (overrides mic mode)', () => {
+    const r = loadVoiceShell({ voiceStore: { micMode: 'listening', connState: 'reconnecting' } });
+    assert.equal(r.component.capsuleMicClass['voice-capsule__mic--reconnecting'], true);
+    assert.ok(!r.component.capsuleMicClass['voice-capsule__mic--listening']);
+    const d = loadVoiceShell({ voiceStore: { micMode: 'listening', connState: 'disconnected' } });
+    assert.equal(d.component.capsuleMicClass['voice-capsule__mic--disconnected'], true);
+  });
+
+  it('capsuleIcon(mic): slashed while reconnecting/disconnected (not actually capturing)', () => {
+    const slash = 'x1="3" y1="3"';
+    assert.ok(loadVoiceShell({ voiceStore: { micMode: 'listening', connState: 'reconnecting' } })
+      .component.capsuleIcon('mic').indexOf(slash) !== -1);
+  });
+
+  it('tapping the red mic retries the connection (not toggle)', () => {
+    let retries = 0, toggles = 0;
+    const h = loadVoiceShell({ voiceStore: { connState: 'disconnected', toggleMic() { toggles++; return true; } } });
+    h.window.Autonomy = h.window.Autonomy || {};
+    h.window.Autonomy.voiceCapture = { retryReconnect() { retries++; return true; } };
+    h.component.runCapsuleAction('mic');
+    assert.equal(retries, 1);
+    assert.equal(toggles, 0);
+  });
+
+  it('tapping the mic when connected toggles mute (not retry)', () => {
+    let retries = 0, toggles = 0;
+    const h = loadVoiceShell({ voiceStore: { connState: 'ok', toggleMic() { toggles++; return true; } } });
+    h.window.Autonomy = { voice: {}, voiceCapture: { retryReconnect() { retries++; } } };
+    h.component.runCapsuleAction('mic');
+    assert.equal(toggles, 1);
+    assert.equal(retries, 0);
+  });
 });

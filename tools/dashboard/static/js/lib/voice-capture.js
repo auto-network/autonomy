@@ -25,7 +25,59 @@
     finals: '',
     removed: [],            // recently cleared/sent text, for re-emit suppression
     wakeLock: null,
+    reconnectAttempt: 0,    // backoff index for the auto-reconnect loop
+    reconnectTimer: null,
+    stabilityTimer: null,   // resets the backoff once a fresh link survives a beat
   };
+
+  // ── Auto-reconnect with backoff ─────────────────────────────────────────
+  // An unexpected socket drop used to need a manual session-switch (react()
+  // only re-runs on micMode/boundSessionId changes, not on a close). Now we
+  // retry with exponential backoff + jitter, cap the attempts, and surface the
+  // state on the mic (red while reconnecting, solid red + tap-to-retry once we
+  // give up) so it never looks alive when it's dead.
+  var RECONNECT_BACKOFF = [1000, 2000, 4000, 8000, 16000, 30000];
+  function _setConn(state) {
+    var st = store();
+    if (st && typeof st.setConnState === 'function') st.setConnState(state);
+    else if (st) st.connState = state;
+  }
+  function _wantsConnection() {
+    var st = store();
+    return !!(st && st.boundSessionId && (st.micMode === 'listening' || st.micMode === 'vad_paused'));
+  }
+  function _scheduleReconnect() {
+    _setConn('reconnecting');
+    if (s.reconnectTimer) clearTimeout(s.reconnectTimer);
+    if (s.reconnectAttempt >= RECONNECT_BACKOFF.length) {
+      _setConn('disconnected');            // give up → manual retry only (no loop)
+      _diag('reconnect: gave up after ' + RECONNECT_BACKOFF.length + ' attempts');
+      return;
+    }
+    var base = RECONNECT_BACKOFF[s.reconnectAttempt];
+    var jitter = base * 0.2 * (Math.random() * 2 - 1);   // ±20% so we don't hammer in lockstep
+    var delay = Math.max(300, base + jitter);
+    s.reconnectAttempt++;
+    _diag('reconnect: attempt ' + s.reconnectAttempt + ' of ' + RECONNECT_BACKOFF.length + ' in ' + Math.round(delay) + 'ms');
+    s.reconnectTimer = setTimeout(function () {
+      s.reconnectTimer = null;
+      if (!_wantsConnection()) { _setConn('ok'); return; }   // muted/unbound meanwhile
+      var st = store();
+      s.starting = false; s.started = false;
+      startListening(st.boundSessionId);
+    }, delay);
+  }
+  // Manual retry from the red mic — reset the backoff and try immediately.
+  function retryReconnectNow() {
+    var st = store();
+    if (!st || !st.boundSessionId) return false;
+    if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null; }
+    s.reconnectAttempt = 0;
+    _setConn('reconnecting');
+    s.starting = false; s.started = false;
+    startListening(st.boundSessionId);
+    return true;
+  }
 
   // ── Look-back suppression of re-emitted cleared/sent text ───────────────
   // After Clear/Send, whisper_live keeps the just-spoken audio in its per-client
@@ -178,6 +230,11 @@
     ws.addEventListener('open', function () {
       if (ws !== s.ws) return;
       s.wsOpen = true; s.started = false; s.requiresReconnect = false;
+      _setConn('ok');
+      // Only declare full recovery (reset the backoff) once the link has been
+      // STABLE for a beat — an open-then-close flap must not keep resetting it.
+      if (s.stabilityTimer) clearTimeout(s.stabilityTimer);
+      s.stabilityTimer = setTimeout(function () { s.reconnectAttempt = 0; s.stabilityTimer = null; }, 3000);
       _diag('socket OPEN → ' + bind);
     });
     ws.addEventListener('message', function (event) {
@@ -229,8 +286,14 @@
       }
     });
     ws.addEventListener('close', function () {
-      if (ws !== s.ws) return;
-      s.wsOpen = false; s.started = false; s.talkActive = false; s.ws = null;
+      if (ws !== s.ws) return;   // intentional teardown nulls s.ws first → ignored here
+      s.wsOpen = false; s.started = false; s.ws = null;
+      if (s.stabilityTimer) { clearTimeout(s.stabilityTimer); s.stabilityTimer = null; }
+      if (_wantsConnection()) {
+        _scheduleReconnect();   // unexpected drop while we still want to be live
+      } else {
+        s.talkActive = false;
+      }
     });
     ws.addEventListener('error', function () { /* surfaced by close */ });
   }
@@ -327,6 +390,10 @@
   }
 
   function teardown() {
+    if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null; }
+    if (s.stabilityTimer) { clearTimeout(s.stabilityTimer); s.stabilityTimer = null; }
+    s.reconnectAttempt = 0;
+    _setConn('ok');
     s.talkActive = false;
     _releaseWakeLock();
     try { if (s.ws) s.ws.close(1000, 'end'); } catch (_e) {}
@@ -376,5 +443,5 @@
   });
 
   window.Autonomy = window.Autonomy || {};
-  window.Autonomy.voiceCapture = { teardown: teardown, _state: s };
+  window.Autonomy.voiceCapture = { teardown: teardown, retryReconnect: retryReconnectNow, _state: s };
 })();

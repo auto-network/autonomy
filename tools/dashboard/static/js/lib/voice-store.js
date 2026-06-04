@@ -130,6 +130,11 @@
     return {
       boundSessionId: '',
       micMode: 'idle',
+      // Voice-socket health, driven by voice-capture's reconnect loop:
+      //   'ok'            — connected (or not yet needed)
+      //   'reconnecting'  — dropped, auto-retrying with backoff (mic shows red+spin)
+      //   'disconnected'  — backoff exhausted; tap the mic to retry (solid red)
+      connState: 'ok',
       bufferText: '',
       capsulePosition: _readPosition(STORAGE_KEYS.capsulePosition),
       pendingRebindTarget: '',
@@ -219,6 +224,12 @@
           return false;
         }
         this.micMode = mode;
+        return true;
+      },
+
+      setConnState(state) {
+        if (state !== 'ok' && state !== 'reconnecting' && state !== 'disconnected') return false;
+        this.connState = state;
         return true;
       },
 
