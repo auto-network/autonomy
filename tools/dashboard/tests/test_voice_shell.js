@@ -374,6 +374,30 @@ describe('voice shell helpers', () => {
     assert.deepEqual(h.voiceStore._setCapsuleCalls[0], { x: 268, y: 664 });
   });
 
+  it('ends PTT on release even when the capsule was dragged during the hold (#38)', async () => {
+    const setMicModeCalls = [];
+    const h = loadVoiceShell({
+      voiceStore: {
+        micMode: 'muted',
+        setMicMode(mode) { this.micMode = mode; setMicModeCalls.push(mode); },
+      },
+    });
+    const down = { clientX: 320, clientY: 730, target: actionTarget('mic'), preventDefault() {} };
+    assert.equal(h.component.onCapsulePointerDown(down), true);
+    // Let the hold timer fire → push-to-talk engages (gray → orange / listening).
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(h.component.capsulePttActive, true, 'hold engaged PTT');
+    assert.equal(h.voiceStore.micMode, 'listening');
+    // Drag the capsule while STILL holding, then release.
+    h.winListeners.pointermove[0]({ clientX: 360, clientY: 690 });
+    h.winListeners.pointerup[0]({ clientX: 360, clientY: 690 });
+    // Bug was: the dragging branch returned before ending PTT → stuck orange.
+    assert.equal(h.component.capsulePttActive, false, 'release ends PTT despite the drag');
+    assert.equal(h.voiceStore.micMode, 'muted');
+    assert.deepEqual(setMicModeCalls, ['listening', 'muted']);
+    assert.equal(h.voiceStore._setCapsuleCalls.length, 1, 'the drag still persisted the new position');
+  });
+
   it('sheet handle drag expands a partial sheet to full mode', () => {
     const h = loadVoiceShell({
       voiceStore: {

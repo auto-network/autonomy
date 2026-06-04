@@ -793,16 +793,21 @@
             var gesture = self._capsuleGesture;
             self._clearCapsuleHold();
             self._teardownCapsuleGesture();
+            // PTT release ALWAYS wins, even if the capsule was dragged mid-hold.
+            // Without this, a held-then-dragged gesture took the dragging branch
+            // below and returned before ending PTT — leaving the mic stuck orange
+            // after the finger lifted. End it first, then handle the drag/position.
+            if (gesture.held && gesture.action === 'mic') self._endCapsulePtt();
             if (gesture.dragging) {
               if (self.voice && typeof self.voice.setCapsulePosition === 'function' && self.capsulePosition) {
                 self.voice.setCapsulePosition(self.capsulePosition);
               }
+              self.capsulePressedAction = '';
               return;
             }
             if (gesture.held) {
-              // The hold already fired: PTT engaged (release it now → muted) or
-              // the keyboard hold-to-clear ran. No tap action either way.
-              if (gesture.action === 'mic') self._endCapsulePtt();
+              // The hold already fired: PTT was released above (mic) or the
+              // keyboard hold-to-clear ran. No tap action either way.
               self.capsulePressedAction = '';
               return;
             }

@@ -116,6 +116,12 @@
   font-size: 11px; font-weight: 600;
   color: #cbd5e1; background: #2a3444;
   white-space: nowrap; flex-shrink: 0;
+  /* Long-pressing the corner mic dot kept selecting the HOST/role badge text
+     instead of toggling dictation — kill selection + the iOS callout (prefixed
+     forms required for WebKit) so the press falls through to the dot. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 .sc-role-host { background: #1e3a5f; color: #93c5fd; }
 

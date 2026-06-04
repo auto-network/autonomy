@@ -14,6 +14,12 @@
   overflow: visible;
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
+  /* Widen the long-press hit target for the corner dictation toggle without
+     shifting layout: padding grows the clickable area, the equal negative
+     margin pulls siblings back so the visual position is unchanged. The glyph
+     stays centred (padding/margin cancel at the centre). */
+  padding: 10px;
+  margin: -10px;
 }
 
 .voice-dot-button[disabled] {
