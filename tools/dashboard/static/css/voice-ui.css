@@ -420,7 +420,13 @@ body.sv-viewer-composer-active .voice-caption {
   box-shadow: 0 18px 42px rgba(2, 6, 23, 0.42);
   backdrop-filter: blur(14px);
   touch-action: none;
+  /* WebKit (iOS Safari) needs the prefixed forms or a long press still fires the
+     text-selection loupe — the unprefixed user-select:none is ignored there. The
+     callout suppression kills the selection handles the hold-to-clear gesture was
+     surfacing between the mic and Send buttons. */
   user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .voice-capsule__action {
@@ -438,6 +444,11 @@ body.sv-viewer-composer-active .voice-caption {
      pointercancel — killing the drag gesture before it starts. Taps still
      work; drags don't. Match the capsule body so the whole surface drags. */
   touch-action: none;
+  /* Same reason as the capsule body: the press targets cover its whole area, so
+     they each need the prefixed selection/callout suppression directly. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .voice-capsule__send {
