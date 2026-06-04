@@ -23,6 +23,9 @@
     stream: null, ctx: null, sourceNode: null, workletNode: null, sinkNode: null, micGranted: false,
     starting: false,
     finals: '',
+    carryPrefix: '',        // text carried over when the binding switches mid-buffer
+                            // (#23 switch-takes-buffer): prepended to whatever the
+                            // NEW session transcribes so the old text isn't clobbered.
     removed: [],            // recently cleared/sent text, for re-emit suppression
     wakeLock: null,
     reconnectAttempt: 0,    // backoff index for the auto-reconnect loop
@@ -222,7 +225,12 @@
       _diag('NO STORE — text="' + (text || '').slice(-40) + '"');
       return;
     }
-    st.setBufferText(text);
+    // Carried text (from a mid-buffer session switch) always leads; the new
+    // session's transcript appends after it. carryPrefix is '' in the normal
+    // case, so this is a no-op until a switch seeds it.
+    var core = text || '';
+    var full = s.carryPrefix ? (core ? (s.carryPrefix + ' ' + core) : s.carryPrefix) : core;
+    st.setBufferText(full);
   }
 
   function attachSocket(ws, bind) {
@@ -409,8 +417,18 @@
     var bound = st.boundSessionId;
     var mode = st.micMode;
     if (bound && mode === 'listening') {
-      if (s.bind !== bound || !s.ws) startListening(bound);
-      else if (!s.talkActive && !s.starting) resumeListening();
+      if (s.bind !== bound || !s.ws) {
+        // Genuine target switch (old bind was real, target differs) with text
+        // still in the box → carry it over so the new session's transcription
+        // appends instead of overwriting. teardown() (inside startListening)
+        // wipes s.finals; carryPrefix survives it and is cleared only when the
+        // buffer is emptied (Clear/Send/unbind, handled in the clear effect).
+        if (s.bind && bound !== s.bind) {
+          var carried = (st.bufferText || '').trim();
+          if (carried) s.carryPrefix = carried;
+        }
+        startListening(bound);
+      } else if (!s.talkActive && !s.starting) resumeListening();
     } else if (bound && mode === 'muted') {
       if (s.talkActive) muteListening();
     } else if (!bound || mode === 'idle') {
@@ -428,15 +446,19 @@
       var st = store();
       if (!st) return;
       var buf = st.bufferText;
-      if (buf === '' && s.finals) {
+      if (buf === '' && (s.finals || s.carryPrefix)) {
         // Remember what we just removed (Clear or Send both empty the box) so a
         // whisper_live re-emit of this exact text gets suppressed instead of
-        // reappearing. Must happen BEFORE we drop s.finals.
-        _vlog('CLEAR remembering="' + s.finals.slice(0, 80) + '"');
-        _rememberRemoved(s.finals);
+        // reappearing. Must happen BEFORE we drop s.finals. Fold in carryPrefix
+        // so a switched-then-cleared buffer doesn't leave the carried text behind
+        // to re-prepend on the next render.
+        var removedFull = (s.carryPrefix ? (s.carryPrefix + ' ' + s.finals) : s.finals).trim();
+        _vlog('CLEAR remembering="' + removedFull.slice(0, 80) + '"');
+        _rememberRemoved(removedFull);
         s.finals = '';
+        s.carryPrefix = '';
         sendControl('discard');
-      } else if (buf === '' && !s.finals) {
+      } else if (buf === '' && !s.finals && !s.carryPrefix) {
         _vlog('CLEAR but s.finals already EMPTY — nothing remembered (bug?)');
       }
     });
