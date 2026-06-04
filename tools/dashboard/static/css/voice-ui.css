@@ -251,6 +251,26 @@ body.sv-viewer-composer-active .voice-caption {
   background: rgba(148, 163, 184, 0.38);
 }
 
+/* Cross-session banner (#23) — same violet language as the dictation tile, so
+   composing into a session other than the one being viewed is never a surprise. */
+.voice-sheet__cross {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 2px 4px 8px;
+  padding: 7px 12px;
+  border-radius: 10px;
+  border-left: 3px solid #7c3aed;
+  background: linear-gradient(90deg, rgba(124, 58, 237, 0.18), rgba(124, 58, 237, 0.03));
+  font-size: 0.8125rem;
+}
+.voice-sheet__cross-arrow { color: #a78bfa; font-weight: 700; }
+.voice-sheet__cross-label {
+  color: #c4b5fd; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .06em; font-size: 0.6875rem;
+}
+.voice-sheet__cross-target { color: #ede9fe; font-weight: 700; }
+
 .voice-sheet__body {
   flex: 1;
   min-height: 0;

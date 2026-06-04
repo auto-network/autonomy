@@ -446,6 +446,30 @@ describe('voice shell helpers', () => {
     assert.equal(h.voiceStore._sendCalls, 1, 'falls through to a normal send');
   });
 
+  it('sheetCrossSession is true when bound != viewed, with the target title from the store', () => {
+    const h = loadVoiceShell({
+      voiceStore: { boundSessionId: 'auto-B', viewedSessionId: 'auto-A' },
+      sessionsStore: { 'auto-B': { label: 'Enterprise NG' } },
+    });
+    assert.equal(h.component.sheetCrossSession, true);
+    assert.equal(h.component.sheetCrossTargetTitle, 'Enterprise NG');
+  });
+
+  it('sheetCrossSession is false when viewing the bound session', () => {
+    const h = loadVoiceShell({ voiceStore: { boundSessionId: 'auto-A', viewedSessionId: 'auto-A' } });
+    assert.equal(h.component.sheetCrossSession, false);
+  });
+
+  it('sheetCrossSession is false when not in any viewer (no viewedSessionId)', () => {
+    const h = loadVoiceShell({ voiceStore: { boundSessionId: 'auto-B', viewedSessionId: '' } });
+    assert.equal(h.component.sheetCrossSession, false);
+  });
+
+  it('sheetCrossTargetTitle falls back to the bound id when the session has no label', () => {
+    const h = loadVoiceShell({ voiceStore: { boundSessionId: 'auto-B', viewedSessionId: 'auto-A' } });
+    assert.equal(h.component.sheetCrossTargetTitle, 'auto-B');
+  });
+
   it('sheet handle drag expands a partial sheet to full mode', () => {
     const h = loadVoiceShell({
       voiceStore: {

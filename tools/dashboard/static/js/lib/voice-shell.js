@@ -383,6 +383,25 @@
           return t.split(/\s+/).filter(Boolean).length;
         },
 
+        // Cross-session for the KEYBOARD sheet: input is bound to a different
+        // session than the one being viewed, so a Send goes elsewhere. Reactive
+        // off store props (boundSessionId + viewedSessionId the viewer publishes).
+        get sheetCrossSession() {
+          var v = this.voice;
+          return !!(v && v.boundSessionId && v.viewedSessionId &&
+                    v.boundSessionId !== v.viewedSessionId);
+        },
+        get sheetCrossTargetTitle() {
+          var v = this.voice;
+          if (!v || !v.boundSessionId) return '';
+          try {
+            var sessions = (typeof Alpine !== 'undefined' && Alpine.store) ? Alpine.store('sessions') : null;
+            var s = sessions && sessions[v.boundSessionId];
+            if (s && s.label) return s.label;
+          } catch (_e) {}
+          return v.boundSessionId;
+        },
+
         get sendPulse() {
           var voice = this.voice;
           return !!(voice && voice.micMode === 'vad_paused' && this.hasBufferText);
