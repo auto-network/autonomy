@@ -38,28 +38,44 @@
   // few seconds while the audio is still buffered upstream) so it can NEVER
   // suppress something the operator legitimately says later.
   var REMOVED_TTL_MS = 45000;
-  function _normText(x) {
-    return String(x == null ? '' : x).toLowerCase().replace(/\s+/g, ' ').trim();
-  }
   function _nowMs() { return (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0; }
-  function _rememberRemoved(text) {
-    var t = _normText(text);
-    if (!t) return;
-    s.removed.push({ text: t, ts: _nowMs() });
-    if (s.removed.length > 20) s.removed = s.removed.slice(-20);  // bound memory
+  function _normWord(w) { return String(w).toLowerCase().replace(/[^a-z0-9]/g, ''); }
+  function _wordList(text) {
+    return String(text == null ? '' : text).trim().split(/\s+/).map(_normWord).filter(Boolean);
   }
-  // True when `text` reproduces something we recently removed (a whisper_live
-  // re-emit). Normalized substring match so partial/incremental re-emits also
-  // drop. Prunes TTL-expired entries on the way through.
-  function _isReEmit(text) {
-    var t = _normText(text);
-    if (t.length < 3) return false;   // too short to confidently call a re-emit
+  function _pruneRemoved() {
     var now = _nowMs();
     s.removed = s.removed.filter(function (e) { return now - e.ts < REMOVED_TTL_MS; });
+  }
+  function _rememberRemoved(text) {
+    var words = _wordList(text);
+    if (!words.length) return;
+    s.removed.push({ words: words, ts: _nowMs() });
+    if (s.removed.length > 20) s.removed = s.removed.slice(-20);  // bound memory
+  }
+  // whisper_live re-transcribes its still-buffered audio and re-emits the just-
+  // removed text — often with small variance (a re-timed segment, a reworded
+  // token, punctuation) that an exact substring check misses. So strip it by
+  // WORD PREFIX, with prejudice: if `candidate` begins by reproducing a recently
+  // removed chunk, drop that leading run of words and keep only what's genuinely
+  // new. Returns the kept text (original spacing preserved), or '' for a pure
+  // re-emit. Case/punctuation-insensitive. TTL-bounded so later speech is safe.
+  function _stripRemoved(candidate) {
+    var orig = String(candidate == null ? '' : candidate).trim().split(/\s+/).filter(Boolean);
+    if (!orig.length) return '';
+    var norm = orig.map(_normWord);
+    _pruneRemoved();
+    var strip = 0;
     for (var i = 0; i < s.removed.length; i++) {
-      if (s.removed[i].text.indexOf(t) !== -1) return true;
+      var rw = s.removed[i].words, k = 0;
+      while (k < rw.length && k < norm.length && rw[k] === norm[k]) k++;
+      // Count it as a re-emit prefix only on a meaningful run (so a 1-2 word
+      // coincidence with new speech isn't stripped), OR when the whole candidate
+      // is still inside the removed chunk (a partial re-emit rebuilding it).
+      if (k > strip && (k >= Math.min(rw.length, 3) || k === norm.length)) strip = k;
     }
-    return false;
+    if (strip >= orig.length) return '';
+    return orig.slice(strip).join(' ');
   }
 
   // Keep the screen awake while capturing (iOS auto-lock cuts off dictation).
@@ -166,22 +182,17 @@
         var t = String(frame.text || '').trim();
         if (frame.kind === 'final') {
           if (t) {
-            if (_isReEmit(t)) {
-              _diag('suppressed re-emit (final): ' + t.slice(-38));
-              return;
-            }
+            var candF = s.finals ? (s.finals + ' ' + t) : t;
+            var keptF = _stripRemoved(candF);
+            if (keptF !== candF) _diag('stripped re-emit (final) → "' + keptF.slice(-38) + '"');
+            s.finals = keptF;
             _finalCount++;
-            s.finals = s.finals ? (s.finals + ' ' + t) : t;
             _renderBuffer(s.finals);
-            _diag('final#' + _finalCount + ': ' + t.slice(-38));
           }
         } else if (frame.kind === 'partial') {
           if (t) {
-            if (_isReEmit(t)) {
-              _diag('suppressed re-emit (partial): ' + t.slice(-38));
-              return;
-            }
-            _renderBuffer(s.finals ? (s.finals + ' ' + t) : t);
+            var candP = s.finals ? (s.finals + ' ' + t) : t;
+            _renderBuffer(_stripRemoved(candP));
             _diag('live: ' + t.slice(-44));
           }
         }
