@@ -81,6 +81,21 @@
     startListening(st.boundSessionId);
     return true;
   }
+  // The global EventBus saw the server come back (epoch change after a uvicorn
+  // hot-reload / restart). That same restart dropped the voice WS, so re-establish
+  // audio NOW instead of waiting out the backoff — the server's per-session manager
+  // buffer is restored on reconnect, so the dictated text survives the blip. No-op
+  // when muted/unbound or if the socket somehow survived.
+  function onServerRecovered() {
+    if (!_wantsConnection()) return;          // muted/unbound → nothing to re-establish
+    if (s.ws && s.wsOpen) return;             // connection survived → leave it alone
+    if (s.reconnectTimer) { clearTimeout(s.reconnectTimer); s.reconnectTimer = null; }
+    s.reconnectAttempt = 0;
+    _setConn('reconnecting');
+    s.starting = false; s.started = false;
+    var st = store();
+    if (st && st.boundSessionId) startListening(st.boundSessionId);
+  }
 
   // ── Look-back suppression of re-emitted cleared/sent text ───────────────
   // After Clear/Send, whisper_live keeps the just-spoken audio in its per-client
@@ -465,5 +480,10 @@
   });
 
   window.Autonomy = window.Autonomy || {};
-  window.Autonomy.voiceCapture = { teardown: teardown, retryReconnect: retryReconnectNow, _state: s };
+  window.Autonomy.voiceCapture = {
+    teardown: teardown,
+    retryReconnect: retryReconnectNow,
+    onServerRecovered: onServerRecovered,
+    _state: s,
+  };
 })();

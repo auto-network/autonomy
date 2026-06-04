@@ -81,6 +81,15 @@
         if (epoch > 0 && _serverEpoch !== null && epoch !== _serverEpoch) {
           console.warn('[EventBus] server restarted, epoch ' + _serverEpoch + ' → ' + epoch);
           _onInterruption('Server restarted');
+          // The restart (uvicorn hot-reload) also dropped the voice audio WS.
+          // Re-establish it the moment the server is confirmed back, rather than
+          // letting the voice backoff blindly guess — buffer recovery is automatic.
+          try {
+            if (window.Autonomy && window.Autonomy.voiceCapture &&
+                typeof window.Autonomy.voiceCapture.onServerRecovered === 'function') {
+              window.Autonomy.voiceCapture.onServerRecovered();
+            }
+          } catch (e) { /* voice not present on this page */ }
         }
         if (epoch > 0) _serverEpoch = epoch;
 
