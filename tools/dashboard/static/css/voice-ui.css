@@ -16,6 +16,17 @@
   touch-action: manipulation;
 }
 
+/* Transparent tap-target extender (viewer corner toggle only). Pushes the
+   clickable surface ~10px past the visual dot on every side without resizing,
+   recolouring, or relayouting it. No background/border → invisible. Only the
+   viewer dot carries the .voice-dot-hit child, so the list-card dot is untouched. */
+.voice-dot-hit {
+  position: absolute;
+  inset: -10px;
+  border-radius: 50%;
+  background: transparent;
+}
+
 .voice-dot-button[disabled] {
   cursor: default;
 }
