@@ -141,6 +141,19 @@
   function _diag(msg) {
     try { if (window.console && console.debug) console.debug('VOICE ⟶ ' + msg); } catch (_e) {}
   }
+  // Server-visible trace for live debugging the re-emit suppression: POSTs to
+  // /api/voice/diag so the operator can reproduce on a phone while we tail the
+  // dashboard log. Fire-and-forget. (Temporary — remove once the bug is found.)
+  function _vlog(msg) {
+    _diag(msg);
+    try {
+      var f = (window.Autonomy && window.Autonomy.fetch) || window.fetch;
+      f('/api/voice/diag', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ msg: String(msg) }), keepalive: true,
+      }).catch(function () {});
+    } catch (_e) {}
+  }
 
   function store() {
     try { return (typeof Alpine !== 'undefined' && Alpine.store) ? (Alpine.store('voice') || null) : null; }
@@ -184,7 +197,7 @@
           if (t) {
             var candF = s.finals ? (s.finals + ' ' + t) : t;
             var keptF = _stripRemoved(candF);
-            if (keptF !== candF) _diag('stripped re-emit (final) → "' + keptF.slice(-38) + '"');
+            if (s.removed.length) _vlog('FINAL t="' + t.slice(0, 70) + '" removedN=' + s.removed.length + ' kept="' + keptF.slice(0, 70) + '"');
             s.finals = keptF;
             _finalCount++;
             _renderBuffer(s.finals);
@@ -192,14 +205,21 @@
         } else if (frame.kind === 'partial') {
           if (t) {
             var candP = s.finals ? (s.finals + ' ' + t) : t;
-            _renderBuffer(_stripRemoved(candP));
-            _diag('live: ' + t.slice(-44));
+            var keptP = _stripRemoved(candP);
+            if (s.removed.length) _vlog('PARTIAL t="' + t.slice(0, 70) + '" removedN=' + s.removed.length + ' kept="' + keptP.slice(0, 70) + '"');
+            _renderBuffer(keptP);
           }
         }
         return;
       }
       if (type === 'buffer_state') {
-        s.finals = String(frame.text || '');
+        // Strip removed text here too: a reconnect restores the server's MANAGER
+        // buffer, which re-emits can have re-polluted after a Clear/Send — this
+        // path used to bypass suppression entirely.
+        var bsRaw = String(frame.text || '');
+        var bsKept = _stripRemoved(bsRaw);
+        if (bsRaw) _vlog('BUFFER_STATE raw="' + bsRaw.slice(0, 70) + '" removedN=' + s.removed.length + ' kept="' + bsKept.slice(0, 70) + '"');
+        s.finals = bsKept;
         _renderBuffer(s.finals);
         return;
       }
@@ -351,10 +371,12 @@
         // Remember what we just removed (Clear or Send both empty the box) so a
         // whisper_live re-emit of this exact text gets suppressed instead of
         // reappearing. Must happen BEFORE we drop s.finals.
+        _vlog('CLEAR remembering="' + s.finals.slice(0, 80) + '"');
         _rememberRemoved(s.finals);
         s.finals = '';
         sendControl('discard');
-        _diag('sent → buffer cleared (remembered ' + s.removed.length + ' chunks)');
+      } else if (buf === '' && !s.finals) {
+        _vlog('CLEAR but s.finals already EMPTY — nothing remembered (bug?)');
       }
     });
   });

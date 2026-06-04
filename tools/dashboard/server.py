@@ -9314,6 +9314,18 @@ async def api_operator_active(request):
     return JSONResponse({"ok": True})
 
 
+async def api_voice_diag(request):
+    """Receive a client-side voice-capture trace line and log it so the operator
+    can reproduce a bug on-device while we tail the dashboard log. Temporary
+    debugging aid (removed once the re-emit suppression bug is found)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    logger.info("VOICE-DIAG %s", str(body.get("msg", ""))[:500])
+    return JSONResponse({"ok": True})
+
+
 def _publish_harness_usage_snapshot() -> None:
     if operator_is_idle(threshold_minutes=15):
         return
@@ -13184,6 +13196,7 @@ def _plugin_asset_rev(plugin) -> str:
 routes = [
     Route("/api/ping", api_ping),
     Route("/api/operator/active", api_operator_active, methods=["POST"]),
+    Route("/api/voice/diag", api_voice_diag, methods=["POST"]),
     # Pages
     Route("/", page_index),
     Route("/beads", page_beads),
