@@ -406,25 +406,10 @@
        can't swipe and the original dots were 0.24rem with no hover —
        effectively unscrollable. On pointer:fine devices we
        (a) enlarge + brighten the dots with a hover/cursor affordance,
-       (b) expose previous/next chevrons flanking the scroller,
-       (c) show a thin scrollbar as a fallback for power users. */
-    @media (hover: hover) and (pointer: fine) {
-      .harness-strip-scroller {
-        scrollbar-width: thin;
-        -ms-overflow-style: auto;
-      }
-      .harness-strip-scroller::-webkit-scrollbar {
-        display: block;
-        height: 4px;
-      }
-      .harness-strip-scroller::-webkit-scrollbar-thumb {
-        background: rgba(100, 116, 139, 0.4);
-        border-radius: 2px;
-      }
-      .harness-strip-scroller::-webkit-scrollbar-thumb:hover {
-        background: rgba(148, 163, 184, 0.65);
-      }
-    }
+       (b) expose previous/next chevrons flanking the scroller.
+       The scrollbar stays hidden everywhere (scrollbar-width:none above):
+       it was redundant with the chevrons + dots and showed even on a
+       single page with nothing to scroll (operator-reported). */
     .harness-strip-nav {
       position: absolute;
       top: 50%;
@@ -453,11 +438,24 @@
       cursor: default;
       pointer-events: none;
     }
-    /* Show chevrons only on pointer:fine devices and only when there
-       is more than one page (the JS sets .has-multi on the wrapper). */
+    /* Chevrons: pointer:fine + more than one page (JS sets .has-multi), and
+       only REVEALED while the operator hovers the strip — they're clutter
+       otherwise (operator-reported). Laid out always (so they don't shift the
+       strip on hover) but faded out + non-interactive until hover; the existing
+       opacity transition makes the reveal smooth. */
     @media (hover: hover) and (pointer: fine) {
       .harness-strip.has-multi .harness-strip-nav {
         display: inline-flex;
+        opacity: 0;
+        pointer-events: none;
+      }
+      .harness-strip.has-multi:hover .harness-strip-nav {
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .harness-strip.has-multi:hover .harness-strip-nav[disabled] {
+        opacity: 0.35;
+        pointer-events: none;
       }
     }
     .harness-strip-page {
