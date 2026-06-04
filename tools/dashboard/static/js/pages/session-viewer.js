@@ -210,6 +210,14 @@
         this._committedLocalId = s.outbox.localId;
         this._durableSend(s.outbox.text, s.outbox.localId);
       },
+      // Discard an unconfirmed message — drop the optimistic tile without
+      // resending. The text never reached the log; the operator chose to let it go.
+      dismissOutbox() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        if (!s) return;
+        s.outbox = null;
+        this._committedLocalId = null;
+      },
       // Watch keys: send-key fires when an outbox enters 'sending' (the voice
       // path flips state without going through sendMessage); tail-key fires as
       // entries arrive so we can reconcile the optimistic tile against the log.
