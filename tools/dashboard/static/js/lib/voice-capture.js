@@ -141,18 +141,12 @@
   function _diag(msg) {
     try { if (window.console && console.debug) console.debug('VOICE ⟶ ' + msg); } catch (_e) {}
   }
-  // Server-visible trace for live debugging the re-emit suppression: POSTs to
-  // /api/voice/diag so the operator can reproduce on a phone while we tail the
-  // dashboard log. Fire-and-forget. (Temporary — remove once the bug is found.)
+  // NOTE: network tracing removed — POSTing per re-emit frame flooded the pipe
+  // that also forwards audio and stalled it. _vlog is now console-only (no
+  // network), so the call sites are harmless. Re-enable a THROTTLED POST only
+  // for a deliberate, short debug session.
   function _vlog(msg) {
-    _diag(msg);
-    try {
-      var f = (window.Autonomy && window.Autonomy.fetch) || window.fetch;
-      f('/api/voice/diag', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ msg: String(msg) }), keepalive: true,
-      }).catch(function () {});
-    } catch (_e) {}
+    try { if (window.console && console.debug) console.debug('VOICE-DIAG ⟶ ' + msg); } catch (_e) {}
   }
 
   function store() {
