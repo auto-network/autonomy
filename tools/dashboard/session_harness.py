@@ -941,6 +941,13 @@ def _classify_system_message(text: str) -> dict | None:
     return None
 
 
+# Pure image placeholders the harness injects alongside real payloads — the
+# image tile carries the meaning, so these strings must not render as text.
+_IMAGE_PLACEHOLDER_RE = re.compile(
+    r"^\[Image #\d+\]$|^\[Image: source: .+\]$", re.IGNORECASE
+)
+
+
 def parse_claude_log_line(line: str) -> dict | list[dict] | None:
     try:
         raw = json.loads(line)
@@ -1187,6 +1194,41 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
             out.append(sem)
         out.extend(read_imgs)   # surface Read-of-image tiles (#34)
         return out if len(out) > 1 else base_result
+
+    if entry_type == "attachment":
+        # A message/screenshot the operator queued WHILE the assistant was working
+        # (#34). The real payload — including base64 images — lives in
+        # attachment.prompt[], and this record type had no handler, so the whole
+        # thing (and the only copy of the image) was dropped. Materialize it.
+        attachment = raw.get("attachment")
+        if not isinstance(attachment, dict) or attachment.get("type") != "queued_command":
+            return None  # other subtypes (task_reminder, …) are scaffolding
+        prompt = attachment.get("prompt")
+        if not isinstance(prompt, list):
+            return None
+        attach_entries: list[dict] = []
+        text_parts: list[str] = []
+        for block in prompt:
+            if isinstance(block, dict) and block.get("type") == "text":
+                t = block.get("text", "")
+                # Drop pure "[Image #N]" / "[Image: source: …]" placeholders.
+                if t and not _IMAGE_PLACEHOLDER_RE.match(t.strip()):
+                    text_parts.append(t)
+        text = "".join(text_parts).strip()
+        if text:
+            attach_entries.append({
+                "type": "user",
+                "role": "user",
+                "content": text,
+                "timestamp": timestamp,
+                **identity,
+            })
+        # prompt image parts share the tool_result image shape, so reuse the
+        # extractor — they surface as the same read_image tiles.
+        attach_entries.extend(_extract_read_images(prompt, timestamp))
+        if not attach_entries:
+            return None
+        return attach_entries if len(attach_entries) > 1 else attach_entries[0]
 
     return None
 
