@@ -9283,6 +9283,37 @@ def _now_iso() -> str:
     )
 
 
+# Debounce UI-driven operator-activity writes. The idle gate
+# (OperatorActivity) historically only advanced when a session parsed a
+# user/crosstalk turn, so merely viewing/navigating the dashboard read as
+# idle (and idle-gated UI like the harness-usage strip vanished). The client
+# pings api_operator_active on genuine interaction (already client-throttled);
+# we debounce again here so a chatty/misbehaving tab can't hammer the singleton
+# graph write. One write per interval is plenty against a 15-30 min idle gate.
+_OPERATOR_ACTIVE_MIN_INTERVAL_S = 45.0
+_operator_active_last_write_mono = 0.0
+
+
+async def api_operator_active(request):
+    """Record operator UI interaction (nav / click / scroll) as input.
+
+    POST-only, no body. Returns ``{"ok": true}`` (``debounced: true`` when the
+    write was coalesced). Never raises into the request — the underlying write
+    is itself fire-and-forget.
+    """
+    global _operator_active_last_write_mono
+    now_mono = time.monotonic()
+    if now_mono - _operator_active_last_write_mono < _OPERATOR_ACTIVE_MIN_INTERVAL_S:
+        return JSONResponse({"ok": True, "debounced": True})
+    _operator_active_last_write_mono = now_mono
+    try:
+        from tools.dashboard.session_monitor import _record_operator_input
+        _record_operator_input(_now_iso())
+    except Exception:
+        logger.exception("api_operator_active: record failed")
+    return JSONResponse({"ok": True})
+
+
 def _publish_harness_usage_snapshot() -> None:
     if operator_is_idle(threshold_minutes=15):
         return
@@ -13152,6 +13183,7 @@ def _plugin_asset_rev(plugin) -> str:
 
 routes = [
     Route("/api/ping", api_ping),
+    Route("/api/operator/active", api_operator_active, methods=["POST"]),
     # Pages
     Route("/", page_index),
     Route("/beads", page_beads),
