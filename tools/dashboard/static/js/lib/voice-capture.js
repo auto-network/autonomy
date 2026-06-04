@@ -23,8 +23,44 @@
     stream: null, ctx: null, sourceNode: null, workletNode: null, sinkNode: null, micGranted: false,
     starting: false,
     finals: '',
+    removed: [],            // recently cleared/sent text, for re-emit suppression
     wakeLock: null,
   };
+
+  // ── Look-back suppression of re-emitted cleared/sent text ───────────────
+  // After Clear/Send, whisper_live keeps the just-spoken audio in its per-client
+  // buffer and re-transcribes it, re-emitting the removed text in a fresh segment
+  // that can slip past the server's timestamp cutoff — so the message reappears in
+  // the box. The cutoff alone can't win that race (whisper_live has no runtime
+  // buffer reset). So we remember what was just removed and refuse to re-render
+  // anything that reproduces it. Operator-requested: "I don't like my message
+  // reappearing after I click send." TTL-bounded (re-emission only happens for a
+  // few seconds while the audio is still buffered upstream) so it can NEVER
+  // suppress something the operator legitimately says later.
+  var REMOVED_TTL_MS = 45000;
+  function _normText(x) {
+    return String(x == null ? '' : x).toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+  function _nowMs() { return (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0; }
+  function _rememberRemoved(text) {
+    var t = _normText(text);
+    if (!t) return;
+    s.removed.push({ text: t, ts: _nowMs() });
+    if (s.removed.length > 20) s.removed = s.removed.slice(-20);  // bound memory
+  }
+  // True when `text` reproduces something we recently removed (a whisper_live
+  // re-emit). Normalized substring match so partial/incremental re-emits also
+  // drop. Prunes TTL-expired entries on the way through.
+  function _isReEmit(text) {
+    var t = _normText(text);
+    if (t.length < 3) return false;   // too short to confidently call a re-emit
+    var now = _nowMs();
+    s.removed = s.removed.filter(function (e) { return now - e.ts < REMOVED_TTL_MS; });
+    for (var i = 0; i < s.removed.length; i++) {
+      if (s.removed[i].text.indexOf(t) !== -1) return true;
+    }
+    return false;
+  }
 
   // Keep the screen awake while capturing (iOS auto-lock cuts off dictation).
   function _acquireWakeLock() {
@@ -130,6 +166,10 @@
         var t = String(frame.text || '').trim();
         if (frame.kind === 'final') {
           if (t) {
+            if (_isReEmit(t)) {
+              _diag('suppressed re-emit (final): ' + t.slice(-38));
+              return;
+            }
             _finalCount++;
             s.finals = s.finals ? (s.finals + ' ' + t) : t;
             _renderBuffer(s.finals);
@@ -137,6 +177,10 @@
           }
         } else if (frame.kind === 'partial') {
           if (t) {
+            if (_isReEmit(t)) {
+              _diag('suppressed re-emit (partial): ' + t.slice(-38));
+              return;
+            }
             _renderBuffer(s.finals ? (s.finals + ' ' + t) : t);
             _diag('live: ' + t.slice(-44));
           }
@@ -293,9 +337,13 @@
       if (!st) return;
       var buf = st.bufferText;
       if (buf === '' && s.finals) {
+        // Remember what we just removed (Clear or Send both empty the box) so a
+        // whisper_live re-emit of this exact text gets suppressed instead of
+        // reappearing. Must happen BEFORE we drop s.finals.
+        _rememberRemoved(s.finals);
         s.finals = '';
         sendControl('discard');
-        _diag('sent → buffer cleared');
+        _diag('sent → buffer cleared (remembered ' + s.removed.length + ' chunks)');
       }
     });
   });
