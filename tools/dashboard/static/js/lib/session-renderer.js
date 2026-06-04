@@ -90,6 +90,16 @@
       return typeof m === 'string' && m.indexOf('image/') === 0;
     },
 
+    /** Inline data URI for a read_image entry (an image the assistant Read).
+     *  The base64 rides in the entry itself, so no server round-trip — works
+     *  for any path that was Read, even outside a session's served dir (#34).
+     *  Returns '' when bits are missing so the template can hide the tile. */
+    readImageSrc(entry) {
+      if (!entry || !entry.data) return '';
+      var mime = (entry.mime && entry.mime.indexOf('image/') === 0) ? entry.mime : 'image/png';
+      return 'data:' + mime + ';base64,' + entry.data;
+    },
+
     /** Friendly size label, e.g. 12 B, 4.2 KB, 1.7 MB. */
     fmtFileSize(bytes) {
       if (typeof bytes !== 'number' || !isFinite(bytes) || bytes < 0) return '';
