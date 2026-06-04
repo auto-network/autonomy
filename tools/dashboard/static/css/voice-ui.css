@@ -442,9 +442,48 @@ body.sv-viewer-composer-active .voice-caption {
 
 .voice-capsule__send {
   position: relative;
-  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+  /* Drained base. The blue lives in the fill layer so holding the keyboard can
+     drain it out; at rest the fill is at 100% so Send still reads fully blue. */
+  background: rgba(30, 41, 59, 0.92);
   color: #eff6ff;
 }
+.voice-capsule__send-clip {
+  position: absolute;
+  inset: 0;
+  border-radius: 14px;   /* match .voice-capsule__action */
+  overflow: hidden;
+  pointer-events: none;
+}
+.voice-capsule__send-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 100%;          /* JS drains this to 0% during keyboard hold-to-clear */
+  background: linear-gradient(180deg, #3b82f6 0%, #1d4ed8 100%);
+}
+.voice-capsule__send .voice-capsule__icon-wrap { position: relative; z-index: 2; }
+.voice-capsule__count { z-index: 3; }
+
+/* Mic button — gray (muted) / blue (listening) / orange (push-to-talk). */
+.voice-capsule__mic--muted {
+  background: linear-gradient(180deg, #334155 0%, #1f2937 100%);
+  box-shadow: 0 0 0 1px rgba(100, 116, 139, 0.32);
+}
+.voice-capsule__mic--listening {
+  background: linear-gradient(180deg, #3b82f6 0%, #1d4ed8 100%);
+  box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.3), 0 0 18px rgba(37, 99, 235, 0.3);
+}
+.voice-capsule__mic--ptt {
+  background: linear-gradient(180deg, #fb923c 0%, #ea580c 100%);
+  box-shadow: 0 0 0 2px rgba(251, 146, 60, 0.42), 0 0 26px rgba(234, 88, 12, 0.5);
+  color: #1a1206;   /* dark glyph for contrast on orange */
+}
+
+/* Count badge poof on clear: scale up + fade as it leaves (Alpine x-transition). */
+.voice-capsule__count-leave { transition: transform 280ms ease, opacity 280ms ease; }
+.voice-capsule__count-leave-start { transform: scale(1); opacity: 1; }
+.voice-capsule__count-leave-end { transform: scale(1.7); opacity: 0; }
 
 /* Live buffer word-count badge — "it's working" proof while speaking. */
 .voice-capsule__count {
