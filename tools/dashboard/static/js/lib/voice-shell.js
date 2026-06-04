@@ -513,6 +513,23 @@
           var self = this;
           setTimeout(function () { self._setSendFill(100, 280); }, 240);
         },
+        _capsuleSendClaimable() {
+          // Returns the viewed session id when the Send button is in the violet
+          // cross-session state (dictating to a DIFFERENT session than the one
+          // being viewed), so a long-press can claim dictation to it. Else ''.
+          if (typeof document === 'undefined' || !document.body) return '';
+          if (!document.body.classList.contains('sv-cross-session-dictation')) return '';
+          return document.body.dataset.svComposerSession || '';
+        },
+        _beginCapsuleClaim(target) {
+          // Long-press on the violet Send → re-bind dictation to the session being
+          // viewed. bindSession carries the live buffer over (#23 switch-takes-
+          // buffer); viewed === bound now, so the fill drains violet → blue.
+          if (!target || !this.voice || typeof this.voice.bindSession !== 'function') return;
+          this.voice.bindSession(target);
+          var self = this;
+          setTimeout(function () { self._setSendFill(100, 280); }, 240);
+        },
         _clearCapsuleHold() {
           if (this._capsuleHoldTimer) {
             clearTimeout(this._capsuleHoldTimer);
@@ -761,14 +778,19 @@
           // — only a tap retries — so don't arm the PTT timer for it.
           var conn = this.voice ? this.voice.connState : 'ok';
           var micHoldable = action === 'mic' && conn !== 'reconnecting' && conn !== 'disconnected';
-          if (micHoldable || action === 'type') {
-            if (action === 'type') this._setSendFill(0, CAPSULE_CLEAR_MS);
+          // Long-press the violet (cross-session) Send to claim dictation to the
+          // session being viewed. Only armed while actually cross-session.
+          var sendClaimTarget = action === 'send' ? this._capsuleSendClaimable() : '';
+          if (micHoldable || action === 'type' || sendClaimTarget) {
+            // Drain the Send fill over the hold as a progress cue (clear AND claim).
+            if (action === 'type' || sendClaimTarget) this._setSendFill(0, CAPSULE_CLEAR_MS);
             this._capsuleHoldTimer = setTimeout(function () {
               if (!self._capsuleGesture || self._capsuleGesture.dragging) return;
               self._capsuleGesture.held = true;
               self.capsulePressedAction = '';
               if (action === 'mic') self._beginCapsulePtt();
-              else self._beginCapsuleClear();
+              else if (action === 'type') self._beginCapsuleClear();
+              else if (action === 'send') self._beginCapsuleClaim(sendClaimTarget);
             }, action === 'mic' ? CAPSULE_HOLD_MS : CAPSULE_CLEAR_MS);
           }
           this._capsuleMoveHandler = function (moveEvent) {
@@ -780,7 +802,7 @@
               self._capsuleGesture.dragging = true;
               self.capsulePressedAction = '';
               self._clearCapsuleHold();
-              if (self._capsuleGesture.action === 'type') self._setSendFill(100, 160);
+              if (self._capsuleGesture.action === 'type' || self._capsuleGesture.action === 'send') self._setSendFill(100, 160);
             }
             if (!self._capsuleGesture.dragging) return;
             self.capsulePosition = self._clampCapsulePosition({
@@ -812,7 +834,7 @@
               return;
             }
             // Tap (released before the hold threshold).
-            if (gesture.action === 'type') self._setSendFill(100, 160);  // undo any partial drain
+            if (gesture.action === 'type' || gesture.action === 'send') self._setSendFill(100, 160);  // undo any partial drain
             var actionName = gesture.action;
             self.capsulePressedAction = '';
             if (actionName) self.runCapsuleAction(actionName);
