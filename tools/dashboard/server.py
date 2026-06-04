@@ -13675,6 +13675,18 @@ class _CSPMiddleware(BaseHTTPMiddleware):
             response.headers["Content-Security-Policy"] = self._CSP_FRAMEABLE
         else:
             response.headers["Content-Security-Policy"] = self._CSP
+        # The app-shell HTML must NEVER be cached. Static assets are cache-busted
+        # via ?v=<static_version>, but that only works if the browser fetches
+        # FRESH html to see the new ?v=. The shell had no cache headers, so an
+        # iOS home-screen PWA (and plain Safari) could pin a stale shell —
+        # serving an old ?v= and therefore a stale voice-capture.js etc., which
+        # made client fixes silently not reach the operator. Force-revalidate all
+        # HTML; static JS/CSS keep their own (?v=-busted) caching.
+        ctype = response.headers.get("content-type", "")
+        if ctype.startswith("text/html"):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
         return response
 
 
