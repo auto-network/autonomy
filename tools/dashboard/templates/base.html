@@ -945,10 +945,13 @@
     }
     .indicator--green { color: #4ade80; }
     .indicator--gray  { color: #6b7280; }
-    .indicator-dot--working { animation: sv-dot-flash 0.8s ease-in-out infinite; }
+    .indicator-dot--working { animation: sv-dot-flash 1s ease-in-out infinite; }
+    /* Stays clearly visible at the trough (was opacity 0.15 — nearly
+       invisible) and pulses a halo so the activity reads as a bold,
+       attention-grabbing blink rather than a faint flicker. */
     @keyframes sv-dot-flash {
-      0%, 100% { opacity: 1; }
-      50%      { opacity: 0.15; }
+      0%, 100% { opacity: 1;    box-shadow: 0 0 3px 1px rgba(74,222,128,0.6); }
+      50%      { opacity: 0.6;  box-shadow: 0 0 8px 3px rgba(74,222,128,0.95); }
     }
 
     /* Row 1 — Header (normal flow grid child) */
@@ -2041,11 +2044,13 @@
            @keydown.space.prevent="onCapsuleKey('send')">
         <span class="voice-capsule__send-clip"><span class="voice-capsule__send-fill" x-ref="capsuleSendFill"></span></span>
         <span class="voice-capsule__icon-wrap" x-html="capsuleIcon('send')"></span>
+        <!-- #39: the count is a plain x-show — NO x-transition:leave. The leave
+             ("poof") transition could get stuck transparent when a dictation
+             frame re-showed the count mid-leave, leaving the badge permanently
+             hidden until the next Clear/Send. Reliable visibility wins over the
+             flourish; a poof can be re-added later as an imperative one-shot. -->
         <span class="voice-capsule__count"
               x-show="bufferWordCount > 0"
-              x-transition:leave="voice-capsule__count-leave"
-              x-transition:leave-start="voice-capsule__count-leave-start"
-              x-transition:leave-end="voice-capsule__count-leave-end"
               x-text="bufferWordCount"
               data-testid="voice-buffer-count"></span>
       </div>
