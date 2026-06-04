@@ -2026,8 +2026,28 @@ async function renderPluginFragment(plugin) {
 
 // ── Router ───────────────────────────────────────────────────
 
+// Operator-activity heartbeat. Navigation is a REAL operator action — unlike a
+// visible tab or a timer, which an abandoned-but-open tab would fake — so it's
+// the only honest signal that the operator is actually here. It keeps the 15-min
+// idle gate (OperatorActivity, which feeds e.g. the harness-usage strip) from
+// marking an active operator idle. Debounced to one POST per window: a single
+// write already keeps you non-idle for the full 15 minutes, so writing on every
+// navigation would be pointless.
+var _ACTIVITY_DEBOUNCE_MS = 60000;
+var _lastActivityPing = 0;
+function _recordOperatorActivity() {
+  var now = Date.now();
+  if (now - _lastActivityPing < _ACTIVITY_DEBOUNCE_MS) return;
+  _lastActivityPing = now;
+  try {
+    var f = (window.Autonomy && window.Autonomy.fetch) || window.fetch;
+    f('/api/operator/active', { method: 'POST', keepalive: true }).catch(function () {});
+  } catch (_e) {}
+}
+
 function navigateTo(path) {
   if (path === window.location.pathname + window.location.search) return;
+  _recordOperatorActivity();
   const fromPath = window.location.pathname;
   history.replaceState({ scrollY: window.scrollY }, '');
   history.pushState({}, '', path);
