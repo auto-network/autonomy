@@ -59,6 +59,11 @@
                     @pointercancel.stop="window.Autonomy.voice.ui.onPointerCancel($event)"
                     @click.stop="window.Autonomy.voice.ui.onClick($event, sessionKey, { isLive: isLive })"
                     data-testid="voice-session-dot">
+              <!-- Transparent tap-target extender: enlarges the long-press hit
+                   area beyond the small visual dot WITHOUT resizing it. Scoped
+                   to the viewer corner toggle only (the card dot has no such
+                   child). aria-hidden + transparent → no visual, no a11y noise. -->
+              <span class="voice-dot-hit" aria-hidden="true"></span>
               <!-- Pending-message ring overlay (auto-xkdoi) — mirrors the card dot. -->
               <span class="sc-pending-ring"
                     x-show="!!window.outboxPendingState(sessionKey)"
@@ -97,8 +102,21 @@
                  breathe; the parent row's 12px stays for the left
                  badges. -->
             <div style="display:flex;align-items:center;gap:16px;">
-              <template x-if="!isLive">
+              <template x-if="!isLive && !resumeStarting">
                 <span class="text-xs text-gray-500" x-text="entries.length + ' entries'"></span>
+              </template>
+              <!-- Boot indicator while a resume started from inside the
+                   viewer is in flight. Feeds the SAME lifecycle derivation
+                   the list card uses, via _resumePhaseRow (resolved pinned
+                   false) so the historical JSONL doesn't short-circuit the
+                   phase chip straight to "ready". -->
+              <template x-if="resumeStarting && window.Autonomy && window.Autonomy.lifecycle && _resumePhaseRow">
+                <span class="sc-phase-chip"
+                      :class="window.Autonomy.lifecycle.phaseTone(_resumePhaseRow)"
+                      data-testid="sv-resume-phase-chip">
+                  <span class="sc-phase-dot"></span>
+                  <span x-text="window.Autonomy.lifecycle.phaseChip(_resumePhaseRow) || 'Resuming…'"></span>
+                </span>
               </template>
               <!-- Workspace-changes indicator. Same shape as the overlay
                    control in base.html; both bind to the same component
@@ -216,6 +234,29 @@
                   <span>&check; Asked — awaiting update</span>
                 </template>
               </button>
+            </div>
+          </template>
+
+          <!-- Resume affordance for a terminated, still-resumable session.
+               Same /api/session/resume action as the list card's Resume
+               button; the difference is the operator is already in the
+               viewer, so resumeFromViewer() drives the terminated→starting
+               →ready transition in place (boot chip in header row 1). -->
+          <template x-if="canResume || resumeStarting">
+            <div class="sv-exp-section">
+              <button type="button"
+                      class="sv-identity-refresh-btn"
+                      :disabled="resumeStarting"
+                      @click.stop="resumeFromViewer()"
+                      data-testid="drawer-resume-button">
+                <template x-if="!resumeStarting"><span>&#9656; Resume session</span></template>
+                <template x-if="resumeStarting"><span>Resuming&hellip;</span></template>
+              </button>
+              <template x-if="resumeStartErr">
+                <div x-text="resumeStartErr"
+                     data-testid="drawer-resume-error"
+                     style="color:#f87171;font-size:11px;margin-top:4px;"></div>
+              </template>
             </div>
           </template>
 
