@@ -9,6 +9,8 @@
   var VOICE_COLLAPSE_FLAG = 'voice.responsive_collapse_enabled';
   var CAPSULE_DRAG_THRESHOLD = 6;
   var CAPSULE_BOTTOM_GAP = 12;
+  var CAPSULE_HOLD_MS = 350;    // mic press-and-hold → push-to-talk threshold
+  var CAPSULE_CLEAR_MS = 600;   // keyboard press-and-hold → clear (Send drains over this)
   var CAPTION_PREVIEW_WORDS = 12;
   var CAPTION_RESERVED_HEIGHT = 72;
   var SHEET_BACKDROP_GUARD_MS = 300;
@@ -173,9 +175,34 @@
   }
 
   function _sendIcon() {
+    // Diagonal paper plane (up-and-to-the-right), per operator preference.
     return (
-      '<svg class="voice-capsule__icon" viewBox="0 0 24 24" aria-hidden="true">' +
-      '<path d="M3.478 2.405a.75.75 0 0 0-.926.94l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94l18.04-8.5a.75.75 0 0 0 0-1.38l-18.04-8.5Z" fill="currentColor"></path>' +
+      '<svg class="voice-capsule__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<line x1="22" y1="2" x2="11" y2="13"></line>' +
+      '<polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>' +
+      '</svg>'
+    );
+  }
+
+  function _micOnIcon() {
+    return (
+      '<svg class="voice-capsule__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<rect x="9" y="2" width="6" height="12" rx="3"></rect>' +
+      '<path d="M5 10v1a7 7 0 0 0 14 0v-1"></path>' +
+      '<line x1="12" y1="19" x2="12" y2="22"></line>' +
+      '</svg>'
+    );
+  }
+
+  function _micSlashIcon() {
+    return (
+      '<svg class="voice-capsule__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 .4 1.5"></path>' +
+      '<path d="M15 9.3V5a3 3 0 0 0-5.1-2.1"></path>' +
+      '<path d="M19 10v1a7 7 0 0 1-.6 2.8"></path>' +
+      '<path d="M5 10v1a7 7 0 0 0 11 5.7"></path>' +
+      '<line x1="12" y1="19" x2="12" y2="22"></line>' +
+      '<line x1="3" y1="3" x2="21" y2="21"></line>' +
       '</svg>'
     );
   }
@@ -222,6 +249,8 @@
         viewportHeight: _viewportHeight(),
         capsulePosition: null,
         capsulePressedAction: '',
+        capsulePttActive: false,
+        _capsuleHoldTimer: null,
         _capsuleGesture: null,
         _capsuleMoveHandler: null,
         _capsuleUpHandler: null,
@@ -405,7 +434,78 @@
         },
 
         capsuleIcon(action) {
-          return action === 'type' ? _typeIcon() : _sendIcon();
+          if (action === 'type') return _typeIcon();
+          if (action === 'mic') {
+            var voice = this.voice;
+            var mode = voice ? voice.micMode : 'idle';
+            var open = this.capsulePttActive || mode === 'listening' || mode === 'vad_paused';
+            return open ? _micOnIcon() : _micSlashIcon();
+          }
+          return _sendIcon();
+        },
+
+        // Mic button skin: gray (muted) / blue (listening) / orange (push-to-talk
+        // while held). PTT is a transient UI flag, not a micMode value.
+        get capsuleMicClass() {
+          var voice = this.voice;
+          var mode = voice ? voice.micMode : 'idle';
+          var state = 'muted';
+          if (this.capsulePttActive) state = 'ptt';
+          else if (mode === 'listening' || mode === 'vad_paused') state = 'listening';
+          return {
+            'voice-capsule__mic--muted': state === 'muted',
+            'voice-capsule__mic--listening': state === 'listening',
+            'voice-capsule__mic--ptt': state === 'ptt',
+            'voice-capsule__action--pressed': this.capsulePressedAction === 'mic',
+          };
+        },
+
+        // ── push-to-talk + hold-to-clear drain ───────────────────────
+        _beginCapsulePtt() {
+          var voice = this.voice;
+          if (!voice) return;
+          // Hold only does something from muted; from listening it's a no-op.
+          if (voice.micMode === 'muted' || voice.micMode === 'idle') {
+            this.capsulePttActive = true;
+            if (typeof voice.setMicMode === 'function') voice.setMicMode('listening');
+          }
+        },
+        _endCapsulePtt() {
+          var voice = this.voice;
+          if (this.capsulePttActive && voice && typeof voice.setMicMode === 'function') {
+            voice.setMicMode('muted');
+          }
+          this.capsulePttActive = false;
+        },
+        _sendFillEl() {
+          if (this.$refs && this.$refs.capsuleSendFill) return this.$refs.capsuleSendFill;
+          // Fallback: the gesture handlers run as window listeners, where $refs
+          // can be out of scope on some Alpine versions — query the DOM directly.
+          if (typeof document !== 'undefined' && document.querySelector) {
+            return document.querySelector('.voice-capsule__send-fill');
+          }
+          return null;
+        },
+        _setSendFill(pct, ms) {
+          var el = this._sendFillEl();
+          if (!el) return;
+          el.style.transition = 'height ' + ms + 'ms linear';
+          // force reflow so the transition runs from the current height
+          void el.offsetHeight;
+          el.style.height = pct + '%';
+        },
+        _beginCapsuleClear() {
+          // The Send fill has fully drained over CAPSULE_CLEAR_MS; now wipe the
+          // buffer (which collapses the word-count badge) and refill the Send.
+          if (this.voice && typeof this.clearBuffer === 'function') this.clearBuffer();
+          var self = this;
+          setTimeout(function () { self._setSendFill(100, 280); }, 240);
+        },
+        _clearCapsuleHold() {
+          if (this._capsuleHoldTimer) {
+            clearTimeout(this._capsuleHoldTimer);
+            this._capsuleHoldTimer = null;
+          }
         },
 
         refreshViewport() {
@@ -548,6 +648,9 @@
 
         runCapsuleAction(action) {
           if (!this.voice) return false;
+          if (action === 'mic' && typeof this.voice.toggleMic === 'function') {
+            return this.voice.toggleMic();  // tap = mute ⇄ unmute
+          }
           if (action === 'type' && typeof this.voice.openSheet === 'function') {
             return this.voice.openSheet();
           }
@@ -626,8 +729,22 @@
             originX: origin.x,
             originY: origin.y,
             dragging: false,
+            held: false,
           };
           var self = this;
+          // Press-and-hold: mic → push-to-talk; keyboard → clear (the Send fill
+          // drains over the hold, then the count poofs as the buffer clears).
+          this._clearCapsuleHold();
+          if (action === 'mic' || action === 'type') {
+            if (action === 'type') this._setSendFill(0, CAPSULE_CLEAR_MS);
+            this._capsuleHoldTimer = setTimeout(function () {
+              if (!self._capsuleGesture || self._capsuleGesture.dragging) return;
+              self._capsuleGesture.held = true;
+              self.capsulePressedAction = '';
+              if (action === 'mic') self._beginCapsulePtt();
+              else self._beginCapsuleClear();
+            }, action === 'mic' ? CAPSULE_HOLD_MS : CAPSULE_CLEAR_MS);
+          }
           this._capsuleMoveHandler = function (moveEvent) {
             if (!self._capsuleGesture) return;
             var deltaX = moveEvent.clientX - self._capsuleGesture.startX;
@@ -636,6 +753,8 @@
                 (Math.abs(deltaX) > CAPSULE_DRAG_THRESHOLD || Math.abs(deltaY) > CAPSULE_DRAG_THRESHOLD)) {
               self._capsuleGesture.dragging = true;
               self.capsulePressedAction = '';
+              self._clearCapsuleHold();
+              if (self._capsuleGesture.action === 'type') self._setSendFill(100, 160);
             }
             if (!self._capsuleGesture.dragging) return;
             self.capsulePosition = self._clampCapsulePosition({
@@ -646,6 +765,7 @@
           this._capsuleUpHandler = function () {
             if (!self._capsuleGesture) return;
             var gesture = self._capsuleGesture;
+            self._clearCapsuleHold();
             self._teardownCapsuleGesture();
             if (gesture.dragging) {
               if (self.voice && typeof self.voice.setCapsulePosition === 'function' && self.capsulePosition) {
@@ -653,6 +773,15 @@
               }
               return;
             }
+            if (gesture.held) {
+              // The hold already fired: PTT engaged (release it now → muted) or
+              // the keyboard hold-to-clear ran. No tap action either way.
+              if (gesture.action === 'mic') self._endCapsulePtt();
+              self.capsulePressedAction = '';
+              return;
+            }
+            // Tap (released before the hold threshold).
+            if (gesture.action === 'type') self._setSendFill(100, 160);  // undo any partial drain
             var actionName = gesture.action;
             self.capsulePressedAction = '';
             if (actionName) self.runCapsuleAction(actionName);

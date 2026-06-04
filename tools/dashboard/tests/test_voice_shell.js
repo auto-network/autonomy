@@ -468,4 +468,47 @@ describe('voice shell helpers', () => {
     h.component.clearBuffer();
     assert.equal(sessionStore.outbox, sending);
   });
+
+  // ── 3-button capsule: mic control (#30) ───────────────────────────────
+  it('capsuleMicClass: gray when muted, blue when listening, orange on PTT', () => {
+    assert.equal(loadVoiceShell({ voiceStore: { micMode: 'muted' } })
+      .component.capsuleMicClass['voice-capsule__mic--muted'], true);
+    assert.equal(loadVoiceShell({ voiceStore: { micMode: 'listening' } })
+      .component.capsuleMicClass['voice-capsule__mic--listening'], true);
+    const ptt = loadVoiceShell({ voiceStore: { micMode: 'muted' } });
+    ptt.component.capsulePttActive = true;
+    assert.equal(ptt.component.capsuleMicClass['voice-capsule__mic--ptt'], true);
+  });
+
+  it('capsuleIcon(mic): slashed when muted, open when listening', () => {
+    const slash = 'x1="3" y1="3"';   // the slash line is only in the muted glyph
+    assert.ok(loadVoiceShell({ voiceStore: { micMode: 'muted' } }).component.capsuleIcon('mic').indexOf(slash) !== -1);
+    assert.ok(loadVoiceShell({ voiceStore: { micMode: 'listening' } }).component.capsuleIcon('mic').indexOf(slash) === -1);
+  });
+
+  it('mic tap routes to voice.toggleMic()', () => {
+    let calls = 0;
+    const h = loadVoiceShell({ voiceStore: { toggleMic() { calls++; return true; } } });
+    h.component.runCapsuleAction('mic');
+    assert.equal(calls, 1);
+  });
+
+  it('PTT: begin-from-muted opens the mic + sets active; release mutes', () => {
+    const modes = [];
+    const h = loadVoiceShell({ voiceStore: { micMode: 'muted', setMicMode(m) { modes.push(m); this.micMode = m; return true; } } });
+    h.component._beginCapsulePtt();
+    assert.equal(h.component.capsulePttActive, true);
+    assert.deepEqual(modes, ['listening']);
+    h.component._endCapsulePtt();
+    assert.equal(h.component.capsulePttActive, false);
+    assert.deepEqual(modes, ['listening', 'muted']);
+  });
+
+  it('PTT: begin-from-listening is a no-op (hold while live does nothing)', () => {
+    const modes = [];
+    const h = loadVoiceShell({ voiceStore: { micMode: 'listening', setMicMode(m) { modes.push(m); return true; } } });
+    h.component._beginCapsulePtt();
+    assert.equal(h.component.capsulePttActive, false);
+    assert.deepEqual(modes, []);
+  });
 });

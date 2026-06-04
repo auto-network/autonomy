@@ -2006,6 +2006,17 @@
          data-testid="voice-floating-capsule"
          :style="capsuleStyle"
          @pointerdown="onCapsulePointerDown($event)">
+      <div class="voice-capsule__action voice-capsule__mic"
+           role="button"
+           tabindex="0"
+           aria-label="Microphone: tap to mute or unmute, hold to push-to-talk"
+           title="Tap: mute / unmute · Hold: push-to-talk"
+           data-voice-action="mic"
+           :class="capsuleMicClass"
+           @keydown.enter.prevent="onCapsuleKey('mic')"
+           @keydown.space.prevent="onCapsuleKey('mic')">
+        <span class="voice-capsule__icon-wrap" x-html="capsuleIcon('mic')"></span>
+      </div>
       <div class="voice-capsule__action voice-capsule__send"
            role="button"
            tabindex="0"
@@ -2019,9 +2030,13 @@
            }"
            @keydown.enter.prevent="onCapsuleKey('send')"
            @keydown.space.prevent="onCapsuleKey('send')">
+        <span class="voice-capsule__send-clip"><span class="voice-capsule__send-fill" x-ref="capsuleSendFill"></span></span>
         <span class="voice-capsule__icon-wrap" x-html="capsuleIcon('send')"></span>
         <span class="voice-capsule__count"
               x-show="bufferWordCount > 0"
+              x-transition:leave="voice-capsule__count-leave"
+              x-transition:leave-start="voice-capsule__count-leave-start"
+              x-transition:leave-end="voice-capsule__count-leave-end"
               x-text="bufferWordCount"
               data-testid="voice-buffer-count"></span>
       </div>
