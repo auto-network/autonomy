@@ -189,6 +189,26 @@
         return !this.showTerminal && this.isLive && !!this._tmuxSession &&
                (this.sessionType !== 'host' || this._linked);
       },
+      // Cross-session dictation: we're viewing THIS session, but voice is bound to
+      // a DIFFERENT one — so anything dictated goes elsewhere. Drives the violet
+      // send fill + the "→ ‹target›" tile so it can't be mistaken for local input.
+      get _crossSessionDictation() {
+        var voice = this.getVoiceStore();
+        return !!(this._composerActive && voice && voice.enabled && voice.boundSessionId &&
+                  voice.boundSessionId !== this._tmuxSession);
+      },
+      get _crossSessionText() {
+        var voice = this.getVoiceStore();
+        return (voice && typeof voice.bufferText === 'string') ? voice.bufferText : '';
+      },
+      get _crossSessionTargetTitle() {
+        var voice = this.getVoiceStore();
+        var bound = voice && voice.boundSessionId;
+        if (!bound) return '';
+        var sessions = Alpine.store('sessions') || {};
+        var s = sessions[bound];
+        return (s && s.label) ? s.label : bound;
+      },
       // Pending/optimistic message for this session (auto-xkdoi). null when idle.
       get outbox() {
         var s = Alpine.store('sessions')[this.sessionKey];
@@ -1061,6 +1081,9 @@
         this._syncComposerSignal();
         this.$watch('_composerActive', () => this._syncComposerSignal());
         this.$watch('_tmuxSession', () => this._syncComposerSignal());
+        // Re-sync when the voice binding changes (cross-session flips without any
+        // local state change) — the getter reads the reactive voice store.
+        this.$watch('_crossSessionDictation', () => this._syncComposerSignal());
 
         // Durable outbox wiring (auto-xkdoi Phase 2): commit on external
         // send-flip (voice), reconcile the optimistic tile as log entries
@@ -1153,6 +1176,9 @@
           document.body.classList.remove('sv-viewer-composer-active');
           delete document.body.dataset.svComposerSession;
         }
+        // Cross-session cue — CSS-gated body class so the capsule's send fill
+        // reacts across navigation without per-component JS reactivity.
+        document.body.classList.toggle('sv-cross-session-dictation', this._crossSessionDictation);
       },
 
       destroy() {
@@ -1168,6 +1194,7 @@
             document.body.dataset.svComposerSession === (this._tmuxSession || '')) {
           document.body.classList.remove('sv-viewer-composer-active');
           document.body.classList.remove('sv-outbox-tile-present');
+          document.body.classList.remove('sv-cross-session-dictation');
           delete document.body.dataset.svComposerSession;
         }
         if (this._mode === 'page' && window._diagFocusedViewerId === this.sessionKey) {

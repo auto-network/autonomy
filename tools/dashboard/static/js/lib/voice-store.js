@@ -187,6 +187,9 @@
       },
 
       bindSession(sessionId) {
+        // Switch-takes-buffer (#23): a rebind deliberately PRESERVES bufferText so
+        // an in-flight dictation cuts over to the new target instead of being
+        // stranded. Do NOT reset bufferText here — only a full unbind clears it.
         this.boundSessionId = sessionId || '';
         this.pendingRebindTarget = '';
         this.awayEventSessionId = '';
