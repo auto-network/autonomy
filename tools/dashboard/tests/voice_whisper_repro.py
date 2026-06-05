@@ -134,7 +134,21 @@ async def main() -> None:
     ap.add_argument("--audio", default="data/voice-fixtures/jfk-x3-16k.wav")
     ap.add_argument("--clear-at", type=float, default=13.0)
     ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument("--mode", choices=["both", "control", "clear"], default="both")
+    ap.add_argument("--dump", action="store_true", help="print every partial/final event")
     args = ap.parse_args()
+
+    if args.dump:
+        do_clear = args.mode == "clear"
+        r = await one_run(args.audio, args.clear_at, do_clear=do_clear)
+        print(f"DUMP mode={'clear' if do_clear else 'control'} "
+              f"clear@{args.clear_at}s cutoff_ms={r['clear'].get('cutoff_ms')}\n")
+        for (t, k, v) in r["events"]:
+            mark = "  <<<< CLEAR" if k == "CLEAR" else ""
+            print(f"  {t:6.2f}s  {k:8s}  {v!r}{mark}")
+        print(f"\ngap_to_first_after_clear={r['gap_to_first_after_clear_s']}s "
+              f"transcripts_after={r['n_transcripts_after_clear']}")
+        return
 
     print(f"model={MODEL} vad={USE_VAD} no_speech={NO_SPEECH} vad_thresh={VAD_THRESH}")
     print(f"audio={args.audio} clear_at={args.clear_at}s runs={args.runs}\n")

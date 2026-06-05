@@ -146,6 +146,34 @@ describe('#39 clear / suppression interleave harness', () => {
     assert.equal(h.voice.bufferText, '', 'the racing duplicate is suppressed');
   });
 
+  // REAL TRACE (captured from voice_whisper_repro against live WhisperLive):
+  // Whisper streams cumulative PARTIALS within a segment, then one FINAL, then the
+  // next segment. If you clear mid-segment, the visible text is a PARTIAL and
+  // s.finals is still '' — so remembering s.finals on clear remembers NOTHING, and
+  // the segment's final (the whole sentence) re-emits and REAPPEARS. The buffer
+  // must remember what was DISPLAYED (the partial), not just committed finals.
+  it('REAL: clearing mid-partial must not let the segment final reappear', async () => {
+    const h = makeHarness();
+    const ws = await h.startListening();
+    // pre-clear — only partials have arrived (no final yet for this utterance)
+    ws.firePartial('And so, my fellow Americans');
+    ws.firePartial('And so, my fellow Americans, ask not');
+    ws.firePartial('And so, my fellow Americans, ask not what you');
+    assert.ok(/^And so, my fellow Americans/.test(h.voice.bufferText), 'partial shown');
+
+    h.clearBox();
+    assert.equal(h.voice.bufferText, '', 'box empties on clear');
+
+    // the same utterance keeps going and FINALIZES (whole sentence re-emitted),
+    // then the next segment finalizes.
+    ws.firePartial('And so, my fellow Americans, ask not what your country can do for you.');
+    ws.fireFinal('And so, my fellow Americans, ask not what your country can do for you.');
+    ws.fireFinal('Ask what you can do for your country.');
+
+    assert.ok(!/and so, my fellow americans/i.test(h.voice.bufferText),
+      'cleared text reappeared in the buffer: ' + JSON.stringify(h.voice.bufferText));
+  });
+
   it('after Clear + re-emit, the badge can come back: new speech repopulates bufferText', async () => {
     const h = makeHarness();
     const ws = await h.startListening();
