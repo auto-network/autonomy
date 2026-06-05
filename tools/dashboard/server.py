@@ -8222,9 +8222,21 @@ async def api_events(request):
     queue = event_bus.subscribe(client_id=client_id)
 
     async def event_generator():
+        # Activity-gated heartbeat: if no real event arrives within HEARTBEAT_S,
+        # emit a JS-visible `heartbeat` event so the client can distinguish a
+        # quiet-but-alive stream from a dead one (iOS EventSource won't fire
+        # `error` on a silent half-open socket). Real events reset the wait, so a
+        # busy stream sends zero heartbeats. No `id:` → it never advances the
+        # client's seq / pollutes gap-replay. A heartbeat write to a dead socket
+        # eventually errors → this generator unwinds → the subscriber is reaped.
+        HEARTBEAT_S = 5.0
         try:
             while True:
-                topic, data, seq = await queue.get()
+                try:
+                    topic, data, seq = await asyncio.wait_for(queue.get(), timeout=HEARTBEAT_S)
+                except asyncio.TimeoutError:
+                    yield {"event": "heartbeat", "data": "{}"}
+                    continue
                 yield {"id": f"{seq}:{current_server_epoch()}", "event": topic, "data": json.dumps(data)}
         except asyncio.CancelledError:
             pass

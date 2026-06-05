@@ -29,6 +29,8 @@
   var _gapReplaysCount = 0;
   var _lastGapReplayTs = 0;     // ms-precision wall-clock; 0 means never
   var _lastUserInteractionTs = Date.now();
+  var _lastSeenTs = Date.now();   // last SSE message of ANY kind (event or heartbeat)
+  var _watchdogTimer = null;
 
   function _dispatch(topic, data) {
     var set = _handlers[topic];
@@ -72,6 +74,7 @@
     _topicListening.add(topic);
     _es.addEventListener(topic, function(e) {
       try {
+        _lastSeenTs = Date.now();   // any event proves the stream is alive
         var parts = e.lastEventId.split(':');
         var seq = parseInt(parts[0], 10) || 0;
         var epoch = parseInt(parts[1], 10) || 0;
@@ -170,6 +173,10 @@
     if (cid) url += '?client_id=' + encodeURIComponent(cid);
     _es = new EventSource(url);
     _esConnectedAt = Date.now();
+    _lastSeenTs = Date.now();
+    // The server emits `heartbeat` only when the stream is otherwise idle;
+    // receiving one proves liveness and feeds the watchdog during quiet periods.
+    _es.addEventListener('heartbeat', function() { _lastSeenTs = Date.now(); });
 
     // Attach listeners for any topics already registered before _connect ran.
     for (var topic in _handlers) {
@@ -191,6 +198,33 @@
       console.warn('[EventBus] close before reconnect failed', e);
     }
     _connect();
+  }
+
+  // Liveness watchdog. iOS EventSource does NOT fire `error` when a stream silently
+  // half-opens (app suspend / network change), so the browser's auto-reconnect
+  // never triggers and the tail wedges (observed: a 16h zombie SSE subscriber).
+  // We track last-message time — reset by any event AND the server heartbeat — and
+  // if nothing arrives for WATCHDOG_MS we force a reconnect ourselves. This is what
+  // makes a server restart / dead socket transparent instead of wedging.
+  var WATCHDOG_MS = 15000;   // ~3 missed 5s heartbeats
+  function _watchdogTick() {
+    // A hidden tab legitimately receives nothing (SSE paused); only act when the
+    // page is visible — and we also check immediately on becoming visible.
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    if (Date.now() - _lastSeenTs > WATCHDOG_MS) {
+      console.warn('[EventBus] no SSE activity for >' + WATCHDOG_MS + 'ms — forcing reconnect');
+      _lastSeenTs = Date.now();   // one reconnect per window; avoid a storm
+      reconnectEvents();
+    }
+  }
+  function _startWatchdog() {
+    if (_watchdogTimer) return;
+    _watchdogTimer = setInterval(_watchdogTick, 5000);
+    if (typeof document !== 'undefined' && document.addEventListener) {
+      document.addEventListener('visibilitychange', function() {
+        if (document.visibilityState === 'visible') _watchdogTick();
+      });
+    }
   }
 
   function registerHandler(topic, fn) {
@@ -465,4 +499,5 @@
   // Defer connection to next microtask so synchronous handler registrations
   // in app.js (loaded immediately after this script) are in place.
   setTimeout(_connect, 0);
+  _startWatchdog();
 })();
