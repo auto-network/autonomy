@@ -857,6 +857,14 @@ AGENT_RUNS_DIR = Path(os.environ.get(
     str(Path(__file__).parent.parent.parent / "data" / "agent-runs"),
 ))
 
+# Host (terminal) sessions run on the host filesystem, not in a container,
+# so they have no data/agent-runs/<name>-* run dir to drop uploads into.
+# Their attachments land here, one subdir per session, where the host agent
+# can read them directly and api_session_output can serve them back to the
+# viewer tile — the host-session counterpart of a container run dir's
+# ``.uploads`` folder.
+HOST_UPLOADS_DIR = Path(__file__).parent.parent.parent / "data" / "host-uploads"
+
 
 def _resolve_agentic_identity(agentic_source_id: str | None) -> dict:
     """Resolve agentic identity fields from the agentic source row.
@@ -4634,6 +4642,19 @@ async def api_session_get(request):
         "session_id": session["tmux_name"],
         "session_uuid": session.get("session_uuid"),
         "graph_source_id": resolved_source_id or None,
+        # The tmux_sessions transcript column is ``jsonl_path`` (the graph
+        # ``sources`` table is what carries ``file_path``). Surface it under
+        # ``file_path`` because that is the key /api/session/resume expects
+        # in its request body.
+        "file_path": session.get("jsonl_path") or "",
+        # resumable = the session's JSONL still exists on disk, so the
+        # viewer can offer an in-place Resume affordance (mirrors the
+        # session-list dead_resumable gate, dao/sessions.py). Computed
+        # read-side so a pruned transcript flips the button off without a
+        # schema change.
+        "resumable": bool(
+            session.get("jsonl_path") and Path(str(session.get("jsonl_path"))).exists()
+        ),
         "type": session.get("type"),
         "role": session.get("role", ""),
         "activity_state": session.get("activity_state", "idle"),
@@ -4678,21 +4699,29 @@ async def api_session_output(request):
     if not rel_path or rel_path.startswith("/") or ".." in Path(rel_path).parts:
         return JSONResponse({"error": "invalid path"}, status_code=400)
 
-    if not AGENT_RUNS_DIR.exists():
-        return JSONResponse({"error": "agent-runs not configured"}, status_code=404)
+    # Candidate base dirs, newest-first. Container sessions resolve under
+    # their data/agent-runs/<name>-<ts>/ run dir(s); host (terminal) sessions
+    # have no run dir, so their uploads live under data/host-uploads/<name>/.
+    # Both are searched the same way (resolve + re-check containment) so the
+    # viewer tile serves identically regardless of session kind.
+    base_dirs = []
+    if AGENT_RUNS_DIR.exists():
+        base_dirs.extend(sorted(
+            (p for p in AGENT_RUNS_DIR.glob(f"{tmux_name}-*") if p.is_dir()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ))
+    host_dir = HOST_UPLOADS_DIR / tmux_name
+    if host_dir.is_dir():
+        base_dirs.append(host_dir)
 
-    run_dirs = sorted(
-        (p for p in AGENT_RUNS_DIR.glob(f"{tmux_name}-*") if p.is_dir()),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if not run_dirs:
+    if not base_dirs:
         return JSONResponse({"error": "session run dir not found"}, status_code=404)
 
-    for run_dir in run_dirs:
-        candidate = (run_dir / rel_path).resolve()
+    for base_dir in base_dirs:
+        candidate = (base_dir / rel_path).resolve()
         try:
-            candidate.relative_to(run_dir.resolve())
+            candidate.relative_to(base_dir.resolve())
         except ValueError:
             continue
         if candidate.is_file():
@@ -5777,9 +5806,29 @@ async def api_session_resume(request):
             import random
             tmux_name = f"resume-{time.strftime('%m%d-%H%M%S')}-{random.randint(10, 99)}"
 
-    # Default to the autonomy workspace's model; resume-into-workspace path
-    # below re-resolves from the dead session's project if applicable.
-    model = _resolve_host_session_model()
+    # Preserve the ORIGINAL session's harness + model. A Codex session's
+    # JSONL is a codex rollout that can ONLY be resumed by ``codex`` with its
+    # own gpt model — relaunching it as the workspace/host default Claude
+    # (the old behaviour) was broken: wrong CLI, wrong model. dashboard.db
+    # records both on the session row; fall back to the graph source
+    # metadata when there is no live db row to read from.
+    resume_harness = (dead_session or {}).get("harness") or None
+    resume_model = (dead_session or {}).get("model") or None
+    if (not resume_harness or not resume_model) and source_id and src:
+        try:
+            _src_meta = json.loads(src.get("metadata") or "{}")
+        except Exception:
+            _src_meta = {}
+        resume_harness = resume_harness or _src_meta.get("harness")
+        resume_model = resume_model or _src_meta.get("model")
+    resume_harness = resume_harness or "claude"
+
+    # Keep the session's own model. Only a Claude session falls back to the
+    # host default — never hand Codex a Claude model id (which is exactly
+    # what _resolve_host_session_model() would have returned).
+    model = resume_model
+    if not model and resume_harness == "claude":
+        model = _resolve_host_session_model()
 
     if session_type == "container":
         # Derive output_dir (the run dir) by walking up to the "sessions" parent.
@@ -5800,7 +5849,10 @@ async def api_session_resume(request):
                 proj_for_resume = workspace_settings.get_workspace(dead_project)
             except (KeyError, workspace_settings.WorkspaceSettingsError):
                 proj_for_resume = None
-            if proj_for_resume is not None and proj_for_resume.model:
+            # Only let the workspace model override a Claude session that has
+            # no recorded model of its own; a Codex session keeps its gpt model.
+            if (proj_for_resume is not None and proj_for_resume.model
+                    and not model and resume_harness == "claude"):
                 model = proj_for_resume.model
 
         if proj_for_resume is not None:
@@ -5873,7 +5925,7 @@ async def api_session_resume(request):
                 image=proj_for_resume.image,
                 mounts=resume_mounts or None,
                 metadata=meta,
-                harness=proj_for_resume.harness,
+                harness=resume_harness,
                 extra_env=extra_env,
                 global_claude_md=global_claude_md,
                 startup_script=startup_script,
@@ -5893,6 +5945,7 @@ async def api_session_resume(request):
                 detach=False,
                 image="autonomy-agent:dashboard",
                 metadata={"tmux_session": tmux_name},
+                harness=resume_harness,
                 output_dir=output_dir,
                 model=model,
                 resume_uuid=session_uuid,
@@ -5903,11 +5956,33 @@ async def api_session_resume(request):
 
         cmd_str = docker_cmd
     else:
-        # Host session: bare claude command
-        cmd_str = (
+        # Host session: relaunch the SAME harness CLI on the host. Hardcoding
+        # ``claude`` here meant resuming a host Codex session ran the wrong
+        # CLI against a codex rollout it can't read.
+        _env_prefix = (
             f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
-            f"claude --dangerously-skip-permissions --model {model} --resume {session_uuid}"
         )
+        if resume_harness == "codex":
+            # session_uuid is the rollout filename stem; codex resume needs
+            # the canonical UUID tail (same extraction the launcher uses).
+            _m = re.search(
+                r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+                session_uuid,
+            )
+            _codex_uuid = _m.group(1) if _m else session_uuid
+            _model_flag = f"--model {shlex.quote(model)} " if model else ""
+            cmd_str = (
+                _env_prefix
+                + "codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox "
+                + _model_flag
+                + f"resume {shlex.quote(_codex_uuid)}"
+            )
+        else:
+            cmd_str = (
+                _env_prefix
+                + f"claude --dangerously-skip-permissions "
+                + f"--model {shlex.quote(model)} --resume {shlex.quote(session_uuid)}"
+            )
 
     # ── Launch in tmux ──
     tmux_cmd = ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40"]
@@ -6008,12 +6083,26 @@ async def api_upload(request):
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         ) if AGENT_RUNS_DIR.exists() else []
-        if not run_dirs:
-            return JSONResponse(
-                {"error": f"no run dir for session {tmux_session!r}"},
-                status_code=404,
-            )
-        target_dir = run_dirs[0] / ".uploads"
+        if run_dirs:
+            target_dir = run_dirs[0] / ".uploads"
+        else:
+            # Host (terminal) sessions run on the host filesystem, not in a
+            # container, so they never have a data/agent-runs/<name>-* run
+            # dir — uploading to one used to 404 ("no run dir"). Save to a
+            # per-session dir under data/host-uploads/ instead; the host
+            # agent reads it directly via the returned host_path (no docker
+            # cp needed, and the cp block below no-ops because there's no
+            # container), and api_session_output serves it back to the tile.
+            # A CONTAINER session with no run dir genuinely can't receive the
+            # file, so it still 404s.
+            _sess = dashboard_db.get_session(tmux_session)
+            if _sess and _sess.get("type") == "host":
+                target_dir = HOST_UPLOADS_DIR / tmux_session
+            else:
+                return JSONResponse(
+                    {"error": f"no run dir for session {tmux_session!r}"},
+                    status_code=404,
+                )
     else:
         target_dir = _REPO_ROOT / "data" / "uploads"
 
@@ -6064,6 +6153,13 @@ async def api_upload(request):
             rel_path_parts = dest.relative_to(_REPO_ROOT).parts
             if len(rel_path_parts) > 3:
                 rel_path = "/".join(rel_path_parts[3:])
+        elif tmux_session and HOST_UPLOADS_DIR in dest.parents:
+            # Host session: rel_path is the file path under the session's
+            # data/host-uploads/<session>/ dir. The viewer tile renders via
+            # /api/session/<session>/output/<rel_path>, which api_session_output
+            # resolves back to this file — the same rel_path contract the
+            # container path uses, so the tile converts identically.
+            rel_path = dest.relative_to(HOST_UPLOADS_DIR / tmux_session).as_posix()
 
         results.append({
             "path": agent_path,
@@ -9324,6 +9420,30 @@ async def api_voice_diag(request):
         body = {}
     logger.info("VOICE-DIAG %s", str(body.get("msg", ""))[:500])
     return JSONResponse({"ok": True})
+
+
+async def api_voice_trace(request):
+    """Persist a client-side voice failure-trace (real inbound frames + render +
+    clear events) so a flaky clear can be replayed deterministically in the mock
+    harness instead of guessed. Debug aid — the client only POSTs when enabled
+    via ?vtrace=1, once per clear (never per audio frame)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        traces_dir = _REPO_ROOT / "data" / "voice-traces"
+        traces_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        reason = re.sub(r"[^a-z0-9]+", "-", str(body.get("reason", "trace")).lower())[:24] or "trace"
+        out = traces_dir / f"voice-trace-{ts}-{reason}.json"
+        out.write_text(json.dumps(body, indent=2), encoding="utf-8")
+        nframes = len(body.get("frames", []) or [])
+        logger.info("VOICE-TRACE saved %s (%d frames)", out, nframes)
+        return JSONResponse({"ok": True, "path": str(out), "frames": nframes})
+    except Exception:
+        logger.exception("api_voice_trace: save failed")
+        return JSONResponse({"ok": False}, status_code=500)
 
 
 def _publish_harness_usage_snapshot() -> None:
@@ -13197,6 +13317,7 @@ routes = [
     Route("/api/ping", api_ping),
     Route("/api/operator/active", api_operator_active, methods=["POST"]),
     Route("/api/voice/diag", api_voice_diag, methods=["POST"]),
+    Route("/api/voice/trace", api_voice_trace, methods=["POST"]),
     # Pages
     Route("/", page_index),
     Route("/beads", page_beads),
