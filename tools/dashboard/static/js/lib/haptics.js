@@ -11,6 +11,7 @@
   'use strict';
 
   var _switch = null;
+  var _lastTs = 0;
 
   function _ensureSwitch() {
     if (_switch) return _switch;
@@ -34,6 +35,11 @@
   // gesture for iOS to honour it; silently does nothing if unsupported.
   function haptic() {
     try {
+      // Collapse near-simultaneous calls (e.g. a clear that fires both from its
+      // timer and from the gesture release) into a single tap.
+      var now = (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0;
+      if (now && now - _lastTs < 200) return;
+      _lastTs = now;
       var el = _ensureSwitch();
       if (el && typeof el.click === 'function') el.click();
     } catch (_e) { /* unsupported → no-op */ }

@@ -49,12 +49,18 @@ describe('#35 haptics helper', () => {
     assert.equal(h.clicks.length, 1, 'clicked once to emit the tap');
   });
 
-  it('reuses the same switch element across calls', () => {
+  it('reuses the same switch element across calls (no second element created)', () => {
     const h = load();
     h.window.Autonomy.haptic();
     h.window.Autonomy.haptic();
     assert.equal(h.appended.length, 1, 'element reused, not recreated');
-    assert.equal(h.clicks.length, 2);
+  });
+
+  it('debounces near-simultaneous calls into a single tap', () => {
+    const h = load();
+    h.window.Autonomy.haptic();
+    h.window.Autonomy.haptic();   // same millisecond → collapsed
+    assert.equal(h.clicks.length, 1, 'rapid double-call fires once');
   });
 
   it('is a safe no-op when there is no document.body yet', () => {

@@ -849,6 +849,13 @@
             if (gesture.held) {
               // The hold already fired: PTT was released above (mic) or the
               // keyboard hold-to-clear ran. No tap action either way.
+              // Fire the clear haptic HERE — this pointerup is a synchronous user
+              // gesture, which iOS requires for the switch haptic; the clear ran
+              // from the hold TIMER (no gesture), so a tap there was ignored (#35).
+              if (gesture.action === 'type' && typeof window !== 'undefined' &&
+                  window.Autonomy && typeof window.Autonomy.haptic === 'function') {
+                window.Autonomy.haptic();
+              }
               self.capsulePressedAction = '';
               return;
             }
