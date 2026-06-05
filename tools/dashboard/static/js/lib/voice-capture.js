@@ -31,7 +31,58 @@
     reconnectAttempt: 0,    // backoff index for the auto-reconnect loop
     reconnectTimer: null,
     stabilityTimer: null,   // resets the backoff once a fresh link survives a beat
+    trace: [],              // failure-trace ring (debug only)
+    traceOn: false,
+    traceDumpTimer: null,
   };
+
+  // ── Failure-trace recorder (clearing reliability) ───────────────────────
+  // Capture REAL frames so a flaky clear can be replayed deterministically in the
+  // mock harness instead of guessed. OFF by default — enable with ?vtrace=1 (sticks
+  // in localStorage). Records inbound WS frames, every render, and buffer-empty
+  // (clear/send) events into a bounded in-memory ring. On a clear it auto-POSTs the
+  // window ONCE a few seconds later (to capture the post-clear re-emits) — never
+  // per-frame (a per-frame POST once flooded the loop and stalled the audio path).
+  var TRACE_MAX = 1200;
+  function _traceRec(kind, payload) {
+    if (!s.traceOn) return;
+    var e = { t: _nowMs(), kind: kind };
+    if (payload !== undefined) e.v = payload;
+    s.trace.push(e);
+    if (s.trace.length > TRACE_MAX) s.trace.shift();
+  }
+  function _traceDump(reason) {
+    if (!s.traceOn || !s.trace.length) return;
+    try {
+      fetch('/api/voice/trace', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reason: reason || 'manual',
+          bind: s.bind || '',
+          ua: (typeof navigator !== 'undefined' && navigator.userAgent) || '',
+          frames: s.trace.slice(),
+        }),
+        keepalive: true,
+      }).catch(function () {});
+    } catch (_e) {}
+  }
+  function _traceScheduleDump() {
+    if (!s.traceOn || s.traceDumpTimer) return;   // one pending dump at a time
+    s.traceDumpTimer = setTimeout(function () {
+      s.traceDumpTimer = null;
+      _traceDump('clear+window');
+    }, 5000);
+  }
+  function _traceInit() {
+    try {
+      if (typeof location !== 'undefined' && /[?&]vtrace=1\b/.test(location.search) &&
+          typeof localStorage !== 'undefined') {
+        localStorage.setItem('voice-trace', '1');
+      }
+      s.traceOn = (typeof localStorage !== 'undefined' && localStorage.getItem('voice-trace') === '1');
+    } catch (_e) { s.traceOn = false; }
+  }
 
   // ── Auto-reconnect with backoff ─────────────────────────────────────────
   // An unexpected socket drop used to need a manual session-switch (react()
@@ -245,6 +296,7 @@
     // case, so this is a no-op until a switch seeds it.
     var core = text || '';
     var full = s.carryPrefix ? (core ? (s.carryPrefix + ' ' + core) : s.carryPrefix) : core;
+    _traceRec('render', full);
     st.setBufferText(full);
   }
 
@@ -264,6 +316,7 @@
       if (ws !== s.ws) return;
       var frame;
       try { frame = JSON.parse(event.data); } catch (_e) { return; }
+      _traceRec('in', frame);   // record the real inbound frame for replay
       var type = String(frame.type || '');
       if (type === 'transcript') {
         var t = String(frame.text || '').trim();
@@ -453,6 +506,7 @@
 
   document.addEventListener('alpine:init', function () {
     if (typeof Alpine === 'undefined' || typeof Alpine.effect !== 'function') return;
+    _traceInit();
     Alpine.effect(react);
     // When the buffer is cleared externally (operator pressed Send), reset our
     // accumulator AND tell the server to drop the committed audio — otherwise
@@ -469,6 +523,8 @@
         // to re-prepend on the next render.
         var removedFull = (s.carryPrefix ? (s.carryPrefix + ' ' + s.finals) : s.finals).trim();
         _vlog('CLEAR remembering="' + removedFull.slice(0, 80) + '"');
+        _traceRec('clear', removedFull);   // mark the clear, then capture the re-emit window
+        _traceScheduleDump();
         _rememberRemoved(removedFull);
         s.finals = '';
         s.carryPrefix = '';
@@ -484,6 +540,9 @@
     teardown: teardown,
     retryReconnect: retryReconnectNow,
     onServerRecovered: onServerRecovered,
+    dumpTrace: function () { _traceDump('manual'); },
+    startTrace: function () { try { localStorage.setItem('voice-trace', '1'); } catch (_e) {} s.traceOn = true; },
+    stopTrace: function () { try { localStorage.removeItem('voice-trace'); } catch (_e) {} s.traceOn = false; },
     _state: s,
   };
 })();
