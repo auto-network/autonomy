@@ -23,6 +23,9 @@
     stream: null, ctx: null, sourceNode: null, workletNode: null, sinkNode: null, micGranted: false,
     starting: false,
     finals: '',
+    lastRendered: '',       // last text actually shown in the box (incl. in-flight
+                            // partial) — what a Clear/Send must remember to suppress,
+                            // since s.finals is empty when clearing mid-partial.
     carryPrefix: '',        // text carried over when the binding switches mid-buffer
                             // (#23 switch-takes-buffer): prepended to whatever the
                             // NEW session transcribes so the old text isn't clobbered.
@@ -296,6 +299,7 @@
     // case, so this is a no-op until a switch seeds it.
     var core = text || '';
     var full = s.carryPrefix ? (core ? (s.carryPrefix + ' ' + core) : s.carryPrefix) : core;
+    s.lastRendered = full;   // remember what's on screen so a Clear can suppress it
     _traceRec('render', full);
     st.setBufferText(full);
   }
@@ -515,22 +519,23 @@
       var st = store();
       if (!st) return;
       var buf = st.bufferText;
-      if (buf === '' && (s.finals || s.carryPrefix)) {
-        // Remember what we just removed (Clear or Send both empty the box) so a
-        // whisper_live re-emit of this exact text gets suppressed instead of
-        // reappearing. Must happen BEFORE we drop s.finals. Fold in carryPrefix
-        // so a switched-then-cleared buffer doesn't leave the carried text behind
-        // to re-prepend on the next render.
-        var removedFull = (s.carryPrefix ? (s.carryPrefix + ' ' + s.finals) : s.finals).trim();
-        _vlog('CLEAR remembering="' + removedFull.slice(0, 80) + '"');
-        _traceRec('clear', removedFull);   // mark the clear, then capture the re-emit window
+      // Remember what was DISPLAYED (last render) — NOT just committed finals.
+      // Clearing mid-utterance leaves s.finals empty (only a partial was shown),
+      // yet whisper_live still finalizes that segment and re-emits the whole
+      // sentence; suppression must key off the visible text or it reappears.
+      var visible = (s.lastRendered ||
+                     (s.carryPrefix ? (s.carryPrefix + ' ' + s.finals) : s.finals) || '').trim();
+      if (buf === '' && visible) {
+        _vlog('CLEAR remembering="' + visible.slice(0, 80) + '"');
+        _traceRec('clear', visible);       // mark the clear, then capture the re-emit window
         _traceScheduleDump();
-        _rememberRemoved(removedFull);
+        _rememberRemoved(visible);
         s.finals = '';
         s.carryPrefix = '';
+        s.lastRendered = '';
         sendControl('discard');
-      } else if (buf === '' && !s.finals && !s.carryPrefix) {
-        _vlog('CLEAR but s.finals already EMPTY — nothing remembered (bug?)');
+      } else if (buf === '' && !visible) {
+        _vlog('CLEAR but nothing was displayed — nothing to remember');
       }
     });
   });

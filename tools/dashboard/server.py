@@ -6676,21 +6676,17 @@ async def ws_voice(websocket: WebSocket):
                 # buffer-clearing side effect lives in the transport.
                 if frame_type == "discard" and session.state in voice_mod.ACTIVE_STATES:
                     voice_buffer_mod.MANAGER.clear(bind)
-                    # Seal the audio timeline at the current position so
-                    # WhisperLive's re-emitted segments for already-spoken
-                    # audio can't repopulate the just-cleared/just-sent buffer.
-                    if whisperlive_client is not None:
-                        whisperlive_client.set_cutoff()
-                    # Authoritative post-cutoff reset. The client clears its
-                    # local finals accumulator optimistically the instant the
-                    # box empties, but transcript frames already in flight for
-                    # the just-cleared audio arrive AFTER that and re-append,
-                    # repopulating the box (operator-reported Clear/Send "the
-                    # same text comes back"). WS delivery is FIFO, so a
-                    # buffer_state("") emitted here — after set_cutoff — lands
-                    # after those stragglers and wipes them; any genuinely new
-                    # post-cutoff utterance is transcribed later and re-appends
-                    # after this reset.
+                    # NOTE: we deliberately do NOT seal the WhisperLive audio
+                    # timeline (set_cutoff) here. A controlled repro
+                    # (tools/dashboard/tests/voice_whisper_repro.py) proved the
+                    # cutoff STALLS dictation ~2.6s and hangs 3/4 of the time:
+                    # the in-flight segment straddling the clear has no word
+                    # timestamps yet, so its partials are dropped wholesale until
+                    # the segment finalizes. Clear/Send must not touch the audio
+                    # stream — suppression of the just-cleared text is purely
+                    # client-side (voice-capture remembers the displayed text and
+                    # strips its re-emit). buffer_state("") still wipes immediate
+                    # in-flight stragglers; the client handles the later re-emit.
                     await websocket.send_json(
                         voice_buffer_mod.buffer_state_frame("")
                     )
@@ -6757,10 +6753,10 @@ async def ws_voice(websocket: WebSocket):
                             )
                         else:
                             voice_buffer_mod.MANAGER.clear(bind)
-                            # Seal the timeline so re-emitted segments for the
-                            # just-committed audio don't repopulate the buffer.
-                            if whisperlive_client is not None:
-                                whisperlive_client.set_cutoff()
+                            # As with 'discard': do NOT set_cutoff on commit — it
+                            # stalls dictation after Send (proven by the repro
+                            # harness). Re-emit suppression of the just-sent text
+                            # is client-side; the audio stream is left untouched.
                             finish = session.finish_commit(
                                 success=True,
                                 committed_text=pending_text,
