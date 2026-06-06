@@ -26,9 +26,24 @@
   display: inline-block; width: 8px; height: 8px; border-radius: 50%;
   vertical-align: 1px; margin-right: 1px; flex-shrink: 0;
 }
-.sc-dot-live { background: #22c55e; box-shadow: 0 0 4px rgba(34,197,94,0.4); }
-.sc-dot-dead { background: #374151; }
-.sc-dot--working { animation: sv-dot-flash 0.8s ease-in-out infinite; }
+/* The card dot is a .voice-dot-button (transparent background), so the fill
+   rules need the extra .sc-dot qualifier to out-specify it — otherwise the
+   dot renders transparent and only its halo shows (the "thin ring" look). */
+.sc-dot.sc-dot-live { background: #22c55e; box-shadow: 0 0 4px rgba(34,197,94,0.4); }
+.sc-dot.sc-dot-dead { background: #374151; }
+/* Working/activity pulse — a BOLD, attention-grabbing throb. The dot stays a
+   solid bright-green filled circle and pulses a strong halo + slight scale,
+   instead of the old sv-dot-flash that dropped opacity to 0.15 (which read as
+   a thin, dim, nearly-invisible ring). The whole point of the blink is to
+   catch the eye, so it never fades out. */
+.sc-dot.sc-dot--working {
+  background: #22c55e;
+  animation: sc-dot-throb 1s ease-in-out infinite;
+}
+@keyframes sc-dot-throb {
+  0%, 100% { transform: scale(1);    box-shadow: 0 0 4px 1px rgba(34,197,94,0.65); }
+  50%      { transform: scale(1.35); box-shadow: 0 0 11px 3px rgba(34,197,94,1); }
+}
 
 /* ── Pending-message ring (auto-xkdoi) ───────────────────────────────────────
    A halo over the activity dot when a sent message hasn't cleared the log yet.
