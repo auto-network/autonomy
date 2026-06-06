@@ -1050,6 +1050,36 @@ class TestWorktreePage:
         assert "this.rows.splice(idx, 1, updated)" in js
         assert "this.syncOverlayRows()" in js
 
+    def test_merge_confetti_is_viewport_fixed_outside_commit_dialog(self):
+        """Merge/cherry-pick celebration should not be anchored to the
+        bottom action row, and closing the commit dialog should not unmount
+        the burst before it finishes.
+        """
+        template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
+        shared_overlay = (TEMPLATE_DIR / "partials" / "worktree-review-overlays.html").read_text()
+        base = (TEMPLATE_DIR / "base.html").read_text()
+
+        for markup in (template, shared_overlay):
+            assert 'data-testid="worktree-merge-confetti-layer"' in markup
+            assert 'fixed inset-0' in markup
+            assert 'top-1/2' in markup
+            assert '-top-16' not in markup
+
+        assert "@keyframes mergeConfettiBurst" in base
+        assert ".merge-confetti-piece" in base
+
+    def test_cherry_pick_closes_dialog_without_waiting_for_cached_refresh(self):
+        """Cherry-pick success must close the dialog directly. A stale
+        /api/worktrees cache response can still contain the just-picked
+        commit while the server's background refresh is running.
+        """
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+
+        assert "markCherryPickedRowLanded(row)" in js
+        assert "cherry_pick_eligible: false" in js
+        assert "cherry_pick_commit: null" in js
+        assert "this.selectedCommit = null;" in js
+
     def test_pr_empty_state_cta_wired(self):
         """Rows with no visible ``source_control`` block should explain
         the absence and offer a row-scoped refresh affordance."""
