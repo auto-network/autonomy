@@ -1079,6 +1079,9 @@ class TestWorktreePage:
         assert "cherry_pick_eligible: false" in js
         assert "cherry_pick_commit: null" in js
         assert "this.selectedCommit = null;" in js
+        assert "refresh(manual, options)" in js
+        assert "suppressErrorToast" in js
+        assert "this.refresh(false, { suppressErrorToast: true })" in js
 
     def test_pr_empty_state_cta_wired(self):
         """Rows with no visible ``source_control`` block should explain

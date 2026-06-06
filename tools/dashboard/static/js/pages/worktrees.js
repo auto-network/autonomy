@@ -1646,7 +1646,8 @@
         return ' ';
       },
 
-      async refresh(manual) {
+      async refresh(manual, options) {
+        const opts = options || {};
         if (manual) this.refreshing = true;
         this.error = '';
         try {
@@ -1660,8 +1661,11 @@
           this.queuePathMeasurements();
           this.queueCommitStickyOffsets();
           this.queueReviewHeaderState();
+          return true;
         } catch (err) {
-          this.error = err.message || String(err);
+          const message = err.message || String(err);
+          if (opts.suppressErrorToast) return false;
+          this.error = message;
           // If the failure leaves the page empty (initial load, or
           // the prior data has already been cleared), the page is in
           // an unrecoverable state — escalate the toast to a full-
@@ -1674,6 +1678,7 @@
             'Worktree refresh failed: ' + this.error,
             fatal ? 'fatal' : 'error',
           );
+          return false;
         } finally {
           this.loading = false;
           this.refreshing = false;
@@ -1949,9 +1954,9 @@
           this.markCherryPickedRowLanded(row);
           this.selectedCommit = null;
           try {
-            await this.refresh(false);
+            await this.refresh(false, { suppressErrorToast: true });
           } catch (_ignored) {
-            // refresh already toasts on failure
+            // refresh() catches and returns false on failure.
           } finally {
             this.markCherryPickedRowLanded(row);
             this.selectedCommit = null;
