@@ -170,6 +170,28 @@ describe('#43 client epoch acceptance + resetEpoch (flag ON)', () => {
     assert.equal(h.voice.boundOutbox, sentinel, 'outbox object identity untouched');
     assert.equal(h.voice.boundOutbox.text, 'pending', 'outbox contents untouched');
   });
+
+  // REGRESSION (live failure 2026-06-06): the server epoch is PER-CONNECTION and
+  // resets to 0 on every fresh ws_voice connection, but acceptEpoch/serverEpoch are
+  // module state that survive reconnects. After a Send/Clear bumped acceptEpoch, a
+  // WS reconnect left it stale-high, so the new connection's epoch-0 frames were ALL
+  // dropped — dictation died silently (Whisper transcribed fine; nothing rendered).
+  it('6. a WS reconnect resets the epoch baseline so fresh epoch-0 frames are accepted', () => {
+    const h = makeHarness({ resetMode: true });
+    const ws = h.startListening();
+    ws.fireFinal('before reset', 0);
+    h.resetEpoch('send');                         // acceptEpoch -> 1
+    assert.equal(h.cap._state.acceptEpoch, 1, 'reset raised the bar');
+
+    ws.fireOpen();                                // simulate a reconnect (open fires again)
+    assert.equal(h.cap._state.acceptEpoch, 0, 'reconnect re-syncs the epoch baseline to 0');
+    assert.equal(h.cap._state.serverEpoch, 0, 'serverEpoch also reset for the fresh connection');
+
+    h.renders.length = 0;
+    ws.fireFinal('after the reconnect', 0);       // server epoch is fresh (0) again
+    assert.ok(h.renders.some((r) => /after the reconnect/.test(r)),
+      'epoch-0 frames on the new connection are accepted, not silently dropped');
+  });
 });
 
 describe('#43 reversibility (flag OFF = legacy behavior)', () => {
