@@ -5644,6 +5644,33 @@ async def api_session_create(request):
                     tmux_name, exc_info=True,
                 )
                 first_message = "Hello"
+    else:
+        # Host sessions: the orientation message is both the agent's first
+        # orientation turn AND the unique fingerprint the JSONL watcher
+        # (_watch_for_host_session_jsonl) matches on to link the file. A host
+        # Claude writes no JSONL until it receives input, so without this
+        # injection the watcher times out and the card falls back to the
+        # manual "Link Terminal" handshake. The default template carries
+        # {{tmux_name}} + {{ts}}, so the line is unique per session.
+        # enabled=false → render returns None → no injection; the operator
+        # opted out and the manual fallback still covers that case.
+        from tools.dashboard.session_orientation import render_orientation
+        try:
+            first_message = render_orientation(
+                tmux_name=tmux_name,
+                workspace_id="",
+                workspace_name="host",
+                org="autonomy",
+            )
+        except Exception:
+            logger.warning(
+                "api_session_create: host orientation render failed for %s; "
+                "falling back to a unique fingerprint line",
+                tmux_name, exc_info=True,
+            )
+            # Stay unique per session — never a generic literal here, or the
+            # watcher cannot tell two concurrent host JSONLs apart.
+            first_message = f"Session {tmux_name} started. Awaiting instructions."
 
     if first_message:
         async def _inject_first_message():
@@ -6184,65 +6211,76 @@ async def api_upload(request):
 # ── WebSocket Terminal ─────────────────────────────────────────
 
 # Per-project locks to serialise host session JSONL watchers
-_host_launch_locks: dict[str, asyncio.Lock] = {}
-
-
-def _get_host_launch_lock(project_folder: str) -> asyncio.Lock:
-    if project_folder not in _host_launch_locks:
-        _host_launch_locks[project_folder] = asyncio.Lock()
-    return _host_launch_locks[project_folder]
-
-
 async def _watch_for_host_session_jsonl(
-    projects_dir: Path, tmux_name: str, timeout: float = 10.0
+    projects_dir: Path, tmux_name: str, timeout: float = 30.0
 ) -> None:
-    """Watch for a new JSONL to appear after a host Claude session starts.
+    """Watch for this host session's JSONL to appear and link it by content.
 
-    Polls every 500ms for up to `timeout` seconds. Updates dashboard.db with
-    the discovered JSONL path — the ONLY code that sets jsonl_path for host sessions.
+    A host Claude writes no JSONL until it receives input. ``api_session_create``
+    injects the orientation message — which contains ``tmux_name`` — right after
+    launch; this watcher waits for the JSONL that message creates and links it.
+
+    Matching is by **content** (the JSONL whose text contains ``tmux_name``), not
+    by mtime. The orientation line is unique per session, so concurrent host
+    launches in the same project dir each link their own file with no race — which
+    is why no per-dir lock is needed. This is the ONLY code that sets jsonl_path
+    for host sessions. Polls every 500ms for up to ``timeout`` seconds.
+
+    Timeout is generous (30s) to absorb a slow Claude boot: injection fires ~5s
+    after launch, then Claude must come up and flush its first turn to disk.
     """
-    lock = _get_host_launch_lock(projects_dir.name)
-    async with lock:
-        existing = set(projects_dir.glob("*.jsonl")) if projects_dir.exists() else set()
-        logger.info("JSONL watcher started  tmux=%s  existing=%d", tmux_name, len(existing))
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
-            await asyncio.sleep(0.5)
-            if not projects_dir.exists():
+    existing = set(projects_dir.glob("*.jsonl")) if projects_dir.exists() else set()
+    logger.info("JSONL watcher started  tmux=%s  existing=%d", tmux_name, len(existing))
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(0.5)
+        if not projects_dir.exists():
+            continue
+        current = set(projects_dir.glob("*.jsonl"))
+        new_files = current - existing
+        # Link the new file whose contents carry this session's tmux_name (the
+        # orientation message injected at launch). Content match — not mtime —
+        # so concurrent host launches never cross-link. Keep polling until a
+        # file actually matches; a new but unrelated JSONL is left alone.
+        new_jsonl = None
+        for jf in new_files:
+            try:
+                if tmux_name in jf.read_text(encoding="utf-8", errors="replace"):
+                    new_jsonl = jf
+                    break
+            except OSError:
                 continue
-            current = set(projects_dir.glob("*.jsonl"))
-            new_files = current - existing
-            if new_files:
-                new_jsonl = min(new_files, key=lambda p: p.stat().st_mtime)
-                logger.info("JSONL watcher found new session  uuid=%s  tmux=%s", new_jsonl.stem, tmux_name)
-                # LINK + ENRICH: set session_uuid, jsonl_path, and graph_source_id
-                dashboard_db.link_and_enrich(
-                    tmux_name,
-                    session_uuid=new_jsonl.stem,
-                    jsonl_path=str(new_jsonl),
-                    project=projects_dir.name,
-                )
+        if new_jsonl is None:
+            continue
+        logger.info("JSONL watcher found new session  uuid=%s  tmux=%s", new_jsonl.stem, tmux_name)
+        # LINK + ENRICH: set session_uuid, jsonl_path, and graph_source_id
+        dashboard_db.link_and_enrich(
+            tmux_name,
+            session_uuid=new_jsonl.stem,
+            jsonl_path=str(new_jsonl),
+            project=projects_dir.name,
+        )
 
-                # Set up tail state with resolution_dir FIRST — _add_file_watch
-                # constructs a default _TailState (no resolution_dir) on first
-                # call, so the prior "if not in _tail_states" guard was always
-                # false here and resolution_dir never got assigned.
-                from tools.dashboard.session_monitor import _TailState
-                ts = session_monitor._tail_states.get(tmux_name)
-                if ts is None:
-                    session_monitor._tail_states[tmux_name] = _TailState(
-                        resolution_dir=projects_dir)
-                else:
-                    ts.resolution_dir = projects_dir
+        # Set up tail state with resolution_dir FIRST — _add_file_watch
+        # constructs a default _TailState (no resolution_dir) on first
+        # call, so the prior "if not in _tail_states" guard was always
+        # false here and resolution_dir never got assigned.
+        from tools.dashboard.session_monitor import _TailState
+        ts = session_monitor._tail_states.get(tmux_name)
+        if ts is None:
+            session_monitor._tail_states[tmux_name] = _TailState(
+                resolution_dir=projects_dir)
+        else:
+            ts.resolution_dir = projects_dir
 
-                # Now add the inotify watches
-                session_monitor._add_file_watch(tmux_name, str(new_jsonl))
-                session_monitor._add_dir_watch(tmux_name, str(projects_dir))
+        # Now add the inotify watches
+        session_monitor._add_file_watch(tmux_name, str(new_jsonl))
+        session_monitor._add_dir_watch(tmux_name, str(projects_dir))
 
-                # Broadcast registry so clients see resolved=true
-                await session_monitor._broadcast_registry()
-                return
-        logger.warning("JSONL watcher timed out after %.0fs  tmux=%s", timeout, tmux_name)
+        # Broadcast registry so clients see resolved=true
+        await session_monitor._broadcast_registry()
+        return
+    logger.warning("JSONL watcher timed out after %.0fs  tmux=%s", timeout, tmux_name)
 
 
 def _tmux_session_exists(name: str) -> bool:
@@ -6442,6 +6480,37 @@ async def ws_terminal(websocket: WebSocket):
             os.close(master_fd)
         except OSError:
             pass
+
+
+def _voice_audio_capture_enabled() -> bool:
+    """Debug audio capture — gated on a flag file so it's OFF by default. Toggle:
+    `touch data/voice-captures/CAPTURE_ON` to start, `rm` it to stop. Lets us grab
+    the operator's REAL mic audio (ambient room tone, real silence) for VAD /
+    no_speech threshold tuning, since there's no other way to obtain it."""
+    try:
+        return (_REPO_ROOT / "data" / "voice-captures" / "CAPTURE_ON").exists()
+    except Exception:
+        return False
+
+
+def _open_voice_audio_capture(bind: str):
+    """Open a 16kHz mono int16 WAV writer for raw browser PCM frames, or None."""
+    import wave
+    try:
+        d = _REPO_ROOT / "data" / "voice-captures"
+        d.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(bind))[:40] or "voice"
+        out = d / f"{safe}-{ts}.wav"
+        w = wave.open(str(out), "wb")
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        logger.info("ws_voice: AUDIO CAPTURE started -> %s", out)
+        return w
+    except Exception:
+        logger.exception("ws_voice: failed to open audio capture")
+        return None
 
 
 async def ws_voice(websocket: WebSocket):
@@ -6656,6 +6725,7 @@ async def ws_voice(websocket: WebSocket):
         bind, session.state, len(acq.buffer_text),
     )
     _audio_frames = 0
+    _audio_capture_wav = None   # debug WAV writer (lazily opened if capture flag set)
 
     try:
         while True:
@@ -6780,6 +6850,16 @@ async def ws_voice(websocket: WebSocket):
             elif "bytes" in msg and msg["bytes"] is not None:
                 should_forward = session.handle_audio(msg["bytes"])
                 _audio_frames += 1
+                # Debug: capture the RAW browser PCM (real mic, ambient room tone)
+                # to a WAV when the flag file is present. Lazily opened on the first
+                # frame; harmless no-op otherwise.
+                if _audio_capture_wav is None and _voice_audio_capture_enabled():
+                    _audio_capture_wav = _open_voice_audio_capture(bind)
+                if _audio_capture_wav is not None:
+                    try:
+                        _audio_capture_wav.writeframes(msg["bytes"])
+                    except Exception:
+                        pass
                 if _audio_frames % 50 == 1:
                     logger.info(
                         "ws_voice DIAG: audio frame #%d forward=%s wl_ready=%s bind=%s",
@@ -6804,6 +6884,12 @@ async def ws_voice(websocket: WebSocket):
     except Exception:
         logger.exception("ws_voice: unexpected error bind=%s", bind)
     finally:
+        if _audio_capture_wav is not None:
+            try:
+                _audio_capture_wav.close()
+                logger.info("ws_voice: AUDIO CAPTURE closed (%d frames) bind=%s", _audio_frames, bind)
+            except Exception:
+                pass
         session.force_end()
         if whisperlive_client is not None:
             # Idempotent; safe to call even if already torn down.
