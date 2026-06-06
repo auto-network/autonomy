@@ -240,7 +240,10 @@
       // Pending/optimistic message for this session (auto-xkdoi). null when idle.
       get outbox() {
         var s = Alpine.store('sessions')[this.sessionKey];
-        return (s && s.outbox) || null;
+        var o = (s && s.outbox) || null;
+        if (!o) return null;
+        if (typeof o.text !== 'string' || !o.text.trim()) return null;
+        return o;
       },
       // Skin class for the pending tile, by state.
       outboxTileClass() {
@@ -261,10 +264,12 @@
       // Discard an unconfirmed message — drop the optimistic tile without
       // resending. The text never reached the log; the operator chose to let it go.
       dismissOutbox() {
+        var sid = this.sessionKey;
         var s = Alpine.store('sessions')[this.sessionKey];
         if (!s) return;
         s.outbox = null;
         this._committedLocalId = null;
+        if (window.clearOutbox) window.clearOutbox(sid);
       },
       // Watch keys: send-key fires when an outbox enters 'sending' (the voice
       // path flips state without going through sendMessage); tail-key fires as
@@ -385,6 +390,10 @@
         if (!sid || !window.loadOutbox) return;
         var saved = window.loadOutbox(sid);
         if (!saved) return;
+        if (typeof saved.text !== 'string' || !saved.text.trim()) {
+          if (window.clearOutbox) window.clearOutbox(sid);
+          return;
+        }
         var s = window.getSessionStore(sid);
         if (!s || s.outbox) return;   // don't clobber a live one
         s.outbox = saved;

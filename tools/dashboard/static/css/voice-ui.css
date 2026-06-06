@@ -236,6 +236,20 @@ body.sv-viewer-composer-active .voice-caption {
   border: 1px solid rgba(71, 85, 105, 0.34);
 }
 
+@media (min-width: 768px) {
+  body:not(.fullscreen-page):not(.session-overlay-active) .voice-sheet-backdrop {
+    left: 14rem;
+  }
+
+  body:not(.fullscreen-page):not(.session-overlay-active) .voice-sheet {
+    left: 14rem;
+  }
+
+  body:not(.fullscreen-page):not(.session-overlay-active) .voice-sheet--full {
+    left: calc(14rem + 8px);
+  }
+}
+
 .voice-sheet__handle {
   display: flex;
   justify-content: center;
