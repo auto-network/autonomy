@@ -1723,6 +1723,9 @@
         store._pendingAttachments.sort(function(a, b) {
           return (a.timestamp || '').localeCompare(b.timestamp || '');
         });
+        if ((store.loaded || store.entries.length > 0) && window.flushPendingSessionAttachments) {
+          window.flushPendingSessionAttachments(store, 'fetch');
+        }
         var self = this;
         this._uploadUnsub = this._uploadProxy.onChange(function() {
           self._handleNewUpload();
@@ -1744,7 +1747,14 @@
           var p = m && m.payload;
           if (!p || p.target_session !== tmux) continue;
           this._uploadSeen.add(m.key);
-          store.entries.push(this._buildUploadEntry(p));
+          var entry = this._buildUploadEntry(p);
+          if (window.flushPendingSessionAttachments) {
+            store._pendingAttachments = store._pendingAttachments || [];
+            store._pendingAttachments.push(entry);
+            window.flushPendingSessionAttachments(store, 'sse');
+          } else {
+            store.entries.push(entry);
+          }
         }
       },
 

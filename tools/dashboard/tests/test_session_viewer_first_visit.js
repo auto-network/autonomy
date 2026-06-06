@@ -396,6 +396,69 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
     viewer.destroy();
   });
 
+  it('hydrates uploaded screenshots into an already-loaded timeline chronologically', async () => {
+    const h = makeHarness({});
+    const store = h.window.getSessionStore('auto-test');
+    h.window.appendSessionEntries(store, {
+      seq: 10,
+      entries: [
+        entryAt('2026-01-01T09:00:00Z', 'older-turn'),
+        entryAt('2026-01-01T10:00:00Z', 'newer-turn'),
+      ],
+    }, 'fetch');
+    store.loaded = true;
+
+    h.window.Schema = {
+      of: async (setId) => {
+        assert.equal(setId, 'dashboard.session.upload');
+        return {
+          all: async () => [
+            {
+              key: 'upload-a',
+              payload: {
+                target_session: 'auto-test',
+                rel_path: '.uploads/a.png',
+                filename: 'a.png',
+                mime: 'image/png',
+                size: 10,
+                timestamp: '2026-01-01T09:30:00Z',
+              },
+            },
+            {
+              key: 'upload-b',
+              payload: {
+                target_session: 'auto-test',
+                rel_path: '.uploads/b.png',
+                filename: 'b.png',
+                mime: 'image/png',
+                size: 20,
+                timestamp: '2026-01-01T09:30:00Z',
+              },
+            },
+          ],
+          onChange: () => () => {},
+        };
+      },
+    };
+
+    const viewer = h.makeViewer();
+    viewer.sessionKey = 'auto-test';
+    viewer._tmuxSession = 'auto-test';
+
+    await viewer._initUploads();
+
+    assert.equal(store.entries.length, 4);
+    assert.equal(store.entries[0].content, 'older-turn');
+    assert.equal(store.entries[1].rel_path, '.uploads/a.png');
+    assert.equal(store.entries[2].rel_path, '.uploads/b.png');
+    assert.equal(store.entries[3].content, 'newer-turn');
+    assert.equal(store._pendingAttachments.length, 0);
+    assert.equal(store._displayDirty, true,
+      'mid-list upload insertion must force a full display rebuild');
+
+    viewer.destroy();
+  });
+
   it('hydrates corrections with no-store and retries after a new correction event', async () => {
     const h = makeHarness({
       '/api/session/auto-test/turn-corrections': (url, options) => ({
