@@ -174,6 +174,23 @@ describe('#39 clear / suppression interleave harness', () => {
       'cleared text reappeared in the buffer: ' + JSON.stringify(h.voice.bufferText));
   });
 
+  it('mute-gate: while muted, incoming transcripts/buffer_state do NOT render (no churn)', async () => {
+    const h = makeHarness();
+    const ws = await h.startListening();
+    ws.fireFinal('hello world');
+    assert.equal(h.voice.bufferText, 'hello world');
+
+    h.voice.micMode = 'muted';                       // operator mutes
+    ws.fireFinal('hello world but reworded again');   // WhisperLive re-transcription churn
+    ws.firePartial('hello wor');
+    ws.fireBufferState('something stale');
+    assert.equal(h.voice.bufferText, 'hello world', 'box stays frozen while muted');
+
+    h.voice.micMode = 'listening';                   // unmute → resumes
+    ws.fireFinal('and now new words');
+    assert.ok(/new words/.test(h.voice.bufferText), 'transcripts resume on unmute');
+  });
+
   it('after Clear + re-emit, the badge can come back: new speech repopulates bufferText', async () => {
     const h = makeHarness();
     const ws = await h.startListening();
