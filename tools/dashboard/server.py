@@ -35,6 +35,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from starlette.applications import Starlette
+from starlette.background import BackgroundTask
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
@@ -7880,6 +7881,38 @@ async def _record_worktree_merge_timeline(
         )
 
 
+async def _finish_worktree_merge_after_response(
+    *,
+    session_name: str,
+    repo_name: str,
+    branch: str | None,
+    result: dict,
+    celebration_kind: str,
+    timeline_reason: str,
+) -> None:
+    try:
+        await worktree_monitor.refresh()
+    except Exception:  # noqa: BLE001 — merge already succeeded
+        logger.exception(
+            "worktree-merge post-response refresh failed for %s/%s",
+            session_name,
+            repo_name,
+        )
+    await _signal_session_merge_celebration(
+        target_session=session_name,
+        repo_name=repo_name,
+        commit_sha=result.get("commit", ""),
+        commit_message=result.get("message", ""),
+        kind=celebration_kind,
+    )
+    await _record_worktree_merge_timeline(
+        session_name=session_name,
+        branch=branch,
+        result=result,
+        reason=timeline_reason,
+    )
+
+
 async def api_worktree_commit_merge(request):
     session_name = request.path_params["session"]
     repo_name = request.path_params["repo"]
@@ -7907,25 +7940,19 @@ async def api_worktree_commit_merge(request):
     except WorkspaceError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
 
-    await worktree_monitor.refresh()
-    await _signal_session_merge_celebration(
-        target_session=session_name,
-        repo_name=repo_name,
-        commit_sha=result.get("commit", ""),
-        commit_message=result.get("message", ""),
-        kind="commit",
-    )
-    await _record_worktree_merge_timeline(
-        session_name=session_name,
-        branch=None,
-        result=result,
-        reason="commit-merge",
-    )
     return JSONResponse({
         "ok": True,
         "commit": result.get("commit", ""),
         "message": result.get("message", ""),
-    })
+    }, background=BackgroundTask(
+        _finish_worktree_merge_after_response,
+        session_name=session_name,
+        repo_name=repo_name,
+        branch=None,
+        result=result,
+        celebration_kind="commit",
+        timeline_reason="commit-merge",
+    ))
 
 async def api_worktree_merge(request):
     session_name = request.path_params["session"]
@@ -7951,25 +7978,19 @@ async def api_worktree_merge(request):
     except WorkspaceError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
 
-    await worktree_monitor.refresh()
-    await _signal_session_merge_celebration(
-        target_session=session_name,
-        repo_name=repo_name,
-        commit_sha=result.get("commit", ""),
-        commit_message=result.get("message", ""),
-        kind="ff",
-    )
-    await _record_worktree_merge_timeline(
-        session_name=session_name,
-        branch=getattr(row, "branch", None),
-        result=result,
-        reason="ff",
-    )
     return JSONResponse({
         "ok": True,
         "commit": result.get("commit", ""),
         "message": result.get("message", ""),
-    })
+    }, background=BackgroundTask(
+        _finish_worktree_merge_after_response,
+        session_name=session_name,
+        repo_name=repo_name,
+        branch=getattr(row, "branch", None),
+        result=result,
+        celebration_kind="ff",
+        timeline_reason="ff",
+    ))
 
 
 async def api_worktree_cherry_pick(request):
@@ -7996,30 +8017,20 @@ async def api_worktree_cherry_pick(request):
     except WorkspaceError as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
 
-    await worktree_monitor.refresh()
-    # Cherry-pick to base lands the session's commit on master too, so
-    # the session deserves the same "You got merged!" CrossTalk that
-    # ff-merge and commit-merge already fire — without it the operator
-    # cherry-picked the work and the dispatcher session never heard.
-    await _signal_session_merge_celebration(
-        target_session=session_name,
-        repo_name=repo_name,
-        commit_sha=result.get("commit", ""),
-        commit_message=result.get("message", ""),
-        kind="cherry-pick",
-    )
-    await _record_worktree_merge_timeline(
-        session_name=session_name,
-        branch=getattr(row, "branch", None),
-        result=result,
-        reason="cherry-pick",
-    )
     return JSONResponse({
         "ok": True,
         "commit": result.get("commit", ""),
         "source_commit": result.get("source_commit", ""),
         "message": result.get("message", ""),
-    })
+    }, background=BackgroundTask(
+        _finish_worktree_merge_after_response,
+        session_name=session_name,
+        repo_name=repo_name,
+        branch=getattr(row, "branch", None),
+        result=result,
+        celebration_kind="cherry-pick",
+        timeline_reason="cherry-pick",
+    ))
 
 
 async def api_worktree_watch_set(request):
