@@ -1261,6 +1261,29 @@
         return null;
       },
 
+      markCherryPickedRowLanded(row) {
+        if (!row) return;
+        const key = this.rowKey(row);
+        let changed = false;
+        this.rows = this.rows.map((item) => {
+          if (this.rowKey(item) !== key) return item;
+          changed = true;
+          return {
+            ...item,
+            commits: [],
+            commits_ahead: 0,
+            cherry_pick_eligible: false,
+            cherry_pick_commit: null,
+            ff_eligible: false,
+            rebase_required: false,
+          };
+        });
+        if (changed) {
+          this.queueBranchLayouts();
+          this.queuePathMeasurements();
+        }
+      },
+
       syncOverlayRows() {
         if (this.selectedCommit) {
           const row = this.rows.find(item => this.rowKey(item) === this.rowKey(this.selectedCommit.row));
@@ -1923,11 +1946,15 @@
           this.mergeBurstActive = false;
           _toast('Cherry-picked ' + (data.commit || '').slice(0, 8) +
                  ' to ' + this.targetBranch(row), 'success');
+          this.markCherryPickedRowLanded(row);
+          this.selectedCommit = null;
           try {
             await this.refresh(false);
           } catch (_ignored) {
             // refresh already toasts on failure
           } finally {
+            this.markCherryPickedRowLanded(row);
+            this.selectedCommit = null;
             this.cherryPicking = false;
           }
         }, this._BURST_WINDOW_MS);

@@ -1391,6 +1391,24 @@
       background: transparent;
       color: inherit;
     }
+    @keyframes mergeConfettiBurst {
+      0%   { opacity: 0; transform: translate3d(0, 0, 0) rotate(0deg) scale(0.65); }
+      8%   { opacity: 1; }
+      75%  { opacity: 1; }
+      100% { opacity: 0; transform: translate3d(var(--dx), var(--dy), 0) rotate(var(--rot)) scale(1.1); }
+    }
+    @keyframes mergeConfettiGlow {
+      0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.5); }
+      18%  { opacity: 0.9; }
+      70%  { opacity: 0.6; }
+      100% { opacity: 0; transform: translate(-50%, calc(-50% - 8px)) scale(2.0); }
+    }
+    .merge-confetti-piece {
+      animation: mergeConfettiBurst 1300ms cubic-bezier(0.18, 0.82, 0.24, 1) forwards;
+    }
+    .merge-confetti-glow {
+      animation: mergeConfettiGlow 1100ms ease-out forwards;
+    }
     /* auto-f58ca: gutter cells (line number, +/- marker) must be
        non-selectable so plain-text copy from a diff selection includes
        only the code, not "67\n\n+\n\ncontent\n" per-cell joining.
