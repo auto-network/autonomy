@@ -229,6 +229,17 @@
         var voice = this.getVoiceStore();
         return (voice && typeof voice.bufferText === 'string') ? voice.bufferText : '';
       },
+      get _localDictationText() {
+        var voice = this.getVoiceStore();
+        if (!this._composerActive || !voice || !voice.enabled || !voice.boundSessionId) return '';
+        if (voice.boundSessionId !== this._tmuxSession) return '';
+        var text = typeof voice.bufferText === 'string' ? voice.bufferText : '';
+        return text.trim() ? text : '';
+      },
+      get _showLocalDictationMirror() {
+        var o = this.outbox;
+        return !!(this._localDictationText && o && o.state !== 'capturing');
+      },
       get _crossSessionTargetTitle() {
         var voice = this.getVoiceStore();
         var bound = voice && voice.boundSessionId;

@@ -421,6 +421,21 @@
         </div>
       </div>
 
+      <!-- Local dictation mirror — shown when the retryable outbox slot is occupied
+           by a prior send/unconfirmed message but the live voice buffer already has
+           new in-viewer text. Read-only; Send still waits for the outbox slot. -->
+      <div class="sv-pending sv-pending--live" x-show="_showLocalDictationMirror">
+        <div class="sv-pending-tile is-capturing" data-pending-state="capturing">
+          <div class="sv-pending-head">
+            <span class="sv-pending-label">USER · DICTATING</span>
+            <span class="sv-pending-status"><span class="txt">Listening</span></span>
+          </div>
+          <div class="sv-pending-content"
+               x-text="_localDictationText"
+               x-effect="_localDictationText, $nextTick(() => { if ($el) $el.scrollTop = $el.scrollHeight; })"></div>
+        </div>
+      </div>
+
       <!-- Cross-session dictation tile — shown when the operator is dictating to a
            DIFFERENT session than the one being viewed. Violet-tinted so it can't be
            confused with a local pending message; the top line names the real target.

@@ -195,6 +195,45 @@ describe('composer-active signal (_composerActive + _syncComposerSignal)', () =>
     assert.equal(h.stores.sessions['auto-test'].outbox.state, 'sending');
   });
 
+  it('shows a local dictation mirror when the outbox slot is occupied by sending', () => {
+    store.isLive = true; store.sessionType = 'container';
+    store.outbox = { localId: 'ob_send', state: 'sending', source: 'voice', text: 'previous send', ts: 1 };
+    h.stores.voice = {
+      enabled: true,
+      boundSessionId: 'auto-test',
+      bufferText: 'new speech while previous send is pending',
+    };
+    const v = h.makeViewer('auto-test');
+    assert.equal(v._localDictationText, 'new speech while previous send is pending');
+    assert.equal(v._showLocalDictationMirror, true);
+  });
+
+  it('does not duplicate the normal capturing outbox tile', () => {
+    store.isLive = true; store.sessionType = 'container';
+    store.outbox = { localId: 'ob_cap', state: 'capturing', source: 'voice', text: 'live text', ts: 1 };
+    h.stores.voice = {
+      enabled: true,
+      boundSessionId: 'auto-test',
+      bufferText: 'live text',
+    };
+    const v = h.makeViewer('auto-test');
+    assert.equal(v._localDictationText, 'live text');
+    assert.equal(v._showLocalDictationMirror, false);
+  });
+
+  it('does not show the local mirror for cross-session dictation', () => {
+    store.isLive = true; store.sessionType = 'container';
+    store.outbox = { localId: 'ob_send', state: 'sending', source: 'voice', text: 'previous send', ts: 1 };
+    h.stores.voice = {
+      enabled: true,
+      boundSessionId: 'other-session',
+      bufferText: 'remote speech',
+    };
+    const v = h.makeViewer('auto-test');
+    assert.equal(v._localDictationText, '');
+    assert.equal(v._showLocalDictationMirror, false);
+  });
+
   it('does not stomp another viewer\'s signal when clearing', () => {
     // viewer B owns the signal; viewer A (inactive) must not clear it.
     h.body.classList.add('sv-viewer-composer-active');
