@@ -74,7 +74,7 @@
       <!-- Harness badge — auto-ngis4 / icon-rail principle 553c7437-036.
            Surfaces the running CLI (claude / codex) so peers can tell at
            a glance. Falls through to "?" for legacy / unknown rows. -->
-      <span x-data="{ harness: s.harness }">
+      <span class="sc-harness-wrap" x-data="{ harness: s.harness }">
         {% include 'partials/session-harness-badge.html' %}
       </span>
       <!-- Startup-phase chip (auto-yfcoc; design rev 63542418). Visible
@@ -180,7 +180,7 @@
       <!-- Harness badge mirrored on the stats row for the same reason
            the role/type badges are duplicated: zoom modes hide one row
            or the other via CSS. -->
-      <span x-data="{ harness: s.harness }">
+      <span class="sc-harness-wrap" x-data="{ harness: s.harness }">
         {% include 'partials/session-harness-badge.html' %}
       </span>
       <!-- Startup-phase chip mirrored on the stats row (auto-yfcoc).
