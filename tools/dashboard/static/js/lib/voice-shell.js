@@ -238,11 +238,53 @@
     }
   }
 
+  function _syncViewerOutboxCapture() {
+    var voice = _voiceStore();
+    if (!voice) return false;
+    var bound = voice.boundSessionId;
+    if (typeof window === 'undefined' ||
+        typeof window.getSessionStore !== 'function') return false;
+    if (!bound || !_viewerComposerActive()) return false;
+    var s = window.getSessionStore(bound);
+    if (!s) return false;
+    var text = typeof voice.bufferText === 'string' ? voice.bufferText : '';
+    var trimmed = text.trim();
+    if (s.outbox && (typeof s.outbox.text !== 'string' ||
+                     !s.outbox.text.trim())) {
+      s.outbox = null;
+    }
+    if (trimmed) {
+      if (!s.outbox) {
+        s.outbox = {
+          localId: (typeof window.newOutboxId === 'function')
+            ? window.newOutboxId() : ('ob_' + bound),
+          state: 'capturing',
+          source: 'voice',
+          text: text,
+          ts: (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0,
+        };
+        return true;
+      }
+      if (s.outbox.source === 'voice' && s.outbox.state === 'capturing') {
+        s.outbox.text = text;
+        return true;
+      }
+      return false;
+    }
+    if (s.outbox && s.outbox.source === 'voice' &&
+        s.outbox.state === 'capturing') {
+      s.outbox = null;
+      return true;
+    }
+    return false;
+  }
+
   window.Autonomy = window.Autonomy || {};
   window.Autonomy.voice = window.Autonomy.voice || {};
   window.Autonomy.voice.shell = {
     hideInlineComposer: _hideInlineComposer,
     previewWords: _previewWords,
+    syncViewerOutboxCapture: _syncViewerOutboxCapture,
     create: function () {
       return {
         viewportWidth: _viewportWidth(),
@@ -301,32 +343,10 @@
             Alpine.effect(function () {
               var voice = _voiceStore();
               if (!voice) return;
-              var bound = voice.boundSessionId;
-              var text = voice.bufferText;  // track for reactivity
-              if (typeof window === 'undefined' ||
-                  typeof window.getSessionStore !== 'function') return;
-              if (!bound || !_viewerComposerActive()) return;
-              var s = window.getSessionStore(bound);
-              if (!s) return;
-              var trimmed = (text || '').trim();
-              if (trimmed) {
-                if (!s.outbox) {
-                  s.outbox = {
-                    localId: (typeof window.newOutboxId === 'function')
-                      ? window.newOutboxId() : ('ob_' + bound),
-                    state: 'capturing',
-                    source: 'voice',
-                    text: text,
-                    ts: (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0,
-                  };
-                } else if (s.outbox.source === 'voice' &&
-                           s.outbox.state === 'capturing') {
-                  s.outbox.text = text;
-                }
-              } else if (s.outbox && s.outbox.source === 'voice' &&
-                         s.outbox.state === 'capturing') {
-                s.outbox = null;  // dictation cleared → collapse the tile
-              }
+              var _bound = voice.boundSessionId;      // track for reactivity
+              var _text = voice.bufferText;           // track for reactivity
+              var _viewed = voice.viewedSessionId;    // track viewer composer changes
+              _syncViewerOutboxCapture();
             });
           }
         },

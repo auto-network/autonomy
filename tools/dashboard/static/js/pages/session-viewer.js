@@ -1369,6 +1369,10 @@
         if (voice && typeof voice.setViewedSession === 'function') {
           voice.setViewedSession(this._composerActive ? sid : '');
         }
+        var shell = window.Autonomy && window.Autonomy.voice && window.Autonomy.voice.shell;
+        if (shell && typeof shell.syncViewerOutboxCapture === 'function') {
+          shell.syncViewerOutboxCapture();
+        }
       },
 
       destroy() {
