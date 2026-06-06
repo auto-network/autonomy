@@ -478,6 +478,42 @@ describe('voice shell helpers', () => {
     assert.equal(h.voiceStore.bufferText, '');
   });
 
+  it('voice Send resets capture after snapshotting the sending outbox and before clearing the buffer', async () => {
+    const events = [];
+    const sessionStore = { outbox: null };
+    const h = loadVoiceShell({
+      voiceStore: {
+        boundSessionId: 'session-a',
+        bufferText: 'snapshot before reset',
+        clearBuffer() {
+          events.push('clearBuffer');
+          this.bufferText = '';
+          this.sheetError = '';
+        },
+      },
+    });
+    h.document.body.classList.add('sv-viewer-composer-active');
+    h.document.body.dataset.svComposerSession = 'session-a';
+    h.window.getSessionStore = function (sid) {
+      return sid === 'session-a' ? sessionStore : null;
+    };
+    h.window.newOutboxId = function () { return 'ob_reset_order'; };
+    h.window.Autonomy.voiceCapture = {
+      resetEpoch(reason) {
+        events.push('reset:' + reason);
+        assert.equal(reason, 'send');
+        assert.equal(h.voiceStore.bufferText, 'snapshot before reset');
+        assert.equal(sessionStore.outbox && sessionStore.outbox.state, 'sending');
+        assert.equal(sessionStore.outbox && sessionStore.outbox.text, 'snapshot before reset');
+        return true;
+      },
+    };
+
+    assert.equal(await h.component.sendBuffer(), true);
+    assert.deepEqual(events, ['reset:send', 'clearBuffer']);
+    assert.equal(h.voiceStore.bufferText, '');
+  });
+
   it('syncs an existing voice buffer into a capturing outbox when the viewer composer is active', () => {
     const sessionStore = { outbox: null };
     const h = loadVoiceShell({
@@ -692,6 +728,37 @@ describe('voice shell helpers', () => {
     };
     h.component.clearBuffer();
     assert.equal(sessionStore.outbox, null);
+  });
+
+  it('Clear resets capture after clearing the buffer and the capturing outbox', () => {
+    const events = [];
+    const h = loadVoiceShell({
+      voiceStore: {
+        boundSessionId: 'session-a',
+        bufferText: 'old dictation',
+        clearBuffer() {
+          events.push('clearBuffer');
+          this.bufferText = '';
+          this.sheetError = '';
+        },
+      },
+    });
+    const sessionStore = { outbox: { source: 'voice', state: 'capturing', text: 'old dictation' } };
+    h.window.getSessionStore = function (sid) {
+      return sid === 'session-a' ? sessionStore : null;
+    };
+    h.window.Autonomy.voiceCapture = {
+      resetEpoch(reason) {
+        events.push('reset:' + reason);
+        assert.equal(reason, 'clear');
+        assert.equal(h.voiceStore.bufferText, '');
+        assert.equal(sessionStore.outbox, null);
+        return true;
+      },
+    };
+
+    h.component.clearBuffer();
+    assert.deepEqual(events, ['clearBuffer', 'reset:clear']);
   });
 
   it('Clear leaves a non-capturing outbox (a pending send) intact', () => {
