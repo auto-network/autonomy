@@ -167,10 +167,23 @@
     if (!st || st.micMode !== 'listening') return;       // only while actively capturing
     if (!s.talkActive || !s.ctx || s.starting) return;   // not streaming / mid-(re)start
     if (st.connState === 'reconnecting' || st.connState === 'disconnected') return;
-    if (!s.lastFrameAt || (_nowMs() - s.lastFrameAt) <= AUDIO_STALL_MS) return;
+    // Two silent-death modes: (a) the worklet stops posting frames (AudioContext
+    // suspended/died), and (b) the mic TRACK ends but the context keeps posting
+    // silent buffers — iOS turned the mic OFF (no notch indicator) while the app
+    // still thinks it's listening. Frame-presence alone misses (b), so also check
+    // the track readyState.
+    var trackDead = false;
+    try {
+      if (s.stream && typeof s.stream.getTracks === 'function') {
+        var tks = s.stream.getTracks();
+        trackDead = (tks.length === 0) || tks.some(function (t) { return t.readyState === 'ended'; });
+      }
+    } catch (_e) {}
+    var noFrames = !!s.lastFrameAt && (_nowMs() - s.lastFrameAt) > AUDIO_STALL_MS;
+    if (!trackDead && !noFrames) return;
     var bind = s.bind || st.boundSessionId || '';
     if (!bind) return;
-    _diag('audio stall: no worklet frame for ' + (_nowMs() - s.lastFrameAt) + 'ms — restarting capture');
+    _diag('audio stall (' + (trackDead ? 'mic track ended' : 'no frames') + ') — restarting capture');
     teardown();                 // teardown resets connState to 'ok' …
     _setConn('reconnecting');   // … so re-assert the spinny recon ring for the restart
     s.starting = false; s.started = false; s.lastFrameAt = 0;
