@@ -58,6 +58,7 @@ function makeListening(h, lastFrameAgoMs) {
   h.state.ws = h.sockets[0] || { readyState: 1, close() {} };
   h.state.wsOpen = true;
   h.state.starting = false;
+  h.state.stream = { getTracks: () => [{ readyState: 'live' }] };   // healthy mic track
   h.state.lastFrameAt = Date.now() - lastFrameAgoMs;
 }
 
@@ -69,6 +70,16 @@ describe('#17 audio-stall watchdog', () => {
     h.tick();
     assert.equal(h.voice.connState, 'reconnecting', 'shows the spinny recon state');
     assert.ok(h.sockets.length > before, 'a fresh capture/socket was started');
+  });
+
+  it('restarts when the mic track has ENDED even if frames still flow (iOS mic off)', () => {
+    const h = makeHarness();
+    makeListening(h, 200);             // frames fresh — frame-presence alone would miss this
+    h.state.stream = { getTracks: () => [{ readyState: 'ended' }] };
+    const before = h.sockets.length;
+    h.tick();
+    assert.equal(h.voice.connState, 'reconnecting', 'recon ring on a dead track');
+    assert.ok(h.sockets.length > before, 'restarted despite fresh frames');
   });
 
   it('does NOT fire while frames are still flowing', () => {
