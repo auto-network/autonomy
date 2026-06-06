@@ -713,6 +713,9 @@ def _apply_activity_entries(ts: _TailState, entries: list[dict]) -> str:
             else:
                 ts.pending_tool_ids.discard(tid)
                 ts.completed_tool_ids.add(tid)
+        elif etype == "codex_task_complete":
+            ts.completed_tool_ids.update(ts.pending_tool_ids)
+            ts.pending_tool_ids.clear()
         if etype:
             ts.last_entry_type = etype
             ts.recent_processed.append((

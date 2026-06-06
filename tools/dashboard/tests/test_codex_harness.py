@@ -19,6 +19,7 @@ import pytest
 from tools.dashboard.session_harness import (
     CODEX_HARNESS,
     extract_codex_context_tokens,
+    postprocess_codex_entries,
     parse_codex_log_line,
     resolve_harness_for_path,
     resolve_harness_for_session_row,
@@ -1080,7 +1081,7 @@ def test_parse_codex_compacted_history_as_compact_summary():
     assert "<environment_context>" not in entry["content"]
 
 
-def test_parse_codex_task_lifecycle_events_are_suppressed():
+def test_parse_codex_task_started_is_suppressed():
     started = parse_codex_log_line(_line({
         "timestamp": TS,
         "type": "event_msg",
@@ -1092,7 +1093,12 @@ def test_parse_codex_task_lifecycle_events_are_suppressed():
             "collaboration_mode_kind": "default",
         },
     }))
-    complete = parse_codex_log_line(_line({
+
+    assert started is None
+
+
+def test_parse_codex_task_complete_surfaces_internal_activity_boundary():
+    entry = parse_codex_log_line(_line({
         "timestamp": TS,
         "type": "event_msg",
         "payload": {
@@ -1104,8 +1110,36 @@ def test_parse_codex_task_lifecycle_events_are_suppressed():
         },
     }))
 
-    assert started is None
-    assert complete is None
+    assert entry == {
+        "type": "codex_task_complete",
+        "role": "system",
+        "timestamp": TS,
+        "internal": True,
+    }
+
+
+def test_postprocess_codex_split_write_stdin_output_does_not_stay_running():
+    parsed = parse_codex_log_line(_line({
+        "timestamp": "2026-04-24T01:16:32.000Z",
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": "call_write_split",
+            "output": (
+                "Chunk ID: poll\n"
+                "Wall time: 1.0007 seconds\n"
+                "Process running with session ID 27299\n"
+                "Original token count: 2\n"
+                "Output:\n"
+                "still here"
+            ),
+        },
+    }))
+
+    entries = postprocess_codex_entries([parsed], session_dir=None)
+
+    assert entries[0]["tool_id"] == "call_write_split"
+    assert entries[0]["status"] == "completed"
 
 
 # ── Tests from local scaffolding (complementary coverage) ────────────
