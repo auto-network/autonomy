@@ -6623,6 +6623,12 @@ async def ws_voice(websocket: WebSocket):
     # disconnect+reconnect to retry.
     whisperlive_client: voice_wl.WhisperLiveClient | None = None
     whisperlive_unavailable = False
+    # #43: per-connection transcript-acceptance epoch. Bumped on each explicit
+    # Send/Clear reset (_handle_voice_reset); every transcript/buffer_state frame
+    # carries it so the client drops the re-emit of just-sent/cleared speech still
+    # draining from the pre-reset WhisperLive buffer. Stays 0 (harmless) when the
+    # voice.reset_suppression flag is off.
+    voice_epoch = 0
 
     async def _on_partial(text: str) -> None:
         # Partials are operator-visible feedback but not persisted
@@ -6636,6 +6642,7 @@ async def ws_voice(websocket: WebSocket):
                 "kind": "partial",
                 "text": text,
                 "ts_ms": int(time.time() * 1000),
+                "epoch": voice_epoch,
             })
         except Exception:
             logger.debug("ws_voice: on_partial send failed bind=%s", bind)
@@ -6652,6 +6659,7 @@ async def ws_voice(websocket: WebSocket):
                 "kind": "final",
                 "text": text,
                 "ts_ms": int(time.time() * 1000),
+                "epoch": voice_epoch,
             })
         except Exception:
             logger.debug("ws_voice: on_final send failed bind=%s", bind)
@@ -6721,6 +6729,40 @@ async def ws_voice(websocket: WebSocket):
         logger.info("ws_voice DIAG: WhisperLive READY bind=%s", bind)
         return True
 
+    async def _handle_voice_reset() -> None:
+        """#43: explicit Send/Clear suppression control. Flag-gated.
+
+        ON (``voice.reset_suppression``): flush the WhisperLive session at the
+        source — close + reopen (~15ms), which drops its buffered audio + clock —
+        so the just-sent/cleared speech can NEVER re-emit; bump the epoch; and tell
+        the client the new epoch via an empty buffer_state. Audio frames that arrive
+        during the ~15ms reopen are simply not forwarded (wrapper not ready) — a
+        bounded clip, never a hang (proven by voice_whisper_reset_trace.py).
+
+        OFF: behave exactly like a legacy ``discard`` — clear the manager buffer,
+        emit buffer_state(""), leave WhisperLive untouched. Reversible by flag.
+        """
+        nonlocal voice_epoch, whisperlive_client
+        voice_buffer_mod.MANAGER.clear(bind)
+        if not feature_flags.is_enabled("voice.reset_suppression"):
+            await websocket.send_json(voice_buffer_mod.buffer_state_frame(""))
+            return
+        voice_epoch += 1
+        old = whisperlive_client
+        whisperlive_client = None
+        if old is not None:
+            try:
+                await old.close()
+            except Exception:
+                logger.debug("ws_voice: reset close failed bind=%s", bind)
+        # Reopen a fresh session (the idempotent helper re-instantiates since we
+        # nulled the ref). Buffer + audio clock are gone at the source.
+        await _ensure_whisperlive_connected()
+        frame = voice_buffer_mod.buffer_state_frame("")
+        frame["epoch"] = voice_epoch
+        await websocket.send_json(frame)
+        logger.info("ws_voice DIAG: reset → epoch=%d bind=%s", voice_epoch, bind)
+
     logger.info(
         "ws_voice: connected bind=%s state=%s restored_buffer_chars=%d",
         bind, session.state, len(acq.buffer_text),
@@ -6735,6 +6777,18 @@ async def ws_voice(websocket: WebSocket):
             if msg_type == "websocket.disconnect":
                 break
             if "text" in msg and msg["text"] is not None:
+                # #43: 'reset' is the explicit Send/Clear suppression control. It is
+                # NOT a state-machine control, so intercept it before
+                # parse_control_frame (which would reject the unknown type). The
+                # flag gate lives inside _handle_voice_reset (off => legacy discard
+                # semantics, no WhisperLive reset).
+                try:
+                    _ctrl = json.loads(msg["text"])
+                except Exception:
+                    _ctrl = None
+                if isinstance(_ctrl, dict) and _ctrl.get("type") == "reset":
+                    await _handle_voice_reset()
+                    continue
                 frame_type, payload = voice_mod.parse_control_frame(msg["text"])
                 if frame_type is None:
                     # parse_control_frame already built the error frame.
