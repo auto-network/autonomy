@@ -237,6 +237,15 @@ function _entryIdentity(entry) {
   if (!entry) return null;
   if (entry.type === 'tool_use' && entry.tool_id) return 'tu:' + entry.tool_id;
   if (entry.type === 'tool_result' && entry.tool_id) return 'tr:' + entry.tool_id;
+  if (entry.type === 'viewer_attachment') {
+    return [
+      'att',
+      entry.session || '',
+      entry.rel_path || '',
+      entry.filename || '',
+      entry.timestamp || '',
+    ].join(':');
+  }
   var t = entry.type || '?';
   var ts = entry.timestamp || '';
   var c = '';
@@ -327,6 +336,16 @@ function _mergeExistingEntry(store, existing, incoming) {
   return displayChanged;
 }
 
+function _chronologicalInsertIndex(store, entry) {
+  var ts = entry && entry.timestamp ? entry.timestamp : '';
+  if (!ts) return store.entries.length;
+  for (var i = store.entries.length - 1; i >= 0; i--) {
+    var existingTs = store.entries[i] && store.entries[i].timestamp ? store.entries[i].timestamp : '';
+    if (!existingTs || existingTs <= ts) return i + 1;
+  }
+  return 0;
+}
+
 function _appendUniqueEntry(store, entry, insertAt) {
   _ensureSeenIdentities(store);
   var key = _entryIdentity(entry);
@@ -349,10 +368,34 @@ function _appendUniqueEntry(store, entry, insertAt) {
   if (insertAt === undefined || insertAt === null || insertAt >= store.entries.length) {
     store.entries.push(entry);
   } else {
+    store._displayDirty = true;
     store.entries.splice(insertAt, 0, entry);
   }
   return true;
 }
+
+function _noteEntriesAdded(store, added, provenance) {
+  if (added <= 0) return;
+  if (provenance === 'fetch') {
+    store._entriesViaFetchCount = (store._entriesViaFetchCount || 0) + added;
+  } else {
+    store._entriesViaSSECount = (store._entriesViaSSECount || 0) + added;
+  }
+  store._lastRenderTs = Date.now();
+  _emitSessionStoreChanged(provenance === 'fetch' ? 'fetch' : 'message');
+}
+
+window.flushPendingSessionAttachments = function(store, provenance) {
+  if (!store || !store._pendingAttachments || store._pendingAttachments.length === 0) return 0;
+  var pending = store._pendingAttachments;
+  store._pendingAttachments = [];
+  var added = 0;
+  for (var i = 0; i < pending.length; i++) {
+    if (_appendUniqueEntry(store, pending[i], _chronologicalInsertIndex(store, pending[i]))) added++;
+  }
+  _noteEntriesAdded(store, added, provenance);
+  return added;
+};
 
 /**
  * Append entries to store with entry-identity dedup.
@@ -388,22 +431,16 @@ window.appendSessionEntries = function(store, data, provenance) {
   for (var i = 0; i < data.entries.length; i++) {
     var entry = data.entries[i];
     while (pa && pa.length && (pa[0].timestamp || '') <= (entry.timestamp || '')) {
-      if (_appendUniqueEntry(store, pa.shift())) added++;
+      var pendingAttachment = pa.shift();
+      if (_appendUniqueEntry(store, pendingAttachment, _chronologicalInsertIndex(store, pendingAttachment))) added++;
     }
     if (_appendUniqueEntry(store, entry)) added++;
   }
   while (pa && pa.length) {
-    if (_appendUniqueEntry(store, pa.shift())) added++;
+    var remainingAttachment = pa.shift();
+    if (_appendUniqueEntry(store, remainingAttachment, _chronologicalInsertIndex(store, remainingAttachment))) added++;
   }
-  if (added > 0) {
-    if (provenance === 'fetch') {
-      store._entriesViaFetchCount = (store._entriesViaFetchCount || 0) + added;
-    } else {
-      store._entriesViaSSECount = (store._entriesViaSSECount || 0) + added;
-    }
-    store._lastRenderTs = Date.now();
-    _emitSessionStoreChanged(provenance === 'fetch' ? 'fetch' : 'message');
-  }
+  _noteEntriesAdded(store, added, provenance);
   return added;
 };
 
