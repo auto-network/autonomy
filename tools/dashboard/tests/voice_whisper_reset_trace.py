@@ -11,6 +11,7 @@ a fresh client B (buffer + clock reset); stream the new sentences through B. Pro
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import time
 
@@ -54,6 +55,11 @@ async def _stream(client, buf, sr):
 
 
 async def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--clear-at", type=float, default=0.0,
+                    help="reset MID-sentence-1 at this second (Clear case); 0 = after it finalizes (Send case)")
+    args = ap.parse_args()
+
     events: list = []
     t0 = time.monotonic()
     s1, sr1 = sf.read(SENT1, dtype="int16")
@@ -62,8 +68,15 @@ async def main() -> None:
 
     a = _mk("A", events, t0)
     await a.connect_and_wait_ready(ready_timeout=20.0)
-    await _stream(a, s1, sr1)
-    await asyncio.sleep(1.5)             # let sentence 1 finalize
+    if args.clear_at > 0:
+        # CLEAR mid-utterance: A hears only the first part; the rest (continuation)
+        # plus the next sentence go to the fresh epoch B.
+        cut = int(args.clear_at * sr1)
+        await _stream(a, s1[:cut], sr1)
+        s2 = np.concatenate([s1[cut:], s2])   # continuation + next sentence → B
+    else:
+        await _stream(a, s1, sr1)
+        await asyncio.sleep(1.5)         # let sentence 1 finalize
 
     # ── SEND boundary → reset the session ──
     reset_t = round(time.monotonic() - t0, 2)
