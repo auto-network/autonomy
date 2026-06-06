@@ -279,6 +279,19 @@
     return false;
   }
 
+  function _resetVoiceCaptureEpoch(reason) {
+    try {
+      if (typeof window === 'undefined' || !window.Autonomy ||
+          !window.Autonomy.voiceCapture ||
+          typeof window.Autonomy.voiceCapture.resetEpoch !== 'function') {
+        return false;
+      }
+      return window.Autonomy.voiceCapture.resetEpoch(reason) === true;
+    } catch (_err) {
+      return false;
+    }
+  }
+
   window.Autonomy = window.Autonomy || {};
   window.Autonomy.voice = window.Autonomy.voice || {};
   window.Autonomy.voice.shell = {
@@ -627,6 +640,7 @@
               s.outbox = null;
             }
           }
+          _resetVoiceCaptureEpoch('clear');
           // Do NOT focus the editor — focusing pops the iOS keyboard, and the
           // operator wants Clear to just empty the buffer, not start typing.
           return true;
@@ -694,6 +708,7 @@
               }
               s.outbox.text = body;
               s.outbox.state = 'sending';
+              _resetVoiceCaptureEpoch('send');
               if (typeof voice.clearBuffer === 'function') voice.clearBuffer();
               if (typeof voice.clearAttachments === 'function') voice.clearAttachments();
               return true;
