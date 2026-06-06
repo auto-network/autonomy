@@ -19,6 +19,10 @@
     return entry.type === 'tool_use' && GROUPABLE[entry.tool_name] === 1;
   }
 
+  function isDisplayable(entry) {
+    return entry && entry.internal !== true && entry.hidden !== true;
+  }
+
   /**
    * Build full display array from entries. Groups consecutive same-tool
    * groupable entries (2+) into group descriptors.
@@ -29,9 +33,13 @@
     var len = entries.length;
     while (i < len) {
       var e = entries[i];
+      if (!isDisplayable(e)) {
+        i++;
+        continue;
+      }
       if (isGroupable(e)) {
         var j = i + 1;
-        while (j < len && entries[j].type === 'tool_use' && entries[j].tool_name === e.tool_name) {
+        while (j < len && isDisplayable(entries[j]) && entries[j].type === 'tool_use' && entries[j].tool_name === e.tool_name) {
           j++;
         }
         if (j - i >= 2) {
@@ -57,6 +65,7 @@
     var newIdx = (atIdx !== undefined) ? atIdx : entries.length - 1;
     if (newIdx < 0 || newIdx >= entries.length) return display;
     var entry = entries[newIdx];
+    if (!isDisplayable(entry)) return display;
     var last = display.length > 0 ? display[display.length - 1] : null;
 
     if (last && isGroupable(entry)) {

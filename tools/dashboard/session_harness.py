@@ -1598,6 +1598,13 @@ def postprocess_codex_entries(
                             _append_codex_exec_sidecars(normalized, progress)
                         continue
                     continue
+                if entry.get("status") == "running":
+                    # In a split/cold batch with no remembered tool name,
+                    # "Process running with session ID ..." is not enough
+                    # evidence that this function_call_output is itself an
+                    # active exec_command. Treat the call as complete so
+                    # write_stdin polling artifacts cannot pin activity.
+                    entry["status"] = "completed"
 
         normalized.append(entry)
 
@@ -2170,7 +2177,12 @@ def parse_codex_log_line(line: str) -> dict | list[dict] | None:
         if event_type == "task_started":
             return None
         if event_type == "task_complete":
-            return None
+            return {
+                "type": "codex_task_complete",
+                "role": "system",
+                "timestamp": timestamp,
+                "internal": True,
+            }
         return None
 
     if entry_type != "response_item":

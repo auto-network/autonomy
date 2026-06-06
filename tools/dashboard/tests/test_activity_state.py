@@ -785,6 +785,19 @@ class TestActivityStateBroadcast:
         assert "call_exec_progress" in ts.pending_tool_ids
         assert "call_exec_progress" not in ts.completed_tool_ids
 
+    def test_codex_task_complete_clears_stale_pending_tools(self):
+        """Codex task_complete means the agent is back at the prompt."""
+        ts = _TailState()
+        state = _apply_activity_entries(ts, [
+            {"type": "tool_use", "tool_id": "call_stale"},
+            {"type": "tool_result", "tool_id": "call_stale", "status": "running"},
+            {"type": "codex_task_complete", "timestamp": "2026-04-15T00:00:02Z"},
+        ])
+
+        assert state == "idle"
+        assert ts.pending_tool_ids == set()
+        assert "call_stale" in ts.completed_tool_ids
+
     @pytest.mark.asyncio
     async def test_registry_includes_activity_state(self, setup_env):
         """session:registry broadcast includes activity_state field."""

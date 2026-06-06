@@ -108,6 +108,16 @@ describe('buildAll', () => {
       assert.equal(d[0].tool_name, t);
     }
   });
+
+  it('internal entries are not displayed', () => {
+    const entries = [
+      user('hi'),
+      { type: 'codex_task_complete', role: 'system', internal: true },
+      asst('done'),
+    ];
+    const d = buildAll(entries);
+    assert.deepStrictEqual(d, [{ idx: 0 }, { idx: 2 }]);
+  });
 });
 
 // ── Suite 2: appendOne ───────────────────────────────────────────────
@@ -165,6 +175,13 @@ describe('appendOne', () => {
     const result = appendOne(d, entries);
     assert.strictEqual(result, d);
     assert.equal(d.length, 2);
+  });
+
+  it('skips internal entries incrementally', () => {
+    const entries = [user('x'), { type: 'codex_task_complete', internal: true }];
+    const d = [{ idx: 0 }];
+    appendOne(d, entries);
+    assert.deepStrictEqual(d, [{ idx: 0 }]);
   });
 
   it('incremental appendOne matches buildAll', () => {
