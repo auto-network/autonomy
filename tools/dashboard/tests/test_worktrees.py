@@ -598,6 +598,57 @@ class TestWorktreeAPI:
         assert captured["branch"] == "session/auto-test"
         assert captured["branch_base"] == "master"
 
+    def test_cherry_pick_endpoint_defers_post_success_work_until_background(
+        self, monkeypatch,
+    ):
+        server, fake = _install_fake_monitor(
+            monkeypatch,
+            [_row(cherry_pick_eligible=True, cherry_pick_commit="abcdef1234567890")],
+        )
+
+        def fake_cherry_pick(_session_name, _repo_name):
+            return {
+                "commit": "fedcba9876543210",
+                "source_commit": "abcdef1234567890",
+                "message": "Trim header padding",
+                "target_repo": "/repo",
+                "target_branch": "master",
+            }
+
+        signal_calls = []
+
+        async def fake_signal(**kwargs):
+            signal_calls.append(kwargs)
+
+        captured = {}
+
+        def fake_record(**kwargs):
+            captured.update(kwargs)
+            return f"wt-{kwargs['commit_hash'][:12]}"
+
+        class _Request:
+            path_params = {"session": "auto-test", "repo": "autonomy"}
+
+        monkeypatch.setattr(server, "cherry_pick_session_worktree", fake_cherry_pick)
+        monkeypatch.setattr(server, "_signal_session_merge_celebration", fake_signal)
+        monkeypatch.setattr(server, "record_worktree_merge_run", fake_record)
+
+        resp = asyncio.run(server.api_worktree_cherry_pick(_Request()))
+
+        assert resp.status_code == 200
+        assert json.loads(resp.body)["ok"] is True
+        assert fake.refresh_count == 0
+        assert signal_calls == []
+        assert captured == {}
+
+        assert resp.background is not None
+        asyncio.run(resp.background())
+
+        assert fake.refresh_count == 1
+        assert signal_calls[0]["kind"] == "cherry-pick"
+        assert captured["reason"] == "cherry-pick"
+        assert captured["commit_hash"] == "fedcba9876543210"
+
     def test_cherry_pick_endpoint_swallows_timeline_writer_failure(
         self, test_client, monkeypatch,
     ):
