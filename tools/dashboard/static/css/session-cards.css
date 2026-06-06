@@ -143,6 +143,13 @@
 /* Harness badge — auto-ngis4. Per-harness brand colour so the operator
    can tell at a glance which CLI a session is running under. Renders
    alongside role/type chips in the card-chrome icon rail. */
+/* The badge is dropped into the row inside a bare <span x-data> wrapper.
+   Without this the wrapper is an inline box at the row's full line-height
+   (24px), so the pill baseline-aligns ~1.5px BELOW the row center while the
+   sibling chips (direct flex children) sit dead-center — the harness chip
+   was the one visibly "jumping". inline-flex makes the wrapper hug + center
+   its pill so it lands on the same center line as everything else. */
+.sc-harness-wrap { display: inline-flex; align-items: center; }
 .sc-harness {
   display: inline-flex; align-items: center;
   padding: 1px 6px; border-radius: 4px;
