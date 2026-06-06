@@ -11,6 +11,11 @@ data/worktrees/
 # Project artifacts (licenses, secrets) — layered config-driven mounts
 data/artifacts/
 
+# Operator-supplied attachments/screenshots (runtime, not source)
+data/uploads/
+data/host-uploads/
+data/attachments/
+
 # Databases (derived, regenerable)
 data/graph.db
 data/graph.db-wal
