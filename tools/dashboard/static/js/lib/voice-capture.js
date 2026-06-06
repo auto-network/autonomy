@@ -361,6 +361,15 @@
       try { frame = JSON.parse(event.data); } catch (_e) { return; }
       _traceRec('in', frame);   // record the real inbound frame for replay
       var type = String(frame.type || '');
+      // Mute-gate: while muted, the operator wants the box FROZEN. WhisperLive
+      // keeps re-transcribing its buffered pre-mute speech and emits a churn of
+      // variants (NOT noise — pure silence/white-noise emit nothing); ignore
+      // transcript/buffer_state frames so none of that re-renders. Resumes on unmute.
+      var _muteSt = store();
+      if (_muteSt && _muteSt.micMode === 'muted' && (type === 'transcript' || type === 'buffer_state')) {
+        _traceRec('muted-drop', type);
+        return;
+      }
       if (type === 'transcript') {
         var t = String(frame.text || '').trim();
         if (frame.kind === 'final') {
