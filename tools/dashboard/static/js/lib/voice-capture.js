@@ -381,6 +381,14 @@
     ws.addEventListener('open', function () {
       if (ws !== s.ws) return;
       s.wsOpen = true; s.started = false; s.requiresReconnect = false;
+      // #43: the server's transcript epoch is PER-CONNECTION and starts at 0 on
+      // every fresh ws_voice connection. acceptEpoch/serverEpoch live in module
+      // state and survive reconnects, so without this reset a reconnect after any
+      // Send/Clear would leave acceptEpoch>0 and silently drop ALL of the new
+      // connection's epoch-0 frames (dictation dies with no error). Re-sync to the
+      // fresh connection's epoch baseline.
+      s.acceptEpoch = 0;
+      s.serverEpoch = 0;
       _setConn('ok');
       // Only declare full recovery (reset the backoff) once the link has been
       // STABLE for a beat — an open-then-close flap must not keep resetting it.
