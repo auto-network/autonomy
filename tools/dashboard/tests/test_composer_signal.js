@@ -100,6 +100,32 @@ describe('composer-active signal (_composerActive + _syncComposerSignal)', () =>
     assert.equal(h.body.dataset.svComposerSession, 'auto-test');
   });
 
+  it('asks the voice shell to resync capture after publishing the active composer', () => {
+    store.isLive = true; store.sessionType = 'container';
+    let viewed = '';
+    let syncCalls = 0;
+    h.stores.voice = {
+      setViewedSession(sessionId) {
+        viewed = sessionId;
+      },
+    };
+    h.windowObj.Autonomy = {
+      voice: {
+        shell: {
+          syncViewerOutboxCapture() {
+            syncCalls += 1;
+            assert.equal(viewed, 'auto-test');
+            assert.equal(h.body.classList.contains('sv-viewer-composer-active'), true);
+            assert.equal(h.body.dataset.svComposerSession, 'auto-test');
+          },
+        },
+      },
+    };
+    const v = h.makeViewer('auto-test');
+    v._syncComposerSignal();
+    assert.equal(syncCalls, 1);
+  });
+
   it('clears the signal when the terminal is shown (composer hidden)', () => {
     store.isLive = true; store.sessionType = 'container';
     const v = h.makeViewer('auto-test');

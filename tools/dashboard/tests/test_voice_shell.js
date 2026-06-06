@@ -11,6 +11,7 @@ function loadVoiceShell(opts) {
   const docListeners = {};
   const winListeners = {};
   const dataFns = {};
+  const effects = [];
   const viewerPage = !!(opts && opts.viewerPage);
   const width = (opts && opts.width) || 390;
   const height = (opts && opts.height) || 844;
@@ -136,6 +137,11 @@ function loadVoiceShell(opts) {
     data(name, factory) {
       dataFns[name] = factory;
     },
+    effect(fn) {
+      effects.push(fn);
+      fn();
+      return fn;
+    },
   };
 
   const sandbox = {
@@ -185,6 +191,7 @@ function loadVoiceShell(opts) {
     winListeners,
     window: windowObj,
     document,
+    effects,
   };
 }
 
@@ -469,6 +476,91 @@ describe('voice shell helpers', () => {
       ts: 0,
     });
     assert.equal(h.voiceStore.bufferText, '');
+  });
+
+  it('syncs an existing voice buffer into a capturing outbox when the viewer composer is active', () => {
+    const sessionStore = { outbox: null };
+    const h = loadVoiceShell({
+      voiceStore: { boundSessionId: 'session-a', bufferText: 'existing dictation' },
+    });
+    h.window.getSessionStore = function (sid) {
+      return sid === 'session-a' ? sessionStore : null;
+    };
+    h.window.newOutboxId = function () { return 'ob_existing_buffer'; };
+
+    h.document.body.classList.add('sv-viewer-composer-active');
+    h.document.body.dataset.svComposerSession = 'session-a';
+
+    assert.equal(h.window.Autonomy.voice.shell.syncViewerOutboxCapture(), true);
+    assert.equal(sessionStore.outbox && sessionStore.outbox.state, 'capturing');
+    assert.equal(sessionStore.outbox && sessionStore.outbox.text, 'existing dictation');
+  });
+
+  it('updates the capturing outbox as the voice buffer changes', () => {
+    const sessionStore = {
+      outbox: { localId: 'ob_capture', source: 'voice', state: 'capturing', text: 'first', ts: 1 },
+    };
+    const h = loadVoiceShell({
+      voiceStore: { boundSessionId: 'session-a', bufferText: 'first and second' },
+    });
+    h.window.getSessionStore = function (sid) {
+      return sid === 'session-a' ? sessionStore : null;
+    };
+    h.document.body.classList.add('sv-viewer-composer-active');
+    h.document.body.dataset.svComposerSession = 'session-a';
+
+    assert.equal(h.window.Autonomy.voice.shell.syncViewerOutboxCapture(), true);
+    assert.equal(sessionStore.outbox.localId, 'ob_capture');
+    assert.equal(sessionStore.outbox.text, 'first and second');
+  });
+
+  it('clears only a voice capturing outbox when the active voice buffer is empty', () => {
+    const sessionStore = {
+      outbox: { localId: 'ob_capture', source: 'voice', state: 'capturing', text: 'old text', ts: 1 },
+    };
+    const h = loadVoiceShell({
+      voiceStore: { boundSessionId: 'session-a', bufferText: '' },
+    });
+    h.window.getSessionStore = function (sid) {
+      return sid === 'session-a' ? sessionStore : null;
+    };
+    h.document.body.classList.add('sv-viewer-composer-active');
+    h.document.body.dataset.svComposerSession = 'session-a';
+
+    assert.equal(h.window.Autonomy.voice.shell.syncViewerOutboxCapture(), true);
+    assert.equal(sessionStore.outbox, null);
+  });
+
+  it('does not overwrite a non-empty sending outbox while syncing capture', () => {
+    const sending = { localId: 'ob_send', source: 'voice', state: 'sending', text: 'already sent', ts: 1 };
+    const sessionStore = { outbox: sending };
+    const h = loadVoiceShell({
+      voiceStore: { boundSessionId: 'session-a', bufferText: 'new transcript' },
+    });
+    h.window.getSessionStore = function (sid) {
+      return sid === 'session-a' ? sessionStore : null;
+    };
+    h.document.body.classList.add('sv-viewer-composer-active');
+    h.document.body.dataset.svComposerSession = 'session-a';
+
+    assert.equal(h.window.Autonomy.voice.shell.syncViewerOutboxCapture(), false);
+    assert.equal(sessionStore.outbox, sending);
+  });
+
+  it('does not overwrite a non-empty unconfirmed outbox while syncing capture', () => {
+    const unconfirmed = { localId: 'ob_retry', source: 'voice', state: 'unconfirmed', text: 'retry me', ts: 1 };
+    const sessionStore = { outbox: unconfirmed };
+    const h = loadVoiceShell({
+      voiceStore: { boundSessionId: 'session-a', bufferText: 'new transcript' },
+    });
+    h.window.getSessionStore = function (sid) {
+      return sid === 'session-a' ? sessionStore : null;
+    };
+    h.document.body.classList.add('sv-viewer-composer-active');
+    h.document.body.dataset.svComposerSession = 'session-a';
+
+    assert.equal(h.window.Autonomy.voice.shell.syncViewerOutboxCapture(), false);
+    assert.equal(sessionStore.outbox, unconfirmed);
   });
 
   it('voice Send replaces an empty stale outbox instead of blocking or direct-sending', async () => {
