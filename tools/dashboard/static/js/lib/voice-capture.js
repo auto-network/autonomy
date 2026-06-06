@@ -34,6 +34,7 @@
     reconnectAttempt: 0,    // backoff index for the auto-reconnect loop
     reconnectTimer: null,
     stabilityTimer: null,   // resets the backoff once a fresh link survives a beat
+    lastFrameAt: 0,         // last worklet audio frame — audio-stall watchdog baseline
     trace: [],              // failure-trace ring (debug only)
     traceOn: false,
     traceDumpTimer: null,
@@ -149,6 +150,31 @@
     s.starting = false; s.started = false;
     var st = store();
     if (st && st.boundSessionId) startListening(st.boundSessionId);
+  }
+
+  // ── Audio-capture liveness watchdog ─────────────────────────────────────
+  // The mic stream / AudioContext can die SILENTLY (iOS audio interruption,
+  // route change) with NO visibilitychange/focus/pageshow — so _onWake (which is
+  // event-gated) never fires and the worklet simply stops producing frames: the
+  // UI still shows "listening" but no audio flows and no transcripts return
+  // ("stalled listening", recoverable only by a manual disconnect/reconnect —
+  // confirmed in the server log: audio frames stop while state stays listening).
+  // This time-based watchdog catches it and restarts capture, surfaced via the
+  // SAME `reconnecting` state (spinny ring) used for a backend reconnect.
+  var AUDIO_STALL_MS = 4000;
+  function _audioWatchdogTick() {
+    var st = store();
+    if (!st || st.micMode !== 'listening') return;       // only while actively capturing
+    if (!s.talkActive || !s.ctx || s.starting) return;   // not streaming / mid-(re)start
+    if (st.connState === 'reconnecting' || st.connState === 'disconnected') return;
+    if (!s.lastFrameAt || (_nowMs() - s.lastFrameAt) <= AUDIO_STALL_MS) return;
+    var bind = s.bind || st.boundSessionId || '';
+    if (!bind) return;
+    _diag('audio stall: no worklet frame for ' + (_nowMs() - s.lastFrameAt) + 'ms — restarting capture');
+    teardown();                 // teardown resets connState to 'ok' …
+    _setConn('reconnecting');   // … so re-assert the spinny recon ring for the restart
+    s.starting = false; s.started = false; s.lastFrameAt = 0;
+    startListening(bind);
   }
 
   // ── Look-back suppression of re-emitted cleared/sent text ───────────────
@@ -404,6 +430,7 @@
         workletNode.port.onmessage = function (event) {
           var payload = event.data || {};
           if (payload.type !== 'audio' || !(payload.buffer instanceof ArrayBuffer)) return;
+          s.lastFrameAt = _nowMs();   // worklet alive (mic + AudioContext producing)
           if (!s.talkActive || !s.wsOpen || !s.ws || s.ws.readyState !== WebSocket.OPEN) return;
           if (!s.started || s.requiresReconnect) return;
           try { s.ws.send(payload.buffer); } catch (_e) {}
@@ -548,6 +575,13 @@
     dumpTrace: function () { _traceDump('manual'); },
     startTrace: function () { try { localStorage.setItem('voice-trace', '1'); } catch (_e) {} s.traceOn = true; },
     stopTrace: function () { try { localStorage.removeItem('voice-trace'); } catch (_e) {} s.traceOn = false; },
+    _audioWatchdogTick: _audioWatchdogTick,   // exposed for tests
     _state: s,
   };
+
+  // Audio-stall watchdog: cheap (guards on micMode), runs for the page lifetime.
+  if (typeof setInterval === 'function') {
+    var _wd = setInterval(_audioWatchdogTick, 2000);
+    if (_wd && typeof _wd.unref === 'function') _wd.unref();   // don't pin Node test loops
+  }
 })();
