@@ -708,6 +708,33 @@ async function renderSessionViewFragment(host) {
   if (target === content) _currentContentPath = window.location.pathname;
 }
 
+// A bare ``/session/<name>`` URL (no project segment) can only be resolved
+// server-side — the project lives in the live tmux table or the graph
+// source's metadata, neither of which the client carries. Client-side
+// pushState nav never consults the server, so these links used to
+// dead-end at "Page not found"; only a hard refresh worked, because the
+// server's ``page_session_view_by_name`` route 302-redirects the bare
+// form to ``/session/<project>/<name>``. Mirror that here so in-app nav
+// behaves exactly like a refresh: ask the server to resolve (HEAD +
+// follow the redirect), adopt the canonical two-segment URL, then re-run
+// the router so the viewer renders with the correct body classes. Covers
+// the source-view session chip AND journal-entry links, both of which
+// emit bare ``/session/<name>`` URLs.
+async function resolveBareSessionPath(path) {
+  try {
+    const res = await fetch(path, { method: 'HEAD' });
+    if (res.redirected) {
+      const u = new URL(res.url);
+      if (_isSessionPath(u.pathname)) {
+        history.replaceState({}, '', u.pathname + u.search);
+        route();
+        return;
+      }
+    }
+  } catch (_e) { /* fall through to not-found */ }
+  _replaceFragment(content, '<div class="text-gray-400">Session not found</div>');
+}
+
 function _isSessionPath(path) {
   return /^\/session\/[^/]+\/.+$/.test(path || '');
 }
@@ -2173,6 +2200,8 @@ async function route() {
     renderWorktreesFragment();
   } else if (path.match(/^\/session\/[^/]+\/.+$/)) {
     renderSessionViewFragment();
+  } else if (path.match(/^\/session\/[^/]+$/)) {
+    resolveBareSessionPath(path);
   } else if (path === '/collab') {
     renderCollabFragment();
   } else if (path === '/streams') {
