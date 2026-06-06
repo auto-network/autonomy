@@ -30,6 +30,7 @@ function makeBody() {
     classList: {
       add: (c) => classes.add(c),
       remove: (c) => classes.delete(c),
+      toggle: (c, on) => { if (on) classes.add(c); else classes.delete(c); },
       contains: (c) => classes.has(c),
     },
     _classes: classes,
@@ -147,6 +148,15 @@ describe('composer-active signal (_composerActive + _syncComposerSignal)', () =>
     store.isLive = false; store.sessionType = 'container';
     store.outbox = { localId: 'ob_2', state: 'sending', source: 'manual', text: 'x', ts: 1 };
     const v = h.makeViewer('auto-test');
+    v._syncTilePresent();
+    assert.equal(h.body.classList.contains('sv-outbox-tile-present'), false);
+  });
+
+  it('empty outbox text does not count as a renderable pending tile', () => {
+    store.isLive = true; store.sessionType = 'container';
+    store.outbox = { localId: 'ob_empty', state: 'sending', source: 'voice', text: '', ts: 1 };
+    const v = h.makeViewer('auto-test');
+    assert.equal(v.outbox, null);
     v._syncTilePresent();
     assert.equal(h.body.classList.contains('sv-outbox-tile-present'), false);
   });

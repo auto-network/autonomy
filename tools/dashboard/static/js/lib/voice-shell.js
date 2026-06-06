@@ -632,22 +632,19 @@
           return this.dismissSheet();
         },
 
-        // Commit the dictation. Inside the viewer with an active outbox tile,
+        // Commit the dictation. Inside the viewer with an active composer,
         // hand off to the durability path: set the final text, flip the outbox
         // to 'sending' (auto-0530's watcher owns the POST + reconcile), and
         // clear the voice buffer — NO direct POST (no double-send). The
-        // capturing effect gates on state==='capturing', so it won't touch the
-        // flipped outbox, and clearing the buffer still drives the WhisperLive
-        // cutoff via the existing send-clear effect. Outside the viewer, or
-        // with no tile, fall back to the direct send.
+        // capturing effect usually creates the tile before Send, but Send must
+        // also create it synchronously if the effect has not run yet.
         _commitBuffer() {
           var voice = this.voice;
           if (!voice) return false;
           if (_viewerComposerActive() && typeof window !== 'undefined' &&
               typeof window.getSessionStore === 'function' && voice.boundSessionId) {
             var s = window.getSessionStore(voice.boundSessionId);
-            if (s && s.outbox && s.outbox.source === 'voice' &&
-                s.outbox.state === 'capturing') {
+            if (s) {
               if (voice.attachmentsPending) {
                 voice.sheetError = 'Attachment still uploading…';
                 return false;
@@ -656,6 +653,25 @@
                 ? voice._buildSendBody()
                 : (voice.bufferText || '').trim();
               if (!body) return false;
+              if (s.outbox && (typeof s.outbox.text !== 'string' ||
+                               !s.outbox.text.trim())) {
+                s.outbox = null;
+              }
+              if (s.outbox && !(s.outbox.source === 'voice' &&
+                                s.outbox.state === 'capturing')) {
+                voice.sheetError = 'Message still pending.';
+                return false;
+              }
+              if (!s.outbox) {
+                s.outbox = {
+                  localId: (typeof window.newOutboxId === 'function')
+                    ? window.newOutboxId() : ('ob_' + voice.boundSessionId),
+                  state: 'capturing',
+                  source: 'voice',
+                  text: body,
+                  ts: (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0,
+                };
+              }
               s.outbox.text = body;
               s.outbox.state = 'sending';
               if (typeof voice.clearBuffer === 'function') voice.clearBuffer();

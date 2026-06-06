@@ -173,13 +173,16 @@
       return !!(entry && entry.todo_annotation);
     },
 
-    /** Returns true if a tool_use entry has no corresponding result yet.
-     *  Uses server-provided pendingToolIds when the session is in tool_running
-     *  state. Dead sessions cannot have running tools. Falls back to local
-     *  _resultMap for history/replay and during initial load.
+    /** Returns true if a tool_use entry has no corresponding terminal result yet.
+     *  A terminal local result wins before server pendingToolIds. Otherwise uses
+     *  server-provided pendingToolIds while the session is in tool_running state.
+     *  Dead sessions cannot have running tools. Falls back to local _resultMap
+     *  for history/replay and during initial load.
      */
     isToolRunning(entry) {
       if (entry.type !== 'tool_use') return false;
+      var result = this._resultMap[entry.tool_id];
+      if (result && result.status && result.status !== 'running') return false;
       var store = Alpine.store('sessions')[this.sessionKey];
       if (store) {
         // Dead sessions: no tool can be running (killed mid-flight)
@@ -190,7 +193,6 @@
         }
       }
       // Fallback to local resultMap (history, initial load, non-tool_running states)
-      var result = this._resultMap[entry.tool_id];
       if (result && result.status === 'running') return true;
       return !result;
     },

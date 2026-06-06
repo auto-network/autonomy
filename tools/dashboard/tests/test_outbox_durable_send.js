@@ -155,6 +155,14 @@ describe('outbox durable send + reconciliation', () => {
     assert.ok(h.fetchCalls.some((c) => c.url === '/api/session/send'), 'resend must hit the send endpoint');
     if (v._outboxTimer) clearTimeout(v._outboxTimer);
   });
+
+  it('dismiss clears the persisted outbox so it does not restore on revisit', () => {
+    store.outbox = { localId: 'ob_j', state: 'unconfirmed', source: 'manual', text: 'dismiss this', ts: 1 };
+    h.windowObj.saveOutbox('auto-test', store.outbox);
+    v.dismissOutbox();
+    assert.equal(store.outbox, null);
+    assert.equal(h.windowObj.loadOutbox('auto-test'), null);
+  });
 });
 
 // End-to-end lifecycle against the contract (cbb8497c-a1f): the exact sequence

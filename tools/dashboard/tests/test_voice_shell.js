@@ -446,6 +446,52 @@ describe('voice shell helpers', () => {
     assert.equal(h.voiceStore._sendCalls, 1, 'falls through to a normal send');
   });
 
+  it('voice Send in the active viewer creates an outbox even if no capturing tile exists yet', async () => {
+    const sessionStore = { outbox: null };
+    const h = loadVoiceShell({
+      voiceStore: { boundSessionId: 'session-a', bufferText: 'do not lose this' },
+    });
+    h.document.body.classList.add('sv-viewer-composer-active');
+    h.document.body.dataset.svComposerSession = 'session-a';
+    h.window.getSessionStore = function (sid) {
+      return sid === 'session-a' ? sessionStore : null;
+    };
+    h.window.newOutboxId = function () { return 'ob_voice_send'; };
+
+    assert.equal(await h.component.sendBuffer(), true);
+    assert.equal(h.voiceStore._sendCalls, 0, 'viewer voice send must not use direct send fallback');
+    assert.equal(typeof sessionStore.outbox.ts, 'number');
+    assert.deepEqual(Object.assign({}, sessionStore.outbox, { ts: 0 }), {
+      localId: 'ob_voice_send',
+      state: 'sending',
+      source: 'voice',
+      text: 'do not lose this',
+      ts: 0,
+    });
+    assert.equal(h.voiceStore.bufferText, '');
+  });
+
+  it('voice Send replaces an empty stale outbox instead of blocking or direct-sending', async () => {
+    const sessionStore = {
+      outbox: { localId: 'ob_stale', state: 'sending', source: 'voice', text: '', ts: 1 },
+    };
+    const h = loadVoiceShell({
+      voiceStore: { boundSessionId: 'session-a', bufferText: 'fresh message' },
+    });
+    h.document.body.classList.add('sv-viewer-composer-active');
+    h.document.body.dataset.svComposerSession = 'session-a';
+    h.window.getSessionStore = function (sid) {
+      return sid === 'session-a' ? sessionStore : null;
+    };
+    h.window.newOutboxId = function () { return 'ob_fresh'; };
+
+    assert.equal(await h.component.sendBuffer(), true);
+    assert.equal(h.voiceStore._sendCalls, 0);
+    assert.equal(sessionStore.outbox.localId, 'ob_fresh');
+    assert.equal(sessionStore.outbox.state, 'sending');
+    assert.equal(sessionStore.outbox.text, 'fresh message');
+  });
+
   it('sheetCrossSession is true when bound != viewed, with the target title from the store', () => {
     const h = loadVoiceShell({
       voiceStore: { boundSessionId: 'auto-B', viewedSessionId: 'auto-A' },

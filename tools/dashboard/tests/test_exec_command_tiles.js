@@ -352,6 +352,21 @@ describe('exec_command meta badges', () => {
     assert.equal(h.win.SessionRenderer.isToolRunning.call(ctx, store.entries[0]), false);
   });
 
+  it('renders a tool as finished when its local result is terminal', () => {
+    const h = makeHarness();
+    const entry = makeExecUse('call_terminal_wins', 'graph turn-correction suggest x --json');
+    const result = makeExecResult('call_terminal_wins', [], '{"type":"turn_correction"}\n', {
+      status: 'completed',
+      exit_code: 0,
+    });
+    const ctx = makeRendererContext(h.win, entry, result);
+    const store = h.win.getSessionStore(ctx.sessionKey);
+    store.activityState = 'tool_running';
+    store.pendingToolIds = { call_terminal_wins: true };
+
+    assert.equal(h.win.SessionRenderer.isToolRunning.call(ctx, entry), false);
+  });
+
   it('shows detached instead of running for a dead session with a lingering running result', () => {
     const h = makeHarness();
     const entry = makeExecUse('call_detached', 'python3 -m uvicorn tools.dashboard.server:app');
