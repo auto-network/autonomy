@@ -29,7 +29,9 @@
     carryPrefix: '',        // text carried over when the binding switches mid-buffer
                             // (#23 switch-takes-buffer): prepended to whatever the
                             // NEW session transcribes so the old text isn't clobbered.
-    removed: [],            // recently cleared/sent text, for re-emit suppression
+    removed: [],            // recently cleared/sent text, for re-emit suppression (legacy/flag-off path)
+    serverEpoch: 0,         // #43: highest transcript-acceptance epoch seen from the server
+    acceptEpoch: 0,         // #43: drop transcript/buffer_state frames whose epoch < this
     wakeLock: null,
     reconnectAttempt: 0,    // backoff index for the auto-reconnect loop
     reconnectTimer: null,
@@ -317,14 +319,45 @@
     catch (_e) { return null; }
   }
 
+  // #43: reset-suppression mode. When the `voice.reset_suppression` flag is on,
+  // re-emit suppression is handled by a server-side WhisperLive reset + per-frame
+  // epoch acceptance (this module), and the explicit resetEpoch() hook replaces the
+  // legacy bufferText==='' -> discard inference + the _stripRemoved heuristic.
+  // Flag absent/off (the default) keeps the legacy path byte-for-byte.
+  function _resetMode() {
+    try {
+      var f = (typeof Alpine !== 'undefined' && Alpine.store) ? Alpine.store('flags') : null;
+      return !!(f && typeof f.get === 'function' && f.get('voice.reset_suppression') === true);
+    } catch (_e) { return false; }
+  }
+
   function wsUrl(bind) {
     var proto = (typeof location !== 'undefined' && location.protocol === 'https:') ? 'wss:' : 'ws:';
     return proto + '//' + location.host + '/ws/voice?bind=' + encodeURIComponent(bind);
   }
 
-  function sendControl(type) {
+  function sendControl(type, extra) {
     if (!s.ws || s.ws.readyState !== WebSocket.OPEN) return false;
-    try { s.ws.send(JSON.stringify({ type: type })); return true; } catch (_e) { return false; }
+    var frame = { type: type };
+    if (extra) { for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) frame[k] = extra[k]; } }
+    try { s.ws.send(JSON.stringify(frame)); return true; } catch (_e) { return false; }
+  }
+
+  // #43: explicit Send/Clear reset hook. Called by the viewer's Send/Clear handlers
+  // (voice-shell.js), the SOLE callers — never inferred from an empty buffer. It
+  // (a) raises acceptEpoch so every in-flight pre-reset frame (the re-emit of the
+  // just-sent/cleared speech) is dropped before it can repopulate the buffer, and
+  // (b) tells the server to reset the WhisperLive session (flush its buffered audio
+  // + bump the epoch). The server's post-reset frames carry the new epoch and flow
+  // again, so genuinely-new speech is never suppressed. No-op (and harmless) when
+  // the flag is off — the legacy discard path owns reset then.
+  function resetEpoch(reason) {
+    if (!_resetMode()) return false;
+    s.acceptEpoch = s.serverEpoch + 1;
+    s.finals = '';
+    s.lastRendered = '';
+    _traceRec('reset', { reason: reason || '', acceptEpoch: s.acceptEpoch });
+    return sendControl('reset', { reason: reason || '' });
   }
 
   function _renderBuffer(text) {
@@ -370,13 +403,27 @@
         _traceRec('muted-drop', type);
         return;
       }
+      // #43 epoch acceptance: in reset mode, every transcript/buffer_state frame
+      // carries the server's reset epoch. Drop anything below acceptEpoch — that's
+      // the re-emit of just-sent/cleared speech still draining from the pre-reset
+      // WhisperLive buffer. Genuine post-reset speech arrives at the new epoch
+      // (>= acceptEpoch) and flows. Track the high-water epoch so the next
+      // resetEpoch() raises the bar correctly.
+      var _rmode = _resetMode();
+      if (_rmode && (type === 'transcript' || type === 'buffer_state')) {
+        var ep = (frame.epoch == null) ? 0 : (frame.epoch | 0);
+        if (ep < s.acceptEpoch) { _traceRec('epoch-drop', ep); return; }
+        if (ep > s.serverEpoch) s.serverEpoch = ep;
+      }
       if (type === 'transcript') {
         var t = String(frame.text || '').trim();
         if (frame.kind === 'final') {
           if (t) {
             var candF = s.finals ? (s.finals + ' ' + t) : t;
-            var keptF = _stripRemoved(candF);
-            if (s.removed.length) _vlog('FINAL t="' + t.slice(0, 70) + '" removedN=' + s.removed.length + ' kept="' + keptF.slice(0, 70) + '"');
+            // Reset mode handles re-emit via epoch; the fuzzy _stripRemoved
+            // heuristic is bypassed (it would risk stripping legit text).
+            var keptF = _rmode ? candF : _stripRemoved(candF);
+            if (!_rmode && s.removed.length) _vlog('FINAL t="' + t.slice(0, 70) + '" removedN=' + s.removed.length + ' kept="' + keptF.slice(0, 70) + '"');
             s.finals = keptF;
             _finalCount++;
             _renderBuffer(s.finals);
@@ -384,8 +431,8 @@
         } else if (frame.kind === 'partial') {
           if (t) {
             var candP = s.finals ? (s.finals + ' ' + t) : t;
-            var keptP = _stripRemoved(candP);
-            if (s.removed.length) _vlog('PARTIAL t="' + t.slice(0, 70) + '" removedN=' + s.removed.length + ' kept="' + keptP.slice(0, 70) + '"');
+            var keptP = _rmode ? candP : _stripRemoved(candP);
+            if (!_rmode && s.removed.length) _vlog('PARTIAL t="' + t.slice(0, 70) + '" removedN=' + s.removed.length + ' kept="' + keptP.slice(0, 70) + '"');
             _renderBuffer(keptP);
           }
         }
@@ -396,8 +443,8 @@
         // buffer, which re-emits can have re-polluted after a Clear/Send — this
         // path used to bypass suppression entirely.
         var bsRaw = String(frame.text || '');
-        var bsKept = _stripRemoved(bsRaw);
-        if (bsRaw) _vlog('BUFFER_STATE raw="' + bsRaw.slice(0, 70) + '" removedN=' + s.removed.length + ' kept="' + bsKept.slice(0, 70) + '"');
+        var bsKept = _rmode ? bsRaw : _stripRemoved(bsRaw);
+        if (!_rmode && bsRaw) _vlog('BUFFER_STATE raw="' + bsRaw.slice(0, 70) + '" removedN=' + s.removed.length + ' kept="' + bsKept.slice(0, 70) + '"');
         s.finals = bsKept;
         _renderBuffer(s.finals);
         return;
@@ -567,7 +614,12 @@
     Alpine.effect(function () {
       var st = store();
       if (!st) return;
-      var buf = st.bufferText;
+      var buf = st.bufferText;   // read first to keep the Alpine dependency tracked
+      // #43: in reset mode the explicit resetEpoch() hook (called by the Send/Clear
+      // handlers) owns reset — an empty buffer is NOT an action here, because it can
+      // also be a server-side WhisperLive reset or a reconnect straggler. Never
+      // infer a discard from bufferText===''. Legacy path runs only when flag off.
+      if (_resetMode()) return;
       // Remember what was DISPLAYED (last render) — NOT just committed finals.
       // Clearing mid-utterance leaves s.finals empty (only a partial was shown),
       // yet whisper_live still finalizes that segment and re-emits the whole
@@ -594,6 +646,7 @@
     teardown: teardown,
     retryReconnect: retryReconnectNow,
     onServerRecovered: onServerRecovered,
+    resetEpoch: resetEpoch,   // #43: explicit Send/Clear reset hook (voice-shell.js calls this)
     dumpTrace: function () { _traceDump('manual'); },
     startTrace: function () { try { localStorage.setItem('voice-trace', '1'); } catch (_e) {} s.traceOn = true; },
     stopTrace: function () { try { localStorage.removeItem('voice-trace'); } catch (_e) {} s.traceOn = false; },
