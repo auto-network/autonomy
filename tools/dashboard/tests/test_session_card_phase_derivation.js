@@ -25,7 +25,6 @@ const PHASE_PAIR = {
   pending: { is_live: true, setup_phase: 'pending', harness_phase: 'pending' },
   container_starting: { is_live: true, setup_phase: 'container_starting', harness_phase: 'harness_starting' },
   entrypoint: { is_live: true, setup_phase: 'entrypoint_running', harness_phase: 'pending' },
-  dind_ready: { is_live: true, setup_phase: 'dind_ready', harness_phase: 'pending' },
   setup_running: { is_live: true, setup_phase: 'setup_running', harness_phase: 'harness_starting' },
   harness_starting: { is_live: true, setup_phase: 'setup_complete', harness_phase: 'harness_starting', harness: 'claude' },
   first_turn_written: { is_live: true, setup_phase: 'setup_complete', harness_phase: 'first_turn_written' },
@@ -45,7 +44,6 @@ const DESIGN_CHIP = {
   pending: 'Queued',
   container_starting: 'Starting container',
   entrypoint: 'Preparing workspace',
-  dind_ready: 'Docker ready',
   setup_running: 'Setup running',
   // harness_starting: dynamic — see "harness_starting harness-dynamic" test
   first_turn_written: 'Verifying input',
@@ -61,7 +59,6 @@ const DESIGN_TONE = {
   pending: '',
   container_starting: '',
   entrypoint: '',
-  dind_ready: '',
   setup_running: '',
   harness_starting: '',
   first_turn_written: '',
@@ -77,7 +74,6 @@ const DESIGN_LANE_VALUES = {
   pending:             ['allocating', 'waiting',    'pending', 'queued'],
   container_starting:  ['created',    'container',  'pending', 'queued'],
   entrypoint:          ['created',    'entrypoint', 'pending', 'queued'],
-  dind_ready:          ['created',    'docker',     'pending', 'queued'],
   setup_running:       ['created',    'running',    'booting', 'queued'],
   harness_starting:    ['created',    'complete',   'booting', 'queued'],
   first_turn_written:  ['created',    'complete',   'jsonl',   'checking'],
@@ -85,7 +81,7 @@ const DESIGN_LANE_VALUES = {
 };
 
 const STARTUP_VISIBLE_TRUE = [
-  'pending', 'container_starting', 'entrypoint', 'dind_ready',
+  'pending', 'container_starting', 'entrypoint',
   'setup_running', 'harness_starting', 'first_turn_written',
   'setup_failed',
 ];

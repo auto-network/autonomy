@@ -7,11 +7,10 @@
 // chip/lifecycle/action markup expects.
 //
 // Design rev 63542418-40f2-40cd-972b-7ae1a50f41a3 (Session Card Lifecycle
-// States) maps 13 derivable states from the (setup_phase, harness_phase)
+// States) maps derivable states from the (setup_phase, harness_phase)
 // pair plus ``is_live`` + ``resumable``. The derivation here is
 // data-driven over that pair — intermediate states (entrypoint_running,
-// dind_ready, setup_running) that the backend doesn't emit live yet
-// will light up automatically when their markers land later.
+// setup_running) light up automatically as their markers are written.
 //
 // Exposed via ``window.Autonomy.lifecycle.*`` — same global-namespace
 // pattern the voice helpers (``window.Autonomy.voice.ui.*``) use, so
@@ -95,7 +94,9 @@
     // becomes the visible chip.
     if (setupPhase !== "setup_complete") {
       if (setupPhase === "setup_running") return "setup_running";
-      if (setupPhase === "dind_ready") return "dind_ready";
+      // dind_ready dropped — verified by host-0531-020038 audit (turn 549):
+      // dind-entrypoint.sh writes only entrypoint_running + setup_running.
+      // The dind_ready marker is never written by any production code path.
       if (setupPhase === "entrypoint_running") return "entrypoint";
       if (setupPhase === "container_starting") return "container_starting";
     }
@@ -125,7 +126,6 @@
     pending: "Queued",
     container_starting: "Starting container",
     entrypoint: "Preparing workspace",
-    dind_ready: "Docker ready",
     setup_running: "Setup running",
     // harness_starting handled in phaseChip() — dynamic over s.harness
     first_turn_written: "Verifying input",
@@ -194,7 +194,9 @@
       // the actual phase has progressed past the target; "active" when
       // the actual phase is at the target; "failed" propagates only to
       // the segment that owns the in-flight failure.
-      var ORDER = ["pending", "container_starting", "entrypoint_running", "dind_ready", "setup_running", "setup_complete"];
+      // dind_ready dropped — never written by dind-entrypoint.sh in production
+      // (host-0531-020038 audit turn 549). Phase order is the real progression.
+      var ORDER = ["pending", "container_starting", "entrypoint_running", "setup_running", "setup_complete"];
       var actual = ORDER.indexOf(setupPhase);
       var want = ORDER.indexOf(target);
       if (actual < 0 || want < 0) return "";
@@ -232,7 +234,6 @@
     pending:             ["allocating", "waiting",    "pending", "queued"],
     container_starting:  ["created",    "container",  "pending", "queued"],
     entrypoint:          ["created",    "entrypoint", "pending", "queued"],
-    dind_ready:          ["created",    "docker",     "pending", "queued"],
     setup_running:       ["created",    "running",    "booting", "queued"],
     harness_starting:    ["created",    "complete",   "booting", "queued"],
     first_turn_written:  ["created",    "complete",   "jsonl",   "checking"],
