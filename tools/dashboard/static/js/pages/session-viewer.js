@@ -268,6 +268,10 @@
       resendOutbox() {
         var s = Alpine.store('sessions')[this.sessionKey];
         if (!s || !s.outbox) return;
+        // Resend is only for a message that already PARKED as unconfirmed. If one
+        // is already in flight ('sending'), a second tap must be a no-op — never
+        // re-POST a message that's still being delivered (duplicate-send guard).
+        if (s.outbox.state === 'sending') return;
         s.outbox = Object.assign({}, s.outbox, { state: 'sending' });
         this._committedLocalId = s.outbox.localId;
         this._durableSend(s.outbox.text, s.outbox.localId);
@@ -2033,6 +2037,16 @@
           // a failed/timed-out send parks the tile in 'unconfirmed', recoverable.
           var sid = this.sessionKey;
           var s = window.getSessionStore(sid);
+          // One message in flight per session. If an outbox is already pending
+          // (sending or unconfirmed), do NOT stage a second send — this is the
+          // guard the capsule path (_commitBuffer) already has; the viewer Send
+          // button was missing it, so repeated taps re-POSTed the same text (the
+          // duplicate-send the operator demonstrated). A stuck message is retried
+          // explicitly via resendOutbox(), not by tapping Send again.
+          if (s && s.outbox && (s.outbox.state === 'sending' || s.outbox.state === 'unconfirmed')) {
+            this.sending = false;
+            return;
+          }
           var localId = window.newOutboxId ? window.newOutboxId() : ('ob_' + (s ? (s.seq || 0) : 0));
           this._committedLocalId = localId;   // claim it so the voice watcher won't double-send
           if (s) {
