@@ -5564,72 +5564,9 @@ async def api_session_create(request):
     # — long enough for poetry install + container image pulls on a
     # cold cache, short enough that abandoned sessions don't leak tasks.
     if is_container and run_dirs:
-        run_dir = run_dirs[0]
-        async def _watch_setup_exit():
-            setup_exit = run_dir / ".setup-exit"
-            setup_phase_file = run_dir / ".setup_phase"
-            # Forward-only phase order. The intermediate markers
-            # (entrypoint_running / dind_ready / setup_running) are written
-            # by dind-entrypoint.sh into /workspace/output/.setup_phase; the
-            # terminal state comes from .setup-exit. Rendering the linear
-            # sequence is what closes the "phases trigger out of order or
-            # not at all" gap — without the markers the card jumps straight
-            # from container_starting to setup_complete.
-            order = {
-                "container_starting": 0,
-                "entrypoint_running": 1,
-                "dind_ready": 2,
-                "setup_running": 3,
-                "setup_complete": 4,
-                "setup_failed": 4,
-            }
-            last = "container_starting"
-            deadline = time.time() + 600  # 10 min
-            while time.time() < deadline:
-                # Intermediate marker from the entrypoint — advance forward
-                # only, broadcast on each real transition.
-                try:
-                    if setup_phase_file.exists():
-                        marker = setup_phase_file.read_text().strip()
-                        if marker in order and order[marker] > order.get(last, 0):
-                            last = marker
-                            dashboard_db.update_tail_state(tmux_name, setup_phase=marker)
-                            await event_bus.broadcast(
-                                "session:registry", session_monitor.get_registry()
-                            )
-                            logger.info(
-                                "auto-a1jco: %s setup_phase=%s (marker)",
-                                tmux_name, marker,
-                            )
-                except Exception:
-                    logger.debug(
-                        "auto-a1jco: .setup_phase marker read failed for %s",
-                        tmux_name, exc_info=True,
-                    )
-                if setup_exit.exists():
-                    try:
-                        exit_code = setup_exit.read_text().strip()
-                        phase = "setup_complete" if exit_code == "0" else "setup_failed"
-                        dashboard_db.update_tail_state(tmux_name, setup_phase=phase)
-                        await event_bus.broadcast(
-                            "session:registry", session_monitor.get_registry()
-                        )
-                        logger.info(
-                            "auto-a1jco: %s setup_phase=%s (exit=%s)",
-                            tmux_name, phase, exit_code,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "auto-a1jco: failed to read .setup-exit for %s",
-                            tmux_name, exc_info=True,
-                        )
-                    return
-                await asyncio.sleep(1)
-            logger.info(
-                "auto-a1jco: .setup-exit watcher for %s timed out (10 min)",
-                tmux_name,
-            )
-        asyncio.create_task(_watch_setup_exit())
+        # auto-a1jco: per-session .setup-exit watcher. Extracted to a shared
+        # helper so api_session_resume drives the same phase progression.
+        _spawn_setup_exit_watcher(tmux_name, run_dirs[0])
 
     # ── Resolve primer (container only) ─────────────────────────
     # Primer URL takes precedence over the orientation Setting. When no
@@ -5749,6 +5686,93 @@ async def api_session_create(request):
     if primer_error:
         resp["primer_warning"] = primer_error
     return JSONResponse(resp, status_code=202)
+
+
+def _spawn_setup_exit_watcher(tmux_name: str, run_dir: Path) -> None:
+    """Arm the per-session ``.setup_phase`` / ``.setup-exit`` watcher for a
+    (re)launched container so its dind-entrypoint markers drive the lifecycle
+    chip. Shared by api_session_create and api_session_resume — without it on
+    the resume path the relaunched container's markers went unread,
+    ``harness_phase`` never entered the screen-poll window, and the chip froze
+    on "Queued".
+
+    Clears stale markers from a prior boot first: resume reuses the original
+    run_dir, so a leftover ``.setup-exit`` (exit=0) would make the watcher jump
+    straight to setup_complete and skip the whole boot. On a fresh create dir
+    the unlinks are harmless no-ops.
+    """
+    for _stale in (".setup_phase", ".setup-exit"):
+        try:
+            (run_dir / _stale).unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            logger.debug(
+                "setup-watcher: stale %s clear failed for %s",
+                _stale, tmux_name, exc_info=True,
+            )
+
+    async def _watch_setup_exit():
+        setup_exit = run_dir / ".setup-exit"
+        setup_phase_file = run_dir / ".setup_phase"
+        # Forward-only phase order. Intermediate markers (entrypoint_running /
+        # dind_ready / setup_running) are written by dind-entrypoint.sh into
+        # /workspace/output/.setup_phase; the terminal state comes from
+        # .setup-exit. Without the markers the card jumps straight from
+        # container_starting to setup_complete.
+        order = {
+            "container_starting": 0,
+            "entrypoint_running": 1,
+            "dind_ready": 2,
+            "setup_running": 3,
+            "setup_complete": 4,
+            "setup_failed": 4,
+        }
+        last = "container_starting"
+        deadline = time.time() + 600  # 10 min
+        while time.time() < deadline:
+            try:
+                if setup_phase_file.exists():
+                    marker = setup_phase_file.read_text().strip()
+                    if marker in order and order[marker] > order.get(last, 0):
+                        last = marker
+                        dashboard_db.update_tail_state(tmux_name, setup_phase=marker)
+                        await event_bus.broadcast(
+                            "session:registry", session_monitor.get_registry()
+                        )
+                        logger.info(
+                            "auto-a1jco: %s setup_phase=%s (marker)",
+                            tmux_name, marker,
+                        )
+            except Exception:
+                logger.debug(
+                    "auto-a1jco: .setup_phase marker read failed for %s",
+                    tmux_name, exc_info=True,
+                )
+            if setup_exit.exists():
+                try:
+                    exit_code = setup_exit.read_text().strip()
+                    phase = "setup_complete" if exit_code == "0" else "setup_failed"
+                    dashboard_db.update_tail_state(tmux_name, setup_phase=phase)
+                    await event_bus.broadcast(
+                        "session:registry", session_monitor.get_registry()
+                    )
+                    logger.info(
+                        "auto-a1jco: %s setup_phase=%s (exit=%s)",
+                        tmux_name, phase, exit_code,
+                    )
+                except Exception:
+                    logger.warning(
+                        "auto-a1jco: failed to read .setup-exit for %s",
+                        tmux_name, exc_info=True,
+                    )
+                return
+            await asyncio.sleep(1)
+        logger.info(
+            "auto-a1jco: .setup-exit watcher for %s timed out (10 min)",
+            tmux_name,
+        )
+    asyncio.create_task(_watch_setup_exit())
 
 
 async def api_session_resume(request):
@@ -6085,6 +6109,33 @@ async def api_session_resume(request):
             jsonl_path=Path(file_path),
             session_uuid=session_uuid,
         )
+
+    # ── Arm lifecycle-phase tracking for the relaunched session ──
+    # Mirror of api_session_create. Without this a resumed session keeps the
+    # dead row's STALE phase columns, no watcher reads the relaunched
+    # container's .setup_phase markers, harness_phase never enters the
+    # screen-poll window, and the chip freezes on "Queued" (no trust/composer
+    # detection). harness_phase MUST reset to "harness_starting" (not
+    # "pending") — the screen-poll gates on {harness_starting,
+    # first_turn_written}, so "pending" would never be polled, which is the
+    # exact freeze we're fixing.
+    try:
+        dashboard_db.update_tail_state(
+            tmux_name,
+            setup_phase=(
+                "container_starting" if session_type == "container"
+                else "setup_complete"
+            ),
+            harness_phase="harness_starting",
+        )
+        await event_bus.broadcast("session:registry", session_monitor.get_registry())
+    except Exception:
+        logger.warning(
+            "api_session_resume: failed to arm initial phases for %s",
+            tmux_name, exc_info=True,
+        )
+    if session_type == "container":
+        _spawn_setup_exit_watcher(tmux_name, Path(output_dir))
 
     if not label:
         label = src.get("title", "") if source_id and src else ""
