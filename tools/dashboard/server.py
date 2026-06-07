@@ -6073,6 +6073,43 @@ async def api_session_resume(request):
     })
 
 
+def _deliver_file_to_session(tmux_session: str, host_path: str, container_dest: str | None = None) -> str:
+    """Return the path *tmux_session*'s agent should read for a host file.
+
+    Container sessions get the file docker-cp'd to ``container_dest`` (default
+    ``/tmp/<name>``) and read that path; host (terminal) sessions run on the
+    host filesystem and read ``host_path`` directly — ``docker inspect``
+    naturally distinguishes them (no running container ⇒ host path). Single
+    source of truth for the host-vs-container split so callers (upload,
+    screenshot, …) don't each re-implement it and grow the same edge cases.
+    """
+    if not tmux_session:
+        return host_path
+    container_path = container_dest or f"/tmp/{Path(host_path).name}"
+    try:
+        inspect = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", tmux_session],
+            capture_output=True, text=True,
+        )
+    except (FileNotFoundError, OSError):
+        inspect = None
+    if inspect and inspect.returncode == 0 and inspect.stdout.strip() == "true":
+        try:
+            cp = subprocess.run(
+                ["docker", "cp", host_path, f"{tmux_session}:{container_path}"],
+                capture_output=True, text=True,
+            )
+        except (FileNotFoundError, OSError):
+            cp = None
+        if cp and cp.returncode == 0:
+            return container_path
+        logger.warning(
+            "[deliver] docker cp failed for %s: %s",
+            tmux_session, (cp.stderr if cp else "docker unavailable"),
+        )
+    return host_path
+
+
 async def api_upload(request):
     """Upload a file to the workspace.
 
@@ -6154,27 +6191,7 @@ async def api_upload(request):
         dest.write_bytes(contents)
 
         host_path = str(dest)
-        agent_path = host_path
-
-        if tmux_session:
-            try:
-                inspect = subprocess.run(
-                    ["docker", "inspect", "-f", "{{.State.Running}}", tmux_session],
-                    capture_output=True, text=True,
-                )
-            except (FileNotFoundError, OSError):
-                inspect = None
-            if inspect and inspect.returncode == 0 and inspect.stdout.strip() == "true":
-                container_path = f"/tmp/{dest.name}"
-                try:
-                    cp = subprocess.run(
-                        ["docker", "cp", host_path, f"{tmux_session}:{container_path}"],
-                        capture_output=True, text=True,
-                    )
-                except (FileNotFoundError, OSError):
-                    cp = None
-                if cp and cp.returncode == 0:
-                    agent_path = container_path
+        agent_path = _deliver_file_to_session(tmux_session, host_path) if tmux_session else host_path
 
         rel_path = ""
         if tmux_session and AGENT_RUNS_DIR in dest.parents:
@@ -7364,27 +7381,18 @@ async def api_design_screenshot(request):
     tmux_session = request.query_params.get("tmux_session", "").strip()
     injected = False
     if tmux_session and _tmux_session_exists(tmux_session):
-        # Copy screenshot into container so Claude Code can read it
-        container_image_path = "/tmp/screenshot.png"
-        cp_result = subprocess.run(
-            ["docker", "cp", abs_path, f"{tmux_session}:{container_image_path}"],
-            capture_output=True,
+        # Same delivery path as a normal image upload: host sessions read the
+        # host path, container sessions get it docker-cp'd in (auto-resolved).
+        image_path = _deliver_file_to_session(tmux_session, abs_path, "/tmp/screenshot.png")
+        # First send: bare image path (triggers isMeta=True image injection)
+        await tmux_send(tmux_session, image_path)
+        # Second send: follow-up text so agent sees the image and acts
+        await tmux_send(
+            tmux_session,
+            "Screenshot captured — describe what you see and continue iterating",
         )
-        if cp_result.returncode == 0:
-            # First send: bare image path (triggers isMeta=True image injection)
-            await tmux_send(tmux_session, container_image_path)
-            # Second send: follow-up text so agent sees the image and acts
-            await tmux_send(
-                tmux_session,
-                "Screenshot captured — describe what you see and continue iterating",
-            )
-            injected = True
-            logger.info("[screenshot] Two-send injection complete for %s", tmux_session)
-        else:
-            logger.warning(
-                "[screenshot] docker cp failed for %s: %s",
-                tmux_session, cp_result.stderr.decode(errors="replace"),
-            )
+        injected = True
+        logger.info("[screenshot] injection complete for %s", tmux_session)
 
     return JSONResponse({"path": abs_path, "injected": injected})
 
