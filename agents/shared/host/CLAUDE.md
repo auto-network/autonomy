@@ -66,6 +66,7 @@ Run `bd --help` for full reference.
 
 ### agent-browser — Headless Chrome
 Pre-configured: dark mode, PNG screenshots to `/tmp/screenshots/`, `--no-sandbox`.
+**Location:** `/home/jeremy/.nvm/versions/node/v22.18.0/bin/agent-browser` (installed via nvm — NOT on a non-login shell's PATH, so `which agent-browser` and `find` come up empty from agent sessions; use the absolute path or `bash -lc`).
 ```bash
 agent-browser open https://localhost:8080 --ignore-https-errors
 agent-browser snapshot -i             # interactive elements with refs
@@ -128,3 +129,4 @@ All localhost services reachable directly:
 - In design discussions, your role is to formulate and polish beads — not to dispatch or implement while the design is ongoing. The user will signal when work is ready to dispatch.
 - Orient yourself using the tools above **after** the user tells you what they need — not as a startup ritual.
 - You have full write access — be deliberate with destructive operations (force push, dropping DBs, killing the dispatcher, deleting worktrees).
+- **Git here: commit, don't sign, don't push, don't ask.** Committing finished work locally is routine — keep the history without asking permission. Autonomy commits are **never signed** and **never pushed** by you; pushing to origin is a rare, explicit operator action you don't initiate, offer, or caveat. Do not append "it's unsigned / yours to push / you sign it" to commits — that ritual belongs to the **Anchore/enterprise** workspace (which *does* sign + push), not here. This overrides the generic "commit/push only when the user asks" default.
