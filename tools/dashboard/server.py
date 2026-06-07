@@ -10419,6 +10419,14 @@ async def api_graph_note(request):
         tmp_paths, err = await _materialize_uploads(form)
         if err is not None:
             return err
+        html_paths, err = await _materialize_uploads(form, key="html")
+        if err is not None:
+            for p in tmp_paths:
+                _safe_unlink(p)
+            return err
+        html_path = html_paths[0] if html_paths else None
+        for extra in html_paths[1:]:
+            _safe_unlink(extra)
     else:
         body = await request.json()
         e = _graph_validate_content(body)
@@ -10433,6 +10441,7 @@ async def api_graph_note(request):
         short_description = body.get("short_description")
         keywords = body.get("keywords")
         tmp_paths = []
+        html_path = None
 
     tags = str(tags_raw).split(",") if tags_raw else []
 
@@ -10444,6 +10453,7 @@ async def api_graph_note(request):
             author=author,
             project=project,
             attachments=tmp_paths or None,
+            html_path=html_path,
             short_description=short_description,
             keywords=keywords,
             org=org,
@@ -10455,6 +10465,8 @@ async def api_graph_note(request):
     finally:
         for p in tmp_paths:
             _safe_unlink(p)
+        if html_path:
+            _safe_unlink(html_path)
 
     _checkpoint_graph()
     return JSONResponse({
@@ -10464,6 +10476,7 @@ async def api_graph_note(request):
         "lines": result["lines"],
         "chars": result["chars"],
         "attachments": result["attachments"],
+        "rich_content": result.get("rich_content", False),
         "short_description": result.get("short_description"),
         "keywords": result.get("keywords"),
     })
@@ -10615,6 +10628,14 @@ async def api_graph_note_update(request):
         tmp_paths, err = await _materialize_uploads(form)
         if err is not None:
             return err
+        html_paths, err = await _materialize_uploads(form, key="html")
+        if err is not None:
+            for p in tmp_paths:
+                _safe_unlink(p)
+            return err
+        html_path = html_paths[0] if html_paths else None
+        for extra in html_paths[1:]:
+            _safe_unlink(extra)
     else:
         body = await request.json()
         source_id = body.get("source_id", "")
@@ -10639,6 +10660,7 @@ async def api_graph_note_update(request):
         short_description = body.get("short_description")
         keywords = body.get("keywords")
         tmp_paths = []
+        html_path = None
 
     try:
         result = await asyncio.to_thread(
@@ -10648,6 +10670,7 @@ async def api_graph_note_update(request):
             title=title,
             integrate_comments=integrate_ids,
             attachments=tmp_paths or None,
+            html_path=html_path,
             short_description=short_description,
             keywords=keywords,
             org=org,
@@ -10663,6 +10686,8 @@ async def api_graph_note_update(request):
     finally:
         for p in tmp_paths:
             _safe_unlink(p)
+        if html_path:
+            _safe_unlink(html_path)
 
     _checkpoint_graph()
     return JSONResponse({
@@ -10675,6 +10700,7 @@ async def api_graph_note_update(request):
         "integrated": result["integrated"],
         "not_found_comments": result["not_found_comments"],
         "attachments": result["attachments"],
+        "rich_content": result.get("rich_content", False),
         "title": result.get("title"),
         "short_description": result.get("short_description"),
         "keywords": result.get("keywords"),
