@@ -5716,17 +5716,18 @@ def _spawn_setup_exit_watcher(tmux_name: str, run_dir: Path) -> None:
         setup_exit = run_dir / ".setup-exit"
         setup_phase_file = run_dir / ".setup_phase"
         # Forward-only phase order. Intermediate markers (entrypoint_running /
-        # dind_ready / setup_running) are written by dind-entrypoint.sh into
+        # setup_running) are written by dind-entrypoint.sh into
         # /workspace/output/.setup_phase; the terminal state comes from
         # .setup-exit. Without the markers the card jumps straight from
         # container_starting to setup_complete.
+        # dind_ready dropped from the order — never written by
+        # dind-entrypoint.sh in production (host-0531-020038 audit turn 549).
         order = {
             "container_starting": 0,
             "entrypoint_running": 1,
-            "dind_ready": 2,
-            "setup_running": 3,
-            "setup_complete": 4,
-            "setup_failed": 4,
+            "setup_running": 2,
+            "setup_complete": 3,
+            "setup_failed": 3,
         }
         last = "container_starting"
         deadline = time.time() + 600  # 10 min
