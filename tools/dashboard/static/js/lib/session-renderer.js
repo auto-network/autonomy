@@ -173,28 +173,16 @@
       return !!(entry && entry.todo_annotation);
     },
 
-    /** Returns true if a tool_use entry has no corresponding terminal result yet.
-     *  A terminal local result wins before server pendingToolIds. Otherwise uses
-     *  server-provided pendingToolIds while the session is in tool_running state.
-     *  Dead sessions cannot have running tools. Falls back to local _resultMap
-     *  for history/replay and during initial load.
-     */
+    /** Returns true only when the server marks this tool as currently pending. */
     isToolRunning(entry) {
       if (entry.type !== 'tool_use') return false;
       var result = this._resultMap[entry.tool_id];
       if (result && result.status && result.status !== 'running') return false;
       var store = Alpine.store('sessions')[this.sessionKey];
-      if (store) {
-        // Dead sessions: no tool can be running (killed mid-flight)
-        if (store.activityState === 'dead') return false;
-        // Server says tools are running — check the server-provided set
-        if (store.activityState === 'tool_running') {
-          return !!store.pendingToolIds[entry.tool_id];
-        }
+      if (store && store.activityState === 'tool_running') {
+        return !!(store.pendingToolIds && store.pendingToolIds[entry.tool_id]);
       }
-      // Fallback to local resultMap (history, initial load, non-tool_running states)
-      if (result && result.status === 'running') return true;
-      return !result;
+      return false;
     },
 
     /** Elapsed seconds since entry.timestamp (for running tools). */
@@ -222,9 +210,9 @@
         return badges;
       }
 
-      // Running tool: show elapsed time + "Running" badge
+      // Running tool: show elapsed time + "Running" badge.
       // Touch _tick to force Alpine re-evaluation every second
-      if (!result || result.status === 'running') {
+      if (this.isToolRunning(entry)) {
         void this._tick;
         const elapsed = this._elapsed(entry);
         const elapsedText = this.durationText(elapsed);
