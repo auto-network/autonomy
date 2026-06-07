@@ -43,6 +43,13 @@
     }
   </script>
   <style>
+    /* FOUC guard: hide Alpine-controlled elements until Alpine initializes and
+       evaluates x-show. Without this on-screen rule, every element carrying
+       x-cloak (voice sheet, capsule, caption zone, Actions button, modals)
+       renders at full size on initial load and only snaps hidden once Alpine
+       boots — a visible flash on hard reload. (The print block has its own
+       [x-cloak] rule, which only applies to @media print.) */
+    [x-cloak] { display: none !important; }
     .markdown-body h1 { font-size: 1.5rem; font-weight: 700; margin: 1rem 0 0.5rem; }
     .markdown-body h2 { font-size: 1.25rem; font-weight: 600; margin: 1rem 0 0.5rem; border-bottom: 1px solid #374151; padding-bottom: 0.25rem; }
     .markdown-body h3 { font-size: 1.1rem; font-weight: 600; margin: 0.75rem 0 0.25rem; }
