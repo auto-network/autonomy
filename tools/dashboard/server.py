@@ -5671,7 +5671,7 @@ async def api_session_create(request):
             )
             # Stay unique per session — never a generic literal here, or the
             # watcher cannot tell two concurrent host JSONLs apart.
-            first_message = f"Session {tmux_name} started. Awaiting instructions."
+            first_message = f"Session {tmux_name} started."
 
     if first_message:
         async def _inject_first_message():
