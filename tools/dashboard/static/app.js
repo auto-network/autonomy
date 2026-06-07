@@ -2372,12 +2372,66 @@ function _recordOperatorActivity() {
   } catch (_e) {}
 }
 
+// ── Last-session restore ─────────────────────────────────────
+// Persist the canonical path of the most-recently-viewed session. Keyed on
+// the full /session/<project>/<name> URL so restore is a no-op lookup.
+const _LAST_SESSION_KEY = 'lastSessionPath';
+const _LAST_SESSION_TS_KEY = 'lastSessionTs';
+
+function _recordLastSessionView(path) {
+  try {
+    localStorage.setItem(_LAST_SESSION_KEY, path);
+    localStorage.setItem(_LAST_SESSION_TS_KEY, String(Date.now()));
+  } catch (_e) { /* private mode / quota — non-fatal */ }
+}
+
+// On a cold app start that lands on the home start_url ('/'), drop straight
+// back into the most-recently-viewed session IF it is still live — mirrors a
+// native app reopening to its last screen. Runs once per page load (only from
+// the boot path), so client-side nav to the home page never triggers it: no
+// redirect loop, no surprise once you're already using the app.
+//
+// Non-blocking by design — the home page has already rendered (route() ran
+// first); this async liveness check only *then* navigates, so initial paint
+// pays zero extra cost. If the session is dead (or the check fails) we leave
+// the operator on the home page.
+async function _maybeRestoreLastSession() {
+  // Home landing only. The PWA start_url is '/', which the server 307s to
+  // '/beads' — so a cold boot lands on one of these. Restoring only from the
+  // home page means a deep-linked reload (already on a session URL, or any
+  // other page) is left untouched.
+  const home = window.location.pathname;
+  if (home !== '/' && home !== '/beads') return;
+  let stored;
+  try { stored = localStorage.getItem(_LAST_SESSION_KEY); } catch (_e) { return; }
+  if (!stored || !_isSessionPath(stored)) return;
+  // Liveness gate: the tmux name is the last path segment.
+  const tmux = stored.split('/').pop();
+  try {
+    const res = await fetch('/api/session/' + encodeURIComponent(tmux));
+    if (!res.ok) return;                       // 404 = pruned/unknown session
+    const data = await res.json();
+    if (!data.is_live) return;                 // dead session — stay home
+  } catch (_e) { return; }
+  // Bail if the operator navigated away while the check was in flight.
+  if (window.location.pathname !== home) return;
+  navigateTo(stored);                          // pushState — back returns home
+}
+
 function navigateTo(path) {
   if (path === window.location.pathname + window.location.search) return;
   _recordOperatorActivity();
   const fromPath = window.location.pathname;
   history.replaceState({ scrollY: window.scrollY }, '');
   history.pushState({}, '', path);
+  // Record the most-recently-viewed session here (not only in route()): the
+  // mobile overlay branch below returns BEFORE route() runs, so recording in
+  // route() alone misses every session opened from the list on mobile — which
+  // is the common case on the iOS PWA. window.location.pathname is the clean
+  // canonical path (query stripped) now that pushState has applied it.
+  if (_isSessionPath(window.location.pathname)) {
+    _recordLastSessionView(window.location.pathname);
+  }
   if (fromPath === '/sessions' && _sessionOverlayCanHandle(path)) {
     _openSessionOverlay(fromPath);
     return;
@@ -2398,6 +2452,10 @@ async function route() {
   const path = window.location.pathname;
   const isTerminalPage = path === '/terminal' || path.startsWith('/terminal/');
   const isSessionViewPage = _isSessionPath(path);
+  // Remember the most-recently-viewed session so a cold app restart can drop
+  // straight back into it (see _maybeRestoreLastSession). Recorded on the
+  // canonical /session/<project>/<name> path so restore needs no extra lookup.
+  if (isSessionViewPage) _recordLastSessionView(path);
   const handledBySessionOverlay = _sessionOverlayCanHandle(path);
   const isMobileOverlayViewport = _isMobileOverlayViewport();
 
@@ -2817,4 +2875,6 @@ if (typeof window !== 'undefined') {
   }
   _renderSidebarPlugins();
   route();
+  // After the home page paints, jump back into the last live session (if any).
+  _maybeRestoreLastSession();
 })();
