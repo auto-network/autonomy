@@ -44,7 +44,7 @@ DEFAULT_KEY = "__default__"
 
 DEFAULT_TEMPLATE = (
     "Session {{tmux_name}} started in workspace "
-    "{{workspace_name}} at {{ts}}. Awaiting instructions."
+    "{{workspace_name}} at {{ts}}."
 )
 
 
