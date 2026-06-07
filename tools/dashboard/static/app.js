@@ -113,17 +113,264 @@ window.Autonomy.fetch = function (path, opts) {
   return fetch(path, _withOrgHeader(opts));
 };
 
-window.Autonomy.resetTopbar = function () {
-  const header = document.querySelector('header');
-  if (header) header.classList.remove('app-topbar-active');
-  if (appTopbarSlot) appTopbarSlot.innerHTML = '';
-};
+function _escapeTopbarHtml(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[ch]));
+}
 
-window.Autonomy.setTopbar = function (opts) {
+function _setTopbarHtml(opts) {
   const header = document.querySelector('header');
   if (!header || !appTopbarSlot) return;
   appTopbarSlot.innerHTML = opts && opts.html ? opts.html : '';
   header.classList.add('app-topbar-active');
+  header.classList.toggle('app-topbar-has-search', !!(opts && opts.hasSearch));
+}
+
+window.Autonomy.resetTopbar = function () {
+  if (window.Autonomy._activeTopbarHandle
+      && typeof window.Autonomy._activeTopbarHandle.destroy === 'function') {
+    const handle = window.Autonomy._activeTopbarHandle;
+    window.Autonomy._activeTopbarHandle = null;
+    handle.destroy();
+  }
+  const header = document.querySelector('header');
+  if (header) {
+    header.classList.remove('app-topbar-active');
+    header.classList.remove('app-topbar-has-search');
+  }
+  if (appTopbarSlot) appTopbarSlot.innerHTML = '';
+};
+
+window.Autonomy.setTopbar = function (opts) {
+  if (window.Autonomy._activeTopbarHandle
+      && typeof window.Autonomy._activeTopbarHandle.destroy === 'function') {
+    const handle = window.Autonomy._activeTopbarHandle;
+    window.Autonomy._activeTopbarHandle = null;
+    handle.destroy();
+  }
+  _setTopbarHtml(opts || {});
+  return {
+    update(nextOpts) { window.Autonomy.setTopbar(nextOpts || opts || {}); },
+    destroy() {
+      const header = document.querySelector('header');
+      if (header) header.classList.remove('app-topbar-has-search');
+      if (appTopbarSlot) appTopbarSlot.innerHTML = '';
+    },
+  };
+};
+
+window.Autonomy.topbar = window.Autonomy.topbar || {};
+window.Autonomy.topbar.set = function (initialOptions) {
+  let options = Object.assign({}, initialOptions || {});
+  const state = { searchOpen: {} };
+  let destroyed = false;
+
+  function allControls() {
+    return []
+      .concat(options.left || [])
+      .concat(options.controls || []);
+  }
+
+  function searchControls() {
+    return allControls().filter(c => c && c.type === 'search');
+  }
+
+  function controlId(control, index) {
+    return String(control.id || `${control.type || 'control'}-${index}`);
+  }
+
+  function optionRows(control) {
+    return (control.options || []).map(opt => {
+      const value = typeof opt === 'string' ? opt : opt.value;
+      const label = typeof opt === 'string' ? opt : (opt.label || opt.value);
+      const selected = String(value) === String(control.value) ? ' selected' : '';
+      return '<option value="' + _escapeTopbarHtml(value) + '"' + selected + '>'
+        + _escapeTopbarHtml(label) + '</option>';
+    }).join('');
+  }
+
+  function renderControl(control, index, region) {
+    if (!control || typeof control !== 'object') return '';
+    const id = controlId(control, index);
+    const domId = `app-topbar-${region}-${id}`;
+    if (control.type === 'html') {
+      return '<span class="app-topbar-control app-topbar-html-control"'
+        + ' data-topbar-control-id="' + _escapeTopbarHtml(id) + '">'
+        + (control.html || '') + '</span>';
+    }
+    if (control.type === 'select') {
+      const label = control.label
+        ? '<label for="' + _escapeTopbarHtml(domId) + '">'
+          + _escapeTopbarHtml(control.label) + '</label>'
+        : '';
+      return '<span class="app-topbar-control app-topbar-select-control"'
+        + ' data-topbar-control-id="' + _escapeTopbarHtml(id) + '">'
+        + label
+        + '<select id="' + _escapeTopbarHtml(domId) + '"'
+        + ' class="app-topbar-select" data-testid="' + _escapeTopbarHtml(control.testId || id) + '">'
+        + optionRows(control)
+        + '</select></span>';
+    }
+    if (control.type === 'search') {
+      const open = !!state.searchOpen[id];
+      if (!open) {
+        return '';
+      }
+      const clearLabel = control.clearLabel || 'Collapse search';
+      return '<span class="app-topbar-control app-topbar-search-control"'
+        + ' data-topbar-control-id="' + _escapeTopbarHtml(id) + '">'
+        + '<input id="' + _escapeTopbarHtml(domId) + '"'
+        + ' class="app-topbar-search-input"'
+        + ' data-testid="' + _escapeTopbarHtml(control.testId || id) + '"'
+        + ' type="text" value="' + _escapeTopbarHtml(control.value || '') + '"'
+        + ' placeholder="' + _escapeTopbarHtml(control.placeholder || 'Search') + '">'
+        + '<button type="button" class="app-topbar-icon-button"'
+        + ' data-topbar-search-clear="' + _escapeTopbarHtml(id) + '"'
+        + ' aria-label="' + _escapeTopbarHtml(clearLabel) + '"'
+        + ' title="' + _escapeTopbarHtml(clearLabel) + '">&times;</button>'
+        + '</span>';
+    }
+    if (control.type === 'button') {
+      return '<button type="button" class="app-topbar-button"'
+        + ' data-topbar-control-id="' + _escapeTopbarHtml(id) + '"'
+        + ' data-testid="' + _escapeTopbarHtml(control.testId || id) + '">'
+        + _escapeTopbarHtml(control.label || id) + '</button>';
+    }
+    return '';
+  }
+
+  function renderRegion(regionControls, region) {
+    return (regionControls || [])
+      .map((control, index) => renderControl(control, index, region))
+      .join('');
+  }
+
+  function html() {
+    const subtitle = options.subtitle
+      ? '<span>' + _escapeTopbarHtml(options.subtitle) + '</span>'
+      : '';
+    const left = renderRegion(options.left || [], 'left');
+    const controls = renderRegion(options.controls || [], 'controls');
+    return '<div class="app-structured-topbar" data-testid="app-structured-topbar">'
+      + '<div class="app-topbar-main">'
+      + '<div class="app-topbar-title"><strong>'
+      + _escapeTopbarHtml(options.title || '')
+      + '</strong>' + subtitle + '</div>'
+      + (left ? '<div class="app-topbar-left">' + left + '</div>' : '')
+      + '</div>'
+      + '<div class="app-topbar-controls">' + controls + '</div>'
+      + '</div>';
+  }
+
+  function bindControls() {
+    allControls().forEach((control, index) => {
+      if (!control || typeof control !== 'object') return;
+      const id = controlId(control, index);
+      const escapedId = window.CSS && typeof CSS.escape === 'function'
+        ? CSS.escape(id)
+        : id.replace(/["\\]/g, '\\$&');
+      const root = appTopbarSlot && appTopbarSlot.querySelector(
+        `[data-topbar-control-id="${escapedId}"]`
+      );
+      if (control.type === 'html' && root && typeof control.onMount === 'function') {
+        control.onMount(root);
+      }
+      if (control.type === 'button' && root && typeof control.onClick === 'function') {
+        root.onclick = event => control.onClick(event);
+      }
+      if (control.type === 'select' && root) {
+        const select = root.querySelector('select');
+        if (select && typeof control.onChange === 'function') {
+          select.onchange = event => control.onChange(event.target.value, event);
+        }
+      }
+      if (control.type === 'search' && root) {
+        const input = root.querySelector('input');
+        const clear = root.querySelector('[data-topbar-search-clear]');
+        if (input) {
+          input.oninput = event => {
+            control.value = event.target.value;
+            if (typeof control.onInput === 'function') {
+              control.onInput(event.target.value, event);
+            }
+          };
+          input.onkeydown = event => {
+            if (event.key !== 'Escape') return;
+            event.preventDefault();
+            state.searchOpen[id] = false;
+            control.value = '';
+            if (typeof control.onInput === 'function') control.onInput('', event);
+            render();
+          };
+          if (control.autoFocus !== false) {
+            setTimeout(() => input.focus({ preventScroll: true }), 0);
+          }
+        }
+        if (clear) {
+          clear.onclick = event => {
+            state.searchOpen[id] = false;
+            control.value = '';
+            if (typeof control.onInput === 'function') control.onInput('', event);
+            render();
+          };
+        }
+      }
+    });
+  }
+
+  function render() {
+    if (destroyed) return;
+    const hasSearch = searchControls().length > 0;
+    _setTopbarHtml({ html: html(), hasSearch });
+    bindControls();
+  }
+
+  const handle = {
+    update(nextOptions) {
+      options = Object.assign({}, options, nextOptions || {});
+      render();
+      return handle;
+    },
+    destroy() {
+      destroyed = true;
+      const header = document.querySelector('header');
+      if (header) header.classList.remove('app-topbar-has-search');
+      if (appTopbarSlot) appTopbarSlot.innerHTML = '';
+      if (window.Autonomy._activeTopbarHandle === handle) {
+        window.Autonomy._activeTopbarHandle = null;
+      }
+    },
+    openSearch(id) {
+      const controls = searchControls();
+      const all = allControls();
+      const target = id || (
+        controls[0] && controlId(controls[0], all.indexOf(controls[0]))
+      );
+      if (!target) return false;
+      state.searchOpen[target] = true;
+      render();
+      return true;
+    },
+  };
+
+  if (window.Autonomy._activeTopbarHandle
+      && typeof window.Autonomy._activeTopbarHandle.destroy === 'function') {
+    window.Autonomy._activeTopbarHandle.destroy();
+  }
+  window.Autonomy._activeTopbarHandle = handle;
+  render();
+  return handle;
+};
+
+window.Autonomy.topbar._handleSearchIcon = function () {
+  const handle = window.Autonomy._activeTopbarHandle;
+  if (!handle || typeof handle.openSearch !== 'function') return false;
+  return handle.openSearch();
 };
 
 // ── Badge Helpers ────────────────────────────────────────────
@@ -2249,6 +2496,14 @@ globalSearch.addEventListener('input', () => {
     window.dispatchEvent(new CustomEvent('global-search:input', {
       detail: { value: globalSearch.value },
     }));
+  }
+});
+globalSearchIcon.addEventListener('click', (e) => {
+  if (window.Autonomy && window.Autonomy.topbar
+      && typeof window.Autonomy.topbar._handleSearchIcon === 'function'
+      && window.Autonomy.topbar._handleSearchIcon()) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
   }
 });
 globalSearch.addEventListener('keydown', (e) => {

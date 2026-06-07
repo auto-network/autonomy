@@ -1,8 +1,8 @@
 // Primers UI plugin — frontend Alpine factory.
 //
-// Lists workspaces (one entry per ``load_workspaces()`` member, served
-// by /api/primers/workspaces) and renders each one's markdown primer
-// on demand via /api/primers/workspace/{id}.
+// Lists workspaces for the selected org (served by
+// /api/primers/workspaces) and renders each one's markdown primer on
+// demand via /api/primers/workspace/{id}.
 //
 // Selection (the workspace id) persists to localStorage so the SPA
 // restores it after navigation away and back. Markdown rendering goes
@@ -14,8 +14,11 @@ const PRIMERS_LS_KEY = 'autonomy.plugin.primers.selection';
 function primersPage() {
   return {
     // ── Data ───────────────────────────────────────────────────
+    orgs: [],
+    selectedOrg: 'autonomy',
     workspaces: [],
     primers: {},          // { workspace_id: {markdown, token_estimate, workspace} }
+    query: '',
 
     // ── Selection / view ──────────────────────────────────────
     selectedId: null,
@@ -24,16 +27,34 @@ function primersPage() {
     copied: false,
     errorCopied: false,
     showListOnMobile: false,
+    loadingOrgs: false,
+    topbarHandle: null,
 
     // ── Lifecycle ──────────────────────────────────────────────
     async init() {
       const saved = this._readPersistedSelection();
+      await this._loadOrgs();
+      if (saved && saved.org && this.orgs.includes(saved.org)) {
+        this.selectedOrg = saved.org;
+      } else if (!this.orgs.includes(this.selectedOrg)) {
+        this.selectedOrg = this.orgs.includes('autonomy')
+          ? 'autonomy'
+          : (this.orgs[0] || 'autonomy');
+      }
+      this._updateTopbar();
       await this._loadWorkspaces();
       if (saved && saved.workspace_id
           && this.workspaces.some(w => w.id === saved.workspace_id)) {
         this.selectedId = saved.workspace_id;
         await this._loadPrimer(this.selectedId);
       }
+    },
+
+    destroy() {
+      if (this.topbarHandle && typeof this.topbarHandle.destroy === 'function') {
+        this.topbarHandle.destroy();
+      }
+      this.topbarHandle = null;
     },
 
     // ── Computed-style getters ─────────────────────────────────
@@ -43,6 +64,20 @@ function primersPage() {
 
     get currentPrimer() {
       return this.selectedId ? (this.primers[this.selectedId] || null) : null;
+    },
+
+    get filteredWorkspaces() {
+      const q = String(this.query || '').trim().toLowerCase();
+      if (!q) return this.workspaces;
+      return this.workspaces.filter(ws => {
+        const haystack = [
+          ws.id,
+          ws.name,
+          ws.org,
+          ws.image,
+        ].join(' ').toLowerCase();
+        return haystack.indexOf(q) !== -1;
+      });
     },
 
     get writability() {
@@ -69,6 +104,19 @@ function primersPage() {
       await this._loadPrimer(id);
     },
 
+    async onOrgChange() {
+      this.selectedId = null;
+      this.workspaces = [];
+      this.primers = {};
+      this.error = null;
+      this.copied = false;
+      this.errorCopied = false;
+      this.showListOnMobile = false;
+      this._persistSelection();
+      this._updateTopbar();
+      await this._loadWorkspaces();
+    },
+
     async retry() {
       if (!this.selectedId) return;
       await this._loadPrimer(this.selectedId);
@@ -92,9 +140,30 @@ function primersPage() {
     },
 
     // ── Data loading ──────────────────────────────────────────
+    async _loadOrgs() {
+      this.loadingOrgs = true;
+      try {
+        const res = await window.Autonomy.fetch('/api/orgs');
+        if (!res.ok) { this.orgs = ['autonomy']; return; }
+        const data = await res.json();
+        const slugs = (data.orgs || [])
+          .map(entry => (entry && entry.org && entry.org.slug) || entry.slug)
+          .filter(Boolean);
+        this.orgs = slugs.length ? slugs : ['autonomy'];
+      } catch (e) {
+        this.orgs = ['autonomy'];
+      } finally {
+        this.loadingOrgs = false;
+        this._updateTopbar();
+      }
+    },
+
     async _loadWorkspaces() {
       try {
-        const res = await window.Autonomy.fetch('/api/primers/workspaces');
+        const res = await this._fetchAsOrg(
+          '/api/primers/workspaces',
+          this.selectedOrg,
+        );
         if (!res.ok) { this.workspaces = []; return; }
         const data = await res.json();
         this.workspaces = Array.isArray(data.workspaces) ? data.workspaces : [];
@@ -107,8 +176,9 @@ function primersPage() {
       this.loading = true;
       this.error = null;
       try {
-        const res = await window.Autonomy.fetch(
+        const res = await this._fetchAsOrg(
           '/api/primers/workspace/' + encodeURIComponent(id),
+          this.selectedOrg,
         );
         if (!res.ok) {
           let message = 'Render failed (HTTP ' + res.status + ')';
@@ -131,10 +201,66 @@ function primersPage() {
       }
     },
 
+    _fetchAsOrg(path, org) {
+      return fetch(path, {
+        headers: { 'X-Graph-Org': org },
+      });
+    },
+
+    _updateTopbar() {
+      if (!window.Autonomy || !window.Autonomy.topbar
+          || typeof window.Autonomy.topbar.set !== 'function') {
+        return;
+      }
+      const options = this._topbarOptions();
+      if (this.topbarHandle && typeof this.topbarHandle.update === 'function') {
+        this.topbarHandle.update(options);
+      } else {
+        this.topbarHandle = window.Autonomy.topbar.set(options);
+      }
+    },
+
+    _topbarOptions() {
+      return {
+        title: 'Primers',
+        subtitle: 'Workspace context previews',
+        controls: [
+          {
+            type: 'search',
+            id: 'primers-workspace-filter',
+            testId: 'primers-topbar-search',
+            placeholder: 'Filter workspaces',
+            value: this.query,
+            onInput: value => {
+              this.query = value || '';
+            },
+          },
+          {
+            type: 'select',
+            id: 'primers-org',
+            testId: 'org-picker',
+            label: 'Org',
+            value: this.selectedOrg,
+            options: this.orgs.length ? this.orgs : [this.selectedOrg],
+            onChange: async value => {
+              this.selectedOrg = value;
+              await this.onOrgChange();
+            },
+          },
+          {
+            type: 'html',
+            id: 'primers-scope-chip',
+            html: '<span class="app-topbar-control-label" data-testid="primers-scope-chip">scoped</span>',
+          },
+        ],
+      };
+    },
+
     // ── localStorage persistence ──────────────────────────────
     _persistSelection() {
       try {
         localStorage.setItem(PRIMERS_LS_KEY, JSON.stringify({
+          org: this.selectedOrg,
           workspace_id: this.selectedId,
         }));
       } catch (e) { /* storage disabled — selection is session-local */ }
@@ -147,6 +273,7 @@ function primersPage() {
         const saved = JSON.parse(raw);
         if (!saved || typeof saved !== 'object') return null;
         return {
+          org: typeof saved.org === 'string' ? saved.org : null,
           workspace_id: typeof saved.workspace_id === 'string'
             ? saved.workspace_id : null,
         };
