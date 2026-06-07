@@ -602,11 +602,26 @@
       // a multi-touch gesture that doesn't fire click, so it stays.
       lightboxSrc: '',
       lightboxAlt: '',
+      // 'image' (default — tap-to-close img) | 'iframe' (PDF/text/viewable) |
+      // 'download' (binary). File attachments open HERE as an in-page overlay
+      // instead of navigating via <a target=_blank>, which on an iOS PWA kicks
+      // out to Safari, backgrounds the app, and drops the voice connection.
+      lightboxKind: 'image',
+      lightboxName: '',
       _lightboxPrevViewport: null,
-      openLightbox(src, alt) {
+      lightboxKindForMime(mime) {
+        if (typeof mime !== 'string' || !mime) return 'download';
+        if (mime.indexOf('image/') === 0) return 'image';
+        if (mime === 'application/pdf' || mime.indexOf('text/') === 0) return 'iframe';
+        return 'download';
+      },
+      openLightbox(src, alt, opts) {
         if (!src) return;
+        opts = opts || {};
         this.lightboxSrc = src;
         this.lightboxAlt = alt || '';
+        this.lightboxKind = opts.kind || 'image';
+        this.lightboxName = opts.name || '';
         // The base layout pins the viewport to maximum-scale=1,
         // user-scalable=no so the chat UI doesn't accidentally zoom on
         // mobile. We want pinch-zoom inside the lightbox though, so swap
@@ -624,6 +639,8 @@
       closeLightbox() {
         this.lightboxSrc = '';
         this.lightboxAlt = '';
+        this.lightboxKind = 'image';
+        this.lightboxName = '';
         var meta = document.querySelector('meta[name="viewport"]');
         if (meta && this._lightboxPrevViewport !== null) {
           meta.setAttribute('content', this._lightboxPrevViewport);

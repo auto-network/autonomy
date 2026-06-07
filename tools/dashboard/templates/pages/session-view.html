@@ -537,7 +537,10 @@
         </div>
       </template>
 
-      <!-- Viewer-attachment lightbox: shown when openLightbox() sets the src -->
+      <!-- Viewer-attachment lightbox: shown when openLightbox() sets the src.
+           Images close on tap; files render in-overlay (iframe for viewable
+           types, Download for binaries) so the page + voice connection stay
+           alive — no navigation, unlike the old <a target=_blank> file link. -->
       <template x-if="lightboxSrc">
         <div class="sc-va-lightbox"
              data-testid="viewer-attachment-lightbox"
@@ -545,7 +548,21 @@
              @keydown.escape.window="closeLightbox()"
              tabindex="-1"
              x-init="$el.focus()">
-          <img :src="lightboxSrc" :alt="lightboxAlt" class="sc-va-lightbox-img">
+          <template x-if="lightboxKind === 'image'">
+            <img :src="lightboxSrc" :alt="lightboxAlt" class="sc-va-lightbox-img">
+          </template>
+          <template x-if="lightboxKind === 'iframe'">
+            <iframe :src="lightboxSrc" :title="lightboxAlt" @click.stop
+                    style="width:92vw;height:88vh;border:none;border-radius:8px;background:#fff"></iframe>
+          </template>
+          <template x-if="lightboxKind === 'download'">
+            <div @click.stop
+                 style="background:#172232;border:1px solid #25364c;border-radius:12px;padding:24px;max-width:80vw;text-align:center;color:#cbd5e1">
+              <div style="margin-bottom:14px;word-break:break-all;font-size:14px" x-text="lightboxName || 'file'"></div>
+              <a :href="lightboxSrc" :download="lightboxName || ''"
+                 style="display:inline-block;padding:10px 18px;background:#5638f3;color:#fff;border-radius:8px;text-decoration:none;font-weight:600">Download</a>
+            </div>
+          </template>
         </div>
       </template>
 
