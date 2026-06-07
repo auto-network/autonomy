@@ -6137,6 +6137,64 @@ async def api_session_resume(request):
     if session_type == "container":
         _spawn_setup_exit_watcher(tmux_name, Path(output_dir))
 
+    # ── Bead B2: inject a resume first-message ──
+    # A resumed session reaches composer_ready but, with no prompt, produces no
+    # new assistant turn — it sits silent in awaiting_first_response and the
+    # tile never shows a "ready" reply. Mirror api_session_create's injection,
+    # but with a RESUME-appropriate message (continue, don't re-orient as fresh)
+    # and gated on composer_ready (a9a1e8b drives that on resume now) so the
+    # keystrokes land in a ready composer rather than a fixed-sleep guess.
+    from tools.dashboard.session_orientation import render_orientation as _render_orient
+    try:
+        if session_type == "container" and proj_for_resume is not None:
+            _resume_msg = _render_orient(
+                tmux_name=tmux_name,
+                workspace_id=proj_for_resume.id,
+                workspace_name=proj_for_resume.name,
+                org=proj_for_resume.graph_project,
+                resumed=True,
+            )
+        elif session_type == "container":
+            _resume_msg = _render_orient(
+                tmux_name=tmux_name, workspace_id="",
+                workspace_name="default", org="autonomy", resumed=True,
+            )
+        else:
+            _resume_msg = _render_orient(
+                tmux_name=tmux_name, workspace_id="",
+                workspace_name="host", org="autonomy", resumed=True,
+            )
+    except Exception:
+        logger.warning(
+            "api_session_resume: resume orientation render failed for %s",
+            tmux_name, exc_info=True,
+        )
+        _resume_msg = None
+
+    if _resume_msg:
+        async def _inject_resume_message(msg=_resume_msg):
+            # Wait for the resumed harness to reach composer_ready before
+            # typing — `claude --resume` loads history first, so a fixed sleep
+            # is unreliable. Falls through after 120s (matches the watcher net).
+            deadline = time.time() + 120
+            while time.time() < deadline:
+                row = dashboard_db.get_session(tmux_name)
+                if row and row.get("harness_phase") == "composer_ready":
+                    break
+                await asyncio.sleep(1)
+            try:
+                await tmux_send(tmux_name, msg)
+                logger.info(
+                    "api_session_resume: injected resume message into %s  len=%d",
+                    tmux_name, len(msg),
+                )
+            except Exception:
+                logger.warning(
+                    "api_session_resume: failed to inject resume message into %s",
+                    tmux_name, exc_info=True,
+                )
+        asyncio.create_task(_inject_resume_message())
+
     if not label:
         label = src.get("title", "") if source_id and src else ""
     if not label:
@@ -6577,12 +6635,17 @@ async def ws_terminal(websocket: WebSocket):
 
 
 def _voice_audio_capture_enabled() -> bool:
-    """Debug audio capture — gated on a flag file so it's OFF by default. Toggle:
-    `touch data/voice-captures/CAPTURE_ON` to start, `rm` it to stop. Lets us grab
-    the operator's REAL mic audio (ambient room tone, real silence) for VAD /
-    no_speech threshold tuning, since there's no other way to obtain it."""
+    """Debug audio capture — OFF by default, toggled via the ``voice.audio_capture``
+    graph feature flag (set ``dashboard.feature_flags``). No file on disk. Enable:
+      graph set add 'dashboard.feature_flags#1' --key voice.audio_capture \
+        --inline '{"enabled":true}' --state canonical
+    Captures the operator's REAL mic PCM (ambient room tone, real silence) to a WAV
+    for VAD/no_speech tuning AND for diagnosing the garbage-transcription bug — is
+    the audio reaching WhisperLive corrupt, or is the model hallucinating on clean
+    audio? Read fresh per audio frame so the operator can toggle it live."""
     try:
-        return (_REPO_ROOT / "data" / "voice-captures" / "CAPTURE_ON").exists()
+        from tools.dashboard import feature_flags
+        return feature_flags.is_enabled("voice.audio_capture")
     except Exception:
         return False
 
