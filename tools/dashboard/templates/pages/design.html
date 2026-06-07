@@ -305,6 +305,9 @@
                  style="flex:1; overflow-y:auto; min-height:0; padding:8px;">
               {% include "partials/session-entries.html" %}
             </div>
+            {# Pending / dictation tiles — same surface as the page-mode viewer.
+               Shows the live dictation / pending-send tile while chat is open. #}
+            {% include "partials/session-pending-tiles.html" %}
             <!-- Screenshot injected indicator -->
             <div x-show="screenshotInjected" x-transition
                  class="px-2 py-1 bg-green-900/50 text-green-400 text-xs text-center flex-shrink-0">
