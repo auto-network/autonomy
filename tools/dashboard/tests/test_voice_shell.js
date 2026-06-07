@@ -453,78 +453,26 @@ describe('voice shell helpers', () => {
     assert.equal(h.voiceStore._sendCalls, 1, 'falls through to a normal send');
   });
 
-  it('voice Send in the active viewer creates an outbox even if no capturing tile exists yet', async () => {
-    const sessionStore = { outbox: null };
-    const staged = [];
-    const h = loadVoiceShell({
-      voiceStore: { boundSessionId: 'session-a', bufferText: 'do not lose this' },
-    });
-    h.document.body.classList.add('sv-viewer-composer-active');
-    h.document.body.dataset.svComposerSession = 'session-a';
-    h.window.getSessionStore = function (sid) {
-      return sid === 'session-a' ? sessionStore : null;
-    };
-    h.window.newOutboxId = function () { return 'ob_voice_send'; };
-    h.window.stageOutboxSend = function (sessionId, outbox, options) {
-      staged.push({ sessionId, outbox: Object.assign({}, outbox), options: Object.assign({}, options) });
-      sessionStore.outbox = Object.assign({}, outbox);
-      return Promise.resolve(true);
-    };
-
-    assert.equal(await h.component.sendBuffer(), true);
-    assert.equal(h.voiceStore._sendCalls, 0, 'viewer voice send must not use direct send fallback');
-    assert.equal(staged.length, 1);
-    assert.equal(staged[0].sessionId, 'session-a');
-    assert.equal(staged[0].options.tmuxSession, 'session-a');
-    assert.equal(typeof sessionStore.outbox.ts, 'number');
-    assert.deepEqual(Object.assign({}, sessionStore.outbox, { ts: 0 }), {
-      localId: 'ob_voice_send',
-      state: 'sending',
-      source: 'voice',
-      text: 'do not lose this',
-      ts: 0,
-    });
-    assert.equal(h.voiceStore.bufferText, '');
-  });
-
-  it('voice Send resets capture after snapshotting the sending outbox and before clearing the buffer', async () => {
-    const events = [];
-    const sessionStore = { outbox: null };
+  it('voice Send uses the shared voice-store transition even when the viewer composer is active', async () => {
     const h = loadVoiceShell({
       voiceStore: {
         boundSessionId: 'session-a',
-        bufferText: 'snapshot before reset',
-        clearBuffer() {
-          events.push('clearBuffer');
+        bufferText: 'shared transition',
+        async sendBuffer() {
+          this._sendCalls += 1;
           this.bufferText = '';
-          this.sheetError = '';
+          return true;
         },
       },
     });
     h.document.body.classList.add('sv-viewer-composer-active');
     h.document.body.dataset.svComposerSession = 'session-a';
-    h.window.getSessionStore = function (sid) {
-      return sid === 'session-a' ? sessionStore : null;
-    };
-    h.window.newOutboxId = function () { return 'ob_reset_order'; };
-    h.window.stageOutboxSend = function (_sessionId, outbox) {
-      events.push('stage');
-      sessionStore.outbox = Object.assign({}, outbox);
-      return Promise.resolve(true);
-    };
-    h.window.Autonomy.voiceCapture = {
-      resetEpoch(reason) {
-        events.push('reset:' + reason);
-        assert.equal(reason, 'send');
-        assert.equal(h.voiceStore.bufferText, 'snapshot before reset');
-        assert.equal(sessionStore.outbox && sessionStore.outbox.state, 'sending');
-        assert.equal(sessionStore.outbox && sessionStore.outbox.text, 'snapshot before reset');
-        return true;
-      },
+    h.window.getSessionStore = function () {
+      throw new Error('voice-shell must not own the Send transition');
     };
 
     assert.equal(await h.component.sendBuffer(), true);
-    assert.deepEqual(events, ['stage', 'reset:send', 'clearBuffer']);
+    assert.equal(h.voiceStore._sendCalls, 1);
     assert.equal(h.voiceStore.bufferText, '');
   });
 
@@ -611,31 +559,6 @@ describe('voice shell helpers', () => {
 
     assert.equal(h.window.Autonomy.voice.shell.syncViewerOutboxCapture(), false);
     assert.equal(sessionStore.outbox, unconfirmed);
-  });
-
-  it('voice Send replaces an empty stale outbox instead of blocking or direct-sending', async () => {
-    const sessionStore = {
-      outbox: { localId: 'ob_stale', state: 'sending', source: 'voice', text: '', ts: 1 },
-    };
-    const h = loadVoiceShell({
-      voiceStore: { boundSessionId: 'session-a', bufferText: 'fresh message' },
-    });
-    h.document.body.classList.add('sv-viewer-composer-active');
-    h.document.body.dataset.svComposerSession = 'session-a';
-    h.window.getSessionStore = function (sid) {
-      return sid === 'session-a' ? sessionStore : null;
-    };
-    h.window.newOutboxId = function () { return 'ob_fresh'; };
-    h.window.stageOutboxSend = function (_sessionId, outbox) {
-      sessionStore.outbox = Object.assign({}, outbox);
-      return Promise.resolve(true);
-    };
-
-    assert.equal(await h.component.sendBuffer(), true);
-    assert.equal(h.voiceStore._sendCalls, 0);
-    assert.equal(sessionStore.outbox.localId, 'ob_fresh');
-    assert.equal(sessionStore.outbox.state, 'sending');
-    assert.equal(sessionStore.outbox.text, 'fresh message');
   });
 
   it('sheetCrossSession is true when bound != viewed, with the target title from the store', () => {

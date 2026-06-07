@@ -126,6 +126,36 @@
     return 'Send failed. Session connection dropped. Retry after reconnecting or end voice on this session.';
   }
 
+  function _getSessionStore(sessionId) {
+    try {
+      if (typeof window === 'undefined' ||
+          typeof window.getSessionStore !== 'function') return null;
+      return window.getSessionStore(sessionId) || null;
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  function _newOutboxId(sessionId) {
+    if (typeof window !== 'undefined' && typeof window.newOutboxId === 'function') {
+      return window.newOutboxId();
+    }
+    return 'ob_' + sessionId;
+  }
+
+  function _resetVoiceCaptureEpoch(reason) {
+    try {
+      if (typeof window === 'undefined' || !window.Autonomy ||
+          !window.Autonomy.voiceCapture ||
+          typeof window.Autonomy.voiceCapture.resetEpoch !== 'function') {
+        return false;
+      }
+      return window.Autonomy.voiceCapture.resetEpoch(reason) === true;
+    } catch (_err) {
+      return false;
+    }
+  }
+
   function _buildStore() {
     return {
       boundSessionId: '',
@@ -452,14 +482,29 @@
           return false;
         }
         try {
+          var sessionStore = _getSessionStore(this.boundSessionId);
+          var existing = sessionStore && sessionStore.outbox;
+          if (existing && (typeof existing.text !== 'string' || !existing.text.trim())) {
+            sessionStore.outbox = null;
+            existing = null;
+          }
+          if (existing && !(existing.source === 'voice' && existing.state === 'capturing')) {
+            this.sheetError = 'Message still pending.';
+            return false;
+          }
+          var baseOutbox = existing || {
+            localId: _newOutboxId(this.boundSessionId),
+            source: 'voice',
+            ts: (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0,
+          };
           window.stageOutboxSend(this.boundSessionId, {
-            localId: (typeof window.newOutboxId === 'function')
-              ? window.newOutboxId() : ('ob_' + this.boundSessionId),
+            localId: baseOutbox.localId,
             state: 'sending',
             source: 'voice',
             text: body,
-            ts: (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0,
+            ts: baseOutbox.ts || ((typeof Date !== 'undefined' && Date.now) ? Date.now() : 0),
           }, { tmuxSession: this.boundSessionId });
+          _resetVoiceCaptureEpoch('send');
           this.bufferText = '';
           this.clearAttachments();
           this.sheetError = '';
