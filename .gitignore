@@ -23,6 +23,18 @@ data/graph.db-shm
 data/dashboard.db
 data/dashboard.db-wal
 data/dashboard.db-shm
+# Any DB, its wal/shm sidecars, and timestamped backup/snapshot variants
+# (graph.db.backup-*, .hourly-*, .pre-txg5-*, .legacy-*, .corrupted-*, etc.).
+# The exact names above miss these; staging them as 300MB–2GB blobs is what
+# orphaned 12 GiB into .git. Broad globs so no future variant slips through.
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.db.*
+# Local backup tier (restic source, ~tens of GB) and runtime logs/pids.
+data/backups/
+data/*.log
+data/*.pid
 
 # Beads (Dolt local state — .beads/issues.jsonl IS tracked via git add -f)
 .beads/
