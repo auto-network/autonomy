@@ -667,9 +667,9 @@
         },
 
         // Commit the dictation. Inside the viewer with an active composer,
-        // hand off to the durability path: set the final text, flip the outbox
-        // to 'sending' (auto-0530's watcher owns the POST + reconcile), and
-        // clear the voice buffer — NO direct POST (no double-send). The
+        // hand off to the durability path: set the final text, stage the outbox
+        // as 'sending' (session-store owns the POST + reconcile), and clear the
+        // voice buffer — NO direct POST (no double-send). The
         // capturing effect usually creates the tile before Send, but Send must
         // also create it synchronously if the effect has not run yet.
         _commitBuffer() {
@@ -706,8 +706,18 @@
                   ts: (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0,
                 };
               }
-              s.outbox.text = body;
-              s.outbox.state = 'sending';
+              var stagedOutbox = Object.assign({}, s.outbox, {
+                text: body,
+                state: 'sending',
+                source: 'voice',
+              });
+              if (typeof window.stageOutboxSend !== 'function') {
+                voice.sheetError = 'Send failed. Message outbox is unavailable.';
+                return false;
+              }
+              window.stageOutboxSend(voice.boundSessionId, stagedOutbox, {
+                tmuxSession: voice.boundSessionId,
+              });
               _resetVoiceCaptureEpoch('send');
               if (typeof voice.clearBuffer === 'function') voice.clearBuffer();
               if (typeof voice.clearAttachments === 'function') voice.clearAttachments();

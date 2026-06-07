@@ -455,6 +455,7 @@ describe('voice shell helpers', () => {
 
   it('voice Send in the active viewer creates an outbox even if no capturing tile exists yet', async () => {
     const sessionStore = { outbox: null };
+    const staged = [];
     const h = loadVoiceShell({
       voiceStore: { boundSessionId: 'session-a', bufferText: 'do not lose this' },
     });
@@ -464,9 +465,17 @@ describe('voice shell helpers', () => {
       return sid === 'session-a' ? sessionStore : null;
     };
     h.window.newOutboxId = function () { return 'ob_voice_send'; };
+    h.window.stageOutboxSend = function (sessionId, outbox, options) {
+      staged.push({ sessionId, outbox: Object.assign({}, outbox), options: Object.assign({}, options) });
+      sessionStore.outbox = Object.assign({}, outbox);
+      return Promise.resolve(true);
+    };
 
     assert.equal(await h.component.sendBuffer(), true);
     assert.equal(h.voiceStore._sendCalls, 0, 'viewer voice send must not use direct send fallback');
+    assert.equal(staged.length, 1);
+    assert.equal(staged[0].sessionId, 'session-a');
+    assert.equal(staged[0].options.tmuxSession, 'session-a');
     assert.equal(typeof sessionStore.outbox.ts, 'number');
     assert.deepEqual(Object.assign({}, sessionStore.outbox, { ts: 0 }), {
       localId: 'ob_voice_send',
@@ -498,6 +507,11 @@ describe('voice shell helpers', () => {
       return sid === 'session-a' ? sessionStore : null;
     };
     h.window.newOutboxId = function () { return 'ob_reset_order'; };
+    h.window.stageOutboxSend = function (_sessionId, outbox) {
+      events.push('stage');
+      sessionStore.outbox = Object.assign({}, outbox);
+      return Promise.resolve(true);
+    };
     h.window.Autonomy.voiceCapture = {
       resetEpoch(reason) {
         events.push('reset:' + reason);
@@ -510,7 +524,7 @@ describe('voice shell helpers', () => {
     };
 
     assert.equal(await h.component.sendBuffer(), true);
-    assert.deepEqual(events, ['reset:send', 'clearBuffer']);
+    assert.deepEqual(events, ['stage', 'reset:send', 'clearBuffer']);
     assert.equal(h.voiceStore.bufferText, '');
   });
 
@@ -612,6 +626,10 @@ describe('voice shell helpers', () => {
       return sid === 'session-a' ? sessionStore : null;
     };
     h.window.newOutboxId = function () { return 'ob_fresh'; };
+    h.window.stageOutboxSend = function (_sessionId, outbox) {
+      sessionStore.outbox = Object.assign({}, outbox);
+      return Promise.resolve(true);
+    };
 
     assert.equal(await h.component.sendBuffer(), true);
     assert.equal(h.voiceStore._sendCalls, 0);
