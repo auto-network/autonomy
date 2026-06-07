@@ -159,6 +159,25 @@
           resolved: false,
         };
       },
+      // auto-ja51w C5: launching-until-first-response predicate. Mirrors
+      // the lifecycle.js gate: a session is "still launching" while live
+      // AND no entries have arrived AND not in a resumed-with-history
+      // state. The viewer stays in state='loading' (pre-ready slot
+      // rendered) until this predicate flips to false — at which point
+      // the configure() flow OR the Alpine $watch in init() promotes
+      // state to 'ready'.
+      _isStillLaunching: function (store) {
+        if (!store) return false;
+        if (!store.isLive) return false;
+        var entries = (store.entries || []).length;
+        if (entries > 0) return false;
+        // Resumed session with historical JSONL — resolved=true means the
+        // historical turns ARE the user's content, so we should NOT hold
+        // launching. (Fresh sessions arrive with resolved=false until
+        // first entry lands.)
+        if (store.resolved === true) return false;
+        return true;
+      },
       // [lc] viewer-loading slot emit helper. Logs a viewer-slot-render
       // record whenever the *result* of the slot's render condition
       // changes — distinguishes "state===loading but no row yet"
@@ -1182,21 +1201,23 @@
               this._lcSetState('error', 'configure: messages fetch failed');
               return;
             }
-            // New session with no JSONL yet — show empty ready state
+            // New session with no JSONL yet. auto-ja51w C5: gate the
+            // flip-to-ready on _isStillLaunching — if the session is genuinely
+            // still booting (live, no resolved JSONL, no entries, harness
+            // hasn't reached composer_ready), keep state='loading' so the
+            // pre-ready slot's phase chip stays rendered. The Alpine $watch
+            // below flips state→'ready' automatically once SSE updates the
+            // store to a no-longer-launching condition.
             if (this.sessionKey) {
               store._loading = false;
               store.loaded = true;
               this._rebuildDisplay();
-              // SUSPECTED BLANK-SCREEN BUG (IMG_1434 / IMG_1435): this
-              // flip happens unconditionally when a session has no JSONL
-              // yet — even if the container is still booting and the
-              // harness isn't actually ready. The viewer drops out of
-              // 'loading' so the pre-ready loading slot never gets a
-              // chance to render, and the empty-conversation empty state
-              // ("Session started / Send a message to begin") takes over.
-              // Logging it explicitly so the captured timeline shows the
-              // suspect transition with full context.
-              this._lcSetState('ready', 'configure: no JSONL yet — UNCONDITIONAL FLIP (suspected blank-screen bug)');
+              if (this._isStillLaunching(store)) {
+                // Stay in loading — pre-ready slot renders the phase chip.
+                this._lcEmitSlot(this.loadingPhaseRow, 'configure: still launching, holding loading state');
+              } else {
+                this._lcSetState('ready', 'configure: no JSONL yet, but session not launching (composer_ready+entries or resolved)');
+              }
             } else {
               if (this.state === 'loading') {
                 this.errorMsg = 'Failed to connect to session';
@@ -1217,7 +1238,7 @@
           }
 
           this._rebuildDisplay();
-          if (this.state === 'loading') {
+          if (this.state === 'loading' && !this._isStillLaunching(store)) {
             this._lcSetState('ready', 'configure: messages flushed, exiting loading');
           }
           this._scrollToBottom();
@@ -1289,6 +1310,29 @@
         this.$watch('hasTodos', (now) => {
           if (!now) this.selectedDrawerTab = 'topics';
         });
+
+        // auto-ja51w C5: promote state→'ready' when launching ends.
+        // configure() may have left the viewer in state='loading' because
+        // the session was still launching (no entries, harness not yet
+        // composer_ready). When SSE later delivers an entry OR resolves
+        // the registry to a no-longer-launching condition, the viewer
+        // must flip state to 'ready' so the entries view renders.
+        // The watched expression evaluates _isStillLaunching against the
+        // current session store row on every reactivity tick.
+        this.$watch(
+          () => {
+            var store = Alpine.store('sessions')[this.sessionKey];
+            return store ? this._isStillLaunching(store) : false;
+          },
+          (stillLaunching) => {
+            if (!stillLaunching && this.state === 'loading') {
+              this._lcSetState('ready', 'watch: launching ended (entries arrived or session resolved)');
+              // Repaint so the entries view replaces the loading slot.
+              this._rebuildDisplay();
+              this._scrollToBottom();
+            }
+          }
+        );
 
         // Publish the authoritative "composer surface active" signal to
         // document.body so the voice side branches caption-suppression and its
