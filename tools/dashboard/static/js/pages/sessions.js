@@ -446,6 +446,19 @@
         this._onRegistryChanged = function() { self._scheduleRecentRefresh(); };
         window.addEventListener('sessions:registry-changed', this._onRegistryChanged);
 
+        // Launching-tile sweep. _updateFromStore holds the placeholder
+        // reconcile + TTL expiry, but it only runs on registry/store events —
+        // and after a reconnect those can go quiet, leaving a placeholder
+        // stuck as a "starting up" card. Re-run it on a timer ONLY while a
+        // pending tile exists, so every placeholder eventually retires (by its
+        // bound real session or the TTL) without needing a fresh event.
+        this._launchSweep = setInterval(function() {
+          var store = Alpine.store('sessions');
+          for (var k in store) {
+            if (k.indexOf('pending-') === 0) { self._updateFromStore(); break; }
+          }
+        }, 10000);
+
         // Workspace-changes status per session (drives the ⌥ indicator
         // on each session card). Pushed live via the ``worktrees`` SSE
         // topic — the bus replays cached state on registerHandler so
@@ -535,7 +548,17 @@
               var err = await res.json().catch(function () { return {}; });
               throw new Error(err.error || 'Session create failed');
             }
-            await res.json();
+            var created = await res.json();
+            // Bind the optimistic placeholder to the REAL session id the
+            // create returned. The reconcile then retires the tile by exact
+            // tmux_name (live OR dead) instead of the fuzzy live-only
+            // project|type match — which orphaned the tile as a stuck
+            // "starting up" card once that session died (the registry never
+            // re-fired _updateFromStore to expire it).
+            if (created && created.tmux_name) {
+              var ph = Alpine.store('sessions')[pendingId];
+              if (ph) ph._realSession = created.tmux_name;
+            }
           } catch (err) {
             // Create failed — drop the optimistic tile immediately so it
             // doesn't linger as a ghost in the Launching section.
@@ -602,16 +625,23 @@
           if (pid.indexOf('pending-') !== 0) continue;
           var p = allSessions[pid];
           var pk = (p.project || '') + '|' + (p.sessionType || '');
+          // Deterministic retire: the create POST bound this tile to its real
+          // session id, so retire as soon as that row exists in the store —
+          // LIVE OR DEAD. This is the stuck-tile fix: the fuzzy match below
+          // only sees LIVE reals, so a session that died left the tile
+          // orphaned as a "starting up" card until a manual refresh.
+          var bound = !!(p._realSession && allSessions[p._realSession]);
           // A real session created at/after this tile (5s skew tolerance)
           // means the launch resolved — retire the placeholder.
-          var matched = realByKey[pk] !== undefined && realByKey[pk] >= (p.startedAt || 0) - 5;
+          var matched = bound || (realByKey[pk] !== undefined && realByKey[pk] >= (p.startedAt || 0) - 5);
           var expired = (nowS - (p.startedAt || 0)) > _LAUNCH_TTL_S;
           if (matched || expired) {
             if (_lcLib && _lcLib.emit) {
               _lcLib.emit({
                 sid: pid, surface: 'list-card', event: 'reconcile',
                 from: 'pending', to: null,
-                reason: matched ? 'real session arrived for ' + pk : 'TTL expired (' + _LAUNCH_TTL_S + 's)',
+                reason: bound ? ('bound real session ' + p._realSession + ' present')
+                  : (matched ? 'real session arrived for ' + pk : 'TTL expired (' + _LAUNCH_TTL_S + 's)'),
                 matched: matched, expired: expired,
                 pending_started_at: p.startedAt || 0,
               });
@@ -934,6 +964,7 @@
       },
 
       destroy() {
+        if (this._launchSweep) { clearInterval(this._launchSweep); this._launchSweep = null; }
         if (this._onStoreChanged) window.removeEventListener('sessions:store-changed', this._onStoreChanged);
         if (this._onRegistryChanged) window.removeEventListener('sessions:registry-changed', this._onRegistryChanged);
         if (this._workspaceHandler && typeof window.unregisterHandler === 'function') {
