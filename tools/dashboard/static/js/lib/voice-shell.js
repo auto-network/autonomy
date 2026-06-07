@@ -441,7 +441,7 @@
         },
 
         get captionPlaceholder() {
-          return 'Live captions';
+          return '';
         },
 
         get captionText() {
