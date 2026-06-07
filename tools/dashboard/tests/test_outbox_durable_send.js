@@ -35,7 +35,7 @@ function harness() {
   const components = {};
   const body = { dataset: {}, classList: { add() {}, remove() {}, contains() { return false; } } };
   const document = { body, addEventListener(n, cb) { (docListeners[n] ||= []).push(cb); } };
-  let fetchImpl = () => Promise.resolve({ json: () => Promise.resolve({ ok: true }) });
+  let fetchImpl = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) });
   const fetchCalls = [];
   const windowObj = { localStorage: makeLocalStorage() };
   const alpine = {
@@ -85,7 +85,46 @@ describe('outbox durable send + reconciliation', () => {
     const call = h.fetchCalls.find((c) => c.url === '/api/session/send');
     assert.ok(call, 'should POST to /api/session/send');
     assert.equal(JSON.parse(call.opts.body).message, 'hello world');
-    if (v._outboxTimer) clearTimeout(v._outboxTimer);
+  });
+
+  it('stageOutboxSend persists synchronously before the POST resolves', async () => {
+    let resolveFetch;
+    h.setFetch(() => new Promise((resolve) => {
+      resolveFetch = () => resolve({ ok: true, json: () => Promise.resolve({ ok: true }) });
+    }));
+
+    const pending = h.windowObj.stageOutboxSend('auto-test', {
+      localId: 'ob_stage',
+      state: 'capturing',
+      source: 'voice',
+      text: 'persist before network',
+      ts: 1,
+    });
+
+    const saved = h.windowObj.loadOutbox('auto-test');
+    assert.equal(saved.localId, 'ob_stage');
+    assert.equal(saved.state, 'sending');
+    assert.equal(saved.text, 'persist before network');
+    assert.ok(h.fetchCalls.length >= 1, 'POST owner starts outside any viewer method');
+
+    resolveFetch();
+    assert.equal(await pending, true);
+  });
+
+  it('restore replays a queued staged outbox that never reached the POST owner', async () => {
+    h.windowObj.saveOutbox('auto-test', {
+      localId: 'ob_queued',
+      state: 'sending',
+      source: 'voice',
+      text: 'queued before crash',
+      ts: 1,
+      delivery: 'queued',
+    });
+    store.outbox = null;
+
+    assert.equal(h.windowObj.restoreOutbox('auto-test'), true);
+    assert.equal(store.outbox.localId, 'ob_queued');
+    assert.ok(h.fetchCalls.some((c) => c.url === '/api/session/send'), 'queued restore must POST');
   });
 
   it('does NOT clear the outbox on HTTP 200 (waits for log echo)', async () => {
@@ -93,7 +132,6 @@ describe('outbox durable send + reconciliation', () => {
     await v._durableSend('still pending', 'ob_b');
     assert.ok(store.outbox, 'outbox must survive a 200 — confirmation is the log echo, not the POST');
     assert.equal(store.outbox.state, 'sending');
-    if (v._outboxTimer) clearTimeout(v._outboxTimer);
   });
 
   it('parks in unconfirmed when the POST fails (text preserved)', async () => {
@@ -137,7 +175,6 @@ describe('outbox durable send + reconciliation', () => {
     v._restoreOutbox();
     assert.ok(store.outbox, 'a persisted mid-flight message must come back');
     assert.equal(store.outbox.text, 'survived reload');
-    if (v._outboxTimer) clearTimeout(v._outboxTimer);
   });
 
   it('restore reconciles immediately if the message already landed while away', () => {
@@ -153,7 +190,6 @@ describe('outbox durable send + reconciliation', () => {
     v.resendOutbox();
     assert.equal(store.outbox.state, 'sending');
     assert.ok(h.fetchCalls.some((c) => c.url === '/api/session/send'), 'resend must hit the send endpoint');
-    if (v._outboxTimer) clearTimeout(v._outboxTimer);
   });
 
   it('dismiss clears the persisted outbox so it does not restore on revisit', () => {
@@ -188,7 +224,8 @@ describe('contract lifecycle end-to-end (cbb8497c-a1f)', () => {
     store.outbox = Object.assign({}, store.outbox, { state: 'sending', text: 'scan the new vuln set' });
     await v._onOutboxSendKey();
 
-    // The viewer owned the POST; outbox is NOT cleared on 200 (persisted, sending).
+    // The shared outbox engine owned the POST; outbox is NOT cleared on 200
+    // (persisted, sending).
     assert.ok(h.fetchCalls.some((c) => c.url === '/api/session/send'
       && JSON.parse(c.opts.body).message === 'scan the new vuln set'), 'viewer POSTs the final text');
     assert.ok(store.outbox && store.outbox.state === 'sending', 'still pending after 200');
@@ -205,7 +242,6 @@ describe('contract lifecycle end-to-end (cbb8497c-a1f)', () => {
     const id = h.windowObj.newOutboxId();
     store.outbox = { localId: id, state: 'sending', source: 'voice', text: 'never echoed', ts: 1 };
     await v._onOutboxSendKey();
-    if (v._outboxTimer) clearTimeout(v._outboxTimer);   // simulate the window elapsing
     v._markOutboxUnconfirmed(id);
     assert.equal(store.outbox.state, 'unconfirmed', 'no echo within window -> unconfirmed, not dropped');
     assert.equal(store.outbox.text, 'never echoed', 'text preserved for recovery');
@@ -214,7 +250,6 @@ describe('contract lifecycle end-to-end (cbb8497c-a1f)', () => {
     v.resendOutbox();
     assert.equal(store.outbox.state, 'sending');
     assert.ok(h.fetchCalls.length > before, 'Resend re-POSTs');
-    if (v._outboxTimer) clearTimeout(v._outboxTimer);
   });
 });
 

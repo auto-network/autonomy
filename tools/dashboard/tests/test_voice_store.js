@@ -362,29 +362,34 @@ describe('voice store substrate', () => {
     assert.equal(h.store.sheetError, '');
   });
 
-  it('sendBuffer posts through the existing session send API and restores listening on success', async () => {
+  it('sendBuffer stages through the durable outbox engine and restores listening on success', async () => {
     const h = loadVoiceStore({
       initialStores: {
         flags: { get() { return true; } },
       },
-      fetchImpl: async function() {
-        return {
-          ok: true,
-          async json() {
-            return { ok: true };
-          },
-        };
-      },
     });
+    const staged = [];
+    h.window.newOutboxId = function () { return 'ob_voice_store'; };
+    h.window.stageOutboxSend = function (sessionId, outbox, options) {
+      staged.push({ sessionId, outbox: toPlain(outbox), options: toPlain(options) });
+      return Promise.resolve(true);
+    };
     h.store.requestBind('session-a', { isLive: true });
     h.store.setBufferText('  ship this  ');
     h.store.openSheet();
     assert.equal(await h.store.sendBuffer(), true);
-    assert.equal(h.fetchCalls.length, 1);
-    assert.equal(h.fetchCalls[0].url, '/api/session/send');
-    assert.equal(h.fetchCalls[0].init.method, 'POST');
-    assert.equal(JSON.parse(h.fetchCalls[0].init.body).message, 'ship this');
-    assert.equal(JSON.parse(h.fetchCalls[0].init.body).tmux_session, 'session-a');
+    assert.deepEqual(staged, [{
+      sessionId: 'session-a',
+      outbox: {
+        localId: 'ob_voice_store',
+        state: 'sending',
+        source: 'voice',
+        text: 'ship this',
+        ts: staged[0].outbox.ts,
+      },
+      options: { tmuxSession: 'session-a' },
+    }]);
+    assert.equal(h.fetchCalls.length, 0, 'voice-store must not POST directly');
     assert.equal(h.store.bufferText, '');
     assert.equal(h.store.sheetOpen, false);
     assert.equal(h.store.sheetMode, 'partial');
@@ -393,20 +398,68 @@ describe('voice store substrate', () => {
     assert.equal(h.store.sheetResumeListeningOnDismiss, false);
   });
 
-  it('sendBuffer leaves the sheet open and preserves the buffer on API failure', async () => {
+  it('sendBuffer uses the same durable outbox path even when no viewer is mounted', async () => {
     const h = loadVoiceStore({
       initialStores: {
         flags: { get() { return true; } },
       },
-      fetchImpl: async function() {
-        return {
-          ok: false,
-          async json() {
-            return { error: 'dropped' };
-          },
-        };
+    });
+    const staged = [];
+    h.window.newOutboxId = function () { return 'ob_cross_session'; };
+    h.window.stageOutboxSend = function (sessionId, outbox, options) {
+      staged.push({ sessionId, outbox: toPlain(outbox), options: toPlain(options) });
+      return Promise.resolve(true);
+    };
+
+    h.store.requestBind('session-a', { isLive: true });
+    h.store.setBufferText('send without mounted viewer');
+    h.store.openSheet();
+
+    assert.equal(await h.store.sendBuffer(), true);
+    assert.deepEqual(staged, [{
+      sessionId: 'session-a',
+      outbox: {
+        localId: 'ob_cross_session',
+        state: 'sending',
+        source: 'voice',
+        text: 'send without mounted viewer',
+        ts: staged[0].outbox.ts,
+      },
+      options: { tmuxSession: 'session-a' },
+    }]);
+    assert.equal(h.fetchCalls.length, 0, 'voice-store must not direct POST when durable owner exists');
+    assert.equal(h.store.bufferText, '');
+    assert.equal(h.store.sheetOpen, false);
+    assert.equal(h.store.sheetMode, 'partial');
+  });
+
+  it('sendBuffer leaves the sheet open and preserves the buffer when the outbox engine is unavailable', async () => {
+    const h = loadVoiceStore({
+      initialStores: {
+        flags: { get() { return true; } },
       },
     });
+    h.store.requestBind('session-a', { isLive: true });
+    h.store.setBufferText('retry me');
+    h.store.openSheet();
+    assert.equal(await h.store.sendBuffer(), false);
+    assert.equal(h.store.sheetOpen, true);
+    assert.equal(h.store.bufferText, 'retry me');
+    assert.equal(h.store.sheetError, 'Send failed. Message outbox is unavailable.');
+    // openSheet no longer mutes (live-capture directive), so the session stays
+    // listening through the sheet and a failed send.
+    assert.equal(h.store.micMode, 'listening');
+  });
+
+  it('sendBuffer leaves the sheet open and preserves the buffer when durable staging throws', async () => {
+    const h = loadVoiceStore({
+      initialStores: {
+        flags: { get() { return true; } },
+      },
+    });
+    h.window.stageOutboxSend = function () {
+      throw new Error('stage failed');
+    };
     h.store.requestBind('session-a', { isLive: true });
     h.store.setBufferText('retry me');
     h.store.openSheet();
@@ -414,33 +467,6 @@ describe('voice store substrate', () => {
     assert.equal(h.store.sheetOpen, true);
     assert.equal(h.store.bufferText, 'retry me');
     assert.equal(h.store.sheetError, 'Send failed. Session connection dropped. Retry after reconnecting or end voice on this session.');
-    // openSheet no longer mutes (live-capture directive), so the session stays
-    // listening through the sheet and a failed send.
-    assert.equal(h.store.micMode, 'listening');
-  });
-
-  it('sendBuffer reports a session-ended message when the send API returns 404', async () => {
-    const h = loadVoiceStore({
-      initialStores: {
-        flags: { get() { return true; } },
-      },
-      fetchImpl: async function() {
-        return {
-          ok: false,
-          status: 404,
-          async json() {
-            return { error: 'missing' };
-          },
-        };
-      },
-    });
-    h.store.requestBind('session-a', { isLive: true });
-    h.store.setBufferText('retry me');
-    h.store.openSheet();
-    assert.equal(await h.store.sendBuffer(), false);
-    assert.equal(h.store.sheetOpen, true);
-    assert.equal(h.store.bufferText, 'retry me');
-    assert.equal(h.store.sheetError, 'Send failed. Session is no longer available.');
   });
 
   it('sendBuffer reports a session-ended error when no session is bound', async () => {
@@ -519,19 +545,22 @@ describe('voice store attachments', () => {
     assert.equal(h.fetchCalls.length, 0);
   });
 
-  it('sendBuffer posts the composed body and clears attachments on success', async () => {
-    const h = boundStore(async function (url) {
-      if (url === '/api/session/send') {
-        return { ok: true, async json() { return { ok: true }; } };
-      }
-      throw new Error('unexpected url ' + url);
-    });
+  it('sendBuffer stages the composed body and clears attachments on success', async () => {
+    const h = boundStore();
+    const staged = [];
+    h.window.newOutboxId = function () { return 'ob_attachment'; };
+    h.window.stageOutboxSend = function (sessionId, outbox, options) {
+      staged.push({ sessionId, outbox: toPlain(outbox), options: toPlain(options) });
+      return Promise.resolve(true);
+    };
     h.store.attachments = [{ id: 1, path: '/tmp/pic.png', name: 'pic.png' }];
     h.store.setBufferText('ship it');
     h.store.openSheet();
     assert.equal(await h.store.sendBuffer(), true);
-    const send = h.fetchCalls.find((c) => c.url === '/api/session/send');
-    assert.equal(JSON.parse(send.init.body).message, '/tmp/pic.png\n\nship it');
+    assert.equal(staged[0].outbox.text, '/tmp/pic.png\n\nship it');
+    assert.equal(staged[0].sessionId, 'session-a');
+    assert.equal(staged[0].options.tmuxSession, 'session-a');
+    assert.equal(h.fetchCalls.length, 0, 'voice-store must not POST attachments directly');
     assert.equal(h.store.attachments.length, 0);   // cleared after send
   });
 

@@ -447,20 +447,19 @@
         var body = this._buildSendBody();
         if (!body) return false;
         this.sheetError = '';
+        if (typeof window === 'undefined' || typeof window.stageOutboxSend !== 'function') {
+          this.sheetError = 'Send failed. Message outbox is unavailable.';
+          return false;
+        }
         try {
-          var res = await _sendFetch('/api/session/send', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              message: body,
-              tmux_session: this.boundSessionId,
-            }),
-          });
-          var data = await res.json();
-          if (!res.ok || !data || data.ok !== true) {
-            this.sheetError = _sendErrorMessage(res && typeof res.status === 'number' ? res.status : 0);
-            return false;
-          }
+          window.stageOutboxSend(this.boundSessionId, {
+            localId: (typeof window.newOutboxId === 'function')
+              ? window.newOutboxId() : ('ob_' + this.boundSessionId),
+            state: 'sending',
+            source: 'voice',
+            text: body,
+            ts: (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0,
+          }, { tmuxSession: this.boundSessionId });
           this.bufferText = '';
           this.clearAttachments();
           this.sheetError = '';

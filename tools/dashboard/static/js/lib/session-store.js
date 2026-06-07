@@ -124,6 +124,159 @@ window.clearOutbox = function(sessionId) {
   catch (e) { /* ignore */ }
 };
 
+// ── Durable outbox send engine ────────────────────────────────────────────
+//
+// This lives at the session-store layer, not in session-viewer.js, because
+// voice can send to a bound session whose viewer is not mounted. Staging,
+// persistence, POST, timeout, restore, and reconciliation all need one owner.
+var _OUTBOX_CONFIRM_MS = 9000;
+var _outboxTimers = {};
+var _outboxInFlight = {};
+
+function _outboxStore(sessionId) {
+  if (!sessionId || typeof window.getSessionStore !== 'function') return null;
+  return window.getSessionStore(sessionId);
+}
+
+function _outboxText(outbox) {
+  return (outbox && typeof outbox.text === 'string') ? outbox.text.trim() : '';
+}
+
+function _clearOutboxTimer(sessionId) {
+  if (_outboxTimers[sessionId]) {
+    clearTimeout(_outboxTimers[sessionId]);
+    delete _outboxTimers[sessionId];
+  }
+}
+
+window.markOutboxUnconfirmed = function(sessionId, localId) {
+  var s = _outboxStore(sessionId);
+  if (s && s.outbox && s.outbox.localId === localId && s.outbox.state === 'sending') {
+    s.outbox = Object.assign({}, s.outbox, { state: 'unconfirmed' });
+    window.saveOutbox(sessionId, s.outbox);
+  }
+};
+
+window.armOutboxTimeout = function(sessionId, localId) {
+  _clearOutboxTimer(sessionId);
+  _outboxTimers[sessionId] = setTimeout(function() {
+    window.markOutboxUnconfirmed(sessionId, localId);
+  }, _OUTBOX_CONFIRM_MS);
+};
+
+window.tryReconcileOutbox = function(sessionId) {
+  var s = _outboxStore(sessionId);
+  var o = s && s.outbox;
+  if (!o || (o.state !== 'sending' && o.state !== 'unconfirmed')) return false;
+  var want = _outboxText(o);
+  if (!want) return false;
+  var entries = (s && s.entries) || [];
+  for (var i = entries.length - 1; i >= 0 && i >= entries.length - 8; i--) {
+    var e = entries[i];
+    if (e && e.type === 'user' && typeof e.content === 'string' &&
+        e.content.trim().indexOf(want) !== -1) {
+      _clearOutboxTimer(sessionId);
+      delete _outboxInFlight[sessionId];
+      s.outbox = null;
+      window.clearOutbox(sessionId);
+      return true;
+    }
+  }
+  return false;
+};
+
+window.sendCurrentOutbox = async function(sessionId, options) {
+  options = options || {};
+  var s = _outboxStore(sessionId);
+  var o = s && s.outbox;
+  var body = _outboxText(o);
+  if (!body || !o.localId || o.state !== 'sending') return false;
+  if (!options.force && _outboxInFlight[sessionId] === o.localId) return true;
+
+  _outboxInFlight[sessionId] = o.localId;
+  s.outbox = Object.assign({}, o, { delivery: 'posted' });
+  window.saveOutbox(sessionId, s.outbox);
+
+  var ok = false;
+  try {
+    var res = await fetch('/api/session/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: body,
+        tmux_session: options.tmuxSession || sessionId,
+      }),
+    });
+    var data = await res.json();
+    ok = !!(res && res.ok && data && data.ok);
+  } catch (e) {
+    ok = false;
+  }
+
+  if (_outboxInFlight[sessionId] === o.localId) delete _outboxInFlight[sessionId];
+  if (!ok) {
+    window.markOutboxUnconfirmed(sessionId, o.localId);
+    return false;
+  }
+  window.armOutboxTimeout(sessionId, o.localId);
+  return true;
+};
+
+window.stageOutboxSend = function(sessionId, outbox, options) {
+  var s = _outboxStore(sessionId);
+  var body = _outboxText(outbox);
+  if (!s || !body) return Promise.resolve(false);
+  var next = Object.assign({}, outbox, {
+    localId: outbox.localId || (window.newOutboxId ? window.newOutboxId() : ('ob_' + sessionId)),
+    state: 'sending',
+    text: outbox.text,
+    ts: outbox.ts || ((typeof Date !== 'undefined' && Date.now) ? Date.now() : 0),
+    delivery: 'queued',
+  });
+  s.outbox = next;
+  window.saveOutbox(sessionId, next);
+  return window.sendCurrentOutbox(sessionId, options);
+};
+
+window.resendOutbox = function(sessionId, options) {
+  var s = _outboxStore(sessionId);
+  if (!s || !s.outbox || s.outbox.state !== 'unconfirmed') return Promise.resolve(false);
+  s.outbox = Object.assign({}, s.outbox, { state: 'sending', delivery: 'queued' });
+  window.saveOutbox(sessionId, s.outbox);
+  return window.sendCurrentOutbox(sessionId, Object.assign({}, options || {}, { force: true }));
+};
+
+window.dismissOutbox = function(sessionId) {
+  var s = _outboxStore(sessionId);
+  if (!s) return;
+  _clearOutboxTimer(sessionId);
+  delete _outboxInFlight[sessionId];
+  s.outbox = null;
+  window.clearOutbox(sessionId);
+};
+
+window.restoreOutbox = function(sessionId) {
+  if (!sessionId) return false;
+  var saved = window.loadOutbox(sessionId);
+  if (!saved) return false;
+  if (!_outboxText(saved)) {
+    window.clearOutbox(sessionId);
+    return false;
+  }
+  var s = _outboxStore(sessionId);
+  if (!s || s.outbox) return false;
+  s.outbox = saved;
+  if (window.tryReconcileOutbox(sessionId)) return true;
+  if (s.outbox && s.outbox.state === 'sending') {
+    if (s.outbox.delivery === 'queued') {
+      window.sendCurrentOutbox(sessionId);
+    } else {
+      window.armOutboxTimeout(sessionId, s.outbox.localId);
+    }
+  }
+  return true;
+};
+
 // Pending-message state for the session-card / viewer activity dot (auto-xkdoi).
 // Returns '' | 'sending' | 'unconfirmed' — the "hasn't cleared yet" states that
 // warrant a glanceable indicator. 'capturing' is intentionally excluded (live
@@ -153,6 +306,7 @@ window.getSessionStore = function(sessionId) {
   var sessions = Alpine.store('sessions');
   if (!sessions[sessionId]) {
     sessions[sessionId] = {
+      sessionId: sessionId,
       entries: [],
       offset: 0,
       seq: 0,
@@ -207,6 +361,9 @@ window.getSessionStore = function(sessionId) {
       _dedupCollisionsCount: 0,
       _lastRenderTs: 0,
     };
+    setTimeout(function() {
+      if (window.restoreOutbox) window.restoreOutbox(sessionId);
+    }, 0);
   }
   return sessions[sessionId];
 };
@@ -440,6 +597,7 @@ window.appendSessionEntries = function(store, data, provenance) {
     var remainingAttachment = pa.shift();
     if (_appendUniqueEntry(store, remainingAttachment, _chronologicalInsertIndex(store, remainingAttachment))) added++;
   }
+  if (added > 0 && window.tryReconcileOutbox) window.tryReconcileOutbox(store.sessionId || data.session_id || data.tmux_name || '');
   _noteEntriesAdded(store, added, provenance);
   return added;
 };
@@ -472,6 +630,7 @@ window.prependSessionEntries = function(store, data, provenance) {
       store._entriesViaSSECount = (store._entriesViaSSECount || 0) + added;
     }
     store._lastRenderTs = Date.now();
+    if (window.tryReconcileOutbox) window.tryReconcileOutbox(store.sessionId || data.session_id || data.tmux_name || '');
     _emitSessionStoreChanged(provenance === 'fetch' ? 'fetch-prepend' : 'prepend');
   }
   return added;
