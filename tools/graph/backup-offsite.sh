@@ -112,7 +112,13 @@ crontab -l 2>/dev/null | restic backup \
     --stdin --stdin-filename "crontab.txt" || true
 
 # ── Retention ─────────────────────────────────────────────────────────
+# Group by tags, NOT the default host,paths. The db snapshot's path carries a
+# per-run timestamp (data/backups/<tier>/<stamp>), so default grouping puts
+# every db snapshot in its own group of one and the keep-policy never thins
+# them. Grouping by host+tags (tier=,kind=) lets all db snapshots share a
+# group so retention actually applies. See graph backup-retention pitfall.
 restic forget --prune \
+    --group-by host,tags \
     --keep-hourly  "${RESTIC_KEEP_HOURLY:-24}" \
     --keep-daily   "${RESTIC_KEEP_DAILY:-30}" \
     --keep-weekly  "${RESTIC_KEEP_WEEKLY:-12}" \
