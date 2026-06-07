@@ -48,18 +48,24 @@
   // ungrabbable.
   var _cachedSafeTop = null;
   function _safeAreaInsetTop() {
-    if (_cachedSafeTop !== null) return _cachedSafeTop;
-    _cachedSafeTop = 0;
+    // Only a NON-ZERO reading is cacheable. env(safe-area-inset-top) reads 0 until
+    // iOS resolves the notch inset (after the standalone/fullscreen viewport is
+    // established), so a premature 0 must NOT get locked into the cache — that left
+    // the capsule top-clamp at minY=8 and let it be dragged under the notch
+    // (intermittent, depending on first-probe timing). Re-probe until it resolves.
+    if (_cachedSafeTop) return _cachedSafeTop;
+    var v = 0;
     try {
       if (typeof document !== 'undefined' && document.body) {
         var probe = document.createElement('div');
         probe.style.cssText = 'position:fixed;top:0;left:0;width:0;height:env(safe-area-inset-top,0px);visibility:hidden;pointer-events:none;';
         document.body.appendChild(probe);
-        _cachedSafeTop = probe.getBoundingClientRect().height || 0;
+        v = probe.getBoundingClientRect().height || 0;
         if (probe.parentNode) probe.parentNode.removeChild(probe);
       }
-    } catch (_e) { _cachedSafeTop = 0; }
-    return _cachedSafeTop;
+    } catch (_e) { v = 0; }
+    if (v > 0) _cachedSafeTop = v;
+    return v;
   }
 
   function _collapseEnabled() {
