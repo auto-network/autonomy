@@ -285,14 +285,14 @@ describe('voice shell helpers', () => {
     assert.equal(h.component.showCapsule, true);
   });
 
-  it('uses the Live captions placeholder when the buffer is empty', () => {
+  it('uses an empty caption placeholder when the buffer is empty', () => {
     const h = loadVoiceShell({
       voiceStore: {
         bufferText: '',
       },
     });
     assert.equal(h.component.hasCaptionText, false);
-    assert.equal(h.component.captionPlaceholder, 'Live captions');
+    assert.equal(h.component.captionPlaceholder, '');
     assert.equal(h.component.captionText, '');
   });
 
