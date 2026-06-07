@@ -5384,6 +5384,11 @@ async def api_session_create(request):
                 {"error": f"Workspace prep failed: {e}"}, status_code=500,
             )
         project_mounts.update(workspace_settings.artifact_mounts(proj))
+        # auto-bpomi phase-trace: prepare_session_mounts done (git ops × N
+        # repos). Splits the prep slice from launch_session so Bead B can see
+        # the per-repo mount work independently.
+        logger.info("phase-trace: mounts-prepared  tmux=%s  dt_from_post_ms=%d",
+                    tmux_name, int((time.monotonic() - _phase_t0) * 1000))
         meta: dict = {
             "tmux_session": tmux_name,
             "project": proj.id,
