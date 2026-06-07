@@ -428,6 +428,17 @@
               project: s.project || 'default',
               session_type: sessionType,
               is_live: true,
+              // Startup-phase fields (auto-yfcoc). The shared session-card
+              // partial derives a phase chip via window.Autonomy.lifecycle.*;
+              // without these the derivation defaults to 'pending' and paints
+              // a "Queued" startup chip on EVERY already-running session in
+              // the picker. Pass the real store values so a session that has
+              // actually started (resolved / composer_ready) resolves to
+              // "ready" and shows no startup chrome.
+              setup_phase: s.setupPhase,
+              harness_phase: s.harnessPhase,
+              harness_state: s.harnessState,
+              resolved: s.resolved === true,
               entry_count: s.entryCount || s.entries.length,
               context_tokens: s.contextTokens || 0,
               last_activity: s.lastActivity || 0,
@@ -441,29 +452,27 @@
               bead_id: s.beadId || '',
             });
           }
+          // Most-recently-active first (descending last_activity), so the
+          // session you're most likely to chat with sits at the top; fall back
+          // to id for stable ordering when activity ties.
           this.chatSessions = results.sort(function (a, b) {
-            if (a.label && !b.label) return -1;
-            if (!a.label && b.label) return 1;
-            return a.id.localeCompare(b.id);
+            var d = (b.last_activity || 0) - (a.last_activity || 0);
+            return d !== 0 ? d : a.id.localeCompare(b.id);
           });
         },
 
         // ── Auto-reconnect Chat With ──────────────────────────────────────
 
         _checkChatWith: function () {
-          var savedSession = localStorage.getItem('design-chat-' + this.designId);
-          if (savedSession) {
-            // Verify saved session is still alive via store
-            var allSessions = Alpine.store('sessions');
-            var s = allSessions[savedSession];
-            if (s && s.isLive) {
-              this._connectSession(savedSession);
-              return;
-            }
-            // Saved session is dead — clear and fall through to picker
-            localStorage.removeItem('design-chat-' + this.designId);
-          }
-          // No saved session — load picker options
+          // Your explicit picker choice (localStorage) wins; otherwise fall
+          // back to the server's linked_session — the session running the
+          // watch on this design (graph ui-design stamps it). Connect whichever
+          // is live, else show the picker. No self-destruct: a transient
+          // not-live no longer wipes the link.
+          var saved = localStorage.getItem('design-chat-' + this.designId)
+            || (this.design && this.design.linked_session);
+          var s = saved && Alpine.store('sessions')[saved];
+          if (s && s.isLive) { this._connectSession(saved); return; }
           this._loadChatSessions();
         },
 

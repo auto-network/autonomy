@@ -277,6 +277,15 @@ def get_design(rev_id: str) -> dict | None:
             (did,),
         ).fetchall()
         exp["revisions"] = [s["id"] for s in siblings]
+        # linked_session: the session currently working this design — the most
+        # recent revision's creator (what `graph ui-design`/the watch stamps on
+        # every push). The design chat uses it as the default linked session.
+        latest = conn.execute(
+            "SELECT creator_session_id FROM designs WHERE design_id = ? "
+            "AND creator_session_id IS NOT NULL ORDER BY revision_seq DESC LIMIT 1",
+            (did,),
+        ).fetchone()
+        exp["linked_session"] = latest["creator_session_id"] if latest else None
         return exp
     finally:
         conn.close()
