@@ -31,59 +31,52 @@
     }
     var setupPhase = s.setup_phase || "pending";
     var harnessPhase = s.harness_phase || "pending";
+    // entries_length is the canonical first-turn signal. Falls back to
+    // entry_count (the registry column) when the caller hasn't passed an
+    // explicit override (which is e.g. the case for the viewer's
+    // loadingPhaseRow, where we want a synthetic 0 to KEEP the launching
+    // chrome until the user has actually seen a real entry).
+    var entriesLen = (typeof s.entries_length === "number")
+      ? s.entries_length
+      : (s.entry_count || 0);
 
     if (setupPhase === "setup_failed") return "setup_failed";
 
-    // STARTUP-OVER GUARDS (post-launch fixes). The setup_phase column
-    // is unreliable for two real reasons, both surfaced by live-data
-    // verification against the real registry:
+    // LAUNCHING-UNTIL-FIRST-RESPONSE GATE (auto-ja51w):
+    // A session is "ready" only when it has emitted a real assistant turn
+    // (entries.length > 0). Until then it stays in the launching states.
     //
-    //   1. Pre-existing sessions that were running BEFORE the schema
-    //      migration ran have setup_phase + harness_phase defaulted
-    //      to 'pending' by the column defaults — they never went
-    //      through the api_session_create path. (25 of 27 live rows
-    //      in the first merge attempt.)
+    // Two ways out of launching:
+    //   1. ``resolved === true`` AND entries > 0 — a resumed session with
+    //      historical JSONL where the existing turns are the user's content.
+    //      (Resumed sessions also pass through the new awaiting_first_response
+    //      state in flight; auto-sj0gb's resume orientation triggers the
+    //      first new assistant turn that flips them to ready.)
+    //   2. ``harness_phase === "composer_ready"`` AND entries > 0 — fresh
+    //      create whose orientation reply has landed.
     //
-    //   2. The setup-exit watcher isn't re-armed on dashboard restart,
-    //      so an idle session that booted before the last restart can
-    //      have setup_phase stuck at 'container_starting' forever even
-    //      though the harness is fully ready. (1 of 27 in the same
-    //      verification — auto-0531-152256: idle 77min at composer_ready
-    //      but setup_phase frozen at container_starting because nobody
-    //      ever sent a first prompt + the watcher didn't pick up the
-    //      old .setup-exit file after the dashboard restart.)
+    // Composer-ready WITHOUT entries → awaiting_first_response (still
+    // launching, but with a distinct chip telling operators "harness up,
+    // waiting on its reply to the orientation message").
     //
-    // Two independent signals authoritatively say "startup is over":
-    //
-    //   • ``resolved === true`` — the harness has produced JSONL output
-    //     (covers case 1 — long-running sessions have data on disk).
-    //
-    //   • ``harness_phase === "composer_ready"`` — the harness screen-
-    //     reader has explicitly observed the composer prompt (covers
-    //     case 2 — idle sessions that never typed anything but ARE
-    //     past their boot screen).
-    //
-    // Either-or bypasses to ready. setup_failed still wins because the
-    // failed check above this block fires first — "setup script failed"
-    // is a state the operator MUST see regardless of whether the
-    // harness happens to be at composer_ready.
-    if (s.resolved === true || harnessPhase === "composer_ready") {
-      var hsResolved = s.harness_state || {};
-      if (hsResolved.confirming_trust_prompt) return "ready_with_confirming_trust";
-      if (hsResolved.in_planning_mode) return "ready_with_planning";
+    // setup_failed still wins because the failed check above fires first —
+    // "setup script failed" is a state the operator MUST see regardless of
+    // whether the harness happens to be at composer_ready.
+    if (entriesLen > 0 && (s.resolved === true || harnessPhase === "composer_ready")) {
+      var hsReady = s.harness_state || {};
+      if (hsReady.confirming_trust_prompt) return "ready_with_confirming_trust";
+      if (hsReady.in_planning_mode) return "ready_with_planning";
       return "ready";
     }
-
-    // Ready = setup_complete + composer_ready. Within ready, harness_state
-    // flags expose the in-flight overlay (confirming trust, planning).
-    if (
-      setupPhase === "setup_complete" &&
-      harnessPhase === "composer_ready"
-    ) {
-      var hs = s.harness_state || {};
-      if (hs.confirming_trust_prompt) return "ready_with_confirming_trust";
-      if (hs.in_planning_mode) return "ready_with_planning";
-      return "ready";
+    if (harnessPhase === "composer_ready") {
+      // Composer is up but no first turn yet — usually the brief window
+      // between the orientation injection and the agent's first JSONL reply.
+      // Harness-state overlays apply here too (an agent could be at trust
+      // prompt or planning before its first emit).
+      var hsAwait = s.harness_state || {};
+      if (hsAwait.confirming_trust_prompt) return "ready_with_confirming_trust";
+      if (hsAwait.in_planning_mode) return "ready_with_planning";
+      return "awaiting_first_response";
     }
 
     // The two phases run in parallel (dind-entrypoint.sh backgrounds
@@ -92,13 +85,22 @@
     // about "container coming up" first, then "harness booting" once
     // setup is complete. After setup_complete, the harness progression
     // becomes the visible chip.
+    //
+    // auto-ja51w: the four pre-container phases (requesting,
+    // preparing_workspace, launching_container, container_started) are
+    // written by api_session_create BEFORE dind-entrypoint runs — they
+    // cover the ~7-9s pre-container window that previously showed only
+    // the optimistic-tile "Queued" placeholder. Once dind-entrypoint
+    // starts writing .setup_phase markers, the existing setup-exit
+    // watcher overwrites these forward-only.
     if (setupPhase !== "setup_complete") {
       if (setupPhase === "setup_running") return "setup_running";
-      // dind_ready dropped — verified by host-0531-020038 audit (turn 549):
-      // dind-entrypoint.sh writes only entrypoint_running + setup_running.
-      // The dind_ready marker is never written by any production code path.
       if (setupPhase === "entrypoint_running") return "entrypoint";
       if (setupPhase === "container_starting") return "container_starting";
+      if (setupPhase === "container_started") return "booting_harness";
+      if (setupPhase === "launching_container") return "launching_container";
+      if (setupPhase === "preparing_workspace") return "preparing_workspace";
+      if (setupPhase === "requesting") return "requesting";
     }
     if (harnessPhase === "first_turn_written") return "first_turn_written";
     if (harnessPhase === "harness_starting") return "harness_starting";
@@ -124,11 +126,17 @@
   //      dynamic form is host-approved (turn 71).
   var _STATE_CHIP_LABEL = {
     pending: "Queued",
+    // auto-ja51w: pre-container phases (register-early pattern).
+    requesting: "Queued",
+    preparing_workspace: "Preparing workspace",  // augmented in phaseChip() with N/M
+    launching_container: "Starting container",
     container_starting: "Starting container",
+    container_started: "Starting container",
     entrypoint: "Preparing workspace",
     setup_running: "Setup running",
-    // harness_starting handled in phaseChip() — dynamic over s.harness
+    // harness_starting + booting_harness handled in phaseChip() — dynamic over s.harness
     first_turn_written: "Verifying input",
+    awaiting_first_response: "Awaiting first reply",
     ready: "",                              // deliberate deviation, see comment above
     ready_with_confirming_trust: "Confirming trust",
     ready_with_planning: "Planning",
@@ -152,13 +160,24 @@
 
   function phaseChip(s) {
     var state = lifecycleState(s);
-    if (state === "harness_starting") {
+    if (state === "harness_starting" || state === "booting_harness") {
       // Dynamic over s.harness so Codex sessions don't mis-render as
       // "Booting Claude" (the design's hardcoded text). Capitalize
       // the first letter for readability.
       var h = (s && s.harness) || "harness";
       var label = h.charAt(0).toUpperCase() + h.slice(1);
       return "Booting " + label;
+    }
+    if (state === "preparing_workspace") {
+      // auto-ja51w: enrich with the N/M progress from the SSE registry
+      // payload's phase_progress dict (set by SessionMonitor.update_phase
+      // from inside prepare_session_mounts' per-repo callback). Falls
+      // through to the plain label when no progress is attached.
+      var p = s && s.phase_progress;
+      if (p && typeof p.repo_index === "number" && typeof p.total === "number") {
+        return "Preparing workspace " + p.repo_index + "/" + p.total;
+      }
+      return _STATE_CHIP_LABEL.preparing_workspace;
     }
     return _STATE_CHIP_LABEL[state] || "";
   }
