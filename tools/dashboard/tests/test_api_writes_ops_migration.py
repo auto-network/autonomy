@@ -140,6 +140,45 @@ def test_api_graph_note_scopeless_lands_in_personal(dashboard_client, orgs_root)
         pc.close()
 
 
+def test_api_graph_note_multipart_html_creates_rich_content(
+    dashboard_client, orgs_root, tmp_path,
+):
+    """Multipart ``html`` upload must become the note's version-paired
+    rich-content attachment. Container callers use this path for
+    ``graph note --html``.
+    """
+    html_path = tmp_path / "note.html"
+    html_path.write_text("<main><h1>Rich API Note</h1></main>", encoding="utf-8")
+
+    with html_path.open("rb") as html_file:
+        resp = dashboard_client.post(
+            "/api/graph/note",
+            data={"content": "# Rich API Note\n\nMarkdown body."},
+            files={"html": ("note.html", html_file, "text/html")},
+            headers={"X-Graph-Org": "autonomy"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["rich_content"] is True
+    assert any(att.get("kind") == "html" for att in body["attachments"])
+
+    au = sqlite3.connect(str(orgs_root / "autonomy.db"))
+    try:
+        meta_raw = au.execute(
+            "SELECT metadata FROM sources WHERE id = ?", (body["source_id"],),
+        ).fetchone()[0]
+        assert json.loads(meta_raw)["rich_content"] is True
+        html_rows = au.execute(
+            "SELECT mime_type, source_id FROM attachments WHERE source_id = ?",
+            (f"{body['source_id']}@1",),
+        ).fetchall()
+        assert html_rows == [("text/html", f"{body['source_id']}@1")]
+    finally:
+        au.close()
+
+
 # ── Note update: the motivating regression (auto-co51y) ─────────
 
 
@@ -288,6 +327,56 @@ def test_api_graph_note_update_body_preserves_title(dashboard_client, orgs_root)
             "SELECT title FROM sources WHERE id = ?", (auto_id,),
         ).fetchone()
         assert row[0] == "Pinned", "title preserved across body edits"
+    finally:
+        au.close()
+
+
+def test_api_graph_note_update_multipart_html_updates_rich_content(
+    dashboard_client, orgs_root, tmp_path,
+):
+    """Multipart ``html`` upload must be passed to graph_ops.update_note.
+
+    Without this, rich-content updates from container sessions are rejected
+    because the API path drops the HTML file before ops sees it.
+    """
+    html_v1 = tmp_path / "v1.html"
+    html_v2 = tmp_path / "v2.html"
+    html_v1.write_text("<main>v1</main>", encoding="utf-8")
+    html_v2.write_text("<main>v2</main>", encoding="utf-8")
+    created = ops.create_note(
+        "# Rich v1\n\nBody v1",
+        html_path=str(html_v1),
+        org="autonomy",
+    )
+
+    with html_v2.open("rb") as html_file:
+        resp = dashboard_client.post(
+            "/api/graph/note/update",
+            data={
+                "source_id": created["source_id"],
+                "content": "# Rich v2\n\nBody v2",
+            },
+            files={"html": ("v2.html", html_file, "text/html")},
+            headers={"X-Graph-Org": "autonomy"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["new_version"] == 2
+    assert body["rich_content"] is True
+    assert any(
+        att.get("kind") == "html" and att.get("source_id") == f"{created['source_id']}@2"
+        for att in body["attachments"]
+    )
+
+    au = sqlite3.connect(str(orgs_root / "autonomy.db"))
+    try:
+        html_rows = au.execute(
+            "SELECT mime_type, source_id FROM attachments WHERE source_id = ?",
+            (f"{created['source_id']}@2",),
+        ).fetchall()
+        assert html_rows == [("text/html", f"{created['source_id']}@2")]
     finally:
         au.close()
 

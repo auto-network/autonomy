@@ -752,6 +752,44 @@ def test_graph_note_router_roundtrip_via_api(
         db.close()
 
 
+def test_graph_note_router_html_roundtrip_via_api(
+    api_client, forbid_cli_sqlite, capsys, monkeypatch, tmp_path,
+):
+    """``graph note --html`` keeps the HTML upload on the API path."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    monkeypatch.setattr(graph_cli, "_require_read", lambda *a, **k: None)
+    html_path = tmp_path / "api-rich.html"
+    html_path.write_text("<main><h1>Router Rich Note</h1></main>", encoding="utf-8")
+    args = _cli_args(
+        text=["# Router Rich Note\n\nMarkdown body."],
+        tags=None, author=None, project="autonomy", html=str(html_path),
+    )
+
+    graph_cli.cmd_note_router(args)
+
+    out = capsys.readouterr().out
+    assert "Note saved" in out
+    assert "(rich-content)" in out
+    GraphDB.close_all_pooled()
+    db = GraphDB.open_org_db("autonomy", mode="ro")
+    try:
+        row = db.conn.execute(
+            "SELECT id, metadata FROM sources WHERE title = ?",
+            ("Router Rich Note",),
+        ).fetchone()
+        assert row is not None
+        assert json.loads(row["metadata"])["rich_content"] is True
+        html_rows = db.conn.execute(
+            "SELECT mime_type, source_id FROM attachments WHERE source_id = ?",
+            (f"{row['id']}@1",),
+        ).fetchall()
+        assert [(r["mime_type"], r["source_id"]) for r in html_rows] == [
+            ("text/html", f"{row['id']}@1"),
+        ]
+    finally:
+        db.close()
+
+
 def test_cmd_note_update_routes_through_api(
     api_client, forbid_cli_sqlite, seeded_source_id, capsys, monkeypatch,
 ):
