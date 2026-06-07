@@ -349,6 +349,8 @@ window.getSessionStore = function(sessionId) {
       harnessPhase: 'pending',
       resumable: false,
       harnessState: {},
+      // auto-ja51w: transient per-session sub-phase progress; null when none.
+      phaseProgress: null,
       olderBefore: null,           // reverse-tail cursor for older-history paging
       hasMoreHistory: false,       // whether older-history paging can continue
       loaded: false,
@@ -740,6 +742,12 @@ window.ensureSessionMessages = function() {
       if (s.harness_phase !== undefined) store.harnessPhase = s.harness_phase;
       if (s.resumable !== undefined) store.resumable = !!s.resumable;
       if (s.harness_state !== undefined) store.harnessState = s.harness_state;
+      // auto-ja51w: transient sub-phase progress (e.g.
+      // {repo_index:2, total:3, current_repo:'enterprise_ng'}). Surfaced
+      // by SessionMonitor.update_phase(progress=...) — present only while
+      // an active progress is set, omitted from payload otherwise. Store
+      // gets explicit null on omit so the field clears cleanly.
+      store.phaseProgress = s.phase_progress || null;
     }
     // Mark removed sessions as dead
     var allSessions = Alpine.store('sessions');

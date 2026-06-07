@@ -704,6 +704,11 @@
             harness_phase: s.harnessPhase || 'pending',
             harness_state: s.harnessState || {},
             resolved: s.resolved === true,
+            // auto-ja51w: transient sub-phase progress from
+            // SessionMonitor.update_phase(progress=...). Drives the
+            // "Preparing workspace N/M" chip label in phaseChip().
+            // Omitted when no progress is active.
+            phase_progress: s.phaseProgress || null,
             // auto-yfcoc PART 2: optimistic launching-tile marker. Drives
             // placement into the Launching section (and the chip suppresses
             // navigation until the real session reconciles in).
