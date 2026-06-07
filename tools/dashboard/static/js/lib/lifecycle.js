@@ -32,37 +32,33 @@
     var setupPhase = s.setup_phase || "pending";
     var harnessPhase = s.harness_phase || "pending";
     // entries_length is the canonical first-turn signal. Falls back to
-    // entry_count (the registry column) when the caller hasn't passed an
-    // explicit override (which is e.g. the case for the viewer's
-    // loadingPhaseRow, where we want a synthetic 0 to KEEP the launching
-    // chrome until the user has actually seen a real entry).
-    var entriesLen = (typeof s.entries_length === "number")
-      ? s.entries_length
-      : (s.entry_count || 0);
+    // The launching-until-first-response gate keys on whether the AGENT
+    // has produced a turn — not on entry count, because the first JSONL
+    // entry is the user-side orientation echo (tmux_send's input shows up
+    // as a user-role turn before codex even processes it). Per host-0531
+    // turn 683's grep of auto-0607-173153: user_message at 21:31:59 +
+    // assistant reasoning at 21:32:01 = ~2s gap. Gating on entries.length
+    // would flip the card to Active during that gap.
+    //
+    // ``hasAssistantTurn`` is true if any entry has role=assistant
+    // (assistant_text, thinking, tool_use — all model-authored). Caller
+    // can also override via ``s.has_assistant_turn`` boolean.
+    var hasAssistantTurn = (typeof s.has_assistant_turn === "boolean")
+      ? s.has_assistant_turn
+      : (Array.isArray(s.entries) && s.entries.some(function (e) {
+          return e && e.role === "assistant";
+        }));
 
     if (setupPhase === "setup_failed") return "setup_failed";
 
     // LAUNCHING-UNTIL-FIRST-RESPONSE GATE (auto-ja51w):
-    // A session is "ready" only when it has emitted a real assistant turn
-    // (entries.length > 0). Until then it stays in the launching states.
-    //
-    // Two ways out of launching:
-    //   1. ``resolved === true`` AND entries > 0 — a resumed session with
-    //      historical JSONL where the existing turns are the user's content.
-    //      (Resumed sessions also pass through the new awaiting_first_response
-    //      state in flight; auto-sj0gb's resume orientation triggers the
-    //      first new assistant turn that flips them to ready.)
-    //   2. ``harness_phase === "composer_ready"`` AND entries > 0 — fresh
-    //      create whose orientation reply has landed.
-    //
-    // Composer-ready WITHOUT entries → awaiting_first_response (still
-    // launching, but with a distinct chip telling operators "harness up,
-    // waiting on its reply to the orientation message").
-    //
-    // setup_failed still wins because the failed check above fires first —
-    // "setup script failed" is a state the operator MUST see regardless of
-    // whether the harness happens to be at composer_ready.
-    if (entriesLen > 0 && (s.resolved === true || harnessPhase === "composer_ready")) {
+    // A session is "ready" only when the AGENT has emitted a real turn —
+    // i.e. an assistant-role entry exists in the JSONL. Until then it
+    // stays in the launching states. ``resolved`` alone is not enough
+    // because brand-new sessions get jsonl_path set the moment the
+    // orientation echo lands (=> resolved=true while only user turns
+    // exist).
+    if (hasAssistantTurn && (s.resolved === true || harnessPhase === "composer_ready")) {
       var hsReady = s.harness_state || {};
       if (hsReady.confirming_trust_prompt) return "ready_with_confirming_trust";
       if (hsReady.in_planning_mode) return "ready_with_planning";
