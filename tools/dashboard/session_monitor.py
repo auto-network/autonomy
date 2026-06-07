@@ -968,6 +968,16 @@ class SessionMonitor:
                 if res_dir is None:
                     res_dir = jsonl_path.parent
 
+        # auto-ja51w: register() may be called after register_pending has
+        # already inserted a stub row at api_session_create's POST entry.
+        # In that case the INSERT fails with IntegrityError and we MUST
+        # still proceed — backfill the now-known jsonl_path / resolution_dir
+        # / session_uuid / harness_token onto the existing row, set up the
+        # tail state, attach inotify watches, and broadcast. The previous
+        # early-return left the row orphaned (no tail state, no watches),
+        # and reconciliation purged it within a few seconds.
+        import sqlite3
+        row_existed = False
         try:
             insert_session(
                 tmux_name=tmux_name,
@@ -981,9 +991,61 @@ class SessionMonitor:
                 resolution_dir=str(res_dir) if res_dir else None,
                 harness_token=harness_token,
             )
+        except sqlite3.IntegrityError:
+            row_existed = True
+            logger.debug(
+                "session_monitor: row already exists for %s (likely from register_pending); "
+                "backfilling jsonl_path + resolution_dir",
+                tmux_name,
+            )
         except Exception:
-            logger.warning("session_monitor: INSERT failed for tmux=%s (may already exist)", tmux_name)
+            logger.warning(
+                "session_monitor: INSERT failed for tmux=%s — unexpected error, aborting register",
+                tmux_name, exc_info=True,
+            )
             return
+
+        if row_existed:
+            # Backfill the columns insert_session would have written. The
+            # session_uuid is appended via update_jsonl_link if known; for
+            # the typical container-create path it's still pending so we
+            # only touch the file paths.
+            from tools.dashboard.dao.dashboard_db import get_conn
+            conn = get_conn()
+            parts: list[str] = []
+            vals: list = []
+            if path_str is not None:
+                parts.append("jsonl_path=?")
+                vals.append(path_str)
+                parts.append("curr_jsonl_file=?")
+                vals.append(path_str)
+            if res_dir is not None:
+                parts.append("resolution_dir=?")
+                vals.append(str(res_dir))
+            if session_uuid is not None:
+                parts.append("session_uuid=?")
+                vals.append(session_uuid)
+            if bead_id is not None:
+                parts.append("bead_id=?")
+                vals.append(bead_id)
+            if harness_token is not None:
+                parts.append("harness_token=?")
+                vals.append(harness_token)
+            # type + project + harness — refresh in case register_pending
+            # used defaults that differ from the now-known values.
+            parts.append("type=?")
+            vals.append(session_type)
+            parts.append("project=?")
+            vals.append(project)
+            parts.append("harness=?")
+            vals.append(harness)
+            if parts:
+                vals.append(tmux_name)
+                conn.execute(
+                    f"UPDATE tmux_sessions SET {', '.join(parts)} WHERE tmux_name=?",
+                    vals,
+                )
+                conn.commit()
 
         if seed_message:
             update_tail_state(tmux_name, last_message=seed_message)
