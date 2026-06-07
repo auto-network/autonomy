@@ -79,6 +79,16 @@
       display: flex;
       flex-direction: column;
       gap: 0.875rem;
+      /* Own the vertical scroll. Previously this was overflow:visible, so a tall
+         designs list + usage/stats footer overflowed the flex item and only the
+         parent #sidebar could (fragilely) scroll it — no discoverable scrollbar,
+         so on desktop the usage-stats footer just read as cut off. Scrolling the
+         main region directly gives a real scrollbar and keeps the footer
+         reachable. overflow-x stays hidden: with only overflow-y set, x would
+         compute to auto and the vertical scrollbar's width nudges a full-width
+         child into a spurious horizontal scrollbar. */
+      overflow-x: hidden;
+      overflow-y: auto;
     }
     .sidebar-footer {
       margin-top: auto;
