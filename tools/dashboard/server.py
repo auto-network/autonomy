@@ -5362,6 +5362,20 @@ async def api_session_create(request):
                 },
                 status_code=400,
             )
+        # auto-ja51w C3: register the session row IMMEDIATELY (before the
+        # ~7-9s prepare_session_mounts + launch_session block) so the dashboard
+        # can broadcast per-step progress via SSE during the otherwise dead-air
+        # window. The normal register() call later, at the post-tmux-spawn
+        # point, is idempotent — the duplicate INSERT no-ops and the regular
+        # tail-state setup proceeds with the now-known jsonl_path and
+        # resolution_dir.
+        await session_monitor.register_pending(
+            tmux_name,
+            session_type="container",
+            project=proj.id,
+            harness=proj.harness or "claude",
+            setup_phase="requesting",
+        )
         try:
             # prepare_session_mounts runs a synchronous `git fetch origin
             # --prune` on every workspace clone — for enterprise-ng that's 3
@@ -5369,11 +5383,31 @@ async def api_session_create(request):
             # is what froze the whole dashboard API during NG startup (proven:
             # /api/ping spiked to ~9.5s during the first fetch). Offload to a
             # worker thread so the loop stays responsive while repos fetch.
+            #
+            # auto-ja51w C3: progress_callback (called once per repo, from
+            # inside the worker thread) schedules an update_phase coroutine
+            # back on the event loop via run_coroutine_threadsafe — emits the
+            # per-repo chip progression while prepare_session_mounts runs.
+            _loop = asyncio.get_running_loop()
+            def _on_repo_prepared(repo_index: int, total_repos: int, repo_name: str):
+                asyncio.run_coroutine_threadsafe(
+                    session_monitor.update_phase(
+                        tmux_name,
+                        setup_phase="preparing_workspace",
+                        progress={
+                            "repo_index": repo_index,
+                            "total": total_repos,
+                            "current_repo": repo_name,
+                        },
+                    ),
+                    _loop,
+                )
             project_mounts = await asyncio.to_thread(
                 prepare_session_mounts,
                 proj,
                 tmux_name,
                 refresh_existing_worktree=True,
+                progress_callback=_on_repo_prepared,
             )
         except WorkspaceError as e:
             logger.error(
@@ -5467,6 +5501,13 @@ async def api_session_create(request):
     # command) done; about to spawn the tmux session.
     logger.info("phase-trace: launch-session-built  tmux=%s  dt_from_post_ms=%d",
                 tmux_name, int((time.monotonic() - _phase_t0) * 1000))
+    # auto-ja51w C3: phase transition for the launching_container chip
+    # (container slot before tmux spawn). Only applies to the container path
+    # — host sessions skip the docker spawn entirely.
+    if is_container:
+        await session_monitor.update_phase(
+            tmux_name, setup_phase="launching_container", progress={},
+        )
 
     # ── Launch tmux ─────────────────────────────────────────────
     tmux_cmd = ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40"]
@@ -5506,6 +5547,14 @@ async def api_session_create(request):
     # auto-bpomi phase-trace: container/process spawned (tmux new-session).
     logger.info("phase-trace: tmux-spawned  tmux=%s  dt_from_post_ms=%d",
                 tmux_name, int((time.monotonic() - _phase_t0) * 1000))
+    # auto-ja51w C3: phase transition for the booting_harness chip. The
+    # container's dind-entrypoint will write `.setup_phase=entrypoint_running`
+    # within ~1s, and _watch_setup_exit (spawned below for container sessions)
+    # will overwrite this value forward-only as the in-container phases advance.
+    if is_container:
+        await session_monitor.update_phase(
+            tmux_name, setup_phase="container_started", progress={},
+        )
 
     # ── Register with session monitor ───────────────────────────
     if is_container:
@@ -5630,13 +5679,33 @@ async def api_session_create(request):
             first_message = f"Session {tmux_name} started."
 
     if first_message:
-        async def _inject_first_message():
-            await asyncio.sleep(5)
+        async def _inject_first_message(msg=first_message):
+            # auto-ja51w C3: composer_ready-gated injection. The previous
+            # 5-second fixed sleep was load-bearing only on luck — fresh-boot
+            # composer typically comes up within 1-3s of container start, but
+            # codex-harness sessions take ~3-4s of credential resolution
+            # before docker even starts and Claude Code v2.1+ has variable
+            # boot latency. Polling harness_phase mirrors the resume-side
+            # pattern from f8c4add (host-0531-020038, bead auto-sj0gb) and
+            # gives sub-second injection latency from real composer readiness.
+            deadline = time.time() + 60  # 60s ceiling — matches the watcher net
+            while time.time() < deadline:
+                row = dashboard_db.get_session(tmux_name)
+                if row and row.get("harness_phase") == "composer_ready":
+                    break
+                await asyncio.sleep(0.5)
+            else:
+                logger.warning(
+                    "api_session_create: composer_ready not detected within 60s "
+                    "for %s — skipping first-message inject (session still functional)",
+                    tmux_name,
+                )
+                return
             try:
-                await tmux_send(tmux_name, first_message)
+                await tmux_send(tmux_name, msg)
                 logger.info(
-                    "api_session_create: injected first message into %s  len=%d  primer=%s",
-                    tmux_name, len(first_message), bool(primer_url and not primer_error),
+                    "api_session_create: injected first message into %s  len=%d  primer=%s  (composer_ready-gated)",
+                    tmux_name, len(msg), bool(primer_url and not primer_error),
                 )
             except Exception:
                 logger.warning(
