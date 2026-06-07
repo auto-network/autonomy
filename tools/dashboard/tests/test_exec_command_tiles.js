@@ -313,11 +313,41 @@ describe('exec_command meta badges', () => {
       exit_code: null,
     });
     const ctx = makeRendererContext(h.win, entry, result);
+    const store = h.win.getSessionStore(ctx.sessionKey);
+    store.activityState = 'tool_running';
+    store.pendingToolIds = { call_progress: true };
 
     assert.equal(h.win.SessionRenderer.isToolRunning.call(ctx, entry), true);
     const badges = h.win.SessionRenderer.metaDisplay.call(ctx, entry);
     assert.equal(badges.some((badge) => badge.text === 'Running'), true);
     assert.equal(badges.some((badge) => badge.text === '2 lines'), true);
+  });
+
+  it('does not render a missing result as running when server activity is idle', () => {
+    const h = makeHarness();
+    const entry = makeExecUse('call_missing_result', 'rg isToolRunning tools/dashboard');
+    const ctx = makeRendererContext(h.win, entry, undefined);
+    const store = h.win.getSessionStore(ctx.sessionKey);
+    store.activityState = 'idle';
+    store.pendingToolIds = {};
+
+    assert.equal(h.win.SessionRenderer.isToolRunning.call(ctx, entry), false);
+    const badges = h.win.SessionRenderer.metaDisplay.call(ctx, entry);
+    assert.equal(badges.some((badge) => badge.text === 'Running'), false);
+    assert.equal(badges.some((badge) => badge.cls === 'sc-meta-running'), false);
+  });
+
+  it('renders a missing result as running only when the server marks that tool pending', () => {
+    const h = makeHarness();
+    const entry = makeExecUse('call_pending_result', 'rg isToolRunning tools/dashboard');
+    const ctx = makeRendererContext(h.win, entry, undefined);
+    const store = h.win.getSessionStore(ctx.sessionKey);
+    store.activityState = 'tool_running';
+    store.pendingToolIds = { call_pending_result: true };
+
+    assert.equal(h.win.SessionRenderer.isToolRunning.call(ctx, entry), true);
+    const badges = h.win.SessionRenderer.metaDisplay.call(ctx, entry);
+    assert.equal(badges.some((badge) => badge.text === 'Running'), true);
   });
 
   it('does not allow a completed exec result to regress back to running', () => {
