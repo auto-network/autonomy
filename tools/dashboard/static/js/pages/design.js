@@ -101,6 +101,16 @@
 
           this.$watch('chatOpen', function (open) {
             localStorage.setItem('design-chatOpen-' + self.designId, open ? 'true' : 'false');
+            // Mirror chat-open into the panel viewer so it switches between the
+            // active composer + pending/dictation tile (open) and the passive
+            // caption gutter (collapsed). The panel stays mounted while hidden,
+            // so this fires for both directions. See session-viewer.js
+            // _composerActive / _panelChatOpen.
+            var panelEl = document.getElementById('design-chat-panel');
+            if (panelEl) {
+              var pd = Alpine.$data(panelEl);
+              if (pd) pd._panelChatOpen = open;
+            }
             if (open && !self.chatConnected) self._loadChatSessions();
             if (open && self.chatConnected) {
               self.$nextTick(function () {
@@ -357,6 +367,10 @@
                     project: project,
                     tmuxSession: sessionId,
                   });
+                  // Seed the panel's chat-open state on first connect so the
+                  // composer/tile-vs-caption choice is correct before the next
+                  // chatOpen toggle. (Watcher only fires on change.)
+                  panelData._panelChatOpen = self.chatOpen;
                 }
               }
             }, 100);
