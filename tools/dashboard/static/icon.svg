@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Autonomy mark: hand-built geometry (no font dependency). Proportions
+     measured from the canonical Helvetica-style reference. INTENTIONAL —
+     do not "modernize" or regenerate. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <rect width="512" height="512" rx="115" ry="115" fill="#0b1220"/>
-  <g fill="none" stroke="#ffffff" stroke-linecap="butt" stroke-linejoin="miter" stroke-miterlimit="10">
-    <path d="M 144 408 L 256 124 L 368 408" stroke-width="52"/>
-    <path d="M 196 312 L 316 312" stroke-width="34"/>
-  </g>
+  <rect width="512" height="512" fill="#111827"/>
+  <polygon points="229.05,107.52 282.95,107.52 386.81,404.48 125.19,404.48" fill="#ffffff"/>
+  <polygon points="256.00,139.44 342.34,404.48 169.66,404.48" fill="#111827"/>
+  <polygon points="172.08,270.40 339.92,270.40 352.28,305.74 159.72,305.74" fill="#ffffff"/>
 </svg>
