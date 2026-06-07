@@ -249,27 +249,16 @@
       </template>
     </div>
 
-    <!-- Lifecycle strip (auto-yfcoc). 4-segment track + 4-lane caption
-         row. Rendered when the derivation marks startup_visible=true:
-         every active startup state plus setup_failed (so the operator
-         sees which segment failed). Hidden for ready + dead states. -->
-    <template x-if="window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.startupVisible(s)">
-      <div class="sc-lifecycle" data-testid="sc-lifecycle">
-        <div class="sc-lifecycle-track">
-          <template x-for="seg in window.Autonomy.lifecycle.lifecycleStages(s)" :key="seg.key">
-            <span class="sc-lifecycle-seg" :class="seg.state"></span>
-          </template>
-        </div>
-        <div class="sc-lifecycle-row">
-          <template x-for="lane in window.Autonomy.lifecycle.lifecycleLanes(s)" :key="lane.label">
-            <div>
-              <div class="sc-lifecycle-label" x-text="lane.label"></div>
-              <div class="sc-lifecycle-value" x-text="lane.value"></div>
-            </div>
-          </template>
-        </div>
-      </div>
-    </template>
+    <!-- Lifecycle strip — auto-ja51w C5 DROPS the 4-segment track + 4-lane
+         caption row. Per Jeremy's direction and host-0531-020038 audit
+         (turn 549): the track had only 2 of 4 segments ever turning green
+         in production (container_starting → setup_running, with the
+         intermediate dind_ready dead and harness/first_turn rendering
+         later than expected), and the lane captions REQUEST/SETUP/HARNESS/
+         INPUT with values like "created/container/pending/queued" were
+         engineering vocabulary the operator never recognized as progress.
+         The chip alone now carries the phase. Captured-timeline evidence:
+         /workspace/output/captures/20260607-163458/frame-13.png. -->
 
     <!-- Topics -->
     <template x-if="s.topics && s.topics.length > 0">
