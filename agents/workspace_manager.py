@@ -41,7 +41,7 @@ import sys
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from agents.git_status import has_working_tree_changes
 from agents.workspace_settings import (
@@ -362,14 +362,22 @@ def prepare_session_mounts(
     repos_dir: Path = REPOS_DIR,
     worktrees_dir: Path = WORKTREES_DIR,
     refresh_existing_worktree: bool = False,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict[str, str]:
     """Prepare clones + worktrees for ``workspace`` and return launch_session mounts.
 
     The returned dict maps host paths to ``container_path[:mode]`` strings,
     suitable for ``launch_session(mounts=...)``.
+
+    ``progress_callback`` (auto-ja51w): optional ``(repo_index, total_repos,
+    repo_name) -> None`` called once per repo as each completes. Used by
+    ``api_session_create`` to broadcast per-repo progress to the SSE registry
+    while this function runs inside ``asyncio.to_thread``. Callback exceptions
+    are swallowed — progress reporting must never break the actual mount prep.
     """
     mounts: dict[str, str] = {}
-    for repo in workspace.repos:
+    total = len(workspace.repos)
+    for idx, repo in enumerate(workspace.repos):
         clone = ensure_managed_clone(repo.url, repos_dir=repos_dir)
         _sync_managed_clone_from_base_source(repo, clone)
         if repo.writable:
@@ -405,6 +413,14 @@ def prepare_session_mounts(
         else:
             _update_readonly_clone(clone)
             mounts[str(clone)] = f"{repo.mount}:ro"
+        if progress_callback is not None:
+            try:
+                progress_callback(idx + 1, total, _worktree_basename(repo.url))
+            except Exception:
+                logger.debug(
+                    "prepare_session_mounts: progress_callback raised — swallowing",
+                    exc_info=True,
+                )
     _apply_workspace_mount_settings(workspace, mounts)
     return mounts
 
