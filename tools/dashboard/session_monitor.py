@@ -1962,6 +1962,15 @@ class SessionMonitor:
                             kwargs["harness_state"] = json.dumps(new_state)
                         if advance:
                             kwargs["harness_phase"] = "composer_ready"
+                            # Bead A (auto-bpomi) phase-trace: composer_ready
+                            # detection. No POST baseline in the screen-poll
+                            # flow, so log wall ms — the parser correlates by
+                            # tmux against the create-side `enter` line. Two-
+                            # space format, single grep target `phase-trace:`.
+                            logger.info(
+                                "phase-trace: composer_ready  tmux=%s  ts_ms=%d",
+                                tmux_name, int(time.time() * 1000),
+                            )
                         try:
                             update_tail_state(tmux_name, **kwargs)
                         except Exception:
