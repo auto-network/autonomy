@@ -356,8 +356,9 @@
                 </template>
                 <template x-if="!viewerAttachmentIsImage(resolveEntry(dEntry)) && viewerAttachmentSrc(resolveEntry(dEntry))">
                   <a class="sc-va-file"
-                     :href="viewerAttachmentSrc(resolveEntry(dEntry))"
-                     target="_blank" rel="noopener">
+                     role="button" tabindex="0" style="cursor:pointer"
+                     @click="openLightbox(viewerAttachmentSrc(resolveEntry(dEntry)), resolveEntry(dEntry).filename || 'file', { kind: lightboxKindForMime(resolveEntry(dEntry).mime), name: resolveEntry(dEntry).filename })"
+                     @keydown.enter="openLightbox(viewerAttachmentSrc(resolveEntry(dEntry)), resolveEntry(dEntry).filename || 'file', { kind: lightboxKindForMime(resolveEntry(dEntry).mime), name: resolveEntry(dEntry).filename })">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
                       <polyline points="14 2 14 8 20 8"/>
