@@ -32,6 +32,7 @@ from tools.dashboard.test_lib.l2b_harness import (
 
 _FETCH_STUB_JS = r"""
 window.__primersStubData = window.__primersStubData || {
+    orgs: ['autonomy', 'anchore', 'personal'],
     workspaces: [
         {id: 'autonomy',       name: 'Autonomy Network', org: 'autonomy',
          image: 'autonomy-agent:dashboard',     writable: false},
@@ -91,8 +92,18 @@ if (!window.__primersFetchInstalled) {
             ));
         }
 
+        if (url === '/api/orgs') {
+            return jsonResp({orgs: (stub.orgs || []).map(function (slug) {
+                return {org: {slug: slug}};
+            })}, 200);
+        }
+
         if (url === '/api/primers/workspaces') {
-            return jsonResp({workspaces: stub.workspaces}, 200);
+            var rows = stub.workspaces || [];
+            if (orgHeader) {
+                rows = rows.filter(function (ws) { return ws.org === orgHeader; });
+            }
+            return jsonResp({workspaces: rows}, 200);
         }
 
         if (url.indexOf('/api/primers/workspace/') === 0
@@ -106,6 +117,10 @@ if (!window.__primersFetchInstalled) {
             var p = (stub.primers || {})[wid];
             if (!p) return jsonResp(
                 {error: 'unknown workspace: ' + JSON.stringify(wid)}, 404);
+            if (orgHeader && p.workspace && p.workspace.org !== orgHeader) {
+                return jsonResp(
+                    {error: 'unknown workspace: ' + JSON.stringify(wid)}, 404);
+            }
             return jsonResp(p, 200);
         }
 
@@ -201,7 +216,7 @@ class TestPrimersPlugin:
     # State matrix row 1 (continued) — workspace list populates.
     def test_workspace_list_populates(self):
         """Left rail shows ≥1 workspace row; row count matches the API
-        response's ``workspaces.length``."""
+        response filtered to the selected org."""
         _navigate_to_primers_and_check("")
         result = _ab_eval_batch(
             """
@@ -211,11 +226,18 @@ class TestPrimersPlugin:
                     var rows = document.querySelectorAll(
                         '[data-testid="workspace-row"]');
                     r.workspace_row_count = rows.length;
-                    r.expected_count =
-                        (window.__primersStubData.workspaces || []).length;
+                    var root = document.querySelector(
+                        '[data-testid="primers-fragment-root"]');
+                    var data = window.Alpine ? Alpine.$data(root) : null;
+                    r.selected_org = data ? data.selectedOrg : null;
+                    r.expected_count = (window.__primersStubData.workspaces || [])
+                        .filter(function (ws) { return ws.org === r.selected_org; })
+                        .length;
                     r.workspace_ids = Array.from(rows).map(function (b) {
                         return b.dataset.workspaceId;
                     });
+                    r.org_picker_present =
+                        !!document.querySelector('[data-testid="org-picker"]');
                     resolve(r);
                 }, 600);
             });
@@ -225,7 +247,9 @@ class TestPrimersPlugin:
             "expected_count"
         ), f"row count != API workspaces.length: {result}"
         assert result.get("workspace_row_count") >= 1, result
-        assert "enterprise-ng" in (result.get("workspace_ids") or []), result
+        assert result.get("selected_org") == "autonomy", result
+        assert result.get("org_picker_present"), result
+        assert "autonomy" in (result.get("workspace_ids") or []), result
 
     # State matrix row 2 — clicking a workspace renders its primer.
     def test_click_workspace_renders_primer(self):
@@ -237,6 +261,13 @@ class TestPrimersPlugin:
             var r = {};
             return new Promise(function (resolve) {
                 setTimeout(function () {
+                    var picker = document.querySelector(
+                        '[data-testid="org-picker"]');
+                    if (picker) {
+                        picker.value = 'anchore';
+                        picker.dispatchEvent(new Event('change', {bubbles: true}));
+                    }
+                    setTimeout(function () {
                     window.__primersFetchSpy.length = 0;
                     var target = Array.from(document.querySelectorAll(
                         '[data-testid="workspace-row"]')).find(function (b) {
@@ -260,7 +291,11 @@ class TestPrimersPlugin:
                                     '/api/primers/workspace/enterprise-ng';
                             });
                         r.workspace_fetch_count = calls.length;
+                        r.workspace_fetch_orgs = calls.map(function (c) {
+                            return c.org;
+                        });
                         resolve(r);
+                    }, 700);
                     }, 700);
                 }, 600);
             });
@@ -271,6 +306,7 @@ class TestPrimersPlugin:
         assert result.get("workspace_fetch_count", 0) >= 1, (
             f"render-route fetch did not fire on row click: {result}"
         )
+        assert "anchore" in (result.get("workspace_fetch_orgs") or []), result
         # The rendered markdown text contains the expected leading body.
         # The leading "# " becomes an <h1> header, so plain-textContent
         # matches the body without the hash.
@@ -290,6 +326,13 @@ class TestPrimersPlugin:
             var r = {};
             return new Promise(function (resolve) {
                 setTimeout(function () {
+                    var picker = document.querySelector(
+                        '[data-testid="org-picker"]');
+                    if (picker) {
+                        picker.value = 'anchore';
+                        picker.dispatchEvent(new Event('change', {bubbles: true}));
+                    }
+                    setTimeout(function () {
                     var target = Array.from(document.querySelectorAll(
                         '[data-testid="workspace-row"]')).find(function (b) {
                         return b.dataset.workspaceId === 'enterprise-ng';
@@ -312,6 +355,7 @@ class TestPrimersPlugin:
                             r.token_count_text.indexOf(
                                 expected.toLocaleString()) !== -1;
                         resolve(r);
+                    }, 700);
                     }, 700);
                 }, 600);
             });
@@ -387,12 +431,20 @@ class TestPrimersPlugin:
             """
             return new Promise(function (resolve) {
                 setTimeout(function () {
+                    var picker = document.querySelector(
+                        '[data-testid="org-picker"]');
+                    if (picker) {
+                        picker.value = 'anchore';
+                        picker.dispatchEvent(new Event('change', {bubbles: true}));
+                    }
+                    setTimeout(function () {
                     var target = Array.from(document.querySelectorAll(
                         '[data-testid="workspace-row"]')).find(function (b) {
                         return b.dataset.workspaceId === 'enterprise-ng';
                     });
                     if (target) target.click();
                     setTimeout(function () { resolve(true); }, 500);
+                    }, 700);
                 }, 500);
             });
             """
@@ -434,6 +486,7 @@ class TestPrimersPlugin:
             """
         )
         persisted = result.get("persisted") or {}
+        assert persisted.get("org") == "anchore", persisted
         assert persisted.get("workspace_id") == "enterprise-ng", persisted
         assert result.get("alpine_selected_id") == "enterprise-ng", result
         assert result.get("markdown_visible"), (
@@ -465,3 +518,85 @@ class TestPrimersPlugin:
         assert "v2" in (result.get("tab_text") or "").lower(), (
             f"Dispatch tab missing v2 marker: {result}"
         )
+
+    def test_topbar_org_switch_scopes_workspace_requests(self):
+        """Changing the topbar org picker refetches the rail as that org."""
+        _navigate_to_primers_and_check("")
+        result = _ab_eval_batch(
+            """
+            var r = {};
+            return new Promise(function (resolve) {
+                setTimeout(function () {
+                    window.__primersFetchSpy.length = 0;
+                    var picker = document.querySelector('[data-testid="org-picker"]');
+                    r.picker_present = !!picker;
+                    if (picker) {
+                        picker.value = 'anchore';
+                        picker.dispatchEvent(new Event('change', {bubbles: true}));
+                    }
+                    setTimeout(function () {
+                        var rows = document.querySelectorAll(
+                            '[data-testid="workspace-row"]');
+                        r.workspace_ids = Array.from(rows).map(function (b) {
+                            return b.dataset.workspaceId;
+                        });
+                        r.workspace_fetch_orgs = window.__primersFetchSpy
+                            .filter(function (c) {
+                                return c.url === '/api/primers/workspaces';
+                            })
+                            .map(function (c) { return c.org; });
+                        var root = document.querySelector(
+                            '[data-testid="primers-fragment-root"]');
+                        var data = window.Alpine ? Alpine.$data(root) : null;
+                        r.alpine_selected_org = data ? data.selectedOrg : null;
+                        resolve(r);
+                    }, 800);
+                }, 600);
+            });
+            """
+        )
+        assert result.get("picker_present"), result
+        assert result.get("alpine_selected_org") == "anchore", result
+        assert result.get("workspace_ids") == ["enterprise-ng"], result
+        assert "anchore" in (result.get("workspace_fetch_orgs") or []), result
+
+    def test_topbar_search_collapses_until_icon_click(self):
+        """Structured topbar search starts collapsed behind the shell
+        search icon, then expands to a filter input."""
+        _navigate_to_primers_and_check("")
+        result = _ab_eval_batch(
+            """
+            var r = {};
+            return new Promise(function (resolve) {
+                setTimeout(function () {
+                    var icon = document.getElementById('global-search-icon');
+                    r.topbar_present =
+                        !!document.querySelector('[data-testid="app-structured-topbar"]');
+                    r.icon_visible = icon !== null && icon.offsetParent !== null;
+                    r.input_before =
+                        !!document.querySelector('[data-testid="primers-topbar-search"]');
+                    if (icon) icon.click();
+                    setTimeout(function () {
+                        var input = document.querySelector(
+                            '[data-testid="primers-topbar-search"]');
+                        r.input_after = !!input;
+                        if (input) {
+                            input.value = 'auto';
+                            input.dispatchEvent(new Event('input', {bubbles: true}));
+                        }
+                        setTimeout(function () {
+                            r.workspace_ids = Array.from(
+                                document.querySelectorAll('[data-testid="workspace-row"]')
+                            ).map(function (b) { return b.dataset.workspaceId; });
+                            resolve(r);
+                        }, 200);
+                    }, 300);
+                }, 600);
+            });
+            """
+        )
+        assert result.get("topbar_present"), result
+        assert result.get("icon_visible"), result
+        assert result.get("input_before") is False, result
+        assert result.get("input_after"), result
+        assert result.get("workspace_ids") == ["autonomy"], result

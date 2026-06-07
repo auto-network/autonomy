@@ -31,11 +31,12 @@
       <div class="flex items-center justify-between mb-2 px-2">
         <h2 class="text-xs uppercase tracking-wider text-gray-500 font-semibold">
           Workspaces
-          <span class="ml-1 text-[10px] font-mono text-gray-600" x-text="workspaces.length + ' total'"></span>
+          <span class="ml-1 text-[10px] font-mono text-gray-600"
+                x-text="query ? (filteredWorkspaces.length + ' / ' + workspaces.length) : (workspaces.length + ' total')"></span>
         </h2>
       </div>
       <ul class="space-y-1" data-testid="workspace-list">
-        <template x-for="ws in workspaces" :key="ws.id">
+        <template x-for="ws in filteredWorkspaces" :key="ws.id">
           <li>
             <button
               class="w-full text-left px-3 py-2 rounded-lg hover:bg-gray-800 flex flex-col gap-0.5 transition-colors"
