@@ -160,7 +160,7 @@ setsid bash -c "
     --reload-exclude '**/__pycache__/*' \
     --timeout-graceful-shutdown 5 \
     \$SSL_ARGS \
-    >> \"$LOG_FILE\" 2>&1 &
+    2>&1 | awk '{ printf \"%s %s\n\", strftime(\"%Y-%m-%d %H:%M:%S\"), \$0; fflush() }' >> \"$LOG_FILE\" &
   wait
 " </dev/null >>"$LOG_FILE" 2>&1 &
 
