@@ -560,29 +560,58 @@ class TestPrimersPlugin:
         assert result.get("workspace_ids") == ["enterprise-ng"], result
         assert "anchore" in (result.get("workspace_fetch_orgs") or []), result
 
-    def test_topbar_search_collapses_until_icon_click(self):
-        """Structured topbar search starts collapsed behind the shell
-        search icon, then expands to a filter input."""
+    def test_topbar_search_expands_in_place(self):
+        """Structured topbar search expands from its own inline button."""
         _navigate_to_primers_and_check("")
         result = _ab_eval_batch(
             """
             var r = {};
             return new Promise(function (resolve) {
                 setTimeout(function () {
-                    var icon = document.getElementById('global-search-icon');
+                    var shellIcon = document.getElementById('global-search-icon');
+                    var control = document.querySelector(
+                        '[data-topbar-control-id="primers-workspace-filter"]');
+                    var button = document.querySelector(
+                        '[data-testid="primers-topbar-search-toggle"]');
+                    var input = document.querySelector(
+                        '[data-testid="primers-topbar-search"]');
                     r.topbar_present =
                         !!document.querySelector('[data-testid="app-structured-topbar"]');
-                    r.icon_visible = icon !== null && icon.offsetParent !== null;
-                    r.input_before =
-                        !!document.querySelector('[data-testid="primers-topbar-search"]');
-                    if (icon) icon.click();
+                    r.shell_icon_visible =
+                        shellIcon !== null && shellIcon.offsetParent !== null;
+                    r.control_present = !!control;
+                    r.button_visible = button !== null && button.offsetParent !== null;
+                    r.input_present = !!input;
+                    r.input_hidden_before = input
+                        ? input.getAttribute('aria-hidden')
+                        : null;
+                    r.button_expanded_before = button
+                        ? button.getAttribute('aria-expanded')
+                        : null;
+                    if (button) button.click();
                     setTimeout(function () {
-                        var input = document.querySelector(
+                        var afterControl = document.querySelector(
+                            '[data-topbar-control-id="primers-workspace-filter"]');
+                        var afterButton = document.querySelector(
+                            '[data-testid="primers-topbar-search-toggle"]');
+                        var afterInput = document.querySelector(
                             '[data-testid="primers-topbar-search"]');
-                        r.input_after = !!input;
-                        if (input) {
-                            input.value = 'auto';
-                            input.dispatchEvent(new Event('input', {bubbles: true}));
+                        r.control_open = afterControl
+                            ? afterControl.classList.contains('is-open')
+                            : false;
+                        r.input_hidden_after = afterInput
+                            ? afterInput.getAttribute('aria-hidden')
+                            : null;
+                        r.button_expanded_after = afterButton
+                            ? afterButton.getAttribute('aria-expanded')
+                            : null;
+                        r.same_control_after =
+                            !!afterControl && !!afterInput
+                            && afterControl.contains(afterInput)
+                            && afterControl.contains(afterButton);
+                        if (afterInput) {
+                            afterInput.value = 'auto';
+                            afterInput.dispatchEvent(new Event('input', {bubbles: true}));
                         }
                         setTimeout(function () {
                             r.workspace_ids = Array.from(
@@ -596,7 +625,14 @@ class TestPrimersPlugin:
             """
         )
         assert result.get("topbar_present"), result
-        assert result.get("icon_visible"), result
-        assert result.get("input_before") is False, result
-        assert result.get("input_after"), result
+        assert result.get("shell_icon_visible") is False, result
+        assert result.get("control_present"), result
+        assert result.get("button_visible"), result
+        assert result.get("input_present"), result
+        assert result.get("input_hidden_before") == "true", result
+        assert result.get("button_expanded_before") == "false", result
+        assert result.get("control_open"), result
+        assert result.get("input_hidden_after") == "false", result
+        assert result.get("button_expanded_after") == "true", result
+        assert result.get("same_control_after"), result
         assert result.get("workspace_ids") == ["autonomy"], result

@@ -194,6 +194,15 @@ window.Autonomy.topbar.set = function (initialOptions) {
     }).join('');
   }
 
+  function searchIconSvg() {
+    return '<svg aria-hidden="true" viewBox="0 0 24 24" width="15" height="15"'
+      + ' fill="none" stroke="currentColor" stroke-width="2"'
+      + ' stroke-linecap="round" stroke-linejoin="round">'
+      + '<circle cx="11" cy="11" r="8"></circle>'
+      + '<path d="m21 21-4.35-4.35"></path>'
+      + '</svg>';
+  }
+
   function renderControl(control, index, region) {
     if (!control || typeof control !== 'object') return '';
     const id = controlId(control, index);
@@ -218,21 +227,28 @@ window.Autonomy.topbar.set = function (initialOptions) {
     }
     if (control.type === 'search') {
       const open = !!state.searchOpen[id];
-      if (!open) {
-        return '';
-      }
-      const clearLabel = control.clearLabel || 'Collapse search';
-      return '<span class="app-topbar-control app-topbar-search-control"'
+      const actionLabel = open
+        ? (control.submitLabel || 'Apply search')
+        : (control.openLabel || 'Open search');
+      return '<span class="app-topbar-control app-topbar-search-control'
+        + (open ? ' is-open' : '') + '"'
         + ' data-topbar-control-id="' + _escapeTopbarHtml(id) + '">'
         + '<input id="' + _escapeTopbarHtml(domId) + '"'
         + ' class="app-topbar-search-input"'
         + ' data-testid="' + _escapeTopbarHtml(control.testId || id) + '"'
         + ' type="text" value="' + _escapeTopbarHtml(control.value || '') + '"'
+        + ' aria-hidden="' + (open ? 'false' : 'true') + '"'
+        + ' tabindex="' + (open ? '0' : '-1') + '"'
         + ' placeholder="' + _escapeTopbarHtml(control.placeholder || 'Search') + '">'
-        + '<button type="button" class="app-topbar-icon-button"'
-        + ' data-topbar-search-clear="' + _escapeTopbarHtml(id) + '"'
-        + ' aria-label="' + _escapeTopbarHtml(clearLabel) + '"'
-        + ' title="' + _escapeTopbarHtml(clearLabel) + '">&times;</button>'
+        + '<button type="button" class="app-topbar-search-button"'
+        + ' data-topbar-search-action="' + _escapeTopbarHtml(id) + '"'
+        + ' data-testid="' + _escapeTopbarHtml((control.testId || id) + '-toggle') + '"'
+        + ' aria-expanded="' + (open ? 'true' : 'false') + '"'
+        + ' aria-controls="' + _escapeTopbarHtml(domId) + '"'
+        + ' aria-label="' + _escapeTopbarHtml(actionLabel) + '"'
+        + ' title="' + _escapeTopbarHtml(actionLabel) + '">'
+        + searchIconSvg()
+        + '</button>'
         + '</span>';
     }
     if (control.type === 'button') {
@@ -291,7 +307,14 @@ window.Autonomy.topbar.set = function (initialOptions) {
       }
       if (control.type === 'search' && root) {
         const input = root.querySelector('input');
-        const clear = root.querySelector('[data-topbar-search-clear]');
+        const action = root.querySelector('[data-topbar-search-action]');
+        const submitSearch = event => {
+          if (typeof control.onSubmit === 'function') {
+            control.onSubmit(control.value || '', event);
+          } else if (input) {
+            input.focus({ preventScroll: true });
+          }
+        };
         if (input) {
           input.oninput = event => {
             control.value = event.target.value;
@@ -300,23 +323,31 @@ window.Autonomy.topbar.set = function (initialOptions) {
             }
           };
           input.onkeydown = event => {
-            if (event.key !== 'Escape') return;
-            event.preventDefault();
-            state.searchOpen[id] = false;
-            control.value = '';
-            if (typeof control.onInput === 'function') control.onInput('', event);
-            render();
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              state.searchOpen[id] = false;
+              control.value = '';
+              if (typeof control.onInput === 'function') control.onInput('', event);
+              render();
+              return;
+            }
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              submitSearch(event);
+            }
           };
-          if (control.autoFocus !== false) {
+          if (state.searchOpen[id] && control.autoFocus !== false) {
             setTimeout(() => input.focus({ preventScroll: true }), 0);
           }
         }
-        if (clear) {
-          clear.onclick = event => {
-            state.searchOpen[id] = false;
-            control.value = '';
-            if (typeof control.onInput === 'function') control.onInput('', event);
-            render();
+        if (action) {
+          action.onclick = event => {
+            if (!state.searchOpen[id]) {
+              state.searchOpen[id] = true;
+              render();
+              return;
+            }
+            submitSearch(event);
           };
         }
       }
@@ -325,8 +356,7 @@ window.Autonomy.topbar.set = function (initialOptions) {
 
   function render() {
     if (destroyed) return;
-    const hasSearch = searchControls().length > 0;
-    _setTopbarHtml({ html: html(), hasSearch });
+    _setTopbarHtml({ html: html(), hasSearch: false });
     bindControls();
   }
 
@@ -365,12 +395,6 @@ window.Autonomy.topbar.set = function (initialOptions) {
   window.Autonomy._activeTopbarHandle = handle;
   render();
   return handle;
-};
-
-window.Autonomy.topbar._handleSearchIcon = function () {
-  const handle = window.Autonomy._activeTopbarHandle;
-  if (!handle || typeof handle.openSearch !== 'function') return false;
-  return handle.openSearch();
 };
 
 // ── Badge Helpers ────────────────────────────────────────────
@@ -2496,14 +2520,6 @@ globalSearch.addEventListener('input', () => {
     window.dispatchEvent(new CustomEvent('global-search:input', {
       detail: { value: globalSearch.value },
     }));
-  }
-});
-globalSearchIcon.addEventListener('click', (e) => {
-  if (window.Autonomy && window.Autonomy.topbar
-      && typeof window.Autonomy.topbar._handleSearchIcon === 'function'
-      && window.Autonomy.topbar._handleSearchIcon()) {
-    e.preventDefault();
-    e.stopImmediatePropagation();
   }
 });
 globalSearch.addEventListener('keydown', (e) => {

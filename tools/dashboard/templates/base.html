@@ -179,15 +179,68 @@
       max-width: 12rem;
       padding: 0 1.75rem 0 0.625rem;
     }
+    .app-topbar-search-control {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 0;
+      width: 2rem;
+      overflow: hidden;
+      border: 1px solid #374151;
+      border-radius: 0.5rem;
+      background: #1f2937;
+      transition: width 160ms ease, border-color 160ms ease, background-color 160ms ease;
+    }
+    .app-topbar-search-control.is-open {
+      width: min(19rem, 36vw);
+      border-color: #4f46e5;
+      background: #111827;
+    }
     .app-topbar-search-input {
-      width: min(18rem, 34vw);
-      padding: 0 0.625rem;
+      width: 0;
+      min-width: 0;
+      border: 0;
+      background: transparent;
+      opacity: 0;
+      padding: 0;
+      transition: width 160ms ease, opacity 120ms ease, padding 160ms ease;
+    }
+    .app-topbar-search-control.is-open .app-topbar-search-input {
+      width: 100%;
+      opacity: 1;
+      padding: 0 0.5rem 0 0.625rem;
+    }
+    .app-topbar-search-button {
+      flex: 0 0 auto;
+      width: 2rem;
+      height: 2rem;
+      border: 0;
+      border-left: 1px solid transparent;
+      border-radius: 0;
+      background: transparent;
+      color: #d1d5db;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: color 140ms ease, background-color 140ms ease, border-color 140ms ease;
+    }
+    .app-topbar-search-control.is-open .app-topbar-search-button {
+      border-left-color: #374151;
+      background: #1f2937;
+    }
+    .app-topbar-search-button:hover {
+      color: #f9fafb;
+      background: #374151;
+    }
+    .app-topbar-search-button:focus-visible {
+      outline: 2px solid rgba(99, 102, 241, 0.75);
+      outline-offset: -2px;
     }
     .app-topbar-select:focus,
     .app-topbar-search-input:focus {
       outline: none;
-      border-color: #6366f1;
-      box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.35);
     }
     .app-topbar-icon-button,
     .app-topbar-button {
@@ -225,7 +278,10 @@
         overflow-x: auto;
       }
       .app-topbar-search-input {
-        width: min(15rem, 58vw);
+        font-size: 1rem;
+      }
+      .app-topbar-search-control.is-open {
+        width: min(16rem, 62vw);
       }
     }
     .dispatch-badges { display: flex; gap: 0.25rem; }
