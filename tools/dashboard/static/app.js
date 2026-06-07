@@ -168,7 +168,13 @@ window.Autonomy.topbar = window.Autonomy.topbar || {};
 window.Autonomy.topbar.set = function (initialOptions) {
   let options = Object.assign({}, initialOptions || {});
   const state = { searchOpen: {} };
+  let cleanupFns = [];
   let destroyed = false;
+
+  function cleanupBindings() {
+    cleanupFns.forEach(fn => fn());
+    cleanupFns = [];
+  }
 
   function allControls() {
     return []
@@ -308,6 +314,12 @@ window.Autonomy.topbar.set = function (initialOptions) {
       if (control.type === 'search' && root) {
         const input = root.querySelector('input');
         const action = root.querySelector('[data-topbar-search-action]');
+        const isEmptySearch = () => String(control.value || '').trim() === '';
+        const collapseIfEmpty = () => {
+          if (!state.searchOpen[id] || !isEmptySearch()) return;
+          state.searchOpen[id] = false;
+          render();
+        };
         const submitSearch = event => {
           if (typeof control.onSubmit === 'function') {
             control.onSubmit(control.value || '', event);
@@ -315,6 +327,21 @@ window.Autonomy.topbar.set = function (initialOptions) {
             input.focus({ preventScroll: true });
           }
         };
+        root.onfocusout = () => {
+          setTimeout(() => {
+            if (!root.contains(document.activeElement)) {
+              collapseIfEmpty();
+            }
+          }, 0);
+        };
+        const onOutsidePointer = event => {
+          if (!state.searchOpen[id] || root.contains(event.target)) return;
+          setTimeout(collapseIfEmpty, 0);
+        };
+        document.addEventListener('pointerdown', onOutsidePointer, true);
+        cleanupFns.push(() => {
+          document.removeEventListener('pointerdown', onOutsidePointer, true);
+        });
         if (input) {
           input.oninput = event => {
             control.value = event.target.value;
@@ -356,6 +383,7 @@ window.Autonomy.topbar.set = function (initialOptions) {
 
   function render() {
     if (destroyed) return;
+    cleanupBindings();
     _setTopbarHtml({ html: html(), hasSearch: false });
     bindControls();
   }
@@ -368,6 +396,7 @@ window.Autonomy.topbar.set = function (initialOptions) {
     },
     destroy() {
       destroyed = true;
+      cleanupBindings();
       const header = document.querySelector('header');
       if (header) header.classList.remove('app-topbar-has-search');
       if (appTopbarSlot) appTopbarSlot.innerHTML = '';

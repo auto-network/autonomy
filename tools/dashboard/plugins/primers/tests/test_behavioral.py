@@ -617,7 +617,42 @@ class TestPrimersPlugin:
                             r.workspace_ids = Array.from(
                                 document.querySelectorAll('[data-testid="workspace-row"]')
                             ).map(function (b) { return b.dataset.workspaceId; });
-                            resolve(r);
+                            document.body.dispatchEvent(new PointerEvent(
+                                'pointerdown', {bubbles: true}));
+                            setTimeout(function () {
+                                var filledControl = document.querySelector(
+                                    '[data-topbar-control-id="primers-workspace-filter"]');
+                                var filledInput = document.querySelector(
+                                    '[data-testid="primers-topbar-search"]');
+                                r.stays_open_when_filled = filledControl
+                                    ? filledControl.classList.contains('is-open')
+                                    : false;
+                                if (filledInput) {
+                                    filledInput.value = '';
+                                    filledInput.dispatchEvent(new Event(
+                                        'input', {bubbles: true}));
+                                    document.body.dispatchEvent(new PointerEvent(
+                                        'pointerdown', {bubbles: true}));
+                                }
+                                setTimeout(function () {
+                                    var emptyControl = document.querySelector(
+                                        '[data-topbar-control-id="primers-workspace-filter"]');
+                                    var emptyButton = document.querySelector(
+                                        '[data-testid="primers-topbar-search-toggle"]');
+                                    var emptyInput = document.querySelector(
+                                        '[data-testid="primers-topbar-search"]');
+                                    r.collapses_when_empty = emptyControl
+                                        ? !emptyControl.classList.contains('is-open')
+                                        : false;
+                                    r.empty_input_hidden = emptyInput
+                                        ? emptyInput.getAttribute('aria-hidden')
+                                        : null;
+                                    r.empty_button_expanded = emptyButton
+                                        ? emptyButton.getAttribute('aria-expanded')
+                                        : null;
+                                    resolve(r);
+                                }, 100);
+                            }, 100);
                         }, 200);
                     }, 300);
                 }, 600);
@@ -636,3 +671,7 @@ class TestPrimersPlugin:
         assert result.get("button_expanded_after") == "true", result
         assert result.get("same_control_after"), result
         assert result.get("workspace_ids") == ["autonomy"], result
+        assert result.get("stays_open_when_filled"), result
+        assert result.get("collapses_when_empty"), result
+        assert result.get("empty_input_hidden") == "true", result
+        assert result.get("empty_button_expanded") == "false", result
