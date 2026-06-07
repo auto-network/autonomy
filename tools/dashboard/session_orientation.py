@@ -24,6 +24,18 @@ from tools.dashboard.session_orientation_settings import (
     SESSION_ORIENTATION_SET_ID,
 )
 
+# Resume injection (Bead B2). A resumed session carries its full prior context,
+# so the create-side "session started" orientation would wrongly make the agent
+# re-orient as if fresh. This prompts a first NEW assistant turn — so the
+# session exits awaiting_first_response and the tile shows a reply — while
+# telling the agent to CONTINUE, not restart. Per-workspace override via the
+# orientation payload's ``resume_template``; the enabled=false opt-out still
+# suppresses it (shared with the create-side orientation).
+DEFAULT_RESUME_TEMPLATE = (
+    "Session {{tmux_name}} resumed at {{ts}}. Your prior context is intact — "
+    "briefly confirm where things stand and that you're ready to continue."
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +90,7 @@ def render_orientation(
     workspace_name: str,
     org: Any,
     operator: str = "",
+    resumed: bool = False,
 ) -> str | None:
     """Render the orientation message for a freshly-created session.
 
@@ -100,7 +113,10 @@ def render_orientation(
     if not enabled:
         return None
 
-    template_src = payload.get("template") or DEFAULT_TEMPLATE
+    if resumed:
+        template_src = payload.get("resume_template") or DEFAULT_RESUME_TEMPLATE
+    else:
+        template_src = payload.get("template") or DEFAULT_TEMPLATE
     context = {
         "tmux_name": tmux_name,
         "workspace_id": workspace_id or "",
