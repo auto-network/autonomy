@@ -911,6 +911,11 @@ class SessionMonitor:
         # Used by the screen-poll loop's grace fallback to promote
         # composer_ready when the docker-bridged pane can't be screen-read.
         self._harness_ready_grace: dict[str, float] = {}
+        # Screen-poll self-repair: when a session first entered the poll
+        # window (to measure stuck-time) and which sessions we've already
+        # filed a self-repair ticket for (file once, not every 2s poll).
+        self._screen_stuck_since: dict[str, float] = {}
+        self._self_repair_filed: set[str] = set()
         self._started = False
         self._last_pause_nag_sent: float = 0.0  # timestamp of last dispatch-pause nag
         self._last_orphan_prune: float = time.time()  # defer first prune one full interval
@@ -1790,6 +1795,12 @@ class SessionMonitor:
     # symptom: session online + accepting input while the tile shows
     # in-progress).
     HARNESS_READY_GRACE_S = 12.0
+    # Self-repair trigger: a session stuck in the poll window this long
+    # WITHOUT reaching composer_ready means the harness is up but its screen
+    # won't parse (e.g. a trust/login prompt whose wording drifted past our
+    # regex). Generous vs HARNESS_READY_GRACE_S so a merely-slow setup never
+    # files a false ticket — only a genuinely stuck startup does.
+    SELF_REPAIR_TIMEOUT_S = 120.0
 
     async def _screen_poll_loop(self) -> None:
         """auto-eerfx: per-2s tmux capture-pane → harness.read_screen_state.
@@ -1895,6 +1906,56 @@ class SessionMonitor:
                                 changed = True
                     else:
                         self._harness_ready_grace.pop(tmux_name, None)
+
+                    # ── self-repair: stuck-in-startup detector miss ──
+                    # A session sitting in the poll window past the timeout
+                    # without reaching composer_ready means the harness is up
+                    # but we can't parse its screen (e.g. a trust/login prompt
+                    # whose wording drifted past our regex → composer never
+                    # shows → stuck). Capture the pane as evidence and file a
+                    # ticket the librarian can fix. Filing is deduped + rate-
+                    # limited inside report_detector_miss; the per-session
+                    # guard files once and is cleared when the session
+                    # advances.
+                    if advance or new_state.get("composer_ready"):
+                        self._screen_stuck_since.pop(tmux_name, None)
+                        self._self_repair_filed.discard(tmux_name)
+                    else:
+                        stuck_since = self._screen_stuck_since.setdefault(
+                            tmux_name, time.monotonic()
+                        )
+                        stuck_for = time.monotonic() - stuck_since
+                        if (
+                            stuck_for >= self.SELF_REPAIR_TIMEOUT_S
+                            and tmux_name not in self._self_repair_filed
+                            and pane_text.strip()
+                        ):
+                            self._self_repair_filed.add(tmux_name)
+                            try:
+                                from tools.dashboard import self_repair
+                                await self_repair.report_detector_miss(
+                                    f"{harness.name}_screen_state",
+                                    expected="composer_ready",
+                                    evidence=pane_text,
+                                    evidence_kind="screen_capture",
+                                    code_ref=(
+                                        "tools/dashboard/session_harness.py"
+                                        ":_claude_read_screen_state"
+                                    ),
+                                    context={
+                                        "session": tmux_name,
+                                        "harness": harness.name,
+                                        "harness_phase": harness_phase,
+                                        "setup_phase": row.get("setup_phase"),
+                                        "stuck_for_s": round(stuck_for),
+                                    },
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "screen_poll: self_repair report failed for %s",
+                                    tmux_name,
+                                )
+
                     if changed or advance:
                         kwargs: dict[str, Any] = {}
                         if changed:
