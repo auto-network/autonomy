@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-pip git sqlite3 ca-certificates curl \
         nodejs npm \
         gh \
+        jq \
         tmux \
         libglib2.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 \
         libxfixes3 libxrandr2 libxkbcommon0 libgbm1 libcairo2 libpango-1.0-0 \
@@ -63,16 +64,22 @@ RUN bd --help > /dev/null 2>&1 || echo "WARN: bd not functional (expected if cro
 # Agent runs as non-root
 RUN userdel -r ubuntu 2>/dev/null; useradd -m -s /bin/bash -u 1000 agent \
     && mkdir -p /home/agent/.claude /home/agent/.codex /home/agent/.agents /home/agent/.local/bin \
+    # claude is COPYed to /usr/local/bin (above), but .claude.json declares
+    # installMethod=native, so Claude Code's startup self-check (/doctor) looks
+    # for the binary at ~/.local/bin/claude and prints a "missing or broken"
+    # setup warning when it's absent. Symlink it so the native-install path
+    # resolves and the boot warning goes away.
+    && ln -sf /usr/local/bin/claude /home/agent/.local/bin/claude \
     && echo '{"numStartups":1,"hasCompletedOnboarding":true,"hasSeenTasksHint":true,"hasSeenStashHint":true,"remoteDialogSeen":true,"installMethod":"native","autoUpdates":false,"projects":{"/workspace/repo":{"hasTrustDialogAccepted":true,"effortCalloutV2Dismissed":true}}}' \
        > /home/agent/.claude.json \
-    && echo '{"skipDangerousModePermissionPrompt":true,"effortLevel":"high"}' \
+    && echo '{"skipDangerousModePermissionPrompt":true,"effortLevel":"high","permissions":{"deny":["AskUserQuestion"]}}' \
        > /home/agent/.claude/settings.json \
     && chown -R agent:agent /home/agent/.claude /home/agent/.codex /home/agent/.agents /home/agent/.claude.json /home/agent/.local
 
 # ── Codex CLI + agent-browser (needs node + agent user to exist) ──
 # Codex is an npm package plus platform-specific optional dependency, not a
 # standalone host ELF like Claude, so install it inside the image directly.
-ARG CODEX_VERSION=0.133.0
+ARG CODEX_VERSION=0.135.0
 RUN npm install -g "@openai/codex@${CODEX_VERSION}" agent-browser \
     && su agent -c "agent-browser install"
 
