@@ -666,64 +666,10 @@
           return this.dismissSheet();
         },
 
-        // Commit the dictation. Inside the viewer with an active composer,
-        // hand off to the durability path: set the final text, stage the outbox
-        // as 'sending' (session-store owns the POST + reconcile), and clear the
-        // voice buffer — NO direct POST (no double-send). The
-        // capturing effect usually creates the tile before Send, but Send must
-        // also create it synchronously if the effect has not run yet.
         _commitBuffer() {
           var voice = this.voice;
           if (!voice) return false;
-          if (_viewerComposerActive() && typeof window !== 'undefined' &&
-              typeof window.getSessionStore === 'function' && voice.boundSessionId) {
-            var s = window.getSessionStore(voice.boundSessionId);
-            if (s) {
-              if (voice.attachmentsPending) {
-                voice.sheetError = 'Attachment still uploading…';
-                return false;
-              }
-              var body = typeof voice._buildSendBody === 'function'
-                ? voice._buildSendBody()
-                : (voice.bufferText || '').trim();
-              if (!body) return false;
-              if (s.outbox && (typeof s.outbox.text !== 'string' ||
-                               !s.outbox.text.trim())) {
-                s.outbox = null;
-              }
-              if (s.outbox && !(s.outbox.source === 'voice' &&
-                                s.outbox.state === 'capturing')) {
-                voice.sheetError = 'Message still pending.';
-                return false;
-              }
-              if (!s.outbox) {
-                s.outbox = {
-                  localId: (typeof window.newOutboxId === 'function')
-                    ? window.newOutboxId() : ('ob_' + voice.boundSessionId),
-                  state: 'capturing',
-                  source: 'voice',
-                  text: body,
-                  ts: (typeof Date !== 'undefined' && Date.now) ? Date.now() : 0,
-                };
-              }
-              var stagedOutbox = Object.assign({}, s.outbox, {
-                text: body,
-                state: 'sending',
-                source: 'voice',
-              });
-              if (typeof window.stageOutboxSend !== 'function') {
-                voice.sheetError = 'Send failed. Message outbox is unavailable.';
-                return false;
-              }
-              window.stageOutboxSend(voice.boundSessionId, stagedOutbox, {
-                tmuxSession: voice.boundSessionId,
-              });
-              _resetVoiceCaptureEpoch('send');
-              if (typeof voice.clearBuffer === 'function') voice.clearBuffer();
-              if (typeof voice.clearAttachments === 'function') voice.clearAttachments();
-              return true;
-            }
-          }
+          if (typeof voice.sendBuffer !== 'function') return false;
           return voice.sendBuffer();
         },
 

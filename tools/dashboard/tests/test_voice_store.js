@@ -433,6 +433,124 @@ describe('voice store substrate', () => {
     assert.equal(h.store.sheetMode, 'partial');
   });
 
+  it('sendBuffer resets capture after staging the durable outbox and before clearing text', async () => {
+    const h = loadVoiceStore({
+      initialStores: {
+        flags: { get() { return true; } },
+      },
+    });
+    const events = [];
+    h.window.newOutboxId = function () { return 'ob_off_viewer_reset'; };
+    h.window.stageOutboxSend = function (sessionId, outbox, options) {
+      events.push('stage');
+      assert.equal(sessionId, 'session-a');
+      assert.equal(outbox.text, 'off viewer snapshot');
+      assert.deepEqual(toPlain(options), { tmuxSession: 'session-a' });
+      return Promise.resolve(true);
+    };
+    h.window.Autonomy.voiceCapture = {
+      resetEpoch(reason) {
+        events.push('reset:' + reason);
+        assert.equal(reason, 'send');
+        assert.equal(h.store.bufferText, 'off viewer snapshot');
+        return true;
+      },
+    };
+
+    h.store.requestBind('session-a', { isLive: true });
+    h.store.setBufferText('off viewer snapshot');
+
+    assert.equal(await h.store.sendBuffer(), true);
+    assert.deepEqual(events, ['stage', 'reset:send']);
+    assert.equal(h.store.bufferText, '');
+  });
+
+  it('sendBuffer reuses an existing voice capturing outbox from the bound session store', async () => {
+    const h = loadVoiceStore({
+      initialStores: {
+        flags: { get() { return true; } },
+      },
+    });
+    const sessionStore = {
+      outbox: { localId: 'ob_capture', source: 'voice', state: 'capturing', text: 'first words', ts: 123 },
+    };
+    const staged = [];
+    h.window.getSessionStore = function (sid) {
+      return sid === 'session-a' ? sessionStore : null;
+    };
+    h.window.stageOutboxSend = function (_sessionId, outbox) {
+      staged.push(toPlain(outbox));
+      sessionStore.outbox = Object.assign({}, outbox);
+      return Promise.resolve(true);
+    };
+    h.window.Autonomy.voiceCapture = { resetEpoch() { return true; } };
+
+    h.store.requestBind('session-a', { isLive: true });
+    h.store.setBufferText('final words');
+
+    assert.equal(await h.store.sendBuffer(), true);
+    assert.equal(staged.length, 1);
+    assert.deepEqual(staged[0], {
+      localId: 'ob_capture',
+      state: 'sending',
+      source: 'voice',
+      text: 'final words',
+      ts: 123,
+    });
+  });
+
+  it('sendBuffer replaces an empty stale outbox instead of blocking', async () => {
+    const h = loadVoiceStore({
+      initialStores: {
+        flags: { get() { return true; } },
+      },
+    });
+    const sessionStore = {
+      outbox: { localId: 'ob_stale', state: 'sending', source: 'voice', text: '', ts: 1 },
+    };
+    h.window.getSessionStore = function (sid) {
+      return sid === 'session-a' ? sessionStore : null;
+    };
+    h.window.newOutboxId = function () { return 'ob_fresh'; };
+    h.window.stageOutboxSend = function (_sessionId, outbox) {
+      sessionStore.outbox = Object.assign({}, outbox);
+      return Promise.resolve(true);
+    };
+    h.window.Autonomy.voiceCapture = { resetEpoch() { return true; } };
+
+    h.store.requestBind('session-a', { isLive: true });
+    h.store.setBufferText('fresh message');
+
+    assert.equal(await h.store.sendBuffer(), true);
+    assert.equal(sessionStore.outbox.localId, 'ob_fresh');
+    assert.equal(sessionStore.outbox.state, 'sending');
+    assert.equal(sessionStore.outbox.text, 'fresh message');
+  });
+
+  it('sendBuffer refuses to overwrite a non-capturing pending outbox', async () => {
+    const h = loadVoiceStore({
+      initialStores: {
+        flags: { get() { return true; } },
+      },
+    });
+    const pending = { localId: 'ob_pending', state: 'sending', source: 'voice', text: 'already pending', ts: 1 };
+    const sessionStore = { outbox: pending };
+    h.window.getSessionStore = function (sid) {
+      return sid === 'session-a' ? sessionStore : null;
+    };
+    h.window.stageOutboxSend = function () {
+      throw new Error('must not stage while another message is pending');
+    };
+
+    h.store.requestBind('session-a', { isLive: true });
+    h.store.setBufferText('new message');
+
+    assert.equal(await h.store.sendBuffer(), false);
+    assert.equal(h.store.sheetError, 'Message still pending.');
+    assert.equal(h.store.bufferText, 'new message');
+    assert.equal(sessionStore.outbox, pending);
+  });
+
   it('sendBuffer leaves the sheet open and preserves the buffer when the outbox engine is unavailable', async () => {
     const h = loadVoiceStore({
       initialStores: {
