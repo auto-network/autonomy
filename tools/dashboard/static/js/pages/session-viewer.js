@@ -169,13 +169,15 @@
       _isStillLaunching: function (store) {
         if (!store) return false;
         if (!store.isLive) return false;
-        var entries = (store.entries || []).length;
-        if (entries > 0) return false;
-        // Resumed session with historical JSONL — resolved=true means the
-        // historical turns ARE the user's content, so we should NOT hold
-        // launching. (Fresh sessions arrive with resolved=false until
-        // first entry lands.)
-        if (store.resolved === true) return false;
+        // auto-ja51w: gate on first ASSISTANT entry, not any entry —
+        // mirrors lifecycle.js. The user-side orientation echo (tmux_send
+        // input) gets written to JSONL ~2s before the model's reply, and
+        // gating on entries.length would flip the viewer out of loading
+        // during that gap.
+        var entries = store.entries || [];
+        if (entries.some(function (e) { return e && e.role === 'assistant'; })) {
+          return false;
+        }
         return true;
       },
       // [lc] viewer-loading slot emit helper. Logs a viewer-slot-render

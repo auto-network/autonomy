@@ -36,10 +36,12 @@ const PHASE_PAIR = {
   first_turn_written: { is_live: true, setup_phase: 'setup_complete', harness_phase: 'first_turn_written', entry_count: 0 },
   // new "harness up, waiting on first reply" state
   awaiting_first_response: { is_live: true, setup_phase: 'setup_complete', harness_phase: 'composer_ready', entry_count: 0 },
-  // ready requires entry_count > 0 under the new gate
-  ready: { is_live: true, setup_phase: 'setup_complete', harness_phase: 'composer_ready', entry_count: 1 },
-  ready_with_confirming_trust: { is_live: true, setup_phase: 'setup_complete', harness_phase: 'composer_ready', entry_count: 1, harness_state: { confirming_trust_prompt: true } },
-  ready_with_planning: { is_live: true, setup_phase: 'setup_complete', harness_phase: 'composer_ready', entry_count: 1, harness_state: { in_planning_mode: true } },
+  // ready requires an assistant-role entry under the auto-ja51w gate.
+  // entry_count alone (user-side echo) does NOT flip — first assistant
+  // turn does.
+  ready: { is_live: true, setup_phase: 'setup_complete', harness_phase: 'composer_ready', entries: [{ role: 'assistant', content: 'hi' }] },
+  ready_with_confirming_trust: { is_live: true, setup_phase: 'setup_complete', harness_phase: 'composer_ready', entries: [{ role: 'assistant', content: 'hi' }], harness_state: { confirming_trust_prompt: true } },
+  ready_with_planning: { is_live: true, setup_phase: 'setup_complete', harness_phase: 'composer_ready', entries: [{ role: 'assistant', content: 'hi' }], harness_state: { in_planning_mode: true } },
   setup_failed: { is_live: true, setup_phase: 'setup_failed', harness_phase: 'pending', entry_count: 0 },
   dead_resumable: { is_live: false, resumable: true },
   dead_not_resumable: { is_live: false, resumable: false },
@@ -109,37 +111,58 @@ for (const [name, row] of Object.entries(PHASE_PAIR)) {
   check(`lifecycleState(${name})`, actual === name, `got ${actual}`);
 }
 
-// ── LAUNCHING-UNTIL-FIRST-RESPONSE GATE (auto-ja51w) ──
-// composer_ready + entries=0 → awaiting_first_response (NOT ready)
-check('composer_ready + entries=0 → awaiting_first_response',
-      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready', entry_count:0}) === 'awaiting_first_response');
-check('composer_ready + entries=1 → ready',
-      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready', entry_count:1}) === 'ready');
-check('resolved + entries=0 + no composer_ready → pending (not ready)',
-      L.lifecycleState({is_live:true, resolved:true, setup_phase:'pending', harness_phase:'pending', entry_count:0}) === 'pending');
-check('resolved + entries=1 → ready (resumed session with historical JSONL)',
-      L.lifecycleState({is_live:true, resolved:true, setup_phase:'pending', harness_phase:'pending', entry_count:5}) === 'ready');
-check('entries_length override beats entry_count',
-      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready', entry_count:0, entries_length:1}) === 'ready');
+// ── LAUNCHING-UNTIL-FIRST-ASSISTANT-RESPONSE GATE (auto-ja51w) ──
+// composer_ready + no entries → awaiting_first_response (NOT ready)
+check('composer_ready + no entries → awaiting_first_response',
+      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready'}) === 'awaiting_first_response');
+// composer_ready + ONLY user entry (orientation echo) → still awaiting (the bug fix)
+check('composer_ready + only user entry → awaiting_first_response (BUG-FIX: was flipping to ready on user echo)',
+      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready',
+                        entries:[{role:'user', content:'orientation'}]}) === 'awaiting_first_response');
+// composer_ready + assistant entry → ready
+check('composer_ready + assistant entry → ready',
+      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready',
+                        entries:[{role:'assistant', content:'hi'}]}) === 'ready');
+// composer_ready + user THEN assistant → ready (mixed entries with at least one assistant)
+check('composer_ready + user + assistant → ready',
+      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready',
+                        entries:[{role:'user'}, {role:'assistant'}]}) === 'ready');
+// resolved + ONLY user entries → not ready (rare; user typed but agent didn't reply)
+check('resolved + user-only entries → pending (no assistant turn yet)',
+      L.lifecycleState({is_live:true, resolved:true, setup_phase:'pending', harness_phase:'pending',
+                        entries:[{role:'user'}]}) === 'pending');
+// resolved + assistant entries → ready (resumed session with history)
+check('resolved + assistant entry → ready',
+      L.lifecycleState({is_live:true, resolved:true, setup_phase:'pending', harness_phase:'pending',
+                        entries:[{role:'assistant', content:'previous reply'}]}) === 'ready');
+// has_assistant_turn override beats inspecting entries
+check('has_assistant_turn=true override flips to ready',
+      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready',
+                        has_assistant_turn:true}) === 'ready');
+check('has_assistant_turn=false override holds in awaiting',
+      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready',
+                        entries:[{role:'assistant'}], has_assistant_turn:false}) === 'awaiting_first_response');
 
-// composer_ready + overlays still surface the overlay (even while
-// awaiting first response, an agent could be at trust prompt or planning).
-check('composer_ready + entries=0 + confirming_trust → ready_with_confirming_trust',
-      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready', entry_count:0,
+// composer_ready + overlays still surface even while awaiting first response
+check('composer_ready + no entries + confirming_trust → ready_with_confirming_trust',
+      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready',
                         harness_state:{confirming_trust_prompt:true}}) === 'ready_with_confirming_trust');
-check('composer_ready + entries=0 + planning → ready_with_planning',
-      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready', entry_count:0,
+check('composer_ready + no entries + planning → ready_with_planning',
+      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready',
                         harness_state:{in_planning_mode:true}}) === 'ready_with_planning');
 
-// setup_failed wins over the launching-until-first-response gate
-check('setup_failed wins over composer_ready (with entries)',
-      L.lifecycleState({is_live:true, setup_phase:'setup_failed', harness_phase:'composer_ready', entry_count:5}) === 'setup_failed');
+// setup_failed wins regardless
+check('setup_failed wins over composer_ready (with assistant entry)',
+      L.lifecycleState({is_live:true, setup_phase:'setup_failed', harness_phase:'composer_ready',
+                        entries:[{role:'assistant'}]}) === 'setup_failed');
 check('setup_failed wins over resolved',
-      L.lifecycleState({is_live:true, resolved:true, setup_phase:'setup_failed', harness_phase:'pending', entry_count:5}) === 'setup_failed');
+      L.lifecycleState({is_live:true, resolved:true, setup_phase:'setup_failed', harness_phase:'pending',
+                        entries:[{role:'assistant'}]}) === 'setup_failed');
 
-// Dead sessions ignore everything else
-check("dead session ignores resolved + entries",
-      L.lifecycleState({is_live:false, resolved:true, resumable:true, entry_count:100}) === 'dead_resumable');
+// Dead sessions ignore everything
+check("dead session ignores assistant entries",
+      L.lifecycleState({is_live:false, resolved:true, resumable:true,
+                        entries:[{role:'assistant'}]}) === 'dead_resumable');
 
 // ── PRE-CONTAINER PHASES (auto-ja51w register-early pattern) ──
 // These four phases fire during the ~7-9s server-side window before
