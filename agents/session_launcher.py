@@ -595,21 +595,86 @@ def _schedule_creds_cleanup(container_id: str, creds_copy: str) -> None:
     t.start()
 
 
-def _resolve_optional_tool_mounts() -> dict[str, str]:
+def _codex_git_root(worktree_host: Path) -> str | None:
+    """Return the repository root Codex resolves trust to for a worktree.
+
+    Codex, started with cwd inside a git worktree, applies trust to the *main*
+    working tree it derives from — the parent of ``--git-common-dir``
+    (``<root>/.git`` -> ``<root>``). The managed clone is bind-mounted at the
+    same absolute host path inside the container, so the host-computed path is
+    also the path Codex sees at runtime. Generic — no workspace is hardcoded.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(worktree_host), "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if out.returncode != 0:
+            return None
+        common = Path(out.stdout.strip())
+        if not common.is_absolute():
+            common = (worktree_host / common).resolve()
+        return str(common.parent if common.name == ".git" else common)
+    except Exception:
+        return None
+
+
+def _generate_codex_config(base_config: Path, git_root: str, run_dir: Path) -> Path | None:
+    """Write a per-session Codex ``config.toml`` that pre-trusts ``git_root``.
+
+    The shared ``~/.codex/config.toml`` is mounted ``:ro``, so Codex cannot
+    persist trust itself ("config/batchWrite failed") and hangs on the trust
+    dialog. We instead generate a per-session copy with the trust entry already
+    present so Codex never needs to write. Idempotent; returns None on any error
+    (the caller then mounts the shared config unchanged).
+    """
+    try:
+        text = base_config.read_text()
+        marker = f'[projects."{git_root}"]'
+        if marker not in text:
+            text = text.rstrip("\n") + f'\n\n{marker}\ntrust_level = "trusted"\n'
+        out = run_dir / "codex-config.toml"
+        out.write_text(text)
+        return out
+    except Exception:
+        return None
+
+
+def _resolve_optional_tool_mounts(
+    worktree_host: Path | None = None,
+    run_dir: Path | None = None,
+) -> dict[str, str]:
     """Return optional host mounts that make Codex usable inside containers.
 
     Claude is already handled via dedicated credential resolution plus the
     mounted sessions directory. Codex keeps its login/config under ~/.codex,
     so mount only the durable control files and skill/rule directories rather
     than the whole mutable state tree.
+
+    When ``worktree_host`` and ``run_dir`` are supplied, mount a generated
+    per-session ``config.toml`` that pre-trusts the worktree's git-root instead
+    of the shared (read-only) host config — otherwise Codex tries to write trust
+    into the ``:ro`` mount, fails ``config/batchWrite``, and hangs on the trust
+    dialog. Without those args (e.g. the CLI path) the shared config is mounted
+    unchanged.
     """
 
     mounts: dict[str, str] = {}
 
     host_codex_home = Path.home() / ".codex"
+    base_config = host_codex_home / "config.toml"
+
+    config_source = base_config
+    if worktree_host is not None and run_dir is not None and base_config.exists():
+        git_root = _codex_git_root(worktree_host)
+        if git_root:
+            generated = _generate_codex_config(base_config, git_root, run_dir)
+            if generated is not None:
+                config_source = generated
+
     codex_mounts = {
         host_codex_home / "auth.json": "/home/agent/.codex/auth.json:ro",
-        host_codex_home / "config.toml": "/home/agent/.codex/config.toml:ro",
+        config_source: "/home/agent/.codex/config.toml:ro",
         host_codex_home / "skills": "/home/agent/.codex/skills:ro",
         host_codex_home / "rules": "/home/agent/.codex/rules:ro",
     }
@@ -897,7 +962,17 @@ def launch_session(
     for host_path, container_spec in default_mounts.items():
         cmd.extend(["-v", f"{host_path}:{container_spec}"])
 
-    for host_path, container_spec in _resolve_optional_tool_mounts().items():
+    # Codex trust pre-seed: find this session's worktree mount and generate a
+    # per-session config.toml that trusts its git-root, so Codex never tries to
+    # write trust into the :ro shared config (auto-sigkn).
+    worktree_host = next(
+        (Path(hp) for hp, spec in default_mounts.items()
+         if spec.split(":", 1)[0] == "/workspace/repo"),
+        None,
+    )
+    for host_path, container_spec in _resolve_optional_tool_mounts(
+        worktree_host=worktree_host, run_dir=run_dir
+    ).items():
         cmd.extend(["-v", f"{host_path}:{container_spec}"])
 
     if global_claude_md is not None:

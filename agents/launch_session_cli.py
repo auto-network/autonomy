@@ -211,7 +211,17 @@ def main() -> int:
             cmd.extend(["-e", f"GRAPH_TAGS={args.graph_tags}"])
         for host_path, container_spec in mounts.items():
             cmd.extend(["-v", f"{host_path}:{container_spec}"])
-        for host_path, container_spec in _resolve_optional_tool_mounts().items():
+        # Codex trust pre-seed: generate a per-session config trusting the
+        # worktree's git-root so Codex doesn't hang writing to the :ro config
+        # (auto-sigkn).
+        worktree_host = next(
+            (Path(hp) for hp, spec in mounts.items()
+             if spec.split(":", 1)[0] == "/workspace/repo"),
+            None,
+        )
+        for host_path, container_spec in _resolve_optional_tool_mounts(
+            worktree_host=worktree_host, run_dir=run_dir
+        ).items():
             cmd.extend(["-v", f"{host_path}:{container_spec}"])
         cmd.extend(["-w", "/workspace/repo"])
 
