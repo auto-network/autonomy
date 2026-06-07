@@ -5724,12 +5724,31 @@ async def api_session_create(request):
                     tmux_name, harness,
                 )
                 return
+            # auto-ja51w C8: per-harness settle delay after composer_ready
+            # before tmux_send. The screen-poll detects the composer PROMPT
+            # VISUAL before the harness's stdin loop is necessarily active.
+            # Claude Code accepts input immediately at composer_ready. Codex
+            # paints the prompt before its input handler initializes —
+            # without a settle, the first-message keystrokes land in a dead
+            # stdin and codex silently drops them (host-0531-020038
+            # diagnosis from auto-0607-171218 vs auto-0607-172230
+            # comparison: 0.3s gap → 0 entries; 12s gap → 12 entries).
+            # 1.5s is empirical; verify-by-echo would be more robust and
+            # is the follow-up bead.
+            _HARNESS_INJECT_SETTLE_S = {"codex": 1.5, "claude": 0.0}
+            settle = _HARNESS_INJECT_SETTLE_S.get(harness, 0.0)
+            if settle > 0:
+                logger.info(
+                    "phase-trace: inject_settle  tmux=%s  harness=%s  settle_s=%.1f",
+                    tmux_name, harness, settle,
+                )
+                await asyncio.sleep(settle)
             try:
                 await tmux_send(tmux_name, msg)
                 logger.info(
-                    "phase-trace: first_message_injected  tmux=%s  dt_from_inject_scheduled_ms=%d  len=%d  primer=%s  harness=%s  (composer_ready-gated)",
+                    "phase-trace: first_message_injected  tmux=%s  dt_from_inject_scheduled_ms=%d  len=%d  primer=%s  harness=%s  settle_s=%.1f  (composer_ready-gated)",
                     tmux_name, int((time.monotonic() - _inject_wait_t0) * 1000),
-                    len(msg), bool(primer_url and not primer_error), harness,
+                    len(msg), bool(primer_url and not primer_error), harness, settle,
                 )
             except Exception:
                 logger.warning(
