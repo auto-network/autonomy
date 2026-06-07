@@ -5376,6 +5376,8 @@ async def api_session_create(request):
             harness=proj.harness or "claude",
             setup_phase="requesting",
         )
+        logger.info("phase-trace: requesting  tmux=%s  dt_from_post_ms=%d",
+                    tmux_name, int((time.monotonic() - _phase_t0) * 1000))
         try:
             # prepare_session_mounts runs a synchronous `git fetch origin
             # --prune` on every workspace clone — for enterprise-ng that's 3
@@ -5390,6 +5392,11 @@ async def api_session_create(request):
             # per-repo chip progression while prepare_session_mounts runs.
             _loop = asyncio.get_running_loop()
             def _on_repo_prepared(repo_index: int, total_repos: int, repo_name: str):
+                logger.info(
+                    "phase-trace: preparing_workspace  tmux=%s  dt_from_post_ms=%d  repo_index=%d  total=%d  current_repo=%s",
+                    tmux_name, int((time.monotonic() - _phase_t0) * 1000),
+                    repo_index, total_repos, repo_name,
+                )
                 asyncio.run_coroutine_threadsafe(
                     session_monitor.update_phase(
                         tmux_name,
@@ -5508,6 +5515,8 @@ async def api_session_create(request):
         await session_monitor.update_phase(
             tmux_name, setup_phase="launching_container", progress={},
         )
+        logger.info("phase-trace: launching_container  tmux=%s  dt_from_post_ms=%d",
+                    tmux_name, int((time.monotonic() - _phase_t0) * 1000))
 
     # ── Launch tmux ─────────────────────────────────────────────
     tmux_cmd = ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40"]
@@ -5555,6 +5564,8 @@ async def api_session_create(request):
         await session_monitor.update_phase(
             tmux_name, setup_phase="container_started", progress={},
         )
+        logger.info("phase-trace: container_started  tmux=%s  dt_from_post_ms=%d",
+                    tmux_name, int((time.monotonic() - _phase_t0) * 1000))
 
     # ── Register with session monitor ───────────────────────────
     if is_container:
@@ -5679,7 +5690,20 @@ async def api_session_create(request):
             first_message = f"Session {tmux_name} started."
 
     if first_message:
-        async def _inject_first_message(msg=first_message):
+        # phase-trace: inject task scheduled. Lets grep show whether the
+        # task was created at all (first_message=None workspaces wouldn't
+        # log this), vs scheduled-but-never-fired (would log this but no
+        # subsequent first_message_injected).
+        logger.info(
+            "phase-trace: inject_scheduled  tmux=%s  dt_from_post_ms=%d  msg_len=%d  primer=%s  harness=%s",
+            tmux_name, int((time.monotonic() - _phase_t0) * 1000),
+            len(first_message), bool(primer_url and not primer_error),
+            (proj.harness if proj else "claude"),
+        )
+        _inject_wait_t0 = time.monotonic()
+        _inject_harness = (proj.harness if proj else "claude")
+
+        async def _inject_first_message(msg=first_message, harness=_inject_harness):
             # auto-ja51w C3: composer_ready-gated injection. The previous
             # 5-second fixed sleep was load-bearing only on luck — fresh-boot
             # composer typically comes up within 1-3s of container start, but
@@ -5696,21 +5720,21 @@ async def api_session_create(request):
                 await asyncio.sleep(0.5)
             else:
                 logger.warning(
-                    "api_session_create: composer_ready not detected within 60s "
-                    "for %s — skipping first-message inject (session still functional)",
-                    tmux_name,
+                    "phase-trace: inject_skipped  tmux=%s  reason=composer_ready_timeout_60s  harness=%s",
+                    tmux_name, harness,
                 )
                 return
             try:
                 await tmux_send(tmux_name, msg)
                 logger.info(
-                    "api_session_create: injected first message into %s  len=%d  primer=%s  (composer_ready-gated)",
-                    tmux_name, len(msg), bool(primer_url and not primer_error),
+                    "phase-trace: first_message_injected  tmux=%s  dt_from_inject_scheduled_ms=%d  len=%d  primer=%s  harness=%s  (composer_ready-gated)",
+                    tmux_name, int((time.monotonic() - _inject_wait_t0) * 1000),
+                    len(msg), bool(primer_url and not primer_error), harness,
                 )
             except Exception:
                 logger.warning(
-                    "api_session_create: failed to inject first message into %s",
-                    tmux_name, exc_info=True,
+                    "phase-trace: inject_failed  tmux=%s  harness=%s  exc=tmux_send_exception",
+                    tmux_name, harness, exc_info=True,
                 )
 
         asyncio.create_task(_inject_first_message())
@@ -6242,6 +6266,15 @@ async def api_session_resume(request):
         _resume_msg = None
 
     if _resume_msg:
+        # phase-trace: resume-side inject scheduled. Symmetric with the
+        # create-side inject so a single phase-trace grep can show
+        # whether resume orientation fired for any session.
+        logger.info(
+            "phase-trace: inject_scheduled  tmux=%s  kind=resume  msg_len=%d",
+            tmux_name, len(_resume_msg),
+        )
+        _resume_inject_t0 = time.monotonic()
+
         async def _inject_resume_message(msg=_resume_msg):
             # Wait for the resumed harness to reach composer_ready before
             # typing — `claude --resume` loads history first, so a fixed sleep
@@ -6252,15 +6285,22 @@ async def api_session_resume(request):
                 if row and row.get("harness_phase") == "composer_ready":
                     break
                 await asyncio.sleep(1)
+            else:
+                logger.warning(
+                    "phase-trace: inject_skipped  tmux=%s  kind=resume  reason=composer_ready_timeout_120s",
+                    tmux_name,
+                )
+                return
             try:
                 await tmux_send(tmux_name, msg)
                 logger.info(
-                    "api_session_resume: injected resume message into %s  len=%d",
-                    tmux_name, len(msg),
+                    "phase-trace: first_message_injected  tmux=%s  kind=resume  dt_from_inject_scheduled_ms=%d  len=%d",
+                    tmux_name, int((time.monotonic() - _resume_inject_t0) * 1000),
+                    len(msg),
                 )
             except Exception:
                 logger.warning(
-                    "api_session_resume: failed to inject resume message into %s",
+                    "phase-trace: inject_failed  tmux=%s  kind=resume  exc=tmux_send_exception",
                     tmux_name, exc_info=True,
                 )
         asyncio.create_task(_inject_resume_message())
