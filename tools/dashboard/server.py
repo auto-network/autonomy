@@ -5300,6 +5300,11 @@ async def api_session_create(request):
     except Exception:
         pass
 
+    # auto-bpomi: throwaway phase-trace diagnostics — measure session-boot
+    # slices for Bead B. Single grep target: 'phase-trace:'.
+    _phase_t0 = time.monotonic()
+    logger.info("phase-trace: enter  tmux=pending  dt_from_post_ms=0")
+
     session_type = body.get("type", "container")
     project_name = body.get("project")
     primer_url = body.get("primer")
@@ -5453,6 +5458,11 @@ async def api_session_create(request):
             return JSONResponse({"error": "Failed to resolve credentials"}, status_code=500)
         is_container = True
 
+    # auto-bpomi phase-trace: launch_session() (mounts/creds/install + docker
+    # command) done; about to spawn the tmux session.
+    logger.info("phase-trace: launch-session-built  tmux=%s  dt_from_post_ms=%d",
+                tmux_name, int((time.monotonic() - _phase_t0) * 1000))
+
     # ── Launch tmux ─────────────────────────────────────────────
     tmux_cmd = ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40"]
     if not is_container:
@@ -5487,6 +5497,10 @@ async def api_session_create(request):
             {"error": f"tmux creation failed: {result.stderr.decode().strip()}"},
             status_code=500,
         )
+
+    # auto-bpomi phase-trace: container/process spawned (tmux new-session).
+    logger.info("phase-trace: tmux-spawned  tmux=%s  dt_from_post_ms=%d",
+                tmux_name, int((time.monotonic() - _phase_t0) * 1000))
 
     # ── Register with session monitor ───────────────────────────
     if is_container:
@@ -5689,6 +5703,12 @@ async def api_session_create(request):
                 )
 
         asyncio.create_task(_inject_first_message())
+
+    # auto-bpomi phase-trace: all create/boot work done, responding. (Container
+    # sessions then poll up to 30s for monitor-tracking before the HTTP return —
+    # that's catch-up latency, not boot.)
+    logger.info("phase-trace: response-ready  tmux=%s  dt_from_post_ms=%d",
+                tmux_name, int((time.monotonic() - _phase_t0) * 1000))
 
     response_type = "container" if is_container else "host"
 
