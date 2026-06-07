@@ -1,0 +1,87 @@
+{# Pending / dictation tiles for the unified session viewer.
+   Extracted from session-view.html so BOTH the page-mode viewer and the
+   Design Studio chat panel (mode:'panel') render the same outbox / dictation
+   surface. All bindings reference sessionViewerPage() component state, so the
+   partial works wherever that component is the x-data root. #}
+
+<!-- Pending / outbox tile — pinned above the composer (auto-xkdoi).
+     Renders only while a message is pending; the grid row collapses
+     otherwise. Drives the sv-outbox-tile-present body signal. -->
+<div class="sv-pending" x-show="_composerActive && outbox" x-effect="_syncTilePresent()">
+  <div class="sv-pending-tile"
+       :class="outboxTileClass()"
+       :data-pending-state="outbox ? outbox.state : null">
+    <div class="sv-pending-head">
+      <span class="sv-pending-label"
+            x-text="outbox && outbox.state === 'capturing' ? 'USER · DICTATING' : 'USER'"></span>
+      <span class="sv-pending-status">
+        <template x-if="outbox && outbox.state === 'sending'">
+          <span style="display:inline-flex;align-items:center;gap:7px;">
+            <span class="sv-spin"></span><span class="txt">Sending</span>
+          </span>
+        </template>
+        <template x-if="outbox && outbox.state === 'capturing'">
+          <span class="txt">Listening</span>
+        </template>
+        <template x-if="outbox && outbox.state === 'unconfirmed'">
+          <span class="txt">Not confirmed</span>
+        </template>
+      </span>
+    </div>
+    <div class="sv-pending-content"
+         x-text="outbox ? outbox.text : ''"
+         x-init="$nextTick(() => { $el.scrollTop = $el.scrollHeight; })"
+         x-effect="(outbox && outbox.text), $nextTick(() => { if ($el) $el.scrollTop = $el.scrollHeight; })"></div>
+    <div class="sv-pending-foot" x-show="outbox && outbox.state === 'unconfirmed'">
+      <button class="sv-resend" type="button" @click="resendOutbox()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12a9 9 0 1 1-2.6-6.4"></path><path d="M21 3v6h-6"></path>
+        </svg>
+        Resend
+      </button>
+      <button class="sv-dismiss" type="button" @click="dismissOutbox()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+             stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+        Dismiss
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Local dictation mirror — shown when the retryable outbox slot is occupied
+     by a prior send/unconfirmed message but the live voice buffer already has
+     new in-viewer text. Read-only; Send still waits for the outbox slot. -->
+<div class="sv-pending sv-pending--live" x-show="_showLocalDictationMirror">
+  <div class="sv-pending-tile is-capturing" data-pending-state="capturing">
+    <div class="sv-pending-head">
+      <span class="sv-pending-label">USER · DICTATING</span>
+      <span class="sv-pending-status"><span class="txt">Listening</span></span>
+    </div>
+    <div class="sv-pending-content"
+         x-text="_localDictationText"
+         x-effect="_localDictationText, $nextTick(() => { if ($el) $el.scrollTop = $el.scrollHeight; })"></div>
+  </div>
+</div>
+
+<!-- Cross-session dictation tile — shown when the operator is dictating to a
+     DIFFERENT session than the one being viewed. Violet-tinted so it can't be
+     confused with a local pending message; the top line names the real target.
+     Read-only mirror of the live buffer (auto-xkdoi / #23). -->
+<div class="sv-pending sv-pending--cross" x-show="_crossSessionDictation && _crossSessionText">
+  <div class="sv-pending-tile sv-pending-tile--cross">
+    <div class="sv-pending-head">
+      <span class="sv-pending-label">
+        USER · DICTATING
+        <span class="sv-cross-arrow">→</span>
+        <span class="sv-cross-target" x-text="_crossSessionTargetTitle"></span>
+      </span>
+      <span class="sv-pending-status"><span class="txt">Elsewhere</span></span>
+    </div>
+    <div class="sv-pending-content"
+         x-text="_crossSessionText"
+         x-effect="_crossSessionText, $nextTick(() => { if ($el) $el.scrollTop = $el.scrollHeight; })"></div>
+  </div>
+</div>

@@ -32,6 +32,10 @@
 
       // ── Mode ────────────────────────────────────────────────────
       _mode: (opts && opts.mode) || 'page',
+      // Panel mode only: whether the design chat overlay is open. Driven by
+      // design.js (off its chatOpen). Gates _composerActive so a collapsed
+      // chat yields the passive caption instead of the active composer/tile.
+      _panelChatOpen: true,
 
       // ── Page state ──────────────────────────────────────────────
       state: 'loading',   // 'loading' | 'ready' | 'error'
@@ -214,6 +218,16 @@
       // BOTH its caption-suppression and its send-path branch on (mirrored to
       // document.body via _syncComposerSignal). See contract note cbb8497c-a1f.
       get _composerActive() {
+        // Panel mode (Design Studio chat): the composer is "active" only while
+        // the chat overlay is actually open. Collapsed, the design page wants
+        // the passive caption gutter instead — so the composer-active body
+        // signals (caption suppression + the pending tile) must drop. The
+        // panel viewer stays mounted while hidden (design.html toggles
+        // `invisible h-0`, not unmount), so without this gate _composerActive
+        // would stay true and keep `sv-viewer-composer-active` set, hiding the
+        // caption in both states. Other modes are unaffected (_panelChatOpen
+        // defaults true). design.js drives the flag off its chatOpen.
+        if (this._mode === 'panel' && !this._panelChatOpen) return false;
         return !this.showTerminal && this.isLive && !!this._tmuxSession &&
                (this.sessionType !== 'host' || this._linked);
       },
