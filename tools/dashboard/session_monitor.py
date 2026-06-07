@@ -919,6 +919,12 @@ class SessionMonitor:
         self._started = False
         self._last_pause_nag_sent: float = 0.0  # timestamp of last dispatch-pause nag
         self._last_orphan_prune: float = time.time()  # defer first prune one full interval
+        # auto-ja51w: transient per-session phase progress dict (e.g.
+        # {"repo_index": 2, "total": 3, "current_repo": "enterprise_ng"})
+        # written by update_phase(progress=...) and surfaced by
+        # get_registry under "phase_progress". Cleared when a session
+        # transitions out of preparing_workspace.
+        self._phase_progress: dict[str, dict] = {}
         # inotify state — populated by _init_inotify()
         self._inotify: Any = None                        # INotify instance
         self._use_inotify: bool = False
@@ -1004,6 +1010,94 @@ class SessionMonitor:
             tmux_name, session_type, project,
             "pending" if path_str is None else Path(path_str).name,
         )
+        await self._broadcast_registry()
+
+    async def register_pending(
+        self,
+        tmux_name: str,
+        *,
+        session_type: str = "container",
+        project: str = "",
+        harness: str = "claude",
+        setup_phase: str = "requesting",
+    ) -> None:
+        """Register a session row IMMEDIATELY at session-create POST entry,
+        before ``prepare_session_mounts`` and ``launch_session`` run.
+
+        Lets the dashboard broadcast per-step progress (via :meth:`update_phase`)
+        during the ~7-9s of host-side git fetches + credential resolution that
+        otherwise leaves the optimistic-tile placeholder as the only client
+        visible signal. The session is inserted with no JSONL path and no
+        resolution_dir — those are filled in later by :meth:`register` (the
+        normal post-tmux-spawn registration path) which is a no-op INSERT
+        because the row already exists, but still sets up the tail-state and
+        inotify watches the regular flow expects.
+
+        ``setup_phase`` seeds the initial lifecycle phase; ``"requesting"`` is
+        the typical value for the very first call from ``api_session_create``.
+        """
+        try:
+            insert_session(
+                tmux_name=tmux_name,
+                session_type=session_type,
+                project=project,
+                harness=harness,
+            )
+        except Exception:
+            # Duplicate-name or other INSERT failure — surfaces as a no-op so
+            # the create handler can still call this safely from a re-entrant
+            # path. Existing rows just get the phase update below.
+            logger.debug(
+                "session_monitor.register_pending: INSERT failed for %s "
+                "(likely already exists; proceeding to update_phase)",
+                tmux_name,
+            )
+        update_tail_state(tmux_name, setup_phase=setup_phase)
+        # Mark as needing resolution so the normal register() call later is
+        # idempotent — the tail-state will get rebuilt cleanly with the
+        # jsonl_path / resolution_dir once those are known.
+        if tmux_name not in self._tail_states:
+            self._tail_states[tmux_name] = _TailState(needs_resolution=True)
+        logger.info(
+            "session_monitor: registered pending %s  type=%s  project=%s  setup_phase=%s",
+            tmux_name, session_type, project, setup_phase,
+        )
+        await self._broadcast_registry()
+
+    async def update_phase(
+        self,
+        tmux_name: str,
+        *,
+        setup_phase: str | None = None,
+        harness_phase: str | None = None,
+        progress: dict | None = None,
+    ) -> None:
+        """Update a session's lifecycle phase + transient progress, broadcast.
+
+        ``setup_phase`` / ``harness_phase`` are persisted via
+        :func:`update_tail_state`. ``progress`` is held only in memory on
+        :attr:`_phase_progress` and surfaced in the registry payload under
+        ``phase_progress`` — used for sub-phase data like
+        ``{"repo_index": 2, "total": 3, "current_repo": "enterprise_ng"}``
+        that the chip label can render alongside the phase name. Pass
+        ``progress=None`` (default) to leave the existing progress dict
+        untouched; pass ``progress={}`` to explicitly clear it.
+
+        Safe to call from a worker thread via
+        ``asyncio.run_coroutine_threadsafe`` — that's the per-repo callback
+        path from inside :func:`prepare_session_mounts`.
+        """
+        if setup_phase is not None or harness_phase is not None:
+            update_tail_state(
+                tmux_name,
+                setup_phase=setup_phase,
+                harness_phase=harness_phase,
+            )
+        if progress is not None:
+            if progress:
+                self._phase_progress[tmux_name] = dict(progress)
+            else:
+                self._phase_progress.pop(tmux_name, None)
         await self._broadcast_registry()
 
     async def register_session(
@@ -1189,6 +1283,8 @@ class SessionMonitor:
         self._remove_watches(tmux_name)
         mark_dead(tmux_name)
         self._tail_states.pop(tmux_name, None)
+        # auto-ja51w: clear transient phase progress on deregister.
+        self._phase_progress.pop(tmux_name, None)
         logger.info("session_monitor: deregistered %s", tmux_name)
         await self._broadcast_registry()
 
@@ -1248,6 +1344,14 @@ class SessionMonitor:
                 "setup_phase": s.get("setup_phase") or "pending",
                 "harness_phase": s.get("harness_phase") or "pending",
             }
+            # auto-ja51w: transient per-session phase progress (e.g. per-repo
+            # tick from inside prepare_session_mounts). Set via
+            # SessionMonitor.update_phase(progress=...). Omitted from the
+            # payload when no progress is active so the field stays opt-in
+            # at the wire level.
+            prog = self._phase_progress.get(s["tmux_name"])
+            if prog:
+                entry["phase_progress"] = prog
             entry["org"] = resolve_session_org(entry)
             out.append(entry)
         return out
