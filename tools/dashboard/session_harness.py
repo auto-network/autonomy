@@ -2468,11 +2468,28 @@ def extract_codex_harness_state(
 # (server.py defaults the terminal to -x 120 -y 40) so the patterns
 # must regex on glyph shape, never absolute column position.
 _CLAUDE_TRUST_DIALOG_RE = re.compile(
-    r"trust this (?:directory|folder)|trust the files in this directory|"
-    r"do you trust the files in this folder",
+    # Wording drifts across Claude Code versions: older builds said
+    # "trust the files in this folder"; v2.1.x says "trust the contents of
+    # this directory". Match the stable core — "trust [the files/contents
+    # in/of] this directory|folder" — rather than an exact phrase. Keying on
+    # the old exact wording silently broke trust auto-confirm (operator had
+    # to confirm by hand, 2026-06-04) — the same drift class as the composer
+    # glyph below. A miss here now also files a self-repair bead (see the
+    # screen-poll timeout in session_monitor) so the next wording change
+    # surfaces itself instead of silently stalling startup.
+    r"trust\s+(?:the\s+(?:files|contents)\s+(?:in|of)\s+)?this\s+(?:directory|folder)",
     re.IGNORECASE,
 )
 _CLAUDE_TRUST_CORNER_RE = re.compile(r"╭[─━]+╮")
+# Confirm affordance. The newer numbered-list trust prompt ("1. Yes,
+# continue   2. No, quit  /  Press enter to continue") may not draw the
+# rounded ╭──╮ box, so the box alone is no longer a reliable corroborator.
+# Either the box OR a visible confirm affordance corroborates the wording.
+_CLAUDE_TRUST_CONFIRM_RE = re.compile(
+    r"yes,?\s+(?:continue|proceed|trust)|press\s+enter\s+to\s+(?:continue|trust|proceed)"
+    r"|(?:^|\n)\s*1\.\s*yes\b|no,?\s+quit",
+    re.IGNORECASE,
+)
 _CLAUDE_PLANNING_RE = re.compile(
     r"(?:^|\n)\s*(?:plan mode|planning|Planning)\b",
     re.IGNORECASE,
@@ -2515,7 +2532,10 @@ def _claude_read_screen_state(
 
     trust_visible = bool(
         _CLAUDE_TRUST_DIALOG_RE.search(text)
-        and _CLAUDE_TRUST_CORNER_RE.search(text)
+        and (
+            _CLAUDE_TRUST_CORNER_RE.search(text)
+            or _CLAUDE_TRUST_CONFIRM_RE.search(text)
+        )
     )
     new_state["confirming_trust_prompt"] = bool(prev.get("confirming_trust_prompt"))
     if trust_visible and not prev.get("confirming_trust_prompt"):
