@@ -49,7 +49,12 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     -- entrypoint backgrounds the setup script and exec's the harness
     -- concurrently. See graph://18c9a9e9-efb for the full state machine.
     setup_phase         TEXT NOT NULL DEFAULT 'pending',
-    harness_phase       TEXT NOT NULL DEFAULT 'pending'
+    harness_phase       TEXT NOT NULL DEFAULT 'pending',
+    -- Unified single-column startup FSM. NULL = "this feature does not
+    -- govern this session" — covers both default (existing rows never
+    -- populated) and terminal success (cleared on first assistant turn).
+    -- Replaces the prior two-column setup_phase + harness_phase split.
+    startup_state       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS turn_corrections (
@@ -225,6 +230,14 @@ def init_db(db_path: Path | None = None) -> None:
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN setup_phase TEXT NOT NULL DEFAULT 'pending'")
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN harness_phase TEXT NOT NULL DEFAULT 'pending'")
+        _conn.commit()
+    # Migrate: add startup_state column (unified single-column startup FSM).
+    # Replaces setup_phase + harness_phase. NULL is the meaningful default:
+    # existing rows stay NULL and the new feature does not govern them.
+    try:
+        _conn.execute("SELECT startup_state FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN startup_state TEXT")
         _conn.commit()
     # Migrate: harness_token column (auto-ghhdg — rename from claude_token_alias;
     # auto-08n3f — values switched from operator alias strings to Anthropic
@@ -992,15 +1005,18 @@ def find_live_session(session_uuid: str | None = None, file_path: str | None = N
 
 
 def revive_session(tmux_name: str, *, file_offset: int = 0) -> None:
-    """Re-activate a dead session: set is_live=1, reset file_offset, and
-    clear the 'dead' activity_state flag so the row isn't contradictory
-    (alive but flagged dead). Leaves non-dead activity states alone."""
+    """Re-activate a dead session: set is_live=1, reset file_offset, clear
+    the 'dead' activity_state flag, and reset startup_state to NULL so the
+    relaunched session's FSM starts fresh (api_session_resume advances it
+    to harness_starting right after this call, mirroring api_session_create).
+    Leaves non-dead activity states alone."""
     conn = get_conn()
     conn.execute(
         "UPDATE tmux_sessions SET"
         "  is_live=1,"
         "  file_offset=?,"
-        "  activity_state=CASE WHEN activity_state='dead' THEN 'idle' ELSE activity_state END"
+        "  activity_state=CASE WHEN activity_state='dead' THEN 'idle' ELSE activity_state END,"
+        "  startup_state=NULL"
         " WHERE tmux_name=?",
         (file_offset, tmux_name),
     )

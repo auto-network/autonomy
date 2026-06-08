@@ -1,102 +1,82 @@
 // L1 derivation test for window.Autonomy.lifecycle.*
 //
-// Covers the lifecycle.js state machine after the auto-ja51w redesign:
-//   - 6-phase launching window (requesting / preparing_workspace /
-//     launching_container / booting_harness / awaiting_first_response /
-//     ready)
-//   - launching-until-first-response gate: ready requires entries > 0
-//   - chip + tone match the design rev 63542418 fixtures (with the two
-//     deliberate deviations: ``ready`` chip suppressed, harness label
-//     dynamic over s.harness)
-//   - migration-artifact guard preserved for resumed sessions
-//     (resolved=true + historical JSONL = entries > 0)
-//   - inlineAction + messageTone unchanged from prior
+// Tests the unified startup_state FSM. The backend tracks one column
+// per session; lifecycleState() is a near-1:1 lookup of that column.
 
 global.window = {};
 require('../static/js/lib/lifecycle.js');
 
 const L = window.Autonomy.lifecycle;
 
-// Phase-pair fixtures. ``entry_count`` is set so each fixture classifies
-// to its intended state under the new launching-until-first-response gate:
-//   - launching states get entry_count: 0 (no first reply yet)
-//   - ready states get entry_count: 1+ (first reply emitted)
-const PHASE_PAIR = {
-  pending: { is_live: true, setup_phase: 'pending', harness_phase: 'pending', entry_count: 0 },
-  // auto-ja51w pre-container phases (register-early pattern)
-  requesting: { is_live: true, setup_phase: 'requesting', harness_phase: 'pending', entry_count: 0 },
-  preparing_workspace: { is_live: true, setup_phase: 'preparing_workspace', harness_phase: 'pending', entry_count: 0 },
-  launching_container: { is_live: true, setup_phase: 'launching_container', harness_phase: 'pending', entry_count: 0 },
-  booting_harness: { is_live: true, setup_phase: 'container_started', harness_phase: 'pending', entry_count: 0, harness: 'claude' },
-  // existing in-container phases
-  container_starting: { is_live: true, setup_phase: 'container_starting', harness_phase: 'harness_starting', entry_count: 0 },
-  entrypoint: { is_live: true, setup_phase: 'entrypoint_running', harness_phase: 'pending', entry_count: 0 },
-  setup_running: { is_live: true, setup_phase: 'setup_running', harness_phase: 'harness_starting', entry_count: 0 },
-  harness_starting: { is_live: true, setup_phase: 'setup_complete', harness_phase: 'harness_starting', harness: 'claude', entry_count: 0 },
-  first_turn_written: { is_live: true, setup_phase: 'setup_complete', harness_phase: 'first_turn_written', entry_count: 0 },
-  // new "harness up, waiting on first reply" state
-  awaiting_first_response: { is_live: true, setup_phase: 'setup_complete', harness_phase: 'composer_ready', entry_count: 0 },
-  // ready requires an assistant-role entry under the auto-ja51w gate.
-  // entry_count alone (user-side echo) does NOT flip — first assistant
-  // turn does.
-  ready: { is_live: true, setup_phase: 'setup_complete', harness_phase: 'composer_ready', entries: [{ role: 'assistant', content: 'hi' }] },
-  ready_with_confirming_trust: { is_live: true, setup_phase: 'setup_complete', harness_phase: 'composer_ready', entries: [{ role: 'assistant', content: 'hi' }], harness_state: { confirming_trust_prompt: true } },
-  ready_with_planning: { is_live: true, setup_phase: 'setup_complete', harness_phase: 'composer_ready', entries: [{ role: 'assistant', content: 'hi' }], harness_state: { in_planning_mode: true } },
-  setup_failed: { is_live: true, setup_phase: 'setup_failed', harness_phase: 'pending', entry_count: 0 },
-  dead_resumable: { is_live: false, resumable: true },
-  dead_not_resumable: { is_live: false, resumable: false },
+// Each fixture sets startup_state directly (or NULL for the terminal /
+// existing-session case).
+const FIXTURES = {
+  // NULL / unset → ready (out of launching).
+  ready:                    { is_live: true, startup_state: null },
+  ready_with_planning:      { is_live: true, startup_state: null, harness_state: { in_planning_mode: true } },
+
+  // Launching FSM states map 1:1.
+  requesting:               { is_live: true, startup_state: 'requesting' },
+  preparing_workspace:      { is_live: true, startup_state: 'preparing_workspace' },
+  launching_container:      { is_live: true, startup_state: 'launching_container' },
+  container_starting:       { is_live: true, startup_state: 'container_starting' },
+  entrypoint_running:       { is_live: true, startup_state: 'entrypoint_running' },
+  setup_running:            { is_live: true, startup_state: 'setup_running' },
+  harness_starting:         { is_live: true, startup_state: 'harness_starting' },
+  confirming_trust:         { is_live: true, startup_state: 'confirming_trust' },
+  composer_ready:           { is_live: true, startup_state: 'composer_ready' },
+  awaiting_first_response:  { is_live: true, startup_state: 'awaiting_first_response' },
+  setup_failed:             { is_live: true, startup_state: 'setup_failed' },
+
+  // Dead branch — startup_state is irrelevant.
+  dead_resumable:           { is_live: false, resumable: true },
+  dead_not_resumable:       { is_live: false, resumable: false },
 };
 
-// Chip labels — these are the strings the operator sees.
-const DESIGN_CHIP = {
-  pending: 'Queued',
-  requesting: 'Queued',
-  preparing_workspace: 'Preparing workspace',  // sans N/M when no phase_progress
-  launching_container: 'Starting container',
-  // booting_harness: dynamic — see "harness-dynamic" test
-  container_starting: 'Starting container',
-  entrypoint: 'Preparing workspace',
-  setup_running: 'Setup running',
-  // harness_starting: dynamic — see "harness-dynamic" test
-  first_turn_written: 'Verifying input',
-  awaiting_first_response: 'Awaiting first reply',
-  ready: '',                                  // deliberate suppression (host-approved)
-  ready_with_confirming_trust: 'Confirming trust',
+const CHIP = {
+  ready: '',
   ready_with_planning: 'Planning',
+  requesting: 'Queued',
+  preparing_workspace: 'Preparing workspace',  // augmented in phaseChip() with N/M
+  launching_container: 'Starting container',
+  container_starting: 'Starting container',
+  entrypoint_running: 'Initializing container',
+  setup_running: 'Container setup',
+  harness_starting: 'Starting harness',
+  confirming_trust: 'Confirming trust',
+  composer_ready: 'Sending orientation',
+  awaiting_first_response: 'Awaiting first reply',
   setup_failed: 'Setup failed',
   dead_resumable: 'Ended',
   dead_not_resumable: 'Ended',
 };
 
-const DESIGN_TONE = {
-  pending: '',
+const TONE = {
+  ready: 'ready',
+  ready_with_planning: '',
   requesting: '',
   preparing_workspace: '',
   launching_container: '',
-  booting_harness: '',
   container_starting: '',
-  entrypoint: '',
+  entrypoint_running: '',
   setup_running: '',
   harness_starting: '',
-  first_turn_written: '',
+  confirming_trust: 'failed',
+  composer_ready: '',
   awaiting_first_response: '',
-  ready: 'ready',                             // moot — chip is suppressed
-  ready_with_confirming_trust: 'failed',
-  ready_with_planning: '',
   setup_failed: 'failed',
   dead_resumable: 'dead',
   dead_not_resumable: 'dead',
 };
 
 const STARTUP_VISIBLE_TRUE = [
-  'pending', 'requesting', 'preparing_workspace', 'launching_container',
-  'booting_harness', 'container_starting', 'entrypoint', 'setup_running',
-  'harness_starting', 'first_turn_written', 'awaiting_first_response',
-  'setup_failed',
+  'requesting', 'preparing_workspace', 'launching_container',
+  'container_starting', 'entrypoint_running', 'setup_running',
+  'harness_starting', 'confirming_trust', 'composer_ready',
+  'awaiting_first_response', 'setup_failed',
 ];
 const STARTUP_VISIBLE_FALSE = [
-  'ready', 'ready_with_confirming_trust', 'ready_with_planning',
-  'dead_resumable', 'dead_not_resumable',
+  'ready', 'ready_with_planning', 'dead_resumable', 'dead_not_resumable',
 ];
 
 let pass = 0, fail = 0;
@@ -105,157 +85,76 @@ function check(label, ok, detail) {
   else { fail++; console.log('FAIL', label, '—', detail || ''); }
 }
 
-// ── lifecycleState classifies each input to the expected state ──
-for (const [name, row] of Object.entries(PHASE_PAIR)) {
+// ── lifecycleState classifies each fixture to the expected state ──
+for (const [name, row] of Object.entries(FIXTURES)) {
   const actual = L.lifecycleState(row);
   check(`lifecycleState(${name})`, actual === name, `got ${actual}`);
 }
 
-// ── LAUNCHING-UNTIL-FIRST-ASSISTANT-RESPONSE GATE (auto-ja51w) ──
-// composer_ready + no entries → awaiting_first_response (NOT ready)
-check('composer_ready + no entries → awaiting_first_response',
-      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready'}) === 'awaiting_first_response');
-// composer_ready + ONLY user entry (orientation echo) → still awaiting (the bug fix)
-check('composer_ready + only user entry → awaiting_first_response (BUG-FIX: was flipping to ready on user echo)',
-      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready',
-                        entries:[{role:'user', content:'orientation'}]}) === 'awaiting_first_response');
-// composer_ready + assistant entry → ready
-check('composer_ready + assistant entry → ready',
-      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready',
-                        entries:[{role:'assistant', content:'hi'}]}) === 'ready');
-// composer_ready + user THEN assistant → ready (mixed entries with at least one assistant)
-check('composer_ready + user + assistant → ready',
-      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready',
-                        entries:[{role:'user'}, {role:'assistant'}]}) === 'ready');
-// resolved + ONLY user entries → not ready (rare; user typed but agent didn't reply)
-check('resolved + user-only entries → pending (no assistant turn yet)',
-      L.lifecycleState({is_live:true, resolved:true, setup_phase:'pending', harness_phase:'pending',
-                        entries:[{role:'user'}]}) === 'pending');
-// resolved + assistant entries → ready (resumed session with history)
-check('resolved + assistant entry → ready',
-      L.lifecycleState({is_live:true, resolved:true, setup_phase:'pending', harness_phase:'pending',
-                        entries:[{role:'assistant', content:'previous reply'}]}) === 'ready');
-// has_assistant_turn override beats inspecting entries
-check('has_assistant_turn=true override flips to ready',
-      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready',
-                        has_assistant_turn:true}) === 'ready');
-check('has_assistant_turn=false override holds in awaiting',
-      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready',
-                        entries:[{role:'assistant'}], has_assistant_turn:false}) === 'awaiting_first_response');
-
-// composer_ready + overlays still surface even while awaiting first response
-check('composer_ready + no entries + confirming_trust → ready_with_confirming_trust',
-      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready',
-                        harness_state:{confirming_trust_prompt:true}}) === 'ready_with_confirming_trust');
-check('composer_ready + no entries + planning → ready_with_planning',
-      L.lifecycleState({is_live:true, setup_phase:'setup_complete', harness_phase:'composer_ready',
-                        harness_state:{in_planning_mode:true}}) === 'ready_with_planning');
-
-// setup_failed wins regardless
-check('setup_failed wins over composer_ready (with assistant entry)',
-      L.lifecycleState({is_live:true, setup_phase:'setup_failed', harness_phase:'composer_ready',
-                        entries:[{role:'assistant'}]}) === 'setup_failed');
-check('setup_failed wins over resolved',
-      L.lifecycleState({is_live:true, resolved:true, setup_phase:'setup_failed', harness_phase:'pending',
-                        entries:[{role:'assistant'}]}) === 'setup_failed');
-
-// Dead sessions ignore everything
-check("dead session ignores assistant entries",
-      L.lifecycleState({is_live:false, resolved:true, resumable:true,
-                        entries:[{role:'assistant'}]}) === 'dead_resumable');
-
-// ── PRE-CONTAINER PHASES (auto-ja51w register-early pattern) ──
-// These four phases fire during the ~7-9s server-side window before
-// dind-entrypoint starts writing .setup_phase markers. They cover what
-// was previously dead-air (only the optimistic-tile "Queued" placeholder).
-check('requesting maps to requesting state',
-      L.lifecycleState({is_live:true, setup_phase:'requesting', harness_phase:'pending'}) === 'requesting');
-check('preparing_workspace maps to preparing_workspace state',
-      L.lifecycleState({is_live:true, setup_phase:'preparing_workspace', harness_phase:'pending'}) === 'preparing_workspace');
-check('launching_container maps to launching_container state',
-      L.lifecycleState({is_live:true, setup_phase:'launching_container', harness_phase:'pending'}) === 'launching_container');
-check('container_started maps to booting_harness state',
-      L.lifecycleState({is_live:true, setup_phase:'container_started', harness_phase:'pending'}) === 'booting_harness');
-
-// ── phaseChip matches design (static states) ──
-for (const [name, expected] of Object.entries(DESIGN_CHIP)) {
-  const actual = L.phaseChip(PHASE_PAIR[name]);
+// ── Chip label per state ──
+for (const [name, expected] of Object.entries(CHIP)) {
+  const actual = L.phaseChip(FIXTURES[name]);
   check(`phaseChip(${name}) = ${JSON.stringify(expected)}`,
         actual === expected, `got ${JSON.stringify(actual)}`);
 }
 
-// ── phaseChip harness_starting / booting_harness are dynamic over s.harness ──
-{
-  const claude = L.phaseChip({ is_live: true, setup_phase: 'setup_complete', harness_phase: 'harness_starting', harness: 'claude', entry_count: 0 });
-  check('phaseChip(harness_starting, claude) = "Booting Claude"',
-        claude === 'Booting Claude', `got ${JSON.stringify(claude)}`);
-  const codex = L.phaseChip({ is_live: true, setup_phase: 'setup_complete', harness_phase: 'harness_starting', harness: 'codex', entry_count: 0 });
-  check('phaseChip(harness_starting, codex) = "Booting Codex"',
-        codex === 'Booting Codex', `got ${JSON.stringify(codex)}`);
-  const bhClaude = L.phaseChip({ is_live: true, setup_phase: 'container_started', harness_phase: 'pending', harness: 'claude', entry_count: 0 });
-  check('phaseChip(booting_harness, claude) = "Booting Claude"',
-        bhClaude === 'Booting Claude', `got ${JSON.stringify(bhClaude)}`);
-  const bhCodex = L.phaseChip({ is_live: true, setup_phase: 'container_started', harness_phase: 'pending', harness: 'codex', entry_count: 0 });
-  check('phaseChip(booting_harness, codex) = "Booting Codex"',
-        bhCodex === 'Booting Codex', `got ${JSON.stringify(bhCodex)}`);
-  const unknown = L.phaseChip({ is_live: true, setup_phase: 'setup_complete', harness_phase: 'harness_starting', entry_count: 0 });
-  check('phaseChip(harness_starting, no harness field) = "Booting Harness"',
-        unknown === 'Booting Harness', `got ${JSON.stringify(unknown)}`);
-}
+// ── preparing_workspace augments with N/M when phase_progress is set ──
+const wsProg = L.phaseChip({
+  is_live: true, startup_state: 'preparing_workspace',
+  phase_progress: { repo_index: 2, total: 3, current_repo: 'enterprise_ng' },
+});
+check('phaseChip(preparing_workspace, progress=2/3) = "Preparing workspace 2/3"',
+      wsProg === 'Preparing workspace 2/3', `got ${JSON.stringify(wsProg)}`);
 
-// ── phaseChip preparing_workspace augments with N/M from phase_progress ──
-{
-  const noProgress = L.phaseChip({ is_live: true, setup_phase: 'preparing_workspace', harness_phase: 'pending', entry_count: 0 });
-  check('phaseChip(preparing_workspace, no progress) = "Preparing workspace"',
-        noProgress === 'Preparing workspace', `got ${JSON.stringify(noProgress)}`);
-  const withProgress = L.phaseChip({
-    is_live: true, setup_phase: 'preparing_workspace', harness_phase: 'pending', entry_count: 0,
-    phase_progress: { repo_index: 2, total: 3, current_repo: 'enterprise_ng' },
-  });
-  check('phaseChip(preparing_workspace, progress=2/3) = "Preparing workspace 2/3"',
-        withProgress === 'Preparing workspace 2/3', `got ${JSON.stringify(withProgress)}`);
-}
-
-// ── phaseTone matches design ──
-for (const [name, expected] of Object.entries(DESIGN_TONE)) {
-  const actual = L.phaseTone(PHASE_PAIR[name]);
+// ── Tone per state ──
+for (const [name, expected] of Object.entries(TONE)) {
+  const actual = L.phaseTone(FIXTURES[name]);
   check(`phaseTone(${name}) = ${JSON.stringify(expected)}`,
         actual === expected, `got ${JSON.stringify(actual)}`);
 }
 
-// ── startupVisible covers the right states ──
+// ── startupVisible ──
 for (const name of STARTUP_VISIBLE_TRUE) {
   check(`startupVisible(${name}) = true`,
-        L.startupVisible(PHASE_PAIR[name]) === true);
+        L.startupVisible(FIXTURES[name]) === true);
 }
 for (const name of STARTUP_VISIBLE_FALSE) {
   check(`startupVisible(${name}) = false`,
-        L.startupVisible(PHASE_PAIR[name]) === false);
+        L.startupVisible(FIXTURES[name]) === false);
 }
 
-// ── inlineAction — Retry on setup_failed, Resume on dead_resumable, nothing else ──
-check('inlineAction(setup_failed) kind = retry',
-      L.inlineAction(PHASE_PAIR.setup_failed).kind === 'retry');
-check('inlineAction(setup_failed) label = "Retry"',
-      L.inlineAction(PHASE_PAIR.setup_failed).label === 'Retry');
-check('inlineAction(dead_resumable) kind = resume',
-      L.inlineAction(PHASE_PAIR.dead_resumable).kind === 'resume');
-check('inlineAction(dead_resumable) label = "Resume"',
-      L.inlineAction(PHASE_PAIR.dead_resumable).label === 'Resume');
+// ── inlineAction (Retry/Resume) ──
+check('inlineAction(setup_failed) kind=retry',
+      L.inlineAction(FIXTURES.setup_failed).kind === 'retry');
+check('inlineAction(dead_resumable) kind=resume',
+      L.inlineAction(FIXTURES.dead_resumable).kind === 'resume');
 check('inlineAction(ready) = null',
-      L.inlineAction(PHASE_PAIR.ready) === null);
+      L.inlineAction(FIXTURES.ready) === null);
 check('inlineAction(dead_not_resumable) = null',
-      L.inlineAction(PHASE_PAIR.dead_not_resumable) === null);
+      L.inlineAction(FIXTURES.dead_not_resumable) === null);
 
-// ── messageTone follows phase ──
-check('messageTone(setup_failed) = "sc-failed-message"',
-      L.messageTone(PHASE_PAIR.setup_failed) === 'sc-failed-message');
-check('messageTone(container_starting) = "sc-startup-message"',
-      L.messageTone(PHASE_PAIR.container_starting) === 'sc-startup-message');
+// ── messageTone ──
+check('messageTone(setup_failed) = sc-failed-message',
+      L.messageTone(FIXTURES.setup_failed) === 'sc-failed-message');
+check('messageTone(harness_starting) = sc-startup-message',
+      L.messageTone(FIXTURES.harness_starting) === 'sc-startup-message');
 check('messageTone(ready) = "" (no tone)',
-      L.messageTone(PHASE_PAIR.ready) === '');
+      L.messageTone(FIXTURES.ready) === '');
 check('messageTone(dead_resumable) = "" (no tone)',
-      L.messageTone(PHASE_PAIR.dead_resumable) === '');
+      L.messageTone(FIXTURES.dead_resumable) === '');
+
+// ── NULL startup_state defaults to ready (corner case folds into normal path) ──
+check('startup_state undefined → ready',
+      L.lifecycleState({ is_live: true }) === 'ready');
+check('startup_state empty-string → ready (falsy)',
+      L.lifecycleState({ is_live: true, startup_state: '' }) === 'ready');
+
+// ── Planning overlay only applies when startup_state is NULL ──
+check('startup_state=preparing_workspace + in_planning_mode → preparing_workspace (overlay suppressed during launch)',
+      L.lifecycleState({
+        is_live: true, startup_state: 'preparing_workspace',
+        harness_state: { in_planning_mode: true },
+      }) === 'preparing_workspace');
 
 console.log('---');
 console.log(`${pass} passed, ${fail} failed`);

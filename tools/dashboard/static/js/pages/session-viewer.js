@@ -119,14 +119,10 @@
         var row = {
           is_live: s.isLive,
           harness: s.harness,
-          setup_phase: s.setupPhase,
-          harness_phase: s.harnessPhase,
+          startup_state: s.startupState || null,
           harness_state: s.harnessState,
           resumable: s.resumable,
-          // resolved is the migration-artifact guard in the lifecycle
-          // bypass — without it a fully-booted RESUMED session would
-          // be classified as still-starting in the viewer.
-          resolved: s.resolved === true,
+          phase_progress: s.phaseProgress || null,
         };
         this._lcEmitSlot(row, null);
         return row;
@@ -143,20 +139,20 @@
       // to loadingPhaseRow EXCEPT resolved is pinned false: a resumed
       // session has historical JSONL, so the registry reports
       // resolved=true, which would short-circuit lifecycleState() straight
-      // to "ready" (lifecycle.js:71) and hide the boot phases entirely.
-      // Pinning resolved:false lets host-0531's derivation report the real
-      // container/harness phase as it actually boots.
+      // to "ready" and hide the boot phases entirely. With the unified
+      // startup_state FSM, api_session_resume resets startup_state to
+      // harness_starting on resume — no synthetic shaping needed in the
+      // viewer's row.
       get _resumePhaseRow() {
         var s = Alpine.store('sessions')[this.sessionKey];
         if (!s) return null;
         return {
           is_live: s.isLive,
           harness: s.harness,
-          setup_phase: s.setupPhase,
-          harness_phase: s.harnessPhase,
+          startup_state: s.startupState || null,
           harness_state: s.harnessState,
           resumable: s.resumable,
-          resolved: false,
+          phase_progress: s.phaseProgress || null,
         };
       },
       // auto-ja51w C5: launching-until-first-response predicate. Mirrors
@@ -167,18 +163,8 @@
       // the configure() flow OR the Alpine $watch in init() promotes
       // state to 'ready'.
       _isStillLaunching: function (store) {
-        if (!store) return false;
-        if (!store.isLive) return false;
-        // auto-ja51w: gate on first ASSISTANT entry, not any entry —
-        // mirrors lifecycle.js. The user-side orientation echo (tmux_send
-        // input) gets written to JSONL ~2s before the model's reply, and
-        // gating on entries.length would flip the viewer out of loading
-        // during that gap.
-        var entries = store.entries || [];
-        if (entries.some(function (e) { return e && e.role === 'assistant'; })) {
-          return false;
-        }
-        return true;
+        // Unified startup FSM. NULL = not in launching.
+        return !!(store && store.isLive && store.startupState);
       },
       // [lc] viewer-loading slot emit helper. Logs a viewer-slot-render
       // record whenever the *result* of the slot's render condition

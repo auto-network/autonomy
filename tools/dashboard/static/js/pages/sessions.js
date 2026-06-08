@@ -700,19 +700,10 @@
             // sessions whose setup_phase + harness_phase columns
             // defaulted to 'pending' from the schema migration —
             // see lifecycle.js for the bypass.
-            setup_phase: s.setupPhase || 'pending',
-            harness_phase: s.harnessPhase || 'pending',
+            // Unified startup FSM. NULL = not in launching.
+            startup_state: s.startupState || null,
             harness_state: s.harnessState || {},
             resolved: s.resolved === true,
-            // auto-ja51w: launching-until-first-assistant-response gate.
-            // True iff any store entry is role=assistant (assistant_text,
-            // thinking, tool_use). The orientation-echo user turn does
-            // NOT flip this — fixes the codex card flipping to Active
-            // ~2s before the model's actual reply.
-            entries: s.entries || [],
-            has_assistant_turn: Array.isArray(s.entries) && s.entries.some(function (e) {
-              return e && e.role === 'assistant';
-            }),
             // auto-ja51w: transient sub-phase progress from
             // SessionMonitor.update_phase(progress=...). Drives the
             // "Preparing workspace N/M" chip label in phaseChip().
