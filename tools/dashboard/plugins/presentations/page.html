@@ -33,7 +33,8 @@
               <span class="present-deck-subtitle" x-show="deck.subtitle" x-text="deck.subtitle"></span>
             </button>
             <div class="present-deck-meta">
-              <span x-text="formatDate(deck.last_shown_at || deck.created_at)"></span>
+              <span x-text="'Modified ' + formatDate(deck.modified_at || deck.created_at)"></span>
+              <span x-show="deck.last_shown_at" x-text="'Opened ' + formatDate(deck.last_shown_at)"></span>
               <span x-show="creatorLabel(deck)" x-text="creatorLabel(deck)"></span>
               <span x-text="(deck.slide_count || 1) + ' slides'"></span>
             </div>

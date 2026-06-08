@@ -216,6 +216,7 @@ def _deck_payload(design: dict, *, last_shown_at: str | None = None) -> dict:
         "name": design.get("title") or "Untitled deck",
         "subtitle": design.get("description") or "",
         "created_at": design.get("created_at") or "",
+        "modified_at": design.get("created_at") or "",
         "last_shown_at": last_shown_at or "",
         "creator_session_id": creator_session_id,
         "creator_session_label": creator_session_label,
@@ -226,17 +227,45 @@ def _deck_payload(design: dict, *, last_shown_at: str | None = None) -> dict:
     }
 
 
+def _deck_record_payload(design: dict, *, last_shown_at: str | None = None) -> dict:
+    """Payload persisted in the deck library.
+
+    The stable design id is the durable pointer. Revision-specific fields are
+    derived on read so a watched Design Studio deck does not leave Present's
+    library metadata stale.
+    """
+    payload = _deck_payload(design, last_shown_at=last_shown_at)
+    payload.pop("latest_revision_id", None)
+    return payload
+
+
+def _hydrate_deck_record(payload: dict) -> dict:
+    design_id = payload.get("design_id") or payload.get("latest_revision_id") or ""
+    design = _get_design_by_revision_or_design_id(design_id)
+    if not design:
+        return dict(payload)
+
+    deck = _deck_payload(design, last_shown_at=payload.get("last_shown_at") or "")
+
+    # Preserve explicit deck ownership if a future UI lets it diverge from the
+    # latest Design Studio revision creator.
+    for key in ("author_session_id", "author_session_label"):
+        if payload.get(key):
+            deck[key] = payload[key]
+    return deck
+
+
 async def list_decks(request: Request) -> JSONResponse:
     org = _caller_org(request)
     rows = _read_deck_members(org)
     decks = []
     for row in rows:
         payload = row.get("payload") or {}
-        deck = dict(payload)
+        deck = _hydrate_deck_record(payload)
         deck["key"] = row.get("key") or deck.get("design_id") or ""
-        deck["updated_at"] = row.get("updated_at") or ""
+        deck["updated_at"] = deck.get("modified_at") or deck.get("created_at") or ""
         decks.append(deck)
-    decks.sort(key=lambda d: d.get("last_shown_at") or d.get("created_at") or "", reverse=True)
+    decks.sort(key=lambda d: d.get("modified_at") or d.get("created_at") or "", reverse=True)
     return JSONResponse({"decks": decks})
 
 
@@ -259,9 +288,9 @@ async def mark_shown(request: Request) -> JSONResponse:
     design = _get_design_by_revision_or_design_id(raw_id)
     if not design:
         return JSONResponse({"error": "design not found"}, status_code=404)
-    payload = _deck_payload(design, last_shown_at=_iso_now())
+    payload = _deck_record_payload(design, last_shown_at=_iso_now())
     _upsert_deck(payload["design_id"], payload, org)
-    return JSONResponse({"ok": True, "deck": payload})
+    return JSONResponse({"ok": True, "deck": _deck_payload(design, last_shown_at=payload["last_shown_at"])})
 
 
 routes: list[Route] = [

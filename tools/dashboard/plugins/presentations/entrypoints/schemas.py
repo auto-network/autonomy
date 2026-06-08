@@ -16,8 +16,8 @@ SCHEMA_REVISION = 1
 
 SYNOPSIS = {
     "summary": (
-        "Presentation deck library records: latest shown Design Studio deck "
-        "metadata, creator/session provenance, and slide ids."
+        "Presentation deck library records keyed by stable Design Studio design "
+        "id, with creator/session provenance and slide metadata."
     ),
     "nouns": [
         "presentation", "presentation deck", "deck library", "present",
@@ -35,10 +35,11 @@ class PresentationDeckV1(SettingSchema):
     schema_revision = SCHEMA_REVISION
 
     design_id: str = field(required=True, description="Stable Design Studio design id")
-    latest_revision_id: str = field(required=True, description="Latest revision rendered")
+    latest_revision_id: str = field(default="", description="Deprecated cached revision id; API responses compute the latest revision from design_id")
     name: str = field(required=True, description="Deck display name")
     subtitle: str = field(default="", description="Deck subtitle/description")
     created_at: str = field(default="", description="Original design creation timestamp")
+    modified_at: str = field(default="", description="Latest Design Studio revision timestamp")
     last_shown_at: str = field(default="", description="Most recent presentation timestamp")
     creator_session_id: str = field(default="", description="Session that created the deck")
     creator_session_label: str = field(default="", description="Human label for creator session")
@@ -53,14 +54,14 @@ class PresentationDeckV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: payload must be a dict, got {type(payload).__name__}"
             )
-        for required in ("design_id", "latest_revision_id", "name"):
+        for required in ("design_id", "name"):
             value = payload.get(required)
             if not isinstance(value, str) or not value.strip():
                 raise SchemaValidationError(
                     f"{cls.__name__}: {required!r} must be a non-empty string"
                 )
         for key in (
-            "subtitle", "created_at", "last_shown_at",
+            "subtitle", "created_at", "modified_at", "last_shown_at",
             "creator_session_id", "creator_session_label",
             "author_session_id", "author_session_label",
         ):
