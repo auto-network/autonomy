@@ -304,7 +304,6 @@
             await this.$nextTick();
             this.updateTopbar();
             this.injectIframe(this.activeSlide);
-            window.Autonomy.fetch('/api/presentations/deck/' + encodeURIComponent(designId) + '/shown', { method: 'POST' });
           } catch (err) {
             this.error = err && err.message ? err.message : 'Could not load deck';
           } finally {

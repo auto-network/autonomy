@@ -56,6 +56,7 @@ def test_presentation_deck_schema_validates_payload():
     }
 
     PresentationDeckV1.validate(payload)
+    PresentationDeckV1.validate({k: v for k, v in payload.items() if k != "latest_revision_id"})
 
     with pytest.raises(SchemaValidationError):
         PresentationDeckV1.validate({**payload, "slide_count": 0})
@@ -127,6 +128,142 @@ def test_presentations_api_reads_design_and_records_shown(tmp_path, monkeypatch)
 
     persisted = json.loads(fixture_path.read_text())["settings"][PRESENTATION_DECK_SET_ID]
     assert persisted["_all"][0]["key"] == TEST_EXPERIMENT_ID
+    assert "latest_revision_id" not in persisted["_all"][0]["payload"]
+
+
+def test_presentations_library_hydrates_latest_design_revision(tmp_path, monkeypatch):
+    fixture_path = tmp_path / "fixture.json"
+    design_id = "roadmap-deck"
+    fixture = {
+        "active_sessions": [],
+        "beads": [],
+        "experiments": [
+            {
+                **make_experiment(
+                    "rev-old",
+                    title="Old Roadmap",
+                    html="<section>Old</section>",
+                ),
+                "design_id": design_id,
+                "revision_seq": 1,
+                "revisions": ["rev-old", "rev-new"],
+                "created_at": "2026-06-08T10:00:00Z",
+            },
+            {
+                **make_experiment(
+                    "rev-new",
+                    title="New Roadmap",
+                    html="<section>One</section><section>Two</section><section>Three</section>",
+                ),
+                "design_id": design_id,
+                "revision_seq": 2,
+                "revisions": ["rev-old", "rev-new"],
+                "created_at": "2026-06-08T11:00:00Z",
+            },
+        ],
+        "settings": {
+            PRESENTATION_DECK_SET_ID: {
+                "_all": [
+                    {
+                        "key": design_id,
+                        "payload": {
+                            "design_id": design_id,
+                            "latest_revision_id": "rev-old",
+                            "name": "Old Roadmap",
+                            "last_shown_at": "2026-06-08T20:00:00Z",
+                            "slide_count": 1,
+                            "slide_ids": ["slide-1"],
+                        },
+                    }
+                ]
+            }
+        },
+    }
+    write_fixture(fixture, fixture_path)
+    monkeypatch.setenv("DASHBOARD_MOCK", str(fixture_path))
+
+    from tools.dashboard.dao import mock as dao_mock
+
+    monkeypatch.setattr(dao_mock, "FIXTURE_PATH", fixture_path)
+
+    app = Starlette(routes=present_api.routes)
+    with TestClient(app) as client:
+        response = client.get("/api/presentations/decks")
+
+    assert response.status_code == 200
+    decks = response.json()["decks"]
+    assert len(decks) == 1
+    deck = decks[0]
+    assert deck["design_id"] == design_id
+    assert deck["latest_revision_id"] == "rev-new"
+    assert deck["name"] == "New Roadmap"
+    assert deck["modified_at"] == "2026-06-08T11:00:00Z"
+    assert deck["updated_at"] == "2026-06-08T11:00:00Z"
+    assert deck["slide_count"] == 3
+    assert deck["slide_ids"] == ["slide-1", "slide-2", "slide-3"]
+    assert deck["last_shown_at"] == "2026-06-08T20:00:00Z"
+
+
+def test_presentations_library_sorts_by_modified_not_last_opened(tmp_path, monkeypatch):
+    fixture_path = tmp_path / "fixture.json"
+    fixture = {
+        "active_sessions": [],
+        "beads": [],
+        "experiments": [
+            {
+                **make_experiment("rev-a", title="Older Modified", html="<section>A</section>"),
+                "design_id": "deck-a",
+                "revision_seq": 1,
+                "revisions": ["rev-a"],
+                "created_at": "2026-06-08T09:00:00Z",
+            },
+            {
+                **make_experiment("rev-b", title="Newer Modified", html="<section>B</section>"),
+                "design_id": "deck-b",
+                "revision_seq": 1,
+                "revisions": ["rev-b"],
+                "created_at": "2026-06-08T12:00:00Z",
+            },
+        ],
+        "settings": {
+            PRESENTATION_DECK_SET_ID: {
+                "_all": [
+                    {
+                        "key": "deck-a",
+                        "payload": {
+                            "design_id": "deck-a",
+                            "name": "Older Modified",
+                            "last_shown_at": "2026-06-08T22:00:00Z",
+                        },
+                    },
+                    {
+                        "key": "deck-b",
+                        "payload": {
+                            "design_id": "deck-b",
+                            "name": "Newer Modified",
+                            "last_shown_at": "2026-06-08T13:00:00Z",
+                        },
+                    },
+                ]
+            }
+        },
+    }
+    write_fixture(fixture, fixture_path)
+    monkeypatch.setenv("DASHBOARD_MOCK", str(fixture_path))
+
+    from tools.dashboard.dao import mock as dao_mock
+
+    monkeypatch.setattr(dao_mock, "FIXTURE_PATH", fixture_path)
+
+    app = Starlette(routes=present_api.routes)
+    with TestClient(app) as client:
+        response = client.get("/api/presentations/decks")
+
+    assert response.status_code == 200
+    decks = response.json()["decks"]
+    assert [deck["design_id"] for deck in decks] == ["deck-b", "deck-a"]
+    assert decks[0]["modified_at"] == "2026-06-08T12:00:00Z"
+    assert decks[1]["last_shown_at"] == "2026-06-08T22:00:00Z"
 
 
 def test_presentations_api_returns_offline_owner_presence_when_unowned(tmp_path, monkeypatch):
@@ -191,6 +328,10 @@ global.document = {{ addEventListener() {{}} }};
 global.history = {{ replaceState() {{}} }};
 vm.runInThisContext(fs.readFileSync({str(PLUGIN_DIR / 'page.js')!r}, 'utf8'));
 const helpers = window.PresentationsTest;
+assert(
+  !fs.readFileSync({str(PLUGIN_DIR / 'page.js')!r}, 'utf8').includes('/shown'),
+  'Opening a deck should not write presentation metadata; publish/show state is explicit.',
+);
 assert.deepStrictEqual(
   helpers.parsePresentPath('/present/deck-1/slide-3'),
   {{ mode: 'deck', designId: 'deck-1', slideIndex: 2 }}
