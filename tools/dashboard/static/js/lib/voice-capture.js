@@ -21,6 +21,14 @@
     ws: null, wsOpen: false, started: false, talkActive: false, requiresReconnect: false,
     bind: '',
     stream: null, ctx: null, sourceNode: null, workletNode: null, sinkNode: null, micGranted: false,
+    captureGen: 0,          // monotonic id of the LIVE capture pipeline. Only the
+                            // worklet whose gen === captureGen may post audio; every
+                            // superseded/torn-down worklet goes inert. Without this,
+                            // teardown→restart cycles (watchdog/_onWake/reconnect)
+                            // leak live worklets that all keep streaming the same mic
+                            // into the current socket — N interleaved copies that
+                            // shred the audio into gibberish (proven from a captured
+                            // WAV: 4 same-mic streams interleaved frame-by-frame).
     starting: false,
     finals: '',
     lastRendered: '',       // last text actually shown in the box (incl. in-flight
@@ -492,6 +500,10 @@
       if (s.ctx && s.ctx.state === 'suspended') return s.ctx.resume();
       return Promise.resolve();
     }
+    // Claim a fresh pipeline generation. Any worklet created by an earlier (or a
+    // racing-later) call will have a gen that no longer equals s.captureGen and is
+    // refused below — so at most ONE worklet ever streams to the socket.
+    var myGen = ++s.captureGen;
     return navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true },
       video: false,
@@ -505,6 +517,15 @@
         var sinkNode = ctx.createGain();
         sinkNode.gain.value = 0;
         workletNode.port.onmessage = function (event) {
+          // Superseded pipeline: a teardown/restart happened after this worklet was
+          // built. Detach + dismantle it the moment it next fires so it can never
+          // interleave its frames with the live pipeline's, then stay silent.
+          if (myGen !== s.captureGen) {
+            try { workletNode.port.onmessage = null; workletNode.disconnect(); sourceNode.disconnect(); } catch (_e) {}
+            try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (_e) {}
+            try { if (ctx && typeof ctx.close === 'function' && ctx.state !== 'closed') ctx.close(); } catch (_e) {}
+            return;
+          }
           var payload = event.data || {};
           if (payload.type !== 'audio' || !(payload.buffer instanceof ArrayBuffer)) return;
           s.lastFrameAt = _nowMs();   // worklet alive (mic + AudioContext producing)
@@ -523,6 +544,15 @@
             t.addEventListener('ended', function () { _diag('mic track ended'); _onWake(); });
           });
         } catch (_e) {}
+        // Dismantle whatever pipeline we're replacing so a torn-down-but-never-
+        // refired worklet can't linger with a live mic track (the gen guard only
+        // fires on the next frame; a dead-track worklet would otherwise leak).
+        if (s.workletNode && s.workletNode !== workletNode) {
+          try { s.workletNode.port.onmessage = null; s.workletNode.disconnect(); } catch (_e) {}
+        }
+        if (s.sourceNode && s.sourceNode !== sourceNode) { try { s.sourceNode.disconnect(); } catch (_e) {} }
+        if (s.stream && s.stream !== stream) { try { s.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (_e) {} }
+        if (s.ctx && s.ctx !== ctx && typeof s.ctx.close === 'function' && s.ctx.state !== 'closed') { try { s.ctx.close(); } catch (_e) {} }
         s.stream = stream; s.ctx = ctx; s.sourceNode = sourceNode;
         s.workletNode = workletNode; s.sinkNode = sinkNode; s.micGranted = true;
       });
@@ -582,6 +612,12 @@
     _releaseWakeLock();
     try { if (s.ws) s.ws.close(1000, 'end'); } catch (_e) {}
     s.ws = null; s.wsOpen = false; s.started = false; s.bind = ''; s.starting = false; s.finals = '';
+    // Invalidate the live pipeline FIRST so its worklet goes inert immediately —
+    // ctx.close() is async (and unreliable on iOS), so don't depend on it to stop
+    // frames. Detach the worklet's port + disconnect the graph synchronously.
+    s.captureGen++;
+    try { if (s.workletNode) { s.workletNode.port.onmessage = null; s.workletNode.disconnect(); } } catch (_e) {}
+    try { if (s.sourceNode) s.sourceNode.disconnect(); } catch (_e) {}
     try { if (s.stream) s.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (_e) {}
     try { if (s.ctx && typeof s.ctx.close === 'function') s.ctx.close(); } catch (_e) {}
     s.stream = null; s.ctx = null; s.sourceNode = null; s.workletNode = null; s.sinkNode = null; s.micGranted = false;
