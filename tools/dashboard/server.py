@@ -5374,7 +5374,6 @@ async def api_session_create(request):
             session_type="container",
             project=proj.id,
             harness=proj.harness or "claude",
-            setup_phase="requesting",
         )
         logger.info("phase-trace: requesting  tmux=%s  dt_from_post_ms=%d",
                     tmux_name, int((time.monotonic() - _phase_t0) * 1000))
@@ -5400,7 +5399,7 @@ async def api_session_create(request):
                 asyncio.run_coroutine_threadsafe(
                     session_monitor.update_phase(
                         tmux_name,
-                        setup_phase="preparing_workspace",
+                        startup_state="preparing_workspace",
                         progress={
                             "repo_index": repo_index,
                             "total": total_repos,
@@ -5508,12 +5507,11 @@ async def api_session_create(request):
     # command) done; about to spawn the tmux session.
     logger.info("phase-trace: launch-session-built  tmux=%s  dt_from_post_ms=%d",
                 tmux_name, int((time.monotonic() - _phase_t0) * 1000))
-    # auto-ja51w C3: phase transition for the launching_container chip
-    # (container slot before tmux spawn). Only applies to the container path
-    # — host sessions skip the docker spawn entirely.
+    # Transition to launching_container before the tmux spawn. Container path
+    # only — host sessions skip the docker spawn entirely.
     if is_container:
         await session_monitor.update_phase(
-            tmux_name, setup_phase="launching_container", progress={},
+            tmux_name, startup_state="launching_container", progress={},
         )
         logger.info("phase-trace: launching_container  tmux=%s  dt_from_post_ms=%d",
                     tmux_name, int((time.monotonic() - _phase_t0) * 1000))
@@ -5556,16 +5554,16 @@ async def api_session_create(request):
     # auto-bpomi phase-trace: container/process spawned (tmux new-session).
     logger.info("phase-trace: tmux-spawned  tmux=%s  dt_from_post_ms=%d",
                 tmux_name, int((time.monotonic() - _phase_t0) * 1000))
-    # auto-ja51w C3: phase transition for the booting_harness chip. The
-    # container's dind-entrypoint will write `.setup_phase=entrypoint_running`
-    # within ~1s, and _watch_setup_exit (spawned below for container sessions)
-    # will overwrite this value forward-only as the in-container phases advance.
-    if is_container:
-        await session_monitor.update_phase(
-            tmux_name, setup_phase="container_started", progress={},
-        )
-        logger.info("phase-trace: container_started  tmux=%s  dt_from_post_ms=%d",
-                    tmux_name, int((time.monotonic() - _phase_t0) * 1000))
+    # The tmux spawn IS the harness start — for container sessions dind-entrypoint
+    # exec's the harness binary immediately; for host sessions the harness binary
+    # runs directly. Transition straight to harness_starting (skipping
+    # container_starting as a separate visible state since no observable event
+    # fires between the tmux spawn and the harness exec).
+    await session_monitor.update_phase(
+        tmux_name, startup_state="harness_starting", progress={},
+    )
+    logger.info("phase-trace: harness_starting  tmux=%s  dt_from_post_ms=%d",
+                tmux_name, int((time.monotonic() - _phase_t0) * 1000))
 
     # ── Register with session monitor ───────────────────────────
     if is_container:
@@ -5597,24 +5595,12 @@ async def api_session_create(request):
             _watch_for_host_session_jsonl(projects_dir, tmux_name),
         )
 
-    # auto-a1jco: write the initial lifecycle-phase transitions. The
-    # tmux session is created and the container is now starting; the
-    # harness exec is about to fire inside the entrypoint. Subsequent
-    # transitions are driven by the session monitor's signal watchers
-    # (JSONL appearance, .setup-exit) and the screen-reading poller
-    # (auto-eerfx).
-    try:
-        dashboard_db.update_tail_state(
-            tmux_name,
-            setup_phase="container_starting",
-            harness_phase="harness_starting",
-        )
-        await event_bus.broadcast("session:registry", session_monitor.get_registry())
-    except Exception:
-        logger.warning(
-            "api_session_create: failed to write initial phases for %s",
-            tmux_name, exc_info=True,
-        )
+    # (Previous code wrote setup_phase=container_starting + harness_phase=
+    # harness_starting here. With the unified startup_state FSM that's done
+    # earlier — harness_starting fires right after the tmux spawn returns,
+    # via session_monitor.update_phase. Subsequent transitions are driven by
+    # the .setup-exit watcher, the screen-poll loop, the orientation inject
+    # task, and the tailer.)
 
     # auto-a1jco: per-session .setup-exit watcher. /startup.sh in the
     # container backgrounds itself and writes its exit code into
@@ -5704,18 +5690,16 @@ async def api_session_create(request):
         _inject_harness = (proj.harness if proj else "claude")
 
         async def _inject_first_message(msg=first_message, harness=_inject_harness):
-            # auto-ja51w C3: composer_ready-gated injection. The previous
-            # 5-second fixed sleep was load-bearing only on luck — fresh-boot
-            # composer typically comes up within 1-3s of container start, but
-            # codex-harness sessions take ~3-4s of credential resolution
-            # before docker even starts and Claude Code v2.1+ has variable
-            # boot latency. Polling harness_phase mirrors the resume-side
-            # pattern from f8c4add (host-0531-020038, bead auto-sj0gb) and
-            # gives sub-second injection latency from real composer readiness.
+            # Composer_ready-gated injection. Poll startup_state until the
+            # screen-poll loop has advanced it to "composer_ready"; then
+            # apply the per-harness settle delay; then tmux_send; then
+            # advance startup_state to "awaiting_first_response" so the
+            # card shows the right chip until the tailer clears on first
+            # assistant turn.
             deadline = time.time() + 60  # 60s ceiling — matches the watcher net
             while time.time() < deadline:
                 row = dashboard_db.get_session(tmux_name)
-                if row and row.get("harness_phase") == "composer_ready":
+                if row and row.get("startup_state") == "composer_ready":
                     break
                 await asyncio.sleep(0.5)
             else:
@@ -5724,17 +5708,12 @@ async def api_session_create(request):
                     tmux_name, harness,
                 )
                 return
-            # auto-ja51w C8: per-harness settle delay after composer_ready
-            # before tmux_send. The screen-poll detects the composer PROMPT
-            # VISUAL before the harness's stdin loop is necessarily active.
-            # Claude Code accepts input immediately at composer_ready. Codex
-            # paints the prompt before its input handler initializes —
-            # without a settle, the first-message keystrokes land in a dead
-            # stdin and codex silently drops them (host-0531-020038
-            # diagnosis from auto-0607-171218 vs auto-0607-172230
-            # comparison: 0.3s gap → 0 entries; 12s gap → 12 entries).
-            # 1.5s is empirical; verify-by-echo would be more robust and
-            # is the follow-up bead.
+            # Per-harness settle delay before tmux_send. The screen-poll
+            # detects the composer PROMPT VISUAL before the harness's stdin
+            # loop is necessarily active. Codex paints the prompt before its
+            # input handler initializes — without a settle, the first-message
+            # keystrokes land in a dead stdin and codex silently drops them.
+            # 1.5s is empirical; verify-by-echo would be more robust.
             _HARNESS_INJECT_SETTLE_S = {"codex": 1.5, "claude": 0.0}
             settle = _HARNESS_INJECT_SETTLE_S.get(harness, 0.0)
             if settle > 0:
@@ -5750,6 +5729,9 @@ async def api_session_create(request):
                     tmux_name, int((time.monotonic() - _inject_wait_t0) * 1000),
                     len(msg), bool(primer_url and not primer_error), harness, settle,
                 )
+                await session_monitor.update_phase(
+                    tmux_name, startup_state="awaiting_first_response",
+                )
             except Exception:
                 logger.warning(
                     "phase-trace: inject_failed  tmux=%s  harness=%s  exc=tmux_send_exception",
@@ -5757,6 +5739,23 @@ async def api_session_create(request):
                 )
 
         asyncio.create_task(_inject_first_message())
+    else:
+        # Orientation disabled for this workspace (render_orientation returned
+        # None). No first turn will ever arrive, so clear startup_state to NULL
+        # immediately once the harness is up — otherwise the card would hang
+        # in launching forever. We schedule this on a small delay so the
+        # screen-poll has a chance to advance to composer_ready first.
+        async def _clear_when_ready():
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                row = dashboard_db.get_session(tmux_name)
+                if row and row.get("startup_state") == "composer_ready":
+                    await session_monitor.update_phase(
+                        tmux_name, clear_startup_state=True,
+                    )
+                    return
+                await asyncio.sleep(0.5)
+        asyncio.create_task(_clear_when_ready())
 
     # auto-bpomi phase-trace: all create/boot work done, responding. (Container
     # sessions then poll up to 30s for monitor-tracking before the HTTP return —
@@ -5827,62 +5826,56 @@ def _spawn_setup_exit_watcher(tmux_name: str, run_dir: Path) -> None:
     async def _watch_setup_exit():
         setup_exit = run_dir / ".setup-exit"
         setup_phase_file = run_dir / ".setup_phase"
-        # Forward-only phase order. Intermediate markers (entrypoint_running /
-        # setup_running) are written by dind-entrypoint.sh into
-        # /workspace/output/.setup_phase; the terminal state comes from
-        # .setup-exit. Without the markers the card jumps straight from
-        # container_starting to setup_complete.
-        # dind_ready dropped from the order — never written by
-        # dind-entrypoint.sh in production (host-0531-020038 audit turn 549).
-        order = {
-            "container_starting": 0,
-            "entrypoint_running": 1,
-            "setup_running": 2,
-            "setup_complete": 3,
-            "setup_failed": 3,
-        }
-        last = "container_starting"
+        # Intermediate markers (entrypoint_running / setup_running) are
+        # written by dind-entrypoint.sh into /workspace/output/.setup_phase;
+        # the terminal failure state comes from .setup-exit (non-zero exit).
+        # advance_startup_state enforces forward-only progression and
+        # setup_failed-as-sticky-terminal; the watcher just attempts
+        # transitions and lets the helper decide what takes effect.
+        # setup_complete is intentionally not a startup_state value — by
+        # the time .setup-exit lands with exit=0, the harness has typically
+        # already advanced through harness_starting → composer_ready, so
+        # there's nothing user-visible to render for it.
         deadline = time.time() + 600  # 10 min
         while time.time() < deadline:
             try:
                 if setup_phase_file.exists():
                     marker = setup_phase_file.read_text().strip()
-                    if marker in order and order[marker] > order.get(last, 0):
-                        last = marker
-                        dashboard_db.update_tail_state(tmux_name, setup_phase=marker)
-                        await event_bus.broadcast(
-                            "session:registry", session_monitor.get_registry()
-                        )
-                        logger.info(
-                            "auto-a1jco: %s setup_phase=%s (marker)",
-                            tmux_name, marker,
-                        )
+                    if marker in ("entrypoint_running", "setup_running"):
+                        if session_monitor.advance_startup_state(tmux_name, marker):
+                            await event_bus.broadcast(
+                                "session:registry", session_monitor.get_registry()
+                            )
+                            logger.info(
+                                "watch_setup_exit: %s startup_state=%s (marker)",
+                                tmux_name, marker,
+                            )
             except Exception:
                 logger.debug(
-                    "auto-a1jco: .setup_phase marker read failed for %s",
+                    "watch_setup_exit: .setup_phase marker read failed for %s",
                     tmux_name, exc_info=True,
                 )
             if setup_exit.exists():
                 try:
                     exit_code = setup_exit.read_text().strip()
-                    phase = "setup_complete" if exit_code == "0" else "setup_failed"
-                    dashboard_db.update_tail_state(tmux_name, setup_phase=phase)
-                    await event_bus.broadcast(
-                        "session:registry", session_monitor.get_registry()
-                    )
-                    logger.info(
-                        "auto-a1jco: %s setup_phase=%s (exit=%s)",
-                        tmux_name, phase, exit_code,
-                    )
+                    if exit_code != "0":
+                        if session_monitor.advance_startup_state(tmux_name, "setup_failed"):
+                            await event_bus.broadcast(
+                                "session:registry", session_monitor.get_registry()
+                            )
+                            logger.info(
+                                "watch_setup_exit: %s startup_state=setup_failed (exit=%s)",
+                                tmux_name, exit_code,
+                            )
                 except Exception:
                     logger.warning(
-                        "auto-a1jco: failed to read .setup-exit for %s",
+                        "watch_setup_exit: failed to read .setup-exit for %s",
                         tmux_name, exc_info=True,
                     )
                 return
             await asyncio.sleep(1)
         logger.info(
-            "auto-a1jco: .setup-exit watcher for %s timed out (10 min)",
+            "watch_setup_exit: .setup-exit watcher for %s timed out (10 min)",
             tmux_name,
         )
     asyncio.create_task(_watch_setup_exit())
@@ -6223,28 +6216,18 @@ async def api_session_resume(request):
             session_uuid=session_uuid,
         )
 
-    # ── Arm lifecycle-phase tracking for the relaunched session ──
-    # Mirror of api_session_create. Without this a resumed session keeps the
-    # dead row's STALE phase columns, no watcher reads the relaunched
-    # container's .setup_phase markers, harness_phase never enters the
-    # screen-poll window, and the chip freezes on "Queued" (no trust/composer
-    # detection). harness_phase MUST reset to "harness_starting" (not
-    # "pending") — the screen-poll gates on {harness_starting,
-    # first_turn_written}, so "pending" would never be polled, which is the
-    # exact freeze we're fixing.
+    # Arm the startup_state FSM for the relaunched session. Without this a
+    # resumed session keeps the dead row's stale state (potentially NULL
+    # because the session previously cleared on first assistant turn), the
+    # screen-poll never picks it up, and the chip freezes. Resetting to
+    # harness_starting puts it back in the screen-poll's watch window so
+    # composer_ready detection and the orientation injection can run.
     try:
-        dashboard_db.update_tail_state(
-            tmux_name,
-            setup_phase=(
-                "container_starting" if session_type == "container"
-                else "setup_complete"
-            ),
-            harness_phase="harness_starting",
-        )
+        session_monitor.advance_startup_state(tmux_name, "harness_starting")
         await event_bus.broadcast("session:registry", session_monitor.get_registry())
     except Exception:
         logger.warning(
-            "api_session_resume: failed to arm initial phases for %s",
+            "api_session_resume: failed to arm initial state for %s",
             tmux_name, exc_info=True,
         )
     if session_type == "container":
@@ -6301,7 +6284,7 @@ async def api_session_resume(request):
             deadline = time.time() + 120
             while time.time() < deadline:
                 row = dashboard_db.get_session(tmux_name)
-                if row and row.get("harness_phase") == "composer_ready":
+                if row and row.get("startup_state") == "composer_ready":
                     break
                 await asyncio.sleep(1)
             else:
@@ -6316,6 +6299,9 @@ async def api_session_resume(request):
                     "phase-trace: first_message_injected  tmux=%s  kind=resume  dt_from_inject_scheduled_ms=%d  len=%d",
                     tmux_name, int((time.monotonic() - _resume_inject_t0) * 1000),
                     len(msg),
+                )
+                await session_monitor.update_phase(
+                    tmux_name, startup_state="awaiting_first_response",
                 )
             except Exception:
                 logger.warning(

@@ -345,8 +345,8 @@ window.getSessionStore = function(sessionId) {
       // auto-yfcoc: startup-phase fields, additive. Defaults match the
       // backend's INSERT defaults so the derivation reads sensible
       // values even before the first session:registry broadcast lands.
-      setupPhase: 'pending',
-      harnessPhase: 'pending',
+      // Unified startup FSM. NULL = "not in launching" (default + terminal).
+      startupState: null,
       resumable: false,
       harnessState: {},
       // auto-ja51w: transient per-session sub-phase progress; null when none.
@@ -738,8 +738,10 @@ window.ensureSessionMessages = function() {
       // partial works against either the raw registry shape or the
       // populated store entry. Defaults applied at store-creation time
       // so a missing field never confuses the derivation.
-      if (s.setup_phase !== undefined) store.setupPhase = s.setup_phase;
-      if (s.harness_phase !== undefined) store.harnessPhase = s.harness_phase;
+      // Unified startup FSM. Payload sends ``startup_state`` (string or
+      // null). Store explicitly nulls on absence so cleared sessions
+      // render correctly.
+      store.startupState = s.startup_state || null;
       if (s.resumable !== undefined) store.resumable = !!s.resumable;
       if (s.harness_state !== undefined) store.harnessState = s.harness_state;
       // auto-ja51w: transient sub-phase progress (e.g.

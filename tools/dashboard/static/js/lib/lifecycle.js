@@ -18,90 +18,30 @@
 // scope dependency through every page Alpine factory.
 
 (function () {
-  // ── Derivation: the (setup_phase, harness_phase) pair → UI state ──
+  // ── Derivation: single column → UI state ──
   //
-  // Returns one of the canonical state keys the design fixtures name.
-  // ``ready`` is the derived AND of (setup_complete, composer_ready).
-  // Dead sessions branch off ``is_live`` before the pair is consulted.
+  // The backend tracks one ``startup_state`` value per session in the DB.
+  // NULL means "not in launching" (default for existing sessions, terminal
+  // state after the model emits its first turn). Any non-NULL value is
+  // a launching FSM state and maps directly to a UI state key.
+  //
+  // Dead sessions branch off ``is_live`` first — startup_state is
+  // irrelevant for dead rows.
+  // Planning mode is the one mid-session overlay (read from harness_state
+  // JSON); it only applies AFTER startup_state has cleared to NULL because
+  // planning mode requires a prior model response.
   function lifecycleState(s) {
     if (!s) return "pending";
     if (s.is_live === false) {
       if (s.resumable) return "dead_resumable";
       return "dead_not_resumable";
     }
-    var setupPhase = s.setup_phase || "pending";
-    var harnessPhase = s.harness_phase || "pending";
-    // entries_length is the canonical first-turn signal. Falls back to
-    // The launching-until-first-response gate keys on whether the AGENT
-    // has produced a turn — not on entry count, because the first JSONL
-    // entry is the user-side orientation echo (tmux_send's input shows up
-    // as a user-role turn before codex even processes it). Per host-0531
-    // turn 683's grep of auto-0607-173153: user_message at 21:31:59 +
-    // assistant reasoning at 21:32:01 = ~2s gap. Gating on entries.length
-    // would flip the card to Active during that gap.
-    //
-    // ``hasAssistantTurn`` is true if any entry has role=assistant
-    // (assistant_text, thinking, tool_use — all model-authored). Caller
-    // can also override via ``s.has_assistant_turn`` boolean.
-    var hasAssistantTurn = (typeof s.has_assistant_turn === "boolean")
-      ? s.has_assistant_turn
-      : (Array.isArray(s.entries) && s.entries.some(function (e) {
-          return e && e.role === "assistant";
-        }));
-
-    if (setupPhase === "setup_failed") return "setup_failed";
-
-    // LAUNCHING-UNTIL-FIRST-RESPONSE GATE (auto-ja51w):
-    // A session is "ready" only when the AGENT has emitted a real turn —
-    // i.e. an assistant-role entry exists in the JSONL. Until then it
-    // stays in the launching states. ``resolved`` alone is not enough
-    // because brand-new sessions get jsonl_path set the moment the
-    // orientation echo lands (=> resolved=true while only user turns
-    // exist).
-    if (hasAssistantTurn && (s.resolved === true || harnessPhase === "composer_ready")) {
-      var hsReady = s.harness_state || {};
-      if (hsReady.confirming_trust_prompt) return "ready_with_confirming_trust";
-      if (hsReady.in_planning_mode) return "ready_with_planning";
-      return "ready";
+    if (s.startup_state) {
+      return s.startup_state;
     }
-    if (harnessPhase === "composer_ready") {
-      // Composer is up but no first turn yet — usually the brief window
-      // between the orientation injection and the agent's first JSONL reply.
-      // Harness-state overlays apply here too (an agent could be at trust
-      // prompt or planning before its first emit).
-      var hsAwait = s.harness_state || {};
-      if (hsAwait.confirming_trust_prompt) return "ready_with_confirming_trust";
-      if (hsAwait.in_planning_mode) return "ready_with_planning";
-      return "awaiting_first_response";
-    }
-
-    // The two phases run in parallel (dind-entrypoint.sh backgrounds
-    // /startup.sh AND exec's the harness concurrently), so when both
-    // are mid-progress we prefer the SETUP side — operators reason
-    // about "container coming up" first, then "harness booting" once
-    // setup is complete. After setup_complete, the harness progression
-    // becomes the visible chip.
-    //
-    // auto-ja51w: the four pre-container phases (requesting,
-    // preparing_workspace, launching_container, container_started) are
-    // written by api_session_create BEFORE dind-entrypoint runs — they
-    // cover the ~7-9s pre-container window that previously showed only
-    // the optimistic-tile "Queued" placeholder. Once dind-entrypoint
-    // starts writing .setup_phase markers, the existing setup-exit
-    // watcher overwrites these forward-only.
-    if (setupPhase !== "setup_complete") {
-      if (setupPhase === "setup_running") return "setup_running";
-      if (setupPhase === "entrypoint_running") return "entrypoint";
-      if (setupPhase === "container_starting") return "container_starting";
-      if (setupPhase === "container_started") return "booting_harness";
-      if (setupPhase === "launching_container") return "launching_container";
-      if (setupPhase === "preparing_workspace") return "preparing_workspace";
-      if (setupPhase === "requesting") return "requesting";
-    }
-    if (harnessPhase === "first_turn_written") return "first_turn_written";
-    if (harnessPhase === "harness_starting") return "harness_starting";
-
-    return "pending";
+    var hs = s.harness_state || {};
+    if (hs.in_planning_mode) return "ready_with_planning";
+    return "ready";
   }
 
   // ── Phase chip label + tone (per design rev 63542418 fixtures) ──
@@ -121,59 +61,46 @@
   //      "Booting Claude" which mis-labels Codex sessions; the
   //      dynamic form is host-approved (turn 71).
   var _STATE_CHIP_LABEL = {
-    pending: "Queued",
-    // auto-ja51w: pre-container phases (register-early pattern).
+    pending: "",
     requesting: "Queued",
     preparing_workspace: "Preparing workspace",  // augmented in phaseChip() with N/M
     launching_container: "Starting container",
     container_starting: "Starting container",
-    container_started: "Starting container",
-    entrypoint: "Preparing workspace",
-    setup_running: "Setup running",
-    // harness_starting + booting_harness handled in phaseChip() — dynamic over s.harness
-    first_turn_written: "Verifying input",
+    entrypoint_running: "Initializing container",
+    setup_running: "Container setup",
+    harness_starting: "Starting harness",
+    confirming_trust: "Confirming trust",
+    composer_ready: "Sending orientation",
     awaiting_first_response: "Awaiting first reply",
-    ready: "",                              // deliberate deviation, see comment above
-    ready_with_confirming_trust: "Confirming trust",
-    ready_with_planning: "Planning",
     setup_failed: "Setup failed",
+    ready: "",
+    ready_with_planning: "Planning",
     dead_resumable: "Ended",
     dead_not_resumable: "Ended",
   };
 
   // Tone modifier class for .sc-phase-chip. "" (default) = sky-blue
   // active startup pulse; "ready" = static green; "failed" = static
-  // amber; "dead" = static slate. Returned as a className string the
-  // template drops directly into :class.
+  // amber; "dead" = static slate.
   var _STATE_CHIP_TONE = {
-    ready: "ready",                         // moot — chip is suppressed
-    ready_with_confirming_trust: "failed",  // amber attention state per design
-    ready_with_planning: "",                // sky-blue default per design
+    ready: "ready",
+    ready_with_planning: "",
     setup_failed: "failed",
+    confirming_trust: "failed",  // amber attention state — operator may need to intervene
     dead_resumable: "dead",
     dead_not_resumable: "dead",
   };
 
   function phaseChip(s) {
     var state = lifecycleState(s);
-    if (state === "harness_starting" || state === "booting_harness") {
-      // Dynamic over s.harness so Codex sessions don't mis-render as
-      // "Booting Claude" (the design's hardcoded text). Capitalize
-      // the first letter for readability.
-      var h = (s && s.harness) || "harness";
-      var label = h.charAt(0).toUpperCase() + h.slice(1);
-      return "Booting " + label;
-    }
     if (state === "preparing_workspace") {
-      // auto-ja51w: enrich with the N/M progress from the SSE registry
-      // payload's phase_progress dict (set by SessionMonitor.update_phase
-      // from inside prepare_session_mounts' per-repo callback). Falls
-      // through to the plain label when no progress is attached.
+      // Augment with the N/M repo progress from the SSE registry payload's
+      // phase_progress dict (set by SessionMonitor.update_phase from inside
+      // prepare_session_mounts' per-repo callback).
       var p = s && s.phase_progress;
       if (p && typeof p.repo_index === "number" && typeof p.total === "number") {
         return "Preparing workspace " + p.repo_index + "/" + p.total;
       }
-      return _STATE_CHIP_LABEL.preparing_workspace;
     }
     return _STATE_CHIP_LABEL[state] || "";
   }
@@ -182,88 +109,18 @@
     return _STATE_CHIP_TONE[lifecycleState(s)] || "";
   }
 
-  // ── Lifecycle strip — visible during startup + on terminal failure ──
+  // ── Lifecycle strip — visible during launching states ──
   //
-  // Returns false for ``ready`` and the two dead states (the chrome
-  // collapses back to normal density there) and true for every active
-  // startup phase + setup_failed (so operators see WHERE it failed).
+  // Returns true when the session is in any launching state (startup_state
+  // IS NOT NULL on the backend → lifecycleState returns the state key
+  // directly). False for ready, dead, and the planning-mode overlay.
   function startupVisible(s) {
     var state = lifecycleState(s);
     if (state === "ready") return false;
-    if (state === "ready_with_confirming_trust") return false;
     if (state === "ready_with_planning") return false;
     if (state === "dead_resumable") return false;
     if (state === "dead_not_resumable") return false;
     return true;
-  }
-
-  // The 4-segment track: container / setup / harness / first turn. Each
-  // segment is one of ``done`` / ``active`` / ``failed`` / "" (pending).
-  function lifecycleStages(s) {
-    var setupPhase = (s && s.setup_phase) || "pending";
-    var harnessPhase = (s && s.harness_phase) || "pending";
-    var failed = setupPhase === "setup_failed";
-
-    function setupState(target) {
-      // ``target`` is the segment's expected setup_phase. "done" when
-      // the actual phase has progressed past the target; "active" when
-      // the actual phase is at the target; "failed" propagates only to
-      // the segment that owns the in-flight failure.
-      // dind_ready dropped — never written by dind-entrypoint.sh in production
-      // (host-0531-020038 audit turn 549). Phase order is the real progression.
-      var ORDER = ["pending", "container_starting", "entrypoint_running", "setup_running", "setup_complete"];
-      var actual = ORDER.indexOf(setupPhase);
-      var want = ORDER.indexOf(target);
-      if (actual < 0 || want < 0) return "";
-      if (failed && want === ORDER.length - 1) return "failed";
-      if (actual > want) return "done";
-      if (actual === want) return "active";
-      return "";
-    }
-
-    function harnessState(target) {
-      var ORDER = ["pending", "harness_starting", "first_turn_written", "composer_ready"];
-      var actual = ORDER.indexOf(harnessPhase);
-      var want = ORDER.indexOf(target);
-      if (actual < 0 || want < 0) return "";
-      if (actual > want) return "done";
-      if (actual === want) return "active";
-      return "";
-    }
-
-    return [
-      { key: "container", state: setupState("container_starting") },
-      { key: "setup", state: failed ? "failed" : setupState("setup_running") },
-      { key: "harness", state: harnessState("harness_starting") },
-      { key: "first_turn", state: harnessState("first_turn_written") },
-    ];
-  }
-
-  // The 4-lane caption row beneath the track. Lane labels are fixed
-  // per the design — request / setup / harness / input — and the
-  // values come straight from the fixture per state. Table-driven so
-  // the design's exact text appears verbatim on each card; falls
-  // through to a sensible default for unmapped (live but pre-broadcast)
-  // states so a stale store row never renders blanks.
-  var _STATE_LANE_VALUES = {
-    pending:             ["allocating", "waiting",    "pending", "queued"],
-    container_starting:  ["created",    "container",  "pending", "queued"],
-    entrypoint:          ["created",    "entrypoint", "pending", "queued"],
-    setup_running:       ["created",    "running",    "booting", "queued"],
-    harness_starting:    ["created",    "complete",   "booting", "queued"],
-    first_turn_written:  ["created",    "complete",   "jsonl",   "checking"],
-    setup_failed:        ["created",    "failed",     "blocked", "held"],
-  };
-
-  function lifecycleLanes(s) {
-    var state = lifecycleState(s);
-    var values = _STATE_LANE_VALUES[state] || ["—", "—", "—", "—"];
-    return [
-      { label: "request", value: values[0] },
-      { label: "setup",   value: values[1] },
-      { label: "harness", value: values[2] },
-      { label: "input",   value: values[3] },
-    ];
   }
 
   // ── Inline action affordance for the card footer ─────────────────
@@ -333,8 +190,6 @@
       phaseChip: phaseChip,
       phaseTone: phaseTone,
       startupVisible: startupVisible,
-      lifecycleStages: lifecycleStages,
-      lifecycleLanes: lifecycleLanes,
       inlineAction: inlineAction,
       messageTone: messageTone,
       // [lc] instrumentation — callers own the memo + emit decision.
