@@ -1257,6 +1257,50 @@ def _worktree_commits(
     return commits
 
 
+def _workflow_resolved_commits(
+    repo_name: str,
+    commits: list[WorktreeCommit],
+) -> list[WorktreeCommit]:
+    """Filter dashboard commits through commit-workflow lifecycle state.
+
+    The workflow store owns the displayed outstanding set. Git topology flags
+    are computed separately from the physical branch and must not use this
+    filtered subset as their source of truth.
+
+    The input list has already passed through ``_dashboard_pending_commit_shas``.
+    For autonomy this means git/patch-id merged commits are removed upstream, so
+    the resolver's ``git_merged_shas`` branch is exercised by DAO-level callers
+    and future integrations that pass a merged set explicitly.
+    """
+    if not commits:
+        return commits
+    try:
+        from tools.dashboard.dao.commit_workflow_db import (
+            resolve_worktree_outstanding,
+        )
+    except Exception:
+        logger.exception("workspace scan: commit workflow resolver import failed")
+        return commits
+    try:
+        dispositions = resolve_worktree_outstanding(
+            repo_slug=repo_name,
+            scanned_shas=[commit.sha for commit in commits],
+            git_merged_shas=set(),
+        )
+    except Exception:
+        logger.exception(
+            "workspace scan: commit workflow resolver failed for repo=%s",
+            repo_name,
+        )
+        return commits
+    outstanding = {
+        disposition.sha
+        for disposition in dispositions
+        if disposition.outstanding
+    }
+    return [commit for commit in commits if commit.sha in outstanding]
+
+
 def _resolve_worktree_commit(worktree: Path, sha: str) -> str:
     """Resolve a user-supplied SHA/prefix to a full commit SHA in ``worktree``."""
     if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
@@ -1332,31 +1376,37 @@ def scan_all_worktrees(
             # Preserve the previous safety behavior: if git status fails,
             # treat the worktree as dirty even though paths are unavailable.
             is_dirty = True if dirty_files_or_none is None else bool(tracked_dirty)
-            commits = _worktree_commits(repo_dir, repo_dir.name, base_ref=base_ref)
-            commits_ahead = _worktree_commits_ahead(repo_dir, base_ref=base_ref)
+            raw_commits = _worktree_commits(repo_dir, repo_dir.name, base_ref=base_ref)
+            commits = _workflow_resolved_commits(repo_dir.name, raw_commits)
+            commits_ahead = len(commits)
+            raw_commits_ahead = _worktree_commits_ahead(repo_dir, base_ref=base_ref)
             rebase_required = _worktree_rebase_required(
                 repo_dir,
                 repo_dir.name,
-                has_pending_commits=bool(commits),
+                has_pending_commits=bool(raw_commits),
                 clone_stale=clone_stale,
             )
-            ff_eligible = (
+            git_ff_eligible = (
                 branch is not None
-                and bool(commits)
+                and raw_commits_ahead > 0
                 and not clone_stale
                 and not rebase_required
                 and _worktree_ff_only_safe(repo_dir, base_ref=base_ref)
             )
+            ff_eligible = git_ff_eligible and commits_ahead > 0
             cherry_pick_eligible, cherry_pick_commit = (
                 _compute_cherry_pick_eligibility(
                     repo_name=repo_dir.name,
                     clone=clone,
-                    commits=commits,
-                    commits_ahead=commits_ahead,
-                    ff_eligible=ff_eligible,
+                    commits=raw_commits,
+                    commits_ahead=raw_commits_ahead,
+                    ff_eligible=git_ff_eligible,
                     clone_stale=clone_stale,
                 )
             )
+            if commits_ahead == 0:
+                cherry_pick_eligible = False
+                cherry_pick_commit = None
             out.append(WorktreeState(
                 session_name=session_dir.name,
                 repo_name=repo_dir.name,
