@@ -13,6 +13,7 @@ import mimetypes
 import os
 import pty
 import re
+import shlex
 import signal
 import sqlite3
 import struct
