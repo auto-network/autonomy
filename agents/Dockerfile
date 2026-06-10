@@ -70,7 +70,7 @@ RUN userdel -r ubuntu 2>/dev/null; useradd -m -s /bin/bash -u 1000 agent \
     # setup warning when it's absent. Symlink it so the native-install path
     # resolves and the boot warning goes away.
     && ln -sf /usr/local/bin/claude /home/agent/.local/bin/claude \
-    && echo '{"numStartups":1,"hasCompletedOnboarding":true,"hasSeenTasksHint":true,"hasSeenStashHint":true,"remoteDialogSeen":true,"installMethod":"native","autoUpdates":false,"projects":{"/workspace/repo":{"hasTrustDialogAccepted":true,"effortCalloutV2Dismissed":true}}}' \
+    && echo '{"numStartups":1,"hasCompletedOnboarding":true,"hasSeenTasksHint":true,"hasSeenStashHint":true,"remoteDialogSeen":true,"resumeReturnDismissed":true,"installMethod":"native","autoUpdates":false,"projects":{"/workspace/repo":{"hasTrustDialogAccepted":true,"effortCalloutV2Dismissed":true}}}' \
        > /home/agent/.claude.json \
     && echo '{"skipDangerousModePermissionPrompt":true,"effortLevel":"high","permissions":{"deny":["AskUserQuestion","ExitPlanMode"]}}' \
        > /home/agent/.claude/settings.json \
@@ -79,7 +79,7 @@ RUN userdel -r ubuntu 2>/dev/null; useradd -m -s /bin/bash -u 1000 agent \
 # ── Codex CLI + agent-browser (needs node + agent user to exist) ──
 # Codex is an npm package plus platform-specific optional dependency, not a
 # standalone host ELF like Claude, so install it inside the image directly.
-ARG CODEX_VERSION=0.135.0
+ARG CODEX_VERSION=0.136.0
 RUN npm install -g "@openai/codex@${CODEX_VERSION}" agent-browser \
     && su agent -c "agent-browser install"
 
