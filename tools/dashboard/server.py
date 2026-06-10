@@ -14317,6 +14317,32 @@ app = Starlette(
 )
 
 
+def _timestamped_log_config():
+    """Build a uvicorn logging config whose lines carry timestamps.
+
+    Uvicorn's own stdout/stderr lines (startup, shutdown, and the
+    "WatchFiles detected changes ... Reloading..." hot-reload notice, all
+    emitted via the ``uvicorn.error`` logger) default to a bare
+    ``%(levelprefix)s %(message)s`` format with no timestamp, so they land
+    in data/dashboard.log untimed — unlike Python-level lines, which carry
+    an asctime via ``logging.basicConfig`` above. Prepend ``%(asctime)s`` to
+    each uvicorn formatter so every line is timestamped and restarts can be
+    counted/timed from the log. The datefmt matches basicConfig's default
+    (``YYYY-MM-DD HH:MM:SS,mmm``) for consistency across line sources.
+    """
+    import copy
+    from uvicorn.config import LOGGING_CONFIG
+
+    config = copy.deepcopy(LOGGING_CONFIG)
+    datefmt = "%Y-%m-%d %H:%M:%S"
+    for name, formatter in config.get("formatters", {}).items():
+        fmt = formatter.get("fmt", "%(message)s")
+        if "%(asctime)s" not in fmt:
+            formatter["fmt"] = "%(asctime)s " + fmt
+        formatter.setdefault("datefmt", datefmt)
+    return config
+
+
 def main():
     import uvicorn
     uvicorn.run(
@@ -14324,6 +14350,7 @@ def main():
         host="0.0.0.0",
         port=8080,
         log_level="info",
+        log_config=_timestamped_log_config(),
         reload=True,
         reload_dirs=["tools/dashboard"],
         reload_excludes=["tools/dashboard/tests"],
