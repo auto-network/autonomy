@@ -547,6 +547,7 @@ def start_agent(
     harness: str = "claude",
     graph_project: str | None = None,
     graph_tags: tuple[str, ...] = (),
+    workspace_id: str | None = None,
 ) -> RunningAgent | None:
     """Launch an agent container in detached mode. Returns immediately.
 
@@ -572,6 +573,8 @@ def start_agent(
     ]
     if graph_project:
         cmd.append(f"--graph-project={graph_project}")
+    if workspace_id:
+        cmd.append(f"--workspace-id={workspace_id}")
     if graph_tags:
         cmd.append(f"--graph-tags={','.join(graph_tags)}")
 
@@ -2719,6 +2722,10 @@ def dispatch_cycle(
             harness=harness,
             graph_project=graph_project,
             graph_tags=project.default_tags if project is not None else (),
+            workspace_id=(
+                project.id if project is not None
+                else (fallback_workspace.id if fallback_workspace is not None else None)
+            ),
         )
         if agent:
             agent.labels = bead.get("labels") or []

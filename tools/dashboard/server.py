@@ -5467,6 +5467,7 @@ async def api_session_create(request):
             mounts=project_mounts or None,
             metadata=meta,
             harness=proj.harness,
+            model=proj.model or None,
             extra_env=extra_env,
             output_dir=str(run_dir),
             global_claude_md=global_claude_md,

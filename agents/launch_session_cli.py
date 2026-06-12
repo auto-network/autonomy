@@ -31,21 +31,24 @@ from agents.session_launcher import launch_session, DEFAULT_IMAGE, DEFAULT_OPUS_
 from agents.workspace_settings import load_workspaces
 
 
-def _workspace_model(graph_project: str) -> str | None:
-    """Return the model declared on the workspace owning ``graph_project``.
+def _workspace_model(workspace_id: str) -> str | None:
+    """Return the model declared on the workspace ``workspace_id``.
 
-    Returns None when ``graph_project`` is empty or no matching workspace
-    declares one — callers chain through their own hardcoded fallback.
+    Keyed on the workspace id (the Setting key), NOT ``graph_project`` —
+    several workspaces can share one graph_project (e.g. ``autonomy``,
+    ``autonomy-codex``, ``autonomy-developer`` all map to ``autonomy``), so a
+    graph_project lookup collapses them to the first match and the model is
+    effectively per-org rather than per-workspace. Returns None when
+    ``workspace_id`` is empty or unknown — callers chain through their own
+    hardcoded fallback.
     """
-    if not graph_project:
+    if not workspace_id:
         return None
     try:
-        for ws in load_workspaces().values():
-            if ws.graph_project == graph_project:
-                return ws.model
+        ws = load_workspaces().get(workspace_id)
+        return ws.model if ws else None
     except Exception:
         return None
-    return None
 
 
 def main() -> int:
@@ -65,6 +68,8 @@ def main() -> int:
     parser.add_argument("--detach", action="store_true", help="Run container in background")
     parser.add_argument("--graph-project", default="",
                         help="Graph scope (GRAPH_SCOPE env + .session_meta.json field)")
+    parser.add_argument("--workspace-id", default="",
+                        help="Workspace id (Setting key) for per-workspace model resolution")
     parser.add_argument("--graph-tags", default="",
                         help="Comma-separated graph tags (GRAPH_TAGS env + .session_meta.json field)")
     args = parser.parse_args()
@@ -99,7 +104,7 @@ def main() -> int:
 
     output_dir = args.output_dir if args.output_dir else None
 
-    workspace_model = _workspace_model(args.graph_project)
+    workspace_model = _workspace_model(args.workspace_id)
 
     if args.detach:
         container_id = launch_session(
