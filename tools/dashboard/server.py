@@ -14116,6 +14116,12 @@ async def _on_startup():
         org_ops.ensure_bootstrap_orgs()
     except Exception:
         logger.exception("ensure_bootstrap_orgs() failed; continuing startup")
+    try:
+        from tools.graph.commit_policy import seed_default_workspace_policies
+        seed_default_workspace_policies(workspace_settings.load_workspaces())
+        workspace_settings.invalidate_caches()
+    except Exception:
+        logger.exception("commit policy default seed failed; continuing startup")
     # Seed from filesystem on first run (one-time), then start background tasks
     await session_monitor.seed_from_filesystem()
     await session_monitor.start(

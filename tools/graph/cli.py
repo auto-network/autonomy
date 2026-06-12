@@ -5663,6 +5663,10 @@ def main():
     from .capability_cmd import attach_capability_subparser
     attach_capability_subparser(sub)
 
+    # commit — workflow policy describe/repair helpers
+    from .commit_policy_cmd import attach_commit_subparser
+    attach_commit_subparser(sub)
+
     # claude — Claude account credentials surface (graph://73c4e9ef-bbc)
     from .claude_cmd import attach_claude_subparser
     attach_claude_subparser(sub)

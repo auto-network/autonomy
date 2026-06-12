@@ -1,0 +1,95 @@
+"""``graph commit policy`` commands."""
+
+from __future__ import annotations
+
+import sys
+from typing import Any
+
+from . import ops
+from .commit_policy import (
+    AUTONOMY_PROFILE,
+    describe_commit_policy,
+    describe_commit_policy_json,
+    resolve_commit_policy,
+    seed_workspace_policy,
+)
+
+
+def cmd_commit_policy_describe(args: Any) -> None:
+    resolved = resolve_commit_policy(
+        workspace_id=args.workspace,
+        repo_slug=args.repo,
+        org=getattr(args, "org", None) or ops.CALLER_ORG,
+    )
+    if args.json:
+        sys.stdout.write(describe_commit_policy_json(resolved) + "\n")
+    else:
+        sys.stdout.write(describe_commit_policy(resolved))
+
+
+def cmd_commit_policy_seed(args: Any) -> None:
+    inserted = seed_workspace_policy(
+        workspace_id=args.workspace,
+        org=getattr(args, "org", None) or ops.CALLER_ORG,
+        profile=args.profile,
+    )
+    action = "inserted" if inserted else "exists"
+    print(
+        f"{action}: autonomy.commit.policy#1 workspace:{args.workspace} "
+        f"profile={args.profile}"
+    )
+
+
+def attach_commit_subparser(sub) -> None:
+    p_commit = sub.add_parser(
+        "commit",
+        help="Commit workflow policy tools",
+    )
+    commit_sub = p_commit.add_subparsers(dest="commit_cmd")
+    commit_sub.required = True
+
+    p_policy = commit_sub.add_parser(
+        "policy",
+        help="Inspect or repair commit workflow policy Settings",
+    )
+    policy_sub = p_policy.add_subparsers(dest="commit_policy_cmd")
+    policy_sub.required = True
+
+    p_describe = policy_sub.add_parser(
+        "describe",
+        help="Describe the commit workflow policy for a workspace/repo",
+    )
+    p_describe.add_argument(
+        "--workspace",
+        default=None,
+        help="Workspace id. Defaults to safe.default when omitted and no org/repo row matches.",
+    )
+    p_describe.add_argument(
+        "--repo",
+        default=None,
+        help="Canonical repo slug for repo-scoped policy lookup.",
+    )
+    p_describe.add_argument(
+        "--org",
+        default=None,
+        help="Read policy from this org DB. Defaults to caller org.",
+    )
+    p_describe.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON including the text projection.",
+    )
+    p_describe.set_defaults(func=cmd_commit_policy_describe)
+
+    p_seed = policy_sub.add_parser(
+        "seed",
+        help="Repair/testing helper: ensure a workspace commit policy row exists",
+    )
+    p_seed.add_argument("--workspace", required=True, help="Workspace id")
+    p_seed.add_argument("--org", default=None, help="Org DB to write")
+    p_seed.add_argument(
+        "--profile",
+        default=AUTONOMY_PROFILE,
+        help=f"Profile to seed (default: {AUTONOMY_PROFILE})",
+    )
+    p_seed.set_defaults(func=cmd_commit_policy_seed)
