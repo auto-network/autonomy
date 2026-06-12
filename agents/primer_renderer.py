@@ -26,6 +26,7 @@ from tools.graph.schemas.turn_correction import (
     SET_ID as TURN_CORRECTION_SET_ID,
     resolve_payload as resolve_turn_correction_payload,
 )
+from tools.graph.commit_policy import describe_commit_policy, resolve_commit_policy
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "primers"
 PROJECTS_DIR = Path(__file__).resolve().parent / "projects"
@@ -177,6 +178,23 @@ def _turn_correction_block(config: WorkspaceV1) -> dict:
     }
 
 
+def _commit_policy_block(config: WorkspaceV1) -> dict:
+    """Render the commit workflow policy primer block for *config*."""
+    try:
+        resolved = resolve_commit_policy(
+            workspace_id=config.id,
+            org=config.graph_project,
+        )
+    except Exception:
+        return {"enabled": False, "text": ""}
+    return {
+        "enabled": True,
+        "profile": resolved.profile,
+        "errors": list(resolved.errors),
+        "text": describe_commit_policy(resolved).rstrip(),
+    }
+
+
 def render_workspace_primer(config: WorkspaceV1) -> str:
     """Render the workspace runtime primer for a given project config.
 
@@ -203,6 +221,7 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
     )
     capability_blocks = _capability_primer_blocks(config)
     turn_correction = _turn_correction_block(config)
+    commit_policy = _commit_policy_block(config)
     return template.render(
         config=config,
         writable_repos=writable_repos,
@@ -212,4 +231,5 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
         org=config.graph_project,
         capability_blocks=capability_blocks,
         turn_correction=turn_correction,
+        commit_policy=commit_policy,
     )

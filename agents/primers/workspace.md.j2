@@ -131,6 +131,12 @@ These environment variables are already exported — **do not create a
 
 {{ workspace_primer.rstrip() }}
 {% endif %}
+{% if commit_policy.enabled %}
+
+## Commit Policy
+
+{{ commit_policy.text }}
+{% endif %}
 
 ## Capabilities
 
