@@ -117,12 +117,16 @@ STARTUP_STATE_RANK = {
 }
 
 
-def _advance_startup_state_sql(tmux_name: str, proposed: str | None) -> bool:
-    """SQL-only forward-only writer. Returns True if the row was updated.
+def advance_startup_state(tmux_name: str, proposed: str | None) -> bool:
+    """Forward-only writer for the unified startup_state column.
 
-    Caller is responsible for broadcasting. The public surface is
-    :meth:`SessionMonitor.advance_startup_state`, which wraps this and
-    broadcasts on real change.
+    Rules:
+      - ``proposed=None`` clears the column (terminal-success path), unless
+        current is ``setup_failed`` (sticky terminal failure).
+      - ``proposed="setup_failed"`` writes from any non-NULL state.
+      - Otherwise writes only if ``rank(proposed) > rank(current)``.
+
+    Returns True if the row was updated.
     """
     from tools.dashboard.dao.dashboard_db import get_conn
     conn = get_conn()
@@ -1147,25 +1151,6 @@ class SessionMonitor:
         )
         await self._broadcast_registry()
 
-    async def advance_startup_state(self, tmux_name: str, proposed: str | None) -> bool:
-        """Forward-only writer for the unified startup_state column.
-
-        Rules:
-          - ``proposed=None`` clears (terminal-success), suppressed if current
-            is ``setup_failed`` (sticky terminal failure).
-          - ``proposed="setup_failed"`` writes from any non-NULL state.
-          - Otherwise writes only if ``rank(proposed) > rank(current)``.
-
-        Broadcasts the registry only when the row actually changed — keeps
-        the broadcast cardinality bounded by real FSM transitions, not by
-        every JSONL-modify event the tailer fires on. Returns True if the
-        row was updated.
-        """
-        changed = _advance_startup_state_sql(tmux_name, proposed)
-        if changed:
-            await self._broadcast_registry()
-        return changed
-
     async def register_pending(
         self,
         tmux_name: str,
@@ -1200,7 +1185,7 @@ class SessionMonitor:
                 "(likely already exists; proceeding to advance_startup_state)",
                 tmux_name,
             )
-        await self.advance_startup_state(tmux_name, "requesting")
+        advance_startup_state(tmux_name, "requesting")
         # Mark as needing resolution so the normal register() call later is
         # idempotent — the tail-state will get rebuilt cleanly with the
         # jsonl_path / resolution_dir once those are known.
@@ -1241,23 +1226,16 @@ class SessionMonitor:
         ``asyncio.run_coroutine_threadsafe`` — that's the per-repo callback
         path from inside :func:`prepare_session_mounts`.
         """
-        # advance_startup_state broadcasts internally on real change, so we
-        # don't need an explicit broadcast for the state-only case. Progress
-        # updates are pure transient — broadcast explicitly when we touched
-        # progress without a state change (to flush the in-memory dict to
-        # the registry payload).
-        progress_only = progress is not None and not (clear_startup_state or startup_state)
         if clear_startup_state:
-            await self.advance_startup_state(tmux_name, None)
+            advance_startup_state(tmux_name, None)
         elif startup_state is not None:
-            await self.advance_startup_state(tmux_name, startup_state)
+            advance_startup_state(tmux_name, startup_state)
         if progress is not None:
             if progress:
                 self._phase_progress[tmux_name] = dict(progress)
             else:
                 self._phase_progress.pop(tmux_name, None)
-        if progress_only:
-            await self._broadcast_registry()
+        await self._broadcast_registry()
 
     async def register_session(
         self,
@@ -2239,7 +2217,7 @@ class SessionMonitor:
                                 )
                                 continue
                         if next_state is not None:
-                            await self.advance_startup_state(tmux_name, next_state)
+                            advance_startup_state(tmux_name, next_state)
                             if next_state == "composer_ready":
                                 logger.info(
                                     "phase-trace: composer_ready  tmux=%s  ts_ms=%d",
@@ -3094,11 +3072,9 @@ class SessionMonitor:
             # Clear startup_state to NULL when the model has emitted its
             # first turn — covers assistant_text, thinking, tool_use (all
             # role=assistant). advance_startup_state is forward-only and
-            # refuses to clear if current state is setup_failed; it
-            # broadcasts the registry on real change so the chip flips
-            # immediately when the assistant turn lands.
+            # refuses to clear if current state is setup_failed.
             if any(e.get("role") == "assistant" for e in parsed_entries):
-                await self.advance_startup_state(tmux_name, None)
+                advance_startup_state(tmux_name, None)
             return True, parsed_entries
 
         # Update offset even if no entries parsed (whitespace lines)
