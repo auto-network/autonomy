@@ -1464,6 +1464,19 @@ def refresh_session_source(source: dict) -> dict:
     if not jsonl_path.exists():
         return source
 
+    try:
+        current_size = jsonl_path.stat().st_size
+        existing_meta = (
+            json.loads(source.get("metadata") or "{}")
+            if isinstance(source.get("metadata"), str)
+            else (source.get("metadata") or {})
+        )
+    except (OSError, TypeError, ValueError):
+        current_size = None
+        existing_meta = {}
+    if current_size is not None and existing_meta.get("file_size") == current_size:
+        return source
+
     db = GraphDB.open_org_db(home_org, mode="rw")
     try:
         ingest_session_file(db, jsonl_path, force=False)

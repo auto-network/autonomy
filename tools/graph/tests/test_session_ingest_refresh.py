@@ -28,6 +28,7 @@ from tools.graph.ingest import (
     _derive_session_title,
     _is_low_signal_title,
     ingest_claude_code_session,
+    refresh_session_source,
 )
 
 
@@ -286,6 +287,27 @@ class TestIncrementalRefresh:
             r2 = ingest_claude_code_session(graph_db, jsonl_path)
         assert r2["status"] == "skipped"
         assert r2["reason"] == "already up to date"
+
+    def test_refresh_session_source_skips_db_open_when_file_unchanged(
+        self, graph_db, jsonl_path,
+    ):
+        """Read-time refresh should not open a writable DB for unchanged JSONL."""
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_jsonl(jsonl_path, [
+            _user_entry("Hello", ts="2026-04-19T10:00:00Z"),
+            _assistant_entry("Hello back to you", ts="2026-04-19T10:00:05Z"),
+        ])
+        with patch("tools.graph.ingest._lookup_dashboard_label", return_value=None):
+            result = ingest_claude_code_session(graph_db, jsonl_path)
+        source = graph_db.get_source(result["source_id"])
+        assert source is not None
+        source["org"] = "autonomy"
+
+        with patch.object(GraphDB, "open_org_db") as open_org_db:
+            refreshed = refresh_session_source(source)
+
+        open_org_db.assert_not_called()
+        assert refreshed == source
 
     def test_title_refresh_when_label_appears_after_first_ingest(self, graph_db, jsonl_path):
         """If the user runs `set-label` after first ingest, the next pass adopts it."""

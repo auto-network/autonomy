@@ -11404,7 +11404,9 @@ async def api_graph_source_get(request):
     org = request.headers.get("X-Graph-Org")
     peers_param = request.query_params.get("peers")
     peers = [p for p in peers_param.split(",") if p] if peers_param is not None else None
-    src = graph_ops.get_source(source_id, org=org, peers=peers)
+    src = await asyncio.to_thread(
+        graph_ops.get_source, source_id, org=org, peers=peers,
+    )
     if not src:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(src)
@@ -13233,7 +13235,7 @@ async def api_graph_resolve(request):
         tail_n = -from_val
 
     org = _caller_org(request)
-    source = graph_ops.get_source(id, org=org)
+    source = await asyncio.to_thread(graph_ops.get_source, id, org=org)
     if source:
         source = await _refresh_graph_session_source(source)
         # Page-load is unbounded by design — full source for the browser.
@@ -13250,7 +13252,7 @@ async def api_graph_resolve(request):
                       "total_chars": 0}
         _attach_source_org(result)
         return JSONResponse(result)
-    att = graph_ops.get_attachment(id, org=org)
+    att = await asyncio.to_thread(graph_ops.get_attachment, id, org=org)
     if att:
         return JSONResponse({
             "type": "attachment",

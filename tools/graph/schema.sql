@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS thoughts (
     publication_state TEXT NOT NULL DEFAULT 'raw' CHECK (publication_state = 'raw')
 );
 CREATE INDEX IF NOT EXISTS idx_thoughts_source ON thoughts(source_id);
+CREATE INDEX IF NOT EXISTS idx_thoughts_source_turn ON thoughts(source_id, turn_number);
 
 -- ============================================================
 -- DERIVATIONS — AI responses (regenerable, non-sovereign)
@@ -74,6 +75,7 @@ CREATE TABLE IF NOT EXISTS derivations (
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_derivations_source ON derivations(source_id);
+CREATE INDEX IF NOT EXISTS idx_derivations_source_turn ON derivations(source_id, turn_number);
 CREATE INDEX IF NOT EXISTS idx_derivations_thought ON derivations(thought_id);
 
 -- ============================================================
