@@ -1362,6 +1362,15 @@ def scan_all_worktrees(
         for repo_dir in repo_dirs:
             if not repo_dir.is_dir():
                 continue
+            # Only scan real git worktrees. A half-provisioned workspace dir
+            # (e.g. clones not yet landed) has no `.git`; running git there
+            # makes git walk UP to the enclosing autonomy superrepo, and
+            # `status --untracked-files=all` then traverses the entire data/
+            # tree (every worktree, agent-runs, graph.db, …) — pegging CPU and
+            # ballooning RSS until the scan never returns and the dashboard
+            # startup hook hangs forever. Skip non-worktree dirs.
+            if not (repo_dir / ".git").exists():
+                continue
             clone = _find_managed_clone_for_worktree(repo_dir)
             branch = _worktree_branch_name(repo_dir)
             base_ref = _worktree_dashboard_base_ref(repo_dir, repo_dir.name)
