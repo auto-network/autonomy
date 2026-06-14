@@ -5844,7 +5844,10 @@ def _spawn_setup_exit_watcher(tmux_name: str, run_dir: Path) -> None:
                 if setup_phase_file.exists():
                     marker = setup_phase_file.read_text().strip()
                     if marker in ("entrypoint_running", "setup_running"):
-                        if await session_monitor.advance_startup_state(tmux_name, marker):
+                        if session_monitor.advance_startup_state(tmux_name, marker):
+                            await event_bus.broadcast(
+                                "session:registry", session_monitor.get_registry()
+                            )
                             logger.info(
                                 "watch_setup_exit: %s startup_state=%s (marker)",
                                 tmux_name, marker,
@@ -5858,7 +5861,10 @@ def _spawn_setup_exit_watcher(tmux_name: str, run_dir: Path) -> None:
                 try:
                     exit_code = setup_exit.read_text().strip()
                     if exit_code != "0":
-                        if await session_monitor.advance_startup_state(tmux_name, "setup_failed"):
+                        if session_monitor.advance_startup_state(tmux_name, "setup_failed"):
+                            await event_bus.broadcast(
+                                "session:registry", session_monitor.get_registry()
+                            )
                             logger.info(
                                 "watch_setup_exit: %s startup_state=setup_failed (exit=%s)",
                                 tmux_name, exit_code,
@@ -6219,7 +6225,8 @@ async def api_session_resume(request):
     # harness_starting puts it back in the screen-poll's watch window so
     # composer_ready detection and the orientation injection can run.
     try:
-        await session_monitor.advance_startup_state(tmux_name, "harness_starting")
+        session_monitor.advance_startup_state(tmux_name, "harness_starting")
+        await event_bus.broadcast("session:registry", session_monitor.get_registry())
     except Exception:
         logger.warning(
             "api_session_resume: failed to arm initial state for %s",
