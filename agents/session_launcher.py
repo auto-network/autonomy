@@ -26,6 +26,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -781,6 +782,23 @@ def launch_session(
         return None
     resolved_model = model or (DEFAULT_OPUS_MODEL if harness == "claude" else None)
 
+    # Per-step launch timing. launch_session was opaquely eating ~12-15s of
+    # session-create wall-clock (the worktrees finish in ~2s); these markers
+    # attribute that time to a specific step so the slow one is obvious in the
+    # log. Each line carries step_ms (since the previous marker) and total_ms
+    # (since entry). Grep ``launch-timing:``.
+    _lt0 = time.monotonic()
+    _lt_prev = [_lt0]
+
+    def _lap(step: str) -> None:
+        now = time.monotonic()
+        logger.info(
+            "launch-timing: %-24s name=%s  step_ms=%d  total_ms=%d",
+            step, name, int((now - _lt_prev[0]) * 1000),
+            int((now - _lt0) * 1000),
+        )
+        _lt_prev[0] = now
+
     # ── Credentials ───────────────────────────────────────────
     # Claude sessions need host auth injected into the container. Codex
     # sessions use the optional ~/.codex mounts instead, so they must not
@@ -789,6 +807,7 @@ def launch_session(
     creds: dict | None = None
     if harness == "claude":
         creds = _resolve_credentials()
+        _lap("resolve_credentials")
         if creds is None:
             print(
                 f"  ERROR: No Claude credentials found for {session_type} session '{name}'",
@@ -855,6 +874,7 @@ def launch_session(
                 file=sys.stderr,
             )
             return None
+    _lap("session_dir+meta+auth")
 
     # ── Build default volume mount table ──────────────────────
     # Key: host path.  Value: container_path[:mode]
@@ -908,11 +928,14 @@ def launch_session(
             continue
         default_mounts[host_path] = container_spec
 
+    _lap("mounts_assembled")
+
     # ── CrossTalk token ──────────────────────────────────────────
     from tools.dashboard.dao import auth_db
     raw_token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
     auth_db.insert_token(token_hash, name)
+    _lap("crosstalk_token")
 
     # ── Networking ─────────────────────────────────────────────
     # host-networked containers can just use localhost; bridge-networked
@@ -1103,6 +1126,8 @@ def launch_session(
                 cmd += [image, *codex_args]
             else:
                 cmd += ["--entrypoint", "codex", image, *codex_args[1:]]
+
+    _lap("docker_cmd_assembled")
 
     # ── Execute or return ──────────────────────────────────────
     if detach:
