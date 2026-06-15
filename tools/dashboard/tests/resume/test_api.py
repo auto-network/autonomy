@@ -13,6 +13,8 @@ Tests:
 - Workspace primer is rendered into the run_dir on resume
 """
 from pathlib import Path
+import threading
+import time
 import pytest
 
 from agents.workspace_settings import (
@@ -443,6 +445,53 @@ class TestWorkspaceHarnessPassthrough:
         assert resp.status_code == 200
         assert launch_kwargs["harness"] == "codex"
         assert prep_kwargs["refresh_existing_worktree"] is True
+
+    def test_workspace_create_returns_before_slow_prepare_finishes(
+        self, test_client, monkeypatch,
+    ):
+        """Workspace create must ACK before repo provisioning completes."""
+        from tools.dashboard import server
+
+        started = threading.Event()
+        release = threading.Event()
+        workspace = WorkspaceV1(
+            id="autonomy",
+            name="Autonomy Codex",
+            description="",
+            image="autonomy-agent:dashboard",
+            graph_project="autonomy",
+            harness="codex",
+            repos=(RepoMount(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
+            working_dir="/workspace/repo",
+        )
+
+        monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _name: workspace)
+        monkeypatch.setattr(server.workspace_settings, "validate_artifacts", lambda _proj: [])
+        monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
+        monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
+
+        def slow_prepare(_proj, _tmux_name, **_kwargs):
+            started.set()
+            release.wait(timeout=2)
+            return {}
+
+        monkeypatch.setattr(server, "prepare_session_mounts", slow_prepare)
+
+        t0 = time.monotonic()
+        resp = test_client.post("/api/session/create", json={"project": "autonomy"})
+        elapsed = time.monotonic() - t0
+
+        try:
+            assert resp.status_code == 200
+            assert resp.json()["pending"] is True
+            assert started.wait(timeout=1)
+            assert elapsed < 0.5
+        finally:
+            release.set()
+            for _ in range(50):
+                if not server._SESSION_CREATE_TASKS:
+                    break
+                time.sleep(0.02)
 
     def test_workspace_resume_passes_codex_harness_without_refreshing_existing_worktree(
         self, test_client, resume_env, monkeypatch,
