@@ -5416,11 +5416,21 @@ async def api_session_create(request):
                 refresh_existing_worktree=True,
                 progress_callback=_on_repo_prepared,
             )
-        except WorkspaceError as e:
+        except (WorkspaceError, workspace_settings.WorkspaceMountError) as e:
             logger.error(
                 "api_session_create: workspace prep failed  project=%s  err=%s",
                 proj.id, e,
             )
+            # Clean up the pending row registered above so a failed prep does
+            # not leave a card stuck on the launching chip forever. deregister
+            # marks the row dead and rebroadcasts the registry.
+            try:
+                await session_monitor.deregister(tmux_name)
+            except Exception:
+                logger.exception(
+                    "api_session_create: row cleanup after prep failure for %s",
+                    tmux_name,
+                )
             return JSONResponse(
                 {"error": f"Workspace prep failed: {e}"}, status_code=500,
             )

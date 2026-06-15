@@ -133,7 +133,16 @@ class WorkspaceSettingsError(ValueError):
     """Raised when Setting-derived workspace data is missing or malformed."""
 
 
-class WorkspaceMountMissingError(Exception):
+class WorkspaceMountError(Exception):
+    """Base for mount-resolution failures (missing or unusable host path).
+
+    Both concrete mount errors derive from this so a single ``except
+    WorkspaceMountError`` in the session-create handler returns a clean
+    error instead of letting the failure escape as an unhandled 500.
+    """
+
+
+class WorkspaceMountMissingError(WorkspaceMountError):
     """A required ``autonomy.workspace.mount#1`` host path is absent.
 
     Surfaces enough provenance (origin org, state, the exact paths) for
@@ -162,8 +171,8 @@ class WorkspaceMountMissingError(Exception):
         )
 
 
-class WorkspaceMountInvalidError(Exception):
-    """A mount's declared host path exists but is not usable (e.g. not a dir)."""
+class WorkspaceMountInvalidError(WorkspaceMountError):
+    """A mount's declared host path exists but is not usable."""
 
     def __init__(self, *, mount_key: str, reason: str):
         self.mount_key = mount_key

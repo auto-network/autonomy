@@ -32,7 +32,14 @@
   // planning mode requires a prior model response.
   function lifecycleState(s) {
     if (!s) return "pending";
-    if (s.is_live === false) {
+    // Dead branches FIRST, using a truthy test rather than ``=== false``:
+    // the dead/registry path delivers is_live as the integer 0 (SQLite) or
+    // missing, and ``0 === false`` / ``undefined === false`` are both false
+    // in JS — which let a dead-mid-launch row skip this branch and fall
+    // through to the launching chip below, so a dead session rendered as if
+    // it were still booting. ``!s.is_live`` routes 0/false/null/undefined to
+    // dead correctly.
+    if (!s.is_live) {
       if (s.resumable) return "dead_resumable";
       return "dead_not_resumable";
     }

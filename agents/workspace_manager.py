@@ -452,11 +452,13 @@ def _apply_workspace_mount_settings(
                 key, payload.host_path,
             )
             continue
-        if not host.is_dir():
-            raise WorkspaceMountInvalidError(
-                mount_key=key,
-                reason=f"host_path is not a directory: {payload.host_path}",
-            )
+        # A mount host path may be a directory OR a single file — the
+        # narrowest credential mount is one key file, not a directory (e.g.
+        # blindhash-operations' encrypted decrypt key at
+        # .../private-key-encrypted.pem). Docker bind-mounts both. The old
+        # is_dir() check rejected legitimate single-file secret mounts and,
+        # because WorkspaceMountInvalidError wasn't caught by the
+        # session-create handler, crashed the request with an unhandled 500.
         mounts[str(host)] = f"{payload.container_path}:{payload.mode}"
 
 
