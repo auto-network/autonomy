@@ -242,21 +242,26 @@ def test_missing_optional_mount_silently_skipped(tmp_path):
     assert not any("/opt/harness" in v for v in result.values())
 
 
-def test_non_directory_host_path_raises(tmp_path):
-    bad = tmp_path / "file.txt"
-    bad.write_text("hi")  # file, not directory
+def test_file_host_path_is_mounted(tmp_path):
+    # A mount host_path may be a single FILE — the narrowest credential mount
+    # is one key file, not a directory (e.g. an encrypted private key). Docker
+    # bind-mounts both, so prepare_session_mounts must accept a file rather
+    # than rejecting it (the old is_dir() check crashed the operator workspace,
+    # which mounts the ssh key + cert + decrypt key as files).
+    keyfile = tmp_path / "private-key.pem"
+    keyfile.write_text("secret")  # file, not directory
     workspace = _workspace({
         "enterprise-ng:vuln-diff": _mount_rs(
             key="enterprise-ng:vuln-diff",
-            host_path=str(bad),
-            container_path="/opt/vuln-diff",
+            host_path=str(keyfile),
+            container_path="/opt/key.pem",
             required=True,
         ),
     })
-    with pytest.raises(WorkspaceMountInvalidError) as ei:
-        wm.prepare_session_mounts(
-            workspace, "s",
-            repos_dir=tmp_path / "repos",
-            worktrees_dir=tmp_path / "wt",
-        )
-    assert "not a directory" in str(ei.value)
+    mounts = wm.prepare_session_mounts(
+        workspace, "s",
+        repos_dir=tmp_path / "repos",
+        worktrees_dir=tmp_path / "wt",
+    )
+    assert str(keyfile) in mounts
+    assert mounts[str(keyfile)].startswith("/opt/key.pem")
