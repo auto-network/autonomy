@@ -22,13 +22,46 @@ import sys
 import termios
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from functools import partial
 from typing import Any
 from urllib import error as urllib_error, request as urllib_request
 
 logger = logging.getLogger(__name__)
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+_SESSION_LAUNCH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=int(os.environ.get("DASHBOARD_SESSION_LAUNCH_WORKERS", "4")),
+    thread_name_prefix="session-launch",
+)
+_SESSION_CREATE_TASKS: set[asyncio.Task] = set()
+
+
+async def _run_session_launch_io(func, /, *args, **kwargs):
+    """Run launch/provisioning blocking I/O away from the default executor."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _SESSION_LAUNCH_EXECUTOR,
+        partial(func, *args, **kwargs),
+    )
+
+
+def _track_session_create_task(task: asyncio.Task) -> None:
+    """Keep detached launch tasks observable and log unexpected failures."""
+    _SESSION_CREATE_TASKS.add(task)
+
+    def _done(done: asyncio.Task) -> None:
+        _SESSION_CREATE_TASKS.discard(done)
+        try:
+            done.result()
+        except asyncio.CancelledError:
+            logger.info("api_session_create: background launch task cancelled")
+        except Exception:
+            logger.exception("api_session_create: background launch task failed")
+
+    task.add_done_callback(_done)
 
 # Allow importing from agents/ (sibling of tools/)
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -5294,6 +5327,275 @@ def _resolve_host_session_model() -> str:
     return _HOST_MODEL_FALLBACK
 
 
+async def _finish_project_session_create(
+    *,
+    tmux_name: str,
+    proj,
+    primer_url: str | None,
+    phase_t0: float,
+) -> None:
+    """Finish a workspace-backed session create after the HTTP ACK returns."""
+    logger.info("phase-trace: requesting  tmux=%s  dt_from_post_ms=%d",
+                tmux_name, int((time.monotonic() - phase_t0) * 1000))
+    try:
+        loop = asyncio.get_running_loop()
+
+        def _on_repo_prepared(repo_index: int, total_repos: int, repo_name: str):
+            logger.info(
+                "phase-trace: preparing_workspace  tmux=%s  dt_from_post_ms=%d  repo_index=%d  total=%d  current_repo=%s",
+                tmux_name, int((time.monotonic() - phase_t0) * 1000),
+                repo_index, total_repos, repo_name,
+            )
+            asyncio.run_coroutine_threadsafe(
+                session_monitor.update_phase(
+                    tmux_name,
+                    startup_state="preparing_workspace",
+                    progress={
+                        "repo_index": repo_index,
+                        "total": total_repos,
+                        "current_repo": repo_name,
+                    },
+                ),
+                loop,
+            )
+
+        try:
+            project_mounts = await _run_session_launch_io(
+                prepare_session_mounts,
+                proj,
+                tmux_name,
+                refresh_existing_worktree=True,
+                progress_callback=_on_repo_prepared,
+            )
+        except WorkspaceError as e:
+            logger.error(
+                "api_session_create: workspace prep failed  project=%s  err=%s",
+                proj.id, e,
+            )
+            await session_monitor.update_phase(
+                tmux_name, startup_state="setup_failed", progress={"error": str(e)},
+            )
+            return
+
+        project_mounts.update(workspace_settings.artifact_mounts(proj))
+        logger.info("phase-trace: mounts-prepared  tmux=%s  dt_from_post_ms=%d",
+                    tmux_name, int((time.monotonic() - phase_t0) * 1000))
+
+        meta: dict = {
+            "tmux_session": tmux_name,
+            "project": proj.id,
+            "graph_project": proj.graph_project,
+        }
+        if proj.default_tags:
+            meta["graph_tags"] = list(proj.default_tags)
+        extra_env: dict[str, str] = dict(proj.env) if proj.env else {}
+        for var in proj.env_from_host:
+            val = os.environ.get(var)
+            if val is not None:
+                extra_env[var] = val
+        extra_env = extra_env or None
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        run_dir = _REPO_ROOT / "data" / "agent-runs" / f"{tmux_name}-{ts}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        primer_path = run_dir / ".claude_md"
+        primer_path.write_text(render_workspace_primer(proj))
+        startup_script = (_REPO_ROOT / proj.startup) if proj.startup else None
+        working_dir = proj.working_dir or "/workspace/repo"
+
+        cmd_str = await _run_session_launch_io(
+            launch_session,
+            session_type="terminal",
+            name=tmux_name,
+            prompt=None,
+            detach=False,
+            image=proj.image,
+            mounts=project_mounts or None,
+            metadata=meta,
+            harness=proj.harness,
+            model=proj.model or None,
+            extra_env=extra_env,
+            output_dir=str(run_dir),
+            global_claude_md=primer_path,
+            startup_script=startup_script,
+            privileged=proj.dind,
+            working_dir=working_dir,
+            network_host=proj.network_host,
+            capabilities=proj.capabilities,
+        )
+        if not cmd_str:
+            logger.error(
+                "api_session_create: launch_session failed for project %s",
+                proj.id,
+            )
+            await session_monitor.update_phase(
+                tmux_name,
+                startup_state="setup_failed",
+                progress={"error": f"launch_session failed for project '{proj.id}'"},
+            )
+            return
+
+        logger.info("phase-trace: launch-session-built  tmux=%s  dt_from_post_ms=%d",
+                    tmux_name, int((time.monotonic() - phase_t0) * 1000))
+        await session_monitor.update_phase(
+            tmux_name, startup_state="launching_container", progress={},
+        )
+        logger.info("phase-trace: launching_container  tmux=%s  dt_from_post_ms=%d",
+                    tmux_name, int((time.monotonic() - phase_t0) * 1000))
+
+        tmux_cmd = [
+            "tmux", "new-session", "-d", "-s", tmux_name, "-x", "120",
+            "-y", "40", cmd_str,
+        ]
+
+        def _launch_tmux_sync():
+            r = subprocess.run(
+                tmux_cmd,
+                env={**os.environ, "TERM": "xterm-256color"},
+                capture_output=True,
+            )
+            if r.returncode == 0:
+                for opt, val in (
+                    ("set-clipboard", "on"),
+                    ("mouse", "on"),
+                    ("allow-passthrough", "on"),
+                ):
+                    subprocess.run(
+                        ["tmux", "set-option", "-t", tmux_name, opt, val],
+                        capture_output=True,
+                    )
+            return r
+
+        result = await _run_session_launch_io(_launch_tmux_sync)
+        if result.returncode != 0:
+            stderr = result.stderr.decode().strip()
+            logger.error(
+                "api_session_create: tmux new-session failed  tmux=%s  rc=%d  stderr=%s",
+                tmux_name, result.returncode, stderr,
+            )
+            await session_monitor.update_phase(
+                tmux_name,
+                startup_state="setup_failed",
+                progress={"error": f"tmux creation failed: {stderr}"},
+            )
+            return
+
+        logger.info("phase-trace: tmux-spawned  tmux=%s  dt_from_post_ms=%d",
+                    tmux_name, int((time.monotonic() - phase_t0) * 1000))
+        await session_monitor.update_phase(
+            tmux_name, startup_state="harness_starting", progress={},
+        )
+        logger.info("phase-trace: harness_starting  tmux=%s  dt_from_post_ms=%d",
+                    tmux_name, int((time.monotonic() - phase_t0) * 1000))
+
+        sess_dir = run_dir / "sessions"
+        await session_monitor.register(
+            tmux_name=tmux_name,
+            session_type="container",
+            project=proj.id,
+            jsonl_path=sess_dir,
+            harness=proj.harness if proj else "claude",
+            seed_message="Starting..." if not primer_url else "",
+        )
+        _spawn_setup_exit_watcher(tmux_name, run_dir)
+
+        first_message: str | None = None
+        primer_error: str | None = None
+        if primer_url:
+            resolved = await _resolve_primer(primer_url)
+            if resolved:
+                first_message = resolved
+            else:
+                primer_error = f"Could not resolve primer {primer_url!r}, falling back to orientation"
+                logger.warning("api_session_create: %s", primer_error)
+        if first_message is None:
+            from tools.dashboard.session_orientation import render_orientation
+            try:
+                first_message = render_orientation(
+                    tmux_name=tmux_name,
+                    workspace_id=proj.id,
+                    workspace_name=proj.name,
+                    org=proj.graph_project,
+                )
+            except Exception:
+                logger.warning(
+                    "api_session_create: orientation render failed for %s; "
+                    "falling back to literal Hello",
+                    tmux_name, exc_info=True,
+                )
+                first_message = "Hello"
+
+        if first_message:
+            logger.info(
+                "phase-trace: inject_scheduled  tmux=%s  dt_from_post_ms=%d  msg_len=%d  primer=%s  harness=%s",
+                tmux_name, int((time.monotonic() - phase_t0) * 1000),
+                len(first_message), bool(primer_url and not primer_error),
+                proj.harness,
+            )
+            inject_wait_t0 = time.monotonic()
+            harness = proj.harness or "claude"
+
+            async def _inject_first_message(msg=first_message, harness=harness):
+                deadline = time.time() + 60
+                while time.time() < deadline:
+                    row = dashboard_db.get_session(tmux_name)
+                    if row and row.get("startup_state") == "composer_ready":
+                        break
+                    await asyncio.sleep(0.5)
+                else:
+                    logger.warning(
+                        "phase-trace: inject_skipped  tmux=%s  reason=composer_ready_timeout_60s  harness=%s",
+                        tmux_name, harness,
+                    )
+                    return
+                settle = {"codex": 1.5, "claude": 0.0}.get(harness, 0.0)
+                if settle > 0:
+                    logger.info(
+                        "phase-trace: inject_settle  tmux=%s  harness=%s  settle_s=%.1f",
+                        tmux_name, harness, settle,
+                    )
+                    await asyncio.sleep(settle)
+                try:
+                    await tmux_send(tmux_name, msg)
+                    logger.info(
+                        "phase-trace: first_message_injected  tmux=%s  dt_from_inject_scheduled_ms=%d  len=%d  primer=%s  harness=%s  settle_s=%.1f  (composer_ready-gated)",
+                        tmux_name, int((time.monotonic() - inject_wait_t0) * 1000),
+                        len(msg), bool(primer_url and not primer_error), harness, settle,
+                    )
+                    await session_monitor.update_phase(
+                        tmux_name, startup_state="awaiting_first_response",
+                    )
+                except Exception:
+                    logger.warning(
+                        "phase-trace: inject_failed  tmux=%s  harness=%s  exc=tmux_send_exception",
+                        tmux_name, harness, exc_info=True,
+                    )
+
+            asyncio.create_task(_inject_first_message())
+        else:
+            async def _clear_when_ready():
+                deadline = time.time() + 60
+                while time.time() < deadline:
+                    row = dashboard_db.get_session(tmux_name)
+                    if row and row.get("startup_state") == "composer_ready":
+                        await session_monitor.update_phase(
+                            tmux_name, clear_startup_state=True,
+                        )
+                        return
+                    await asyncio.sleep(0.5)
+            asyncio.create_task(_clear_when_ready())
+
+        logger.info("phase-trace: background-complete  tmux=%s  dt_from_post_ms=%d",
+                    tmux_name, int((time.monotonic() - phase_t0) * 1000))
+    except Exception:
+        logger.exception("api_session_create: background launch failed for %s", tmux_name)
+        await session_monitor.update_phase(
+            tmux_name,
+            startup_state="setup_failed",
+            progress={"error": "background launch failed"},
+        )
+
+
 async def api_session_create(request):
     """Create a new session (container, project, or host) and return its tmux name.
 
@@ -5307,15 +5609,17 @@ async def api_session_create(request):
     Returns: {"tmux_name": str, "label": str, "type": str}
 
     Semantics:
-      • `project` set → load workspace config, prepare mounts/worktrees,
-        launch image with DinD/graph scoping via project registry.
+      • `project` set → validate config, register a pending row, and launch
+        the provisioning/container pipeline in the background.
       • `type == "host"` → start `claude --dangerously-skip-permissions` on
         the host, then watch for its JSONL to appear.
       • neither → default `autonomy-agent:dashboard` container session.
 
-    Container sessions block up to 30s for the monitor to mark them live with
-    a resolved JSONL path.  Host sessions return immediately — their JSONL is
-    discovered asynchronously by `_watch_for_host_session_jsonl`.
+    Workspace project sessions return immediately after the pending row is
+    registered; progress is delivered via startup_state/SSE.  Non-workspace
+    container sessions still wait for monitor tracking on the legacy path.
+    Host sessions return immediately — their JSONL is discovered
+    asynchronously by `_watch_for_host_session_jsonl`.
     """
     body = {}
     try:
@@ -5411,136 +5715,22 @@ async def api_session_create(request):
             project=proj.id,
             harness=proj.harness or "claude",
         )
-        logger.info("phase-trace: requesting  tmux=%s  dt_from_post_ms=%d",
+        _track_session_create_task(asyncio.create_task(
+            _finish_project_session_create(
+                tmux_name=tmux_name,
+                proj=proj,
+                primer_url=primer_url,
+                phase_t0=_phase_t0,
+            )
+        ))
+        logger.info("phase-trace: response-ready  tmux=%s  dt_from_post_ms=%d  backgrounded=1",
                     tmux_name, int((time.monotonic() - _phase_t0) * 1000))
-        try:
-            # prepare_session_mounts runs a synchronous `git fetch origin
-            # --prune` on every workspace clone — for enterprise-ng that's 3
-            # repos, ~40s total, and it was running ON the event loop, which
-            # is what froze the whole dashboard API during NG startup (proven:
-            # /api/ping spiked to ~9.5s during the first fetch). Offload to a
-            # worker thread so the loop stays responsive while repos fetch.
-            #
-            # auto-ja51w C3: progress_callback (called once per repo, from
-            # inside the worker thread) schedules an update_phase coroutine
-            # back on the event loop via run_coroutine_threadsafe — emits the
-            # per-repo chip progression while prepare_session_mounts runs.
-            _loop = asyncio.get_running_loop()
-            def _on_repo_prepared(repo_index: int, total_repos: int, repo_name: str):
-                logger.info(
-                    "phase-trace: preparing_workspace  tmux=%s  dt_from_post_ms=%d  repo_index=%d  total=%d  current_repo=%s",
-                    tmux_name, int((time.monotonic() - _phase_t0) * 1000),
-                    repo_index, total_repos, repo_name,
-                )
-                asyncio.run_coroutine_threadsafe(
-                    session_monitor.update_phase(
-                        tmux_name,
-                        startup_state="preparing_workspace",
-                        progress={
-                            "repo_index": repo_index,
-                            "total": total_repos,
-                            "current_repo": repo_name,
-                        },
-                    ),
-                    _loop,
-                )
-            project_mounts = await asyncio.to_thread(
-                prepare_session_mounts,
-                proj,
-                tmux_name,
-                refresh_existing_worktree=True,
-                progress_callback=_on_repo_prepared,
-            )
-        except (WorkspaceError, workspace_settings.WorkspaceMountError) as e:
-            logger.error(
-                "api_session_create: workspace prep failed  project=%s  err=%s",
-                proj.id, e,
-            )
-            _trace("prep_failed", outcome="error", error=f"{type(e).__name__}: {e}")
-            # Clean up the pending row registered above so a failed prep does
-            # not leave a card stuck on the launching chip forever. deregister
-            # marks the row dead and rebroadcasts the registry.
-            try:
-                await session_monitor.deregister(tmux_name)
-            except Exception:
-                logger.exception(
-                    "api_session_create: row cleanup after prep failure for %s",
-                    tmux_name,
-                )
-            return JSONResponse(
-                {"error": f"Workspace prep failed: {e}"}, status_code=500,
-            )
-        project_mounts.update(workspace_settings.artifact_mounts(proj))
-        # auto-bpomi phase-trace: prepare_session_mounts done (git ops × N
-        # repos). Splits the prep slice from launch_session so Bead B can see
-        # the per-repo mount work independently.
-        logger.info("phase-trace: mounts-prepared  tmux=%s  dt_from_post_ms=%d",
-                    tmux_name, int((time.monotonic() - _phase_t0) * 1000))
-        _trace("mounts-prepared", repos=len(proj.repos))
-        meta: dict = {
-            "tmux_session": tmux_name,
-            "project": proj.id,
-            "graph_project": proj.graph_project,
-        }
-        if proj.default_tags:
-            meta["graph_tags"] = list(proj.default_tags)
-        extra_env: dict[str, str] = dict(proj.env) if proj.env else {}
-        for _var in proj.env_from_host:
-            _val = os.environ.get(_var)
-            if _val is not None:
-                extra_env[_var] = _val
-        extra_env = extra_env or None
-        # Render the runtime primer from the workspace config (layer 1 of
-        # the context stack). Writing it into the session's run_dir keeps
-        # it colocated with other session artifacts.
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        run_dir = _REPO_ROOT / "data" / "agent-runs" / f"{tmux_name}-{ts}"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        primer_path = run_dir / ".claude_md"
-        _primer_t0 = time.monotonic()
-        primer_path.write_text(render_workspace_primer(proj))
-        logger.info(
-            "phase-trace: primer-rendered  tmux=%s  dt_from_post_ms=%d  step_ms=%d",
-            tmux_name, int((time.monotonic() - _phase_t0) * 1000),
-            int((time.monotonic() - _primer_t0) * 1000),
-        )
-        _trace("primer-rendered", step_ms=int((time.monotonic() - _primer_t0) * 1000))
-        global_claude_md = primer_path
-        startup_script = (_REPO_ROOT / proj.startup) if proj.startup else None
-        working_dir = proj.working_dir or "/workspace/repo"
-        # launch_session runs in a worker thread; this marker right before the
-        # offload isolates thread-pool queue wait (gap to launch-session-built
-        # minus launch_session's own ~167ms of launch-timing markers).
-        logger.info(
-            "phase-trace: launch-session-call  tmux=%s  dt_from_post_ms=%d",
-            tmux_name, int((time.monotonic() - _phase_t0) * 1000))
-        _trace("launch-session-call")
-        cmd_str = await asyncio.to_thread(
-            launch_session,
-            session_type="terminal",
-            name=tmux_name,
-            prompt=None,
-            detach=False,
-            image=proj.image,
-            mounts=project_mounts or None,
-            metadata=meta,
-            harness=proj.harness,
-            model=proj.model or None,
-            extra_env=extra_env,
-            output_dir=str(run_dir),
-            global_claude_md=global_claude_md,
-            startup_script=startup_script,
-            privileged=proj.dind,
-            working_dir=working_dir,
-            network_host=proj.network_host,
-            capabilities=proj.capabilities,
-        )
-        if not cmd_str:
-            return JSONResponse(
-                {"error": f"launch_session failed for project '{proj.id}'"},
-                status_code=500,
-            )
-        is_container = True
+        return JSONResponse({
+            "tmux_name": tmux_name,
+            "label": "",
+            "type": "container",
+            "pending": True,
+        })
     elif session_type == "host":
         model = _resolve_host_session_model()
         cmd_str = (
@@ -5549,7 +5739,7 @@ async def api_session_create(request):
         )
         is_container = False
     else:
-        cmd_str = await asyncio.to_thread(
+        cmd_str = await _run_session_launch_io(
             launch_session,
             session_type="terminal",
             name=tmux_name,
@@ -5587,7 +5777,7 @@ async def api_session_create(request):
     # subprocess calls. Run them in a worker thread so they never block the
     # event loop — proven necessary: a synchronous create froze /api/ping for
     # ~9s (see the fast-poll latency probe). The launch_session() calls above
-    # are likewise wrapped in to_thread for the same reason.
+    # are likewise sent through the dedicated launch executor.
     def _launch_tmux_sync():
         r = subprocess.run(
             tmux_cmd, env={**os.environ, "TERM": "xterm-256color"}, capture_output=True,
@@ -5601,7 +5791,7 @@ async def api_session_create(request):
                     capture_output=True,
                 )
         return r
-    result = await asyncio.to_thread(_launch_tmux_sync)
+    result = await _run_session_launch_io(_launch_tmux_sync)
     if result.returncode != 0:
         logger.error(
             "api_session_create: tmux new-session failed  tmux=%s  rc=%d  stderr=%s",
@@ -6074,6 +6264,7 @@ async def api_session_resume(request):
             _src_meta = {}
         resume_harness = resume_harness or _src_meta.get("harness")
         resume_model = resume_model or _src_meta.get("model")
+    resume_harness_recorded = bool(resume_harness)
     resume_harness = resume_harness or "claude"
 
     # Keep the session's own model. Only a Claude session falls back to the
@@ -6102,10 +6293,14 @@ async def api_session_resume(request):
                 proj_for_resume = workspace_settings.get_workspace(dead_project)
             except (KeyError, workspace_settings.WorkspaceSettingsError):
                 proj_for_resume = None
+            if (proj_for_resume is not None and not resume_harness_recorded
+                    and proj_for_resume.harness):
+                resume_harness = proj_for_resume.harness
             # Only let the workspace model override a Claude session that has
-            # no recorded model of its own; a Codex session keeps its gpt model.
+            # no recorded model of its own; legacy rows without a recorded
+            # harness inherit the workspace harness/model together.
             if (proj_for_resume is not None and proj_for_resume.model
-                    and not model and resume_harness == "claude"):
+                    and not model):
                 model = proj_for_resume.model
 
         if proj_for_resume is not None:
