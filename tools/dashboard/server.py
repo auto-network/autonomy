@@ -5460,13 +5460,22 @@ async def api_session_create(request):
         run_dir = _REPO_ROOT / "data" / "agent-runs" / f"{tmux_name}-{ts}"
         run_dir.mkdir(parents=True, exist_ok=True)
         primer_path = run_dir / ".claude_md"
+        _primer_t0 = time.monotonic()
         primer_path.write_text(render_workspace_primer(proj))
+        logger.info(
+            "phase-trace: primer-rendered  tmux=%s  dt_from_post_ms=%d  step_ms=%d",
+            tmux_name, int((time.monotonic() - _phase_t0) * 1000),
+            int((time.monotonic() - _primer_t0) * 1000),
+        )
         global_claude_md = primer_path
         startup_script = (_REPO_ROOT / proj.startup) if proj.startup else None
         working_dir = proj.working_dir or "/workspace/repo"
-        # launch_session does heavy synchronous work (graph claude install,
-        # credential resolution, mount/auth setup) — offload to a worker
-        # thread so it doesn't freeze the event loop during launch.
+        # launch_session runs in a worker thread; this marker right before the
+        # offload isolates thread-pool queue wait (gap to launch-session-built
+        # minus launch_session's own ~167ms of launch-timing markers).
+        logger.info(
+            "phase-trace: launch-session-call  tmux=%s  dt_from_post_ms=%d",
+            tmux_name, int((time.monotonic() - _phase_t0) * 1000))
         cmd_str = await asyncio.to_thread(
             launch_session,
             session_type="terminal",
