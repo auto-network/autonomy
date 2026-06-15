@@ -3108,6 +3108,19 @@ class SessionMonitor:
 
     _COOLDOWN_SECONDS = 30.0
     _ORPHAN_PRUNE_INTERVAL = 600.0  # seconds between orphan worktree prunes
+    # startup_state values that mean "still booting" — a container session in
+    # any of these has not yet spawned its host tmux, so the tmux-liveness
+    # check below must not treat the miss as death. composer_ready /
+    # awaiting_first_response are intentionally excluded: by then tmux exists
+    # and a real miss is a real death.
+    _STARTUP_BOOTING_STATES = frozenset({
+        "requesting", "preparing_workspace", "launching_container",
+        "harness_starting",
+    })
+    # Upper bound on how long a session may sit in a booting state before the
+    # reaper is allowed to act anyway — protects normal (even cold-cache)
+    # launches while still eventually reaping a genuinely stuck launch.
+    _STARTUP_GRACE_SECONDS = 300.0
 
     async def _liveness_loop(self) -> None:
         """Check tmux liveness for all sessions every 10s."""
@@ -3131,6 +3144,22 @@ class SessionMonitor:
                     # /api/monitor/deregister or container-exit collection,
                     # not tmux polling.
                     if row.get("type") in ("dispatch", "librarian", "agentic"):
+                        continue
+                    # Do not reap a session the startup FSM says is still
+                    # booting. A container session's host tmux is not spawned
+                    # until AFTER launch_session() returns (~15s for an 8-repo
+                    # workspace), yet the row is registered live at request
+                    # time. Without this guard the 10s liveness sweep fires
+                    # mid-launch, _check_tmux misses (no tmux yet), the session
+                    # is marked dead, and cleanup_session_worktrees yanks the
+                    # freshly-built worktrees out from under the launching
+                    # container — leaving empty dirs Docker remounts as root
+                    # (proven: auto-0615-105045 reaped at
+                    # startup_state=launching_container, 2026-06-15). Bounded by
+                    # a grace window so a genuinely stuck launch is still reaped.
+                    if (row.get("startup_state") in self._STARTUP_BOOTING_STATES
+                            and (now - (row.get("created_at") or 0))
+                            < self._STARTUP_GRACE_SECONDS):
                         continue
                     alive = await asyncio.to_thread(self._check_tmux, tmux_name)
                     if not alive:
