@@ -14096,7 +14096,38 @@ _dispatch_watcher_task: asyncio.Task | None = None
 _mock_event_watcher_task: asyncio.Task | None = None
 _harness_usage_poller_task: asyncio.Task | None = None
 _claude_credentials_refresh_task: asyncio.Task | None = None
+_event_loop_watchdog_task: asyncio.Task | None = None
 _settings_mediator_started: bool = False
+
+
+async def _event_loop_watchdog():
+    """Detect event-loop stalls and log them LOUD.
+
+    The loop should wake this coroutine every ``_TICK`` seconds. If the
+    wake-up is late, the loop was unable to run for that delta — i.e. a
+    synchronous call blocked it, OR a CPU-bound ``to_thread`` held the GIL so
+    the loop thread couldn't make progress. Either way every in-flight request
+    stalled for ``lag`` seconds. This is the single detector for the recurring
+    "blocking work on the event loop" class of bug: it can't be designed
+    around, only observed, so we observe it continuously and name the stall.
+
+    Cheap: one 100ms timer tick; the measurement is two ``monotonic()`` reads.
+    """
+    _TICK = 0.1
+    _LAG_WARN_S = 0.5
+    _LAG_HANG_S = 2.0
+    while True:
+        t0 = time.monotonic()
+        await asyncio.sleep(_TICK)
+        lag = time.monotonic() - t0 - _TICK
+        if lag >= _LAG_HANG_S:
+            logger.error(
+                "EVENT-LOOP STALL: loop blocked %.2fs — a sync or CPU-bound "
+                "(GIL-holding) call is not yielding; all requests hung this long",
+                lag,
+            )
+        elif lag >= _LAG_WARN_S:
+            logger.warning("EVENT-LOOP LAG: loop blocked %.2fs", lag)
 
 # Task* tile enricher — per-session taskId → subject/status map. Populated by
 # the session monitor tailer as it walks JSONL entries; also used by the HTTP
@@ -14123,7 +14154,7 @@ def _build_settings_mediator_services():
 
 async def _on_startup():
     global _dispatch_watcher_task, _mock_event_watcher_task, _harness_usage_poller_task
-    global _claude_credentials_refresh_task
+    global _claude_credentials_refresh_task, _event_loop_watchdog_task
     # Re-arm the emit hook on every lifespan startup. Module import
     # already wires it (so ASGITransport-based tests that skip lifespan
     # still get function-level emits), but we re-arm here so that
@@ -14201,6 +14232,7 @@ async def _on_startup():
     )
     await worktree_monitor.start()
     _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())
+    _event_loop_watchdog_task = asyncio.create_task(_event_loop_watchdog())
     if _should_run_harness_usage_poller():
         _harness_usage_poller_task = asyncio.create_task(_harness_usage_poller())
     if _claude_credentials_refresh.should_run_credentials_refresh_poller():
@@ -14257,6 +14289,7 @@ async def _on_shutdown():
             _mock_event_watcher_task,
             _harness_usage_poller_task,
             _claude_credentials_refresh_task,
+            _event_loop_watchdog_task,
         )
         if t and not t.done()
     ]
@@ -14296,11 +14329,32 @@ async def _lifespan(app):
         await _on_shutdown()
 
 class _RequestDurationMiddleware(BaseHTTPMiddleware):
+    # A request slower than this almost always means the event loop was
+    # blocked (sync work on the loop, or CPU-bound to_thread holding the GIL),
+    # NOT that the endpoint is intrinsically heavy — so log it LOUD and
+    # greppable instead of burying it at INFO. Pair with the event-loop
+    # watchdog below: when the loop stalls, the watchdog names the stall and
+    # every request caught in it logs as SLOW-REQUEST, so cause and victims
+    # correlate in one grep.
+    _SLOW_MS = 1000.0
+    _HANG_MS = 5000.0
+
     async def dispatch(self, request, call_next):
         t0 = time.monotonic()
         response = await call_next(request)
         dur_ms = (time.monotonic() - t0) * 1000
-        logger.info("%s %s %d %.1fms", request.method, request.url.path, response.status_code, dur_ms)
+        if dur_ms >= self._HANG_MS:
+            logger.error(
+                "SLOW-REQUEST(HANG) %s %s %d %.0fms — event loop likely blocked",
+                request.method, request.url.path, response.status_code, dur_ms,
+            )
+        elif dur_ms >= self._SLOW_MS:
+            logger.warning(
+                "SLOW-REQUEST %s %s %d %.0fms",
+                request.method, request.url.path, response.status_code, dur_ms,
+            )
+        else:
+            logger.info("%s %s %d %.1fms", request.method, request.url.path, response.status_code, dur_ms)
         return response
 
 
