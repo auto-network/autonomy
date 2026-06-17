@@ -3351,7 +3351,7 @@ async def api_chatwith_check(request):
     session_name = request.query_params.get("session", "").strip()
     if not session_name:
         return JSONResponse({"error": "Missing session parameter"}, status_code=400)
-    exists = _tmux_session_exists(session_name)
+    exists = await asyncio.to_thread(_tmux_session_exists, session_name)
     return JSONResponse({"exists": exists, "session_name": session_name})
 
 
@@ -3361,7 +3361,8 @@ async def api_chatwith_sessions(request):
     GET /api/chatwith/sessions
     Returns {sessions: [session_name, ...]} for all tmux sessions prefixed 'chatwith-'.
     """
-    result = subprocess.run(
+    result = await asyncio.to_thread(
+        subprocess.run,
         ["tmux", "list-sessions", "-F", "#{session_name}"],
         capture_output=True, text=True,
     )
@@ -11360,6 +11361,67 @@ async def api_graph_link(request):
 
 
 _ingest_lock = asyncio.Lock()
+_GRAPH_SESSIONS_INGEST_TIMEOUT = int(
+    os.environ.get("DASHBOARD_GRAPH_SESSIONS_INGEST_TIMEOUT", "600")
+)
+_GRAPH_SESSIONS_TOTAL_RE = re.compile(
+    r"Total:\s+(\d+)\s+new,\s+(\d+)\s+updated,\s+(\d+)\s+refreshed,\s+(\d+)\s+skipped"
+)
+
+
+def _parse_graph_sessions_counts(output: str) -> dict[str, int]:
+    match = _GRAPH_SESSIONS_TOTAL_RE.search(output)
+    if not match:
+        return {"ingested": 0, "updated": 0, "refreshed": 0, "skipped": 0}
+    ingested, updated, refreshed, skipped = match.groups()
+    return {
+        "ingested": int(ingested),
+        "updated": int(updated),
+        "refreshed": int(refreshed),
+        "skipped": int(skipped),
+    }
+
+
+async def _run_graph_sessions_ingest_cli(
+    *,
+    all_projects: bool,
+    project: str | None,
+    force: bool,
+) -> tuple[str, str, int]:
+    """Run CPU-heavy session ingest out-of-process.
+
+    ``ingest_all_claude_code`` parses JSONL and updates FTS indexes. Running
+    that in a dashboard worker thread can still hold the GIL and stall the
+    event loop, so this endpoint intentionally uses the graph CLI in host mode.
+    """
+    cmd = ["graph", "--force-host", "sessions"]
+    if all_projects:
+        cmd.append("--all")
+    elif project:
+        cmd.extend(["--project", project])
+    if force:
+        cmd.append("--force")
+
+    env = os.environ.copy()
+    # Defense in depth: --force-host bypasses HttpClient, and removing
+    # GRAPH_API prevents future CLI path changes from recursing into this API.
+    env.pop("GRAPH_API", None)
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=_GRAPH_SESSIONS_INGEST_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        return "", "graph sessions ingest timed out", -1
+    return stdout.decode(), stderr.decode(), proc.returncode
 
 
 async def _refresh_graph_session_source(source: dict) -> dict:
@@ -11383,56 +11445,33 @@ async def _refresh_graph_session_source(source: dict) -> dict:
 
 
 async def api_graph_sessions(request):
-    """Ingest sessions via direct ingest call (no subprocess)."""
+    """Ingest sessions in a subprocess so CPU-bound parsing cannot stall the loop."""
     if _ingest_lock.locked():
         return JSONResponse({"ok": True, "output": "ingest already in progress", "skipped": True})
 
     async with _ingest_lock:
         body = await request.json()
-        from tools.graph.ingest import (
-            ingest_all_claude_code,
-            ingest_claude_code_project,
-        )
-
         force = bool(body.get("force"))
-        project = body.get("project")
+        project = str(body["project"]) if body.get("project") else None
         all_flag = bool(body.get("all"))
 
-        def _run_ingest():
-            # Per-session routing: each session lands in its own org DB based
-            # on .session_meta.json.graph_org. GRAPH_DB env still pins when
-            # set (test / override).
-            route_per_session = os.environ.get("GRAPH_DB") is None
-            sessions_db = None if route_per_session else graph_ops._open()
-            try:
-                if all_flag:
-                    return ingest_all_claude_code(sessions_db, force=force)
-                if project:
-                    from pathlib import Path as _P
-                    return ingest_claude_code_project(
-                        sessions_db, _P(project), force=force,
-                    )
-                return ingest_claude_code_project(sessions_db, force=force)
-            finally:
-                if sessions_db is not None:
-                    sessions_db.close()
+        stdout, stderr, rc = await _run_graph_sessions_ingest_cli(
+            all_projects=all_flag,
+            project=project,
+            force=force,
+        )
+        if rc != 0:
+            return JSONResponse(
+                {"error": stderr.strip() or stdout.strip() or "graph sessions failed", "rc": rc},
+                status_code=500,
+            )
 
-        try:
-            results = await asyncio.to_thread(_run_ingest)
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
-
-        counts = {
-            "ingested": sum(1 for r in results if r.get("status") == "ingested"),
-            "updated": sum(1 for r in results if r.get("status") == "updated"),
-            "refreshed": sum(1 for r in results if r.get("status") == "refreshed"),
-            "skipped": sum(1 for r in results if r.get("status") == "skipped"),
-        }
+        counts = _parse_graph_sessions_counts(stdout)
         summary = (
             f"Total: {counts['ingested']} new, {counts['updated']} updated, "
             f"{counts['refreshed']} refreshed, {counts['skipped']} skipped"
         )
-        return JSONResponse({"ok": True, "output": summary, "counts": counts})
+        return JSONResponse({"ok": True, "output": stdout or summary, "counts": counts})
 
 
 async def api_graph_attach(request):

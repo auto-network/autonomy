@@ -1,10 +1,9 @@
 """Tests for the ingest mutex on POST /api/graph/sessions.
 
-After the auto-iv6c5 ops migration, ``api_graph_sessions`` calls
-:func:`tools.graph.ingest.ingest_all_claude_code` /
-:func:`tools.graph.ingest.ingest_claude_code_project` directly instead of
-shelling out to the CLI. The mutex semantics are unchanged — the first
-call runs, the second returns ``skipped=True``.
+``api_graph_sessions`` runs the CPU-heavy graph sessions ingest in a
+subprocess so JSONL parsing and FTS work cannot hold the dashboard process
+GIL. The mutex semantics are unchanged — the first call runs, the second
+returns ``skipped=True``.
 """
 import asyncio
 from unittest.mock import AsyncMock, patch
@@ -31,11 +30,11 @@ def client(app):
 
 def test_single_call_succeeds(client):
     """A single POST /api/graph/sessions works normally."""
-    with patch("tools.graph.ingest.ingest_all_claude_code") as mock_ingest:
-        mock_ingest.return_value = [
-            {"status": "ingested", "session_id": "s1"},
-            {"status": "ingested", "session_id": "s2"},
-        ]
+    output = "Total: 2 new, 0 updated, 0 refreshed, 0 skipped\n"
+    with patch(
+        "tools.dashboard.server._run_graph_sessions_ingest_cli",
+        new=AsyncMock(return_value=(output, "", 0)),
+    ):
         resp = client.post("/api/graph/sessions", json={"all": True})
     assert resp.status_code == 200
     body = resp.json()
@@ -45,26 +44,75 @@ def test_single_call_succeeds(client):
 
 
 def test_single_call_passes_flags(client):
-    """Flags from request body are forwarded to the ingest function."""
-    with patch("tools.graph.ingest.ingest_all_claude_code") as mock_ingest:
-        mock_ingest.return_value = []
+    """Flags from request body are forwarded to the ingest subprocess helper."""
+    mock_ingest = AsyncMock(
+        return_value=("Total: 0 new, 0 updated, 0 refreshed, 0 skipped\n", "", 0)
+    )
+    with patch(
+        "tools.dashboard.server._run_graph_sessions_ingest_cli",
+        new=mock_ingest,
+    ):
         resp = client.post("/api/graph/sessions", json={"all": True, "force": True})
     assert resp.status_code == 200
-    assert mock_ingest.called
-    # ingest_all_claude_code(db, force=force) — second kwarg is ``force``.
-    _, kwargs = mock_ingest.call_args
-    assert kwargs.get("force") is True
+    mock_ingest.assert_awaited_once_with(
+        all_projects=True,
+        project=None,
+        force=True,
+    )
 
 
 def test_ingest_exception_returns_500(client):
-    """Ingest error propagates as 500."""
+    """Subprocess ingest errors propagate as 500."""
     with patch(
-        "tools.graph.ingest.ingest_claude_code_project",
-        side_effect=RuntimeError("db locked"),
+        "tools.dashboard.server._run_graph_sessions_ingest_cli",
+        new=AsyncMock(return_value=("", "db locked", 1)),
     ):
         resp = client.post("/api/graph/sessions", json={})
     assert resp.status_code == 500
     assert "db locked" in resp.json()["error"]
+
+
+def test_ingest_cli_uses_host_mode_and_avoids_dashboard_recursion(monkeypatch):
+    """The subprocess must bypass GRAPH_API or it can recurse into this route."""
+    from tools.dashboard import server
+
+    seen = {}
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"Total: 0 new, 1 updated, 0 refreshed, 2 skipped\n", b""
+
+    async def fake_create_subprocess_exec(*cmd, stdout, stderr, env):
+        seen["cmd"] = cmd
+        seen["stdout"] = stdout
+        seen["stderr"] = stderr
+        seen["env"] = env
+        return FakeProc()
+
+    monkeypatch.setenv("GRAPH_API", "https://localhost:8080")
+    with patch("asyncio.create_subprocess_exec", new=fake_create_subprocess_exec):
+        stdout, stderr, rc = asyncio.run(
+            server._run_graph_sessions_ingest_cli(
+                all_projects=False,
+                project="/workspace/repo",
+                force=True,
+            )
+        )
+
+    assert rc == 0
+    assert stderr == ""
+    assert "1 updated" in stdout
+    assert seen["cmd"] == (
+        "graph",
+        "--force-host",
+        "sessions",
+        "--project",
+        "/workspace/repo",
+        "--force",
+    )
+    assert "GRAPH_API" not in seen["env"]
 
 
 def test_concurrent_calls_second_skipped():
@@ -78,34 +126,30 @@ def test_concurrent_calls_second_skipped():
 
         slow_event = asyncio.Event()
 
-        async def slow_thread(fn):
-            # ``asyncio.to_thread`` passthrough that waits for the test
-            # to release the event; allows the test to hold the mutex
-            # while the second call races in.
+        async def slow_ingest(**_kwargs):
             await slow_event.wait()
-            return fn()
+            return "Total: 0 new, 0 updated, 0 refreshed, 0 skipped\n", "", 0
 
-        with patch("tools.graph.ingest.ingest_all_claude_code", return_value=[]):
-            with patch("asyncio.to_thread", side_effect=slow_thread):
-                async def make_request(body):
-                    req = AsyncMock()
-                    req.json = AsyncMock(return_value=body)
-                    return await api_graph_sessions(req)
+        with patch("tools.dashboard.server._run_graph_sessions_ingest_cli", new=slow_ingest):
+            async def make_request(body):
+                req = AsyncMock()
+                req.json = AsyncMock(return_value=body)
+                return await api_graph_sessions(req)
 
-                task1 = asyncio.create_task(make_request({"all": True}))
-                await asyncio.sleep(0.01)
+            task1 = asyncio.create_task(make_request({"all": True}))
+            await asyncio.sleep(0.01)
 
-                assert _ingest_lock.locked(), "First call should hold the lock"
+            assert _ingest_lock.locked(), "First call should hold the lock"
 
-                resp2 = await make_request({"all": True})
-                body2 = json_mod.loads(resp2.body)
-                assert body2["skipped"] is True
-                assert body2["ok"] is True
+            resp2 = await make_request({"all": True})
+            body2 = json_mod.loads(resp2.body)
+            assert body2["skipped"] is True
+            assert body2["ok"] is True
 
-                slow_event.set()
-                resp1 = await task1
-                body1 = json_mod.loads(resp1.body)
-                assert body1["ok"] is True
-                assert "skipped" not in body1
+            slow_event.set()
+            resp1 = await task1
+            body1 = json_mod.loads(resp1.body)
+            assert body1["ok"] is True
+            assert "skipped" not in body1
 
     asyncio.run(_run())
