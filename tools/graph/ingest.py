@@ -738,19 +738,67 @@ def _load_session_meta(file_path: Path) -> dict:
     return {}
 
 
+# Claude Code project-dir → org slug. Host sessions live at
+# ``~/.claude/projects/-<encoded-cwd>/<uuid>.jsonl`` and carry no
+# ``.session_meta.json``, so the only routing signal is the encoded cwd.
+# Add entries here when a new on-host project dir starts producing sessions.
+_HOST_PROJECT_TO_ORG: dict[str, str] = {
+    "-home-jeremy-workspace-enterprise-ng": "anchore",
+    "-home-jeremy-workspace-enterprise": "anchore",
+    "-home-jeremy-workspace-enterprise-dev-compose-files": "anchore",
+    "-home-jeremy-workspace-autonomy": "autonomy",
+    "-home-jeremy-infra": "blindhash",
+    "-home-jeremy-blindhash": "blindhash",
+    "-home-jeremy-jira": "personal",
+    "-home-jeremy-boatlore": "personal",
+    "-home-jeremy-boatlore-chartroom": "personal",
+    "-home-jeremy-boatlore-compendium": "personal",
+    "-home-jeremy-boatlore-passage": "personal",
+    "-home-jeremy-ai-pres-my-video": "personal",
+}
+
+
+def _org_from_host_project_path(file_path: Path) -> str | None:
+    """Return the org slug for a Claude-Code host .jsonl, or ``None``.
+
+    Recognises the ``~/.claude/projects/-<encoded-cwd>/<uuid>.jsonl`` layout
+    and looks the encoded-cwd segment up in :data:`_HOST_PROJECT_TO_ORG`.
+    Returns ``None`` for unknown projects or non-host paths — the caller
+    will fall back to its other signals.
+    """
+    parent_name = file_path.parent.name
+    if not parent_name.startswith("-"):
+        return None
+    return _HOST_PROJECT_TO_ORG.get(parent_name)
+
+
 def session_target_org(file_path: Path | str, default: str | None = None) -> str | None:
     """Return the org slug a session file should land in, or ``None``.
 
-    Reads ``.session_meta.json`` near *file_path* and returns its
-    ``graph_org`` value — falling back to the legacy ``graph_project``
-    field (pre-rename sessions), then to *default*. The default is
-    ``None`` so callers fail-closed (skip ingest) for sessions without
-    org context, rather than silently routing to ``personal.db``.
+    Resolution order:
+
+    1. ``.session_meta.json`` near *file_path* (container sessions) —
+       returns ``graph_org`` or the legacy ``graph_project`` if set.
+    2. Claude-Code host project dir lookup
+       (:data:`_HOST_PROJECT_TO_ORG`) — for bare host ``.jsonl`` files
+       that have no meta alongside them.
+    3. *default*.
+
+    The default is ``None`` so callers fail-closed (skip ingest) for
+    sessions without org context, rather than silently routing to
+    ``personal.db``.
 
     Helper for per-org DB write routing. Pure read; no mutation.
     """
-    meta = _load_session_meta(Path(file_path))
-    return meta.get("graph_org") or meta.get("graph_project") or default
+    file_path = Path(file_path)
+    meta = _load_session_meta(file_path)
+    from_meta = meta.get("graph_org") or meta.get("graph_project")
+    if from_meta:
+        return from_meta
+    from_host = _org_from_host_project_path(file_path)
+    if from_host:
+        return from_host
+    return default
 
 
 def _open_db_for_session(
