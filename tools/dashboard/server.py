@@ -103,6 +103,7 @@ from tools.dashboard.session_harness import (
 )
 from tools.dashboard.session_monitor import count_tool_uses, session_monitor, TaskStateTracker
 from tools.dashboard.worktree_monitor import worktree_monitor
+from tools.dashboard import session_trace
 from tools.dashboard.dao import auth_db, dashboard_db
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
@@ -3226,6 +3227,27 @@ async def api_crosstalk_log(request):
     return JSONResponse({"messages": messages})
 
 
+async def api_session_startup_trace(request):
+    """GET /api/session/{tmux_name}/startup-trace — the persisted, structured
+    per-session startup timeline (data/session-traces/<tmux_name>.jsonl).
+
+    The reliable replacement for grepping phase-trace lines out of the
+    rotating dashboard.log: one query returns every phase with its dt_ms and
+    the terminal outcome (tracked / zombie_202 / prep error).
+    """
+    tmux_name = request.path_params["tmux_name"]
+    events = session_trace.read_trace(tmux_name)
+    outcome = next(
+        (e.get("outcome") for e in reversed(events) if e.get("outcome")), None,
+    )
+    return JSONResponse({
+        "tmux_name": tmux_name,
+        "event_count": len(events),
+        "outcome": outcome,
+        "events": events,
+    })
+
+
 async def api_primer(request):
     bead_id = request.path_params["id"]
     if os.environ.get("DASHBOARD_MOCK"):
@@ -5327,6 +5349,19 @@ async def api_session_create(request):
         import random
         tmux_name = f"{prefix}-{time.strftime('%m%d-%H%M%S')}-{random.randint(10, 99)}"
 
+    # Persistent, per-session startup trace (data/session-traces/<tmux>.jsonl).
+    # ``_trace`` mirrors the scattered ``phase-trace:`` log lines into a durable,
+    # structured, never-rotated per-session file so a launch can be reconstructed
+    # exactly without grepping the rotating dashboard.log. dt_ms is elapsed since
+    # request entry.
+    def _trace(phase: str, **detail) -> None:
+        session_trace.trace(
+            tmux_name, phase,
+            dt_ms=int((time.monotonic() - _phase_t0) * 1000),
+            **detail,
+        )
+    _trace("enter", project=project_name, session_type=session_type, primer=bool(primer_url))
+
     # ── Build the command to run inside tmux ───────────────────
     proj = None
     if project_name:
@@ -5421,6 +5456,7 @@ async def api_session_create(request):
                 "api_session_create: workspace prep failed  project=%s  err=%s",
                 proj.id, e,
             )
+            _trace("prep_failed", outcome="error", error=f"{type(e).__name__}: {e}")
             # Clean up the pending row registered above so a failed prep does
             # not leave a card stuck on the launching chip forever. deregister
             # marks the row dead and rebroadcasts the registry.
@@ -5440,6 +5476,7 @@ async def api_session_create(request):
         # the per-repo mount work independently.
         logger.info("phase-trace: mounts-prepared  tmux=%s  dt_from_post_ms=%d",
                     tmux_name, int((time.monotonic() - _phase_t0) * 1000))
+        _trace("mounts-prepared", repos=len(proj.repos))
         meta: dict = {
             "tmux_session": tmux_name,
             "project": proj.id,
@@ -5467,6 +5504,7 @@ async def api_session_create(request):
             tmux_name, int((time.monotonic() - _phase_t0) * 1000),
             int((time.monotonic() - _primer_t0) * 1000),
         )
+        _trace("primer-rendered", step_ms=int((time.monotonic() - _primer_t0) * 1000))
         global_claude_md = primer_path
         startup_script = (_REPO_ROOT / proj.startup) if proj.startup else None
         working_dir = proj.working_dir or "/workspace/repo"
@@ -5476,6 +5514,7 @@ async def api_session_create(request):
         logger.info(
             "phase-trace: launch-session-call  tmux=%s  dt_from_post_ms=%d",
             tmux_name, int((time.monotonic() - _phase_t0) * 1000))
+        _trace("launch-session-call")
         cmd_str = await asyncio.to_thread(
             launch_session,
             session_type="terminal",
@@ -5528,6 +5567,7 @@ async def api_session_create(request):
     # command) done; about to spawn the tmux session.
     logger.info("phase-trace: launch-session-built  tmux=%s  dt_from_post_ms=%d",
                 tmux_name, int((time.monotonic() - _phase_t0) * 1000))
+    _trace("launch-session-built")
     # Transition to launching_container before the tmux spawn. Container path
     # only — host sessions skip the docker spawn entirely.
     if is_container:
@@ -5585,6 +5625,7 @@ async def api_session_create(request):
     )
     logger.info("phase-trace: harness_starting  tmux=%s  dt_from_post_ms=%d",
                 tmux_name, int((time.monotonic() - _phase_t0) * 1000))
+    _trace("harness_starting")
 
     # ── Register with session monitor ───────────────────────────
     if is_container:
@@ -5728,6 +5769,7 @@ async def api_session_create(request):
                     "phase-trace: inject_skipped  tmux=%s  reason=composer_ready_timeout_60s  harness=%s",
                     tmux_name, harness,
                 )
+                _trace("inject_skipped", reason="composer_ready_timeout_60s", harness=harness)
                 return
             # Per-harness settle delay before tmux_send. The screen-poll
             # detects the composer PROMPT VISUAL before the harness's stdin
@@ -5750,6 +5792,7 @@ async def api_session_create(request):
                     tmux_name, int((time.monotonic() - _inject_wait_t0) * 1000),
                     len(msg), bool(primer_url and not primer_error), harness, settle,
                 )
+                _trace("first_message_injected", len=len(msg), harness=harness, settle_s=settle)
                 await session_monitor.update_phase(
                     tmux_name, startup_state="awaiting_first_response",
                 )
@@ -5758,6 +5801,7 @@ async def api_session_create(request):
                     "phase-trace: inject_failed  tmux=%s  harness=%s  exc=tmux_send_exception",
                     tmux_name, harness, exc_info=True,
                 )
+                _trace("inject_failed", harness=harness)
 
         asyncio.create_task(_inject_first_message())
     else:
@@ -5783,11 +5827,13 @@ async def api_session_create(request):
     # that's catch-up latency, not boot.)
     logger.info("phase-trace: response-ready  tmux=%s  dt_from_post_ms=%d",
                 tmux_name, int((time.monotonic() - _phase_t0) * 1000))
+    _trace("response-ready")
 
     response_type = "container" if is_container else "host"
 
     # ── Host sessions: return immediately; watcher resolves JSONL ──
     if not is_container:
+        _trace("returned", outcome="host_immediate")
         return JSONResponse({
             "tmux_name": tmux_name,
             "label": "",
@@ -5799,6 +5845,10 @@ async def api_session_create(request):
     while time.time() < deadline:
         row = dashboard_db.get_session(tmux_name)
         if row and row.get("is_live") and row.get("jsonl_path"):
+            # The session became fully tracked (JSONL resolved) — the real
+            # success signal. The trace records WHEN, so a slow resolution
+            # shows up as a large dt_ms here.
+            _trace("tracked", outcome="success", jsonl_resolved=True)
             resp = {
                 "tmux_name": tmux_name,
                 "label": row.get("label", ""),
@@ -5809,6 +5859,11 @@ async def api_session_create(request):
             return JSONResponse(resp)
         await asyncio.sleep(1)
 
+    # 30s elapsed and the JSONL never resolved — the session is a "zombie"
+    # (alive but untracked: no first turn captured). This is the single most
+    # important failure signal and the one the rotating log kept losing.
+    _trace("tracking_timeout", outcome="zombie_202",
+           jsonl_resolved=False, waited_s=30)
     resp = {
         "tmux_name": tmux_name,
         "label": "",
@@ -13959,6 +14014,7 @@ routes = [
     Route("/api/session/{tmux_name}/label", api_session_label, methods=["PUT"]),
     Route("/api/session/{tmux_name}/topics", api_session_topics, methods=["PUT"]),
     Route("/api/session/{tmux_name}/role", api_session_role, methods=["PUT"]),
+    Route("/api/session/{tmux_name}/startup-trace", api_session_startup_trace, methods=["GET"]),
     Route("/api/session/{tmux_name}/nag", api_session_nag, methods=["PUT"]),
     Route("/api/session/{tmux_name}/nag", api_session_nag_delete, methods=["DELETE"]),
     Route("/api/session/{tmux_name}/dispatch-nag", api_session_dispatch_nag, methods=["PUT"]),
