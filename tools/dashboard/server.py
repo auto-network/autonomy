@@ -6093,13 +6093,13 @@ async def api_session_create(request):
     Returns: {"tmux_name": str, "label": str, "type": str}
 
     Semantics:
-      • `project` set → validate config, register a pending row, and launch
-        the provisioning/container pipeline in the background.
+      • `project` set → validate config, register a requested row, and enqueue
+        the provisioning/container lifecycle worker job.
       • `type == "host"` → start `claude --dangerously-skip-permissions` on
         the host, then watch for its JSONL to appear.
       • neither → default `autonomy-agent:dashboard` container session.
 
-    Workspace project sessions return immediately after the pending row is
+    Workspace project sessions return immediately after the lifecycle job is
     registered; progress is delivered via startup_state/SSE.  Non-workspace
     container sessions still wait for monitor tracking on the legacy path.
     Host sessions return immediately — their JSONL is discovered
@@ -6199,22 +6199,44 @@ async def api_session_create(request):
             project=proj.id,
             harness=proj.harness or "claude",
         )
-        _track_session_create_task(asyncio.create_task(
-            _finish_project_session_create(
-                tmux_name=tmux_name,
-                proj=proj,
-                primer_url=primer_url,
-                phase_t0=_phase_t0,
+        job = LifecycleJob(
+            "start",
+            tmux_name,
+            {
+                "project_id": proj.id,
+                "primer_url": primer_url,
+                "attempt": 1,
+                "event_loop": asyncio.get_running_loop(),
+            },
+        )
+        if not _SESSION_LIFECYCLE_WORKER.try_enqueue(job):
+            reason = "session lifecycle queue is full"
+            SessionLifecycleStateWriter().fail(
+                tmux_name,
+                phase="requested",
+                reason=reason,
+                retryable=True,
+                attempt=1,
             )
-        ))
-        logger.info("phase-trace: response-ready  tmux=%s  dt_from_post_ms=%d  backgrounded=1",
+            logger.warning(
+                "api_session_create: lifecycle queue full tmux=%s project=%s",
+                tmux_name,
+                proj.id,
+            )
+            return JSONResponse(
+                {"error": reason, "tmux_name": tmux_name, "retryable": True},
+                status_code=503,
+            )
+
+        _trace("queued", project=proj.id, harness=proj.harness or "claude")
+        logger.info("phase-trace: response-ready  tmux=%s  dt_from_post_ms=%d  queued=1",
                     tmux_name, int((time.monotonic() - _phase_t0) * 1000))
         return JSONResponse({
             "tmux_name": tmux_name,
             "label": "",
             "type": "container",
             "pending": True,
-        })
+        }, status_code=202)
     elif session_type == "host":
         model = _resolve_host_session_model()
         cmd_str = (
