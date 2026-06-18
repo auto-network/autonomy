@@ -5,6 +5,7 @@ from __future__ import annotations
 import json as _json
 import logging
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -690,3 +691,53 @@ def get_recent_sessions(
         r.pop("_job_id", None)
         r.pop("_job_type", None)
     return out
+
+
+# ── Recent-sessions cache ──────────────────────────────────────────────────
+# get_recent_sessions iterates every per-org DB and parses ~thousands of rows;
+# on the request path that's 200-500ms idle and tens of seconds when those DBs
+# are being written (graph ingest) or the disk is busy (clone). So the request
+# path NEVER computes it: a background refresher (server _on_startup) precomputes
+# the hot param combos off-loop and the handler reads this cache. Unknown combos
+# are registered on first request and warmed within one refresh cycle.
+_RECENT_CACHE: dict[tuple, list] = {}
+_RECENT_KEYS: set[tuple] = {
+    ("lastActivity", "1d", "all"),
+    ("lastActivity", "1w", "interactive"),
+}
+_RECENT_LOCK = threading.Lock()
+
+
+def recent_sessions_cached(sort: str, since: str, type_group: str) -> list | None:
+    """Cached recent-sessions list for these params, or None if not yet warmed.
+
+    Registers the key so the background refresher computes it. NEVER computes on
+    the caller's thread — the handler serves ``[]`` on a cold ``None`` and the
+    refresher fills it within one cycle, so a request can never block on org-DB
+    iteration.
+    """
+    key = (sort, since, type_group)
+    with _RECENT_LOCK:
+        _RECENT_KEYS.add(key)
+        return _RECENT_CACHE.get(key)
+
+
+def refresh_recent_cache() -> int:
+    """Recompute every registered key (off the request path). Keeps the last
+    good value on error. Returns how many keys were refreshed."""
+    with _RECENT_LOCK:
+        keys = list(_RECENT_KEYS)
+    n = 0
+    for sort, since, type_group in keys:
+        try:
+            res = get_recent_sessions(None, sort, since, type_group)
+        except Exception:
+            logger.exception(
+                "recent_sessions cache refresh failed for %s/%s/%s",
+                sort, since, type_group,
+            )
+            continue
+        with _RECENT_LOCK:
+            _RECENT_CACHE[(sort, since, type_group)] = res
+        n += 1
+    return n

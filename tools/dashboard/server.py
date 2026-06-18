@@ -9291,9 +9291,13 @@ async def api_dao_recent_sessions(request):
     sort = request.query_params.get("sort", "lastActivity")
     since = request.query_params.get("since", "1d")
     type_group = request.query_params.get("type", "all")
-    sessions = await asyncio.to_thread(
-        dao_sessions.get_recent_sessions, None, sort, since, type_group
-    )
+    # Served from the background-refreshed cache — the request path NEVER
+    # iterates the org DBs (that is what hung this endpoint to ~30s under graph
+    # ingest contention). A cold key returns [] and is warmed within one refresh
+    # cycle by _recent_sessions_refresher.
+    sessions = dao_sessions.recent_sessions_cached(sort, since, type_group)
+    if sessions is None:
+        sessions = []
     return JSONResponse(sessions)
 
 
@@ -14838,7 +14842,25 @@ _mock_event_watcher_task: asyncio.Task | None = None
 _harness_usage_poller_task: asyncio.Task | None = None
 _claude_credentials_refresh_task: asyncio.Task | None = None
 _event_loop_watchdog_task: asyncio.Task | None = None
+_recent_sessions_refresher_task: asyncio.Task | None = None
 _settings_mediator_started: bool = False
+
+
+async def _recent_sessions_refresher():
+    """Warm the recent-sessions cache off the request path.
+
+    Every few seconds, recompute the registered param combos in a worker thread
+    so ``/api/dao/recent_sessions`` reads a precomputed dict instead of iterating
+    the per-org DBs on the request — the iteration is what hung that endpoint to
+    ~30s under graph-ingest contention. A slow refresh tick stays off the loop
+    and the handler keeps serving the last good cache meanwhile.
+    """
+    while True:
+        try:
+            await asyncio.to_thread(dao_sessions.refresh_recent_cache)
+        except Exception:
+            logger.exception("recent_sessions refresher tick failed")
+        await asyncio.sleep(5)
 
 
 async def _event_loop_watchdog():
@@ -14896,6 +14918,7 @@ def _build_settings_mediator_services():
 async def _on_startup():
     global _dispatch_watcher_task, _mock_event_watcher_task, _harness_usage_poller_task
     global _claude_credentials_refresh_task, _event_loop_watchdog_task
+    global _recent_sessions_refresher_task
     # Re-arm the emit hook on every lifespan startup. Module import
     # already wires it (so ASGITransport-based tests that skip lifespan
     # still get function-level emits), but we re-arm here so that
@@ -14974,6 +14997,7 @@ async def _on_startup():
     await worktree_monitor.start()
     _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())
     _event_loop_watchdog_task = asyncio.create_task(_event_loop_watchdog())
+    _recent_sessions_refresher_task = asyncio.create_task(_recent_sessions_refresher())
     # Session lifecycle worker (FSM redesign 2026-06-18): start the single
     # off-loop thread that owns workspace start/stop/retry. It sits idle until
     # api_session_create is rewired to enqueue — starting it now is additive and
@@ -15037,6 +15061,7 @@ async def _on_shutdown():
             _harness_usage_poller_task,
             _claude_credentials_refresh_task,
             _event_loop_watchdog_task,
+            _recent_sessions_refresher_task,
         )
         if t and not t.done()
     ]
