@@ -137,7 +137,12 @@ def _run_git(args: list[str], *, cwd: Path | None = None, timeout: int = 600) ->
     return result.stdout
 
 
-def ensure_managed_clone(url: str, *, repos_dir: Path = REPOS_DIR) -> Path:
+def ensure_managed_clone(
+    url: str,
+    *,
+    repos_dir: Path = REPOS_DIR,
+    git_timeout: int = 600,
+) -> Path:
     """Clone ``url`` under ``repos_dir`` if missing, otherwise fetch + prune.
 
     Returns the path to the managed clone. Subsequent calls for the same URL
@@ -146,17 +151,17 @@ def ensure_managed_clone(url: str, *, repos_dir: Path = REPOS_DIR) -> Path:
     clone_path = managed_clone_path(url, repos_dir=repos_dir)
     if clone_path.exists():
         logger.info("workspace: fetching %s", clone_path)
-        _run_git(["fetch", "origin", "--prune"], cwd=clone_path)
+        _run_git(["fetch", "origin", "--prune"], cwd=clone_path, timeout=git_timeout)
         # Refresh the local integration branch when it is merely stale behind
         # origin, but preserve any local-only commits operators may have
         # staged onto the managed clone as the current base.
         default = _repo_default_branch(clone_path)
         if default:
-            _refresh_local_branch_from_remote(clone_path, default)
+            _refresh_local_branch_from_remote(clone_path, default, timeout=min(git_timeout, 15))
     else:
         logger.info("workspace: cloning %s → %s", url, clone_path)
         clone_path.parent.mkdir(parents=True, exist_ok=True)
-        _run_git(["clone", url, str(clone_path)])
+        _run_git(["clone", url, str(clone_path)], timeout=git_timeout)
     return clone_path
 
 
@@ -187,6 +192,8 @@ def _refresh_existing_worktree(
     managed_clone: Path,
     worktree_dir: Path,
     branch: str,
+    *,
+    git_timeout: int = 600,
 ) -> None:
     """Refresh a reused worktree to the current integration base when safe.
 
@@ -223,8 +230,8 @@ def _refresh_existing_worktree(
         worktree_dir,
         base_ref,
     )
-    _run_git(["reset", "--hard", base_ref], cwd=worktree_dir)
-    _run_git(["clean", "-fd"], cwd=worktree_dir)
+    _run_git(["reset", "--hard", base_ref], cwd=worktree_dir, timeout=git_timeout)
+    _run_git(["clean", "-fd"], cwd=worktree_dir, timeout=git_timeout)
 
 
 def create_worktree(
@@ -233,6 +240,7 @@ def create_worktree(
     branch: str,
     *,
     refresh_existing: bool = False,
+    git_timeout: int = 600,
 ) -> Path:
     """Create a new worktree at ``worktree_dir`` on ``branch`` from the
     managed clone's current integration base.
@@ -242,7 +250,12 @@ def create_worktree(
     """
     if worktree_dir.exists():
         if refresh_existing:
-            _refresh_existing_worktree(managed_clone, worktree_dir, branch)
+            _refresh_existing_worktree(
+                managed_clone,
+                worktree_dir,
+                branch,
+                git_timeout=git_timeout,
+            )
         return worktree_dir
     worktree_dir.parent.mkdir(parents=True, exist_ok=True)
     # If the session branch already exists in the managed clone — typically
@@ -259,24 +272,30 @@ def create_worktree(
         _run_git(
             ["worktree", "add", str(worktree_dir), branch],
             cwd=managed_clone,
+            timeout=git_timeout,
         )
     else:
         base_ref = _repo_integration_base_ref(managed_clone)
         _run_git(
             ["worktree", "add", "-b", branch, str(worktree_dir), base_ref],
             cwd=managed_clone,
+            timeout=git_timeout,
         )
     return worktree_dir
 
 
-def _update_readonly_clone(clone: Path) -> None:
+def _update_readonly_clone(clone: Path, *, git_timeout: int = 600) -> None:
     """Fast-forward the managed clone's working tree to the current base ref.
 
     Read-only repos are mounted directly from the managed clone, so the
     clone's own checkout must be current. We use ``checkout --detach`` so
     the clone stays on a detached HEAD and never conflicts with worktrees.
     """
-    _run_git(["checkout", "--detach", _repo_integration_base_ref(clone)], cwd=clone)
+    _run_git(
+        ["checkout", "--detach", _repo_integration_base_ref(clone)],
+        cwd=clone,
+        timeout=git_timeout,
+    )
 
 
 def _repo_identity(url: str) -> tuple[str, str] | str:
@@ -294,7 +313,12 @@ def _repo_identity(url: str) -> tuple[str, str] | str:
         return str(Path(url).resolve())
 
 
-def _sync_managed_clone_from_base_source(repo: RepoMount, clone: Path) -> None:
+def _sync_managed_clone_from_base_source(
+    repo: RepoMount,
+    clone: Path,
+    *,
+    git_timeout: int = 600,
+) -> None:
     """Sync ``clone``'s integration branch from ``repo.base_source``.
 
     Validates that the host path exists, is a git checkout, and its
@@ -352,7 +376,7 @@ def _sync_managed_clone_from_base_source(repo: RepoMount, clone: Path) -> None:
         "workspace: syncing managed clone %s from base_source %s (branch %s)",
         clone, base_source, branch,
     )
-    _sync_managed_clone_branch_ref(clone, host_path, branch)
+    _sync_managed_clone_branch_ref(clone, host_path, branch, timeout=git_timeout)
 
 
 def prepare_session_mounts(
@@ -363,6 +387,7 @@ def prepare_session_mounts(
     worktrees_dir: Path = WORKTREES_DIR,
     refresh_existing_worktree: bool = False,
     progress_callback: Callable[[int, int, str], None] | None = None,
+    git_timeout: int = 600,
 ) -> dict[str, str]:
     """Prepare clones + worktrees for ``workspace`` and return launch_session mounts.
 
@@ -378,8 +403,12 @@ def prepare_session_mounts(
     mounts: dict[str, str] = {}
     total = len(workspace.repos)
     for idx, repo in enumerate(workspace.repos):
-        clone = ensure_managed_clone(repo.url, repos_dir=repos_dir)
-        _sync_managed_clone_from_base_source(repo, clone)
+        clone = ensure_managed_clone(
+            repo.url,
+            repos_dir=repos_dir,
+            git_timeout=git_timeout,
+        )
+        _sync_managed_clone_from_base_source(repo, clone, git_timeout=git_timeout)
         if repo.writable:
             worktree = worktrees_dir / session_name / _worktree_basename(repo.url)
             create_worktree(
@@ -387,6 +416,7 @@ def prepare_session_mounts(
                 worktree,
                 f"session/{session_name}",
                 refresh_existing=refresh_existing_worktree,
+                git_timeout=git_timeout,
             )
             mounts[str(worktree)] = repo.mount
             # Worktree's .git file points at an absolute host path inside the
@@ -411,7 +441,7 @@ def prepare_session_mounts(
                 git_worktrees_dir / own_metadata_name
             )
         else:
-            _update_readonly_clone(clone)
+            _update_readonly_clone(clone, git_timeout=git_timeout)
             mounts[str(clone)] = f"{repo.mount}:ro"
         if progress_callback is not None:
             try:
@@ -681,7 +711,12 @@ def _repo_default_branch(repo: Path) -> str | None:
     return None
 
 
-def _refresh_local_branch_from_remote(repo: Path, branch: str) -> None:
+def _refresh_local_branch_from_remote(
+    repo: Path,
+    branch: str,
+    *,
+    timeout: int = 15,
+) -> None:
     """Fast-forward ``refs/heads/<branch>`` from origin when safe.
 
     Managed clones should normally track origin exactly. The only supported
@@ -693,16 +728,16 @@ def _refresh_local_branch_from_remote(repo: Path, branch: str) -> None:
     """
     local_ref = f"refs/heads/{branch}"
     remote_ref = f"refs/remotes/origin/{branch}"
-    local_ok = _git_output(["rev-parse", "--verify", local_ref], repo, timeout=15)[0] == 0
-    remote_ok = _git_output(["rev-parse", "--verify", remote_ref], repo, timeout=15)[0] == 0
+    local_ok = _git_output(["rev-parse", "--verify", local_ref], repo, timeout=timeout)[0] == 0
+    remote_ok = _git_output(["rev-parse", "--verify", remote_ref], repo, timeout=timeout)[0] == 0
     if not remote_ok:
         return
     if not local_ok:
-        _git_output(["update-ref", local_ref, remote_ref], repo, timeout=15)
+        _git_output(["update-ref", local_ref, remote_ref], repo, timeout=timeout)
         return
 
-    local_head = _git_output(["rev-parse", "--verify", local_ref], repo, timeout=15)[1].strip()
-    remote_head = _git_output(["rev-parse", "--verify", remote_ref], repo, timeout=15)[1].strip()
+    local_head = _git_output(["rev-parse", "--verify", local_ref], repo, timeout=timeout)[1].strip()
+    remote_head = _git_output(["rev-parse", "--verify", remote_ref], repo, timeout=timeout)[1].strip()
     if not local_head or not remote_head:
         return
     sync_head = _managed_clone_synced_source_head(repo, branch)
@@ -714,10 +749,10 @@ def _refresh_local_branch_from_remote(repo: Path, branch: str) -> None:
     rc, _, _ = _git_output(
         ["merge-base", "--is-ancestor", local_ref, remote_ref],
         repo,
-        timeout=15,
+        timeout=timeout,
     )
     if rc == 0:
-        _git_output(["update-ref", local_ref, remote_ref], repo, timeout=15)
+        _git_output(["update-ref", local_ref, remote_ref], repo, timeout=timeout)
         _managed_clone_clear_synced_source_ref(repo, branch)
         return
 
@@ -731,7 +766,7 @@ def _refresh_local_branch_from_remote(repo: Path, branch: str) -> None:
         )
         return
 
-    _git_output(["update-ref", local_ref, remote_ref], repo, timeout=15)
+    _git_output(["update-ref", local_ref, remote_ref], repo, timeout=timeout)
     _managed_clone_clear_synced_source_ref(repo, branch)
     logger.info(
         "workspace: reset divergent local %s in %s back to origin (local=%s remote=%s)",
@@ -819,7 +854,13 @@ def _managed_clone_clear_synced_source_ref(repo: Path, branch: str) -> None:
     )
 
 
-def _sync_managed_clone_branch_ref(clone: Path, source_repo: Path, branch: str) -> None:
+def _sync_managed_clone_branch_ref(
+    clone: Path,
+    source_repo: Path,
+    branch: str,
+    *,
+    timeout: int = 600,
+) -> None:
     """Sync ``clone``'s local branch ref from ``source_repo`` using a temp ref.
 
     The managed clone can have the destination branch checked out, so fetch into
@@ -830,14 +871,17 @@ def _sync_managed_clone_branch_ref(clone: Path, source_repo: Path, branch: str) 
         _run_git(
             ["fetch", str(source_repo), f"refs/heads/{branch}:{temp_ref}"],
             cwd=clone,
+            timeout=timeout,
         )
         _run_git(
             ["update-ref", f"refs/heads/{branch}", temp_ref],
             cwd=clone,
+            timeout=timeout,
         )
         _run_git(
             ["update-ref", _managed_clone_synced_source_ref(branch), temp_ref],
             cwd=clone,
+            timeout=timeout,
         )
     finally:
         _git_output(["update-ref", "-d", temp_ref], clone, timeout=15)
