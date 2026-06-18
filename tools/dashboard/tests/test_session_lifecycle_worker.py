@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 
@@ -52,18 +53,32 @@ def test_state_writer_maps_lifecycle_to_existing_columns(tmp_path):
 
     writer.set_state("auto-life", "requested")
     assert _row()["startup_state"] == "requesting"
-    assert _row()["activity_state"] == "starting"
+    assert _row()["activity_state"] == "running"
     assert _row()["is_live"] == 1
+    assert _row()["lifecycle_detail"] is None
 
     writer.set_state("auto-life", "running")
     assert _row()["startup_state"] is None
-    assert _row()["activity_state"] == "idle"
+    assert _row()["activity_state"] == "running"
     assert _row()["is_live"] == 1
+    assert _row()["lifecycle_detail"] is None
 
-    writer.fail("auto-life", phase="injecting", reason="composer timeout")
+    writer.fail(
+        "auto-life",
+        phase="injecting",
+        reason="composer timeout",
+        retryable=False,
+        attempt=3,
+    )
     assert _row()["startup_state"] == "setup_failed"
     assert _row()["activity_state"] == "failed"
-    assert _row()["is_live"] == 1
+    assert _row()["is_live"] == 0
+    detail = json.loads(_row()["lifecycle_detail"])
+    assert detail["failed_phase"] == "injecting"
+    assert detail["reason"] == "composer timeout"
+    assert detail["retryable"] is False
+    assert detail["attempt"] == 3
+    assert isinstance(detail["last_progress_at"], float)
     assert seen[-1].state == "failed"
     assert seen[-1].phase == "injecting"
     assert seen[-1].reason == "composer timeout"
@@ -72,6 +87,7 @@ def test_state_writer_maps_lifecycle_to_existing_columns(tmp_path):
     assert _row()["startup_state"] is None
     assert _row()["activity_state"] == "dead"
     assert _row()["is_live"] == 0
+    assert _row()["lifecycle_detail"] is None
 
 
 def test_worker_runs_jobs_serially_on_background_thread(tmp_path):
@@ -102,8 +118,8 @@ def test_worker_runs_jobs_serially_on_background_thread(tmp_path):
 
     assert [name for name, _thread_name in calls] == ["auto-one", "auto-two"]
     assert all(thread_name == "test-lifecycle" for _name, thread_name in calls)
-    assert _row("auto-one")["activity_state"] == "idle"
-    assert _row("auto-two")["activity_state"] == "idle"
+    assert _row("auto-one")["activity_state"] == "running"
+    assert _row("auto-two")["activity_state"] == "running"
 
 
 def test_worker_marks_job_failed_when_handler_raises(tmp_path):
@@ -132,6 +148,10 @@ def test_worker_marks_job_failed_when_handler_raises(tmp_path):
 
     assert _row()["startup_state"] == "setup_failed"
     assert _row()["activity_state"] == "failed"
+    assert _row()["is_live"] == 0
+    detail = json.loads(_row()["lifecycle_detail"])
+    assert detail["failed_phase"] == "start"
+    assert "RuntimeError: boom" in detail["reason"]
 
 
 def test_worker_backpressure_is_nonblocking():

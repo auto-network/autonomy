@@ -135,6 +135,11 @@ from tools.dashboard.session_harness import (
     resolve_harness_for_session_row,
 )
 from tools.dashboard.session_monitor import count_tool_uses, session_monitor, TaskStateTracker
+from tools.dashboard.session_lifecycle_worker import (
+    LifecycleJob,
+    SessionLifecycleStateWriter,
+    SessionLifecycleWorker,
+)
 from tools.dashboard.worktree_monitor import worktree_monitor
 from tools.dashboard import session_trace
 from tools.dashboard.dao import auth_db, dashboard_db
@@ -5310,6 +5315,9 @@ async def _resolve_primer(primer: str) -> str | None:
 
 
 _HOST_MODEL_FALLBACK = "claude-opus-4-8[1m]"
+_LIFECYCLE_PREPARING_TIMEOUT_S = 120
+_LIFECYCLE_LAUNCHING_TIMEOUT_S = 60
+_LIFECYCLE_REGISTER_TIMEOUT_S = 5
 
 
 def _resolve_host_session_model() -> str:
@@ -5326,6 +5334,189 @@ def _resolve_host_session_model() -> str:
     except (KeyError, workspace_settings.WorkspaceSettingsError):
         pass
     return _HOST_MODEL_FALLBACK
+
+
+def _remaining_step_timeout(deadline: float, phase: str) -> int:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError(f"{phase} timed out")
+    return max(1, int(remaining))
+
+
+def _register_project_session_from_worker(
+    *,
+    tmux_name: str,
+    proj,
+    run_dir: Path,
+    primer_url: str | None,
+    loop: asyncio.AbstractEventLoop | None,
+) -> None:
+    """Register the launched session without doing lifecycle state writes."""
+    sess_dir = run_dir / "sessions"
+    if loop is not None and loop.is_running():
+        fut = asyncio.run_coroutine_threadsafe(
+            session_monitor.register(
+                tmux_name=tmux_name,
+                session_type="container",
+                project=proj.id,
+                jsonl_path=sess_dir,
+                harness=proj.harness or "claude",
+                seed_message="Starting..." if not primer_url else "",
+            ),
+            loop,
+        )
+        fut.result(timeout=_LIFECYCLE_REGISTER_TIMEOUT_S)
+        return
+
+    # Fallback for tests and early worker wiring before the monitor loop is
+    # supplied. It backfills the durable row; monitor tail-state setup remains
+    # the responsibility of the startup wiring.
+    conn = dashboard_db.get_conn()
+    conn.execute(
+        "UPDATE tmux_sessions"
+        " SET type=?, project=?, harness=?, resolution_dir=?"
+        " WHERE tmux_name=?",
+        ("container", proj.id, proj.harness or "claude", str(sess_dir), tmux_name),
+    )
+    conn.commit()
+    if not primer_url:
+        dashboard_db.update_tail_state(tmux_name, last_message="Starting...")
+
+
+def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateWriter) -> None:
+    """Worker-thread implementation of workspace prepare/launch/tmux/register."""
+    tmux_name = job.tmux_name
+    project_id = str(job.config["project_id"])
+    primer_url = job.config.get("primer_url")
+    attempt = int(job.config.get("attempt", 1))
+    loop = job.config.get("event_loop")
+    if loop is not None and not isinstance(loop, asyncio.AbstractEventLoop):
+        loop = None
+
+    try:
+        proj = workspace_settings.get_workspace(project_id)
+    except Exception as exc:
+        writer.fail(
+            tmux_name,
+            phase="requested",
+            reason=f"{type(exc).__name__}: {exc}",
+            attempt=attempt,
+        )
+        return
+
+    try:
+        writer.set_state(tmux_name, "preparing")
+        prepare_deadline = time.monotonic() + _LIFECYCLE_PREPARING_TIMEOUT_S
+
+        def _on_repo_prepared(repo_index: int, total_repos: int, repo_name: str):
+            logger.info(
+                "session_lifecycle: preparing tmux=%s repo_index=%d total=%d current_repo=%s",
+                tmux_name, repo_index, total_repos, repo_name,
+            )
+
+        project_mounts = prepare_session_mounts(
+            proj,
+            tmux_name,
+            refresh_existing_worktree=True,
+            progress_callback=_on_repo_prepared,
+            git_timeout=_LIFECYCLE_PREPARING_TIMEOUT_S,
+        )
+        _remaining_step_timeout(prepare_deadline, "preparing")
+        project_mounts.update(workspace_settings.artifact_mounts(proj))
+
+        writer.set_state(tmux_name, "launching")
+        launch_deadline = time.monotonic() + _LIFECYCLE_LAUNCHING_TIMEOUT_S
+        meta: dict = {
+            "tmux_session": tmux_name,
+            "project": proj.id,
+            "graph_project": proj.graph_project,
+        }
+        if proj.default_tags:
+            meta["graph_tags"] = list(proj.default_tags)
+        extra_env: dict[str, str] = dict(proj.env) if proj.env else {}
+        for var in proj.env_from_host:
+            val = os.environ.get(var)
+            if val is not None:
+                extra_env[var] = val
+        extra_env = extra_env or None
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        run_dir = _REPO_ROOT / "data" / "agent-runs" / f"{tmux_name}-{ts}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        primer_path = run_dir / ".claude_md"
+        primer_path.write_text(render_workspace_primer(proj))
+        startup_script = (_REPO_ROOT / proj.startup) if proj.startup else None
+        working_dir = proj.working_dir or "/workspace/repo"
+
+        cmd_str = launch_session(
+            session_type="terminal",
+            name=tmux_name,
+            prompt=None,
+            detach=False,
+            image=proj.image,
+            mounts=project_mounts or None,
+            metadata=meta,
+            harness=proj.harness,
+            model=proj.model or None,
+            extra_env=extra_env,
+            output_dir=str(run_dir),
+            global_claude_md=primer_path,
+            startup_script=startup_script,
+            privileged=proj.dind,
+            working_dir=working_dir,
+            network_host=proj.network_host,
+            capabilities=proj.capabilities,
+        )
+        _remaining_step_timeout(launch_deadline, "launching")
+        if not cmd_str:
+            raise RuntimeError(f"launch_session failed for project '{proj.id}'")
+
+        tmux_cmd = [
+            "tmux", "new-session", "-d", "-s", tmux_name, "-x", "120",
+            "-y", "40", cmd_str,
+        ]
+        result = subprocess.run(
+            tmux_cmd,
+            env={**os.environ, "TERM": "xterm-256color"},
+            capture_output=True,
+            timeout=_remaining_step_timeout(launch_deadline, "launching"),
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode().strip()
+            raise RuntimeError(f"tmux creation failed: {stderr}")
+        for opt, val in (
+            ("set-clipboard", "on"),
+            ("mouse", "on"),
+            ("allow-passthrough", "on"),
+        ):
+            subprocess.run(
+                ["tmux", "set-option", "-t", tmux_name, opt, val],
+                capture_output=True,
+                timeout=_remaining_step_timeout(launch_deadline, "launching"),
+            )
+
+        writer.set_state(tmux_name, "setup")
+        _register_project_session_from_worker(
+            tmux_name=tmux_name,
+            proj=proj,
+            run_dir=run_dir,
+            primer_url=primer_url if isinstance(primer_url, str) else None,
+            loop=loop,
+        )
+        writer.set_state(tmux_name, "waiting_ready")
+    except TimeoutError as exc:
+        writer.fail(tmux_name, phase=str(exc).split()[0], reason=str(exc), attempt=attempt)
+    except (WorkspaceError, workspace_settings.WorkspaceMountError, RuntimeError) as exc:
+        writer.fail(
+            tmux_name,
+            phase="start",
+            reason=f"{type(exc).__name__}: {exc}",
+            attempt=attempt,
+        )
+
+
+_SESSION_LIFECYCLE_WORKER = SessionLifecycleWorker()
+_SESSION_LIFECYCLE_WORKER.register_handler("start", _run_project_session_start)
 
 
 async def _finish_project_session_create(

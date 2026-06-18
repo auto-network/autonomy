@@ -453,8 +453,8 @@ def _resolve_credentials_via_substrate(
         # caller as None and the existing "No Claude credentials found"
         # error message takes over.
         try:
-            subprocess.run(["graph", "claude", "install"], check=True)
-        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+            subprocess.run(["graph", "claude", "install"], check=True, timeout=30)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError):
             logger.exception(
                 "session_launcher: `graph claude install` failed; "
                 "no Claude credentials available",

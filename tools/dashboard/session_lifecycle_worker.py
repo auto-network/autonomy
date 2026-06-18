@@ -8,6 +8,7 @@ state writer.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import logging
 import queue
 import threading
@@ -23,6 +24,7 @@ LifecycleState = Literal[
     "launching",
     "setup",
     "waiting_ready",
+    "composer_ready",
     "injecting",
     "running",
     "failed",
@@ -39,6 +41,7 @@ _STARTUP_STATE_FOR_LIFECYCLE: dict[str, str | None] = {
     "launching": "launching_container",
     "setup": "setup_running",
     "waiting_ready": "harness_starting",
+    "composer_ready": "composer_ready",
     "injecting": "awaiting_first_response",
     "running": None,
     "failed": "setup_failed",
@@ -48,13 +51,14 @@ _STARTUP_STATE_FOR_LIFECYCLE: dict[str, str | None] = {
 }
 
 _ACTIVITY_STATE_FOR_LIFECYCLE: dict[str, str] = {
-    "requested": "starting",
-    "preparing": "starting",
-    "launching": "starting",
-    "setup": "starting",
-    "waiting_ready": "starting",
-    "injecting": "starting",
-    "running": "idle",
+    "requested": "running",
+    "preparing": "running",
+    "launching": "running",
+    "setup": "running",
+    "waiting_ready": "running",
+    "composer_ready": "running",
+    "injecting": "running",
+    "running": "running",
     "failed": "failed",
     "stopping": "stopping",
     "cleaning": "cleaning",
@@ -99,19 +103,35 @@ class SessionLifecycleStateWriter:
         *,
         phase: str | None = None,
         reason: str | None = None,
+        retryable: bool = True,
+        attempt: int = 1,
     ) -> None:
         from tools.dashboard.dao import dashboard_db
 
         startup_state = _STARTUP_STATE_FOR_LIFECYCLE[state]
         activity_state = _ACTIVITY_STATE_FOR_LIFECYCLE[state]
-        is_live = 0 if state == "dead" else 1
+        is_live = 0 if state in ("dead", "failed") else 1
+        now = time.time()
+        lifecycle_detail = None
+        if state == "failed":
+            lifecycle_detail = json.dumps(
+                {
+                    "failed_phase": phase or "",
+                    "reason": reason or "",
+                    "retryable": bool(retryable),
+                    "attempt": int(attempt),
+                    "last_progress_at": now,
+                },
+                sort_keys=True,
+            )
 
         conn = dashboard_db.get_conn()
         cur = conn.execute(
             "UPDATE tmux_sessions"
-            " SET startup_state=?, activity_state=?, is_live=?, last_activity=?"
+            " SET startup_state=?, activity_state=?, is_live=?,"
+            " last_activity=?, lifecycle_detail=?"
             " WHERE tmux_name=?",
-            (startup_state, activity_state, is_live, time.time(), tmux_name),
+            (startup_state, activity_state, is_live, now, lifecycle_detail, tmux_name),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -136,8 +156,23 @@ class SessionLifecycleStateWriter:
         if self._on_transition is not None:
             self._on_transition(transition)
 
-    def fail(self, tmux_name: str, *, phase: str, reason: str) -> None:
-        self.set_state(tmux_name, "failed", phase=phase, reason=reason)
+    def fail(
+        self,
+        tmux_name: str,
+        *,
+        phase: str,
+        reason: str,
+        retryable: bool = True,
+        attempt: int = 1,
+    ) -> None:
+        self.set_state(
+            tmux_name,
+            "failed",
+            phase=phase,
+            reason=reason,
+            retryable=retryable,
+            attempt=attempt,
+        )
 
 
 LifecycleHandler = Callable[[LifecycleJob, SessionLifecycleStateWriter], None]
