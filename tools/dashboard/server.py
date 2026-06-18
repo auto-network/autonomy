@@ -20,6 +20,7 @@ import struct
 import subprocess
 import sys
 import termios
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -5328,6 +5329,10 @@ _LIFECYCLE_WAITING_READY_TIMEOUT_S = 60
 _LIFECYCLE_INJECTING_TIMEOUT_S = 30
 _LIFECYCLE_REGISTER_TIMEOUT_S = 5
 _LIFECYCLE_TMUX_OP_TIMEOUT_S = 5
+_LIFECYCLE_STOP_TIMEOUT_S = 30
+_LIFECYCLE_REMOVE_WATCHERS_TIMEOUT_S = 5
+_LIFECYCLE_DEREGISTER_TIMEOUT_S = 5
+_LIFECYCLE_CLEANUP_WORKTREE_TIMEOUT_S = 60
 
 
 def _resolve_host_session_model() -> str:
@@ -5465,6 +5470,11 @@ def _wait_for_prompt(
                 keystrokes,
                 timeout=min(_LIFECYCLE_TMUX_OP_TIMEOUT_S, _remaining_step_timeout(deadline, "waiting_ready")),
             )
+            time.sleep(0.5)
+            continue
+        if new_state.get("confirming_trust_prompt"):
+            time.sleep(0.5)
+            continue
         if new_state.get("composer_ready"):
             return
         time.sleep(0.5)
@@ -5582,6 +5592,137 @@ def _inject_echo_verified(
         last_error = "paste echo was not visible"
         time.sleep(0.5)
     raise TimeoutError(f"injecting timed out: {last_error}")
+
+
+def _run_cleanup_step(
+    *,
+    name: str,
+    timeout: float,
+    func,
+) -> str | None:
+    started = time.monotonic()
+    try:
+        func()
+    except subprocess.TimeoutExpired:
+        return f"{name} timed out after {timeout:g}s"
+    except TimeoutError:
+        return f"{name} timed out after {timeout:g}s"
+    except Exception as exc:
+        return f"{name} failed: {type(exc).__name__}: {exc}"
+    elapsed = time.monotonic() - started
+    if elapsed > timeout:
+        return f"{name} exceeded timeout budget ({elapsed:.1f}s > {timeout:g}s)"
+    return None
+
+
+def _cleanup_after_lifecycle_failure(
+    *,
+    tmux_name: str,
+    loop: asyncio.AbstractEventLoop | None,
+) -> list[str]:
+    """Best-effort bounded teardown after startup fails.
+
+    The worker remains the single lifecycle owner: it marks the session failed,
+    cleans up process/worktree state from the same worker thread, then restores
+    the failed terminal state for operator visibility.
+    """
+    errors: list[str] = []
+
+    def _stop_container_and_tmux() -> None:
+        subprocess.run(
+            ["docker", "rm", "-f", tmux_name],
+            capture_output=True,
+            text=True,
+            timeout=_LIFECYCLE_STOP_TIMEOUT_S,
+        )
+        subprocess.run(
+            ["tmux", "kill-session", "-t", tmux_name],
+            capture_output=True,
+            text=True,
+            timeout=_LIFECYCLE_STOP_TIMEOUT_S,
+        )
+
+    def _remove_watches() -> None:
+        session_monitor._remove_watches(tmux_name)
+        session_monitor._tail_states.pop(tmux_name, None)
+        session_monitor._phase_progress.pop(tmux_name, None)
+
+    def _deregister() -> None:
+        if loop is not None and loop.is_running():
+            fut = asyncio.run_coroutine_threadsafe(
+                session_monitor.deregister(tmux_name),
+                loop,
+            )
+            fut.result(timeout=_LIFECYCLE_DEREGISTER_TIMEOUT_S)
+        else:
+            dashboard_db.mark_dead(tmux_name)
+        auth_db.revoke_token(tmux_name)
+
+    def _cleanup_worktrees() -> None:
+        errors: list[BaseException] = []
+
+        def _target() -> None:
+            try:
+                cleanup_session_worktrees(
+                    tmux_name,
+                    force=True,
+                    worktrees_dir=WORKTREES_DIR,
+                )
+            except BaseException as exc:  # noqa: BLE001 - propagate through parent thread
+                errors.append(exc)
+
+        thread = threading.Thread(
+            target=_target,
+            name=f"lifecycle-cleanup-{tmux_name}",
+            daemon=True,
+        )
+        thread.start()
+        thread.join(_LIFECYCLE_CLEANUP_WORKTREE_TIMEOUT_S)
+        if thread.is_alive():
+            raise TimeoutError("cleanup worktree timed out")
+        if errors:
+            raise errors[0]
+
+    for name, timeout, func in (
+        ("stop_container_tmux", _LIFECYCLE_STOP_TIMEOUT_S, _stop_container_and_tmux),
+        ("remove_watchers", _LIFECYCLE_REMOVE_WATCHERS_TIMEOUT_S, _remove_watches),
+        ("deregister", _LIFECYCLE_DEREGISTER_TIMEOUT_S, _deregister),
+        ("cleanup_worktree", _LIFECYCLE_CLEANUP_WORKTREE_TIMEOUT_S, _cleanup_worktrees),
+    ):
+        err = _run_cleanup_step(name=name, timeout=timeout, func=func)
+        if err:
+            logger.warning(
+                "session_lifecycle: cleanup step issue tmux=%s error=%s",
+                tmux_name,
+                err,
+            )
+            errors.append(err)
+
+    return errors
+
+
+def _fail_lifecycle_start_with_cleanup(
+    *,
+    writer: SessionLifecycleStateWriter,
+    tmux_name: str,
+    phase: str,
+    reason: str,
+    attempt: int,
+    loop: asyncio.AbstractEventLoop | None,
+) -> None:
+    writer.fail(tmux_name, phase=phase, reason=reason, attempt=attempt)
+    writer.set_state(
+        tmux_name,
+        "cleaning",
+        phase=phase,
+        reason="startup failed; cleaning partial session",
+        attempt=attempt,
+    )
+    cleanup_errors = _cleanup_after_lifecycle_failure(tmux_name=tmux_name, loop=loop)
+    final_reason = reason
+    if cleanup_errors:
+        final_reason = f"{reason}; cleanup errors: {'; '.join(cleanup_errors)}"
+    writer.fail(tmux_name, phase=phase, reason=final_reason, attempt=attempt)
 
 
 def _register_project_session_from_worker(
@@ -5790,20 +5931,32 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             )
         writer.set_state(tmux_name, "running")
     except TimeoutError as exc:
-        writer.fail(tmux_name, phase=str(exc).split()[0], reason=str(exc), attempt=attempt)
+        failed_phase = str(exc).split()[0]
+        _fail_lifecycle_start_with_cleanup(
+            writer=writer,
+            tmux_name=tmux_name,
+            phase=failed_phase,
+            reason=str(exc),
+            attempt=attempt,
+            loop=loop,
+        )
     except (WorkspaceError, workspace_settings.WorkspaceMountError, RuntimeError, subprocess.SubprocessError) as exc:
-        writer.fail(
-            tmux_name,
+        _fail_lifecycle_start_with_cleanup(
+            writer=writer,
+            tmux_name=tmux_name,
             phase=phase,
             reason=f"{type(exc).__name__}: {exc}",
             attempt=attempt,
+            loop=loop,
         )
     except Exception as exc:
-        writer.fail(
-            tmux_name,
+        _fail_lifecycle_start_with_cleanup(
+            writer=writer,
+            tmux_name=tmux_name,
             phase=phase,
             reason=f"{type(exc).__name__}: {exc}",
             attempt=attempt,
+            loop=loop,
         )
 
 

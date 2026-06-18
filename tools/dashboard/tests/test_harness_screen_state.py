@@ -72,6 +72,22 @@ def test_claude_detects_trust_dialog_and_emits_confirm():
     assert state["composer_ready"] is False
 
 
+def test_claude_detects_v2_1_177_folder_trust_dialog():
+    pane = """\
+Is this a project you created or one you trust?
+
+  ❯ 1. Yes, I trust this folder
+    2. No, exit
+
+Enter to confirm
+"""
+    state, keys = CLAUDE_HARNESS.read_screen_state(pane, {})
+
+    assert state["confirming_trust_prompt"] is True
+    assert state["composer_ready"] is False
+    assert keys == [{"kind": "key", "value": "C-m"}]
+
+
 def test_claude_does_not_resend_confirm_while_flag_set():
     """Once confirming_trust_prompt=True is the current state, the same
     pane snapshot must NOT emit another keystroke. Otherwise the

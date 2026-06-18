@@ -119,6 +119,12 @@ def test_project_start_handler_failure_writes_lifecycle_detail(monkeypatch, tmp_
     monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
     monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
     monkeypatch.setattr(server, "launch_session", lambda **_kw: None)
+    cleanup_calls = []
+    monkeypatch.setattr(
+        server,
+        "_cleanup_after_lifecycle_failure",
+        lambda **kwargs: cleanup_calls.append(kwargs) or [],
+    )
 
     server._run_project_session_start(
         LifecycleJob("start", "auto-life", {"project_id": "blindhash-operations"}),
@@ -131,6 +137,43 @@ def test_project_start_handler_failure_writes_lifecycle_detail(monkeypatch, tmp_
     assert row["activity_state"] == "failed"
     assert row["is_live"] == 0
     assert "launch_session failed" in row["lifecycle_detail"]
+    assert cleanup_calls and cleanup_calls[0]["tmux_name"] == "auto-life"
+
+
+def test_project_start_handler_cleanup_error_preserves_failed_state(monkeypatch, tmp_path):
+    from tools.dashboard import server
+
+    _init_db(tmp_path)
+    dashboard_db.insert_session(
+        tmux_name="auto-life",
+        session_type="container",
+        project="blindhash-operations",
+        harness="claude",
+    )
+
+    monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _project_id: _project())
+    monkeypatch.setattr(server, "prepare_session_mounts", lambda *_a, **_kw: {})
+    monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
+    monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
+    monkeypatch.setattr(server, "launch_session", lambda **_kw: None)
+    monkeypatch.setattr(
+        server,
+        "_cleanup_after_lifecycle_failure",
+        lambda **_kwargs: ["stop_container_tmux failed"],
+    )
+
+    server._run_project_session_start(
+        LifecycleJob("start", "auto-life", {"project_id": "blindhash-operations"}),
+        SessionLifecycleStateWriter(),
+    )
+
+    row = dashboard_db.get_session("auto-life")
+    assert row is not None
+    assert row["startup_state"] == "setup_failed"
+    assert row["activity_state"] == "failed"
+    assert row["is_live"] == 0
+    assert "launch_session failed" in row["lifecycle_detail"]
+    assert "cleanup errors" in row["lifecycle_detail"]
 
 
 def test_inject_echo_verified_pastes_before_enter(monkeypatch):
@@ -199,3 +242,56 @@ def test_wait_for_prompt_requires_composer_ready(monkeypatch, tmp_path):
 
     row = dashboard_db.get_session("auto-life")
     assert '"composer_ready": true' in row["harness_state"]
+
+
+def test_wait_for_prompt_does_not_return_while_confirming_trust(monkeypatch, tmp_path):
+    from tools.dashboard import server
+
+    _init_db(tmp_path)
+    dashboard_db.insert_session(
+        tmux_name="auto-life",
+        session_type="container",
+        project="blindhash-operations",
+        harness="claude",
+    )
+    captures = iter(["trust", "> "])
+    keys_sent = []
+
+    class Harness:
+        def read_screen_state(self, pane_text, current_state):
+            if pane_text == "trust":
+                return (
+                    {
+                        "composer_ready": True,
+                        "confirming_trust_prompt": True,
+                        "blocking_modal": None,
+                    },
+                    [{"kind": "key", "value": "C-m"}],
+                )
+            return (
+                {
+                    "composer_ready": True,
+                    "confirming_trust_prompt": False,
+                    "blocking_modal": None,
+                },
+                [],
+            )
+
+    monkeypatch.setattr(server, "get_session_harness", lambda _name: Harness())
+    monkeypatch.setattr(server, "_run_tmux_capture", lambda *_a, **_kw: next(captures))
+    monkeypatch.setattr(
+        server,
+        "_run_tmux_keystrokes",
+        lambda _tmux_name, keystrokes, **_kw: keys_sent.extend(keystrokes),
+    )
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+
+    server._wait_for_prompt(
+        tmux_name="auto-life",
+        harness_name="claude",
+        deadline=server.time.monotonic() + 30,
+    )
+
+    assert keys_sent == [{"kind": "key", "value": "C-m"}]
+    row = dashboard_db.get_session("auto-life")
+    assert '"confirming_trust_prompt": false' in row["harness_state"]

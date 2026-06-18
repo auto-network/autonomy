@@ -2486,7 +2486,8 @@ _CLAUDE_TRUST_CORNER_RE = re.compile(r"╭[─━]+╮")
 # rounded ╭──╮ box, so the box alone is no longer a reliable corroborator.
 # Either the box OR a visible confirm affordance corroborates the wording.
 _CLAUDE_TRUST_CONFIRM_RE = re.compile(
-    r"yes,?\s+(?:continue|proceed|trust)|press\s+enter\s+to\s+(?:continue|trust|proceed)"
+    r"yes,?\s+(?:(?:i\s+)?trust(?:\s+this\s+(?:folder|directory))?|continue|proceed)"
+    r"|press\s+enter\s+to\s+(?:confirm|continue|trust|proceed)"
     r"|(?:^|\n)\s*1\.\s*yes\b|no,?\s+quit",
     re.IGNORECASE,
 )
