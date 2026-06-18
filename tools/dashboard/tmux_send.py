@@ -211,6 +211,45 @@ def _tmux_paste_checked(target: str, text: str) -> None:
         os.unlink(tmp_path)
 
 
+def tmux_paste_checked_sync(target: str, text: str, *, timeout: float = 5.0) -> None:
+    """Paste text synchronously and raise on tmux failure.
+
+    This is the lifecycle worker's lower-level primitive for echo-verified
+    injection: paste first, let the caller inspect the pane, then press Enter
+    only after the prompt visibly contains input.
+    """
+    buf = f"inject_{secrets.token_hex(4)}"
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(text)
+        tmp_path = f.name
+    try:
+        _check_subprocess(
+            "load-buffer",
+            subprocess.run(
+                ["tmux", "load-buffer", "-b", buf, tmp_path],
+                capture_output=True,
+                timeout=timeout,
+            ),
+        )
+        _check_subprocess(
+            "paste-buffer",
+            subprocess.run(
+                ["tmux", "paste-buffer", "-p", "-b", buf, "-t", target],
+                capture_output=True,
+                timeout=timeout,
+            ),
+        )
+        subprocess.run(
+            ["tmux", "delete-buffer", "-b", buf],
+            capture_output=True,
+            timeout=timeout,
+        )
+    finally:
+        os.unlink(tmp_path)
+
+
 def _tmux_enter_checked(target: str) -> None:
     """Like :func:`_tmux_enter` but raises :class:`TmuxSendError`
     on non-zero returncode. Used by :func:`tmux_send_awaited`."""
@@ -219,6 +258,18 @@ def _tmux_enter_checked(target: str) -> None:
         subprocess.run(
             ["tmux", "send-keys", "-t", target, "\r"],
             capture_output=True,
+        ),
+    )
+
+
+def tmux_enter_checked_sync(target: str, *, timeout: float = 5.0) -> None:
+    """Press Enter synchronously and raise on tmux failure."""
+    _check_subprocess(
+        "send-keys",
+        subprocess.run(
+            ["tmux", "send-keys", "-t", target, "\r"],
+            capture_output=True,
+            timeout=timeout,
         ),
     )
 
