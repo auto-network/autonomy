@@ -14660,6 +14660,12 @@ async def _on_startup():
     await worktree_monitor.start()
     _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())
     _event_loop_watchdog_task = asyncio.create_task(_event_loop_watchdog())
+    # Session lifecycle worker (FSM redesign 2026-06-18): start the single
+    # off-loop thread that owns workspace start/stop/retry. It sits idle until
+    # api_session_create is rewired to enqueue — starting it now is additive and
+    # lets the create cutover land as a separate, verifiable step.
+    _SESSION_LIFECYCLE_WORKER.start()
+    logger.info("session_lifecycle: worker started from _on_startup (idle until create enqueues)")
     if _should_run_harness_usage_poller():
         _harness_usage_poller_task = asyncio.create_task(_harness_usage_poller())
     if _claude_credentials_refresh.should_run_credentials_refresh_poller():
@@ -14736,6 +14742,10 @@ async def _on_shutdown():
         await worktree_monitor.stop()
     except Exception:
         logger.exception("error during worktree_monitor.stop()")
+    try:
+        _SESSION_LIFECYCLE_WORKER.shutdown()
+    except Exception:
+        logger.exception("error during session lifecycle worker shutdown")
     # Snapshot bus state after monitors stop so the next process boots into
     # the same epoch + seq + buffer state. Best-effort: snapshot() itself
     # logs and swallows any exception. Some tests substitute a MockEventBus
