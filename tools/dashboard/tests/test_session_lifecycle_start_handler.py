@@ -36,7 +36,7 @@ def _project():
         model=None,
         dind=False,
         network_host=False,
-        capabilities=[],
+        capabilities=("capability-one",),
     )
 
 
@@ -66,6 +66,7 @@ def test_project_start_handler_prepares_launches_registers_without_event_loop(mo
         assert kwargs["name"] == "auto-life"
         assert kwargs["metadata"]["project"] == "blindhash-operations"
         assert kwargs["mounts"] == {str(tmp_path / "repo"): "/workspace/repo"}
+        assert kwargs["capabilities"] == proj.capabilities
         return "echo launched"
 
     def fake_subprocess_run(cmd, **kwargs):

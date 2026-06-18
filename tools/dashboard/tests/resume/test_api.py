@@ -13,7 +13,7 @@ Tests:
 - Workspace primer is rendered into the run_dir on resume
 """
 from pathlib import Path
-import threading
+import asyncio
 import time
 import pytest
 
@@ -396,13 +396,12 @@ class TestWorkspacePrimerRendering:
 class TestWorkspaceHarnessPassthrough:
     """Workspace create/resume must honor the workspace harness setting."""
 
-    def test_workspace_create_passes_codex_harness_and_refreshes_stale_worktree(
+    def test_workspace_create_enqueues_codex_lifecycle_job(
         self, test_client, monkeypatch,
     ):
         from tools.dashboard import server
 
-        launch_kwargs = {}
-        prep_kwargs = {}
+        enqueued = []
         workspace = WorkspaceV1(
             id="autonomy",
             name="Autonomy Codex",
@@ -417,43 +416,33 @@ class TestWorkspaceHarnessPassthrough:
         monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _name: workspace)
         monkeypatch.setattr(server.workspace_settings, "validate_artifacts", lambda _proj: [])
         monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
-        monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
-
-        def fake_prepare(_proj, _tmux_name, **kwargs):
-            prep_kwargs.update(kwargs)
-            return {}
-
-        def fake_launch_session(**kwargs):
-            launch_kwargs.update(kwargs)
-            return "docker run codex"
-
-        monkeypatch.setattr(server, "prepare_session_mounts", fake_prepare)
-        monkeypatch.setattr(server, "launch_session", fake_launch_session)
         monkeypatch.setattr(
-            server.dashboard_db,
-            "get_session",
-            lambda tmux_name: {
-                "tmux_name": tmux_name,
-                "is_live": 1,
-                "jsonl_path": "/tmp/fake/sessions",
-                "type": "container",
-                "label": "",
-            },
+            server._SESSION_LIFECYCLE_WORKER,
+            "try_enqueue",
+            lambda job: not enqueued.append(job),
         )
 
         resp = test_client.post("/api/session/create", json={"project": "autonomy"})
-        assert resp.status_code == 200
-        assert launch_kwargs["harness"] == "codex"
-        assert prep_kwargs["refresh_existing_worktree"] is True
+        assert resp.status_code == 202
+        assert resp.json()["pending"] is True
+        assert len(enqueued) == 1
+        job = enqueued[0]
+        assert job.action == "start"
+        assert job.config["project_id"] == "autonomy"
+        assert job.config["primer_url"] is None
+        assert job.config["attempt"] == 1
+        assert isinstance(job.config["event_loop"], asyncio.AbstractEventLoop)
 
-    def test_workspace_create_returns_before_slow_prepare_finishes(
+        row = server.dashboard_db.get_session(job.tmux_name)
+        assert row["startup_state"] == "requesting"
+        assert row["harness"] == "codex"
+
+    def test_workspace_create_returns_without_running_prepare_on_request_path(
         self, test_client, monkeypatch,
     ):
-        """Workspace create must ACK before repo provisioning completes."""
+        """Workspace create must only enqueue lifecycle work on the request path."""
         from tools.dashboard import server
 
-        started = threading.Event()
-        release = threading.Event()
         workspace = WorkspaceV1(
             id="autonomy",
             name="Autonomy Codex",
@@ -468,12 +457,10 @@ class TestWorkspaceHarnessPassthrough:
         monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _name: workspace)
         monkeypatch.setattr(server.workspace_settings, "validate_artifacts", lambda _proj: [])
         monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
-        monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
+        monkeypatch.setattr(server._SESSION_LIFECYCLE_WORKER, "try_enqueue", lambda _job: True)
 
         def slow_prepare(_proj, _tmux_name, **_kwargs):
-            started.set()
-            release.wait(timeout=2)
-            return {}
+            raise AssertionError("prepare_session_mounts must not run on the request path")
 
         monkeypatch.setattr(server, "prepare_session_mounts", slow_prepare)
 
@@ -481,17 +468,41 @@ class TestWorkspaceHarnessPassthrough:
         resp = test_client.post("/api/session/create", json={"project": "autonomy"})
         elapsed = time.monotonic() - t0
 
-        try:
-            assert resp.status_code == 200
-            assert resp.json()["pending"] is True
-            assert started.wait(timeout=1)
-            assert elapsed < 0.5
-        finally:
-            release.set()
-            for _ in range(50):
-                if not server._SESSION_CREATE_TASKS:
-                    break
-                time.sleep(0.02)
+        assert resp.status_code == 202
+        assert resp.json()["pending"] is True
+        assert elapsed < 0.5
+
+    def test_workspace_create_returns_503_when_lifecycle_queue_full(
+        self, test_client, monkeypatch,
+    ):
+        from tools.dashboard import server
+
+        workspace = WorkspaceV1(
+            id="autonomy",
+            name="Autonomy Codex",
+            description="",
+            image="autonomy-agent:dashboard",
+            graph_project="autonomy",
+            harness="codex",
+            repos=(RepoMount(url="git@example.com:autonomy.git", mount="/workspace/repo", writable=True),),
+            working_dir="/workspace/repo",
+        )
+
+        monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _name: workspace)
+        monkeypatch.setattr(server.workspace_settings, "validate_artifacts", lambda _proj: [])
+
+        monkeypatch.setattr(server._SESSION_LIFECYCLE_WORKER, "try_enqueue", lambda _job: False)
+
+        resp = test_client.post("/api/session/create", json={"project": "autonomy"})
+
+        assert resp.status_code == 503
+        payload = resp.json()
+        assert payload["retryable"] is True
+        row = server.dashboard_db.get_session(payload["tmux_name"])
+        assert row["startup_state"] == "setup_failed"
+        assert row["activity_state"] == "failed"
+        assert row["is_live"] == 0
+        assert "session lifecycle queue is full" in row["lifecycle_detail"]
 
     def test_workspace_resume_passes_codex_harness_without_refreshing_existing_worktree(
         self, test_client, resume_env, monkeypatch,
@@ -547,14 +558,12 @@ class TestWorkspaceHarnessPassthrough:
 
 
 class TestWorkspaceCapabilityPassthrough:
-    """Workspace create/resume must pass resolved capabilities to launch_session.
+    """Workspace create/resume must preserve resolved capabilities.
 
     `auto-uqq0i` proved the substrate in isolation but never wired the
-    real Dashboard route to forward `proj.capabilities`. This bead
-    (`auto-1webn.2`) closes the gap — the actual `/api/session/create`
-    and `/api/session/resume` endpoints must hand the capabilities
-    tuple over to the launcher so resolution survives the dashboard
-    seam.
+    real Dashboard route to forward `proj.capabilities`. Create now
+    hands off by project id to the lifecycle worker, which re-reads the
+    workspace and forwards capabilities to the launcher.
     """
 
     @staticmethod
@@ -586,43 +595,22 @@ class TestWorkspaceCapabilityPassthrough:
             capabilities=(self._jira_capability(),),
         )
 
-    def test_workspace_create_passes_capabilities_to_launch_session(
+    def test_workspace_create_enqueues_capability_workspace_job(
         self, test_client, monkeypatch,
     ):
         from tools.dashboard import server
 
-        launch_kwargs: dict = {}
+        enqueued = []
         workspace = self._workspace_with_capabilities()
 
         monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _name: workspace)
         monkeypatch.setattr(server.workspace_settings, "validate_artifacts", lambda _proj: [])
         monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
-        monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
-        monkeypatch.setattr(server, "prepare_session_mounts", lambda *a, **kw: {})
-
-        def fake_launch_session(**kwargs):
-            launch_kwargs.update(kwargs)
-            return "docker run cap"
-
-        monkeypatch.setattr(server, "launch_session", fake_launch_session)
-        monkeypatch.setattr(
-            server.dashboard_db,
-            "get_session",
-            lambda tmux_name: {
-                "tmux_name": tmux_name,
-                "is_live": 1,
-                "jsonl_path": "/tmp/fake/sessions",
-                "type": "container",
-                "label": "",
-            },
-        )
+        monkeypatch.setattr(server._SESSION_LIFECYCLE_WORKER, "enqueue", enqueued.append)
 
         resp = test_client.post("/api/session/create", json={"project": "autonomy"})
-        assert resp.status_code == 200
-        assert "capabilities" in launch_kwargs, (
-            "workspace create must forward capabilities=... to launch_session"
-        )
-        assert launch_kwargs["capabilities"] == workspace.capabilities
+        assert resp.status_code == 202
+        assert enqueued[0].config["project_id"] == workspace.id
 
     def test_workspace_resume_passes_capabilities_to_launch_session(
         self, test_client, resume_env, monkeypatch,
