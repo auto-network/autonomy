@@ -129,6 +129,7 @@ from tools.dashboard.session_harness import (
     CLAUDE_HARNESS,
     dedup_claude_entries,
     enrich_claude_entries,
+    get_session_harness,
     parse_claude_log_line,
     postprocess_claude_entries,
     resolve_harness_for_path,
@@ -152,7 +153,12 @@ else:
     from tools.dashboard.dao import dispatch as dao_dispatch
     from tools.dashboard.dao import sessions as dao_sessions
 
-from tools.dashboard.tmux_send import tmux_send, tmux_send_sync
+from tools.dashboard.tmux_send import (
+    tmux_enter_checked_sync,
+    tmux_paste_checked_sync,
+    tmux_send,
+    tmux_send_sync,
+)
 from tools.graph import ops as graph_ops
 
 
@@ -5317,7 +5323,11 @@ async def _resolve_primer(primer: str) -> str | None:
 _HOST_MODEL_FALLBACK = "claude-opus-4-8[1m]"
 _LIFECYCLE_PREPARING_TIMEOUT_S = 120
 _LIFECYCLE_LAUNCHING_TIMEOUT_S = 60
+_LIFECYCLE_SETUP_TIMEOUT_S = 600
+_LIFECYCLE_WAITING_READY_TIMEOUT_S = 60
+_LIFECYCLE_INJECTING_TIMEOUT_S = 30
 _LIFECYCLE_REGISTER_TIMEOUT_S = 5
+_LIFECYCLE_TMUX_OP_TIMEOUT_S = 5
 
 
 def _resolve_host_session_model() -> str:
@@ -5341,6 +5351,237 @@ def _remaining_step_timeout(deadline: float, phase: str) -> int:
     if remaining <= 0:
         raise TimeoutError(f"{phase} timed out")
     return max(1, int(remaining))
+
+
+def _run_tmux_capture(tmux_name: str, *, timeout: float | None = None) -> str:
+    result = subprocess.run(
+        ["tmux", "capture-pane", "-pJ", "-S", "-200", "-t", tmux_name],
+        capture_output=True,
+        text=True,
+        timeout=timeout or _LIFECYCLE_TMUX_OP_TIMEOUT_S,
+    )
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        raise RuntimeError(f"tmux capture-pane failed: {stderr}")
+    return result.stdout or ""
+
+
+def _run_tmux_keystrokes(tmux_name: str, keystrokes: list[dict], *, timeout: float) -> None:
+    for keystroke in keystrokes:
+        kind = (keystroke or {}).get("kind")
+        value = (keystroke or {}).get("value")
+        if not value:
+            continue
+        if kind == "literal":
+            cmd = ["tmux", "send-keys", "-t", tmux_name, "-l", str(value)]
+        else:
+            cmd = ["tmux", "send-keys", "-t", tmux_name, str(value)]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"tmux send-keys failed: {(result.stderr or '').strip()}"
+            )
+        time.sleep(0.05)
+
+
+def _wait_for_setup_complete(
+    *,
+    tmux_name: str,
+    run_dir: Path,
+    startup_script: Path | None,
+    deadline: float,
+) -> None:
+    """Wait for the optional project startup script's exit marker."""
+    if startup_script is None:
+        return
+    setup_exit = run_dir / ".setup-exit"
+    while time.monotonic() < deadline:
+        if setup_exit.exists():
+            exit_code = setup_exit.read_text().strip()
+            if exit_code == "0":
+                return
+            log_tail = ""
+            setup_log = run_dir / ".setup.log"
+            try:
+                log_tail = "\n".join(setup_log.read_text(errors="replace").splitlines()[-20:])
+            except FileNotFoundError:
+                pass
+            detail = f"setup exited {exit_code}"
+            if log_tail:
+                detail += f": {log_tail[-1000:]}"
+            raise RuntimeError(detail)
+        time.sleep(1.0)
+    raise TimeoutError(f"setup timed out after {_LIFECYCLE_SETUP_TIMEOUT_S}s")
+
+
+def _read_harness_state(tmux_name: str) -> dict[str, Any]:
+    row = dashboard_db.get_session(tmux_name)
+    raw = (row or {}).get("harness_state") if row else None
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _wait_for_prompt(
+    *,
+    tmux_name: str,
+    harness_name: str | None,
+    deadline: float,
+) -> None:
+    """Poll tmux until the harness parser sees a real composer prompt."""
+    harness = get_session_harness(harness_name)
+    current_state = _read_harness_state(tmux_name)
+    while time.monotonic() < deadline:
+        pane_text = _run_tmux_capture(
+            tmux_name,
+            timeout=min(_LIFECYCLE_TMUX_OP_TIMEOUT_S, _remaining_step_timeout(deadline, "waiting_ready")),
+        )
+        new_state, keystrokes = harness.read_screen_state(pane_text, current_state)
+        if new_state != current_state:
+            try:
+                dashboard_db.update_tail_state(
+                    tmux_name,
+                    harness_state=json.dumps(new_state),
+                )
+            except Exception:
+                logger.debug(
+                    "session_lifecycle: harness_state update failed tmux=%s",
+                    tmux_name,
+                    exc_info=True,
+                )
+        current_state = new_state
+        if keystrokes:
+            _run_tmux_keystrokes(
+                tmux_name,
+                keystrokes,
+                timeout=min(_LIFECYCLE_TMUX_OP_TIMEOUT_S, _remaining_step_timeout(deadline, "waiting_ready")),
+            )
+        if new_state.get("composer_ready"):
+            return
+        time.sleep(0.5)
+    raise TimeoutError(f"waiting_ready timed out after {_LIFECYCLE_WAITING_READY_TIMEOUT_S}s")
+
+
+def _resolve_primer_sync(primer: str) -> str | None:
+    graph_id = primer.removeprefix("graph://") if primer.startswith("graph://") else primer
+    if not graph_id:
+        return None
+    payload = graph_ops.read_source_full(graph_id, max_chars=50000)
+    if payload is None:
+        return None
+    src = payload.get("source") or {}
+    parts: list[str] = []
+    title = src.get("title") or ""
+    if title:
+        parts.append(f"# {title}")
+    for entry in payload.get("entries") or []:
+        parts.append(entry.get("content") or "")
+    text = "\n\n".join(part for part in parts if part).strip()
+    return text or None
+
+
+def _render_worker_first_message(
+    *,
+    tmux_name: str,
+    proj,
+    primer_url: str | None,
+) -> tuple[str, bool]:
+    if primer_url:
+        try:
+            resolved = _resolve_primer_sync(primer_url)
+            if resolved:
+                return resolved, True
+            logger.warning(
+                "session_lifecycle: primer unresolved tmux=%s primer=%r; falling back to orientation",
+                tmux_name,
+                primer_url,
+            )
+        except Exception:
+            logger.warning(
+                "session_lifecycle: primer resolve failed tmux=%s primer=%r",
+                tmux_name,
+                primer_url,
+                exc_info=True,
+            )
+
+    from tools.dashboard.session_orientation import render_orientation
+
+    try:
+        return (
+            render_orientation(
+                tmux_name=tmux_name,
+                workspace_id=proj.id,
+                workspace_name=proj.name,
+                org=proj.graph_project,
+            ),
+            False,
+        )
+    except Exception:
+        logger.warning(
+            "session_lifecycle: orientation render failed tmux=%s; falling back to literal Hello",
+            tmux_name,
+            exc_info=True,
+        )
+        return "Hello", False
+
+
+def _echo_candidates(message: str) -> list[str]:
+    candidates: list[str] = []
+    for line in message.splitlines():
+        stripped = re.sub(r"\s+", " ", line.strip())
+        if len(stripped) >= 8:
+            candidates.append(stripped[:120])
+    if not candidates and message.strip():
+        candidates.append(re.sub(r"\s+", " ", message.strip())[:80])
+    # Prefer edge lines; very long primers may only leave the bottom of the
+    # paste visible in the pane.
+    return candidates[:3] + candidates[-3:]
+
+
+def _message_echo_visible(before: str, after: str, message: str) -> bool:
+    normalized_after = re.sub(r"\s+", " ", after)
+    for candidate in _echo_candidates(message):
+        if candidate and candidate in normalized_after:
+            return True
+    return bool(after.strip() and after.strip() != before.strip())
+
+
+def _inject_echo_verified(
+    *,
+    tmux_name: str,
+    message: str,
+    harness_name: str | None,
+    deadline: float,
+) -> None:
+    settle = {"codex": 1.5, "claude": 0.0}.get((harness_name or "").lower(), 0.0)
+    if settle:
+        time.sleep(min(settle, max(0.0, deadline - time.monotonic())))
+
+    last_error = "paste echo was not visible"
+    while time.monotonic() < deadline:
+        op_timeout = min(
+            _LIFECYCLE_TMUX_OP_TIMEOUT_S,
+            _remaining_step_timeout(deadline, "injecting"),
+        )
+        before = _run_tmux_capture(tmux_name, timeout=op_timeout)
+        tmux_paste_checked_sync(tmux_name, message, timeout=op_timeout)
+        time.sleep(0.2)
+        after = _run_tmux_capture(tmux_name, timeout=op_timeout)
+        if _message_echo_visible(before, after, message):
+            tmux_enter_checked_sync(tmux_name, timeout=op_timeout)
+            return
+        last_error = "paste echo was not visible"
+        time.sleep(0.5)
+    raise TimeoutError(f"injecting timed out: {last_error}")
 
 
 def _register_project_session_from_worker(
@@ -5404,7 +5645,9 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
         )
         return
 
+    phase = "start"
     try:
+        phase = "preparing"
         writer.set_state(tmux_name, "preparing")
         prepare_deadline = time.monotonic() + _LIFECYCLE_PREPARING_TIMEOUT_S
 
@@ -5424,6 +5667,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
         _remaining_step_timeout(prepare_deadline, "preparing")
         project_mounts.update(workspace_settings.artifact_mounts(proj))
 
+        phase = "launching"
         writer.set_state(tmux_name, "launching")
         launch_deadline = time.monotonic() + _LIFECYCLE_LAUNCHING_TIMEOUT_S
         meta: dict = {
@@ -5495,6 +5739,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
                 timeout=_remaining_step_timeout(launch_deadline, "launching"),
             )
 
+        phase = "setup"
         writer.set_state(tmux_name, "setup")
         _register_project_session_from_worker(
             tmux_name=tmux_name,
@@ -5503,13 +5748,60 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             primer_url=primer_url if isinstance(primer_url, str) else None,
             loop=loop,
         )
+        setup_deadline = time.monotonic() + _LIFECYCLE_SETUP_TIMEOUT_S
+        _wait_for_setup_complete(
+            tmux_name=tmux_name,
+            run_dir=run_dir,
+            startup_script=startup_script,
+            deadline=setup_deadline,
+        )
+
+        phase = "waiting_ready"
         writer.set_state(tmux_name, "waiting_ready")
+        wait_deadline = time.monotonic() + _LIFECYCLE_WAITING_READY_TIMEOUT_S
+        _wait_for_prompt(
+            tmux_name=tmux_name,
+            harness_name=proj.harness or "claude",
+            deadline=wait_deadline,
+        )
+
+        writer.set_state(tmux_name, "composer_ready")
+        first_message, used_primer = _render_worker_first_message(
+            tmux_name=tmux_name,
+            proj=proj,
+            primer_url=primer_url if isinstance(primer_url, str) else None,
+        )
+        if first_message:
+            phase = "injecting"
+            writer.set_state(tmux_name, "injecting")
+            inject_deadline = time.monotonic() + _LIFECYCLE_INJECTING_TIMEOUT_S
+            _inject_echo_verified(
+                tmux_name=tmux_name,
+                message=first_message,
+                harness_name=proj.harness or "claude",
+                deadline=inject_deadline,
+            )
+            logger.info(
+                "session_lifecycle: first message injected tmux=%s len=%d primer=%s harness=%s",
+                tmux_name,
+                len(first_message),
+                used_primer,
+                proj.harness or "claude",
+            )
+        writer.set_state(tmux_name, "running")
     except TimeoutError as exc:
         writer.fail(tmux_name, phase=str(exc).split()[0], reason=str(exc), attempt=attempt)
-    except (WorkspaceError, workspace_settings.WorkspaceMountError, RuntimeError) as exc:
+    except (WorkspaceError, workspace_settings.WorkspaceMountError, RuntimeError, subprocess.SubprocessError) as exc:
         writer.fail(
             tmux_name,
-            phase="start",
+            phase=phase,
+            reason=f"{type(exc).__name__}: {exc}",
+            attempt=attempt,
+        )
+    except Exception as exc:
+        writer.fail(
+            tmux_name,
+            phase=phase,
             reason=f"{type(exc).__name__}: {exc}",
             attempt=attempt,
         )

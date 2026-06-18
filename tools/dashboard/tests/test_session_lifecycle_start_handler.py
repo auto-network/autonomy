@@ -75,6 +75,10 @@ def test_project_start_handler_prepares_launches_registers_without_event_loop(mo
     monkeypatch.setattr(server, "prepare_session_mounts", fake_prepare)
     monkeypatch.setattr(server, "launch_session", fake_launch_session)
     monkeypatch.setattr(server.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(server, "_wait_for_setup_complete", lambda **_kwargs: None)
+    monkeypatch.setattr(server, "_wait_for_prompt", lambda **_kwargs: None)
+    monkeypatch.setattr(server, "_render_worker_first_message", lambda **_kwargs: ("Hello", False))
+    monkeypatch.setattr(server, "_inject_echo_verified", lambda **_kwargs: None)
 
     server._run_project_session_start(
         LifecycleJob("start", "auto-life", {"project_id": "blindhash-operations"}),
@@ -83,7 +87,7 @@ def test_project_start_handler_prepares_launches_registers_without_event_loop(mo
 
     row = dashboard_db.get_session("auto-life")
     assert row is not None
-    assert row["startup_state"] == "harness_starting"
+    assert row["startup_state"] is None
     assert row["activity_state"] == "running"
     assert row["is_live"] == 1
     assert row["project"] == "blindhash-operations"
@@ -126,3 +130,71 @@ def test_project_start_handler_failure_writes_lifecycle_detail(monkeypatch, tmp_
     assert row["activity_state"] == "failed"
     assert row["is_live"] == 0
     assert "launch_session failed" in row["lifecycle_detail"]
+
+
+def test_inject_echo_verified_pastes_before_enter(monkeypatch):
+    from tools.dashboard import server
+
+    calls = []
+
+    def fake_capture(tmux_name, *, timeout=None):
+        calls.append(("capture", tmux_name, timeout))
+        if any(call[0] == "paste" for call in calls):
+            return "> Lifecycle hello"
+        return "> "
+
+    def fake_paste(tmux_name, message, *, timeout):
+        calls.append(("paste", tmux_name, message, timeout))
+
+    def fake_enter(tmux_name, *, timeout):
+        calls.append(("enter", tmux_name, timeout))
+
+    monkeypatch.setattr(server, "_run_tmux_capture", fake_capture)
+    monkeypatch.setattr(server, "tmux_paste_checked_sync", fake_paste)
+    monkeypatch.setattr(server, "tmux_enter_checked_sync", fake_enter)
+
+    server._inject_echo_verified(
+        tmux_name="auto-life",
+        message="Lifecycle hello",
+        harness_name="claude",
+        deadline=server.time.monotonic() + 30,
+    )
+
+    assert [call[0] for call in calls] == ["capture", "paste", "capture", "enter"]
+
+
+def test_wait_for_prompt_requires_composer_ready(monkeypatch, tmp_path):
+    from tools.dashboard import server
+
+    _init_db(tmp_path)
+    dashboard_db.insert_session(
+        tmux_name="auto-life",
+        session_type="container",
+        project="blindhash-operations",
+        harness="claude",
+    )
+    captures = iter(["loading", "> "])
+
+    class Harness:
+        def read_screen_state(self, pane_text, current_state):
+            return (
+                {
+                    "composer_ready": pane_text == "> ",
+                    "confirming_trust_prompt": False,
+                    "blocking_modal": None,
+                },
+                [],
+            )
+
+    monkeypatch.setattr(server, "get_session_harness", lambda _name: Harness())
+    monkeypatch.setattr(server, "_run_tmux_capture", lambda *_a, **_kw: next(captures))
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+
+    server._wait_for_prompt(
+        tmux_name="auto-life",
+        harness_name="claude",
+        deadline=server.time.monotonic() + 30,
+    )
+
+    row = dashboard_db.get_session("auto-life")
+    assert '"composer_ready": true' in row["harness_state"]
