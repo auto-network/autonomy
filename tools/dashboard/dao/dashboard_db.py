@@ -239,6 +239,18 @@ def init_db(db_path: Path | None = None) -> None:
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN startup_state TEXT")
         _conn.commit()
+    # Migrate: lifecycle_detail column (session lifecycle FSM redesign 2026-06-18).
+    # Nullable JSON holding the structured failure/teardown record the other
+    # columns can't carry: {failed_phase, reason, retryable, attempt,
+    # last_progress_at}. NULL on the happy path. The lifecycle worker is the
+    # only writer; the API reads it O(1) to render "Failed at <phase>: <reason>"
+    # + retry. Coarse lifecycle state stays DERIVED from is_live/startup_state/
+    # activity_state — no extra column needed.
+    try:
+        _conn.execute("SELECT lifecycle_detail FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN lifecycle_detail TEXT")
+        _conn.commit()
     # Migrate: harness_token column (auto-ghhdg — rename from claude_token_alias;
     # auto-08n3f — values switched from operator alias strings to Anthropic
     # org UUIDs joined to ``dashboard.claude.credentials.alias`` for display).
