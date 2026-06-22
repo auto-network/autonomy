@@ -6305,6 +6305,7 @@ async def api_session_create(request):
 
     # ── Build the command to run inside tmux ───────────────────
     proj = None
+    host_project_folder: str | None = None
     if project_name:
         try:
             proj = workspace_settings.get_workspace(project_name)
@@ -6392,6 +6393,13 @@ async def api_session_create(request):
         }, status_code=202)
     elif session_type == "host":
         model = _resolve_host_session_model()
+        host_project_folder = str(_REPO_ROOT).replace("/", "-")
+        await session_monitor.register_pending(
+            tmux_name,
+            session_type="host",
+            project=host_project_folder,
+            harness="claude",
+        )
         cmd_str = (
             f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
             f"claude --dangerously-skip-permissions --model {model}"
@@ -6495,7 +6503,7 @@ async def api_session_create(request):
             seed_message="Starting..." if not primer_url else "",
         )
     else:
-        project_folder = str(_REPO_ROOT).replace("/", "-")
+        project_folder = host_project_folder or str(_REPO_ROOT).replace("/", "-")
         projects_dir = Path.home() / ".claude" / "projects" / project_folder
         await session_monitor.register(
             tmux_name=tmux_name,
@@ -6503,7 +6511,7 @@ async def api_session_create(request):
             project=project_folder,
         )
         asyncio.create_task(
-            _watch_for_host_session_jsonl(projects_dir, tmux_name),
+            _watch_for_host_session_jsonl(projects_dir, tmux_name, timeout=120.0),
         )
 
     # (Previous code wrote setup_phase=container_starting + harness_phase=
@@ -7416,8 +7424,9 @@ async def _watch_for_host_session_jsonl(
     is why no per-dir lock is needed. This is the ONLY code that sets jsonl_path
     for host sessions. Polls every 500ms for up to ``timeout`` seconds.
 
-    Timeout is generous (30s) to absorb a slow Claude boot: injection fires ~5s
-    after launch, then Claude must come up and flush its first turn to disk.
+    Timeout is generous to absorb a slow Claude boot: injection may wait up to
+    60s for a real composer prompt, then Claude must flush its first turn to
+    disk.
     """
     existing = set(projects_dir.glob("*.jsonl")) if projects_dir.exists() else set()
     logger.info("JSONL watcher started  tmux=%s  existing=%d", tmux_name, len(existing))
