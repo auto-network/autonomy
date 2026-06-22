@@ -205,6 +205,16 @@ async def test_register_pending_idempotent_on_duplicate(db, monitor):
     assert _read_state("auto-test") == "requesting"
 
 
+@pytest.mark.asyncio
+async def test_register_after_pending_preserves_startup_state(db, monitor):
+    await monitor.register_pending("host-test", session_type="host", project="host-proj")
+    await monitor.update_phase("host-test", startup_state="harness_starting")
+
+    await monitor.register("host-test", session_type="host", project="host-proj")
+
+    assert _read_state("host-test") == "harness_starting"
+
+
 # ── update_phase: thin wrapper over advance + progress ──────────────
 
 

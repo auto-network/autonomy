@@ -437,6 +437,21 @@ class TestWorkspaceHarnessPassthrough:
         assert row["startup_state"] == "requesting"
         assert row["harness"] == "codex"
 
+    def test_host_create_seeds_row_before_harness_phase_advance(
+        self, test_client, monkeypatch,
+    ):
+        from tools.dashboard import server
+
+        monkeypatch.setattr(server, "_resolve_host_session_model", lambda: "mock-model")
+
+        resp = test_client.post("/api/session/create", json={"type": "host"})
+
+        assert resp.status_code == 200
+        tmux_name = resp.json()["tmux_name"]
+        row = server.dashboard_db.get_session(tmux_name)
+        assert row["type"] == "host"
+        assert row["startup_state"] == "harness_starting"
+
     def test_workspace_create_returns_without_running_prepare_on_request_path(
         self, test_client, monkeypatch,
     ):
