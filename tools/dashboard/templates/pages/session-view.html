@@ -556,10 +556,18 @@
                     style="width:92vw;height:88vh;border:none;border-radius:8px;background:#fff"></iframe>
           </template>
           <template x-if="lightboxKind === 'markdown'">
-            <div @click.stop
-                 class="sc-va-lightbox-md"
-                 style="width:92vw;max-width:900px;max-height:90vh;overflow:auto;background:#0f1a2b;color:#e2e8f0;border:1px solid #25364c;border-radius:12px;padding:32px 40px;font-family:system-ui,-apple-system,sans-serif;line-height:1.6"
-                 x-html="lightboxHtml"></div>
+            <!-- Panel is a fixed-size flex column; the × button is pinned to its
+                 top-right so it stays visible while the prose body scrolls.
+                 @click.stop keeps clicks inside the panel from reaching the
+                 overlay's backdrop-close handler. -->
+            <div @click.stop class="sc-va-lightbox-md-panel">
+              <button type="button"
+                      class="sc-va-lightbox-md-close"
+                      data-testid="lightbox-md-close"
+                      @click="closeLightbox()"
+                      aria-label="Close">&times;</button>
+              <div class="sc-va-lightbox-md" x-html="lightboxHtml"></div>
+            </div>
           </template>
           <template x-if="lightboxKind === 'download'">
             <div @click.stop
