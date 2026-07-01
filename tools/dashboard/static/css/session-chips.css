@@ -568,6 +568,155 @@
   cursor: zoom-out;
 }
 
+/* ── Markdown lightbox panel (auto-g41xg) ────────────────────────────────────
+   Fullscreen viewer for text/markdown attachments. The panel is a fixed-size
+   flex column; the × close button is pinned to its top-right so it stays put
+   while the prose body scrolls. All prose selectors are scoped under
+   .sc-va-lightbox-md so they never leak into the rest of the chat UI. Tokens
+   match the surrounding lightbox aesthetic — dark cool grays (#0f1a2b /
+   #172232 / #25364c) with the accent purple (#5638f3). */
+.sc-va-lightbox-md-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 92vw;
+  max-width: 900px;
+  max-height: 90vh;
+  background: #0f1a2b;
+  color: #e2e8f0;
+  border: 1px solid #25364c;
+  border-radius: 12px;
+  overflow: hidden;
+  cursor: auto;
+}
+
+.sc-va-lightbox-md-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1;
+  color: #cbd5e1;
+  background: rgba(23, 34, 50, 0.85);
+  border: 1px solid #25364c;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.sc-va-lightbox-md-close:hover {
+  background: #273548;
+  color: #fff;
+}
+
+.sc-va-lightbox-md {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 32px 40px;
+  font-family: system-ui, -apple-system, sans-serif;
+  line-height: 1.6;
+}
+
+/* ── Scoped prose ──────────────────────────────────────────────────────────*/
+.sc-va-lightbox-md h1,
+.sc-va-lightbox-md h2,
+.sc-va-lightbox-md h3,
+.sc-va-lightbox-md h4 {
+  margin: 24px 0 12px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: #f1f5f9;
+}
+.sc-va-lightbox-md h1 { font-size: 1.9rem; }
+.sc-va-lightbox-md h2 { font-size: 1.5rem; }
+.sc-va-lightbox-md h3 { font-size: 1.25rem; }
+.sc-va-lightbox-md h4 { font-size: 1.05rem; }
+.sc-va-lightbox-md h1,
+.sc-va-lightbox-md h2 {
+  padding-bottom: 6px;
+  border-bottom: 1px solid #25364c;
+}
+.sc-va-lightbox-md > :first-child { margin-top: 0; }
+
+.sc-va-lightbox-md p { margin: 0 0 12px; }
+
+.sc-va-lightbox-md ul,
+.sc-va-lightbox-md ol {
+  margin: 0 0 12px;
+  padding-left: 24px;
+}
+.sc-va-lightbox-md li { margin: 2px 0; }
+
+.sc-va-lightbox-md code {
+  padding: 1px 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.875em;
+  background: #1e293b;
+  border-radius: 4px;
+}
+
+.sc-va-lightbox-md pre {
+  margin: 0 0 12px;
+  padding: 12px;
+  overflow-x: auto;
+  background: #0b1220;
+  border-radius: 8px;
+}
+.sc-va-lightbox-md pre code {
+  padding: 0;
+  font-size: 0.85em;
+  background: transparent;
+  border-radius: 0;
+}
+
+.sc-va-lightbox-md table {
+  width: 100%;
+  margin: 0 0 12px;
+  border-collapse: collapse;
+  font-size: 0.9em;
+}
+.sc-va-lightbox-md th,
+.sc-va-lightbox-md td {
+  padding: 6px 10px;
+  border: 1px solid #25364c;
+  text-align: left;
+}
+.sc-va-lightbox-md th {
+  background: #172232;
+  font-weight: 600;
+}
+
+.sc-va-lightbox-md blockquote {
+  margin: 0 0 12px;
+  padding: 2px 0 2px 14px;
+  border-left: 3px solid #5638f3;
+  color: #cbd5e1;
+  font-style: italic;
+}
+
+.sc-va-lightbox-md a {
+  color: #7dd3fc;
+  text-decoration: none;
+}
+.sc-va-lightbox-md a:hover { text-decoration: underline; }
+
+.sc-va-lightbox-md img {
+  max-width: 100%;
+  height: auto;
+}
+
+.sc-va-lightbox-md hr {
+  margin: 20px 0;
+  border: none;
+  border-top: 1px solid #25364c;
+}
+
 /* ── Pending / outbox tile (auto-xkdoi) ──────────────────────────────────────
    Pinned bottom surface above the composer. Reuses the .sc-entry-user visual
    language; adds capturing/sending/unconfirmed skins. Contract: cbb8497c-a1f. */
