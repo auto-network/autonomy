@@ -555,6 +555,12 @@
             <iframe :src="lightboxSrc" :title="lightboxAlt" @click.stop
                     style="width:92vw;height:88vh;border:none;border-radius:8px;background:#fff"></iframe>
           </template>
+          <template x-if="lightboxKind === 'markdown'">
+            <div @click.stop
+                 class="sc-va-lightbox-md"
+                 style="width:92vw;max-width:900px;max-height:90vh;overflow:auto;background:#0f1a2b;color:#e2e8f0;border:1px solid #25364c;border-radius:12px;padding:32px 40px;font-family:system-ui,-apple-system,sans-serif;line-height:1.6"
+                 x-html="lightboxHtml"></div>
+          </template>
           <template x-if="lightboxKind === 'download'">
             <div @click.stop
                  style="background:#172232;border:1px solid #25364c;border-radius:12px;padding:24px;max-width:80vw;text-align:center;color:#cbd5e1">

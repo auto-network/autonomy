@@ -615,10 +615,16 @@
       // out to Safari, backgrounds the app, and drops the voice connection.
       lightboxKind: 'image',
       lightboxName: '',
+      // Rendered markdown HTML when lightboxKind === 'markdown'. Browsers have
+      // no native text/markdown renderer, so we fetch the raw bytes and render
+      // client-side with marked + DOMPurify rather than dropping the file into
+      // an iframe (which white-screens).
+      lightboxHtml: '',
       _lightboxPrevViewport: null,
       lightboxKindForMime(mime) {
         if (typeof mime !== 'string' || !mime) return 'download';
         if (mime.indexOf('image/') === 0) return 'image';
+        if (mime === 'text/markdown' || mime === 'text/x-markdown') return 'markdown';
         if (mime === 'application/pdf' || mime.indexOf('text/') === 0) return 'iframe';
         return 'download';
       },
@@ -629,6 +635,25 @@
         this.lightboxAlt = alt || '';
         this.lightboxKind = opts.kind || 'image';
         this.lightboxName = opts.name || '';
+        if (this.lightboxKind === 'markdown') {
+          this.lightboxHtml = '';
+          fetch(src, { credentials: 'same-origin' })
+            .then((r) => (r.ok ? r.text() : Promise.reject(r.status)))
+            .then((md) => {
+              if (window.marked && window.DOMPurify) {
+                this.lightboxHtml = window.DOMPurify.sanitize(window.marked.parse(md));
+              } else {
+                // Graceful fallback if marked/DOMPurify aren't loaded yet
+                this.lightboxHtml =
+                  '<pre style="white-space:pre-wrap">' +
+                  md.replace(/[&<>]/g, (s) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[s])) +
+                  '</pre>';
+              }
+            })
+            .catch((err) => {
+              this.lightboxHtml = '<div style="color:#f87171">Failed to load: ' + err + '</div>';
+            });
+        }
         // The base layout pins the viewport to maximum-scale=1,
         // user-scalable=no so the chat UI doesn't accidentally zoom on
         // mobile. We want pinch-zoom inside the lightbox though, so swap
@@ -648,6 +673,7 @@
         this.lightboxAlt = '';
         this.lightboxKind = 'image';
         this.lightboxName = '';
+        this.lightboxHtml = '';
         var meta = document.querySelector('meta[name="viewport"]');
         if (meta && this._lightboxPrevViewport !== null) {
           meta.setAttribute('content', this._lightboxPrevViewport);
