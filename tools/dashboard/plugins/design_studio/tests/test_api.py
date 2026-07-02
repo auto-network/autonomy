@@ -59,7 +59,8 @@ def _rows() -> list[dict]:
 
 
 def test_list_designs_groups_revisions_and_summarizes_all_statuses():
-    with patch.object(design_api, "_design_rows", return_value=_rows()):
+    with patch.object(design_api, "_design_rows", return_value=_rows()), \
+         patch.object(design_api, "_thumbnail_url", lambda rev_id: "/thumb/" + rev_id):
         resp = _client().get("/api/design-studio/designs")
 
     assert resp.status_code == 200
@@ -77,6 +78,7 @@ def test_list_designs_groups_revisions_and_summarizes_all_statuses():
     assert by_id["series-a"]["revision_count"] == 2
     assert by_id["series-a"]["variant_count"] == 5
     assert by_id["series-a"]["has_fixture"] is True
+    assert by_id["series-a"]["thumbnail_url"] == "/thumb/rev-a2"
 
 
 def test_list_designs_filters_by_status_and_query():
@@ -89,6 +91,18 @@ def test_list_designs_filters_by_status_and_query():
     assert data["designs"][0]["design_id"] == "series-a"
 
 
+def test_list_designs_uses_older_revision_thumbnail_when_latest_has_none():
+    def thumbnail_url(rev_id: str) -> str:
+        return "/thumb/rev-a1" if rev_id == "rev-a1" else ""
+
+    with patch.object(design_api, "_design_rows", return_value=_rows()), \
+         patch.object(design_api, "_thumbnail_url", thumbnail_url):
+        resp = _client().get("/api/design-studio/designs?status=pending")
+
+    assert resp.status_code == 200
+    assert resp.json()["designs"][0]["thumbnail_url"] == "/thumb/rev-a1"
+
+
 def test_get_design_series_returns_revision_timeline():
     with patch.object(design_api, "_design_rows", return_value=_rows()):
         resp = _client().get("/api/design-studio/designs/series-a")
@@ -98,3 +112,20 @@ def test_get_design_series_returns_revision_timeline():
     assert data["design_id"] == "series-a"
     assert [row["id"] for row in data["revisions"]] == ["rev-a1", "rev-a2"]
 
+
+def test_revision_thumbnail_serves_screenshot_file(tmp_path):
+    screenshot = tmp_path / "screenshot.png"
+    screenshot.write_bytes(b"png")
+    with patch.object(design_api, "_screenshot_path", return_value=screenshot):
+        resp = _client().get("/api/design-studio/revisions/rev-a2/thumbnail")
+
+    assert resp.status_code == 200
+    assert resp.content == b"png"
+
+
+def test_revision_thumbnail_rejects_missing_file(tmp_path):
+    missing = tmp_path / "missing.png"
+    with patch.object(design_api, "_screenshot_path", return_value=missing):
+        resp = _client().get("/api/design-studio/revisions/rev-a2/thumbnail")
+
+    assert resp.status_code == 404
