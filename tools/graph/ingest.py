@@ -1136,13 +1136,69 @@ def _ingest_agentic_session(
     max_turn = db.get_max_turn(source_id)
     new_turns = [t for t in turns if t["turn_number"] > max_turn]
 
+    thoughts, derivations, all_entities = _write_new_turns(
+        db, source_id, new_turns, model=meta.get("model", default_model),
+    )
+
+    new_meta = _build_summary_meta(
+        existing_meta, meta, file_path, session_meta, current_size,
+    )
+    db.update_source_summary(
+        source_id,
+        title=None,  # preserve dashboard-set title
+        metadata=new_meta,
+        last_activity_at=meta.get("ended_at") or existing_source.get("last_activity_at"),
+    )
+    db.commit()
+
+    if not new_turns:
+        return {
+            "status": "agentic_refreshed",
+            "source_id": source_id,
+            "reason": "summary refreshed",
+        }
+    return {
+        "status": "agentic_updated",
+        "source_id": source_id,
+        "session_id": meta["session_id"],
+        "new_thoughts": len(thoughts),
+        "new_derivations": len(derivations),
+        "new_entities": len(all_entities),
+        "from_turn": max_turn + 1,
+        "to_turn": turns[-1]["turn_number"],
+    }
+
+
+def _write_new_turns(
+    db: GraphDB, source_id: str, new_turns: list[dict], *, model: str | None,
+) -> tuple[list[Thought], list[Derivation], dict]:
+    """Write a batch of new turns (thoughts/derivations/entities/edges) onto
+    an existing source. Shared by the full-reparse incremental path
+    (``_ingest_text_session``'s existing branch) and the tail-primary
+    ``GraphAppender`` (W3) — identical writes, identical role branching
+    (compact_summary/injected/user/assistant), identical ``last_thought_id``
+    threading for derivation→thought edges, so a tail-fed batch and a
+    sweep-fed batch land byte-identical content regardless of which path
+    got there first (the W3 soak's dedup guarantee depends on this).
+
+    ``new_turns`` must already be filtered to ``turn_number > max_turn`` —
+    this function does no deduping of its own beyond the message-id/turn-
+    number identity SQLite enforces via each turn's own insert.
+
+    Returns ``(thoughts, derivations, all_entities)`` — ``all_entities``
+    maps lowercased entity name → ``(name, type)`` for the caller's
+    entity-count bookkeeping. Caller owns the transaction (commit/rollback);
+    this function only executes/queues writes on ``db.conn``.
+    """
     thoughts: list[Thought] = []
     derivations: list[Derivation] = []
     all_entities: dict = {}
+    if not new_turns:
+        return thoughts, derivations, all_entities
 
     last_thought_row = db.conn.execute(
         "SELECT id FROM thoughts WHERE source_id = ? ORDER BY turn_number DESC LIMIT 1",
-        (source_id,),
+        (source_id,)
     ).fetchone()
     last_thought_id = last_thought_row["id"] if last_thought_row else None
 
@@ -1165,8 +1221,10 @@ def _ingest_agentic_session(
             continue
 
         if turn["role"] == "injected":
-            # Codex operator briefs (W1 §12.3) — see the non-agentic branch
-            # above for the full rationale.
+            # Codex operator briefs (W1 §12.3) — kept searchable via FTS
+            # but role-filtered out of attention/title-probe like
+            # compact_summary. No entity extraction, no thread edge: these
+            # aren't part of the user<->assistant exchange.
             t = Thought(
                 source_id=source_id,
                 content=turn["content"],
@@ -1198,6 +1256,7 @@ def _ingest_agentic_session(
             db.insert_thought(t)
             thoughts.append(t)
             last_thought_id = t.id
+
             for name, etype in ents:
                 eid = db.upsert_entity(name, etype)
                 db.add_mention(eid, t.id, "thought")
@@ -1207,7 +1266,7 @@ def _ingest_agentic_session(
                 source_id=source_id,
                 thought_id=last_thought_id,
                 content=turn["content"],
-                model=meta.get("model", default_model),
+                model=model,
                 turn_number=turn["turn_number"],
                 message_id=turn.get("message_id"),
                 metadata={"timestamp": turn.get("timestamp", "")},
@@ -1215,9 +1274,11 @@ def _ingest_agentic_session(
             )
             db.insert_derivation(d)
             derivations.append(d)
+
             for name, etype in ents:
                 eid = db.upsert_entity(name, etype)
                 db.add_mention(eid, d.id, "derivation")
+
             if last_thought_id:
                 db.insert_edge(Edge(
                     source_id=d.id, source_type="derivation",
@@ -1225,33 +1286,7 @@ def _ingest_agentic_session(
                     relation="responds_to",
                 ))
 
-    new_meta = _build_summary_meta(
-        existing_meta, meta, file_path, session_meta, current_size,
-    )
-    db.update_source_summary(
-        source_id,
-        title=None,  # preserve dashboard-set title
-        metadata=new_meta,
-        last_activity_at=meta.get("ended_at") or existing_source.get("last_activity_at"),
-    )
-    db.commit()
-
-    if not new_turns:
-        return {
-            "status": "agentic_refreshed",
-            "source_id": source_id,
-            "reason": "summary refreshed",
-        }
-    return {
-        "status": "agentic_updated",
-        "source_id": source_id,
-        "session_id": meta["session_id"],
-        "new_thoughts": len(thoughts),
-        "new_derivations": len(derivations),
-        "new_entities": len(all_entities),
-        "from_turn": max_turn + 1,
-        "to_turn": turns[-1]["turn_number"],
-    }
+    return thoughts, derivations, all_entities
 
 
 def _ingest_text_session(
@@ -1322,100 +1357,9 @@ def _ingest_text_session(
         new_turns = [t for t in turns if t["turn_number"] > max_turn]
 
         source_id = existing["id"]
-        thoughts = []
-        derivations = []
-        all_entities = {}
-
-        if new_turns:
-            last_thought_row = db.conn.execute(
-                "SELECT id FROM thoughts WHERE source_id = ? ORDER BY turn_number DESC LIMIT 1",
-                (source_id,)
-            ).fetchone()
-            last_thought_id = last_thought_row["id"] if last_thought_row else None
-
-            for turn in new_turns:
-                if turn["role"] == "compact_summary":
-                    t_meta = {"timestamp": turn.get("timestamp", "")}
-                    if turn.get("compact_metadata"):
-                        t_meta["compact_metadata"] = turn["compact_metadata"]
-                    t = Thought(
-                        source_id=source_id,
-                        content=turn["content"],
-                        role="compact_summary",
-                        turn_number=turn["turn_number"],
-                        message_id=turn.get("message_id"),
-                        metadata=t_meta,
-                        created_at=turn.get("timestamp") or now_iso(),
-                    )
-                    db.insert_thought(t)
-                    thoughts.append(t)
-                    continue
-
-                if turn["role"] == "injected":
-                    # Codex operator briefs (W1 §12.3) — kept searchable via
-                    # FTS but role-filtered out of attention/title-probe like
-                    # compact_summary. No entity extraction, no thread edge:
-                    # these aren't part of the user<->assistant exchange.
-                    t = Thought(
-                        source_id=source_id,
-                        content=turn["content"],
-                        role="injected",
-                        turn_number=turn["turn_number"],
-                        message_id=turn.get("message_id"),
-                        metadata={"timestamp": turn.get("timestamp", "")},
-                        created_at=turn.get("timestamp") or now_iso(),
-                    )
-                    db.insert_thought(t)
-                    thoughts.append(t)
-                    continue
-
-                ents = extract_entities(turn["content"])
-                for name, etype in ents:
-                    key = name.lower()
-                    if key not in all_entities:
-                        all_entities[key] = (name, etype)
-
-                if turn["role"] == "user":
-                    t = Thought(
-                        source_id=source_id,
-                        content=turn["content"],
-                        turn_number=turn["turn_number"],
-                        message_id=turn.get("message_id"),
-                        metadata={"timestamp": turn.get("timestamp", "")},
-                        created_at=turn.get("timestamp") or now_iso(),
-                    )
-                    db.insert_thought(t)
-                    thoughts.append(t)
-                    last_thought_id = t.id
-
-                    for name, etype in ents:
-                        eid = db.upsert_entity(name, etype)
-                        db.add_mention(eid, t.id, "thought")
-
-                elif turn["role"] == "assistant":
-                    d = Derivation(
-                        source_id=source_id,
-                        thought_id=last_thought_id,
-                        content=turn["content"],
-                        model=meta.get("model", default_model),
-                        turn_number=turn["turn_number"],
-                        message_id=turn.get("message_id"),
-                        metadata={"timestamp": turn.get("timestamp", "")},
-                        created_at=turn.get("timestamp") or now_iso(),
-                    )
-                    db.insert_derivation(d)
-                    derivations.append(d)
-
-                    for name, etype in ents:
-                        eid = db.upsert_entity(name, etype)
-                        db.add_mention(eid, d.id, "derivation")
-
-                    if last_thought_id:
-                        db.insert_edge(Edge(
-                            source_id=d.id, source_type="derivation",
-                            target_id=last_thought_id, target_type="thought",
-                            relation="responds_to",
-                        ))
+        thoughts, derivations, all_entities = _write_new_turns(
+            db, source_id, new_turns, model=meta.get("model", default_model),
+        )
 
         existing_meta = json.loads(existing["metadata"]) if existing["metadata"] else {}
         new_meta = _build_summary_meta(existing_meta, meta, file_path, session_meta, current_size)
