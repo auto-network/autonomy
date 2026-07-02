@@ -1014,6 +1014,11 @@ class SessionMonitor:
         self._reconcile_failure_streak: int = 0
         self._reconcile_degraded_since: float | None = None
         self._reconcile_last_error: str | None = None
+        # W3: per-session tail-primary graph appenders. Keyed by tmux_name;
+        # in-memory only (not persisted — a dashboard restart re-establishes
+        # via _build_graph_appender's gap catch-up, resuming from the
+        # graph_ingest_offset already persisted in the source's metadata).
+        self._graph_appenders: dict = {}
 
     # ── Registration ──────────────────────────────────────────────
 
@@ -1959,6 +1964,179 @@ class SessionMonitor:
                 created += 1
         return created
 
+    # ── W3: tail-primary GraphAppender ───────────────────────────────
+
+    def _build_graph_appender(self, tmux_name: str, jsonl_path: Path):
+        """Sync (runs off the event loop). Resolves org, ensures a linked
+        graph source exists (reuses ``_eager_create_source``'s idempotent-
+        by-path logic — a no-op if one already exists), and restores a
+        ``GraphAppender`` from that source's persisted metadata.
+
+        This IS the gap-catch-up mechanism for "tail (re)establishment":
+        an existing source's stored ``graph_ingest_offset``/extractor
+        state means the returned appender naturally resumes rather than
+        re-reading from byte 0 — no separate resume path needed. A
+        genuinely new ``jsonl_path`` (rollover) resolves to a *different*
+        source by path, so the returned appender starts fresh at offset 0
+        against the new file, matching "codex rollover creates new
+        source."
+        """
+        from tools.graph.appender import GraphAppender
+        from tools.graph.db import GraphDB
+        from tools.graph.ingest import _load_session_meta, session_target_org
+
+        row = get_session(tmux_name)
+        if row is None:
+            return None
+        org = session_target_org(jsonl_path, default=row.get("project"))
+        if not org:
+            return None
+
+        # Always (re-)resolve against jsonl_path, not just when
+        # graph_source_id is empty. _build_graph_appender only runs when
+        # no appender is registered yet OR the tracked file_path changed
+        # (rollover) — in the rollover case the row's graph_source_id
+        # still points at the OLD file's source, and insert_eager_session_
+        # source's idempotent-by-path lookup is exactly what re-resolves
+        # it to the (new-or-existing) source for THIS path. Cheap: at most
+        # one get_source_by_path + one UPDATE, and only on this
+        # (re)establishment path, never per tail tick.
+        self._eager_create_source(tmux_name, jsonl_path)
+        row = get_session(tmux_name)
+        source_id = row.get("graph_source_id") if row else None
+        if not source_id:
+            return None
+
+        db = GraphDB.for_org(org)
+        source = db.get_source(source_id)
+        if source is None:
+            return None
+
+        session_meta = _load_session_meta(jsonl_path)
+        harness = str(row.get("harness") or "claude").strip().lower()
+        default_model = "codex-cli" if harness == "codex" else "claude-code"
+        return GraphAppender.from_source(
+            source, org=org, file_path=jsonl_path, session_meta=session_meta,
+            harness=harness, default_model=default_model,
+        )
+
+    def _feed_graph_appender(self, appender) -> None:
+        """Sync tail-delta read + feed — deliberately independent of the
+        viewer's ``_tail_one`` read (separate cursor, separate offset; see
+        ``appender.py``'s module docstring). Implements the AC-offset gap-
+        catch-up triggers: ``size < offset`` (truncation) forces a full
+        reset before reading; ``size > offset`` resumes from the appender's
+        own persisted offset, reading only the tail delta.
+        """
+        try:
+            st = appender.file_path.stat()
+        except OSError:
+            return
+        if st.st_size < appender.graph_ingest_offset:
+            logger.info(
+                "session_monitor: graph appender detected truncation for %s — resetting",
+                appender.source_id,
+            )
+            appender.reset()
+
+        offset = appender.graph_ingest_offset
+        if st.st_size <= offset:
+            return
+
+        try:
+            with open(appender.file_path, "rb") as fh:
+                fh.seek(offset)
+                data = fh.read()
+        except OSError:
+            return
+
+        last_nl = data.rfind(b"\n")
+        if last_nl == -1:
+            return  # only a partial trailing line available — wait for more
+
+        complete = data[:last_nl + 1]
+        lines = complete.splitlines()
+        if not lines:
+            return
+        new_offset = offset + last_nl + 1
+
+        try:
+            appender.feed_lines(lines, new_byte_offset=new_offset)
+        except Exception:
+            logger.exception(
+                "session_monitor: graph appender feed failed for source %s",
+                appender.source_id,
+            )
+
+    async def _graph_appender_tick(self, tmux_name: str, jsonl_path: Path) -> None:
+        """W3: feed the session's GraphAppender with any bytes beyond its
+        own ``graph_ingest_offset``. The single integration point for tail-
+        primary ingest — called after every viewer tail read (IN_MODIFY,
+        rollover re-watch); self-heals by lazily (re)building the appender
+        when none is registered yet for this ``tmux_name`` or the tracked
+        ``file_path`` no longer matches (rollover), so no separate wiring
+        is needed for dashboard-restart or retry-sweep-created sources —
+        they pick up an appender on their next tail event.
+
+        Behind the ``ingest.tail_appender`` flag. Best-effort: any failure
+        here must never affect the live viewer's own tailing.
+        """
+        try:
+            from tools.dashboard import feature_flags
+            if not feature_flags.is_enabled("ingest.tail_appender"):
+                return
+        except Exception:
+            return
+
+        appender = self._graph_appenders.get(tmux_name)
+        if appender is None or appender.file_path != jsonl_path:
+            appender = await asyncio.to_thread(self._build_graph_appender, tmux_name, jsonl_path)
+            if appender is None:
+                return
+            self._graph_appenders[tmux_name] = appender
+
+        await asyncio.to_thread(self._feed_graph_appender, appender)
+
+    async def _final_graph_catchup(self, tmux_name: str, jsonl_path: str) -> None:
+        """W3 death path: final gap check + summary refresh, in-process —
+        replaces the blocking ``subprocess.run(["graph", "ingest-session",
+        ...])`` call this used to make (up to 30s, synchronously, on the
+        event loop thread).
+
+        If a GraphAppender was already active for this session, one last
+        catch-up tick covers any trailing bytes and the appender is
+        dropped (the session is dead; no more ticks needed). Otherwise
+        (flag off, or the session died before its first tail event) falls
+        back to an in-process full-reparse ingest — still no subprocess,
+        unlike the code this replaces.
+        """
+        try:
+            appender = self._graph_appenders.pop(tmux_name, None)
+            if appender is not None:
+                await asyncio.to_thread(self._feed_graph_appender, appender)
+                return
+            await asyncio.to_thread(self._final_full_reparse, jsonl_path)
+        except Exception:
+            logger.exception(
+                "session_monitor: final graph catch-up failed for %s", tmux_name,
+            )
+
+    @staticmethod
+    def _final_full_reparse(jsonl_path: str) -> None:
+        """Sync fallback for the death path when no GraphAppender was
+        active. Same in-process ingest the sweep already uses — no
+        subprocess, unlike the code this replaces."""
+        from tools.graph.ingest import _open_db_for_session, ingest_session_file
+
+        path = Path(jsonl_path)
+        db = _open_db_for_session(path)
+        if db is None:
+            return
+        try:
+            ingest_session_file(db, path)
+        finally:
+            db.close()
+
     def _remove_watches(self, tmux_name: str) -> None:
         """Remove all inotify watches for a session."""
         if not self._inotify:
@@ -2399,6 +2577,7 @@ class SessionMonitor:
                     ts = self._tail_states[tmux_name]
                     _, new_entries = await asyncio.to_thread(self._tail_one, row, ts)
                     await self._process_tail_entries(tmux_name, row, ts, new_entries)
+                    await self._graph_appender_tick(tmux_name, Path(row["jsonl_path"]))
 
             except Exception:
                 logger.exception("session_monitor: inotify tailer error")
@@ -2537,6 +2716,11 @@ class SessionMonitor:
         if row and row.get("jsonl_path"):
             _, new_entries = await asyncio.to_thread(self._tail_one, row, ts)
             await self._process_tail_entries(tmux_name, row, ts, new_entries)
+            # W3: new inode -> new jsonl_path -> _graph_appender_tick sees
+            # appender.file_path no longer matches and rebuilds against the
+            # new file (a genuinely new source by path, per "codex rollover
+            # creates new source").
+            await self._graph_appender_tick(tmux_name, Path(row["jsonl_path"]))
 
     async def _handle_container_create(
         self, tmux_name: str, row: dict, new_file: Path,
@@ -3262,16 +3446,13 @@ class SessionMonitor:
                         if ts:
                             ts.pending_tool_ids.clear()
                         mark_dead(tmux_name)
-                        # Re-ingest completed session into graph (final state)
+                        # W3: final in-process graph catch-up (final state) —
+                        # replaces the blocking `graph ingest-session`
+                        # subprocess (up to 30s on the event loop thread)
+                        # this used to be.
                         jsonl_path = row.get("jsonl_path")
                         if jsonl_path:
-                            try:
-                                subprocess.run(
-                                    ["graph", "ingest-session", jsonl_path],
-                                    capture_output=True, text=True, timeout=30,
-                                )
-                            except Exception:
-                                pass  # best-effort; cron catch-up covers failures
+                            await self._final_graph_catchup(tmux_name, jsonl_path)
                         self._tail_states.pop(tmux_name, None)
                         # Clean up the session's workspace worktrees (no-op
                         # if the session had none). Uncommitted changes or
