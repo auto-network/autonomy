@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,11 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Route
+
+_CATALOG_CACHE_TTL_SECONDS = 10
+_SCREENSHOT_CACHE_TTL_SECONDS = 10
+_catalog_cache: dict[str, Any] = {"expires_at": 0.0, "series": None, "source_key": None}
+_screenshot_cache: dict[str, Any] = {"expires_at": 0.0, "revision_ids": set()}
 
 
 def _status_filter(raw: str | None) -> set[str] | None:
@@ -71,10 +77,30 @@ def _screenshot_path(revision_id: str) -> Path | None:
 
 
 def _thumbnail_url(revision_id: str) -> str:
-    path = _screenshot_path(revision_id)
-    if path and path.is_file():
-        return f"/api/design-studio/revisions/{revision_id}/thumbnail"
+    rev_id = _safe_revision_id(revision_id)
+    if rev_id and rev_id in _screenshot_revision_ids():
+        return f"/api/design-studio/revisions/{rev_id}/thumbnail"
     return ""
+
+
+def _screenshot_revision_ids() -> set[str]:
+    if os.environ.get("DASHBOARD_MOCK"):
+        return set()
+    now = time.monotonic()
+    cached = _screenshot_cache.get("revision_ids")
+    if cached is not None and now < float(_screenshot_cache.get("expires_at") or 0):
+        return set(cached)
+    from agents.design_db import REPO_ROOT
+
+    base = REPO_ROOT / "data" / "experiments"
+    revision_ids = {
+        path.parent.name
+        for path in base.glob("*/screenshot.png")
+        if _safe_revision_id(path.parent.name)
+    } if base.exists() else set()
+    _screenshot_cache["revision_ids"] = revision_ids
+    _screenshot_cache["expires_at"] = now + _SCREENSHOT_CACHE_TTL_SECONDS
+    return set(revision_ids)
 
 
 def _mock_design_rows() -> list[dict]:
@@ -105,6 +131,10 @@ def _sqlite_design_rows() -> list[dict]:
 
     conn = _get_conn()
     try:
+        variant_counts = Counter(
+            row["revision_id"]
+            for row in conn.execute("SELECT revision_id FROM revision_variants").fetchall()
+        )
         rows = conn.execute("""\
             SELECT
               d.id,
@@ -116,13 +146,15 @@ def _sqlite_design_rows() -> list[dict]:
               d.created_at,
               d.creator_session_id,
               d.creator_session_label,
-              CASE WHEN d.fixture IS NOT NULL AND d.fixture != '' THEN 1 ELSE 0 END AS has_fixture,
-              COUNT(rv.id) AS variant_count
+              CASE WHEN d.fixture IS NOT NULL AND d.fixture != '' THEN 1 ELSE 0 END AS has_fixture
             FROM designs d
-            LEFT JOIN revision_variants rv ON rv.revision_id = d.id
-            GROUP BY d.id
         """).fetchall()
-        return [{k: row[k] for k in row.keys()} for row in rows]
+        out = []
+        for row in rows:
+            item = {k: row[k] for k in row.keys()}
+            item["variant_count"] = variant_counts.get(item["id"], 0)
+            out.append(item)
+        return out
     finally:
         conn.close()
 
@@ -131,6 +163,23 @@ def _design_rows() -> list[dict]:
     if os.environ.get("DASHBOARD_MOCK"):
         return _mock_design_rows()
     return _sqlite_design_rows()
+
+
+def _all_series() -> list[dict]:
+    if os.environ.get("DASHBOARD_MOCK"):
+        return _series_from_rows(_design_rows())
+    now = time.monotonic()
+    source_key = (id(_design_rows), id(_thumbnail_url))
+    cached = _catalog_cache.get("series")
+    if (cached is not None
+            and _catalog_cache.get("source_key") == source_key
+            and now < float(_catalog_cache.get("expires_at") or 0)):
+        return [dict(row) for row in cached]
+    series = _series_from_rows(_design_rows())
+    _catalog_cache["series"] = [dict(row) for row in series]
+    _catalog_cache["source_key"] = source_key
+    _catalog_cache["expires_at"] = now + _CATALOG_CACHE_TTL_SECONDS
+    return series
 
 
 def _series_from_rows(rows: list[dict]) -> list[dict]:
@@ -201,7 +250,7 @@ async def list_designs(request: Request) -> JSONResponse:
     direction = request.query_params.get("direction") or "desc"
     limit = max(1, min(_coerce_int(request.query_params.get("limit"), 250), 500))
 
-    all_series = _series_from_rows(_design_rows())
+    all_series = _all_series()
     filtered = [
         row for row in all_series
         if (statuses is None or row.get("status") in statuses)
@@ -247,7 +296,7 @@ async def get_revision_thumbnail(request: Request):
 
 def badge_counter() -> int:
     try:
-        return _summarize(_series_from_rows(_design_rows())).get("pending_series", 0)
+        return _summarize(_all_series()).get("pending_series", 0)
     except Exception:
         return 0
 

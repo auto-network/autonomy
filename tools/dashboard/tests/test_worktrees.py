@@ -899,11 +899,14 @@ class TestWorktreePage:
     def test_style_first_fragments_have_wrapper_root(self):
         worktrees = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text().lstrip()
         collab = (TEMPLATE_DIR / "pages" / "collab.html").read_text().lstrip()
-        design = (TEMPLATE_DIR / "pages" / "design.html").read_text().lstrip()
+        design_plugin = (
+            TEMPLATE_DIR.parent / "plugins" / "design_studio" / "page.html"
+        ).read_text().lstrip()
 
         assert worktrees.startswith('<div data-testid="worktrees-fragment-root">')
         assert collab.startswith('<div data-testid="collab-fragment-root">')
-        assert design.startswith('<div data-testid="design-fragment-root">')
+        assert design_plugin.startswith('<link rel="stylesheet" href="/static/plugins/design_studio/page.css">')
+        assert '<div data-testid="design-studio-fragment-root"' in design_plugin
 
     def test_pr_badge_template_and_helpers_wired(self):
         """The PR badge fragment from the settled design (3435e03f) is in

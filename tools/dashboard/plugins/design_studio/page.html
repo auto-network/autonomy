@@ -48,6 +48,7 @@
       <section class="design-studio-list" data-testid="design-list" x-show="!loading && !error && designs.length">
         <template x-for="design in designs" :key="design.design_id">
           <article class="design-card"
+                   :class="design.thumbnail_url ? 'has-thumbnail' : 'no-thumbnail'"
                    role="button"
                    tabindex="0"
                    @click="openDesign(design)"
@@ -59,20 +60,15 @@
                     x-show="design.creator_session_id"
                     :class="isLiveDesign(design) ? 'is-live' : ''"
                     :title="'Open session: ' + sessionLabel(design)"
+                    :aria-label="'Open session: ' + sessionLabel(design)"
                     @click.stop="openSession(design)">
-              <span></span>
-              <span class="design-card-presence-label" x-text="isLiveDesign(design) ? 'Live' : 'Session'"></span>
+              <span class="design-card-presence-dot"></span>
             </button>
-            <div class="design-card-thumb" :class="design.thumbnail_url ? 'has-thumbnail' : ''">
-              <template x-if="design.thumbnail_url">
+            <template x-if="design.thumbnail_url">
+              <div class="design-card-thumb">
                 <img :src="design.thumbnail_url" alt="" loading="lazy">
-              </template>
-              <template x-if="!design.thumbnail_url">
-                <div class="design-thumb-fallback">
-                  <span x-text="initialFor(design)"></span>
-                </div>
-              </template>
-            </div>
+              </div>
+            </template>
             <div class="design-card-body">
               <div class="design-card-meta">
                 <span :class="statusClass(design.status)"
@@ -85,15 +81,6 @@
               <div class="design-card-footer">
                 <span><span x-text="design.revision_count"></span> rev</span>
                 <span x-text="formatDateTime(design.latest_created_at)"></span>
-              </div>
-              <div class="design-card-session" x-show="design.creator_session_id">
-                <button type="button"
-                        @click.stop="openSession(design)"
-                        :class="isLiveDesign(design) ? 'is-live' : ''"
-                        :title="'Open session ' + design.creator_session_id">
-                  <span class="design-session-dot"></span>
-                  <span x-text="sessionLabel(design)"></span>
-                </button>
               </div>
             </div>
           </article>
