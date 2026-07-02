@@ -6634,7 +6634,7 @@ async def api_session_create(request):
             # input handler initializes — without a settle, the first-message
             # keystrokes land in a dead stdin and codex silently drops them.
             # 1.5s is empirical; verify-by-echo would be more robust.
-            _HARNESS_INJECT_SETTLE_S = {"codex": 1.5, "claude": 0.0}
+            _HARNESS_INJECT_SETTLE_S = {"codex": 1.5, "claude": 2.0}
             settle = _HARNESS_INJECT_SETTLE_S.get(harness, 0.0)
             if settle > 0:
                 logger.info(
