@@ -385,25 +385,196 @@ _CODEX_NOISE_PREFIXES = (
 )
 
 
+class ClaudeTurnExtractor:
+    """Stateful incremental extractor for Claude Code JSONL turns (W1).
+
+    ``feed(entry)`` consumes one already-parsed JSONL line at a time and
+    returns the turn dict to append, or ``None`` if the entry produced no
+    turn (tool noise, sidechain, compaction metadata, low-signal text,
+    etc.). All cross-entry state — running turn number, token totals,
+    first/last timestamp, and the pending compact-metadata carry-over —
+    lives in ``.state``, a JSON-serializable dict.
+
+    ``parse_claude_code_session`` batch-feeds every line through a fresh
+    extractor. The tail appender (W3) instead resumes via
+    ``ClaudeTurnExtractor.from_state(saved_state)`` and feeds only the
+    newly appended lines — the state carries everything needed (in
+    particular ``pending_compact_meta``, which bridges a ``system`` entry
+    to the ``isCompactSummary`` entry that may arrive in a later batch) to
+    make that produce byte-identical turns to a full reparse.
+    """
+
+    def __init__(self, state: dict | None = None):
+        self._s: dict = {
+            "turn_number": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "model": None,
+            "first_ts": None,
+            "last_ts": None,
+            "pending_compact_meta": None,
+        }
+        if state:
+            self._s.update(state)
+
+    @property
+    def state(self) -> dict:
+        return dict(self._s)
+
+    @classmethod
+    def from_state(cls, state: dict) -> "ClaudeTurnExtractor":
+        return cls(state=state)
+
+    def feed(self, entry: dict) -> dict | None:
+        s = self._s
+        etype = entry.get("type")
+        ts = entry.get("timestamp", "")
+
+        # Track timestamps
+        if ts:
+            if s["first_ts"] is None:
+                s["first_ts"] = ts
+            s["last_ts"] = ts
+
+        # Context-compaction boundary: Claude writes a `type=system` entry with
+        # `compactMetadata`, followed by a user-role entry with `isCompactSummary`
+        # carrying the multi-thousand-char summary of the prior session. Capture
+        # the metadata so it can ride along with the summary turn.
+        if etype == "system" and entry.get("compactMetadata"):
+            s["pending_compact_meta"] = entry["compactMetadata"]
+            return None
+
+        # Skip non-conversation entries (but keep queue-operation = human mid-work input)
+        if etype not in ("user", "assistant", "queue-operation"):
+            return None
+
+        # Skip sidechain (subagent) entries
+        if entry.get("isSidechain"):
+            return None
+
+        # Compact-summary turns: Claude's continuation boilerplate. Ingest with a
+        # distinct role so role='user' filters (attention, title probe) skip them,
+        # while keeping the content indexed in FTS.
+        if entry.get("isCompactSummary") or entry.get("isVisibleInTranscriptOnly"):
+            msg = entry.get("message", {})
+            content_raw = msg.get("content", "")
+            if isinstance(content_raw, list):
+                content_raw = "\n".join(
+                    c.get("text", "") for c in content_raw
+                    if isinstance(c, dict) and c.get("type") == "text"
+                )
+            if not isinstance(content_raw, str) or len(content_raw) < 5:
+                return None
+            s["turn_number"] += 1
+            turn_entry = {
+                "turn_number": s["turn_number"],
+                "role": "compact_summary",
+                "content": content_raw,
+                "message_id": entry.get("uuid"),
+                "parent_uuid": entry.get("parentUuid"),
+                "timestamp": ts,
+            }
+            if s["pending_compact_meta"] is not None:
+                turn_entry["compact_metadata"] = s["pending_compact_meta"]
+                s["pending_compact_meta"] = None
+            return turn_entry
+
+        # Skip isMeta system entries
+        if entry.get("isMeta"):
+            return None
+
+        # Queue operations are human messages sent while agent was working
+        if etype == "queue-operation":
+            qcontent = entry.get("content", entry.get("message", {}).get("content", ""))
+            if isinstance(qcontent, str) and len(qcontent) > 5:
+                # Skip task notifications and command outputs
+                if qcontent.startswith(("<task-notification", "<local-command", "<command-name")):
+                    return None
+                s["turn_number"] += 1
+                return {
+                    "turn_number": s["turn_number"],
+                    "role": "user",
+                    "content": qcontent,
+                    "message_id": entry.get("uuid"),
+                    "parent_uuid": entry.get("parentUuid"),
+                    "timestamp": ts,
+                    "queued": True,
+                }
+            return None
+
+        msg = entry.get("message", {})
+        content = msg.get("content", "")
+
+        # Extract text content
+        text = ""
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            text_parts = []
+            has_tool_result = False
+            has_tool_use = False
+            for c in content:
+                if not isinstance(c, dict):
+                    continue
+                if c.get("type") == "text":
+                    text_parts.append(c["text"])
+                elif c.get("type") == "tool_result":
+                    has_tool_result = True
+                elif c.get("type") == "tool_use":
+                    has_tool_use = True
+
+            # Skip pure tool_result/tool_use entries with no text
+            if not text_parts and (has_tool_result or has_tool_use):
+                return None
+
+            text = "\n".join(text_parts)
+
+        # Clean system noise from content
+        text = SYSTEM_NOISE.sub("", text)
+        text = REQUEST_INTERRUPTED.sub("", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+        # Skip empty or trivially short content
+        if len(text) < 5:
+            return None
+
+        # Track model
+        if etype == "assistant" and msg.get("model"):
+            s["model"] = msg["model"]
+
+        # Track tokens
+        usage = msg.get("usage", {})
+        s["total_input_tokens"] += usage.get("input_tokens", 0)
+        s["total_output_tokens"] += usage.get("output_tokens", 0)
+
+        s["turn_number"] += 1
+        return {
+            "turn_number": s["turn_number"],
+            "role": etype if etype == "user" else "assistant",
+            "content": text,
+            "message_id": entry.get("uuid"),
+            "parent_uuid": entry.get("parentUuid"),
+            "timestamp": ts,
+        }
+
+
 def parse_claude_code_session(file_path: Path) -> tuple[dict, list[dict]]:
     """Parse a Claude Code JSONL session into metadata and content turns.
 
     Filters out tool_use, tool_result, file-history-snapshot, progress entries.
     Only keeps actual user prompts and assistant text responses.
     Skips sidechain (subagent) entries.
+
+    Thin batch wrapper over :class:`ClaudeTurnExtractor` — feeds every line
+    through a fresh extractor and reads the running totals back out of
+    its final state.
     """
     meta = {
         "session_id": file_path.stem,
         "platform": "claude-code",
     }
-    turns = []
-    turn_number = 0
-    first_ts = None
-    last_ts = None
-    model = None
-    total_input_tokens = 0
-    total_output_tokens = 0
-    pending_compact_meta: dict | None = None
+    extractor = ClaudeTurnExtractor()
+    turns: list[dict] = []
 
     with open(file_path, "r", encoding="utf-8") as f:
         for line in f:
@@ -414,143 +585,16 @@ def parse_claude_code_session(file_path: Path) -> tuple[dict, list[dict]]:
                 entry = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            turn = extractor.feed(entry)
+            if turn is not None:
+                turns.append(turn)
 
-            etype = entry.get("type")
-            ts = entry.get("timestamp", "")
-
-            # Track timestamps
-            if ts:
-                if first_ts is None:
-                    first_ts = ts
-                last_ts = ts
-
-            # Context-compaction boundary: Claude writes a `type=system` entry with
-            # `compactMetadata`, followed by a user-role entry with `isCompactSummary`
-            # carrying the multi-thousand-char summary of the prior session. Capture
-            # the metadata so it can ride along with the summary turn.
-            if etype == "system" and entry.get("compactMetadata"):
-                pending_compact_meta = entry["compactMetadata"]
-                continue
-
-            # Skip non-conversation entries (but keep queue-operation = human mid-work input)
-            if etype not in ("user", "assistant", "queue-operation"):
-                continue
-
-            # Skip sidechain (subagent) entries
-            if entry.get("isSidechain"):
-                continue
-
-            # Compact-summary turns: Claude's continuation boilerplate. Ingest with a
-            # distinct role so role='user' filters (attention, title probe) skip them,
-            # while keeping the content indexed in FTS.
-            if entry.get("isCompactSummary") or entry.get("isVisibleInTranscriptOnly"):
-                msg = entry.get("message", {})
-                content_raw = msg.get("content", "")
-                if isinstance(content_raw, list):
-                    content_raw = "\n".join(
-                        c.get("text", "") for c in content_raw
-                        if isinstance(c, dict) and c.get("type") == "text"
-                    )
-                if not isinstance(content_raw, str) or len(content_raw) < 5:
-                    continue
-                turn_number += 1
-                turn_entry = {
-                    "turn_number": turn_number,
-                    "role": "compact_summary",
-                    "content": content_raw,
-                    "message_id": entry.get("uuid"),
-                    "parent_uuid": entry.get("parentUuid"),
-                    "timestamp": ts,
-                }
-                if pending_compact_meta is not None:
-                    turn_entry["compact_metadata"] = pending_compact_meta
-                    pending_compact_meta = None
-                turns.append(turn_entry)
-                continue
-
-            # Skip isMeta system entries
-            if entry.get("isMeta"):
-                continue
-
-            # Queue operations are human messages sent while agent was working
-            if etype == "queue-operation":
-                qcontent = entry.get("content", entry.get("message", {}).get("content", ""))
-                if isinstance(qcontent, str) and len(qcontent) > 5:
-                    # Skip task notifications and command outputs
-                    if qcontent.startswith(("<task-notification", "<local-command", "<command-name")):
-                        continue
-                    turn_number += 1
-                    turns.append({
-                        "turn_number": turn_number,
-                        "role": "user",
-                        "content": qcontent,
-                        "message_id": entry.get("uuid"),
-                        "parent_uuid": entry.get("parentUuid"),
-                        "timestamp": ts,
-                        "queued": True,
-                    })
-                continue
-
-            msg = entry.get("message", {})
-            content = msg.get("content", "")
-
-            # Extract text content
-            text = ""
-            if isinstance(content, str):
-                text = content
-            elif isinstance(content, list):
-                text_parts = []
-                has_tool_result = False
-                has_tool_use = False
-                for c in content:
-                    if not isinstance(c, dict):
-                        continue
-                    if c.get("type") == "text":
-                        text_parts.append(c["text"])
-                    elif c.get("type") == "tool_result":
-                        has_tool_result = True
-                    elif c.get("type") == "tool_use":
-                        has_tool_use = True
-
-                # Skip pure tool_result/tool_use entries with no text
-                if not text_parts and (has_tool_result or has_tool_use):
-                    continue
-
-                text = "\n".join(text_parts)
-
-            # Clean system noise from content
-            text = SYSTEM_NOISE.sub("", text)
-            text = REQUEST_INTERRUPTED.sub("", text)
-            text = re.sub(r"\n{3,}", "\n\n", text).strip()
-
-            # Skip empty or trivially short content
-            if len(text) < 5:
-                continue
-
-            # Track model
-            if etype == "assistant" and msg.get("model"):
-                model = msg["model"]
-
-            # Track tokens
-            usage = msg.get("usage", {})
-            total_input_tokens += usage.get("input_tokens", 0)
-            total_output_tokens += usage.get("output_tokens", 0)
-
-            turn_number += 1
-            turns.append({
-                "turn_number": turn_number,
-                "role": etype if etype == "user" else "assistant",
-                "content": text,
-                "message_id": entry.get("uuid"),
-                "parent_uuid": entry.get("parentUuid"),
-                "timestamp": ts,
-            })
-
-    meta["started_at"] = first_ts
-    meta["ended_at"] = last_ts
-    meta["model"] = model
-    meta["total_input_tokens"] = total_input_tokens
-    meta["total_output_tokens"] = total_output_tokens
+    s = extractor.state
+    meta["started_at"] = s["first_ts"]
+    meta["ended_at"] = s["last_ts"]
+    meta["model"] = s["model"]
+    meta["total_input_tokens"] = s["total_input_tokens"]
+    meta["total_output_tokens"] = s["total_output_tokens"]
     meta["total_turns"] = len(turns)
 
     return meta, turns
@@ -598,24 +642,135 @@ def _codex_message_id(
     return None
 
 
+class CodexTurnExtractor:
+    """Stateful incremental extractor for Codex rollout JSONL turns (W1).
+
+    Same contract as :class:`ClaudeTurnExtractor` — ``feed(entry)`` returns
+    a turn dict or ``None``; ``.state`` / ``from_state()`` carry everything
+    needed to resume mid-file. Codex token totals are *absolute* snapshots
+    reported by each ``token_count`` event (not deltas), so unlike Claude's
+    running sum, resuming just needs the most recent value, which state
+    already holds.
+
+    W1 §12.3: ``user_message`` text matching :data:`_CODEX_NOISE_PREFIXES`
+    (operator briefs injected into the session) is no longer dropped — it's
+    ingested with ``role='injected'`` so it stays searchable via FTS while
+    remaining filtered out of attention/title-probe (role != 'user'). The
+    ``message_id`` is still computed with role="user" to match the live
+    viewer overlay's identity (see :func:`_codex_message_id`), so accepted
+    turn-corrections keep resolving correctly regardless of which role the
+    graph stored.
+    """
+
+    def __init__(self, state: dict | None = None):
+        self._s: dict = {
+            "turn_number": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "model": None,
+            "first_ts": None,
+            "last_ts": None,
+            "originator": None,
+            "model_provider": None,
+        }
+        if state:
+            self._s.update(state)
+
+    @property
+    def state(self) -> dict:
+        return dict(self._s)
+
+    @classmethod
+    def from_state(cls, state: dict) -> "CodexTurnExtractor":
+        return cls(state=state)
+
+    def feed(self, entry: dict) -> dict | None:
+        s = self._s
+        ts = entry.get("timestamp", "")
+        if ts:
+            if s["first_ts"] is None:
+                s["first_ts"] = ts
+            s["last_ts"] = ts
+
+        etype = entry.get("type")
+        payload = entry.get("payload") or {}
+        if not isinstance(payload, dict):
+            return None
+
+        if etype == "session_meta":
+            if payload.get("originator"):
+                s["originator"] = payload["originator"]
+            if payload.get("model_provider"):
+                s["model_provider"] = payload["model_provider"]
+            if payload.get("model"):
+                s["model"] = str(payload["model"])
+            return None
+
+        if etype == "compacted":
+            return None
+
+        if etype != "event_msg":
+            return None
+
+        event_type = payload.get("type")
+        if event_type == "token_count":
+            info = payload.get("info") or {}
+            total_usage = info.get("total_token_usage") or {}
+            s["total_input_tokens"] = _safe_int(
+                total_usage.get("input_tokens"), s["total_input_tokens"]
+            )
+            s["total_output_tokens"] = _safe_int(
+                total_usage.get("output_tokens"), s["total_output_tokens"]
+            )
+            return None
+
+        if event_type == "user_message":
+            text = _clean_codex_text(str(payload.get("message") or ""))
+            if len(text) < 5:
+                return None
+            role = "injected" if _is_codex_noise_text(text) else "user"
+            s["turn_number"] += 1
+            return {
+                "turn_number": s["turn_number"],
+                "role": role,
+                "content": text,
+                "message_id": _codex_message_id(payload, entry, "user", text),
+                "timestamp": ts,
+            }
+
+        if event_type == "agent_message":
+            text = _clean_codex_text(str(payload.get("message") or ""))
+            if len(text) < 5:
+                return None
+            s["turn_number"] += 1
+            return {
+                "turn_number": s["turn_number"],
+                "role": "assistant",
+                "content": text,
+                "message_id": _codex_message_id(payload, entry, "assistant", text),
+                "timestamp": ts,
+            }
+
+        return None
+
+
 def parse_codex_session(file_path: Path) -> tuple[dict, list[dict]]:
     """Parse a Codex rollout JSONL session into metadata and content turns.
 
     Keeps only operator-visible text from ``event_msg.user_message`` and
     ``event_msg.agent_message``. Tool use/results, progress items, and
     compaction metadata are excluded from graph content ingest.
+
+    Thin batch wrapper over :class:`CodexTurnExtractor` — feeds every line
+    through a fresh extractor and reads the running totals back out of its
+    final state.
     """
     meta = {
         "session_id": file_path.stem,
         "platform": "codex-cli",
     }
-    turns = []
-    turn_number = 0
-    first_ts = None
-    last_ts = None
-    model = None
-    total_input_tokens = 0
-    total_output_tokens = 0
+    extractor = CodexTurnExtractor()
+    turns: list[dict] = []
 
     with open(file_path, "r", encoding="utf-8") as f:
         for line in f:
@@ -626,81 +781,20 @@ def parse_codex_session(file_path: Path) -> tuple[dict, list[dict]]:
                 entry = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            turn = extractor.feed(entry)
+            if turn is not None:
+                turns.append(turn)
 
-            ts = entry.get("timestamp", "")
-            if ts:
-                if first_ts is None:
-                    first_ts = ts
-                last_ts = ts
-
-            etype = entry.get("type")
-            payload = entry.get("payload") or {}
-            if not isinstance(payload, dict):
-                continue
-
-            if etype == "session_meta":
-                if payload.get("originator"):
-                    meta["originator"] = payload["originator"]
-                if payload.get("model_provider"):
-                    meta["model_provider"] = payload["model_provider"]
-                if payload.get("model"):
-                    model = str(payload["model"])
-                continue
-
-            if etype == "compacted":
-                continue
-
-            if etype != "event_msg":
-                continue
-
-            event_type = payload.get("type")
-            if event_type == "token_count":
-                info = payload.get("info") or {}
-                total_usage = info.get("total_token_usage") or {}
-                total_input_tokens = _safe_int(
-                    total_usage.get("input_tokens"), total_input_tokens
-                )
-                total_output_tokens = _safe_int(
-                    total_usage.get("output_tokens"), total_output_tokens
-                )
-                continue
-
-            if event_type == "user_message":
-                text = _clean_codex_text(str(payload.get("message") or ""))
-                if len(text) < 5 or _is_codex_noise_text(text):
-                    continue
-                turn_number += 1
-                turns.append({
-                    "turn_number": turn_number,
-                    "role": "user",
-                    "content": text,
-                    "message_id": _codex_message_id(
-                        payload, entry, "user", text,
-                    ),
-                    "timestamp": ts,
-                })
-                continue
-
-            if event_type == "agent_message":
-                text = _clean_codex_text(str(payload.get("message") or ""))
-                if len(text) < 5:
-                    continue
-                turn_number += 1
-                turns.append({
-                    "turn_number": turn_number,
-                    "role": "assistant",
-                    "content": text,
-                    "message_id": _codex_message_id(
-                        payload, entry, "assistant", text,
-                    ),
-                    "timestamp": ts,
-                })
-
-    meta["started_at"] = first_ts
-    meta["ended_at"] = last_ts
-    meta["model"] = model
-    meta["total_input_tokens"] = total_input_tokens
-    meta["total_output_tokens"] = total_output_tokens
+    s = extractor.state
+    if s["originator"]:
+        meta["originator"] = s["originator"]
+    if s["model_provider"]:
+        meta["model_provider"] = s["model_provider"]
+    meta["started_at"] = s["first_ts"]
+    meta["ended_at"] = s["last_ts"]
+    meta["model"] = s["model"]
+    meta["total_input_tokens"] = s["total_input_tokens"]
+    meta["total_output_tokens"] = s["total_output_tokens"]
     meta["total_turns"] = len(turns)
 
     return meta, turns
@@ -1070,6 +1164,22 @@ def _ingest_agentic_session(
             thoughts.append(t)
             continue
 
+        if turn["role"] == "injected":
+            # Codex operator briefs (W1 §12.3) — see the non-agentic branch
+            # above for the full rationale.
+            t = Thought(
+                source_id=source_id,
+                content=turn["content"],
+                role="injected",
+                turn_number=turn["turn_number"],
+                message_id=turn.get("message_id"),
+                metadata={"timestamp": turn.get("timestamp", "")},
+                created_at=turn.get("timestamp") or now_iso(),
+            )
+            db.insert_thought(t)
+            thoughts.append(t)
+            continue
+
         ents = extract_entities(turn["content"])
         for name, etype in ents:
             key = name.lower()
@@ -1241,6 +1351,24 @@ def _ingest_text_session(
                     thoughts.append(t)
                     continue
 
+                if turn["role"] == "injected":
+                    # Codex operator briefs (W1 §12.3) — kept searchable via
+                    # FTS but role-filtered out of attention/title-probe like
+                    # compact_summary. No entity extraction, no thread edge:
+                    # these aren't part of the user<->assistant exchange.
+                    t = Thought(
+                        source_id=source_id,
+                        content=turn["content"],
+                        role="injected",
+                        turn_number=turn["turn_number"],
+                        message_id=turn.get("message_id"),
+                        metadata={"timestamp": turn.get("timestamp", "")},
+                        created_at=turn.get("timestamp") or now_iso(),
+                    )
+                    db.insert_thought(t)
+                    thoughts.append(t)
+                    continue
+
                 ents = extract_entities(turn["content"])
                 for name, etype in ents:
                     key = name.lower()
@@ -1354,6 +1482,24 @@ def _ingest_text_session(
                 turn_number=turn["turn_number"],
                 message_id=turn.get("message_id"),
                 metadata=t_meta,
+                created_at=turn.get("timestamp") or now_iso(),
+            )
+            db.insert_thought(t)
+            thoughts.append(t)
+            continue
+
+        if turn["role"] == "injected":
+            # Codex operator briefs (W1 §12.3) — kept searchable via FTS but
+            # role-filtered out of attention/title-probe like compact_summary.
+            # No entity extraction, no thread edge: these aren't part of the
+            # user<->assistant exchange.
+            t = Thought(
+                source_id=source.id,
+                content=turn["content"],
+                role="injected",
+                turn_number=turn["turn_number"],
+                message_id=turn.get("message_id"),
+                metadata={"timestamp": turn.get("timestamp", "")},
                 created_at=turn.get("timestamp") or now_iso(),
             )
             db.insert_thought(t)
