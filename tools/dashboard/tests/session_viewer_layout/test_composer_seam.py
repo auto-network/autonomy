@@ -25,7 +25,7 @@ def test_session_view_template_uses_inline_composer_gate(test_client):
 
 
 def test_design_panel_template_uses_inline_composer_gate(test_client):
-    resp = test_client.get("/pages/design")
+    resp = test_client.get("/pages/design_studio")
     assert resp.status_code == 200
     html = resp.text
     assert 'x-show="showInlineComposer && !window.Autonomy.voice.shell.hideInlineComposer()"' in html, (

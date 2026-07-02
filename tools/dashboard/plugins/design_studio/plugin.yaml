@@ -1,0 +1,21 @@
+id: design_studio
+api_version: 1
+org: autonomy
+
+paths:
+  - /design
+
+assets:
+  template: page.html
+  script: page.js
+  style: page.css
+
+nav:
+  label: Design
+
+frontend:
+  alpine_root: designStudioPage
+
+entrypoints:
+  api: tools.dashboard.plugins.design_studio.entrypoints.api:routes
+  badge_counter: tools.dashboard.plugins.design_studio.entrypoints.api:badge_counter

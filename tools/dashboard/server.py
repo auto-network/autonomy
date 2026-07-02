@@ -8591,19 +8591,6 @@ async def api_design_screenshot(request):
     return JSONResponse({"path": abs_path, "injected": injected})
 
 
-async def page_design(request):
-    return HTMLResponse(_load_template("base.html"))
-
-async def page_design_fragment(request):
-    """Return the Design page as an HTML fragment for SPA injection.
-
-    Rendered via Jinja2 so {% include %} partials work.
-    The fragment is injected into #content by the client router, then
-    Alpine.initTree() initialises the x-data="designPage()" component.
-    The component reads the design ID from window.location.pathname on init.
-    """
-    return templates.TemplateResponse(request, "pages/design.html")
-
 async def page_experiments_redirect(request):
     """Redirect /experiments/{id} to /design/{id} for backwards compat."""
     exp_id = request.path_params["id"]
@@ -14813,7 +14800,6 @@ routes = [
     Route("/terminal", page_terminal),
     Route("/terminal/{session_id}", page_terminal),
     Route("/pages/terminal", page_terminal_fragment),
-    Route("/pages/design", page_design_fragment),
     Route("/session/{session_id}", page_session_view_by_name),
     Route("/session/{project}/{session_id}", page_session_view),
     Route("/pages/session-view", page_session_view_fragment),
@@ -15027,7 +15013,6 @@ routes = [
     Route("/api/design/{id}/dismiss", api_design_dismiss, methods=["POST"]),
     Route("/api/design/{id}/submit", api_design_submit, methods=["POST"]),
     Route("/api/design/{id}/screenshot", api_design_screenshot, methods=["POST"]),
-    Route("/design/{id}", page_design),
     # Backwards compat redirects
     Route("/experiments/{id}", page_experiments_redirect),
 
