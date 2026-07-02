@@ -1851,6 +1851,9 @@ function _renderSidebarPlugins() {
     a.appendChild(badge);
     slot.appendChild(a);
   }
+  if (window._sseCache && window._sseCache.nav) {
+    _applyNavBadges(window._sseCache.nav);
+  }
 }
 
 async function renderPluginFragment(plugin) {
@@ -2187,65 +2190,68 @@ window.addEventListener('popstate', (e) => {
 
 // ── Init ─────────────────────────────────────────────────────
 
+function _applyNavBadges(data) {
+  data = data || {};
+  const running = data.running_agents || 0;
+  const waiting = data.approved_waiting || 0;
+  const blocked = data.approved_blocked || 0;
+
+  const dispatchEl = document.getElementById('badge-dispatch');
+  if (dispatchEl) {
+    let html = '';
+    if (running) html += `<span class="nav-badge nav-badge-green">▶${running}</span>`;
+    if (waiting) html += `<span class="nav-badge nav-badge-blue">◦${waiting}</span>`;
+    if (blocked) html += `<span class="nav-badge nav-badge-amber">⊘${blocked}</span>`;
+    dispatchEl.innerHTML = html;
+  }
+
+  const worktreesEl = document.getElementById('badge-worktrees');
+  if (worktreesEl) {
+    const withCommits = data.worktrees_with_commits || 0;
+    const withChanges = data.worktrees_with_changes || 0;
+    let html = '';
+    if (withCommits) html += `<span class="nav-badge nav-badge-green">${withCommits}</span>`;
+    if (withChanges) html += `<span class="nav-badge nav-badge-amber">${withChanges}</span>`;
+    worktreesEl.innerHTML = html;
+  }
+
+  const beadsEl = document.getElementById('badge-beads');
+  if (beadsEl && data.open_beads != null) beadsEl.textContent = data.open_beads || '';
+
+  const sessionsEl = document.getElementById('badge-sessions');
+  if (sessionsEl) sessionsEl.textContent = data.active_sessions || '';
+
+  const activityEl = document.getElementById('badge-activity');
+  if (activityEl) activityEl.textContent = data.today_done || '';
+
+  const terminalEl = document.getElementById('badge-terminal');
+  if (terminalEl) terminalEl.textContent = data.terminal_count || '';
+
+  const streamsEl = document.getElementById('badge-streams');
+  if (streamsEl) streamsEl.textContent = data.stream_count || '';
+
+  if (data.plugins) {
+    Object.keys(data.plugins).forEach(pluginId => {
+      const el = document.getElementById(`badge-plugin-${pluginId}`);
+      if (!el) return;
+      const badge = data.plugins[pluginId] && data.plugins[pluginId].badge;
+      el.textContent = badge ? String(badge) : '';
+    });
+  }
+
+  // Update pinned beads strip
+  if (data.pinned && window.Alpine) {
+    Alpine.store('pinned').beads = data.pinned;
+  }
+  if (_harnessUsageMode !== 'settings' && data.harness_usage) {
+    renderHarnessUsage(data.harness_usage);
+  }
+}
+
 // Live dispatch badge via SSE nav topic
 connectEvents(['nav', 'dispatch'], {
   dispatch: () => {},  // cache-only — Alpine component handles rendering
-  nav: (data) => {
-    const running = data.running_agents || 0;
-    const waiting = data.approved_waiting || 0;
-    const blocked = data.approved_blocked || 0;
-
-    const dispatchEl = document.getElementById('badge-dispatch');
-    if (dispatchEl) {
-      let html = '';
-      if (running) html += `<span class="nav-badge nav-badge-green">▶${running}</span>`;
-      if (waiting) html += `<span class="nav-badge nav-badge-blue">◦${waiting}</span>`;
-      if (blocked) html += `<span class="nav-badge nav-badge-amber">⊘${blocked}</span>`;
-      dispatchEl.innerHTML = html;
-    }
-
-    const worktreesEl = document.getElementById('badge-worktrees');
-    if (worktreesEl) {
-      const withCommits = data.worktrees_with_commits || 0;
-      const withChanges = data.worktrees_with_changes || 0;
-      let html = '';
-      if (withCommits) html += `<span class="nav-badge nav-badge-green">${withCommits}</span>`;
-      if (withChanges) html += `<span class="nav-badge nav-badge-amber">${withChanges}</span>`;
-      worktreesEl.innerHTML = html;
-    }
-
-    const beadsEl = document.getElementById('badge-beads');
-    if (beadsEl && data.open_beads != null) beadsEl.textContent = data.open_beads || '';
-
-    const sessionsEl = document.getElementById('badge-sessions');
-    if (sessionsEl) sessionsEl.textContent = data.active_sessions || '';
-
-    const activityEl = document.getElementById('badge-activity');
-    if (activityEl) activityEl.textContent = data.today_done || '';
-
-    const terminalEl = document.getElementById('badge-terminal');
-    if (terminalEl) terminalEl.textContent = data.terminal_count || '';
-
-    const streamsEl = document.getElementById('badge-streams');
-    if (streamsEl) streamsEl.textContent = data.stream_count || '';
-
-    if (data.plugins) {
-      Object.keys(data.plugins).forEach(pluginId => {
-        const el = document.getElementById(`badge-plugin-${pluginId}`);
-        if (!el) return;
-        const badge = data.plugins[pluginId] && data.plugins[pluginId].badge;
-        el.textContent = badge ? String(badge) : '';
-      });
-    }
-
-    // Update pinned beads strip
-    if (data.pinned && window.Alpine) {
-      Alpine.store('pinned').beads = data.pinned;
-    }
-    if (_harnessUsageMode !== 'settings' && data.harness_usage) {
-      renderHarnessUsage(data.harness_usage);
-    }
-  },
+  nav: _applyNavBadges,
 });
 
 // Load stats — compact 2x2 grid
