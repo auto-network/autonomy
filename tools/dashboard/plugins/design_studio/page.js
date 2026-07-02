@@ -50,7 +50,9 @@
       pills + '</div>' + script;
   }
 
-  document.addEventListener('alpine:init', function () {
+  function _registerDesignPage() {
+    if (!window.Alpine || window.__designStudioDesignPageRegistered) return;
+    window.__designStudioDesignPageRegistered = true;
     Alpine.data('designPage', function () {
       return {
         // State machine
@@ -494,5 +496,134 @@
 
       };
     });
-  });
+  }
+
+  document.addEventListener('alpine:init', _registerDesignPage);
+  _registerDesignPage();
 })();
+
+function designStudioPage() {
+  return {
+    mode: 'library',
+    loading: false,
+    error: '',
+    designs: [],
+    summary: {},
+    filteredCount: 0,
+    query: '',
+    status: 'all',
+    sort: 'updated',
+    topbarHandle: null,
+    _loadTimer: null,
+
+    init: function () {
+      this.mode = window.location.pathname === '/design' ? 'library' : 'viewer';
+      if (this.mode === 'library') {
+        this._updateTopbar();
+        this.loadDesigns();
+      }
+    },
+
+    destroy: function () {
+      if (this._loadTimer) {
+        clearTimeout(this._loadTimer);
+        this._loadTimer = null;
+      }
+      if (this.topbarHandle && typeof this.topbarHandle.destroy === 'function') {
+        this.topbarHandle.destroy();
+      }
+      this.topbarHandle = null;
+    },
+
+    get hasFilters() {
+      return !!String(this.query || '').trim() || this.status !== 'all';
+    },
+
+    get statusOptions() {
+      return [
+        { value: 'all', label: 'All statuses' },
+        { value: 'pending', label: 'Pending' },
+        { value: 'dismissed', label: 'Dismissed' },
+        { value: 'completed', label: 'Completed' },
+      ];
+    },
+
+    get sortOptions() {
+      return [
+        { value: 'updated', label: 'Latest update' },
+        { value: 'created', label: 'First created' },
+        { value: 'revisions', label: 'Revision count' },
+        { value: 'title', label: 'Title' },
+      ];
+    },
+
+    scheduleLoad: function () {
+      if (this._loadTimer) clearTimeout(this._loadTimer);
+      var self = this;
+      this._loadTimer = setTimeout(function () {
+        self._loadTimer = null;
+        self.loadDesigns();
+      }, 180);
+    },
+
+    loadDesigns: async function () {
+      this.loading = true;
+      this.error = '';
+      try {
+        var params = new URLSearchParams();
+        if (this.query) params.set('q', this.query);
+        if (this.status && this.status !== 'all') params.set('status', this.status);
+        if (this.sort) params.set('sort', this.sort);
+        params.set('limit', '500');
+        var fetcher = (window.Autonomy && window.Autonomy.fetch) || window.fetch;
+        var res = await fetcher('/api/design-studio/designs?' + params.toString());
+        if (!res.ok) {
+          this.error = 'Design catalog failed (HTTP ' + res.status + ')';
+          this.designs = [];
+          return;
+        }
+        var data = await res.json();
+        this.designs = Array.isArray(data.designs) ? data.designs : [];
+        this.summary = data.summary || {};
+        this.filteredCount = data.filtered_count || this.designs.length;
+      } catch (e) {
+        this.error = 'Design catalog failed: ' + (e.message || e);
+        this.designs = [];
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    openDesign: function (design) {
+      if (!design || !design.latest_revision_id) return;
+      navigateTo('/design/' + encodeURIComponent(design.latest_revision_id));
+    },
+
+    statusClass: function (status) {
+      return 'design-pill design-pill-' + (status || 'pending');
+    },
+
+    formatDate: function (value) {
+      if (!value) return 'unknown';
+      var parsed = new Date(String(value).replace(' ', 'T') + 'Z');
+      if (isNaN(parsed.getTime())) return value;
+      return parsed.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    },
+
+    _updateTopbar: function () {
+      if (!window.Autonomy || !window.Autonomy.topbar
+          || typeof window.Autonomy.topbar.set !== 'function') {
+        return;
+      }
+      var options = {
+        title: 'Design Studio',
+        subtitle: 'Search, sort, and recover every design series',
+      };
+      if (this.topbarHandle && typeof this.topbarHandle.update === 'function') {
+        this.topbarHandle.update(options);
+      } else {
+        this.topbarHandle = window.Autonomy.topbar.set(options);
+      }
+    },
+  };
+}

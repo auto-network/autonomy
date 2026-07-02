@@ -127,7 +127,7 @@ class TestConnectWiring:
 
     def _get_function_body(self, func_name, end_marker):
         repo_root = Path(__file__).resolve().parents[4]
-        js = (repo_root / "tools/dashboard/static/js/pages/design.js").read_text()
+        js = (repo_root / "tools/dashboard/plugins/design_studio/page.js").read_text()
         start = js.find(f"{func_name}:")
         end = js.find(f"{end_marker}:", start)
         assert start != -1, f"{func_name} not found"

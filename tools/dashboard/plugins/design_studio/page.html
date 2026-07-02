@@ -1,3 +1,96 @@
+<link rel="stylesheet" href="/static/plugins/design_studio/page.css">
+<div data-testid="design-studio-fragment-root" x-data="designStudioPage()" x-init="init()" class="design-studio-page">
+  <template x-if="mode === 'library'">
+    <div class="design-studio-library" data-testid="design-library">
+      <section class="design-studio-toolbar">
+        <div>
+          <div class="design-studio-kicker">Design Studio</div>
+          <h1 class="design-studio-title">Design library</h1>
+          <div class="design-studio-subtitle">
+            Browse every design series, including dismissed and completed work.
+          </div>
+        </div>
+        <div class="design-studio-controls">
+          <input
+            class="design-studio-search"
+            type="search"
+            placeholder="Search title, id, creator"
+            x-model="query"
+            @input="scheduleLoad()"
+            data-testid="design-search">
+          <select class="design-studio-select" x-model="status" @change="loadDesigns()" data-testid="design-status-filter">
+            <template x-for="option in statusOptions" :key="option.value">
+              <option :value="option.value" x-text="option.label"></option>
+            </template>
+          </select>
+          <select class="design-studio-select" x-model="sort" @change="loadDesigns()" data-testid="design-sort">
+            <template x-for="option in sortOptions" :key="option.value">
+              <option :value="option.value" x-text="option.label"></option>
+            </template>
+          </select>
+        </div>
+      </section>
+
+      <section class="design-studio-summary" data-testid="design-summary">
+        <div class="design-studio-stat">
+          <div class="design-studio-stat-value" x-text="(summary.series || 0).toLocaleString()"></div>
+          <div class="design-studio-stat-label">Series</div>
+        </div>
+        <div class="design-studio-stat">
+          <div class="design-studio-stat-value" x-text="(summary.revisions || 0).toLocaleString()"></div>
+          <div class="design-studio-stat-label">Revisions</div>
+        </div>
+        <div class="design-studio-stat">
+          <div class="design-studio-stat-value" x-text="(summary.pending_series || 0).toLocaleString()"></div>
+          <div class="design-studio-stat-label">Pending</div>
+        </div>
+        <div class="design-studio-stat">
+          <div class="design-studio-stat-value" x-text="(filteredCount || designs.length || 0).toLocaleString()"></div>
+          <div class="design-studio-stat-label">Showing</div>
+        </div>
+      </section>
+
+      <template x-if="loading">
+        <div class="design-studio-empty" data-testid="design-loading">Loading designs...</div>
+      </template>
+
+      <template x-if="!loading && error">
+        <div class="design-studio-error" data-testid="design-error" x-text="error"></div>
+      </template>
+
+      <template x-if="!loading && !error && designs.length === 0">
+        <div class="design-studio-empty" data-testid="design-empty">
+          <span x-show="hasFilters">No designs match those filters.</span>
+          <span x-show="!hasFilters">No designs found.</span>
+        </div>
+      </template>
+
+      <section class="design-studio-list" data-testid="design-list" x-show="!loading && !error && designs.length">
+        <template x-for="design in designs" :key="design.design_id">
+          <button class="design-card" type="button" @click="openDesign(design)" data-testid="design-card">
+            <div>
+              <div class="design-card-meta">
+                <span :class="statusClass(design.status)" x-text="design.status"></span>
+                <span class="design-pill" x-show="design.has_fixture">fixture</span>
+                <span class="design-pill" x-show="design.creator_session_id">creator</span>
+              </div>
+              <div class="design-card-title" x-text="design.title"></div>
+              <div class="design-card-description" x-show="design.description" x-text="design.description"></div>
+            </div>
+            <div class="design-card-footer">
+              <span><span x-text="design.revision_count"></span> revisions</span>
+              <span><span x-text="design.variant_count"></span> variants</span>
+              <span>updated <span x-text="formatDate(design.latest_created_at)"></span></span>
+              <span class="font-mono" x-text="design.design_id"></span>
+            </div>
+          </button>
+        </template>
+      </section>
+    </div>
+  </template>
+
+  <template x-if="mode === 'viewer'">
+    <div class="design-studio-viewer-shell">
 <div data-testid="design-fragment-root">
 <style>
 /* ── Toolbar state classes (from Design Studio experiment a8ee8212) ── */
@@ -390,4 +483,7 @@
 
 
 </div>
+</div>
+    </div>
+  </template>
 </div>
