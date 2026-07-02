@@ -114,7 +114,10 @@ def test_ingest_session_file_routes_codex_text_only(graph_db, tmp_path):
 
     result = ingest_session_file(graph_db, jsonl)
     assert result["status"] == "ingested"
-    assert result["thoughts"] == 1
+    # W1 §12.3: the crosstalk-noise user_message is no longer dropped — it's
+    # ingested with role='injected' so it stays searchable, so thoughts now
+    # counts both the real user turn and the injected one.
+    assert result["thoughts"] == 2
     assert result["derivations"] == 1
 
     source = graph_db.conn.execute(
@@ -132,6 +135,7 @@ def test_ingest_session_file_routes_codex_text_only(graph_db, tmp_path):
     ).fetchall()
     assert [(row["role"], row["content"]) for row in thought_rows] == [
         ("user", "Now your remaining commit for the session viewer resume code?"),
+        ("injected", '<crosstalk from="peer" label="peer" source="x">ignore me</crosstalk>'),
     ]
 
     derivation_rows = graph_db.conn.execute(
