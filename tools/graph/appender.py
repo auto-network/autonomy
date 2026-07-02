@@ -35,6 +35,7 @@ from .db import GraphDB
 from .ingest import (
     ClaudeTurnExtractor,
     CodexTurnExtractor,
+    _dedup_new_turns,
     _derive_session_title,
     _write_new_turns,
 )
@@ -151,7 +152,7 @@ class GraphAppender:
             return {"new_turns": 0, "skipped_lines": skipped, "source_missing": True}
 
         max_turn = db.get_max_turn(self.source_id)
-        dedup_turns = [t for t in new_turns if t["turn_number"] > max_turn]
+        dedup_turns = _dedup_new_turns(db, self.source_id, new_turns, max_turn)
 
         state = self.extractor.state
         thoughts, derivations, entities = _write_new_turns(

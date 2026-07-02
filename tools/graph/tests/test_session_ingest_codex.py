@@ -229,3 +229,112 @@ def test_ingest_all_claude_code_discovers_nested_codex_rollouts(
         ("Nested codex rollout should be discovered.",),
     ).fetchone()
     assert row[0] == 1
+
+
+# ══════════════════════════════════════════════════════════════════════
+# auto-cpg1x — codex renumbering dedup regression
+# ══════════════════════════════════════════════════════════════════════
+#
+# W1's role='injected' change made previously-dropped noise user_message
+# entries start consuming turn-number slots. A codex source ingested
+# BEFORE that change (numbering skipped noise) that grows AFTER it
+# re-parses with every subsequent turn shifted to a higher number — the
+# incremental cursor was purely positional (turn_number > max_turn), so
+# it read the shifted positions as new content and duplicated
+# already-ingested turns (confirmed prod damage: source e26143b6-a08
+# duplicated turns 76-84 at 22:37Z). Fixed by message-id-based dedup on
+# top of the positional filter (_dedup_new_turns).
+#
+# Repro per the bead: ingest a file version with the noise-triggering
+# line's effect absent (simulating pre-W1 numbering, since the noise line
+# was always physically in the transcript but never consumed a slot),
+# then re-ingest the grown file at current code — assert zero duplicate
+# message_ids and the genuinely new content lands.
+
+
+class TestCodexRenumberingDedupRegression:
+    def test_growth_reingest_after_renumbering_produces_no_duplicates(self, graph_db, tmp_path):
+        jsonl = tmp_path / "rollout-2026-05-01T09-00-00-thread.jsonl"
+
+        # "Pre-W1" state: same two real turns a pre-W1 ingest would have
+        # numbered 1 and 2 (the noise line was always in the raw
+        # transcript but consumed no turn-number slot back then — this
+        # fixture just omits it, which is numerically equivalent).
+        _write_jsonl(jsonl, [
+            _session_meta(),
+            _user_message("Ship the fix for the offset bug", "2026-05-01T09:00:01Z"),
+            _agent_message("Done — committed as abc123.", "2026-05-01T09:00:02Z"),
+        ])
+        r1 = ingest_session_file(graph_db, jsonl)
+        assert r1["status"] == "ingested"
+        source_id = r1["source_id"]
+        assert graph_db.get_max_turn(source_id) == 2
+
+        # "Post-W1 growth": the file now includes the noise line (which
+        # W1 ingests as role='injected', consuming turn 2 and pushing the
+        # real assistant turn to 3) PLUS one genuinely new turn.
+        _write_jsonl(jsonl, [
+            _session_meta(),
+            _user_message("Ship the fix for the offset bug", "2026-05-01T09:00:01Z"),
+            _user_message('<crosstalk from="peer">ignore me</crosstalk>', "2026-05-01T09:00:01Z"),
+            _agent_message("Done — committed as abc123.", "2026-05-01T09:00:02Z"),
+            _user_message("One more thing before we wrap up", "2026-05-01T09:05:00Z"),
+        ])
+        r2 = ingest_session_file(graph_db, jsonl)
+        assert r2["status"] == "updated"
+        assert r2["source_id"] == source_id
+
+        thought_rows = graph_db.conn.execute(
+            "SELECT content, role, message_id FROM thoughts WHERE source_id = ?",
+            (source_id,),
+        ).fetchall()
+        deriv_rows = graph_db.conn.execute(
+            "SELECT content, message_id FROM derivations WHERE source_id = ?",
+            (source_id,),
+        ).fetchall()
+
+        all_message_ids = [r["message_id"] for r in list(thought_rows) + list(deriv_rows) if r["message_id"]]
+        assert len(all_message_ids) == len(set(all_message_ids)), (
+            f"duplicate message_id(s) found: {all_message_ids}"
+        )
+
+        contents = [r["content"] for r in thought_rows]
+        assert contents.count("Ship the fix for the offset bug") == 1, "real turn must not be duplicated"
+        assert "One more thing before we wrap up" in contents, "genuinely new content must still land"
+        assert [r["content"] for r in deriv_rows].count("Done — committed as abc123.") == 1
+        # Known residual of the two-stage filter (coarse turn_number >
+        # max_turn, then message-id dedup): the injected turn renumbered
+        # INTO the already-consumed turn_number<=max_turn range (here,
+        # slot 2 — previously the real assistant turn's slot) never clears
+        # the coarse filter, so it isn't backfilled by an incremental
+        # pass. The hotfix's job is stopping duplication, not retroactively
+        # recovering every historically-skipped position — a force
+        # re-ingest (full reparse) would pick it up. Documented here so
+        # it isn't mysterious; not a regression this bead is scoped to fix.
+        assert contents.count('<crosstalk from="peer">ignore me</crosstalk>') == 0
+
+    def test_reingest_with_no_growth_still_dedupes(self, graph_db, tmp_path):
+        """Even with nothing new appended, re-running current code against
+        an old-numbered source must not duplicate the renumbered tail."""
+        jsonl = tmp_path / "rollout-2026-05-01T09-10-00-thread.jsonl"
+        _write_jsonl(jsonl, [
+            _session_meta(),
+            _user_message("Old turn one", "2026-05-01T09:10:01Z"),
+            _agent_message("Old turn two", "2026-05-01T09:10:02Z"),
+        ])
+        r1 = ingest_session_file(graph_db, jsonl)
+        source_id = r1["source_id"]
+
+        _write_jsonl(jsonl, [
+            _session_meta(),
+            _user_message("Old turn one", "2026-05-01T09:10:01Z"),
+            _user_message('<crosstalk from="peer">noise</crosstalk>', "2026-05-01T09:10:01Z"),
+            _agent_message("Old turn two", "2026-05-01T09:10:02Z"),
+        ])
+        r2 = ingest_session_file(graph_db, jsonl)
+        assert r2["status"] in ("updated", "refreshed")
+
+        deriv_rows = graph_db.conn.execute(
+            "SELECT content FROM derivations WHERE source_id = ?", (source_id,),
+        ).fetchall()
+        assert [r["content"] for r in deriv_rows].count("Old turn two") == 1
