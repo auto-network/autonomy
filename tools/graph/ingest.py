@@ -1428,9 +1428,18 @@ def _ingest_text_session(
         # a read-modify-write race: write-through can rename the source
         # mid-pass (entity extraction on a big delta takes seconds) and this
         # update would then clobber the new title with the stale value.
+        #
+        # W2 exception: a source eager-created at session init (before any
+        # JSONL content existed) has no title to preserve — it's None, not
+        # yet-derived. The first pass that lands real content owes it one
+        # derivation; every pass after that falls back to the W5 rule above
+        # once existing["title"] is truthy.
+        new_title = None
+        if not existing.get("title") and existing_meta.get("eager"):
+            new_title = _derive_session_title(meta, file_path, session_meta, turns)
         db.update_source_summary(
             source_id,
-            title=None,
+            title=new_title,
             metadata=new_meta,
             last_activity_at=meta.get("ended_at") or existing.get("last_activity_at"),
         )

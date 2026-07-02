@@ -1847,6 +1847,11 @@ class SessionMonitor:
             reset_state=True,
         )
 
+        # W2: eager-create the graph source row the instant the JSONL is
+        # linked — don't wait for an ingest sweep tick. Best-effort; never
+        # blocks resolution.
+        self._eager_create_source(tmux_name, Path(linked["jsonl_path"]))
+
         logger.info(
             "session_monitor: discovered %s → %s (first file — resolved)",
             tmux_name, jsonl_path.name,
@@ -1875,6 +1880,84 @@ class SessionMonitor:
         except RuntimeError:
             pass
         return True
+
+    def _eager_create_source(self, tmux_name: str, jsonl_path: Path) -> bool:
+        """W2: eager-create the graph source row at JSONL-discovery time.
+
+        Generalizes the ``agentic_source_id`` pattern
+        (``insert_agentic_session``) to every session type: a zero-turn
+        ``type='session'`` row appears immediately, so the Recent-sessions
+        list and ``graph_source_id`` linking never wait on an ingest sweep
+        (which may be minutes behind, or never run for a session whose
+        every turn gets noise-filtered — the codex brief-only case).
+
+        Behind the ``ingest.eager_sources`` feature flag
+        (``dashboard.feature_flags``) for soak. Best-effort throughout:
+        flag lookup, org resolution, and the write are all guarded — any
+        failure here must never block JSONL linking. Returns True iff
+        ``tmux_sessions.graph_source_id`` was written this call. Unresolvable
+        org (fail-closed, matches pre-W2 behavior for org-less sessions) and
+        transient failures both return False and are retried by
+        :meth:`_eager_create_missing_sources` on the next reconciliation
+        tick, so this method does not need its own retry loop.
+        """
+        try:
+            from tools.dashboard import feature_flags
+            if not feature_flags.is_enabled("ingest.eager_sources"):
+                return False
+        except Exception:
+            return False
+
+        try:
+            from tools.graph.ingest import session_target_org, _normalize_session_path
+            row = get_session(tmux_name)
+            default_org = row.get("project") if row else None
+            org = session_target_org(jsonl_path, default=default_org)
+            if not org:
+                logger.info(
+                    "session_monitor: eager-source skipped for %s — no resolvable org",
+                    tmux_name,
+                )
+                return False
+
+            abs_path = _normalize_session_path(jsonl_path)
+            src = graph_ops.insert_eager_session_source(
+                org=org,
+                file_path=abs_path,
+                session_uuid=jsonl_path.stem,
+                platform=(row.get("harness") if row else None) or "claude",
+                container_name=tmux_name,
+            )
+            from tools.dashboard.dao.dashboard_db import set_graph_source_validated
+            set_graph_source_validated(tmux_name, src["id"])
+            return True
+        except Exception:
+            logger.exception(
+                "session_monitor: eager-source creation failed for %s", tmux_name,
+            )
+            return False
+
+    def _eager_create_missing_sources(self) -> int:
+        """Retry sweep (W2) — catches sessions whose eager-source creation
+        didn't happen at discovery time (org unresolved then, the flag was
+        off then on, a transient failure). Idempotent via
+        ``insert_eager_session_source``'s existing-by-path check, so
+        calling this every reconciliation tick is cheap and safe. Also
+        used as the in-process replacement for the old ENRICH subprocess
+        loop after ``seed_from_filesystem`` seeds sessions from disk.
+
+        Synchronous (may open several org DBs) — callers on the event loop
+        must wrap with ``asyncio.to_thread``. Returns the number of
+        sessions that actually got a ``graph_source_id`` written this pass.
+        """
+        created = 0
+        for row in get_live_sessions():
+            jsonl_path_str = row.get("jsonl_path")
+            if not jsonl_path_str or row.get("graph_source_id"):
+                continue
+            if self._eager_create_source(row["tmux_name"], Path(jsonl_path_str)):
+                created += 1
+        return created
 
     def _remove_watches(self, tmux_name: str) -> None:
         """Remove all inotify watches for a session."""
@@ -3378,6 +3461,21 @@ class SessionMonitor:
             tick_ok = False
             logger.exception("session_monitor: reconciliation inode-safety-net step failed")
 
+        # Step 2.5: eager-source retry sweep (W2). Catches sessions whose
+        # eager creation didn't happen at discovery time (org unresolved
+        # then, flag toggled on since, transient failure). Isolated same as
+        # steps 1/2 — must not block step 3's reconciler.
+        try:
+            eager_created = await asyncio.to_thread(self._eager_create_missing_sources)
+            if eager_created:
+                logger.info(
+                    "session_monitor: eager-source retry sweep created %d source(s)",
+                    eager_created,
+                )
+        except Exception:
+            tick_ok = False
+            logger.exception("session_monitor: eager-source retry sweep failed")
+
         # Step 3: graph_source_id reconciler (auto-4jpa8). Backfill empty IDs
         # and repair drifted ones every tick. Idempotent: rows whose stored ID
         # already resolves are left alone, and rows whose JSONL hasn't been
@@ -3605,24 +3703,18 @@ class SessionMonitor:
                 dashboard_tmux.discard(tmux_name)
                 seeded += 1
 
-        # ENRICH: resolve graph_source_id for all seeded sessions via graph ingest-session
-        enriched = 0
-        for row in get_live_sessions():
-            if row.get("session_uuid") and not row.get("graph_source_id") and row.get("jsonl_path"):
-                try:
-                    result = subprocess.run(
-                        ["graph", "ingest-session", row["jsonl_path"]],
-                        capture_output=True, text=True, timeout=30,
-                    )
-                    graph_id = result.stdout.strip()
-                    if result.returncode == 0 and graph_id:
-                        from tools.dashboard.dao.dashboard_db import set_graph_source_validated
-                        set_graph_source_validated(row["tmux_name"], graph_id)
-                        enriched += 1
-                except Exception:
-                    pass
+        # W2: eager-create graph_source_id for all seeded sessions, in-process.
+        # Replaces the old ENRICH loop, which force-ingested each session's
+        # full content via a blocking `graph ingest-session` subprocess (up
+        # to 30s each) purely to mint an id faster than the next sweep tick.
+        # Eager creation solves the same visibility problem — a zero-turn
+        # source row + graph_source_id, immediately — without a subprocess;
+        # the normal ingest sweep (and, once W3 lands, live tailing) still
+        # owns backfilling these sessions' actual content, exactly as it
+        # always has for every other JSONL on disk.
+        enriched = await asyncio.to_thread(self._eager_create_missing_sources)
         if enriched:
-            logger.info("session_monitor: enriched %d sessions with graph_source_id", enriched)
+            logger.info("session_monitor: eager-created graph sources for %d session(s)", enriched)
 
         logger.info("session_monitor: seeded %d sessions from filesystem", seeded)
 

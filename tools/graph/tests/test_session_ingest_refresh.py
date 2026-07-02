@@ -533,3 +533,139 @@ class TestCompactSummaryIngest:
             (result["source_id"],),
         ).fetchall()
         assert len(cs_rows) == 1
+
+
+# ══════════════════════════════════════════════════════════════════════
+# TestEagerRowIngest — W2: appending real content into an eager-created row
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _insert_eager_source(graph_db: GraphDB, jsonl_path: Path) -> str:
+    """Mirror what tools.graph.ops.insert_eager_session_source writes, so
+    these tests exercise ingest.py's consumption side independent of the
+    dashboard/session_monitor plumbing that produces eager rows in prod."""
+    from tools.graph.models import Source
+
+    abs_path = str(jsonl_path.resolve())
+    session_uuid = jsonl_path.stem
+    source = Source(
+        type="session",
+        platform="claude-code",
+        project="autonomy",
+        title=None,
+        file_path=abs_path,
+        metadata={
+            "session_id": session_uuid,
+            "session_uuid": session_uuid,
+            "eager": True,
+            "file_size": 0,
+            "ingest_offset": 0,
+        },
+    )
+    graph_db.insert_source(source)
+    return source.id
+
+
+class TestEagerRowIngest:
+    """W2 AC: ingest recognizes an eager row (source exists, zero turns)
+    and appends into it — no duplicate source by path — deriving the
+    title once on the first content-bearing pass."""
+
+    def test_first_content_pass_appends_into_eager_row_no_duplicate(self, graph_db, jsonl_path):
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        eager_id = _insert_eager_source(graph_db, jsonl_path)
+
+        _write_jsonl(jsonl_path, [
+            _user_entry("Get started on the fix", ts="2026-04-19T10:00:00Z"),
+            _assistant_entry("On it", ts="2026-04-19T10:00:05Z"),
+        ])
+
+        with patch("tools.graph.ingest._lookup_dashboard_label", return_value=None):
+            result = ingest_claude_code_session(graph_db, jsonl_path)
+
+        assert result["status"] == "updated"
+        assert result["source_id"] == eager_id, "must append into the eager row, not create a new one"
+
+        all_sources = graph_db.conn.execute(
+            "SELECT id FROM sources WHERE file_path = ?", (str(jsonl_path.resolve()),)
+        ).fetchall()
+        assert len(all_sources) == 1, "no duplicate source by file_path"
+
+        thought_rows = graph_db.conn.execute(
+            "SELECT content FROM thoughts WHERE source_id = ?", (eager_id,)
+        ).fetchall()
+        assert len(thought_rows) == 1
+        assert thought_rows[0]["content"] == "Get started on the fix"
+
+    def test_title_derived_once_on_first_content(self, graph_db, jsonl_path):
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        eager_id = _insert_eager_source(graph_db, jsonl_path)
+
+        row = graph_db.conn.execute(
+            "SELECT title FROM sources WHERE id = ?", (eager_id,)
+        ).fetchone()
+        assert row["title"] is None, "eager row starts with no title"
+
+        _write_jsonl(jsonl_path, [
+            _user_entry("Investigate the flaky test", ts="2026-04-19T10:00:00Z"),
+        ])
+        with patch("tools.graph.ingest._lookup_dashboard_label", return_value=None):
+            ingest_claude_code_session(graph_db, jsonl_path)
+
+        title = graph_db.conn.execute(
+            "SELECT title FROM sources WHERE id = ?", (eager_id,)
+        ).fetchone()["title"]
+        assert title == "Investigate the flaky test"
+
+    def test_title_not_rederived_on_subsequent_passes(self, graph_db, jsonl_path):
+        """Once the eager row has picked up its first-content title, later
+        passes follow the normal W5 rule: creation-only, never re-derived —
+        even though for an eager row that 'creation' moment is this first
+        content pass rather than the row's literal INSERT."""
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        eager_id = _insert_eager_source(graph_db, jsonl_path)
+
+        _write_jsonl(jsonl_path, [
+            _user_entry("First real question", ts="2026-04-19T10:00:00Z"),
+        ])
+        with patch("tools.graph.ingest._lookup_dashboard_label", return_value=None):
+            ingest_claude_code_session(graph_db, jsonl_path)
+
+        with open(jsonl_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(_user_entry("more content", ts="2026-04-19T11:00:00Z")) + "\n")
+
+        with patch("tools.graph.ingest._lookup_dashboard_label", return_value="A different label"):
+            result = ingest_claude_code_session(graph_db, jsonl_path)
+
+        assert result["status"] == "updated"
+        title = graph_db.conn.execute(
+            "SELECT title FROM sources WHERE id = ?", (eager_id,)
+        ).fetchone()["title"]
+        assert title == "First real question", "title must stay creation-only after the first derivation"
+
+    def test_all_noise_filtered_session_still_has_a_source(self, graph_db, jsonl_path):
+        """Codex brief-only case: every turn gets noise-filtered (or, for
+        this claude fixture, every entry is tool-noise) so the parser
+        produces zero turns. Pre-W2, ingest would skip without creating a
+        source at all. With an eager row already present, the source
+        exists regardless — ingest just reports 'skipped' against it."""
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        eager_id = _insert_eager_source(graph_db, jsonl_path)
+
+        _write_jsonl(jsonl_path, [
+            {
+                "type": "assistant", "uuid": "a-tool",
+                "message": {"role": "assistant", "content": [{"type": "tool_use", "name": "Bash", "input": {}}]},
+                "timestamp": "2026-04-19T10:00:00Z",
+            },
+        ])
+        with patch("tools.graph.ingest._lookup_dashboard_label", return_value=None):
+            result = ingest_claude_code_session(graph_db, jsonl_path)
+
+        assert result["status"] == "skipped"
+        assert result["source_id"] == eager_id
+
+        sources = graph_db.conn.execute(
+            "SELECT id FROM sources WHERE file_path = ?", (str(jsonl_path.resolve()),)
+        ).fetchall()
+        assert len(sources) == 1, "eager source must survive a zero-turn ingest pass"
