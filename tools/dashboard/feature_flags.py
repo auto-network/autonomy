@@ -27,12 +27,20 @@ def is_enabled(
     name: str,
     *,
     org: "str | None | settings_ops._CallerOrgSentinel" = settings_ops.CALLER_ORG,
+    default: bool = False,
 ) -> bool:
     """Return True if the flag named *name* is enabled.
 
-    Absent rows return ``False``. Malformed payloads (missing or
-    non-bool ``enabled``) return ``False``; this helper never raises on
-    a read-shaped error so downstream consumers can gate freely.
+    Absent rows return ``default`` (``False`` unless the caller opts in —
+    e.g. a flag W4 wants unflagged-on by default, like
+    ``ingest.eager_sources``, passes ``default=True`` so a fresh
+    deployment with no seeded Settings row still gets the behavior; an
+    explicit ``{"enabled": false}`` row still disables it regardless of
+    ``default``). Malformed payloads (missing or non-bool ``enabled``)
+    return ``False`` — an existing-but-broken row never falls through to
+    ``default``, only a genuinely absent row does. This helper never
+    raises on a read-shaped error so downstream consumers can gate
+    freely.
 
     ``org`` defaults to :data:`settings_ops.CALLER_ORG` (env-cascade
     resolution). Tests pass an explicit slug.
@@ -47,7 +55,7 @@ def is_enabled(
             payload = m.payload or {}
             value = payload.get("enabled")
             return value is True
-    return False
+    return default
 
 
 def all_flags(

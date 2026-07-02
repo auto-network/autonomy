@@ -153,3 +153,59 @@ def test_concurrent_calls_second_skipped():
             assert "skipped" not in body1
 
     asyncio.run(_run())
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Single-session mode (W4, auto-gah4g) — {"session": tmux_name}
+# ══════════════════════════════════════════════════════════════════════
+
+
+class TestSingleSessionMode:
+    def test_ingests_only_the_named_session_in_process(self, client):
+        fake_row = {"jsonl_path": "/tmp/fake-session.jsonl"}
+        fake_result = {"status": "ingested", "source_id": "src-1", "thoughts": 3, "derivations": 2}
+
+        with patch("tools.dashboard.server._run_graph_sessions_ingest_cli") as mock_subprocess, \
+             patch("tools.dashboard.dao.dashboard_db.get_session", return_value=fake_row), \
+             patch("tools.graph.ingest._open_db_for_session") as mock_open_db, \
+             patch("tools.graph.ingest.ingest_session_file", return_value=fake_result) as mock_ingest:
+            mock_db = mock_open_db.return_value
+            resp = client.post("/api/graph/sessions", json={"session": "auto-test-001"})
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["session"] == "auto-test-001"
+        assert body["result"] == fake_result
+        mock_ingest.assert_called_once()
+        mock_db.close.assert_called_once()
+        mock_subprocess.assert_not_called(), "single-session mode must not shell out"
+
+    def test_404_when_no_jsonl_path(self, client):
+        with patch("tools.dashboard.dao.dashboard_db.get_session", return_value={"jsonl_path": None}):
+            resp = client.post("/api/graph/sessions", json={"session": "auto-nopath"})
+        assert resp.status_code == 404
+        assert "no jsonl_path" in resp.json()["error"]
+
+    def test_404_when_session_unknown(self, client):
+        with patch("tools.dashboard.dao.dashboard_db.get_session", return_value=None):
+            resp = client.post("/api/graph/sessions", json={"session": "auto-unknown"})
+        assert resp.status_code == 404
+
+    def test_404_when_org_unresolvable(self, client):
+        fake_row = {"jsonl_path": "/tmp/fake.jsonl"}
+        with patch("tools.dashboard.dao.dashboard_db.get_session", return_value=fake_row), \
+             patch("tools.graph.ingest._open_db_for_session", return_value=None):
+            resp = client.post("/api/graph/sessions", json={"session": "auto-noorg"})
+        assert resp.status_code == 404
+        assert "no resolvable graph_org" in resp.json()["error"]
+
+    def test_force_flag_forwarded(self, client):
+        fake_row = {"jsonl_path": "/tmp/fake.jsonl"}
+        with patch("tools.dashboard.dao.dashboard_db.get_session", return_value=fake_row), \
+             patch("tools.graph.ingest._open_db_for_session") as mock_open_db, \
+             patch("tools.graph.ingest.ingest_session_file", return_value={"status": "ingested"}) as mock_ingest:
+            client.post("/api/graph/sessions", json={"session": "auto-test", "force": True})
+
+        _, kwargs = mock_ingest.call_args
+        assert kwargs.get("force") is True

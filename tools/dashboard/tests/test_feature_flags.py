@@ -67,6 +67,35 @@ def test_is_enabled_round_trips_through_upsert(graph_db_env):
     """Flipping a flag via upsert_by_key is observable immediately."""
     _seed_flag("voice.toggle", enabled=False)
     assert ff.is_enabled("voice.toggle") is False
+
+
+# ── is_enabled(default=...) — W4 unflagged-default support ───────────
+
+
+def test_is_enabled_absent_flag_honors_default_true(graph_db_env):
+    """A flag W4 wants unflagged-on (e.g. ingest.eager_sources) reads
+    True with no Settings row at all — no seeding required."""
+    assert ff.is_enabled("ingest.eager_sources", default=True) is True
+
+
+def test_is_enabled_explicit_false_row_overrides_default_true(graph_db_env):
+    """An explicit disable still wins over default=True — a deployment
+    can always opt out regardless of the code-level default."""
+    _seed_flag("ingest.eager_sources", enabled=False)
+    assert ff.is_enabled("ingest.eager_sources", default=True) is False
+
+
+def test_is_enabled_explicit_true_row_with_default_false_unaffected(graph_db_env):
+    """default= only matters for absent rows — an explicit true row
+    behaves identically regardless of what default= is passed."""
+    _seed_flag("voice.pipe_enabled", enabled=True)
+    assert ff.is_enabled("voice.pipe_enabled", default=False) is True
+
+
+def test_is_enabled_default_false_is_backward_compatible(graph_db_env):
+    """Existing callers that don't pass default= keep the original
+    absent-row-returns-False contract."""
+    assert ff.is_enabled("some.other.flag") is False
     _seed_flag("voice.toggle", enabled=True)
     assert ff.is_enabled("voice.toggle") is True
     _seed_flag("voice.toggle", enabled=False)

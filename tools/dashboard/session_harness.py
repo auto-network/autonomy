@@ -2656,7 +2656,15 @@ def _link_session_file(
 
     project = project or jsonl_path.parent.name
     session_uuid = jsonl_path.stem
-    dashboard_db.link_and_enrich(
+    # W4 (auto-gah4g): link only — no ENRICH subprocess. This path is
+    # always followed by SessionMonitor._eager_create_source (called from
+    # _handle_jsonl_appeared right after resolve_session() returns), which
+    # already sets graph_source_id in-process. The old link_and_enrich's
+    # `subprocess.run(["graph", "ingest-session", ...], timeout=30)` was
+    # therefore redundant here — same blocking-subprocess pattern as the
+    # ENRICH loop retired in W2, just triggered per-session instead of at
+    # startup.
+    dashboard_db.update_jsonl_link(
         tmux_name,
         session_uuid=session_uuid,
         jsonl_path=str(jsonl_path),

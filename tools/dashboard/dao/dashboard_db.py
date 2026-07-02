@@ -70,6 +70,24 @@ CREATE TABLE IF NOT EXISTS turn_corrections (
     updated_at         REAL NOT NULL,
     PRIMARY KEY (session_uuid, target_message_id)
 );
+
+-- W4 (auto-gah4g): manifest-driven catch-up sweep. One row per session
+-- JSONL the sweep has ever seen. A steady-state sweep is scandir + stat
+-- against this table only — no GraphDB open at all unless (size, mtime)
+-- disagrees with what's stored here. 'sealed' rows (dead + unchanged)
+-- are skipped by routine sweeps entirely; --force or the weekly deep
+-- integrity pass are the only things that re-touch them.
+CREATE TABLE IF NOT EXISTS ingest_manifest (
+    file_path      TEXT PRIMARY KEY,
+    size           INTEGER NOT NULL DEFAULT 0,
+    mtime          REAL NOT NULL DEFAULT 0,
+    inode          INTEGER,
+    org            TEXT,
+    source_id      TEXT,
+    ingest_offset  INTEGER NOT NULL DEFAULT 0,
+    state          TEXT NOT NULL DEFAULT 'active',
+    last_seen_at   REAL NOT NULL DEFAULT 0
+);
 """
 
 
@@ -1320,3 +1338,74 @@ def delete_turn_corrections_for_session(session_uuid: str) -> int:
     )
     conn.commit()
     return cursor.rowcount or 0
+
+
+# ── W4: ingest manifest (auto-gah4g) ────────────────────────────────
+
+
+def get_manifest_entry(file_path: str) -> dict | None:
+    """Look up one file's manifest row, or None if never seen."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM ingest_manifest WHERE file_path = ?", (file_path,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_manifest_entry(
+    file_path: str, *, size: int, mtime: float, inode: int | None,
+    org: str | None, source_id: str | None, ingest_offset: int,
+    state: str = "active", last_seen_at: float | None = None,
+) -> None:
+    """Insert or fully overwrite one file's manifest row.
+
+    Called after a sweep pass touches ``file_path`` (new file, changed
+    file, or a state transition like sealing) — always writes the
+    complete row rather than a partial patch, since the sweep always has
+    every field in hand at the point it calls this.
+    """
+    conn = get_conn()
+    conn.execute(
+        """INSERT INTO ingest_manifest
+               (file_path, size, mtime, inode, org, source_id, ingest_offset, state, last_seen_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(file_path) DO UPDATE SET
+               size=excluded.size, mtime=excluded.mtime, inode=excluded.inode,
+               org=excluded.org, source_id=excluded.source_id,
+               ingest_offset=excluded.ingest_offset, state=excluded.state,
+               last_seen_at=excluded.last_seen_at""",
+        (file_path, size, mtime, inode, org, source_id, ingest_offset, state,
+         last_seen_at if last_seen_at is not None else time.time()),
+    )
+    conn.commit()
+
+
+def seal_manifest_entry(file_path: str) -> None:
+    """Mark a file 'sealed' — dead + unchanged, skipped by routine sweeps
+    until --force or the deep integrity pass. Leaves every other column
+    (size/mtime/inode/org/source_id/ingest_offset) untouched."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE ingest_manifest SET state = 'sealed', last_seen_at = ? WHERE file_path = ?",
+        (time.time(), file_path),
+    )
+    conn.commit()
+
+
+def get_sealed_manifest_paths() -> set[str]:
+    """Every currently-sealed file_path — the sweep's skip-set."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT file_path FROM ingest_manifest WHERE state = 'sealed'"
+    ).fetchall()
+    return {r["file_path"] for r in rows}
+
+
+def get_active_manifest_paths() -> set[str]:
+    """Every file_path not already sealed — candidates for the sweep's
+    'no longer found on disk' seal-detection pass."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT file_path FROM ingest_manifest WHERE state != 'sealed'"
+    ).fetchall()
+    return {r["file_path"] for r in rows}

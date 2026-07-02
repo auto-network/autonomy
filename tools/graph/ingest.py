@@ -1703,39 +1703,25 @@ def ingest_claude_code_project(
     return results
 
 
-def ingest_all_claude_code(
-    db: GraphDB | None = None, force: bool = False,
-) -> list[dict]:
-    """Ingest all Claude Code sessions across all projects.
+def _scan_session_files() -> list[Path]:
+    """Every session JSONL across both known roots, as a flat list.
 
-    Scans two locations:
     1. ~/.claude/projects/ — user sessions, chatwith, terminal containers
     2. data/agent-runs/*/sessions/ — dispatch and librarian agent sessions
 
-    Org routing comes from each session's ``.session_meta.json``
-    (``graph_org`` / legacy ``graph_project`` field). Sessions launched
-    via the autonomy infrastructure always carry meta; sessions without
-    meta default to ``personal.db`` (auto-txg5.3 scopeless convergence).
-    Passing an explicit ``db`` short-circuits routing — every session is
-    written to that connection (legacy / test behaviour).
+    Shared by :func:`ingest_all_claude_code` (legacy full-reparse sweep)
+    and :func:`catch_up_sweep` (W4 manifest-driven sweep) so both agree
+    on exactly what "the estate" means.
     """
-    results = []
+    files: list[Path] = []
 
-    # ── Location 1: host ~/.claude/projects ───────────────────
     projects_dir = Path.home() / ".claude" / "projects"
     if projects_dir.exists():
         for project_dir in sorted(projects_dir.iterdir()):
             if not project_dir.is_dir():
                 continue
-            for jsonl_file in sorted(project_dir.glob("*.jsonl")):
-                if db is None:
-                    result = _ingest_session_routed(jsonl_file, force)
-                else:
-                    result = ingest_session_file(db, jsonl_file, force)
-                result["file"] = str(jsonl_file)
-                results.append(result)
+            files.extend(sorted(project_dir.glob("*.jsonl")))
 
-    # ── Location 2: data/agent-runs/*/sessions/ ───────────────
     agent_runs_dir = _REPO_ROOT / "data" / "agent-runs"
     if agent_runs_dir.exists():
         for run_dir in sorted(agent_runs_dir.iterdir()):
@@ -1744,15 +1730,137 @@ def ingest_all_claude_code(
             sessions_dir = run_dir / "sessions"
             if not sessions_dir.is_dir():
                 continue
-            for jsonl_file in sorted(sessions_dir.rglob("*.jsonl")):
-                if db is None:
-                    result = _ingest_session_routed(jsonl_file, force)
-                else:
-                    result = ingest_session_file(db, jsonl_file, force)
-                result["file"] = str(jsonl_file)
-                results.append(result)
+            files.extend(sorted(sessions_dir.rglob("*.jsonl")))
 
+    return files
+
+
+def ingest_all_claude_code(
+    db: GraphDB | None = None, force: bool = False,
+) -> list[dict]:
+    """Ingest all Claude Code sessions across all projects.
+
+    Org routing comes from each session's ``.session_meta.json``
+    (``graph_org`` / legacy ``graph_project`` field). Sessions launched
+    via the autonomy infrastructure always carry meta; sessions without
+    meta default to ``personal.db`` (auto-txg5.3 scopeless convergence).
+    Passing an explicit ``db`` short-circuits routing — every session is
+    written to that connection (legacy / test behaviour).
+
+    Full-reparse sweep — opens a GraphDB per file regardless of whether
+    it changed since the last pass. Superseded as the steady-state sweep
+    by :func:`catch_up_sweep` (W4); kept for explicit ``--force`` full
+    reparse and for callers that pass an explicit ``db`` (tests, single-
+    connection legacy behavior).
+    """
+    results = []
+    for jsonl_file in _scan_session_files():
+        if db is None:
+            result = _ingest_session_routed(jsonl_file, force)
+        else:
+            result = ingest_session_file(db, jsonl_file, force)
+        result["file"] = str(jsonl_file)
+        results.append(result)
     return results
+
+
+def catch_up_sweep(*, force: bool = False) -> dict:
+    """Manifest-driven catch-up sweep (W4 §FS-4).
+
+    Steady state (nothing changed since the last pass): scandir + stat
+    only, comparing against ``ingest_manifest`` — zero ``GraphDB`` opens.
+    Changed or new files are grouped by org and ingested with ONE
+    ``GraphDB`` connection per org for the whole batch (org resolved
+    once per file via :func:`session_target_org`, not re-resolved per
+    write). Sealed rows (files this sweep no longer finds on disk — the
+    session ended and nothing further will change) are skipped by future
+    passes unless ``force=True``, which also unseals anything it
+    successfully re-ingests.
+
+    This is the function ``/api/graph/sessions --all`` and the CLI's
+    ``graph sessions --all`` call — the replacement for
+    ``ingest_all_claude_code`` as the routine/timer-driven sweep.
+    ``ingest_all_claude_code`` remains available for explicit full
+    reparse and tests.
+
+    Returns ``{"scanned", "unchanged", "changed", "sealed", "db_opens",
+    "orgs_touched", "results"}``.
+    """
+    from tools.dashboard.dao.dashboard_db import (
+        get_active_manifest_paths,
+        get_manifest_entry,
+        get_sealed_manifest_paths,
+        seal_manifest_entry,
+        upsert_manifest_entry,
+    )
+
+    files = _scan_session_files()
+    scanned_paths: set[str] = set()
+    sealed_paths = get_sealed_manifest_paths()
+
+    by_org: dict[str, list[Path]] = {}
+    unchanged = 0
+
+    for f in files:
+        abs_path = _normalize_session_path(f)
+        scanned_paths.add(abs_path)
+        if not force and abs_path in sealed_paths:
+            continue
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        entry = get_manifest_entry(abs_path)
+        if not force and entry and entry["size"] == st.st_size and entry["mtime"] == st.st_mtime:
+            unchanged += 1
+            continue
+        org = session_target_org(f)
+        if not org:
+            continue
+        by_org.setdefault(org, []).append(f)
+
+    results: list[dict] = []
+    db_opens = 0
+    for org, org_files in by_org.items():
+        db = GraphDB(resolve_caller_db_path(org))
+        db_opens += 1
+        try:
+            for f in org_files:
+                result = ingest_session_file(db, f, force=force)
+                result["file"] = str(f)
+                results.append(result)
+                try:
+                    st = f.stat()
+                except OSError:
+                    continue
+                abs_path = _normalize_session_path(f)
+                upsert_manifest_entry(
+                    abs_path, size=st.st_size, mtime=st.st_mtime,
+                    inode=getattr(st, "st_ino", None), org=org,
+                    source_id=result.get("source_id"),
+                    ingest_offset=st.st_size, state="active",
+                )
+        finally:
+            db.close()
+
+    # Seal manifest rows for files this pass no longer finds on disk —
+    # the session's file went away (moved/deleted); nothing more will
+    # ever change about it. Rows already sealed are left alone (no-op
+    # UPDATE avoided).
+    sealed = 0
+    for stale_path in get_active_manifest_paths() - scanned_paths:
+        seal_manifest_entry(stale_path)
+        sealed += 1
+
+    return {
+        "scanned": len(files),
+        "unchanged": unchanged,
+        "changed": sum(len(v) for v in by_org.values()),
+        "sealed": sealed,
+        "db_opens": db_opens,
+        "orgs_touched": len(by_org),
+        "results": results,
+    }
 
 
 # ── Status File Ingestion ────────────────────────────────────

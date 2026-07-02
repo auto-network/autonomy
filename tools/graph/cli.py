@@ -209,12 +209,11 @@ def _parse_state_args(args) -> tuple[list[str] | None, bool]:
     return states, include_raw
 from .ingest import (
     ingest_conversation, ingest_musing, ingest_directory,
-    ingest_claude_code_project, ingest_all_claude_code,
+    ingest_claude_code_project, ingest_all_claude_code, catch_up_sweep,
     ingest_session_file, refresh_session_source,
     ingest_status_file, ingest_status_dir, ingest_git_commits,
     ingest_doc_file, ingest_docs_dir,
 )
-from .watch import watch_sessions
 from .duration import parse_duration as _shared_parse_duration
 from .playbooks import get_catalog, get_playbook_status, save_playbook
 from .agent_runs import ingest_all_agent_runs, discover_subagent_traces, parse_agent_trace
@@ -1923,8 +1922,31 @@ def cmd_sessions(args):
         else:
             _print_session_status(since=since, show_topics=show_topics)
         return
+
+    # W4: bare `graph sessions` (no --session/--all/--project) inside a
+    # container defaults to ingesting the CALLING session, not a project
+    # scan — AUTONOMY_SESSION is only set inside a session container, so
+    # host/CI invocations of bare `graph sessions` are unaffected.
+    session_target = args.session
+    if not session_target and not args.all and not args.project:
+        session_target = os.environ.get("AUTONOMY_SESSION") or None
+
     client = get_client()
     if isinstance(client, HttpClient):
+        if session_target:
+            result = client.ingest_sessions(
+                session=session_target,
+                force=bool(getattr(args, "force", False)),
+                org=os.environ.get("GRAPH_ORG"),
+            ) or {}
+            if result.get("error"):
+                print(f"Error: {result['error']}", file=sys.stderr)
+                sys.exit(1)
+            r = result.get("result") or {}
+            print(f"  session {session_target}: {r.get('status', '?')} "
+                  f"({r.get('new_thoughts', r.get('thoughts', 0))} thoughts, "
+                  f"{r.get('new_derivations', r.get('derivations', 0))} derivations)")
+            return
         result = client.ingest_sessions(
             all_projects=bool(args.all),
             project=args.project,
@@ -1935,6 +1957,29 @@ def cmd_sessions(args):
         if output:
             print(output, end="" if output.endswith("\n") else "\n")
         return
+
+    if session_target:
+        from tools.dashboard.dao.dashboard_db import get_session as _get_dash_session
+        from .ingest import _open_db_for_session
+        row = _get_dash_session(session_target)
+        jsonl_path = row.get("jsonl_path") if row else None
+        if not jsonl_path:
+            print(f"Error: no jsonl_path for session {session_target!r}", file=sys.stderr)
+            sys.exit(1)
+        path = Path(jsonl_path)
+        session_db = _open_db_for_session(path)
+        if session_db is None:
+            print(f"Error: no resolvable graph_org for session {session_target!r}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            result = ingest_session_file(session_db, path, force=args.force)
+        finally:
+            session_db.close()
+        print(f"  session {session_target}: {result.get('status', '?')} "
+              f"({result.get('new_thoughts', result.get('thoughts', 0))} thoughts, "
+              f"{result.get('new_derivations', result.get('derivations', 0))} derivations)")
+        return
+
     db = GraphDB(args.db)
 
     # Per-session routing (post-txg5.3): each session lands in its own
@@ -1944,7 +1989,12 @@ def cmd_sessions(args):
     sessions_db = None if route_per_session else db
 
     if args.all:
-        results = ingest_all_claude_code(sessions_db, force=args.force)
+        # W4: manifest-driven catch-up sweep, not the legacy full reparse.
+        sweep = catch_up_sweep(force=args.force)
+        print(f"  scanned {sweep['scanned']}, changed {sweep['changed']}, "
+              f"unchanged {sweep['unchanged']}, sealed {sweep['sealed']}, "
+              f"db_opens {sweep['db_opens']} across {sweep['orgs_touched']} org(s)")
+        results = sweep["results"]
     elif args.project:
         results = ingest_claude_code_project(
             sessions_db, Path(args.project), force=args.force,
@@ -3927,14 +3977,6 @@ def cmd_projects(args):
     db.close()
 
 
-def cmd_watch(args):
-    """Watch sessions live and ingest incrementally."""
-    watch_sessions(
-        db_path=args.db,
-        interval=args.interval,
-        project_filter=args.project,
-        verbose=args.verbose,
-    )
 
 
 def cmd_ui_design(args):
@@ -5140,7 +5182,8 @@ def main():
 
     # sessions
     p = sub.add_parser("sessions", help="Ingest Claude Code sessions")
-    p.add_argument("--all", action="store_true", help="Ingest all projects, not just current")
+    p.add_argument("--session", help="Ingest only this tmux session (by name); bare `graph sessions` defaults to $AUTONOMY_SESSION when set")
+    p.add_argument("--all", action="store_true", help="Catch-up sweep: manifest-driven, ingest all changed sessions across all projects")
     p.add_argument("--project", help="Specific project path")
     p.add_argument("--force", action="store_true", help="Re-ingest existing sessions")
     p.add_argument("--status", action="store_true", help="Show session status table from dashboard.db (live-only unless --since)")
@@ -5361,13 +5404,6 @@ def main():
     p.add_argument("--audience", help="Filter by audience (agent, architect, operator, developer, researcher)")
     p.add_argument("--missing", action="store_true", help="Show only missing playbooks")
     p.set_defaults(func=cmd_playbooks)
-
-    # watch
-    p = sub.add_parser("watch", help="Live-watch sessions and ingest incrementally")
-    p.add_argument("--interval", type=float, default=5.0, help="Poll interval in seconds")
-    p.add_argument("--project", "-p", help="Filter to projects matching this substring")
-    p.add_argument("--verbose", "-v", action="store_true", help="Show skip events too")
-    p.set_defaults(func=cmd_watch)
 
     # wait
     p = sub.add_parser("wait", help="Block until a dispatched bead completes")
