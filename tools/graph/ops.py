@@ -1687,6 +1687,76 @@ def update_source_title(
         db.close()
 
 
+def insert_eager_session_source(
+    *,
+    org: str,
+    file_path: str,
+    session_uuid: str,
+    platform: str = "claude-code",
+    container_name: str | None = None,
+) -> dict:
+    """Eager-create a zero-turn ``type='session'`` source row (W2).
+
+    Called the instant a session's JSONL is discovered — before any
+    content has been ingested — so the Recent-sessions list and
+    ``graph_source_id`` linking never wait on the ingest sweep (which may
+    be minutes behind, or never run at all for a session whose every turn
+    gets noise-filtered). Generalizes the ``agentic_source_id`` pattern
+    (:func:`insert_agentic_session`) from agent-action dispatch to every
+    session type.
+
+    Idempotent: if a source already exists at ``file_path`` in ``org``'s
+    DB (a race with a normal ingest pass, or a re-run of the reconciliation
+    retry sweep), returns that row unchanged instead of inserting a
+    duplicate — callers must not assume a fresh row was created.
+
+    ``metadata`` carries both ``session_id`` and ``session_uuid`` (matching
+    what a normal ingest pass would eventually write via
+    ``_build_summary_meta``) so :meth:`GraphDB.get_source`'s session-uuid
+    fallback lookup keeps working. ``eager: True`` marks the row's origin
+    permanently — ``ingest.py``'s incremental-ingest branch uses it to
+    decide whether the *next* content-bearing pass owes this row its first
+    (and only) title derivation.
+
+    Uses :func:`_open` (bare, self-creating connection), matching
+    ``_open_db_for_session``'s established behavior for normal ingest
+    (``GraphDB(resolve_caller_db_path(org))``) rather than
+    :meth:`GraphDB.for_org`/``open_org_db``, which fail closed on a
+    not-yet-existing org DB — eager creation must be able to write the
+    very first source an org ever sees, same as ingest always could.
+    """
+    from .models import Source
+
+    db = _open(org)
+    try:
+        existing = db.get_source_by_path(file_path)
+        if existing is not None:
+            return existing
+
+        metadata = {
+            "session_id": session_uuid,
+            "session_uuid": session_uuid,
+            "eager": True,
+            "file_size": 0,
+            "ingest_offset": 0,
+        }
+        if container_name:
+            metadata["container_name"] = container_name
+
+        source = Source(
+            type="session",
+            platform=platform,
+            project=org,
+            title=None,
+            file_path=file_path,
+            metadata=metadata,
+        )
+        db.insert_source(source)
+        return db.get_source(source.id)
+    finally:
+        db.close()
+
+
 def insert_agentic_session(
     *,
     org: str,
