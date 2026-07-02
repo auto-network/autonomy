@@ -311,3 +311,59 @@ class TestIdempotenceAndDedup:
         assert result["status"] in ("updated", "refreshed")
         thoughts = _thoughts_for(orgs_dir, "autonomy", source_id)
         assert len(thoughts) == 1, f"sweep must not duplicate appender-written content, got {len(thoughts)}"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Concurrency — two sessions, same org, concurrent feeds
+# ══════════════════════════════════════════════════════════════════════
+#
+# asyncio.to_thread's default executor hands each concurrent submission a
+# real, potentially-distinct OS thread (verified: 8 concurrent calls land
+# on 8 distinct threads). feed_lines() must be safe to call from two such
+# threads at once for two DIFFERENT sessions in the SAME org — that's
+# exactly what happens when two sessions in one org both grow their JSONL
+# around the same tail tick.
+
+
+class TestConcurrentAppenders:
+    def test_two_sessions_same_org_concurrent_feeds_both_land_cleanly(self, org_env, tmp_path):
+        import threading
+
+        orgs_dir = org_env
+        jsonl_a = tmp_path / "session-a.jsonl"
+        jsonl_b = tmp_path / "session-b.jsonl"
+        source_a = _insert_eager_source(orgs_dir, "autonomy", jsonl_a)
+        source_b = _insert_eager_source(orgs_dir, "autonomy", jsonl_b)
+
+        appender_a = GraphAppender(org="autonomy", source_id=source_a, file_path=jsonl_a, session_meta={})
+        appender_b = GraphAppender(org="autonomy", source_id=source_b, file_path=jsonl_b, session_meta={})
+
+        lines_a = [_entry_line(f"A turn {i}", f"2026-05-01T10:00:{i:02d}Z", uuid=f"a-u{i}") for i in range(20)]
+        lines_b = [_entry_line(f"B turn {i}", f"2026-05-01T11:00:{i:02d}Z", uuid=f"b-u{i}") for i in range(20)]
+
+        errors: list[Exception] = []
+
+        def _feed(appender, lines):
+            try:
+                offset = sum(len(l) for l in lines)
+                appender.feed_lines(lines, new_byte_offset=offset)
+            except Exception as exc:  # noqa: BLE001 - captured for the assertion below
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=_feed, args=(appender_a, lines_a)),
+            threading.Thread(target=_feed, args=(appender_b, lines_b)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"concurrent feed_lines raised: {errors}"
+
+        thoughts_a = _thoughts_for(orgs_dir, "autonomy", source_a)
+        thoughts_b = _thoughts_for(orgs_dir, "autonomy", source_b)
+        assert [t["content"] for t in thoughts_a] == [f"A turn {i}" for i in range(20)]
+        assert [t["content"] for t in thoughts_b] == [f"B turn {i}" for i in range(20)]
+        assert appender_a.graph_ingest_offset == sum(len(l) for l in lines_a)
+        assert appender_b.graph_ingest_offset == sum(len(l) for l in lines_b)

@@ -24,14 +24,35 @@ Idempotence: turn writes are keyed by ``turn_number`` (deduped against
 see ``_write_new_turns``), so at-least-once delivery from a crash-and-
 resume, or a legacy sweep racing the same file, both converge to the
 same content with no duplicates.
+
+Concurrency: each ``feed_lines`` call opens its own connection (never the
+pooled ``GraphDB.for_org``) and closes it before returning — deliberately
+NOT reused across calls. Every live session's appender runs its DB work
+via ``asyncio.to_thread``, and the default executor spins up a real OS
+thread per concurrent submission (verified: 8 concurrent ticks land on 8
+distinct threads), not just per session. ``sqlite3.connect()`` defaults
+to ``check_same_thread=True``, so a *pooled* connection first opened on
+one worker thread raises ``ProgrammingError`` the moment a second
+concurrent tick — same org, different session, different thread — tries
+to use it; that isn't a hypothetical, it reproduces on the second call.
+A fresh connection per call sidesteps the thread-affinity problem
+entirely. ``_ORG_LOCKS`` then serializes the DB-touching section itself
+per org, so two sessions in the same org can't race each other's
+transaction against the underlying SQLite file (WAL still allows only
+one writer at a time; without app-level serialization a losing writer
+would hit ``SQLITE_BUSY`` instead of simply waiting its turn). Decode and
+extraction (pure per-instance in-memory state, never shared) happen
+outside the lock; only open-connection/get-source/write-turns/commit/
+close holds it, for the shortest critical section that's still correct.
 """
 
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
-from .db import GraphDB
+from .db import GraphDB, resolve_caller_db_path
 from .ingest import (
     ClaudeTurnExtractor,
     CodexTurnExtractor,
@@ -44,6 +65,22 @@ _EXTRACTORS = {
     "claude": ClaudeTurnExtractor,
     "codex": CodexTurnExtractor,
 }
+
+# Per-org locks guarding the DB-writing section of feed_lines(). Every live
+# session in an org shares one pooled connection (GraphDB.for_org); without
+# this, two appenders in the same org feeding on different threads at the
+# same time could interleave writes against that shared connection.
+_ORG_LOCKS: dict[str, threading.Lock] = {}
+_ORG_LOCKS_GUARD = threading.Lock()
+
+
+def _org_lock(org: str) -> threading.Lock:
+    with _ORG_LOCKS_GUARD:
+        lock = _ORG_LOCKS.get(org)
+        if lock is None:
+            lock = threading.Lock()
+            _ORG_LOCKS[org] = lock
+        return lock
 
 
 def extractor_class_for_harness(harness: str):
@@ -146,52 +183,63 @@ class GraphAppender:
             if turn is not None:
                 new_turns.append(turn)
 
-        db = GraphDB.for_org(self.org)
-        source = db.get_source(self.source_id)
-        if source is None:
-            return {"new_turns": 0, "skipped_lines": skipped, "source_missing": True}
+        # Everything from here on touches the org's DB — a fresh
+        # connection (not the pooled GraphDB.for_org, which is not safe to
+        # share across the worker threads asyncio.to_thread actually uses)
+        # opened and closed within this call, serialized per org so two
+        # sessions' appenders can't race each other's transaction against
+        # the underlying SQLite file. See the module docstring for why.
+        with _org_lock(self.org):
+            db = GraphDB(resolve_caller_db_path(self.org))
+            try:
+                source = db.get_source(self.source_id)
+                if source is None:
+                    return {"new_turns": 0, "skipped_lines": skipped, "source_missing": True}
 
-        max_turn = db.get_max_turn(self.source_id)
-        dedup_turns = _dedup_new_turns(db, self.source_id, new_turns, max_turn)
+                max_turn = db.get_max_turn(self.source_id)
+                dedup_turns = _dedup_new_turns(db, self.source_id, new_turns, max_turn)
 
-        state = self.extractor.state
-        thoughts, derivations, entities = _write_new_turns(
-            db, self.source_id, dedup_turns,
-            model=state.get("model") or self.default_model,
-        )
+                state = self.extractor.state
+                thoughts, derivations, entities = _write_new_turns(
+                    db, self.source_id, dedup_turns,
+                    model=state.get("model") or self.default_model,
+                )
 
-        existing_meta = json.loads(source["metadata"]) if source.get("metadata") else {}
-        existing_meta["extractor_state"] = state
-        existing_meta["graph_ingest_offset"] = new_byte_offset
-        existing_meta["total_turns"] = max(max_turn, dedup_turns[-1]["turn_number"] if dedup_turns else max_turn)
-        if state.get("total_input_tokens") is not None:
-            existing_meta["total_input_tokens"] = state["total_input_tokens"]
-        if state.get("total_output_tokens") is not None:
-            existing_meta["total_output_tokens"] = state["total_output_tokens"]
-        if state.get("first_ts") and not existing_meta.get("started_at"):
-            existing_meta["started_at"] = state["first_ts"]
-        if state.get("last_ts"):
-            existing_meta["ended_at"] = state["last_ts"]
+                existing_meta = json.loads(source["metadata"]) if source.get("metadata") else {}
+                existing_meta["extractor_state"] = state
+                existing_meta["graph_ingest_offset"] = new_byte_offset
+                existing_meta["total_turns"] = max(max_turn, dedup_turns[-1]["turn_number"] if dedup_turns else max_turn)
+                if state.get("total_input_tokens") is not None:
+                    existing_meta["total_input_tokens"] = state["total_input_tokens"]
+                if state.get("total_output_tokens") is not None:
+                    existing_meta["total_output_tokens"] = state["total_output_tokens"]
+                if state.get("first_ts") and not existing_meta.get("started_at"):
+                    existing_meta["started_at"] = state["first_ts"]
+                if state.get("last_ts"):
+                    existing_meta["ended_at"] = state["last_ts"]
 
-        # W2/W5 interplay: an eager row's title is derived once, on the
-        # first batch that lands real content — mirrors the full-reparse
-        # incremental branch's rule in _ingest_text_session. Scoped to
-        # this batch's turns only (not the session's full history) so the
-        # appender doesn't need to hold every turn in memory; if this
-        # batch's turns are all low-signal, the title stays unset and the
-        # next content-bearing batch tries again — self-correcting, same
-        # as the pre-eager-row fallback behavior.
-        new_title = None
-        if not source.get("title") and existing_meta.get("eager") and dedup_turns:
-            new_title = _derive_session_title({}, self.file_path, self.session_meta, dedup_turns)
+                # W2/W5 interplay: an eager row's title is derived once, on
+                # the first batch that lands real content — mirrors the
+                # full-reparse incremental branch's rule in
+                # _ingest_text_session. Scoped to this batch's turns only
+                # (not the session's full history) so the appender doesn't
+                # need to hold every turn in memory; if this batch's turns
+                # are all low-signal, the title stays unset and the next
+                # content-bearing batch tries again — self-correcting, same
+                # as the pre-eager-row fallback behavior.
+                new_title = None
+                if not source.get("title") and existing_meta.get("eager") and dedup_turns:
+                    new_title = _derive_session_title({}, self.file_path, self.session_meta, dedup_turns)
 
-        db.update_source_summary(
-            self.source_id,
-            title=new_title,
-            metadata=existing_meta,
-            last_activity_at=state.get("last_ts") or source.get("last_activity_at"),
-        )
-        db.commit()
+                db.update_source_summary(
+                    self.source_id,
+                    title=new_title,
+                    metadata=existing_meta,
+                    last_activity_at=state.get("last_ts") or source.get("last_activity_at"),
+                )
+                db.commit()
+            finally:
+                db.close()
 
         self.graph_ingest_offset = new_byte_offset
         return {
