@@ -12142,12 +12142,45 @@ async def _refresh_graph_session_source(source: dict) -> dict:
 
 
 async def api_graph_sessions(request):
-    """Ingest sessions in a subprocess so CPU-bound parsing cannot stall the loop."""
+    """Ingest sessions. Two modes:
+
+    ``{"session": <tmux_name>}`` — single-session mode (W4). Resolves
+    jsonl_path via dashboard.db and ingests just that one file in-process
+    (asyncio.to_thread) — a single file is cheap enough not to need the
+    subprocess isolation the full sweep requires.
+
+    Anything else (``--all``/``--project``/bare) — unchanged: runs the
+    graph CLI in a subprocess so CPU-bound parsing/FTS work cannot stall
+    the event loop.
+    """
     if _ingest_lock.locked():
         return JSONResponse({"ok": True, "output": "ingest already in progress", "skipped": True})
 
     async with _ingest_lock:
         body = await request.json()
+        session = str(body["session"]) if body.get("session") else None
+
+        if session:
+            def _run_single() -> dict:
+                from tools.graph.ingest import _open_db_for_session, ingest_session_file
+                row = dashboard_db.get_session(session)
+                jsonl_path = row.get("jsonl_path") if row else None
+                if not jsonl_path:
+                    return {"error": f"no jsonl_path for session {session!r}"}
+                path = Path(jsonl_path)
+                db = _open_db_for_session(path)
+                if db is None:
+                    return {"error": "no resolvable graph_org for this session"}
+                try:
+                    return ingest_session_file(db, path, force=bool(body.get("force")))
+                finally:
+                    db.close()
+
+            result = await asyncio.to_thread(_run_single)
+            if result.get("error"):
+                return JSONResponse(result, status_code=404)
+            return JSONResponse({"ok": True, "session": session, "result": result})
+
         force = bool(body.get("force"))
         project = str(body["project"]) if body.get("project") else None
         all_flag = bool(body.get("all"))

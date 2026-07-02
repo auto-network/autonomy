@@ -1896,10 +1896,13 @@ class SessionMonitor:
         (which may be minutes behind, or never run for a session whose
         every turn gets noise-filtered — the codex brief-only case).
 
-        Behind the ``ingest.eager_sources`` feature flag
-        (``dashboard.feature_flags``) for soak. Best-effort throughout:
-        flag lookup, org resolution, and the write are all guarded — any
-        failure here must never block JSONL linking. Returns True iff
+        Gated by the ``ingest.eager_sources`` feature flag
+        (``dashboard.feature_flags``) — unflagged default is ON as of W4
+        (soak validated the W2/W3 rollout); an explicit
+        ``{"enabled": false}`` row still opts a deployment out. Best-
+        effort throughout: flag lookup, org resolution, and the write are
+        all guarded — any failure here must never block JSONL linking.
+        Returns True iff
         ``tmux_sessions.graph_source_id`` was written this call. Unresolvable
         org (fail-closed, matches pre-W2 behavior for org-less sessions) and
         transient failures both return False and are retried by
@@ -1908,7 +1911,11 @@ class SessionMonitor:
         """
         try:
             from tools.dashboard import feature_flags
-            if not feature_flags.is_enabled("ingest.eager_sources"):
+            # W4: eager sources is the unflagged default — a fresh
+            # deployment (no seeded Settings row) gets it without needing
+            # `graph set add dashboard.feature_flags#1 ...`. An explicit
+            # {"enabled": false} row still disables it.
+            if not feature_flags.is_enabled("ingest.eager_sources", default=True):
                 return False
         except Exception:
             return False

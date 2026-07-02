@@ -917,8 +917,10 @@ class HttpClient:
     def write_journal_entry(self, payload, *, org=None):
         return self._post("/api/graph/journal", payload, org=org) or {}
 
-    def ingest_sessions(self, *, all_projects=False, project=None, force=False, org=None):
+    def ingest_sessions(self, *, all_projects=False, project=None, force=False, session=None, org=None):
         body = {}
+        if session:
+            body["session"] = session
         if all_projects:
             body["all"] = True
         if project:
