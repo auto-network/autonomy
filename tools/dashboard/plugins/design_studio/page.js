@@ -511,7 +511,7 @@ function designStudioPage() {
     summary: {},
     filteredCount: 0,
     query: '',
-    status: 'all',
+    status: 'pending',
     sort: 'updated',
     topbarHandle: null,
     _loadTimer: null,
@@ -536,13 +536,13 @@ function designStudioPage() {
     },
 
     get hasFilters() {
-      return !!String(this.query || '').trim() || this.status !== 'all';
+      return !!String(this.query || '').trim() || this.status !== 'pending';
     },
 
     get statusOptions() {
       return [
         { value: 'all', label: 'All statuses' },
-        { value: 'pending', label: 'Pending' },
+        { value: 'pending', label: 'Active' },
         { value: 'dismissed', label: 'Dismissed' },
         { value: 'completed', label: 'Completed' },
       ];
@@ -586,6 +586,7 @@ function designStudioPage() {
         this.designs = Array.isArray(data.designs) ? data.designs : [];
         this.summary = data.summary || {};
         this.filteredCount = data.filtered_count || this.designs.length;
+        this._updateTopbar();
       } catch (e) {
         this.error = 'Design catalog failed: ' + (e.message || e);
         this.designs = [];
@@ -599,15 +600,95 @@ function designStudioPage() {
       navigateTo('/design/' + encodeURIComponent(design.latest_revision_id));
     },
 
+    openSession: function (design) {
+      if (!design || !design.creator_session_id) return;
+      navigateTo('/session/autonomy/' + encodeURIComponent(design.creator_session_id));
+    },
+
+    showStatusPill: function (design) {
+      return !!design && (!this.status || this.status === 'all' || design.status !== this.status);
+    },
+
+    statusLabel: function (status) {
+      if (status === 'pending') return 'Active';
+      return status || 'Active';
+    },
+
     statusClass: function (status) {
       return 'design-pill design-pill-' + (status || 'pending');
     },
 
-    formatDate: function (value) {
+    formatDateTime: function (value) {
       if (!value) return 'unknown';
-      var parsed = new Date(String(value).replace(' ', 'T') + 'Z');
+      var raw = String(value).trim();
+      var normalized = raw.indexOf('T') >= 0 ? raw : raw.replace(' ', 'T') + 'Z';
+      var parsed = new Date(normalized);
       if (isNaN(parsed.getTime())) return value;
-      return parsed.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+      return parsed.toLocaleString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      });
+    },
+
+    initialFor: function (design) {
+      var title = (design && design.title) || 'Design';
+      return title.trim().charAt(0).toUpperCase() || 'D';
+    },
+
+    sessionLabel: function (design) {
+      if (!design) return '';
+      var live = this._liveSession(design.creator_session_id);
+      return (live && live.label) || design.creator_session_label || design.creator_session_id || '';
+    },
+
+    isLiveDesign: function (design) {
+      return !!(design && this._liveSession(design.creator_session_id));
+    },
+
+    _liveSession: function (sessionId) {
+      if (!sessionId || !window.Alpine || !Alpine.store) return null;
+      var sessions = Alpine.store('sessions') || {};
+      var s = sessions[sessionId];
+      return s && s.isLive ? s : null;
+    },
+
+    _liveDesignSessions: function () {
+      var seen = {};
+      var out = [];
+      for (var i = 0; i < this.designs.length; i++) {
+        var design = this.designs[i];
+        var id = design && design.creator_session_id;
+        if (!id || seen[id]) continue;
+        var live = this._liveSession(id);
+        if (!live) continue;
+        seen[id] = true;
+        out.push({
+          id: id,
+          label: live.label || design.creator_session_label || id,
+        });
+      }
+      return out;
+    },
+
+    _topbarStatsHtml: function () {
+      var org = (window.Autonomy && (window.Autonomy._activePluginOrg || window.Autonomy._activeShellOrg)) || 'autonomy';
+      var active = this.summary.pending_series || 0;
+      var total = this.summary.series || 0;
+      var live = this._liveDesignSessions();
+      var avatarHtml = live.slice(0, 3).map(function (s) {
+        var initial = (s.label || s.id || '?').trim().charAt(0).toUpperCase() || '?';
+        return '<span class="design-topbar-avatar" title="' + _escapeDesignHtml(s.label || s.id) + '">' + _escapeDesignHtml(initial) + '</span>';
+      }).join('');
+      return '<span class="design-topbar-strip">'
+        + '<span class="design-topbar-chip design-topbar-org"><span class="design-topbar-orgmark">'
+        + _escapeDesignHtml(org.charAt(0).toUpperCase() || 'A')
+        + '</span><strong>' + _escapeDesignHtml(org) + '</strong><span>' + active + ' active</span></span>'
+        + '<span class="design-topbar-chip"><strong>' + total + '</strong><span>total</span></span>'
+        + '<span class="design-topbar-chip design-topbar-live"><span class="design-topbar-live-dot"></span><strong>' + live.length + '</strong><span>live</span>'
+        + (avatarHtml ? '<span class="design-topbar-avatars">' + avatarHtml + '</span>' : '')
+        + '</span></span>';
     },
 
     _updateTopbar: function () {
@@ -616,8 +697,10 @@ function designStudioPage() {
         return;
       }
       var options = {
-        title: 'Design Studio',
-        subtitle: 'Search, sort, and recover every design series',
+        title: 'Design',
+        left: [
+          { type: 'html', id: 'design-stats', html: this._topbarStatsHtml() },
+        ],
       };
       if (this.topbarHandle && typeof this.topbarHandle.update === 'function') {
         this.topbarHandle.update(options);
@@ -626,4 +709,16 @@ function designStudioPage() {
       }
     },
   };
+}
+
+function _escapeDesignHtml(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, function (ch) {
+    return {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    }[ch];
+  });
 }

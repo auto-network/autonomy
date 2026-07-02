@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import os
 from collections import Counter, defaultdict
+from pathlib import Path
 from typing import Any
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Route
 
 
@@ -47,6 +48,35 @@ def _matches_query(row: dict, query: str) -> bool:
     return query.lower() in haystack
 
 
+def _safe_revision_id(raw: str) -> str:
+    rev_id = str(raw or "").strip()
+    if not rev_id or rev_id in {".", ".."} or "/" in rev_id or "\\" in rev_id:
+        return ""
+    return rev_id
+
+
+def _screenshot_path(revision_id: str) -> Path | None:
+    rev_id = _safe_revision_id(revision_id)
+    if not rev_id:
+        return None
+    from agents.design_db import REPO_ROOT
+
+    base = (REPO_ROOT / "data" / "experiments").resolve()
+    candidate = (base / rev_id / "screenshot.png").resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError:
+        return None
+    return candidate
+
+
+def _thumbnail_url(revision_id: str) -> str:
+    path = _screenshot_path(revision_id)
+    if path and path.is_file():
+        return f"/api/design-studio/revisions/{revision_id}/thumbnail"
+    return ""
+
+
 def _mock_design_rows() -> list[dict]:
     from tools.dashboard.dao import mock as dao_mock
 
@@ -65,6 +95,7 @@ def _mock_design_rows() -> list[dict]:
             "creator_session_label": design.get("creator_session_label") or "",
             "variant_count": len(variants),
             "has_fixture": bool(design.get("fixture")),
+            "thumbnail_url": design.get("thumbnail_url") or "",
         })
     return rows
 
@@ -124,6 +155,12 @@ def _series_from_rows(rows: list[dict]) -> list[dict]:
         created_values = [str(r.get("created_at") or "") for r in revisions if r.get("created_at")]
         first_created = min(created_values) if created_values else ""
         latest_created = max(created_values) if created_values else ""
+        thumbnail_url = str(latest.get("thumbnail_url") or "")
+        if not thumbnail_url:
+            for revision in reversed(revisions):
+                thumbnail_url = str(revision.get("thumbnail_url") or _thumbnail_url(str(revision.get("id") or "")))
+                if thumbnail_url:
+                    break
         series.append({
             "design_id": design_id,
             "latest_revision_id": latest.get("id"),
@@ -140,6 +177,7 @@ def _series_from_rows(rows: list[dict]) -> list[dict]:
             "creator_session_id": latest.get("creator_session_id") or "",
             "creator_session_label": latest.get("creator_session_label") or "",
             "creator_session_count": len(set(creators)),
+            "thumbnail_url": thumbnail_url,
         })
     return series
 
@@ -199,6 +237,14 @@ async def get_design_series(request: Request) -> JSONResponse:
     return JSONResponse(series)
 
 
+async def get_revision_thumbnail(request: Request):
+    revision_id = request.path_params["revision_id"]
+    path = _screenshot_path(revision_id)
+    if not path or not path.is_file():
+        return JSONResponse({"error": "thumbnail not found"}, status_code=404)
+    return FileResponse(path, media_type="image/png")
+
+
 def badge_counter() -> int:
     try:
         return _summarize(_series_from_rows(_design_rows())).get("pending_series", 0)
@@ -209,4 +255,5 @@ def badge_counter() -> int:
 routes: list[Route] = [
     Route("/api/design-studio/designs", list_designs, methods=["GET"]),
     Route("/api/design-studio/designs/{design_id}", get_design_series, methods=["GET"]),
+    Route("/api/design-studio/revisions/{revision_id}/thumbnail", get_revision_thumbnail, methods=["GET"]),
 ]
