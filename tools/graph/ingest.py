@@ -856,6 +856,11 @@ def _lookup_dashboard_label(file_path: Path, session_uuid: str | None) -> str | 
 def _lookup_bead_title(bead_id: str) -> str | None:
     """Best-effort lookup of a bead title from the beads (Dolt) DB.
 
+    Legacy fallback only — dispatch sessions stamp ``bead_title`` into
+    ``.session_meta.json`` at launch (see ``launch_session_cli.py``), so
+    ``_derive_session_title`` reads that first and only reaches here for
+    sessions launched before that field existed.
+
     Returns None if Dolt is unreachable or the bead does not exist.
     Cached per-call only — callers ingest one session at a time.
     """
@@ -888,7 +893,7 @@ def _derive_session_title(meta: dict, file_path: Path, session_meta: dict,
 
     bead_id = session_meta.get("bead_id")
     if bead_id:
-        bead_title = _lookup_bead_title(bead_id)
+        bead_title = session_meta.get("bead_title") or _lookup_bead_title(bead_id)
         if bead_title:
             return f"{bead_id}: {bead_title}"
         return bead_id
@@ -1286,10 +1291,18 @@ def _ingest_text_session(
 
         existing_meta = json.loads(existing["metadata"]) if existing["metadata"] else {}
         new_meta = _build_summary_meta(existing_meta, meta, file_path, session_meta, current_size)
-        new_title = _derive_session_title(meta, file_path, session_meta, turns) or existing.get("title")
+        # Title derivation runs at source creation only (W5) — incremental
+        # passes leave the title column untouched (title=None here means
+        # "don't SET it", not "set it to NULL" — see update_source_summary).
+        # Dashboard label renames reach the title via write-through
+        # (server.py's update_source_title), not by re-deriving here on
+        # every tick. Passing the re-read existing["title"] instead would be
+        # a read-modify-write race: write-through can rename the source
+        # mid-pass (entity extraction on a big delta takes seconds) and this
+        # update would then clobber the new title with the stale value.
         db.update_source_summary(
             source_id,
-            title=new_title,
+            title=None,
             metadata=new_meta,
             last_activity_at=meta.get("ended_at") or existing.get("last_activity_at"),
         )

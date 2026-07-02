@@ -169,6 +169,19 @@ class TestTitleDerivation:
                                               {"bead_id": "auto-test"}, turns)
         assert title == "auto-test: Fix the thing"
 
+    def test_session_meta_bead_title_skips_dolt(self, jsonl_path):
+        """session_meta['bead_title'] (stamped at dispatch) wins over Dolt — zero Dolt calls."""
+        turns = [{"role": "user", "content": "What do you see?", "turn_number": 1}]
+        with patch("tools.graph.ingest._lookup_dashboard_label", return_value=None):
+            with patch("tools.graph.ingest._lookup_bead_title",
+                       side_effect=AssertionError("Dolt must not be queried")) as mock_dolt:
+                title = _derive_session_title(
+                    {}, jsonl_path,
+                    {"bead_id": "auto-test", "bead_title": "Fix the thing"}, turns,
+                )
+        mock_dolt.assert_not_called()
+        assert title == "auto-test: Fix the thing"
+
     def test_bead_id_alone_when_dolt_unreachable(self, jsonl_path):
         """If the beads DB is offline, fall back to the bead_id alone."""
         turns = [{"role": "user", "content": "doing work", "turn_number": 1}]
@@ -309,34 +322,94 @@ class TestIncrementalRefresh:
         open_org_db.assert_not_called()
         assert refreshed == source
 
-    def test_title_refresh_when_label_appears_after_first_ingest(self, graph_db, jsonl_path):
-        """If the user runs `set-label` after first ingest, the next pass adopts it."""
+    def test_new_source_uses_stamped_bead_title_zero_dolt_calls(self, graph_db, jsonl_path):
+        """Full ingest of a bead-session with a stamped bead_title never touches Dolt."""
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        (jsonl_path.parent / ".session_meta.json").write_text(json.dumps({
+            "type": "dispatch",
+            "bead_id": "auto-test",
+            "bead_title": "Fix the thing",
+        }))
+        _write_jsonl(jsonl_path, [
+            _user_entry("Get started", ts="2026-04-19T10:00:00Z"),
+        ])
+        with patch("tools.graph.ingest._lookup_dashboard_label", return_value=None):
+            with patch("tools.graph.ingest._lookup_bead_title",
+                       side_effect=AssertionError("Dolt must not be queried")) as mock_dolt:
+                result = ingest_claude_code_session(graph_db, jsonl_path)
+
+        mock_dolt.assert_not_called()
+        title = graph_db.conn.execute(
+            "SELECT title FROM sources WHERE id = ?", (result["source_id"],)
+        ).fetchone()["title"]
+        assert title == "auto-test: Fix the thing"
+
+    def test_title_stable_across_incremental_reingest(self, graph_db, jsonl_path):
+        """Incremental ingest never re-derives the title (W5): it's creation-only.
+
+        A dashboard label change reaches the title via write-through
+        (server.py's ``update_source_title``), not by re-running
+        ``_derive_session_title`` on the next ingest tick. Even if the
+        label lookup would now return something different, a later
+        ingest pass must leave the title exactly as it was.
+        """
         jsonl_path.parent.mkdir(parents=True, exist_ok=True)
         _write_jsonl(jsonl_path, [
-            _user_entry("[Image #1]", ts="2026-04-19T10:00:00Z"),
+            _user_entry("Help me debug this", ts="2026-04-19T10:00:00Z"),
         ])
-        # First ingest with no label → falls back to content (which is low-signal)
         with patch("tools.graph.ingest._lookup_dashboard_label", return_value=None):
             r1 = ingest_claude_code_session(graph_db, jsonl_path)
         first_title = graph_db.conn.execute(
             "SELECT title FROM sources WHERE id = ?", (r1["source_id"],)
         ).fetchone()["title"]
-        # With only an [Image #1] turn and no metadata, title should be None or empty
-        assert not first_title
+        assert first_title == "Help me debug this"
 
-        # Append turns + simulate set-label firing on the dashboard
+        # Append turns + simulate a label appearing later on the dashboard.
+        # If derivation ran again, this would win and overwrite the title —
+        # it must not.
         with open(jsonl_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(_user_entry("real work", ts="2026-04-19T11:00:00Z")) + "\n")
 
         with patch("tools.graph.ingest._lookup_dashboard_label",
-                   return_value="Session viewer redesign"):
+                   return_value="Session viewer redesign") as mock_label:
             r2 = ingest_claude_code_session(graph_db, jsonl_path)
 
         assert r2["status"] == "updated"
+        mock_label.assert_not_called()
         new_title = graph_db.conn.execute(
             "SELECT title FROM sources WHERE id = ?", (r1["source_id"],)
         ).fetchone()["title"]
-        assert new_title == "Session viewer redesign"
+        assert new_title == "Help me debug this"
+
+    def test_derive_session_title_not_called_on_incremental_reingest(self, graph_db, jsonl_path):
+        """Direct proof: the update branch never calls _derive_session_title."""
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_jsonl(jsonl_path, [
+            _user_entry("Dashboard-set title stands", ts="2026-04-19T10:00:00Z"),
+        ])
+        with patch("tools.graph.ingest._lookup_dashboard_label", return_value=None):
+            r1 = ingest_claude_code_session(graph_db, jsonl_path)
+
+        # Simulate a dashboard-set title (e.g. via set-label write-through)
+        # that does not match anything content-derived.
+        graph_db.conn.execute(
+            "UPDATE sources SET title = ? WHERE id = ?",
+            ("Operator-curated title", r1["source_id"]),
+        )
+        graph_db.commit()
+
+        with open(jsonl_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(_user_entry("more content", ts="2026-04-19T11:00:00Z")) + "\n")
+
+        with patch("tools.graph.ingest._derive_session_title") as mock_derive:
+            r2 = ingest_claude_code_session(graph_db, jsonl_path)
+
+        assert r2["status"] == "updated"
+        mock_derive.assert_not_called()
+        new_title = graph_db.conn.execute(
+            "SELECT title FROM sources WHERE id = ?", (r1["source_id"],)
+        ).fetchone()["title"]
+        assert new_title == "Operator-curated title"
 
 
 # ══════════════════════════════════════════════════════════════════════
