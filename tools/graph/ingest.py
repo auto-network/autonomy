@@ -1134,7 +1134,7 @@ def _ingest_agentic_session(
         }
 
     max_turn = db.get_max_turn(source_id)
-    new_turns = [t for t in turns if t["turn_number"] > max_turn]
+    new_turns = _dedup_new_turns(db, source_id, turns, max_turn)
 
     thoughts, derivations, all_entities = _write_new_turns(
         db, source_id, new_turns, model=meta.get("model", default_model),
@@ -1167,6 +1167,58 @@ def _ingest_agentic_session(
         "from_turn": max_turn + 1,
         "to_turn": turns[-1]["turn_number"],
     }
+
+
+def _dedup_new_turns(
+    db: GraphDB, source_id: str, turns: list[dict], max_turn: int,
+) -> list[dict]:
+    """Filter ``turns`` down to the ones genuinely new for ``source_id``.
+
+    Two stages, both required:
+
+    1. The coarse/cheap ``turn_number > max_turn`` filter. Still correct
+       on its own for *finding* candidates — a renumbering can only ever
+       shift turn numbers upward (entries that used to be dropped now get
+       counted), so every genuinely-new turn still clears this bar — but
+       it is NOT sufficient to exclude duplicates (see below).
+    2. An identity filter dropping any candidate whose ``message_id``
+       already exists among this source's thoughts/derivations.
+
+    Why both are needed (auto-cpg1x): ``turn_number`` is POSITIONAL, not a
+    stable identity. W1's codex ``role='injected'`` change made previously
+    -dropped noise ``user_message`` entries start consuming turn-number
+    slots. A codex source ingested *before* that change and grown *after*
+    it re-parses with every turn after the first noise entry shifted to a
+    higher number — the positional cursor alone reads those shifted
+    positions as new content and duplicates already-ingested turns
+    (confirmed prod damage: source e26143b6-a08 duplicated turns 76-84).
+    Codex ``message_id``s are content hashes (see ``_codex_message_id``),
+    so a genuine duplicate collides exactly. Claude sessions have no
+    filter change and were never affected, but this fix applies uniformly
+    since it costs nothing extra when there's nothing to dedup.
+
+    A turn with no ``message_id`` (rare) has no identity to check and is
+    trusted to the turn_number filter alone — unchanged from before this
+    fix. This is also the at-least-once idempotency the tail-primary
+    ``GraphAppender`` (W3) needs for crash-safe redelivery, so it reuses
+    this exact function rather than reimplementing the check.
+    """
+    candidates = [t for t in turns if t["turn_number"] > max_turn]
+    if not candidates:
+        return candidates
+    existing_ids = {
+        row["message_id"] for row in db.conn.execute(
+            "SELECT message_id FROM thoughts WHERE source_id = ? AND message_id IS NOT NULL "
+            "UNION SELECT message_id FROM derivations WHERE source_id = ? AND message_id IS NOT NULL",
+            (source_id, source_id),
+        ).fetchall()
+    }
+    if not existing_ids:
+        return candidates
+    return [
+        t for t in candidates
+        if not t.get("message_id") or t["message_id"] not in existing_ids
+    ]
 
 
 def _write_new_turns(
@@ -1353,10 +1405,10 @@ def _ingest_text_session(
         existing = None
 
     if existing:
-        max_turn = db.get_max_turn(existing["id"])
-        new_turns = [t for t in turns if t["turn_number"] > max_turn]
-
         source_id = existing["id"]
+        max_turn = db.get_max_turn(source_id)
+        new_turns = _dedup_new_turns(db, source_id, turns, max_turn)
+
         thoughts, derivations, all_entities = _write_new_turns(
             db, source_id, new_turns, model=meta.get("model", default_model),
         )
