@@ -11758,6 +11758,37 @@ async def api_graph_note_update(request):
     })
 
 
+async def api_graph_note_withdraw(request):
+    """POST /api/graph/note/withdraw — hide a source from search/listings.
+
+    Reversible ``deprecated`` flag flip (see ``graph note withdraw``); the
+    record and its links survive and still resolve via ``graph read``.
+    """
+    if os.environ.get("DASHBOARD_MOCK"):
+        return JSONResponse({"ok": True, "output": "  ✓ Mock: withdraw operation skipped"})
+    org = _caller_org(request)
+    body = await request.json()
+    source_id = body.get("source_id", "")
+    e = _graph_validate_source_id(source_id)
+    if e:
+        return JSONResponse({"error": e}, status_code=400)
+
+    try:
+        result = await asyncio.to_thread(graph_ops.withdraw_note, source_id, org=org)
+    except graph_ops.CrossOrgWriteError as e:
+        return _cross_org_error_response(e)
+    except LookupError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+
+    _checkpoint_graph()
+    return JSONResponse({
+        "ok": True,
+        "source_id": result["source_id"],
+        "title": result["title"],
+        "already_withdrawn": result["already_withdrawn"],
+    })
+
+
 async def api_graph_comment_get(request):
     """GET /api/graph/comment/<id> — fetch a single comment (cross-org)."""
     comment_id = request.path_params["id"]
@@ -14951,6 +14982,7 @@ routes = [
     # Graph write API (single-writer proxy for containers)
     Route("/api/graph/note", api_graph_note, methods=["POST"]),
     Route("/api/graph/note/update", api_graph_note_update, methods=["POST"]),
+    Route("/api/graph/note/withdraw", api_graph_note_withdraw, methods=["POST"]),
     Route("/api/graph/note/{id}/versions", api_graph_note_versions_list, methods=["GET"]),
     Route("/api/graph/note/{id}/version/{n}", api_graph_note_version_read, methods=["GET"]),
     Route("/api/graph/comment", api_graph_comment, methods=["POST"]),
