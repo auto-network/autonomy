@@ -276,9 +276,42 @@ def init_db(db_path: Path | None = None) -> None:
     logger.info("dashboard_db: initialised at %s", path)
 
 
+def reset_conn() -> None:
+    """Invalidate the module-level connection so the next get_conn() rebuilds it.
+
+    2026-07-02 incident: the module-level ``_conn`` had no invalidation
+    path, so once it went bad (closed handle, corrupted file, disk error)
+    every subsequent liveness + reconcile tick failed identically until the
+    process was restarted. Called by ``get_conn()`` when a health probe
+    fails; exposed separately so tests (and other error paths) can force it.
+    """
+    global _conn
+    if _conn is not None:
+        try:
+            _conn.close()
+        except sqlite3.Error:
+            pass
+    _conn = None
+
+
 def get_conn() -> sqlite3.Connection:
-    """Return the module-level connection, initialising if needed."""
+    """Return the module-level connection, self-healing if it has gone bad.
+
+    Probes with a trivial query before returning; on failure, invalidates
+    and rebuilds once. The probe cost is negligible (sub-millisecond on an
+    already-open SQLite handle) against the cost of silently wedging every
+    caller for the rest of the process lifetime.
+    """
+    global _conn
     if _conn is None:
+        init_db()
+        assert _conn is not None
+        return _conn
+    try:
+        _conn.execute("SELECT 1")
+    except sqlite3.Error:
+        logger.warning("dashboard_db: connection unhealthy, rebuilding", exc_info=True)
+        reset_conn()
         init_db()
     assert _conn is not None
     return _conn
@@ -497,16 +530,25 @@ def reconcile_graph_source_ids(*, live_only: bool = True) -> int:
     This is the writer-side fix for auto-4jpa8: the dashboard's read paths
     should always trust ``graph_source_id``, so we have to keep it
     consistent with the org DB the ingester actually wrote into.
+
+    W6 addition: when a repair links a row that already carries a
+    dashboard-set ``label``, push that label onto the newly-linked source's
+    title. This closes a gap opened by W5 (title derivation is now
+    creation-only): if an operator runs ``set-label`` before
+    ``graph_source_id`` gets linked, ``api_session_label``'s write-through
+    no-ops (no id to write to yet), and post-W5 nothing else would ever
+    apply that label — the old code healed this on the session's next
+    re-ingest via ``_derive_session_title``, which no longer runs here.
     """
     conn = get_conn()
     if live_only:
         rows = conn.execute(
-            "SELECT tmux_name, graph_source_id, jsonl_path FROM tmux_sessions"
+            "SELECT tmux_name, graph_source_id, jsonl_path, label FROM tmux_sessions"
             " WHERE is_live=1 AND jsonl_path IS NOT NULL AND jsonl_path != ''"
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT tmux_name, graph_source_id, jsonl_path FROM tmux_sessions"
+            "SELECT tmux_name, graph_source_id, jsonl_path, label FROM tmux_sessions"
             " WHERE jsonl_path IS NOT NULL AND jsonl_path != ''"
         ).fetchall()
     repaired = 0
@@ -534,6 +576,17 @@ def reconcile_graph_source_ids(*, live_only: bool = True) -> int:
             tmux_name, gid[:11] if gid else "(empty)", real_id[:11],
         )
         repaired += 1
+
+        label = (row["label"] or "").strip() if "label" in row.keys() else ""
+        if label:
+            try:
+                from tools.graph import ops as graph_ops
+                graph_ops.update_source_title(real_id, label)
+            except Exception:
+                logger.warning(
+                    "dashboard_db: reconcile label write-through failed for %s (%s)",
+                    tmux_name, real_id[:11], exc_info=True,
+                )
     return repaired
 
 
