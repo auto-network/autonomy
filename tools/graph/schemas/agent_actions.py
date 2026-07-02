@@ -27,7 +27,7 @@ AGENT_ACTIONS_REVISION = 2
 
 VALID_ASSET_TYPES = (
     "note", "bead", "session", "agent-run", "conversation",
-    "docs", "musing", "status", "*",
+    "docs", "musing", "status", "design", "*",
 )
 
 

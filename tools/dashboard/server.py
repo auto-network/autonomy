@@ -13380,6 +13380,7 @@ def _build_agent_action_template_context(
     asset: dict,
     source: dict | None = None,
     bead: dict | None = None,
+    design: dict | None = None,
     tags: list[str],
 ) -> dict:
     """Expose generic nested objects to prompt templates."""
@@ -13387,6 +13388,7 @@ def _build_agent_action_template_context(
         "asset": _normalize_action_object(asset),
         "source": _normalize_action_object(source or {}),
         "bead": _normalize_action_object(bead or {}),
+        "design": _normalize_action_object(design or {}),
         "tags": {
             "values": list(tags),
             "list": ", ".join(tags),
@@ -13399,6 +13401,8 @@ def _agent_action_asset_url(*, asset_kind: str, asset_id: str, request) -> str:
     base = f"{request.url.scheme}://{request.url.netloc}"
     if asset_kind == "bead":
         return f"{base}/bead/{asset_id}"
+    if asset_kind == "design":
+        return f"{base}/design/{asset_id}"
     return f"{base}/graph/{asset_id}"
 
 
@@ -13448,6 +13452,90 @@ def _adapt_bead_action_asset(
     return asset, {}, bead_obj
 
 
+def _resolve_design_action_asset(asset_id: str) -> dict | None:
+    """Resolve a Design Studio revision or series id for agent actions."""
+    try:
+        from agents.design_db import _get_conn
+    except Exception:
+        logger.exception("agent-actions: design_db import failed")
+        return None
+    conn = _get_conn()
+    try:
+        rows = conn.execute("""\
+            SELECT
+              id,
+              COALESCE(design_id, id) AS design_id,
+              title,
+              description,
+              status,
+              COALESCE(revision_seq, 1) AS revision_seq,
+              created_at,
+              creator_session_id,
+              creator_session_label,
+              CASE WHEN fixture IS NOT NULL AND fixture != '' THEN 1 ELSE 0 END AS has_fixture
+            FROM designs
+            WHERE id = ? OR COALESCE(design_id, id) = ?
+            ORDER BY COALESCE(revision_seq, 1) ASC, created_at ASC, id ASC
+        """, (asset_id, asset_id)).fetchall()
+        if not rows:
+            return None
+        latest = rows[-1]
+        variant_count = conn.execute(
+            "SELECT COUNT(*) FROM revision_variants WHERE revision_id IN ("
+            + ",".join("?" for _ in rows) + ")",
+            tuple(row["id"] for row in rows),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    created_values = [str(row["created_at"] or "") for row in rows if row["created_at"]]
+    design = {
+        "id": latest["id"],
+        "latest_revision_id": latest["id"],
+        "design_id": latest["design_id"] or latest["id"],
+        "title": latest["title"] or "Untitled Design",
+        "description": latest["description"] or "",
+        "status": latest["status"] or "pending",
+        "revision_count": len(rows),
+        "variant_count": int(variant_count or 0),
+        "has_fixture": bool(latest["has_fixture"]),
+        "first_created_at": min(created_values) if created_values else "",
+        "latest_created_at": max(created_values) if created_values else "",
+        "creator_session_id": latest["creator_session_id"] or "",
+        "creator_session_label": latest["creator_session_label"] or "",
+    }
+    return design
+
+
+def _adapt_design_action_asset(
+    *,
+    design: dict,
+) -> tuple[dict, dict, dict]:
+    """Return normalized prompt objects for a Design Studio action."""
+    asset_id = str(design.get("latest_revision_id") or design.get("id") or "")
+    design_obj = dict(design)
+    design_obj["id"] = asset_id
+    asset = {
+        "id": asset_id,
+        "title": design.get("title") or "Untitled Design",
+        "short_description": design.get("description") or "",
+        "type": "design",
+        "primer": "",
+        "metadata": {
+            "design_id": design.get("design_id") or asset_id,
+            "latest_revision_id": asset_id,
+            "status": design.get("status") or "pending",
+            "revision_count": design.get("revision_count") or 0,
+            "variant_count": design.get("variant_count") or 0,
+            "has_fixture": bool(design.get("has_fixture")),
+            "first_created_at": design.get("first_created_at") or "",
+            "latest_created_at": design.get("latest_created_at") or "",
+            "creator_session_id": design.get("creator_session_id") or "",
+            "creator_session_label": design.get("creator_session_label") or "",
+        },
+    }
+    return asset, {}, design_obj
+
+
 def _build_agent_action_context(
     *,
     asset_kind: str,
@@ -13456,6 +13544,7 @@ def _build_agent_action_context(
     target_org: str,
     source: dict | None = None,
     bead: dict | None = None,
+    design: dict | None = None,
 ) -> dict:
     """Build the generic prompt object bag for any supported asset kind."""
     tags = _get_tag_taxonomy(target_org)
@@ -13469,16 +13558,24 @@ def _build_agent_action_context(
             bead_id=asset_id,
             bead=bead or {},
         )
+        design_obj = {}
+    elif asset_kind == "design":
+        asset, source_obj, design_obj = _adapt_design_action_asset(
+            design=design or {},
+        )
+        bead_obj = {}
     else:
         asset, source_obj, bead_obj = _adapt_source_action_asset(
             source=source or {},
         )
+        design_obj = {}
     asset["url"] = asset_url
     asset["org"] = target_org
     return _build_agent_action_template_context(
         asset=asset,
         source=source_obj,
         bead=bead_obj,
+        design=design_obj,
         tags=tags,
     )
 
@@ -13492,6 +13589,7 @@ _AGENT_ACTION_PLACEHOLDER_ROOTS = (
     "asset",
     "source",
     "bead",
+    "design",
     "tags",
     "dispatched_by_session",
     "member_key",
@@ -13610,6 +13708,7 @@ async def api_agent_action_dispatch(request):
     set_id = "dashboard.agent-actions"
     member_key = body.get("member_key") or ""
     asset_id = body.get("asset_id") or ""
+    requested_asset_kind = str(body.get("asset_kind") or "").strip()
     target_session_name = body.get("target_session_name") or ""
     # Optional operator-typed note for Send-To primers. This is genuine
     # user input (not data the server already has), so it travels on
@@ -13634,9 +13733,20 @@ async def api_agent_action_dispatch(request):
 
     if os.environ.get("DASHBOARD_MOCK"):
         from tools.dashboard.dao import mock as dao_mock
-        src = dao_mock.get_source(asset_id)
-        bead = None if src is not None else dao_mock.get_bead(asset_id)
-        if src is None and bead is None:
+        design = None
+        if requested_asset_kind == "design":
+            for row in dao_mock._designs():
+                did = str(row.get("design_id") or row.get("id") or "")
+                rid = str(row.get("id") or "")
+                if asset_id in {did, rid}:
+                    design = row
+                    break
+            src = None
+            bead = None
+        else:
+            src = dao_mock.get_source(asset_id)
+            bead = None if src is not None else dao_mock.get_bead(asset_id)
+        if src is None and bead is None and design is None:
             return JSONResponse(
                 {"error": f"asset not found: {asset_id}"}, status_code=404,
             )
@@ -13648,9 +13758,14 @@ async def api_agent_action_dispatch(request):
             asset_title = str(src.get("title") or "")
         else:
             target_org = "autonomy"
-            asset_id = str((bead or {}).get("id") or asset_id)
-            asset_type = "bead"
-            asset_title = str((bead or {}).get("title") or asset_id)
+            if design is not None:
+                asset_id = str((design or {}).get("id") or asset_id)
+                asset_type = "design"
+                asset_title = str((design or {}).get("title") or asset_id)
+            else:
+                asset_id = str((bead or {}).get("id") or asset_id)
+                asset_type = "bead"
+                asset_title = str((bead or {}).get("title") or asset_id)
         members = dao_mock.get_settings_members(set_id, org=target_org)
         payload = next(
             (m.get("payload") or {} for m in members if m.get("key") == member_key),
@@ -13704,13 +13819,17 @@ async def api_agent_action_dispatch(request):
         })
 
     # ── Step 1: resolve the target asset and its owning org ──────
-    source = graph_ops.get_source(asset_id)
+    source = None if requested_asset_kind == "design" else graph_ops.get_source(asset_id)
     bead = None
+    design = None
     target_kind = "source"
     target_source_id = ""
     if source is None:
-        bead = await asyncio.to_thread(dao_beads.get_bead, asset_id)
-    if source is None and bead is None:
+        if requested_asset_kind == "design":
+            design = await asyncio.to_thread(_resolve_design_action_asset, asset_id)
+        else:
+            bead = await asyncio.to_thread(dao_beads.get_bead, asset_id)
+    if source is None and bead is None and design is None:
         return JSONResponse(
             {"error": f"asset not found: {asset_id}"}, status_code=404,
         )
@@ -13731,7 +13850,11 @@ async def api_agent_action_dispatch(request):
         target_source_id = asset_id
     else:
         target_org = "autonomy"
-        target_kind = "bead"
+        if design is not None:
+            target_kind = "design"
+            asset_id = str(design.get("latest_revision_id") or design.get("id") or asset_id)
+        else:
+            target_kind = "bead"
         target_source_id = asset_id
 
     # ── Step 2: look up the action member in target_org's DB ─────
@@ -13786,13 +13909,13 @@ async def api_agent_action_dispatch(request):
                 "type": (
                     str(source.get("type") or "")
                     if source is not None else
-                    "bead"
+                    target_kind
                 ),
                 "org": target_org,
                 "title": (
                     str(source.get("title") or "")
                     if source is not None else
-                    str((bead or {}).get("title") or asset_id)
+                    str(((design or bead) or {}).get("title") or asset_id)
                 ),
             },
             custom_message=custom_message,
@@ -13869,6 +13992,7 @@ async def api_agent_action_dispatch(request):
         target_org=target_org,
         source=source,
         bead=bead,
+        design=design,
     )
 
     try:

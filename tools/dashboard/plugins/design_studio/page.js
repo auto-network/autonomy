@@ -504,6 +504,7 @@
 
 function designStudioPage() {
   window.__designStudioLibraryCache = window.__designStudioLibraryCache || {};
+  var librarianMemberKey = 'design.refresh-preview';
   return {
     mode: 'library',
     loading: false,
@@ -514,6 +515,7 @@ function designStudioPage() {
     query: '',
     status: 'pending',
     sort: 'updated',
+    actionStates: {},
     topbarHandle: null,
     _loadTimer: null,
     _activeCacheKey: '',
@@ -611,6 +613,84 @@ function designStudioPage() {
       navigateTo('/session/autonomy/' + encodeURIComponent(design.creator_session_id));
     },
 
+    setDesignStatus: async function (design, status) {
+      if (!design || !design.design_id || !status) return;
+      var key = this._designActionKey(design, 'status');
+      if (this.actionStates[key] === 'working') return;
+      this.actionStates[key] = 'working';
+      var previous = Object.assign({}, design);
+      var optimistic = Object.assign({}, design, { status: status });
+      this._replaceOrRemoveDesign(optimistic);
+      try {
+        var fetcher = (window.Autonomy && window.Autonomy.fetch) || window.fetch;
+        var res = await fetcher('/api/design-studio/designs/' + encodeURIComponent(design.design_id) + '/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: status }),
+        });
+        var data = await res.json().catch(function () { return {}; });
+        if (!res.ok || data.error) {
+          this._replaceOrRemoveDesign(previous, { force: true });
+          this.actionStates[key] = 'error';
+          this.error = data.error || ('Status update failed (HTTP ' + res.status + ')');
+          return;
+        }
+        if (data.design) this._replaceOrRemoveDesign(data.design);
+        this.actionStates[key] = 'done';
+        this.loadDesigns({ background: true });
+      } catch (e) {
+        this._replaceOrRemoveDesign(previous, { force: true });
+        this.actionStates[key] = 'error';
+        this.error = 'Status update failed: ' + (e.message || e);
+      }
+    },
+
+    dispatchDesignLibrarian: async function (design) {
+      if (!design || !design.latest_revision_id) return;
+      var key = this._designActionKey(design, 'librarian');
+      if (this.actionStates[key] === 'working') return;
+      this.actionStates[key] = 'working';
+      try {
+        var fetcher = (window.Autonomy && window.Autonomy.fetch) || window.fetch;
+        var res = await fetcher('/api/agent-actions/dispatch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            asset_kind: 'design',
+            asset_id: design.latest_revision_id,
+            member_key: librarianMemberKey,
+          }),
+        });
+        var data = await res.json().catch(function () { return {}; });
+        if (!res.ok || data.error) {
+          this.actionStates[key] = 'error';
+          this.error = data.error || ('Librarian dispatch failed (HTTP ' + res.status + ')');
+          return;
+        }
+        this.actionStates[key] = 'done';
+      } catch (e) {
+        this.actionStates[key] = 'error';
+        this.error = 'Librarian dispatch failed: ' + (e.message || e);
+      }
+    },
+
+    designActionState: function (design, action) {
+      var state = this.actionStates[this._designActionKey(design, action)] || 'idle';
+      return 'is-' + state;
+    },
+
+    isDesignActionBusy: function (design, action) {
+      return this.actionStates[this._designActionKey(design, action)] === 'working';
+    },
+
+    designActionTitle: function (design) {
+      var state = this.actionStates[this._designActionKey(design, 'librarian')] || 'idle';
+      if (state === 'working') return 'Librarian is queued';
+      if (state === 'done') return 'Librarian dispatched';
+      if (state === 'error') return 'Librarian dispatch failed';
+      return 'Refresh preview and summary';
+    },
+
     showStatusPill: function (design) {
       return !!design && (!this.status || this.status === 'all' || design.status !== this.status);
     },
@@ -683,12 +763,53 @@ function designStudioPage() {
       ].join('|');
     },
 
+    _designActionKey: function (design, action) {
+      return String((design && design.design_id) || (design && design.latest_revision_id) || '') + ':' + action;
+    },
+
+    _designMatchesCurrentFilter: function (design) {
+      if (!design) return false;
+      if (this.status && this.status !== 'all' && design.status !== this.status) return false;
+      return _matchesDesignQuery(design, this.query);
+    },
+
+    _replaceOrRemoveDesign: function (updated, options) {
+      options = options || {};
+      if (!updated || !updated.design_id) return;
+      var found = false;
+      var next = [];
+      for (var i = 0; i < this.designs.length; i++) {
+        var current = this.designs[i];
+        if (current.design_id !== updated.design_id) {
+          next.push(current);
+          continue;
+        }
+        found = true;
+        if (options.force || this._designMatchesCurrentFilter(updated)) {
+          next.push(Object.assign({}, current, updated));
+        }
+      }
+      if (!found && (options.force || this._designMatchesCurrentFilter(updated))) {
+        next.unshift(updated);
+      }
+      this.designs = next;
+      this.filteredCount = next.length;
+      this._writeActiveCache();
+      this._updateTopbar();
+    },
+
     _applyCatalogData: function (data, cacheKey) {
       var key = cacheKey || this._cacheKey();
       this.designs = Array.isArray(data.designs) ? data.designs : [];
       this.summary = data.summary || {};
       this.filteredCount = data.filtered_count || this.designs.length;
       this._activeCacheKey = key;
+      this._writeActiveCache();
+      this._updateTopbar();
+    },
+
+    _writeActiveCache: function () {
+      var key = this._activeCacheKey || this._cacheKey();
       var cached = {
         designs: this.designs,
         summary: this.summary,
@@ -699,7 +820,6 @@ function designStudioPage() {
       try {
         sessionStorage.setItem(key, JSON.stringify(cached));
       } catch (e) { /* storage quota/privacy mode: memory cache still works */ }
-      this._updateTopbar();
     },
 
     _hydrateCachedDesigns: function (cacheKey) {
@@ -746,7 +866,7 @@ function designStudioPage() {
         + '<img src="/static/icon.svg" alt="">'
         + '<span class="design-topbar-badge">' + active + '</span>'
         + '</span>'
-        + '<details class="design-topbar-presence">'
+        + '<details class="design-topbar-presence' + (live.length ? ' is-live' : '') + '">'
         + '<summary title="' + live.length + ' live design sessions" aria-label="' + live.length + ' live design sessions">'
         + '<span class="design-topbar-live-dot"></span>'
         + '<span class="design-topbar-avatars">' + avatarHtml + '</span>'
@@ -787,4 +907,20 @@ function _escapeDesignHtml(value) {
       "'": '&#39;',
     }[ch];
   });
+}
+
+function _matchesDesignQuery(design, query) {
+  var q = String(query || '').trim().toLowerCase();
+  if (!q) return true;
+  var haystack = [
+    design.design_id,
+    design.latest_revision_id,
+    design.title,
+    design.description,
+    design.creator_session_id,
+    design.creator_session_label,
+  ].map(function (value) {
+    return String(value || '');
+  }).join(' ').toLowerCase();
+  return haystack.indexOf(q) >= 0;
 }

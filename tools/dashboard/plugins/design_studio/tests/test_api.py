@@ -129,3 +129,34 @@ def test_revision_thumbnail_rejects_missing_file(tmp_path):
         resp = _client().get("/api/design-studio/revisions/rev-a2/thumbnail")
 
     assert resp.status_code == 404
+
+
+def test_update_design_status_updates_series_and_clears_cache():
+    with patch.object(design_api, "_set_design_series_status") as set_status, \
+         patch.object(design_api, "_clear_catalog_cache") as clear_cache:
+        set_status.return_value = dict(
+            _rows()[1],
+            design_id="series-a",
+            latest_revision_id="rev-a2",
+            revision_count=2,
+            status="completed",
+        )
+        resp = _client().post(
+            "/api/design-studio/designs/series-a/status",
+            json={"status": "completed"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["design"]["status"] == "completed"
+    set_status.assert_called_once_with("series-a", "completed")
+    assert clear_cache.called
+
+
+def test_update_design_status_rejects_invalid_status():
+    resp = _client().post(
+        "/api/design-studio/designs/series-a/status",
+        json={"status": "archived"},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid status"

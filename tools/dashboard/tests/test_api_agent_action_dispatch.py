@@ -189,6 +189,24 @@ def _seed_actions(org_db: Path) -> None:
                 "input_prompt": "What do you want to ask about this bead?",
             },
         ),
+        (
+            "design.refresh-preview",
+            {
+                "asset_type": "design",
+                "label": "Refresh Preview & Summary",
+                "icon": "wand",
+                "model": "claude-haiku-4-5-20251001",
+                "prompt_template": (
+                    "Refresh Design Studio metadata.\n"
+                    "Revision: {asset[id]}\n"
+                    "Series: {design[design_id]}\n"
+                    "Status: {design[status]}\n"
+                    "Page: {asset[url]}\n"
+                ),
+                "estimated_seconds": 60,
+                "writes": ["design.thumbnail", "design.description"],
+            },
+        ),
     ]
     db = GraphDB(org_db)
     try:
@@ -368,6 +386,58 @@ def test_dispatch_creates_agentic_source(client, per_org_universe):
     assert md["target_org"] == "autonomy"
     # Browser-initiated dispatch → server-side sentinel sender.
     assert md["dispatched_by_session"] == "dashboard"
+
+
+def test_dispatch_design_action_uses_design_asset_context(
+    client, per_org_universe, patch_launch_session, monkeypatch,
+):
+    from tools.dashboard import server as server_mod
+
+    design = {
+        "id": "rev-design-2",
+        "latest_revision_id": "rev-design-2",
+        "design_id": "series-design",
+        "title": "Design library card",
+        "description": "Refresh tile preview and subtitle.",
+        "status": "pending",
+        "revision_count": 2,
+        "variant_count": 4,
+        "has_fixture": True,
+        "first_created_at": "2026-07-02 10:00:00",
+        "latest_created_at": "2026-07-02 11:00:00",
+        "creator_session_id": "auto-designer",
+        "creator_session_label": "Design agent",
+    }
+    monkeypatch.setattr(
+        server_mod,
+        "_resolve_design_action_asset",
+        lambda asset_id: dict(design) if asset_id in {"series-design", "rev-design-2"} else None,
+    )
+
+    r = client.post("/api/agent-actions/dispatch", json={
+        "member_key": "design.refresh-preview",
+        "asset_kind": "design",
+        "asset_id": "series-design",
+    })
+
+    assert r.status_code == 201, r.json()
+    body = r.json()
+    assert body["target_org"] == "autonomy"
+    assert body["target_workspace"] == "autonomy-rig"
+
+    row = graph_ops.get_source(body["agentic_source_id"])
+    assert row is not None
+    md = row["metadata"]
+    if isinstance(md, str):
+        md = json.loads(md)
+    assert md["target_kind"] == "design"
+    assert md["target_source_id"] == "rev-design-2"
+
+    prompt = patch_launch_session[-1]["kwargs"]["prompt"]
+    assert "Revision: rev-design-2" in prompt
+    assert "Series: series-design" in prompt
+    assert "Status: pending" in prompt
+    assert "/design/rev-design-2" in prompt
 
 
 def test_dispatch_dispatched_by_session_is_server_sentinel(
