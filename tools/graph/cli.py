@@ -4037,6 +4037,8 @@ def cmd_ui_design(args):
         "title": args.title,
         "variants": [{"id": vid, "html": html} for vid, html in variants.items()],
     }
+    if args.description:
+        exp_data["description"] = args.description
     creator_session_id = os.environ.get("AUTONOMY_SESSION", "").strip()
     if creator_session_id:
         exp_data["creator_session_id"] = creator_session_id
@@ -4119,6 +4121,8 @@ def cmd_ui_design(args):
                 "design_id": design_id,
                 "variants": [{"id": vid, "html": html} for vid, html in variants.items()],
             }
+            if args.description:
+                exp_data["description"] = args.description
             if creator_session_id:
                 exp_data["creator_session_id"] = creator_session_id
             if fixture:
@@ -5415,6 +5419,7 @@ def main():
     p.add_argument("title", help="Design title")
     p.add_argument("dir", help="Directory of .html variant files")
     p.add_argument("--design", help="Existing design ID to append to")
+    p.add_argument("--description", help="Subtitle/summary stored on each design revision")
     p.add_argument("--fixture", help="Path to fixture JSON file")
     p.add_argument("--api", default="https://localhost:8080", help="Dashboard API base URL")
     p.set_defaults(func=cmd_ui_design)
@@ -5424,6 +5429,7 @@ def main():
     p_alias.add_argument("title", help="Design title")
     p_alias.add_argument("dir", help="Directory of .html variant files")
     p_alias.add_argument("--series", dest="design", help="Existing design ID to append to")
+    p_alias.add_argument("--description", help="Subtitle/summary stored on each design revision")
     p_alias.add_argument("--fixture", help="Path to fixture JSON file")
     p_alias.add_argument("--api", default="https://localhost:8080", help="Dashboard API base URL")
     p_alias.set_defaults(func=cmd_ui_design)

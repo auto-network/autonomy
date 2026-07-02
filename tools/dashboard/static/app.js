@@ -1854,6 +1854,9 @@ function _renderSidebarPlugins() {
   if (window._sseCache && window._sseCache.nav) {
     _applyNavBadges(window._sseCache.nav);
   }
+  if (window._sseCache && window._sseCache.plugin_badges) {
+    _applyPluginBadges(window._sseCache.plugin_badges);
+  }
 }
 
 async function renderPluginFragment(plugin) {
@@ -2230,14 +2233,7 @@ function _applyNavBadges(data) {
   const streamsEl = document.getElementById('badge-streams');
   if (streamsEl) streamsEl.textContent = data.stream_count || '';
 
-  if (data.plugins) {
-    Object.keys(data.plugins).forEach(pluginId => {
-      const el = document.getElementById(`badge-plugin-${pluginId}`);
-      if (!el) return;
-      const badge = data.plugins[pluginId] && data.plugins[pluginId].badge;
-      el.textContent = badge ? String(badge) : '';
-    });
-  }
+  _applyPluginBadges(data.plugins);
 
   // Update pinned beads strip
   if (data.pinned && window.Alpine) {
@@ -2248,10 +2244,25 @@ function _applyNavBadges(data) {
   }
 }
 
+function _applyPluginBadges(plugins) {
+  if (!plugins) return;
+  if (window._sseCache && window._sseCache.nav) {
+    const nav = window._sseCache.nav;
+    nav.plugins = Object.assign({}, nav.plugins || {}, plugins);
+  }
+  Object.keys(plugins).forEach(pluginId => {
+    const el = document.getElementById(`badge-plugin-${pluginId}`);
+    if (!el) return;
+    const badge = plugins[pluginId] && plugins[pluginId].badge;
+    el.textContent = badge ? String(badge) : '';
+  });
+}
+
 // Live dispatch badge via SSE nav topic
-connectEvents(['nav', 'dispatch'], {
+connectEvents(['nav', 'dispatch', 'plugin_badges'], {
   dispatch: () => {},  // cache-only — Alpine component handles rendering
   nav: _applyNavBadges,
+  plugin_badges: _applyPluginBadges,
 });
 
 // Load stats — compact 2x2 grid

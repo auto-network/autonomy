@@ -1,6 +1,7 @@
 """Design Studio plugin API."""
 from __future__ import annotations
 
+import logging
 import os
 import time
 from collections import Counter, defaultdict
@@ -13,6 +14,7 @@ from starlette.routing import Route
 
 _CATALOG_CACHE_TTL_SECONDS = 10
 _SCREENSHOT_CACHE_TTL_SECONDS = 10
+logger = logging.getLogger(__name__)
 _catalog_cache: dict[str, Any] = {"expires_at": 0.0, "series": None, "source_key": None}
 _screenshot_cache: dict[str, Any] = {"expires_at": 0.0, "revision_ids": set()}
 
@@ -165,6 +167,55 @@ def _design_rows() -> list[dict]:
     return _sqlite_design_rows()
 
 
+def _clear_catalog_cache() -> None:
+    _catalog_cache["series"] = None
+    _catalog_cache["expires_at"] = 0.0
+    _catalog_cache["source_key"] = None
+
+
+def _set_design_series_status(design_id: str, status: str) -> dict | None:
+    if status not in {"pending", "dismissed", "completed"}:
+        raise ValueError("invalid status")
+    if os.environ.get("DASHBOARD_MOCK"):
+        rows = [
+            row for row in _design_rows()
+            if str(row.get("design_id") or row.get("id")) == design_id
+            or str(row.get("id")) == design_id
+        ]
+        if not rows:
+            return None
+        updated = [dict(row, status=status) for row in rows]
+        return _series_from_rows(updated)[0]
+
+    from agents.design_db import _get_conn
+
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(design_id, id) AS design_id FROM designs "
+            "WHERE id = ? OR design_id = ? ORDER BY revision_seq DESC LIMIT 1",
+            (design_id, design_id),
+        ).fetchone()
+        if not row:
+            return None
+        canonical = row["design_id"] or design_id
+        conn.execute(
+            "UPDATE designs SET status = ? "
+            "WHERE id = ? OR COALESCE(design_id, id) = ?",
+            (status, canonical, canonical),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _clear_catalog_cache()
+    rows = [
+        row for row in _design_rows()
+        if str(row.get("design_id") or row.get("id")) == canonical
+        or str(row.get("id")) == canonical
+    ]
+    return _series_from_rows(rows)[0] if rows else None
+
+
 def _all_series() -> list[dict]:
     if os.environ.get("DASHBOARD_MOCK"):
         return _series_from_rows(_design_rows())
@@ -294,6 +345,33 @@ async def get_revision_thumbnail(request: Request):
     return FileResponse(path, media_type="image/png")
 
 
+async def update_design_status(request: Request) -> JSONResponse:
+    design_id = request.path_params["design_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    status = str(body.get("status") or "").strip()
+    if status not in {"pending", "dismissed", "completed"}:
+        return JSONResponse({"error": "invalid status"}, status_code=400)
+    try:
+        series = _set_design_series_status(design_id, status)
+    except ValueError:
+        return JSONResponse({"error": "invalid status"}, status_code=400)
+    if series is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    _clear_catalog_cache()
+    try:
+        from tools.dashboard.event_bus import event_bus
+        await event_bus.broadcast(
+            "plugin_badges",
+            {"design_studio": {"badge": badge_counter()}},
+        )
+    except Exception:
+        logger.exception("design-studio: failed to broadcast plugin badge update")
+    return JSONResponse({"ok": True, "design": series})
+
+
 def badge_counter() -> int:
     try:
         return _summarize(_all_series()).get("pending_series", 0)
@@ -303,6 +381,7 @@ def badge_counter() -> int:
 
 routes: list[Route] = [
     Route("/api/design-studio/designs", list_designs, methods=["GET"]),
+    Route("/api/design-studio/designs/{design_id}/status", update_design_status, methods=["POST"]),
     Route("/api/design-studio/designs/{design_id}", get_design_series, methods=["GET"]),
     Route("/api/design-studio/revisions/{revision_id}/thumbnail", get_revision_thumbnail, methods=["GET"]),
 ]
