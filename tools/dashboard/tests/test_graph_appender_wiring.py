@@ -297,3 +297,74 @@ class TestFinalGraphCatchup:
         ).fetchone()
         g.close()
         assert row is not None, "final full-reparse fallback must still create a source"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Cross-thread crash regression — _build_graph_appender (live incident,
+# 2026-07-02 23:19-23:26Z). GraphAppender.feed_lines already had its
+# pooled-connection fix (auto-ea9g3 concurrency addition); the BUILD path
+# used tools.graph.db.GraphDB.for_org(org) — a pooled, cross-thread-unsafe
+# connection — and every asyncio.to_thread(self._build_graph_appender, ...)
+# call crashed with sqlite3.ProgrammingError the moment it landed on a
+# worker thread different from whichever thread first populated the pool
+# for that org. Single-threaded tests never exercised this: the pool's
+# first-touch thread and the test's calling thread were the same one.
+# ══════════════════════════════════════════════════════════════════════
+
+
+class TestBuildGraphAppenderThreadSafety:
+    def test_build_survives_pooled_connection_created_on_another_thread(self, setup_env):
+        """Reproduces the live crash directly: pre-warm the org's pooled
+        GraphDB.for_org connection on THIS thread (simulating some other
+        code path having already touched the pool for this org), then run
+        _build_graph_appender on a genuinely different thread — matching
+        what asyncio.to_thread's executor actually does under concurrent
+        load. Must not raise."""
+        import threading
+
+        tmp_path, db_path, orgs_dir = setup_env
+        jsonl = tmp_path / "sess.jsonl"
+        jsonl.write_bytes(_entry_bytes("hello", "2026-05-01T10:00:00Z"))
+        _insert_row(db_path, "auto-crossthread", jsonl_path=str(jsonl))
+
+        # Pre-warm the pool on the current (main) thread.
+        from tools.graph.db import GraphDB
+        GraphDB.for_org("autonomy")
+
+        sm_mod, mon = _fresh_monitor()
+        result: dict = {}
+
+        def _worker():
+            with patch("tools.dashboard.feature_flags.is_enabled", return_value=True):
+                try:
+                    result["appender"] = mon._build_graph_appender("auto-crossthread", jsonl)
+                except Exception as exc:  # noqa: BLE001 - captured for the assertion below
+                    result["error"] = exc
+
+        t = threading.Thread(target=_worker)
+        t.start()
+        t.join(timeout=10)
+
+        assert "error" not in result, f"_build_graph_appender raised on a different thread: {result.get('error')}"
+        assert result.get("appender") is not None
+        assert result["appender"].source_id
+
+    @pytest.mark.asyncio
+    async def test_graph_appender_tick_survives_via_real_to_thread(self, setup_env):
+        """End-to-end via the actual asyncio.to_thread call site (not a
+        bare threading.Thread), with the org's pool pre-warmed on the
+        event loop thread first — closest simulation of the live crash
+        conditions short of running the real dashboard process."""
+        tmp_path, db_path, orgs_dir = setup_env
+        jsonl = tmp_path / "sess.jsonl"
+        jsonl.write_bytes(_entry_bytes("hello", "2026-05-01T10:00:00Z"))
+        _insert_row(db_path, "auto-tothread", jsonl_path=str(jsonl))
+
+        from tools.graph.db import GraphDB
+        GraphDB.for_org("autonomy")
+
+        sm_mod, mon = _fresh_monitor()
+        with patch("tools.dashboard.feature_flags.is_enabled", return_value=True):
+            await mon._graph_appender_tick("auto-tothread", jsonl)  # must not raise
+
+        assert "auto-tothread" in mon._graph_appenders
