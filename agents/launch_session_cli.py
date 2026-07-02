@@ -51,6 +51,22 @@ def _workspace_model(workspace_id: str) -> str | None:
         return None
 
 
+def _bead_title(bead_id: str) -> str | None:
+    """Best-effort Dolt lookup of a bead's title, done once at dispatch.
+
+    Stamped into ``.session_meta.json`` as ``bead_title`` so ingest never
+    needs to hit Dolt on the hot path (see tools/graph/ingest.py W5).
+    """
+    try:
+        from tools.dashboard.dao.beads import get_bead_title_priority
+        info = get_bead_title_priority([bead_id]).get(bead_id)
+        if info and info.get("title"):
+            return info["title"].strip()
+    except Exception:
+        pass
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Launch an agent session container")
     parser.add_argument("--session-type", default="dispatch",
@@ -95,6 +111,9 @@ def main() -> int:
     metadata: dict = {}
     if args.bead_id:
         metadata["bead_id"] = args.bead_id
+        bead_title = _bead_title(args.bead_id)
+        if bead_title:
+            metadata["bead_title"] = bead_title
     if args.graph_project:
         metadata["graph_project"] = args.graph_project
     if args.graph_tags:
