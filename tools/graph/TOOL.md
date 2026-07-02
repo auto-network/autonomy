@@ -37,6 +37,9 @@ Database: `data/graph.db`
 # Search
 .venv/bin/python -m tools.graph search "sovereignty"
 
+# Withdraw a note (hide from search/listings; record + links survive; still resolves via `graph read`)
+graph note withdraw <src_id>
+
 # List entities
 .venv/bin/python -m tools.graph entities
 .venv/bin/python -m tools.graph entities -q "autonomy"

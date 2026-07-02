@@ -21,6 +21,7 @@ graph context <src_id|tmux_name> <turn>  # Show turns around a search hit
 graph tail <src_id|tmux_name> [N] # Last N turns of a session (default 10)
 graph sources                     # List sources (--project X --type Y)
 graph note "text" --tags x,y      # Drop a searchable trail marker
+graph note withdraw <src_id>      # Hide from search/listings (record + links survive)
 graph link <bead> <src> -r rel    # Create provenance edge
 graph attention --last N          # Show recent human input
 graph ui-design "title" <dir>     # Create Design Studio design from HTML files + live-watch for changes

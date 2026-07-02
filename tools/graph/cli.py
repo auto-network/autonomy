@@ -729,6 +729,8 @@ def _format_source_header(source: dict) -> str:
     if when:
         parts.append(when)
     head = " · ".join(parts) + tag
+    if source.get("deprecated"):
+        head += " [withdrawn]"
     return f"{head} — {title}" if title else head
 
 
@@ -3497,7 +3499,7 @@ def _auto_save_note(source_id: str, content: str) -> str:
 
 
 def cmd_note_router(args):
-    """Route 'graph note ...' to create or update."""
+    """Route 'graph note ...' to create, update, or withdraw."""
     if args.text and args.text[0] == "update":
         # graph note update <src_id> [text...]
         if len(args.text) < 2:
@@ -3506,6 +3508,13 @@ def cmd_note_router(args):
         args.source = args.text[1]
         args.text = args.text[2:]
         cmd_note_update(args)
+    elif args.text and args.text[0] == "withdraw":
+        # graph note withdraw <src_id>
+        if len(args.text) != 2:
+            print("Error: usage: graph note withdraw <source_id>", file=sys.stderr)
+            sys.exit(1)
+        args.source = args.text[1]
+        cmd_note_withdraw(args)
     else:
         cmd_note(args)
 
@@ -3744,7 +3753,8 @@ def cmd_note_update(args):
         _require_read(
             "843a8137",
             "Agents must read the Note Revision Protocol before updating "
-            "notes.\n  See: graph://843a8137-3c7",
+            "notes.\n  See: graph://843a8137-3c7\n"
+            "  Trying to retract this note entirely? Use: graph note withdraw <id>",
         )
         _check_single_line_content(new_content, getattr(args, 'force', False))
 
@@ -3813,6 +3823,26 @@ def cmd_note_update(args):
     if has_body:
         local_path = _auto_save_note(src_id, result["content"])
         print(f"  Local copy: {local_path}")
+
+
+def cmd_note_withdraw(args):
+    """Hide a note from search/listings (record + links survive)."""
+    from . import ops as _ops
+    try:
+        result = get_client().withdraw_note(args.source, org=getattr(args, "org", None))
+    except _ops.CrossOrgWriteError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
+    except LookupError as e:
+        print(f"{e}", file=sys.stderr)
+        sys.exit(1)
+
+    title = (result.get("title") or "?")[:60]
+    src_id = result["source_id"]
+    if result.get("already_withdrawn"):
+        print(f"  Already withdrawn: {src_id[:12]} \"{title}\"")
+    else:
+        print(f"  ✓ Withdrawn: {src_id[:12]} \"{title}\" — hidden from search/listings, still resolves via graph read")
 
 
 def cmd_agent_runs(args):
@@ -5201,7 +5231,8 @@ def main():
                             epilog="Create: graph note \"text\" --tags pitfall\n"
                                    "Update: graph note update <src_id> -c - < revised.txt\n"
                                    "  The update form reads new content from -c - (stdin) or positional text.\n"
-                                   "  Use --integrate <comment_id> to mark comments as rolled in.",
+                                   "  Use --integrate <comment_id> to mark comments as rolled in.\n"
+                                   "Withdraw: graph note withdraw <src_id> — hide from search/listings (record + links survive)",
                             formatter_class=argparse.RawDescriptionHelpFormatter)
     p_note.add_argument("text", nargs="*", help="Note text (or 'update <src_id>' to update an existing note)")
     p_note.add_argument("-c", dest="content_stdin", nargs="?", const="-", default=None, help="Read content from stdin")

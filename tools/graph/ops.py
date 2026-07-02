@@ -1351,6 +1351,28 @@ def remove_tag(
         db.close()
 
 
+def withdraw_note(
+    source_id: str,
+    *,
+    org: str | None = None,
+) -> dict:
+    """Withdraw (hide) a source — reversible ``deprecated`` flag flip.
+
+    The record and any links to/from it are untouched and still resolve
+    directly (``graph read``); only search and listings hide it. Cross-org
+    semantics identical to :func:`add_tag`.
+    """
+    write_org = _write_org_for_source(source_id, org=org)
+    db = _open(write_org)
+    try:
+        resolved = db.get_source(source_id)
+        if resolved is None:
+            raise LookupError(f"No source found matching '{source_id}'")
+        return db.withdraw_source(resolved["id"])
+    finally:
+        db.close()
+
+
 def add_comment(
     source_id: str,
     content: str,

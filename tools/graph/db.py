@@ -988,10 +988,18 @@ class GraphDB:
             current session (by id membership or metadata.author match).
 
         Returns ("", []) when no filter should be applied.
+
+        Withdrawn sources (``deprecated = 1``) are hidden from both the
+        explicit ``--state`` override and the default branch — a withdrawal
+        is a different axis than publication state and applies regardless of
+        which states are otherwise in scope. ``--include raw`` is a
+        deliberate escape hatch (see ``graph://8cf067e3-ca3``) and is left
+        unfiltered here; explicit-ID lookups (``_search_source_id``) never
+        call this helper at all, so a withdrawn source still resolves directly.
         """
         if states:
             placeholders = ",".join("?" for _ in states)
-            return f" AND {alias}.publication_state IN ({placeholders})", list(states)
+            return f" AND {alias}.publication_state IN ({placeholders}) AND {alias}.deprecated = 0", list(states)
         if include_raw:
             return "", []
         # Default: hide raw from other sessions; keep raw from current session.
@@ -1004,7 +1012,7 @@ class GraphDB:
         if session_author_pattern:
             clauses.append(f"json_extract({alias}.metadata, '$.author') LIKE ?")
             params.append(session_author_pattern)
-        return " AND (" + " OR ".join(clauses) + ")", params
+        return " AND (" + " OR ".join(clauses) + f") AND {alias}.deprecated = 0", params
 
     # ── Search ───────────────────────────────────────────────
 
@@ -1660,6 +1668,23 @@ class GraphDB:
 
         return None
 
+    def withdraw_source(self, source_id: str) -> dict:
+        """Mark a source withdrawn (``deprecated = 1``). Reversible flag flip,
+
+        not a delete: the record and any links to/from it survive untouched,
+        and it stays reachable via direct ID lookup (``graph read``); it is
+        only hidden from search (``_build_state_filter``) and listings
+        (``list_sources``, both of which funnel through that same helper).
+        """
+        cur = self.conn.execute(
+            "UPDATE sources SET deprecated = 1 WHERE id = ? AND deprecated = 0",
+            (source_id,),
+        )
+        self.conn.commit()
+        row = self.conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
+        if row is None:
+            raise LookupError(f"No source found matching '{source_id}'")
+        return {"source_id": row["id"], "title": row["title"] or "", "already_withdrawn": cur.rowcount == 0}
 
     def get_latest_turn(self, source_id: str) -> int | None:
         """Return the highest turn_number for a source, or None if no turns."""

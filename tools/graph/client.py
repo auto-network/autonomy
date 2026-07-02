@@ -805,6 +805,10 @@ class HttpClient:
         result = self._delete(f"/api/graph/tag/{source_id}/{tag}", org=org)
         return bool(result.get("removed"))
 
+    def withdraw_note(self, source_id, *, org=None):
+        """POST /api/graph/note/withdraw. Reversible ``deprecated`` flag flip."""
+        return self._post("/api/graph/note/withdraw", {"source_id": source_id}, org=org) or {}
+
     def move_source(self, source_id, from_org, to_org, *, reason=None, org=None):
         body = {"from_org": from_org, "to_org": to_org}
         if reason:

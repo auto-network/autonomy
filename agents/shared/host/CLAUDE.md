@@ -23,6 +23,7 @@ graph context <src_id|tmux_name> <turn>         # turns around a search hit
 graph tail <src_id|tmux_name> 20                # last N turns of a session
 graph sessions --all                  # ingest latest session data before searching
 graph note "text" --tags tag          # persist an insight or pitfall for future agents
+graph note withdraw <src_id>          # hide from search/listings (record + links survive)
 graph bead "title" --source <id>      # create a bead with provenance
 graph primer <bead-id>                # full context primer: description + pitfalls + provenance
 graph dispatch approve <bead-id>      # approve bead(s) for dispatch (accepts multiple IDs)

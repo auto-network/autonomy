@@ -317,3 +317,98 @@ def test_session_membership_includes_raw_by_source_id(fresh_db):
     results = fresh_db.search("kappa", limit=50,
                               session_source_ids=["session_owned"])
     assert {r["source_id"] for r in results} == {"session_owned"}
+
+
+# ── Withdraw (deprecated flag) ───────────────────────────────────────────
+
+
+def test_withdraw_source_sets_deprecated_flag(fresh_db):
+    src = Source(type="note", title="junk", file_path="note:junk")
+    fresh_db.insert_source(src)
+    result = fresh_db.withdraw_source(src.id)
+    assert result == {"source_id": src.id, "title": "junk", "already_withdrawn": False}
+    row = fresh_db.conn.execute(
+        "SELECT deprecated FROM sources WHERE id=?", (src.id,)
+    ).fetchone()
+    assert row["deprecated"] == 1
+
+
+def test_withdraw_source_idempotent(fresh_db):
+    src = Source(type="note", title="junk", file_path="note:junk")
+    fresh_db.insert_source(src)
+    fresh_db.withdraw_source(src.id)
+    result = fresh_db.withdraw_source(src.id)
+    assert result["already_withdrawn"] is True
+    row = fresh_db.conn.execute(
+        "SELECT deprecated FROM sources WHERE id=?", (src.id,)
+    ).fetchone()
+    assert row["deprecated"] == 1
+
+
+def test_withdraw_source_missing_raises_lookup_error(fresh_db):
+    with pytest.raises(LookupError):
+        fresh_db.withdraw_source("does-not-exist")
+
+
+def test_search_excludes_withdrawn_by_default(fresh_db):
+    _seed_fts_source(fresh_db, source_id="live", title="live", content="omicron",
+                     author="user", state="canonical")
+    _seed_fts_source(fresh_db, source_id="gone", title="gone", content="omicron",
+                     author="user", state="canonical")
+    fresh_db.withdraw_source("gone")
+
+    results = fresh_db.search("omicron", limit=50)
+    ids = {r["source_id"] for r in results}
+    assert ids == {"live"}
+
+
+def test_search_excludes_withdrawn_even_with_explicit_state_filter(fresh_db):
+    _seed_fts_source(fresh_db, source_id="live", title="live", content="pentad",
+                     author="user", state="canonical")
+    _seed_fts_source(fresh_db, source_id="gone", title="gone", content="pentad",
+                     author="user", state="canonical")
+    fresh_db.withdraw_source("gone")
+
+    results = fresh_db.search("pentad", limit=50, states=["canonical"])
+    ids = {r["source_id"] for r in results}
+    assert ids == {"live"}
+
+
+def test_search_include_raw_still_surfaces_withdrawn(fresh_db):
+    """``--include raw`` is a deliberate escape hatch that widens the
+    publication-state axis; it also happens to bypass the deprecated filter
+    since that branch of ``_build_state_filter`` applies no predicate at all.
+    """
+    _seed_fts_source(fresh_db, source_id="gone", title="gone", content="sigmatau",
+                     author="user", state="canonical")
+    fresh_db.withdraw_source("gone")
+
+    results = fresh_db.search("sigmatau", limit=50, include_raw=True)
+    ids = {r["source_id"] for r in results}
+    assert "gone" in ids
+
+
+def test_list_sources_excludes_withdrawn(fresh_db):
+    _seed_fts_source(fresh_db, source_id="live", title="live", content="x",
+                     author="user", state="canonical")
+    _seed_fts_source(fresh_db, source_id="gone", title="gone", content="x",
+                     author="user", state="canonical")
+    fresh_db.withdraw_source("gone")
+
+    rows = fresh_db.list_sources(source_type="note")
+    ids = {r["id"] for r in rows}
+    assert "live" in ids
+    assert "gone" not in ids
+
+
+def test_get_source_still_resolves_withdrawn(fresh_db):
+    """The direct-ID read path (used by ``graph read``) never filters by
+    state at all, so a withdrawn source must still resolve."""
+    src = Source(type="note", title="withdrawn but readable", file_path="note:w")
+    fresh_db.insert_source(src)
+    fresh_db.withdraw_source(src.id)
+
+    resolved = fresh_db.get_source(src.id)
+    assert resolved is not None
+    assert resolved["id"] == src.id
+    assert resolved["deprecated"] == 1

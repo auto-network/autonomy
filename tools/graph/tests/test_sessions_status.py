@@ -358,6 +358,28 @@ def test_format_source_header_uses_minute_for_notes():
     assert head.count("autonomy") == 1
 
 
+def test_format_source_header_marks_withdrawn():
+    from tools.graph import cli
+    note = {
+        "id": "abcdef0123456789cafe", "type": "note", "deprecated": 1,
+        "title": "Some Note", "project": "autonomy", "org": "autonomy",
+        "created_at": "2026-05-06T17:31:42Z",
+    }
+    head = cli._format_source_header(note)
+    assert "[withdrawn]" in head
+
+
+def test_format_source_header_omits_withdrawn_marker_when_not_deprecated():
+    from tools.graph import cli
+    note = {
+        "id": "abcdef0123456789cafe", "type": "note", "deprecated": 0,
+        "title": "Some Note", "project": "autonomy", "org": "autonomy",
+        "created_at": "2026-05-06T17:31:42Z",
+    }
+    head = cli._format_source_header(note)
+    assert "[withdrawn]" not in head
+
+
 def test_format_source_header_session_range_same_day():
     from tools.graph import cli
     sess = {
