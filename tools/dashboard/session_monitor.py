@@ -1005,6 +1005,15 @@ class SessionMonitor:
         self._dir_wd_sessions: dict[int, set[str]] = {}  # dir wd → set of tmux_names
         self._dir_path_to_wd: dict[str, int] = {}        # dir path → wd (dedup)
         self._wd_to_dir_path: dict[int, str] = {}        # reverse: wd → dir path
+        # W6 reliability: reconciliation_tick failure-streak tracking.
+        # Incremented when ANY step of a tick raises; reset to 0 on a tick
+        # where every step completes cleanly. degraded_since is the
+        # monotonic timestamp of the first failing tick in the current
+        # streak (None while healthy) — health surfacing uses it to flag
+        # "degraded > N minutes" without needing a wall-clock.
+        self._reconcile_failure_streak: int = 0
+        self._reconcile_degraded_since: float | None = None
+        self._reconcile_last_error: str | None = None
 
     # ── Registration ──────────────────────────────────────────────
 
@@ -3285,80 +3294,95 @@ class SessionMonitor:
         without waiting for the 5-minute loop.
         """
         resolved = 0
-        # DB-authoritative view: anything live with jsonl_path IS NULL.
-        from tools.dashboard.dao.dashboard_db import get_sessions_needing_resolution
-        pending_rows = get_sessions_needing_resolution()
-        for row in pending_rows:
-            tmux_name = row["tmux_name"]
-            res_dir = row.get("resolution_dir")
-            if not res_dir:
-                continue
-            # Ensure a TailState exists so _handle_jsonl_appeared can track it.
-            if tmux_name not in self._tail_states:
-                self._tail_states[tmux_name] = _TailState(
-                    needs_resolution=True,
-                    resolution_dir=Path(res_dir),
-                )
-            # Prefer a fresh directory scan over `resolve_session_file`
-            # because the pending session may not have a session_uuids
-            # entry yet to drive the by-uuid search.
-            try:
-                dp = Path(res_dir)
-                if not dp.is_dir():
+        tick_ok = True
+
+        # Step 1: pending-session resolution scan. Isolated (W6) so a bug
+        # here can't prevent step 3's graph_source_id backfill from running —
+        # that backfill is the one thing that keeps the Recent-sessions list
+        # honest, and it must run every tick regardless of what else breaks.
+        try:
+            # DB-authoritative view: anything live with jsonl_path IS NULL.
+            from tools.dashboard.dao.dashboard_db import get_sessions_needing_resolution
+            pending_rows = get_sessions_needing_resolution()
+            for row in pending_rows:
+                tmux_name = row["tmux_name"]
+                res_dir = row.get("resolution_dir")
+                if not res_dir:
                     continue
-                for jsonl in sorted(dp.rglob("*.jsonl")):
-                    if "subagents" in jsonl.parts:
+                # Ensure a TailState exists so _handle_jsonl_appeared can track it.
+                if tmux_name not in self._tail_states:
+                    self._tail_states[tmux_name] = _TailState(
+                        needs_resolution=True,
+                        resolution_dir=Path(res_dir),
+                    )
+                # Prefer a fresh directory scan over `resolve_session_file`
+                # because the pending session may not have a session_uuids
+                # entry yet to drive the by-uuid search.
+                try:
+                    dp = Path(res_dir)
+                    if not dp.is_dir():
                         continue
-                    if self._handle_jsonl_appeared(tmux_name, jsonl):
-                        resolved += 1
-                        ts_obj = self._tail_states.get(tmux_name)
-                        if ts_obj is not None:
-                            ts_obj.full_rescan_count += 1
-                            ts_obj.last_full_rescan_ts = time.time()
-                        logger.info(
-                            "session_monitor: reconciliation resolved %s → %s",
-                            tmux_name, jsonl.name,
-                        )
-                        break
-            except OSError as exc:
-                logger.warning(
-                    "session_monitor: reconciliation scan failed for %s: %s",
-                    tmux_name, exc,
-                )
+                    for jsonl in sorted(dp.rglob("*.jsonl")):
+                        if "subagents" in jsonl.parts:
+                            continue
+                        if self._handle_jsonl_appeared(tmux_name, jsonl):
+                            resolved += 1
+                            ts_obj = self._tail_states.get(tmux_name)
+                            if ts_obj is not None:
+                                ts_obj.full_rescan_count += 1
+                                ts_obj.last_full_rescan_ts = time.time()
+                            logger.info(
+                                "session_monitor: reconciliation resolved %s → %s",
+                                tmux_name, jsonl.name,
+                            )
+                            break
+                except OSError as exc:
+                    logger.warning(
+                        "session_monitor: reconciliation scan failed for %s: %s",
+                        tmux_name, exc,
+                    )
+        except Exception:
+            tick_ok = False
+            logger.exception("session_monitor: reconciliation pending-resolution step failed")
 
-        # Inode safety net — backstop for the case where IN_CREATE was never
-        # delivered (kernel queue overflow, IN_IGNORED arriving without a
-        # subsequent IN_CREATE we noticed, etc.). For every tracked session
+        # Step 2: inode safety net — backstop for the case where IN_CREATE was
+        # never delivered (kernel queue overflow, IN_IGNORED arriving without
+        # a subsequent IN_CREATE we noticed, etc.). For every tracked session
         # whose stored inode disagrees with the file's current inode, run the
-        # rewatch sequence.
-        for tmux_name, ts in list(self._tail_states.items()):
-            row = get_session(tmux_name)
-            if not row:
-                continue
-            jsonl_path_str = row.get("jsonl_path")
-            if not jsonl_path_str:
-                continue
-            jsonl_path = Path(jsonl_path_str)
-            try:
-                current_inode = jsonl_path.stat().st_ino
-            except OSError:
-                continue
-            if ts.last_known_inode == 0:
-                # Watch never ran (e.g. inotify unavailable, or stat failed
-                # at add-watch time). Don't treat 0 → real-inode as a
-                # replacement; just record the current value.
-                ts.last_known_inode = current_inode
-                continue
-            if current_inode == ts.last_known_inode:
-                continue
-            await self._rewatch_replaced_jsonl(
-                tmux_name, jsonl_path, source="reconciliation",
-            )
+        # rewatch sequence. Isolated (W6) — same reasoning as step 1.
+        try:
+            for tmux_name, ts in list(self._tail_states.items()):
+                row = get_session(tmux_name)
+                if not row:
+                    continue
+                jsonl_path_str = row.get("jsonl_path")
+                if not jsonl_path_str:
+                    continue
+                jsonl_path = Path(jsonl_path_str)
+                try:
+                    current_inode = jsonl_path.stat().st_ino
+                except OSError:
+                    continue
+                if ts.last_known_inode == 0:
+                    # Watch never ran (e.g. inotify unavailable, or stat failed
+                    # at add-watch time). Don't treat 0 → real-inode as a
+                    # replacement; just record the current value.
+                    ts.last_known_inode = current_inode
+                    continue
+                if current_inode == ts.last_known_inode:
+                    continue
+                await self._rewatch_replaced_jsonl(
+                    tmux_name, jsonl_path, source="reconciliation",
+                )
+        except Exception:
+            tick_ok = False
+            logger.exception("session_monitor: reconciliation inode-safety-net step failed")
 
-        # graph_source_id reconciler (auto-4jpa8). Backfill empty IDs and
-        # repair drifted ones every tick. Idempotent: rows whose stored ID
+        # Step 3: graph_source_id reconciler (auto-4jpa8). Backfill empty IDs
+        # and repair drifted ones every tick. Idempotent: rows whose stored ID
         # already resolves are left alone, and rows whose JSONL hasn't been
-        # ingested yet stay empty until the next pass.
+        # ingested yet stay empty until the next pass. Must run even when
+        # steps 1/2 raised — see isolation note above.
         try:
             from tools.dashboard.dao.dashboard_db import reconcile_graph_source_ids
             repaired = await asyncio.to_thread(reconcile_graph_source_ids)
@@ -3368,11 +3392,53 @@ class SessionMonitor:
                     repaired,
                 )
         except Exception:
+            tick_ok = False
             logger.exception("session_monitor: graph_source_id reconcile failed")
+
+        self._record_reconcile_outcome(tick_ok)
 
         if resolved:
             await self._broadcast_registry()
         return resolved
+
+    # Minutes a reconciliation failure streak must persist before it counts
+    # as "degraded" for health surfacing (W6). Default 5, per sprint plan §5.
+    _DEGRADED_THRESHOLD_SECONDS: float = 5 * 60
+
+    def _record_reconcile_outcome(self, tick_ok: bool) -> None:
+        """Update the reconciliation failure streak after one tick.
+
+        A clean tick resets the streak immediately. A failing tick
+        increments it and stamps ``degraded_since`` on the first failure of
+        a new streak — ``get_health()`` compares that timestamp against
+        ``_DEGRADED_THRESHOLD_SECONDS`` so a single blip doesn't page anyone.
+        """
+        if tick_ok:
+            self._reconcile_failure_streak = 0
+            self._reconcile_degraded_since = None
+            self._reconcile_last_error = None
+            return
+        self._reconcile_failure_streak += 1
+        if self._reconcile_degraded_since is None:
+            self._reconcile_degraded_since = time.time()
+
+    def get_health(self) -> dict:
+        """Health/degradation snapshot for the reconciliation loop.
+
+        Surfaced via ``/api/health`` so the dashboard can show a banner
+        (and CrossTalk can nag) when the loop has been failing for longer
+        than ``_DEGRADED_THRESHOLD_SECONDS`` — instead of the prior
+        log-only failure mode that was invisible until an operator went
+        looking (2026-07-02 incident).
+        """
+        degraded_since = self._reconcile_degraded_since
+        degraded_seconds = (time.time() - degraded_since) if degraded_since else 0.0
+        return {
+            "reconcile_failure_streak": self._reconcile_failure_streak,
+            "reconcile_degraded_since": degraded_since,
+            "reconcile_degraded_seconds": degraded_seconds,
+            "reconcile_degraded": degraded_seconds >= self._DEGRADED_THRESHOLD_SECONDS,
+        }
 
     async def _check_dispatch_pause_nag(self, now: float) -> None:
         """Send periodic nag to dispatch_nag subscribers when dispatch is paused."""

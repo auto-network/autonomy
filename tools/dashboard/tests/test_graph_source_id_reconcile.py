@@ -99,14 +99,15 @@ def _insert_row(
     jsonl_path: str | None,
     graph_source_id: str | None,
     is_live: int = 1,
+    label: str = "",
 ) -> None:
     conn = sqlite3.connect(str(db_path))
     conn.execute(
         "INSERT INTO tmux_sessions"
         " (tmux_name, type, project, jsonl_path, graph_source_id,"
-        "  created_at, is_live)"
-        " VALUES (?, 'host', 'autonomy', ?, ?, ?, ?)",
-        (tmux_name, jsonl_path, graph_source_id, time.time(), is_live),
+        "  created_at, is_live, label)"
+        " VALUES (?, 'host', 'autonomy', ?, ?, ?, ?, ?)",
+        (tmux_name, jsonl_path, graph_source_id, time.time(), is_live, label),
     )
     conn.commit()
     conn.close()
@@ -324,6 +325,77 @@ class TestReconcileGraphSourceIds:
         assert repaired == 1
         row = ddb.get_session("auto-personal")
         assert row["graph_source_id"] == "personal-source-id-eeee"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Label write-through on repair (W6, auto-4uvpx) — closes the post-W5 gap
+# ══════════════════════════════════════════════════════════════════════
+
+
+class TestReconcileLabelWriteThrough:
+    """W5 made title derivation creation-only, which opened a gap: a label
+    set via ``set-label`` before ``graph_source_id`` gets linked used to
+    heal on the session's next re-ingest (``_derive_session_title`` picking
+    up the label). That no longer runs. The reconciler now pushes a
+    pending label onto the title the moment it links/repairs the id."""
+
+    def test_repair_pushes_pending_label_to_new_source_title(self, setup_env):
+        tmp_path, db_path, orgs_dir = setup_env
+        jsonl = str(tmp_path / "labeled.jsonl")
+        Path(jsonl).touch()
+        _insert_org_source(
+            orgs_dir / "autonomy.db",
+            source_id="labeled-source-id",
+            file_path=jsonl,
+        )
+        _insert_row(
+            db_path, "auto-labeled",
+            jsonl_path=jsonl,
+            graph_source_id="",  # not linked yet — set-label ran first
+            label="Operator-set title",
+        )
+
+        from tools.dashboard.dao import dashboard_db as ddb
+        repaired = ddb.reconcile_graph_source_ids()
+        assert repaired == 1
+
+        from tools.graph.db import GraphDB
+        g = GraphDB(orgs_dir / "autonomy.db")
+        row = g.conn.execute(
+            "SELECT title FROM sources WHERE id = ?", ("labeled-source-id",)
+        ).fetchone()
+        g.close()
+        assert row["title"] == "Operator-set title"
+
+    def test_repair_without_label_does_not_touch_title(self, setup_env):
+        """No label pending → no write-through call, title stays as
+        whatever ingest set it to (untouched by the reconciler)."""
+        tmp_path, db_path, orgs_dir = setup_env
+        jsonl = str(tmp_path / "unlabeled.jsonl")
+        Path(jsonl).touch()
+        _insert_org_source(
+            orgs_dir / "autonomy.db",
+            source_id="unlabeled-source-id",
+            file_path=jsonl,
+        )
+        _insert_row(
+            db_path, "auto-unlabeled",
+            jsonl_path=jsonl,
+            graph_source_id="",
+            label="",
+        )
+
+        from tools.dashboard.dao import dashboard_db as ddb
+        repaired = ddb.reconcile_graph_source_ids()
+        assert repaired == 1
+
+        from tools.graph.db import GraphDB
+        g = GraphDB(orgs_dir / "autonomy.db")
+        row = g.conn.execute(
+            "SELECT title FROM sources WHERE id = ?", ("unlabeled-source-id",)
+        ).fetchone()
+        g.close()
+        assert row["title"] == "test"  # the placeholder title from _insert_org_source
 
 
 # ══════════════════════════════════════════════════════════════════════

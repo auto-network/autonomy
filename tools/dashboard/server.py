@@ -403,6 +403,14 @@ async def api_ping(request):
     """
     return JSONResponse({"ok": True})
 
+async def api_health(request):
+    """Degradation snapshot (W6) — reconciliation-loop failure streak.
+
+    Unlike /api/ping this does real work (reads in-process monitor state)
+    but no I/O; safe to poll for a dashboard banner.
+    """
+    return JSONResponse(session_monitor.get_health())
+
 async def api_beads_ready(request):
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse(dao_beads.get_open_beads())
@@ -14769,6 +14777,7 @@ def _plugin_asset_rev(plugin) -> str:
 
 routes = [
     Route("/api/ping", api_ping),
+    Route("/api/health", api_health),
     Route("/api/operator/active", api_operator_active, methods=["POST"]),
     Route("/api/voice/diag", api_voice_diag, methods=["POST"]),
     Route("/api/voice/trace", api_voice_trace, methods=["POST"]),
