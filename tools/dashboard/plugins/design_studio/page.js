@@ -503,6 +503,7 @@
 })();
 
 function designStudioPage() {
+  window.__designStudioLibraryCache = window.__designStudioLibraryCache || {};
   return {
     mode: 'library',
     loading: false,
@@ -515,12 +516,14 @@ function designStudioPage() {
     sort: 'updated',
     topbarHandle: null,
     _loadTimer: null,
+    _activeCacheKey: '',
 
     init: function () {
       this.mode = window.location.pathname === '/design' ? 'library' : 'viewer';
       if (this.mode === 'library') {
+        var hydrated = this._hydrateCachedDesigns();
         this._updateTopbar();
-        this.loadDesigns();
+        this.loadDesigns({ background: hydrated });
       }
     },
 
@@ -566,8 +569,16 @@ function designStudioPage() {
       }, 180);
     },
 
-    loadDesigns: async function () {
-      this.loading = true;
+    loadDesigns: async function (options) {
+      options = options || {};
+      var cacheKey = this._cacheKey();
+      var hydrated = this._hydrateCachedDesigns(cacheKey);
+      if (!options.background && !hydrated && this._activeCacheKey !== cacheKey) {
+        this.designs = [];
+        this.summary = {};
+        this.filteredCount = 0;
+      }
+      this.loading = !hydrated && this.designs.length === 0;
       this.error = '';
       try {
         var params = new URLSearchParams();
@@ -579,17 +590,12 @@ function designStudioPage() {
         var res = await fetcher('/api/design-studio/designs?' + params.toString());
         if (!res.ok) {
           this.error = 'Design catalog failed (HTTP ' + res.status + ')';
-          this.designs = [];
           return;
         }
         var data = await res.json();
-        this.designs = Array.isArray(data.designs) ? data.designs : [];
-        this.summary = data.summary || {};
-        this.filteredCount = data.filtered_count || this.designs.length;
-        this._updateTopbar();
+        this._applyCatalogData(data, cacheKey);
       } catch (e) {
         this.error = 'Design catalog failed: ' + (e.message || e);
-        this.designs = [];
       } finally {
         this.loading = false;
       }
@@ -632,11 +638,6 @@ function designStudioPage() {
       });
     },
 
-    initialFor: function (design) {
-      var title = (design && design.title) || 'Design';
-      return title.trim().charAt(0).toUpperCase() || 'D';
-    },
-
     sessionLabel: function (design) {
       if (!design) return '';
       var live = this._liveSession(design.creator_session_id);
@@ -667,9 +668,58 @@ function designStudioPage() {
         out.push({
           id: id,
           label: live.label || design.creator_session_label || id,
+          title: design.title || 'Untitled Design',
         });
       }
       return out;
+    },
+
+    _cacheKey: function () {
+      return [
+        'design-library',
+        String(this.query || ''),
+        String(this.status || 'pending'),
+        String(this.sort || 'updated'),
+      ].join('|');
+    },
+
+    _applyCatalogData: function (data, cacheKey) {
+      var key = cacheKey || this._cacheKey();
+      this.designs = Array.isArray(data.designs) ? data.designs : [];
+      this.summary = data.summary || {};
+      this.filteredCount = data.filtered_count || this.designs.length;
+      this._activeCacheKey = key;
+      var cached = {
+        designs: this.designs,
+        summary: this.summary,
+        filtered_count: this.filteredCount,
+        cached_at: Date.now(),
+      };
+      window.__designStudioLibraryCache[key] = cached;
+      try {
+        sessionStorage.setItem(key, JSON.stringify(cached));
+      } catch (e) { /* storage quota/privacy mode: memory cache still works */ }
+      this._updateTopbar();
+    },
+
+    _hydrateCachedDesigns: function (cacheKey) {
+      var key = cacheKey || this._cacheKey();
+      var cached = window.__designStudioLibraryCache[key] || null;
+      if (!cached) {
+        try {
+          cached = JSON.parse(sessionStorage.getItem(key) || 'null');
+        } catch (e) {
+          cached = null;
+        }
+      }
+      if (!cached || !Array.isArray(cached.designs)) return false;
+      this.designs = cached.designs;
+      this.summary = cached.summary || {};
+      this.filteredCount = cached.filtered_count || this.designs.length;
+      this._activeCacheKey = key;
+      this.loading = false;
+      this._updateTopbar();
+      return true;
     },
 
     _topbarStatsHtml: function () {
@@ -677,18 +727,34 @@ function designStudioPage() {
       var active = this.summary.pending_series || 0;
       var total = this.summary.series || 0;
       var live = this._liveDesignSessions();
+      var orgTitle = _escapeDesignHtml(org + ': ' + active + ' active designs, ' + total + ' total');
       var avatarHtml = live.slice(0, 3).map(function (s) {
         var initial = (s.label || s.id || '?').trim().charAt(0).toUpperCase() || '?';
         return '<span class="design-topbar-avatar" title="' + _escapeDesignHtml(s.label || s.id) + '">' + _escapeDesignHtml(initial) + '</span>';
       }).join('');
+      var liveRows = live.map(function (s) {
+        var initial = (s.label || s.id || '?').trim().charAt(0).toUpperCase() || '?';
+        return '<a class="design-presence-row" href="/session/autonomy/' + encodeURIComponent(s.id) + '">'
+          + '<span class="design-topbar-avatar is-row">' + _escapeDesignHtml(initial) + '</span>'
+          + '<span class="design-presence-copy"><strong>' + _escapeDesignHtml(s.title || 'Untitled Design') + '</strong>'
+          + '<span>' + _escapeDesignHtml(s.label || s.id) + '</span></span>'
+          + '</a>';
+      }).join('');
+      var presenceBody = liveRows || '<div class="design-presence-empty">No live design sessions</div>';
       return '<span class="design-topbar-strip">'
-        + '<span class="design-topbar-chip design-topbar-org"><span class="design-topbar-orgmark">'
-        + _escapeDesignHtml(org.charAt(0).toUpperCase() || 'A')
-        + '</span><strong>' + _escapeDesignHtml(org) + '</strong><span>' + active + ' active</span></span>'
-        + '<span class="design-topbar-chip"><strong>' + total + '</strong><span>total</span></span>'
-        + '<span class="design-topbar-chip design-topbar-live"><span class="design-topbar-live-dot"></span><strong>' + live.length + '</strong><span>live</span>'
-        + (avatarHtml ? '<span class="design-topbar-avatars">' + avatarHtml + '</span>' : '')
-        + '</span></span>';
+        + '<span class="design-topbar-orgtile" title="' + orgTitle + '" aria-label="' + orgTitle + '">'
+        + '<img src="/static/icon.svg" alt="">'
+        + '<span class="design-topbar-badge">' + active + '</span>'
+        + '</span>'
+        + '<details class="design-topbar-presence">'
+        + '<summary title="' + live.length + ' live design sessions" aria-label="' + live.length + ' live design sessions">'
+        + '<span class="design-topbar-live-dot"></span>'
+        + '<span class="design-topbar-avatars">' + avatarHtml + '</span>'
+        + '<span class="design-topbar-badge">' + live.length + '</span>'
+        + '</summary>'
+        + '<div class="design-presence-menu">' + presenceBody + '</div>'
+        + '</details>'
+        + '</span>';
     },
 
     _updateTopbar: function () {
