@@ -1981,8 +1981,8 @@ class SessionMonitor:
         against the new file, matching "codex rollover creates new
         source."
         """
-        from tools.graph.appender import GraphAppender
-        from tools.graph.db import GraphDB
+        from tools.graph.appender import GraphAppender, _org_lock
+        from tools.graph.db import GraphDB, resolve_caller_db_path
         from tools.graph.ingest import _load_session_meta, session_target_org
 
         row = get_session(tmux_name)
@@ -2007,8 +2007,21 @@ class SessionMonitor:
         if not source_id:
             return None
 
-        db = GraphDB.for_org(org)
-        source = db.get_source(source_id)
+        # Same fix as GraphAppender.feed_lines (auto-ea9g3): NEVER touch
+        # the pooled GraphDB.for_org connection from a method that runs via
+        # asyncio.to_thread — the default executor hands concurrent
+        # submissions genuinely distinct OS threads, and a pooled
+        # connection first opened on one thread raises ProgrammingError
+        # the moment a different thread touches it. Fresh connection,
+        # opened and closed within this call, under the same per-org lock
+        # feed_lines uses (defense against SQLITE_BUSY from a concurrent
+        # writer — GraphDB sets no busy_timeout).
+        with _org_lock(org):
+            db = GraphDB(resolve_caller_db_path(org))
+            try:
+                source = db.get_source(source_id)
+            finally:
+                db.close()
         if source is None:
             return None
 
