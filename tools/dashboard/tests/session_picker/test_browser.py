@@ -290,9 +290,9 @@ class TestUserCanSeeSessions:
         text = h.visible_text()
         assert "chatwith" not in text.lower(), f"Orphan chatwith visible: {text[:200]}"
 
-    def test_i_see_new_session_option(self, h):
-        text = h.visible_text()
-        assert "New Session" in text, f"No new session option. Visible: {text[:200]}"
+    # NOTE: the picker's "+ New Session" button was intentionally removed
+    # (obsolete now that sessions launch per-workspace; commit 5b69aec), so
+    # the former test_i_see_new_session_option was dropped with it.
 
 
 class TestUserCanConnect:
