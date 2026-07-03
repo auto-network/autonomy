@@ -57,8 +57,17 @@ def find_duplicate_groups(db: GraphDB, source_id: str) -> list[list[dict]]:
 def audit_db(db_path: Path) -> list[dict]:
     """Read-only scan of one org DB. Returns a report row per affected
     codex source: {source_id, title, file_path, duplicate_message_ids,
-    rows_to_delete}."""
-    db = GraphDB(db_path)
+    rows_to_delete}.
+
+    Opens ``mode="ro"`` deliberately (auto-4y579): a normal read-write
+    ``GraphDB`` open runs schema migrations on connection, including
+    ``_migrate_message_id_unique`` — which auto-repairs any duplicate
+    it finds before this function's own query ever runs. Read-only mode
+    skips migrations entirely, so this reports the DB's true on-disk
+    state rather than a state that was silently fixed as a side effect
+    of opening it.
+    """
+    db = GraphDB(db_path, mode="ro")
     try:
         sources = db.conn.execute(
             "SELECT id, title, file_path FROM sources WHERE platform = 'codex-cli'"
@@ -86,7 +95,17 @@ def repair_db(db_path: Path) -> list[dict]:
     row in each duplicate-message_id group. FTS triggers (thoughts_ad /
     derivations_ad, see schema.sql) clean the index automatically on
     DELETE. Returns the list of deleted rows: {source_id, table, id,
-    turn_number, message_id}."""
+    turn_number, message_id}.
+
+    Largely superseded by ``GraphDB``'s own ``_migrate_message_id_unique``
+    migration (auto-4y579), which runs this exact dedupe-then-index logic
+    automatically the moment ANY code opens a read-write connection to a
+    violating DB — including the ``GraphDB(db_path)`` call this function
+    itself makes below, so in practice this loop usually finds nothing
+    left to do by the time it runs; the migration got there first. Kept
+    as an explicit, on-demand tool for operators who want to force/verify
+    a repair without depending on incidental connection-open timing.
+    """
     db = GraphDB(db_path)
     deleted: list[dict] = []
     try:

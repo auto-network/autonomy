@@ -1174,7 +1174,7 @@ def _dedup_new_turns(
 ) -> list[dict]:
     """Filter ``turns`` down to the ones genuinely new for ``source_id``.
 
-    Two stages, both required:
+    Three stages, all required:
 
     1. The coarse/cheap ``turn_number > max_turn`` filter. Still correct
        on its own for *finding* candidates — a renumbering can only ever
@@ -1182,26 +1182,44 @@ def _dedup_new_turns(
        counted), so every genuinely-new turn still clears this bar — but
        it is NOT sufficient to exclude duplicates (see below).
     2. An identity filter dropping any candidate whose ``message_id``
-       already exists among this source's thoughts/derivations.
+       already exists among this source's thoughts/derivations (rows
+       already committed from an earlier pass).
+    3. A within-batch identity filter dropping any candidate whose
+       ``message_id`` already appeared *earlier in this same batch*.
 
-    Why both are needed (auto-cpg1x): ``turn_number`` is POSITIONAL, not a
-    stable identity. W1's codex ``role='injected'`` change made previously
-    -dropped noise ``user_message`` entries start consuming turn-number
-    slots. A codex source ingested *before* that change and grown *after*
-    it re-parses with every turn after the first noise entry shifted to a
-    higher number — the positional cursor alone reads those shifted
-    positions as new content and duplicates already-ingested turns
-    (confirmed prod damage: source e26143b6-a08 duplicated turns 76-84).
-    Codex ``message_id``s are content hashes (see ``_codex_message_id``),
-    so a genuine duplicate collides exactly. Claude sessions have no
-    filter change and were never affected, but this fix applies uniformly
-    since it costs nothing extra when there's nothing to dedup.
+    Why stage 2 is needed (auto-cpg1x): ``turn_number`` is POSITIONAL, not
+    a stable identity. W1's codex ``role='injected'`` change made
+    previously-dropped noise ``user_message`` entries start consuming
+    turn-number slots. A codex source ingested *before* that change and
+    grown *after* it re-parses with every turn after the first noise
+    entry shifted to a higher number — the positional cursor alone reads
+    those shifted positions as new content and duplicates already-
+    ingested turns (confirmed prod damage: source e26143b6-a08 duplicated
+    turns 76-84). Codex ``message_id``s are content hashes (see
+    ``_codex_message_id``), so a genuine duplicate collides exactly.
+
+    Why stage 3 is needed (auto-4y579): stage 2 only ever compares against
+    rows already committed to the DB — it has no way to catch two copies
+    of the *same* event arriving in the *same* batch, before either has
+    been written. A codex rollout can genuinely double-emit an event
+    (~5ms apart, confirmed by raw-file grep on auto-0702-143334's
+    rollout) — both copies parse to the same message_id, both clear
+    stages 1 and 2 (neither is in the DB yet), and without stage 3 both
+    would insert (source e26143b6-a08 turns 181/182, message_id
+    codex-user:482480cedc6f0041). Stage 3 keeps the first occurrence in
+    file order and drops the rest.
 
     A turn with no ``message_id`` (rare) has no identity to check and is
     trusted to the turn_number filter alone — unchanged from before this
-    fix. This is also the at-least-once idempotency the tail-primary
-    ``GraphAppender`` (W3) needs for crash-safe redelivery, so it reuses
-    this exact function rather than reimplementing the check.
+    fix, and never deduped against itself even if several NULL-id turns
+    land in one batch. This is also the at-least-once idempotency the
+    tail-primary ``GraphAppender`` (W3) needs for crash-safe redelivery,
+    so it reuses this exact function rather than reimplementing the
+    check. Stage 2's DB round-trip and the UNIQUE(source_id, message_id)
+    partial index (auto-4y579 migration) are defense-in-depth on top of
+    this, not a substitute for it — the index catches what a future
+    within-process caller might still get wrong; this function is what
+    keeps a single call's own batch clean.
     """
     candidates = [t for t in turns if t["turn_number"] > max_turn]
     if not candidates:
@@ -1213,12 +1231,18 @@ def _dedup_new_turns(
             (source_id, source_id),
         ).fetchall()
     }
-    if not existing_ids:
-        return candidates
-    return [
-        t for t in candidates
-        if not t.get("message_id") or t["message_id"] not in existing_ids
-    ]
+    deduped: list[dict] = []
+    seen_in_batch: set[str] = set()
+    for t in candidates:
+        mid = t.get("message_id")
+        if not mid:
+            deduped.append(t)
+            continue
+        if mid in existing_ids or mid in seen_in_batch:
+            continue
+        seen_in_batch.add(mid)
+        deduped.append(t)
+    return deduped
 
 
 def _write_new_turns(
