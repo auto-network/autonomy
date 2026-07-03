@@ -17,6 +17,8 @@ from tools.graph.schemas.registry import (
 
 PLUGIN_SET_ID = "dashboard.plugin"
 PLUGIN_SCHEMA_REVISION = 1
+PLUGIN_OWNED_SETTING_SET_ID = "dashboard.plugin-owned-setting"
+PLUGIN_OWNED_SETTING_SCHEMA_REVISION = 1
 
 
 class DashboardPluginV1(SettingSchema):
@@ -51,6 +53,64 @@ class DashboardPluginV1(SettingSchema):
                 f"{cls.__name__}: 'org' must be a string when present"
             )
         extra = set(payload) - {"enabled", "org"}
+        if extra:
+            raise SchemaValidationError(
+                f"{cls.__name__}: unknown field(s): {sorted(extra)}"
+            )
+
+
+class DashboardPluginOwnedSettingV1(SettingSchema):
+    """Tracks graph Settings installed from plugin declarations.
+
+    The row key is ``<plugin_id>:<set_id>#<schema_revision>:<setting_key>``.
+    The payload stores the current ownership/reconciliation state.
+    """
+
+    set_id = PLUGIN_OWNED_SETTING_SET_ID
+    schema_revision = PLUGIN_OWNED_SETTING_SCHEMA_REVISION
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            raise SchemaValidationError(
+                f"{cls.__name__}: payload must be a dict, "
+                f"got {type(payload).__name__}"
+            )
+        required_strings = {
+            "plugin_id", "org", "set_id", "key", "status",
+            "plugin_payload_hash", "installed_payload_hash",
+            "current_payload_hash", "resource", "uninstall",
+        }
+        for key in required_strings:
+            v = payload.get(key)
+            if not isinstance(v, str):
+                raise SchemaValidationError(
+                    f"{cls.__name__}: {key!r} must be a string"
+                )
+        if not isinstance(payload.get("schema_revision"), int):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'schema_revision' must be an integer"
+            )
+        if not isinstance(payload.get("setting_id"), str):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'setting_id' must be a string"
+            )
+        if payload["status"] not in {
+            "managed", "drifted", "orphaned", "uninstalled",
+        }:
+            raise SchemaValidationError(
+                f"{cls.__name__}: invalid status {payload['status']!r}"
+            )
+        if payload["uninstall"] not in {"deprecate_if_unchanged", "leave"}:
+            raise SchemaValidationError(
+                f"{cls.__name__}: invalid uninstall {payload['uninstall']!r}"
+            )
+        extra = set(payload) - {
+            "plugin_id", "org", "set_id", "schema_revision", "key",
+            "setting_id", "status", "plugin_payload_hash",
+            "installed_payload_hash", "current_payload_hash", "resource",
+            "uninstall",
+        }
         if extra:
             raise SchemaValidationError(
                 f"{cls.__name__}: unknown field(s): {sorted(extra)}"

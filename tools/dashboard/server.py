@@ -14838,6 +14838,13 @@ async def api_plugins(request):
     (``payload.org``) when set, else ``manifest.org``. The browser
     stamps it as ``X-Graph-Org`` on plugin-originated fetches.
     """
+    try:
+        await asyncio.to_thread(
+            plugin_loader.reconcile_declared_settings,
+            PLUGIN_REGISTRY,
+        )
+    except Exception:
+        logger.exception("plugin declared-settings reconcile failed")
     cache: dict[str, dict[str, dict]] = {}
     out = []
     for idx, p in enumerate(PLUGIN_REGISTRY):
@@ -15330,6 +15337,13 @@ async def _on_startup():
         workspace_settings.invalidate_caches()
     except Exception:
         logger.exception("commit policy default seed failed; continuing startup")
+    try:
+        await asyncio.to_thread(
+            plugin_loader.reconcile_declared_settings,
+            PLUGIN_REGISTRY,
+        )
+    except Exception:
+        logger.exception("plugin declared-settings reconcile failed; continuing startup")
     # Seed from filesystem on first run (one-time), then start background tasks
     await session_monitor.seed_from_filesystem()
     await session_monitor.start(

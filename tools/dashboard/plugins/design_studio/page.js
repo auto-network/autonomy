@@ -509,7 +509,9 @@ function designStudioPage() {
     mode: 'library',
     loading: false,
     error: '',
+    actionError: '',
     designs: [],
+    presenceDesigns: [],
     summary: {},
     filteredCount: 0,
     query: '',
@@ -519,6 +521,7 @@ function designStudioPage() {
     topbarHandle: null,
     _loadTimer: null,
     _activeCacheKey: '',
+    _sessionRegistryHandler: null,
 
     init: function () {
       this.mode = window.location.pathname === '/design' ? 'library' : 'viewer';
@@ -526,6 +529,14 @@ function designStudioPage() {
         var hydrated = this._hydrateCachedDesigns();
         this._updateTopbar();
         this.loadDesigns({ background: hydrated });
+        this._refreshPresenceDesigns();
+        var self = this;
+        this._sessionRegistryHandler = function () {
+          self._updateTopbar();
+        };
+        if (window.registerHandler) {
+          window.registerHandler('session:registry', this._sessionRegistryHandler);
+        }
       }
     },
 
@@ -538,6 +549,10 @@ function designStudioPage() {
         this.topbarHandle.destroy();
       }
       this.topbarHandle = null;
+      if (this._sessionRegistryHandler && window.unregisterHandler) {
+        window.unregisterHandler('session:registry', this._sessionRegistryHandler);
+      }
+      this._sessionRegistryHandler = null;
     },
 
     get hasFilters() {
@@ -617,6 +632,7 @@ function designStudioPage() {
       if (!design || !design.design_id || !status) return;
       var key = this._designActionKey(design, 'status');
       if (this.actionStates[key] === 'working') return;
+      this.actionError = '';
       this.actionStates[key] = 'working';
       var previous = Object.assign({}, design);
       var optimistic = Object.assign({}, design, { status: status });
@@ -632,7 +648,7 @@ function designStudioPage() {
         if (!res.ok || data.error) {
           this._replaceOrRemoveDesign(previous, { force: true });
           this.actionStates[key] = 'error';
-          this.error = data.error || ('Status update failed (HTTP ' + res.status + ')');
+          this.actionError = data.error || ('Status update failed (HTTP ' + res.status + ')');
           return;
         }
         if (data.design) this._replaceOrRemoveDesign(data.design);
@@ -641,7 +657,7 @@ function designStudioPage() {
       } catch (e) {
         this._replaceOrRemoveDesign(previous, { force: true });
         this.actionStates[key] = 'error';
-        this.error = 'Status update failed: ' + (e.message || e);
+        this.actionError = 'Status update failed: ' + (e.message || e);
       }
     },
 
@@ -649,6 +665,7 @@ function designStudioPage() {
       if (!design || !design.latest_revision_id) return;
       var key = this._designActionKey(design, 'librarian');
       if (this.actionStates[key] === 'working') return;
+      this.actionError = '';
       this.actionStates[key] = 'working';
       try {
         var fetcher = (window.Autonomy && window.Autonomy.fetch) || window.fetch;
@@ -664,13 +681,13 @@ function designStudioPage() {
         var data = await res.json().catch(function () { return {}; });
         if (!res.ok || data.error) {
           this.actionStates[key] = 'error';
-          this.error = data.error || ('Librarian dispatch failed (HTTP ' + res.status + ')');
+          this.actionError = data.error || ('Librarian dispatch failed (HTTP ' + res.status + ')');
           return;
         }
         this.actionStates[key] = 'done';
       } catch (e) {
         this.actionStates[key] = 'error';
-        this.error = 'Librarian dispatch failed: ' + (e.message || e);
+        this.actionError = 'Librarian dispatch failed: ' + (e.message || e);
       }
     },
 
@@ -738,8 +755,9 @@ function designStudioPage() {
     _liveDesignSessions: function () {
       var seen = {};
       var out = [];
-      for (var i = 0; i < this.designs.length; i++) {
-        var design = this.designs[i];
+      var source = this.presenceDesigns.length ? this.presenceDesigns : this.designs;
+      for (var i = 0; i < source.length; i++) {
+        var design = source[i];
         var id = design && design.creator_session_id;
         if (!id || seen[id]) continue;
         var live = this._liveSession(id);
@@ -752,6 +770,19 @@ function designStudioPage() {
         });
       }
       return out;
+    },
+
+    _refreshPresenceDesigns: async function () {
+      try {
+        var fetcher = (window.Autonomy && window.Autonomy.fetch) || window.fetch;
+        var res = await fetcher('/api/design-studio/designs?status=pending&sort=updated&limit=500');
+        if (!res.ok) return;
+        var data = await res.json();
+        this.presenceDesigns = Array.isArray(data.designs) ? data.designs : [];
+        this._updateTopbar();
+      } catch (e) {
+        /* Presence is an enhancement; the visible catalog remains authoritative. */
+      }
     },
 
     _cacheKey: function () {

@@ -7,6 +7,7 @@ graph://f77a5415-04f.
 from __future__ import annotations
 
 import logging
+import json
 import sys
 import textwrap
 from pathlib import Path
@@ -16,6 +17,9 @@ from starlette.routing import Route
 
 from tools.dashboard.plugin_api import loader
 from tools.dashboard.plugin_api.manifest import PluginManifest
+from tools.dashboard.plugin_api.schema import PLUGIN_OWNED_SETTING_SET_ID
+from tools.graph import ops as graph_ops
+from tools.graph import org_ops
 
 
 # ── Test fixtures: routes used as entrypoint targets ─────────────────
@@ -75,6 +79,57 @@ def _write_plugin(plugins_dir: Path, dir_name: str, manifest_yaml: str) -> Path:
         "Alpine.data('fooPage', () => ({ init() {} }));"
     )
     return pdir
+
+
+def _write_setting_plugin(
+    plugins_dir: Path,
+    *,
+    payload: dict,
+    plugin_id: str = "settingplug",
+) -> Path:
+    yaml = _min_manifest_yaml(plugin_id) + textwrap.dedent("""
+        settings:
+          - set_id: dashboard.agent-actions
+            schema_revision: 2
+            key: design.refresh-preview
+            state: canonical
+            payload_file: agent_actions/refresh_preview.json
+            uninstall: deprecate_if_unchanged
+    """)
+    pdir = _write_plugin(plugins_dir, plugin_id, yaml)
+    action_dir = pdir / "agent_actions"
+    action_dir.mkdir()
+    (action_dir / "refresh_preview.json").write_text(json.dumps(payload))
+    return pdir
+
+
+def _agent_action_payload(label: str = "Refresh Preview & Summary") -> dict:
+    return {
+        "asset_type": "design",
+        "label": label,
+        "icon": "wand",
+        "model": "claude-haiku-4-5-20251001",
+        "prompt_template": "Design: {design[design_id]}\\nRevision: {asset[id]}\\n",
+        "estimated_seconds": 30,
+        "writes": ["design.thumbnail", "design.description"],
+    }
+
+
+@pytest.fixture
+def org_graph(tmp_path, monkeypatch):
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
+    org_ops.create_org(
+        "autonomy",
+        type_="shared",
+        identity_payload={"name": "Autonomy"},
+        root=orgs_dir,
+    )
+    return orgs_dir
 
 
 # ── Manifest validation ──────────────────────────────────────────────
@@ -447,3 +502,137 @@ def test_setting_without_org_keeps_manifest_org(tmp_path, monkeypatch):
     loaded = loader.load_enabled(plugins_dir=plugins_dir)
     by_id = {p.id: p for p in loaded}
     assert by_id["stable"].effective_org == "autonomy"
+
+
+# ── Plugin-owned graph Settings ─────────────────────────────────────
+
+
+def test_plugin_declared_setting_installs_and_tracks_owner(tmp_path, org_graph):
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    _write_setting_plugin(plugins_dir, payload=_agent_action_payload())
+
+    loaded = loader.load_all(plugins_dir=plugins_dir)
+    results = loader.reconcile_declared_settings(loaded)
+
+    assert results[0]["action"] == "installed"
+    action = graph_ops.read_set(
+        "dashboard.agent-actions",
+        org="autonomy",
+        peers=[],
+    ).to_dict()["design.refresh-preview"]
+    assert action.payload["asset_type"] == "design"
+
+    owner = graph_ops.read_set(
+        PLUGIN_OWNED_SETTING_SET_ID,
+        org="autonomy",
+        peers=[],
+    ).to_dict()["settingplug:dashboard.agent-actions#2:design.refresh-preview"]
+    assert owner.payload["plugin_id"] == "settingplug"
+    assert owner.payload["status"] == "managed"
+    assert owner.payload["setting_id"] == action.id
+    assert owner.payload["installed_payload_hash"]
+
+
+def test_plugin_declared_setting_update_preserves_ownership(tmp_path, org_graph):
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    pdir = _write_setting_plugin(
+        plugins_dir,
+        payload=_agent_action_payload("Original Primer"),
+    )
+    loaded = loader.load_all(plugins_dir=plugins_dir)
+    loader.reconcile_declared_settings(loaded)
+
+    new_payload = _agent_action_payload("Updated Primer")
+    (pdir / "agent_actions" / "refresh_preview.json").write_text(json.dumps(new_payload))
+    loaded = loader.load_all(plugins_dir=plugins_dir)
+    results = loader.reconcile_declared_settings(loaded)
+
+    assert results[0]["action"] == "updated"
+    action = graph_ops.read_set(
+        "dashboard.agent-actions",
+        org="autonomy",
+        peers=[],
+    ).to_dict()["design.refresh-preview"]
+    assert action.payload["label"] == "Updated Primer"
+    owner = graph_ops.read_set(
+        PLUGIN_OWNED_SETTING_SET_ID,
+        org="autonomy",
+        peers=[],
+    ).to_dict()["settingplug:dashboard.agent-actions#2:design.refresh-preview"]
+    assert owner.payload["status"] == "managed"
+    assert owner.payload["plugin_payload_hash"] == owner.payload["installed_payload_hash"]
+
+
+def test_plugin_declared_setting_drift_is_not_overwritten(tmp_path, org_graph):
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    pdir = _write_setting_plugin(
+        plugins_dir,
+        payload=_agent_action_payload("Plugin Primer"),
+    )
+    loaded = loader.load_all(plugins_dir=plugins_dir)
+    loader.reconcile_declared_settings(loaded)
+
+    operator_payload = _agent_action_payload("Operator Primer")
+    graph_ops.upsert_by_key(
+        "dashboard.agent-actions",
+        2,
+        "design.refresh-preview",
+        operator_payload,
+        state="canonical",
+        org="autonomy",
+    )
+    plugin_update = _agent_action_payload("Plugin Update")
+    (pdir / "agent_actions" / "refresh_preview.json").write_text(json.dumps(plugin_update))
+    loaded = loader.load_all(plugins_dir=plugins_dir)
+    results = loader.reconcile_declared_settings(loaded)
+
+    assert results[0]["action"] == "drifted"
+    action = graph_ops.read_set(
+        "dashboard.agent-actions",
+        org="autonomy",
+        peers=[],
+    ).to_dict()["design.refresh-preview"]
+    assert action.payload["label"] == "Operator Primer"
+    owner = graph_ops.read_set(
+        PLUGIN_OWNED_SETTING_SET_ID,
+        org="autonomy",
+        peers=[],
+    ).to_dict()["settingplug:dashboard.agent-actions#2:design.refresh-preview"]
+    assert owner.payload["status"] == "drifted"
+
+
+def test_plugin_declared_setting_disabled_deprecates_unchanged_row(
+    tmp_path,
+    org_graph,
+):
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    _write_setting_plugin(plugins_dir, payload=_agent_action_payload())
+    loaded = loader.load_all(plugins_dir=plugins_dir)
+    loader.reconcile_declared_settings(loaded)
+
+    graph_ops.upsert_by_key(
+        "dashboard.plugin",
+        1,
+        "settingplug",
+        {"enabled": False},
+        state="canonical",
+        org="autonomy",
+    )
+    results = loader.reconcile_declared_settings(loaded)
+
+    assert results[0]["action"] == "deprecated"
+    assert "design.refresh-preview" not in graph_ops.read_set(
+        "dashboard.agent-actions",
+        org="autonomy",
+        peers=[],
+    ).to_dict()
+    owner = graph_ops.read_set(
+        PLUGIN_OWNED_SETTING_SET_ID,
+        org="autonomy",
+        peers=[],
+    ).to_dict()["settingplug:dashboard.agent-actions#2:design.refresh-preview"]
+    assert owner.payload["status"] == "uninstalled"

@@ -7,9 +7,9 @@ the enable filter.
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # The substrate API version this dashboard supports. Plugins declare the
@@ -46,6 +46,29 @@ class PluginEntrypoints(BaseModel):
     actions: Optional[List[str]] = None
 
 
+class PluginSettingDeclaration(BaseModel):
+    """A graph Setting bundled with a plugin and owned by its lifecycle."""
+    model_config = ConfigDict(extra="forbid")
+
+    set_id: str
+    schema_revision: int
+    key: str
+    state: str = "canonical"
+    payload: Optional[dict[str, Any]] = None
+    payload_file: Optional[str] = None
+    uninstall: str = "deprecate_if_unchanged"
+
+    @model_validator(mode="after")
+    def _validate_payload_source(self):
+        if (self.payload is None) == (self.payload_file is None):
+            raise ValueError("exactly one of payload or payload_file is required")
+        if self.state not in {"raw", "curated", "published", "canonical"}:
+            raise ValueError("state must be raw, curated, published, or canonical")
+        if self.uninstall not in {"deprecate_if_unchanged", "leave"}:
+            raise ValueError("uninstall must be deprecate_if_unchanged or leave")
+        return self
+
+
 class PluginManifest(BaseModel):
     """Validated shape of a ``plugin.yaml`` file."""
     model_config = ConfigDict(extra="forbid")
@@ -61,6 +84,8 @@ class PluginManifest(BaseModel):
     nav: PluginNav
     frontend: PluginFrontend
     entrypoints: PluginEntrypoints = Field(default_factory=PluginEntrypoints)
+    # Graph Settings installed/reconciled as part of plugin lifecycle.
+    settings: List[PluginSettingDeclaration] = Field(default_factory=list)
     # Bootstrap default for when no `dashboard.plugin#1` Setting row
     # exists yet. Plugins that should ship dormant (operator opts in)
     # set this to false; the directory-name convention (``_``-prefix)

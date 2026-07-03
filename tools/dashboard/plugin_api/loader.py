@@ -398,3 +398,53 @@ def load_all(
             continue
         out.append(result)
     return out
+
+
+def reconcile_declared_settings(plugins: list[LoadedPlugin]) -> list[dict[str, Any]]:
+    """Reconcile plugin-declared graph Settings for the current enable state.
+
+    Enabled plugins install/update/adopt their declared Settings. Explicitly
+    disabled plugins uninstall their owned Settings according to each
+    declaration's uninstall policy. Mock mode is intentionally read-only.
+    """
+    if os.environ.get("DASHBOARD_MOCK"):
+        return []
+    from . import settings as plugin_settings
+
+    cache: dict[str, dict[str, dict]] = {}
+    results: list[dict[str, Any]] = []
+    for plugin in plugins:
+        if not plugin.manifest.settings:
+            continue
+        manifest_org = plugin.manifest.org
+        if manifest_org not in cache:
+            cache[manifest_org] = _read_plugin_settings(org=manifest_org)
+        settings = cache[manifest_org]
+        payload = settings.get(plugin.id)
+        override = (payload or {}).get("org") if isinstance(payload, dict) else None
+        effective_org = (
+            override if isinstance(override, str) and override else manifest_org
+        )
+        enabled = is_enabled(
+            plugin.id,
+            plugin.plugin_dir,
+            settings,
+            manifest=plugin.manifest,
+        )
+        try:
+            if enabled:
+                results.extend(plugin_settings.reconcile_plugin_settings(
+                    plugin,
+                    effective_org=effective_org,
+                ))
+            elif payload is not None:
+                results.extend(plugin_settings.uninstall_plugin_settings(
+                    plugin,
+                    effective_org=effective_org,
+                ))
+        except Exception:
+            logger.exception(
+                "[plugin_loader] failed reconciling declared settings for %s",
+                plugin.id,
+            )
+    return results
