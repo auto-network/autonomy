@@ -235,6 +235,7 @@ class GraphDB:
         self._migrate_sources_type_index()
         self._migrate_settings()
         self._migrate_orgs()
+        self._migrate_message_id_unique()
         self._seed_tags()
         self._flush_schema_meta()
 
@@ -483,6 +484,58 @@ class GraphDB:
         )
         self.conn.commit()
 
+    def _migrate_message_id_unique(self):
+        """UNIQUE(source_id, message_id) partial index on thoughts and
+        derivations (auto-4y579).
+
+        ``_dedup_new_turns``'s within-batch/existing-row checks
+        (tools/graph/ingest.py) are the primary defense against duplicate
+        turns; this index is defense-in-depth at the storage layer for
+        whatever a future caller gets wrong — e.g. a write path that
+        doesn't route through ``_dedup_new_turns`` at all. Paired with
+        ``INSERT OR IGNORE`` in :meth:`insert_thought` /
+        :meth:`insert_derivation` so a losing writer degrades to a no-op,
+        never a crash.
+
+        ``CREATE UNIQUE INDEX`` fails outright against a table that
+        already has a violating pair, so this repairs any existing
+        violation FIRST — same logic as
+        ``tools/graph/checks/dedupe_codex_message_ids.py``: within each
+        ``(source_id, message_id)`` group, keep the lowest-``turn_number``
+        row, delete the rest. Guarded by an index-existence check so the
+        (only ever necessary once) full-table scan doesn't run on every
+        connection open — once the index exists, future duplicates are
+        rejected at insert time and there's nothing left to repair.
+        """
+        for table in ("thoughts", "derivations"):
+            idx_name = f"idx_{table}_source_message_unique"
+            exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+                (idx_name,),
+            ).fetchone()
+            if exists:
+                continue
+
+            rows = self.conn.execute(
+                f"SELECT id, source_id, message_id, turn_number FROM {table} "
+                f"WHERE message_id IS NOT NULL"
+            ).fetchall()
+            by_key: dict[tuple, list] = {}
+            for r in rows:
+                by_key.setdefault((r["source_id"], r["message_id"]), []).append(r)
+            for group in by_key.values():
+                if len(group) <= 1:
+                    continue
+                group.sort(key=lambda r: r["turn_number"])
+                for r in group[1:]:
+                    self.conn.execute(f"DELETE FROM {table} WHERE id = ?", (r["id"],))
+
+            self.conn.execute(
+                f"CREATE UNIQUE INDEX {idx_name} "
+                f"ON {table}(source_id, message_id) WHERE message_id IS NOT NULL"
+            )
+        self.conn.commit()
+
     def close(self):
         """Close the underlying connection. Pool-managed instances are
         evicted from the pool first so the slot becomes available for
@@ -715,8 +768,15 @@ class GraphDB:
     # ── Thoughts ─────────────────────────────────────────────
 
     def insert_thought(self, t: Thought) -> Thought:
+        # OR IGNORE (auto-4y579): a losing writer against
+        # UNIQUE(source_id, message_id) (message_id IS NOT NULL) degrades
+        # to a no-op instead of raising IntegrityError — _dedup_new_turns
+        # is the primary defense (within-batch + existing-row checks) so
+        # this should only ever fire on a genuine race between two
+        # concurrent writers that both passed dedup before either
+        # committed.
         self.conn.execute(
-            """INSERT INTO thoughts (id, source_id, content, role, turn_number, message_id, tags, metadata, created_at)
+            """INSERT OR IGNORE INTO thoughts (id, source_id, content, role, turn_number, message_id, tags, metadata, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (t.id, t.source_id, t.content, t.role, t.turn_number, t.message_id,
              json.dumps(t.tags), json.dumps(t.metadata), t.created_at),
@@ -732,8 +792,10 @@ class GraphDB:
     # ── Derivations ──────────────────────────────────────────
 
     def insert_derivation(self, d: Derivation) -> Derivation:
+        # OR IGNORE (auto-4y579): see insert_thought's comment — same
+        # UNIQUE(source_id, message_id) defense-in-depth.
         self.conn.execute(
-            """INSERT INTO derivations (id, source_id, thought_id, content, model, turn_number, message_id, metadata, created_at)
+            """INSERT OR IGNORE INTO derivations (id, source_id, thought_id, content, model, turn_number, message_id, metadata, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (d.id, d.source_id, d.thought_id, d.content, d.model, d.turn_number,
              d.message_id, json.dumps(d.metadata), d.created_at),

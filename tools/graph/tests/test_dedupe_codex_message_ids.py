@@ -19,7 +19,17 @@ from tools.graph.models import Derivation, Source, Thought
 
 @pytest.fixture
 def db(tmp_path) -> GraphDB:
+    """auto-4y579 added a UNIQUE(source_id, message_id) partial index —
+    a real GraphDB now refuses to persist the very duplicates this test
+    file exists to exercise repairing. Drop it after creation so these
+    tests can still construct pre-existing-violation fixtures (exactly
+    the "damage from before this fix landed" scenario the repair tool
+    targets); the constraint's own correctness is covered separately in
+    tools/graph/tests/test_message_id_unique_migration.py."""
     g = GraphDB(tmp_path / "org.db")
+    g.conn.execute("DROP INDEX IF EXISTS idx_thoughts_source_message_unique")
+    g.conn.execute("DROP INDEX IF EXISTS idx_derivations_source_message_unique")
+    g.conn.commit()
     yield g
     g.close()
 
@@ -117,7 +127,9 @@ class TestAuditDb:
 
         audit_db(tmp_path / "org.db")
 
-        g = GraphDB(tmp_path / "org.db")
+        # Read-only re-check too — a RW open here would itself trigger the
+        # auto-repair migration and defeat the point of this assertion.
+        g = GraphDB(tmp_path / "org.db", mode="ro")
         count = g.conn.execute(
             "SELECT COUNT(*) c FROM thoughts WHERE source_id = ?", (source_id,)
         ).fetchone()["c"]
@@ -126,6 +138,15 @@ class TestAuditDb:
 
 
 class TestRepairDb:
+    """repair_db opens read-write, and GraphDB's own
+    _migrate_message_id_unique migration (auto-4y579) now runs the exact
+    same dedupe-then-index logic automatically on every RW connection
+    open — including the one repair_db makes internally. In practice the
+    migration gets there first, so these tests check the FINAL on-disk
+    state after calling repair_db rather than asserting on repair_db's
+    own returned ``deleted`` list, which will usually be empty (nothing
+    left for its explicit loop to find)."""
+
     def test_keeps_lowest_turn_number_deletes_rest(self, db, tmp_path):
         source_id = _make_source(db)
         _thought(db, source_id, turn=5, message_id="dup", content="renumbered copy")
@@ -133,11 +154,9 @@ class TestRepairDb:
         db.commit()
         db.close()
 
-        deleted = repair_db(tmp_path / "org.db")
-        assert len(deleted) == 1
-        assert deleted[0]["turn_number"] == 5
+        repair_db(tmp_path / "org.db")
 
-        g = GraphDB(tmp_path / "org.db")
+        g = GraphDB(tmp_path / "org.db", mode="ro")
         rows = g.conn.execute(
             "SELECT turn_number, content FROM thoughts WHERE source_id = ?", (source_id,)
         ).fetchall()
@@ -153,14 +172,21 @@ class TestRepairDb:
         db.commit()
         db.close()
 
-        first = repair_db(tmp_path / "org.db")
-        assert len(first) == 1
+        repair_db(tmp_path / "org.db")
         second = repair_db(tmp_path / "org.db")
         assert second == [], "re-running repair against an already-clean DB deletes nothing"
 
+        g = GraphDB(tmp_path / "org.db", mode="ro")
+        count = g.conn.execute(
+            "SELECT COUNT(*) c FROM thoughts WHERE source_id = ?", (source_id,)
+        ).fetchone()["c"]
+        g.close()
+        assert count == 1
+
     def test_cleans_fts_index_on_delete(self, db, tmp_path):
-        """FTS triggers (thoughts_ad) must fire on the repair's DELETE —
-        stale FTS entries for a deleted row would corrupt search."""
+        """FTS triggers (thoughts_ad) must fire on whichever path performs
+        the delete (the migration, in practice) — stale FTS entries for a
+        deleted row would corrupt search."""
         source_id = _make_source(db)
         _thought(db, source_id, turn=1, message_id="dup", content="findme original")
         _thought(db, source_id, turn=3, message_id="dup", content="findme original")
@@ -169,29 +195,35 @@ class TestRepairDb:
 
         repair_db(tmp_path / "org.db")
 
-        g = GraphDB(tmp_path / "org.db")
+        g = GraphDB(tmp_path / "org.db", mode="ro")
         fts_rows = g.conn.execute(
             "SELECT COUNT(*) c FROM thoughts_fts WHERE thoughts_fts MATCH 'findme'"
         ).fetchone()["c"]
         g.close()
         assert fts_rows == 1, "deleted row must not linger in the FTS index"
 
-    def test_only_touches_codex_platform_sources(self, db, tmp_path):
+    def test_migration_dedupes_across_all_platforms_not_just_codex(self, db, tmp_path):
+        """repair_db's own loop deliberately scopes to platform='codex-cli'
+        sources (the bug this tool was built for), but the UNIQUE index +
+        migration it now rides on top of is universal — ANY duplicate
+        message_id in ANY source gets cleaned up the moment a RW
+        connection opens, codex or not. That's intentional: a broader,
+        simpler invariant (no duplicate message_id per source, ever) is
+        safer than one narrowly scoped to a single platform's known bug."""
         claude_id = _make_source(db, platform="claude-code", title="claude sess")
         _thought(db, claude_id, turn=1, message_id="dup")
         _thought(db, claude_id, turn=2, message_id="dup")
         db.commit()
         db.close()
 
-        deleted = repair_db(tmp_path / "org.db")
-        assert deleted == []
+        repair_db(tmp_path / "org.db")
 
-        g = GraphDB(tmp_path / "org.db")
+        g = GraphDB(tmp_path / "org.db", mode="ro")
         count = g.conn.execute(
             "SELECT COUNT(*) c FROM thoughts WHERE source_id = ?", (claude_id,)
         ).fetchone()["c"]
         g.close()
-        assert count == 2, "non-codex sources must never be touched by this repair"
+        assert count == 1, "the migration's UNIQUE constraint applies to every platform"
 
     def test_multiple_duplicate_groups_in_one_source(self, db, tmp_path):
         source_id = _make_source(db)
@@ -202,6 +234,15 @@ class TestRepairDb:
         db.commit()
         db.close()
 
-        deleted = repair_db(tmp_path / "org.db")
-        assert len(deleted) == 2
-        assert {d["turn_number"] for d in deleted} == {4, 5}
+        repair_db(tmp_path / "org.db")
+
+        g = GraphDB(tmp_path / "org.db", mode="ro")
+        thought_turns = {r["turn_number"] for r in g.conn.execute(
+            "SELECT turn_number FROM thoughts WHERE source_id = ?", (source_id,)
+        ).fetchall()}
+        deriv_turns = {r["turn_number"] for r in g.conn.execute(
+            "SELECT turn_number FROM derivations WHERE source_id = ?", (source_id,)
+        ).fetchall()}
+        g.close()
+        assert thought_turns == {1}
+        assert deriv_turns == {2}
