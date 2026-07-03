@@ -65,14 +65,6 @@ def _evict_pool():
         GraphDB.close_all_pooled()
 
 
-@pytest.fixture(autouse=True)
-def _no_auto_ingest(monkeypatch):
-    """Silence :func:`cmd_context`'s auto-ingest — irrelevant and slow for
-    these unit tests.
-    """
-    monkeypatch.setattr(graph_cli, "_auto_ingest", lambda db: None)
-
-
 # ── Seeders ────────────────────────────────────────────────────
 
 
@@ -323,13 +315,11 @@ def test_cmd_context_cross_org_raw_not_found(orgs_root, capsys, monkeypatch):
 
 
 def test_cmd_context_last_refreshes_only_addressed_session(orgs_root, tmp_path, capsys, monkeypatch):
-    """`graph context <src> last:N` refreshes the addressed session, not a global sweep."""
+    """`graph context <src> last:N` refreshes the addressed session, not a
+    global sweep. W4 (auto-gah4g) removed the global auto-ingest sweep
+    from cmd_context entirely — this is now structurally guaranteed
+    rather than something to guard against with a monkeypatch trap."""
     monkeypatch.setenv("GRAPH_ORG", "autonomy")
-    monkeypatch.setattr(
-        graph_cli,
-        "_auto_ingest",
-        lambda _db: (_ for _ in ()).throw(AssertionError("global auto-ingest should not run")),
-    )
     _seed_org("autonomy").close()
 
     session_path = tmp_path / "sessions" / "fresh-tail-session.jsonl"

@@ -842,11 +842,10 @@ def _auto_provenance(db, title: str = ""):
     and picks the turn with the highest match score (minimum 2 words).
     Falls back to MAX(turn) when no title match is found.
     """
-    # In-process refresh — avoids spawning a subprocess that would inherit the
-    # default HTTP client and re-route through the dashboard for ~7-13s. The
-    # helper no-ops in HttpClient mode (callers gate this function to host
-    # mode, so refresh always happens locally).
-    _auto_ingest(db)
+    # W4 (auto-gah4g): no more auto-ingest sweep on the read path — eager
+    # source creation (W2) + the tail-primary appender (W3) keep the graph
+    # current without a per-call estate scan; the manifest catch-up sweep
+    # (catch_up_sweep, startup + 30min timer) is the freshness backstop.
     source = _resolve_current_source(db)
     if not source:
         return None, None
@@ -1495,17 +1494,6 @@ def cmd_sources(args):
             print(f"                {fp if fp else '(no file)'}")
 
 
-def _auto_ingest(db: GraphDB) -> None:
-    """Silently ingest latest sessions so host queries see fresh data
-    (~100ms when unchanged). No-op under the HTTP client — the dashboard
-    owns ingest freshness and the container can't scan local JSONL."""
-    if isinstance(get_client(), HttpClient):
-        return
-    # Route per session unless GRAPH_DB pins a specific target.
-    sessions_db = db if os.environ.get("GRAPH_DB") else None
-    ingest_all_claude_code(sessions_db, force=False)
-
-
 def _entry_role_label(entry: dict) -> str:
     """Render a USER/ASSISTANT label for one ``entries`` row.
 
@@ -1556,17 +1544,10 @@ def cmd_context(args):
             return
 
     source = client.get_source(args.source, org=org)
-    # Host-only fallback: only do a global session ingest when lookup
-    # misses entirely, so newly visible sessions can be discovered. If the
-    # source already resolves, freshness comes from the targeted pre-read
-    # session refresh below.
-    if not source and not isinstance(client, HttpClient):
-        own_db = GraphDB(args.db)
-        try:
-            _auto_ingest(own_db)
-        finally:
-            own_db.close()
-        source = client.get_source(args.source, org=org)
+    # W4 (auto-gah4g): no more host-only auto-ingest fallback on a lookup
+    # miss — eager source creation (W2) means a session's source exists
+    # from launch, so a genuine miss here means the session doesn't exist
+    # (or its org is unresolvable), not that ingest hasn't run yet.
     if not source:
         print(f"Source not found: {args.source}")
         return
@@ -2431,9 +2412,9 @@ def cmd_bead(args):
     db = GraphDB(args.db)
     from .models import Edge
 
-    # Refresh the graph to capture latest turns. In-process so we don't pay the
-    # ~7-13s a fresh `graph` subprocess would spend on an HTTP round trip.
-    _auto_ingest(db)
+    # W4 (auto-gah4g): no more auto-ingest sweep here — eager source
+    # creation (W2) + the tail-primary appender (W3) keep the graph
+    # current without a per-call estate scan.
 
     # Read description from stdin if -d -
     desc = args.desc
@@ -2712,14 +2693,11 @@ def _query_attention(db, since=None, search=None, last=None, session=None, conte
 def cmd_attention(args):
     """Show human input from sessions, chronologically. Fast query for sovereign content."""
     client = get_client()
-    # Host-only refresh so fresh local session data is visible. Container
-    # relies on the dashboard's own ingest schedule.
-    if not isinstance(client, HttpClient):
-        own_db = GraphDB(args.db)
-        try:
-            _auto_ingest(own_db)
-        finally:
-            own_db.close()
+    # W4 (auto-gah4g): no more host-only auto-ingest refresh — eager
+    # source creation (W2) + the tail-primary appender (W3) keep the
+    # graph current without a per-call estate scan; the manifest catch-up
+    # sweep (catch_up_sweep, startup + 30min timer) is the freshness
+    # backstop.
 
     ctx = getattr(args, "context", 0)
     rows = client.list_attention(
