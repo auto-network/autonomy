@@ -1,0 +1,9 @@
+{
+  "asset_type": "design",
+  "label": "Refresh Preview & Summary",
+  "icon": "wand",
+  "model": "claude-haiku-4-5-20251001",
+  "prompt_template": "You are the Design Studio librarian. Refresh the catalog metadata for this design without changing unrelated application code.\n\nDesign revision: {asset[id]}\nDesign series: {design[design_id]}\nTitle: {asset[title]}\nCurrent summary: {asset[short_description]}\nStatus: {design[status]}\nRevision count: {design[revision_count]}\nVariant count: {design[variant_count]}\nCreator session: {design[creator_session_id]}\nDashboard URL: {asset[url]}\n\nRun this command from the repository root:\npython3 -m tools.dashboard.plugins.design_studio.librarian {asset[id]}\n\nTasks:\n1. Confirm the command generated or refreshed the real PNG thumbnail at data/experiments/{asset[id]}/screenshot.png. The thumbnail should show the design surface itself, not a fake placeholder.\n2. Confirm the command inspected the latest variant HTML and fixture data, then updated the design revision description in data/experiments.db if the current summary was missing or stale.\n3. Preserve provenance: do not erase creator_session_id, creator_session_label, design_id, revision_seq, status, variants, or fixture data.\n4. Report exactly what metadata changed and whether the thumbnail was generated, refreshed, or left unchanged.\n",
+  "estimated_seconds": 90,
+  "writes": ["design.thumbnail", "design.description"]
+}

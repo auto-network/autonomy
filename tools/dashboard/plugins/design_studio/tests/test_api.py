@@ -2,16 +2,88 @@
 from __future__ import annotations
 
 from unittest.mock import patch
+import json
+import yaml
 
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
+from tools.dashboard.plugin_api.manifest import PluginManifest
+from tools.dashboard.plugins.design_studio import librarian
 from tools.dashboard.plugins.design_studio.entrypoints import api as design_api
 
 
 def _client() -> TestClient:
     app = Starlette(routes=design_api.routes)
     return TestClient(app)
+
+
+def test_manifest_declares_librarian_agent_action():
+    plugin_dir = design_api.Path(__file__).resolve().parents[1]
+    manifest = PluginManifest.model_validate(
+        yaml.safe_load((plugin_dir / "plugin.yaml").read_text())
+    )
+    declarations = {decl.key: decl for decl in manifest.settings}
+
+    decl = declarations["design.refresh-preview"]
+    assert decl.set_id == "dashboard.agent-actions"
+    assert decl.schema_revision == 2
+    assert decl.uninstall == "deprecate_if_unchanged"
+
+    payload = json.loads((plugin_dir / (decl.payload_file or "")).read_text())
+    assert payload["asset_type"] == "design"
+    assert payload["writes"] == ["design.thumbnail", "design.description"]
+    assert "tools.dashboard.plugins.design_studio.librarian" in payload["prompt_template"]
+
+
+def test_librarian_updates_stale_description_without_touching_provenance(tmp_path, monkeypatch):
+    from agents import design_db
+
+    old_db_path = design_db.DB_PATH
+    old_initialized = design_db._initialized
+    design_db.DB_PATH = tmp_path / "experiments.db"
+    design_db._initialized = False
+    try:
+        revision_id = design_db.create_design(
+            title="Catalog card",
+            description="",
+            fixture=json.dumps({"states": {"Default": {"count": 1}}}),
+            variants=[
+                {
+                    "id": "variant-a",
+                    "html": "<main><h1>Fast catalog</h1><p>Shows active work and recent previews.</p></main>",
+                }
+            ],
+            creator_session_id="auto-designer",
+            creator_session_label="Designer",
+        )
+        screenshot = tmp_path / "screenshot.png"
+
+        def fake_capture(html_path, screenshot_path, *, viewport):
+            assert "Fast catalog" in html_path.read_text()
+            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+            screenshot_path.write_bytes(screenshot.read_bytes())
+
+        screenshot.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+        monkeypatch.setattr(librarian, "_capture_with_agent_browser", fake_capture)
+        monkeypatch.setattr(librarian, "_repo_root", lambda: tmp_path)
+
+        result = librarian.run_librarian(revision_id)
+        refreshed = design_db.get_design(revision_id)
+
+        assert result.screenshot_written is True
+        assert (tmp_path / "data" / "experiments" / revision_id / "screenshot.png").is_file()
+        assert result.description_updated is True
+        assert "Fast catalog" in result.description_after
+        assert refreshed["description"] == result.description_after
+        assert refreshed["creator_session_id"] == "auto-designer"
+        assert refreshed["creator_session_label"] == "Designer"
+        assert refreshed["design_id"] == revision_id
+        assert refreshed["revision_seq"] == 1
+        assert refreshed["status"] == "pending"
+    finally:
+        design_db.DB_PATH = old_db_path
+        design_db._initialized = old_initialized
 
 
 def _rows() -> list[dict]:

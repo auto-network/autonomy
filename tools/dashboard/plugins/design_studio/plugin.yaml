@@ -13,6 +13,14 @@ assets:
 nav:
   label: Design
 
+settings:
+  - set_id: dashboard.agent-actions
+    schema_revision: 2
+    key: design.refresh-preview
+    state: canonical
+    payload_file: agent_actions/refresh_preview.json
+    uninstall: deprecate_if_unchanged
+
 frontend:
   alpine_root: designStudioPage
 
