@@ -513,13 +513,16 @@ def _fetch_request_message(*, device_id: str, signing_request_id: str, client_no
 
 async def api_local_signer_get_request(request):
     """D3-12: mint the single-use challenge_nonce for this exact GET call
-    — the ONLY place a signing-flow nonce is minted. D3-13's fuller
-    response shape (canonical_payload_preview, batch fields) is layered
-    on incrementally: canonical_payload_preview depends on what
-    commit.request_signature eventually stores in commit_signing_requests
-    .payload_json (not built yet), so it's omitted here rather than
-    guessed at; batch fields are correctly null for every request today
-    since no caller can create a batch (D4-18) yet.
+    — the ONLY place a signing-flow nonce is minted. D3-19/L13: a chain
+    member whose canonical_payload_hash is still NULL (its parent SHA
+    isn't fixed yet — that only happens once its predecessor is actually
+    signed) reports batch_status="waiting_on_predecessor" and mints NO
+    nonce, which alone is sufficient to make any signature submission
+    against it fail the existing nonce-binding gate — no separate reject
+    check is needed on the POST side. D3-13's canonical_payload_preview
+    remains deferred: it depends on what commit.request_signature
+    eventually stores in commit_signing_requests.payload_json, so it's
+    omitted here rather than guessed at.
     """
     signing_request_id = request.path_params["signing_request_id"]
     device_id = request.query_params.get("device_id")
@@ -543,7 +546,8 @@ async def api_local_signer_get_request(request):
     conn = cdb._get_conn()
     try:
         row = conn.execute(
-            "SELECT signing_request_id, workflow_id, status, signing_method, canonical_payload_hash "
+            "SELECT signing_request_id, workflow_id, status, signing_method, canonical_payload_hash, "
+            "batch_group_id, position_in_batch, batch_size "
             "FROM commit_signing_requests WHERE signing_request_id = ?",
             (signing_request_id,),
         ).fetchone()
@@ -551,6 +555,30 @@ async def api_local_signer_get_request(request):
         conn.close()
     if row is None:
         return JSONResponse({"error": "signing_request_not_found"}, status_code=404)
+
+    if not row["canonical_payload_hash"]:
+        # D3-19/L13: a real, ordered chain member whose payload cannot
+        # exist yet -- position i+1's parent is position i's final
+        # post-signing SHA, which isn't known until i is actually signed.
+        # canonical_payload_hash is NOT NULL on this table (Codex's
+        # schema), so "not yet known" is represented as an empty string
+        # rather than NULL -- a real SHA-256 digest is never empty, so
+        # this sentinel can't collide with a genuine hash.
+        # Never a 404 (it's a genuine member), never a fabricated hash or
+        # preview, and NO nonce is minted -- with nothing real to sign,
+        # any subsequent signature submission has no current nonce to
+        # match and is rejected by the existing nonce-binding gate alone.
+        return JSONResponse({
+            "signing_request_id": row["signing_request_id"],
+            "workflow_id": row["workflow_id"],
+            "canonical_payload_hash": None,
+            "signing_kind": row["signing_method"],
+            "challenge_nonce": None,
+            "batch_group_id": row["batch_group_id"],
+            "position_in_batch": row["position_in_batch"],
+            "batch_size": row["batch_size"],
+            "batch_status": "waiting_on_predecessor",
+        })
 
     nonce = secrets.token_urlsafe(24)
     db.mint_challenge_nonce(
@@ -564,9 +592,9 @@ async def api_local_signer_get_request(request):
         "canonical_payload_hash": row["canonical_payload_hash"],
         "signing_kind": row["signing_method"],
         "challenge_nonce": nonce,
-        "batch_group_id": None,
-        "position_in_batch": None,
-        "batch_size": None,
+        "batch_group_id": row["batch_group_id"],
+        "position_in_batch": row["position_in_batch"],
+        "batch_size": row["batch_size"],
         "batch_status": None,
     })
 

@@ -407,3 +407,42 @@ def test_D3_18_L8_request_1_signature_rejected_against_request_2_even_with_match
         challenge_nonce=nonce_for_2_retry, displayed_payload_hash=hash_2, armored_signature=sig_2,
     )
     assert ok_2.status_code == 200, ok_2.text
+
+
+# ── D3-19/L13: signature submission for a not-yet-ready member is rejected ─
+
+
+def test_D3_19_signature_submission_for_not_ready_chain_member_is_rejected(client, signing_setup):
+    """A chain member whose canonical_payload_hash is still NULL was never
+    GET-fetchable for real, so it never had a nonce minted -- any
+    submitted challenge_nonce necessarily fails the existing
+    nonce-binding gate. No new POST-side check is needed."""
+    device_id, private, _pub = _register_device(client)
+    conn = cdb._get_conn()
+    try:
+        conn.execute(
+            "INSERT INTO commit_workflow_events (event_id, workflow_id, event_type, occurred_at, actor_type, repo_slug) "
+            "VALUES ('evt-chain', 'wf-chain', 'proposed', 1.0, 'agent_session', 'repo')"
+        )
+        conn.execute(
+            "INSERT INTO commit_workflow_states (workflow_id, repo_slug, status, last_event_id, created_at, updated_at, state_json) "
+            "VALUES ('wf-chain', 'repo', 'awaiting_signature', 'evt-chain', 1.0, 1.0, '{}')"
+        )
+        conn.execute(
+            "INSERT INTO commit_signing_requests (signing_request_id, workflow_id, repo_slug, status, "
+            "signing_method, trusted_object_store_ref, canonical_payload_hash, "
+            "batch_group_id, position_in_batch, batch_size, requested_at) "
+            "VALUES ('sr-not-ready', 'wf-chain', 'repo', 'pending', 'ssh', 'store://ref', '', 'batch-1', 3, 3, 1.0)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    sig = _ssh_sign(signing_setup["signing_key_path"], signing_setup["canonical_payload"])
+    r = _post_signature(
+        client, signing_request_id="sr-not-ready", device_id=device_id, device_private_key=private,
+        challenge_nonce="any-nonce-nothing-was-ever-minted",
+        displayed_payload_hash=signing_setup["canonical_payload_hash"], armored_signature=sig,
+    )
+    assert r.status_code == 409
+    assert r.json()["reason"] == "stale_nonce"
