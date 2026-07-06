@@ -25,11 +25,13 @@ from tools.dashboard.services.trusted_git_object_store import ContentAddressedSt
 from tools.dashboard.governed_rewrite import (
     REASON_ANCESTOR_CHANGED,
     REASON_VIOLATIONS,
+    ROLE_REWRITE_RESULT,
     ROLE_REWRITE_SOURCE,
     GitIdentityLine,
     construct_corrected_metadata,
     create_governed_rewrite_workflow,
     determine_rewrite_membership,
+    record_chain_source_and_result_roles,
     snapshot_original_commit,
 )
 
@@ -438,3 +440,96 @@ def test_D4_9_snapshot_tree_survives_worktree_and_branch_mutation(tmp_path):
     snap = object_store_dao.get_snapshot(trusted_conn, snapshot_ref)
     assert snap["tree_sha"] == orig_tree
     trusted_conn.close()
+
+
+# ── D4-12: record chain source/result roles, preserved position ────────
+
+
+def test_D4_12_three_commit_chain_gets_matching_source_and_result_rows(tmp_path):
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    report = _report("sha1", compliant=False, violations=("signature_absent",))
+    workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha="sha1", compliance_report=report, db_path=path,
+    )
+
+    chain = [("sha1", "new1"), ("sha2", "new2"), ("sha3", "new3")]
+    record_chain_source_and_result_roles(
+        workflow_id=workflow_id, repo_slug="autonomy", chain=chain, db_path=path,
+    )
+
+    conn = commit_workflow_db._get_conn(path)
+    try:
+        rows = conn.execute(
+            "SELECT commit_sha, role, position FROM commit_workflow_commits "
+            "WHERE workflow_id = ? ORDER BY position, role",
+            (workflow_id,),
+        ).fetchall()
+        by_position = {}
+        for r in rows:
+            by_position.setdefault(r["position"], {})[r["role"]] = r["commit_sha"]
+
+        assert set(by_position.keys()) == {0, 1, 2}
+        assert by_position[0] == {ROLE_REWRITE_SOURCE: "sha1", ROLE_REWRITE_RESULT: "new1"}
+        assert by_position[1] == {ROLE_REWRITE_SOURCE: "sha2", ROLE_REWRITE_RESULT: "new2"}
+        assert by_position[2] == {ROLE_REWRITE_SOURCE: "sha3", ROLE_REWRITE_RESULT: "new3"}
+
+        source_rows = [r for r in rows if r["role"] == ROLE_REWRITE_SOURCE]
+        result_rows = [r for r in rows if r["role"] == ROLE_REWRITE_RESULT]
+        assert len(source_rows) == 3
+        assert len(result_rows) == 3
+    finally:
+        conn.close()
+
+
+def test_D4_12_preserves_workflow_state_from_earlier_steps(tmp_path):
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    report = _report("sha1", compliant=False, violations=("signature_absent",))
+    workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha="sha1", compliance_report=report, db_path=path,
+    )
+
+    record_chain_source_and_result_roles(
+        workflow_id=workflow_id, repo_slug="autonomy",
+        chain=[("sha1", "new1"), ("sha2", "new2")], db_path=path,
+    )
+
+    conn = commit_workflow_db._get_conn(path)
+    try:
+        row = conn.execute(
+            "SELECT state_json FROM commit_workflow_states WHERE workflow_id = ?", (workflow_id,),
+        ).fetchone()
+        state = json.loads(row["state_json"])
+        assert state["origin_kind"] == "governed_rewrite"
+        assert state["source_commit_shas"] == ["sha1"]
+    finally:
+        conn.close()
+
+
+def test_D4_12_survives_projection_rebuild(tmp_path):
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    report = _report("sha1", compliant=False, violations=("signature_absent",))
+    workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha="sha1", compliance_report=report, db_path=path,
+    )
+    record_chain_source_and_result_roles(
+        workflow_id=workflow_id, repo_slug="autonomy",
+        chain=[("sha1", "new1"), ("sha2", "new2")], db_path=path,
+    )
+    commit_workflow_db.rebuild_projection(path)
+
+    conn = commit_workflow_db._get_conn(path)
+    try:
+        rows = conn.execute(
+            "SELECT commit_sha, role, position FROM commit_workflow_commits WHERE workflow_id = ?",
+            (workflow_id,),
+        ).fetchall()
+        by_role_position = {(r["role"], r["position"]): r["commit_sha"] for r in rows}
+        assert by_role_position[(ROLE_REWRITE_SOURCE, 0)] == "sha1"
+        assert by_role_position[(ROLE_REWRITE_RESULT, 0)] == "new1"
+        assert by_role_position[(ROLE_REWRITE_SOURCE, 1)] == "sha2"
+        assert by_role_position[(ROLE_REWRITE_RESULT, 1)] == "new2"
+    finally:
+        conn.close()

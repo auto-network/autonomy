@@ -35,6 +35,14 @@ is never merged automatically. This is what makes the snapshot
 "referenced by the workflow": a later step reads the workflow's own
 state_json for the ref rather than needing to know the trusted-store
 DB's shape.
+
+``record_chain_source_and_result_roles`` (§4) generalizes D4-8's
+single-commit role/position write to a full chain: one
+``rewrite_source`` row per original SHA and one ``rewrite_result`` row
+per new SHA, sharing ``position`` at each chain slot. It takes the
+chain's ``(original_sha, new_sha)`` pairs as a plain parameter — how
+each new SHA gets determined (D4-17/18/19's sequential signing) is a
+separate concern.
 """
 
 from __future__ import annotations
@@ -282,3 +290,45 @@ def snapshot_original_commit(
         db_path=workflow_db_path,
     )
     return snapshot_ref
+
+
+# ── D4-12: record chain source/result roles, preserving chain position ─
+
+
+def record_chain_source_and_result_roles(
+    *,
+    workflow_id: str,
+    repo_slug: str,
+    chain: Sequence[tuple[str, str]],
+    db_path=None,
+) -> None:
+    """Record one ``rewrite_source`` row per original SHA and one
+    ``rewrite_result`` row per new SHA, preserving each commit's original
+    root-to-tip chain order in ``position`` (§4).
+
+    ``chain`` is an ordered list of ``(original_sha, new_sha)`` pairs, one
+    per chain slot, root first. Source and result at the same slot share
+    ``position`` — safe because original and new SHAs are always distinct
+    strings, so the dict-by-sha ``commit_roles`` shape holds both without
+    needing a list-of-entries form.
+    """
+    commit_shas: list[str] = []
+    commit_roles: dict[str, tuple[str, int]] = {}
+    for position, (original_sha, new_sha) in enumerate(chain):
+        commit_shas.append(original_sha)
+        commit_shas.append(new_sha)
+        commit_roles[original_sha] = (ROLE_REWRITE_SOURCE, position)
+        commit_roles[new_sha] = (ROLE_REWRITE_RESULT, position)
+
+    current_state = _current_state_json(workflow_id, db_path=db_path)
+    commit_workflow_db.append_event(
+        event_id=uuid.uuid4().hex,
+        workflow_id=workflow_id,
+        event_type="governed_rewrite_chain_recorded",
+        status_after="draft",
+        repo_slug=repo_slug,
+        commit_shas=commit_shas,
+        commit_roles=commit_roles,
+        payload=current_state,
+        db_path=db_path,
+    )
