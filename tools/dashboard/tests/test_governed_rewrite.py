@@ -32,7 +32,10 @@ from tools.dashboard.governed_rewrite import (
     construct_corrected_metadata,
     create_governed_rewrite_workflow,
     determine_rewrite_membership,
+    get_binding_lease,
     record_chain_source_and_result_roles,
+    record_force_with_lease_approval,
+    record_supersede_approval,
     snapshot_original_commit,
 )
 
@@ -613,3 +616,84 @@ def test_D4_14_neither_approved_names_both_missing_types(tmp_path):
     result = check_publish_approval_gate(workflow_id=workflow_id, db_path=path)
     assert result.allowed is False
     assert set(result.missing_approval_types) == {"supersede", "force_with_lease"}
+
+
+# ── D4-15: binding lease captured at T2, provisional at T0 ─────────────
+
+
+def test_D4_15_binding_lease_is_the_t2_value_not_t0_when_ref_advanced(tmp_path):
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    report = _report("sha1", compliant=False, violations=("signature_absent",))
+    workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha="sha1", compliance_report=report, db_path=path,
+    )
+
+    # T0: supersede approved while the ref is at A.
+    record_supersede_approval(
+        workflow_id=workflow_id, repo_slug="autonomy", approval_id="ap-supersede",
+        observed_ref_tip="sha-A", db_path=path,
+    )
+    # ...the ref advances to B between T0 and T2...
+    # T2: force_with_lease approved while the ref is now at B.
+    record_force_with_lease_approval(
+        workflow_id=workflow_id, repo_slug="autonomy", approval_id="ap-lease",
+        observed_ref_tip="sha-B", db_path=path,
+    )
+
+    binding_lease = get_binding_lease(workflow_id=workflow_id, db_path=path)
+    assert binding_lease == "sha-B"
+    assert binding_lease != "sha-A"
+
+
+def test_D4_15_t0_record_present_but_flagged_provisional_not_binding(tmp_path):
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    report = _report("sha1", compliant=False, violations=("signature_absent",))
+    workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha="sha1", compliance_report=report, db_path=path,
+    )
+
+    record_supersede_approval(
+        workflow_id=workflow_id, repo_slug="autonomy", approval_id="ap-supersede",
+        observed_ref_tip="sha-A", db_path=path,
+    )
+
+    conn = commit_workflow_db._get_conn(path)
+    try:
+        row = conn.execute(
+            "SELECT approval_type, status, payload_json FROM commit_workflow_approvals "
+            "WHERE workflow_id = ? AND approval_type = 'supersede'",
+            (workflow_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "approved"
+        payload = json.loads(row["payload_json"])
+        assert payload["ref_tip"] == "sha-A"
+        assert payload["binding"] is False
+    finally:
+        conn.close()
+
+    # No force_with_lease yet -- no binding lease should be resolvable.
+    assert get_binding_lease(workflow_id=workflow_id, db_path=path) is None
+
+
+def test_D4_15_binding_lease_equals_t0_ref_tip_when_ref_never_moved(tmp_path):
+    """Positive control: when the ref genuinely didn't move between T0 and
+    T2, the binding lease legitimately equals the T0 value too -- but it
+    must come from the T2 record, not be read from T0 as a shortcut."""
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    report = _report("sha1", compliant=False, violations=("signature_absent",))
+    workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha="sha1", compliance_report=report, db_path=path,
+    )
+    record_supersede_approval(
+        workflow_id=workflow_id, repo_slug="autonomy", approval_id="ap-supersede",
+        observed_ref_tip="sha-A", db_path=path,
+    )
+    record_force_with_lease_approval(
+        workflow_id=workflow_id, repo_slug="autonomy", approval_id="ap-lease",
+        observed_ref_tip="sha-A", db_path=path,
+    )
+    assert get_binding_lease(workflow_id=workflow_id, db_path=path) == "sha-A"
