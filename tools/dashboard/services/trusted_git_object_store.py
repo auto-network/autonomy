@@ -91,6 +91,15 @@ class ContentAddressedStore:
             return False
         return True
 
+    def delete(self, digest: str) -> bool:
+        """Remove an object. Returns True if it existed. Used only by GC once no
+        live snapshot references it."""
+        path = self._path_for(digest)
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+
 
 # ── snapshot capture (the N3 freeze) ─────────────────────────────────
 
@@ -215,3 +224,41 @@ def verify_snapshot(*, snapshot_ref: str, store: ContentAddressedStore, dao_conn
     if not store.verify(snapshot["canonical_preview_sha256"]):
         return False
     return True
+
+
+# ── retention / garbage collection ───────────────────────────────────
+
+
+def collect_garbage(*, dao_conn, store: ContentAddressedStore, now: float) -> dict:
+    """Collect snapshots past their retention window.
+
+    Two-phase so the metadata is authoritative before any bytes are removed:
+    (1) mark every expired snapshot ``gc_deleted`` and commit; (2) delete each
+    of their stored objects that no surviving snapshot still references
+    (content-addressed dedup means a shared object is only removed once its last
+    referencer is collected). Objects belonging to a still-live snapshot are
+    kept. Returns a summary count.
+    """
+    refs = snapshot_dao.expired_snapshot_refs(dao_conn, now=now)
+    if not refs:
+        return {"snapshots_collected": 0, "objects_deleted": 0}
+
+    # Phase 1: metadata first — a crash mid-GC leaves gc_deleted rows whose
+    # orphaned objects a later sweep cleans, never a live snapshot with missing bytes.
+    for ref in refs:
+        snapshot_dao.update_snapshot_status(dao_conn, ref, "gc_deleted")
+    dao_conn.commit()
+
+    # Phase 2: delete objects no non-gc_deleted snapshot references.
+    seen: set[str] = set()
+    objects_deleted = 0
+    for ref in refs:
+        for entry in snapshot_dao.list_entries(dao_conn, ref):
+            digest = entry["object_sha256"]
+            if digest in seen:
+                continue
+            seen.add(digest)
+            if not snapshot_dao.object_referenced_by_live_snapshot(dao_conn, digest):
+                if store.delete(digest):
+                    objects_deleted += 1
+    return {"snapshots_collected": len(refs), "objects_deleted": objects_deleted}
