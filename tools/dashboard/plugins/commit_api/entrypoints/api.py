@@ -21,6 +21,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from agents.workspace_settings import get_workspace, resolve_capabilities
+from agents.capabilities.github.service import derive_repo_slug
 from tools.graph import ops
 from tools.graph.commit_policy import (
     ResolvedCommitPolicy,
@@ -46,8 +47,10 @@ from tools.dashboard.commit_api.types import (
     RepoScope,
     WorkflowRef,
 )
+from tools.dashboard.dao import auth_db, dashboard_db
 from tools.dashboard.plugin_api.schema import PLUGIN_SET_ID
 from tools.dashboard.dao import commit_workflow_db as cdb
+from tools.dashboard.worktree_monitor import worktree_monitor
 
 
 logger = logging.getLogger(__name__)
@@ -77,6 +80,12 @@ def _caller_org(request: Request) -> str | None:
     return request.headers.get("X-Graph-Org") or ops.CALLER_ORG
 
 
+def _row_value(row: Any, key: str) -> Any:
+    if isinstance(row, dict):
+        return row.get(key)
+    return getattr(row, key, None)
+
+
 def _workspace_graph_org(workspace_id: str | None) -> str | None:
     if not workspace_id:
         return None
@@ -99,6 +108,136 @@ def _capability_context_for_workspace(
     return WorkspaceCapabilityContext(
         issue_tracker_enabled=any(cap.contract == "issue_tracker" for cap in caps),
     )
+
+
+def _authorize_proposal_request(
+    request: Request,
+    request_model: CommitProposeRequest,
+) -> tuple[CommitProposeRequest, str, str] | JSONResponse:
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return _json_error(
+            "unauthenticated",
+            "missing or invalid Authorization header",
+        )
+
+    raw_token = auth_header[7:]
+    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    session_name = auth_db.resolve_token(token_hash)
+    if session_name is None:
+        return _json_error(
+            "unauthenticated",
+            "invalid or revoked session token",
+        )
+
+    session_row = dashboard_db.get_session(session_name)
+    if session_row is None or not bool(session_row.get("is_live")):
+        return _json_error(
+            "unauthenticated",
+            "session is not live",
+        )
+
+    project = str(session_row.get("project") or "").strip()
+    if not project:
+        return _json_error(
+            "scope_mismatch",
+            "authenticated session is not bound to a workspace",
+        )
+
+    try:
+        workspace = get_workspace(project)
+    except Exception:
+        return _json_error(
+            "scope_mismatch",
+            f"authenticated session workspace {project!r} could not be resolved",
+        )
+
+    scoped_rows = [
+        row for row in worktree_monitor.get_all()
+        if _row_value(row, "session_name") == session_name
+    ]
+    requested_repo_slug = request_model.scope.repo_slug.strip()
+    candidates: list[tuple[Any, str]] = []
+    for row in scoped_rows:
+        managed_clone = _row_value(row, "managed_clone")
+        repo_slug = derive_repo_slug(managed_clone) if managed_clone is not None else None
+        if not repo_slug:
+            continue
+        if requested_repo_slug and repo_slug != requested_repo_slug:
+            continue
+        candidates.append((row, repo_slug))
+
+    if not candidates:
+        return _json_error(
+            "scope_mismatch",
+            "proposal scope does not match the caller's live session worktree",
+        )
+    if not requested_repo_slug and len(candidates) != 1:
+        return _json_error(
+            "scope_mismatch",
+            "proposal scope is ambiguous for the caller's live session",
+        )
+
+    chosen_row, chosen_repo_slug = candidates[0]
+
+    request_workspace_id = request_model.scope.workspace_id.strip()
+    if request_workspace_id and request_workspace_id != workspace.id:
+        return _json_error(
+            "scope_mismatch",
+            "proposal scope does not match the caller's live session workspace",
+        )
+
+    request_session_name = request_model.scope.session_name or ""
+    if request_session_name and request_session_name != session_name:
+        return _json_error(
+            "scope_mismatch",
+            "proposal scope does not match the caller's live session identity",
+        )
+
+    request_repo_slug = request_model.scope.repo_slug.strip()
+    if request_repo_slug and request_repo_slug != chosen_repo_slug:
+        return _json_error(
+            "scope_mismatch",
+            "proposal scope does not match the caller's allowed worktree",
+        )
+
+    chosen_branch = _row_value(chosen_row, "branch")
+    if request_model.scope.branch and chosen_branch and request_model.scope.branch != chosen_branch:
+        return _json_error(
+            "scope_mismatch",
+            "proposal branch does not match the caller's allowed worktree",
+        )
+    if request_model.scope.branch and not chosen_branch:
+        return _json_error(
+            "scope_mismatch",
+            "proposal branch does not match the caller's allowed worktree",
+        )
+
+    chosen_worktree_path = _row_value(chosen_row, "worktree_path")
+    if request_model.scope.worktree_path and chosen_worktree_path:
+        if str(request_model.scope.worktree_path) != str(chosen_worktree_path):
+            return _json_error(
+                "scope_mismatch",
+                "proposal worktree does not match the caller's allowed worktree",
+            )
+    if request_model.scope.worktree_path and not chosen_worktree_path:
+        return _json_error(
+            "scope_mismatch",
+            "proposal worktree does not match the caller's allowed worktree",
+        )
+
+    canonical_scope = RepoScope(
+        workspace_id=workspace.id,
+        repo_slug=chosen_repo_slug,
+        repo_name_alias=request_model.scope.repo_name_alias,
+        session_name=session_name,
+        worktree_path=str(chosen_worktree_path) if chosen_worktree_path else None,
+        branch=str(chosen_branch) if chosen_branch else None,
+        target_branch=request_model.scope.target_branch,
+    )
+    canonical_payload = request_model.to_dict()
+    canonical_payload["scope"] = canonical_scope.to_dict()
+    return CommitProposeRequest.from_dict(canonical_payload), workspace.graph_project, session_name
 
 
 def _policy_members(org: str | None) -> dict[str, Any]:
@@ -405,19 +544,12 @@ async def describe_policy(request: Request) -> JSONResponse:
     return JSONResponse(response.to_dict())
 
 
-def _proposal_scope(request: CommitProposeRequest, request_org: str | None) -> str | None:
-    ws_org = _workspace_graph_org(request.scope.workspace_id)
-    if ws_org:
-        return ws_org
-    return request_org
-
-
 def _persist_proposal(
     *,
     request_model: CommitProposeRequest,
     resolved: ResolvedCommitPolicy,
     org: str | None,
-) -> CommitProposeResponse:
+) -> CommitProposeResponse | JSONResponse:
     conn = cdb._get_conn()
     try:
         cdb.init_schema_on_connection(conn)
@@ -438,12 +570,12 @@ def _persist_proposal(
             request_fields=request_fields,
         )
         if idem_state["kind"] == "conflict":
-            raise commit_api_error(
+            return _json_error(
                 "idempotency_conflict",
                 "same idempotency key used for a different propose request",
             )
         if idem_state["kind"] == "in_flight":
-            raise commit_api_error(
+            return _json_error(
                 "idempotency_in_flight",
                 "a proposal with this idempotency key is already in flight",
             )
@@ -451,12 +583,12 @@ def _persist_proposal(
             payload = idem_state["response_json"]
             return CommitProposeResponse.from_dict(payload)
         if idem_state["kind"] == "failed_retryable":
-            raise commit_api_error(
+            return _json_error(
                 "idempotency_in_flight",
                 "a previous proposal with this idempotency key is retryable but still unresolved",
             )
         if idem_state["kind"] == "failed_terminal":
-            raise commit_api_error(
+            return _json_error(
                 "invalid_transition",
                 "a previous proposal with this idempotency key failed terminally",
             )
@@ -564,7 +696,7 @@ def _persist_proposal(
         return response
     except sqlite3.IntegrityError as exc:
         conn.rollback()
-        raise commit_api_error(
+        return _json_error(
             "duplicate_active_workflow",
             f"proposal violated workflow uniqueness: {exc}",
         )
@@ -581,28 +713,23 @@ async def propose(request: Request) -> JSONResponse:
     except Exception as exc:
         return _json_error("invalid_request", f"invalid proposal request: {exc}")
 
-    request_org = _caller_org(request)
-    org = _proposal_scope(parsed, request_org)
+    auth_result = _authorize_proposal_request(request, parsed)
+    if isinstance(auth_result, JSONResponse):
+        return auth_result
+    parsed, org, _session_name = auth_result
+
     resolved = _policy_resolution(
         workspace_id=parsed.scope.workspace_id,
         repo_slug=parsed.scope.repo_slug,
         org=org,
     )
-    try:
-        response = _persist_proposal(
-            request_model=parsed,
-            resolved=resolved,
-            org=org,
-        )
-    except Exception as exc:
-        if isinstance(exc, sqlite3.IntegrityError):
-            return _json_error("duplicate_active_workflow", str(exc))
-        if isinstance(exc, json.JSONDecodeError):
-            return _json_error("invalid_request", str(exc))
-        if hasattr(exc, "code") and hasattr(exc, "http_status"):
-            return JSONResponse(exc.to_response(), status_code=exc.http_status)  # type: ignore[union-attr]
-        logger.exception("commit propose failed")
-        return _json_error("provider_error", f"proposal failed: {exc}")
+    response = _persist_proposal(
+        request_model=parsed,
+        resolved=resolved,
+        org=org,
+    )
+    if isinstance(response, JSONResponse):
+        return response
     return JSONResponse(response.to_dict())
 
 
