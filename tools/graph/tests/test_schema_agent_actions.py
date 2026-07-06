@@ -95,6 +95,37 @@ def test_unknown_top_level_field_still_rejected():
         AgentActionV1.validate(p)
 
 
+def test_prompt_template_rejects_unescaped_dict_literal_braces():
+    p = _base_payload()
+    p["prompt_template"] = "payload = {'description': 'summary'}"
+    with pytest.raises(SchemaValidationError, match="undefined placeholder"):
+        AgentActionV2.validate(p)
+
+
+def test_prompt_template_rejects_unmatched_literal_brace():
+    p = _base_payload()
+    p["prompt_template"] = "payload = {"
+    with pytest.raises(SchemaValidationError, match="invalid prompt_template"):
+        AgentActionV2.validate(p)
+
+
+def test_prompt_template_rejects_unknown_placeholder_root():
+    p = _base_payload()
+    p["prompt_template"] = "Audit {asset[id]} and {missing[field]}"
+    with pytest.raises(SchemaValidationError, match="undefined placeholder"):
+        AgentActionV2.validate(p)
+
+
+def test_prompt_template_accepts_escaped_literal_braces_and_known_roots():
+    p = _base_payload()
+    p["prompt_template"] = (
+        "Design {design[design_id]} asset {asset[id]} "
+        "payload = {{'description': 'summary'}} "
+        "from {dispatched_by_session} via {member_key}: {custom_input}"
+    )
+    AgentActionV2.validate(p)
+
+
 def test_dry_run_implement_realistic_payload_round_trip():
     """A realistic shape mirroring the production member must validate."""
     p = {

@@ -153,6 +153,7 @@ else:
     from tools.dashboard.dao import beads as dao_beads
     from tools.dashboard.dao import dispatch as dao_dispatch
     from tools.dashboard.dao import sessions as dao_sessions
+from tools.graph.schemas.agent_actions import AGENT_ACTION_TEMPLATE_ROOTS
 
 from tools.dashboard.tmux_send import (
     tmux_enter_checked_sync,
@@ -13580,26 +13581,6 @@ def _build_agent_action_context(
     )
 
 
-# Authoritative list of placeholders that prompt-template authors may
-# reference. Extending this list also requires extending the context
-# build site in ``_render_agent_action_prompt`` so the field actually
-# resolves at runtime — the static check below catches the mismatch
-# before the agent ever sees the prompt.
-_AGENT_ACTION_PLACEHOLDER_ROOTS = (
-    "asset",
-    "source",
-    "bead",
-    "design",
-    "tags",
-    "dispatched_by_session",
-    "member_key",
-    # ``input_prompt``-declaring actions interpolate the operator's typed
-    # answer here (auto-0tkwj). Always-bound; empty string when the action
-    # has no ``input_prompt``.
-    "custom_input",
-)
-
-
 def _template_field_root(field_name: str) -> str:
     """Return the root symbol for a ``str.format`` placeholder."""
     root = field_name.split("[", 1)[0]
@@ -13637,7 +13618,7 @@ def _render_agent_action_prompt(
     }
     unknown = {
         field for field in referenced
-        if _template_field_root(field) not in _AGENT_ACTION_PLACEHOLDER_ROOTS
+        if _template_field_root(field) not in AGENT_ACTION_TEMPLATE_ROOTS
     }
     if unknown:
         msg = (
