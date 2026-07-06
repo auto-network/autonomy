@@ -32,6 +32,7 @@ import os
 import secrets
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 from starlette.responses import JSONResponse
@@ -39,6 +40,7 @@ from starlette.routing import Route
 
 from tools.dashboard.dao import auth_db, local_signer_db as db
 from tools.dashboard.dao import commit_workflow_db as cdb
+from tools.dashboard.services.trusted_git_object_store import ObjectIntegrityError
 
 PAIRING_TTL_SECONDS = 120
 POLL_INTERVAL_SECONDS = 3
@@ -569,6 +571,188 @@ async def api_local_signer_get_request(request):
     })
 
 
+# ── D3-15: POST /requests/{signing_request_id}/signature ──────────────
+#
+# Three independent, all-required gates, checked in order: (1) nonce
+# binding — the submitted challenge_nonce must be the exact, unconsumed
+# value most recently minted by GET for this signing_request_id;
+# (2) hash-display gate (S5) — displayed_payload_hash must equal the
+# request's stored canonical_payload_hash; (3) cryptographic verification
+# — the signature must verify against the ACTUAL trusted-store bytes
+# filed under that same canonical_payload_hash digest (never the display
+# string alone). Any gate failure rejects with no signed event.
+
+
+def _default_verification_key_provider(*, operator_id: str, signing_kind: str) -> str | None:
+    """Swappable seam (mirrors KEY_MATERIAL_PROVIDER) — production wiring
+    resolves this against DN5's real keystore (commit_broker.keys)
+    once that's wired end to end; returns None (fail closed) until then."""
+    return None
+
+
+VERIFICATION_KEY_PROVIDER = _default_verification_key_provider
+
+# Swappable: production wiring points this at the real DN2
+# ContentAddressedStore root. None (the default) fails closed --
+# api_local_signer_attach_signature refuses to accept a signature it
+# cannot verify against real trusted-store bytes rather than skipping
+# the check.
+TRUSTED_OBJECT_STORE = None
+
+
+def _verify_ssh_signature(*, payload: bytes, armored_signature: str, allowed_signer_public_key: str) -> bool:
+    """Verify a detached SSH-format signature (``gpg.format=ssh`` armor)
+    against arbitrary bytes via ``ssh-keygen -Y verify`` — the same
+    mechanism git itself uses, so a signature that verifies here verifies
+    identically under ``git verify-commit`` once assembled."""
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        allowed_signers_path = td_path / "allowed_signers"
+        allowed_signers_path.write_text(f"signer {allowed_signer_public_key}\n")
+        sig_path = td_path / "sig.asc"
+        sig_path.write_text(armored_signature)
+        result = subprocess.run(
+            [
+                "ssh-keygen", "-Y", "verify",
+                "-f", str(allowed_signers_path),
+                "-I", "signer",
+                "-n", "file",
+                "-s", str(sig_path),
+            ],
+            input=payload, capture_output=True,
+        )
+        return result.returncode == 0
+
+
+def _attach_envelope_message(
+    *, challenge_nonce: str, device_id: str, signing_request_id: str,
+    http_method: str, path: str, body_hash: str, issued_at: str,
+) -> bytes:
+    return (
+        f"autonomy-local-signer-attach:{challenge_nonce}:{device_id}:{signing_request_id}:"
+        f"{http_method}:{path}:{body_hash}:{issued_at}"
+    ).encode()
+
+
+async def api_local_signer_attach_signature(request):
+    signing_request_id = request.path_params["signing_request_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"status": "rejected", "reason": "invalid_json_body"}, status_code=400)
+
+    device_id = body.get("device_id")
+    challenge_nonce = body.get("challenge_nonce")
+    displayed_payload_hash = body.get("displayed_payload_hash")
+    armored_signature = body.get("armored_signature")
+    issued_at = body.get("issued_at")
+    auth_signature = body.get("auth_signature")
+    required = [device_id, challenge_nonce, displayed_payload_hash, armored_signature, issued_at, auth_signature]
+    if not all(required):
+        return JSONResponse(
+            {"status": "rejected", "reason": "device_id, challenge_nonce, displayed_payload_hash, "
+                                              "armored_signature, issued_at, auth_signature are all required"},
+            status_code=400,
+        )
+
+    now = time.time()
+    path = f"/api/capabilities/local-signer/v1/requests/{signing_request_id}/signature"
+    body_hash = hashlib.sha256(_json_dumps({
+        "displayed_payload_hash": displayed_payload_hash, "armored_signature": armored_signature,
+    }).encode()).hexdigest()
+
+    device = db.get_device(device_id)
+    if device is None or not device.active:
+        db.append_audit_event(
+            audit_event_id=str(uuid.uuid4()), occurred_at=now,
+            event_type="signature_rejected_revoked_device",
+            device_id=device_id, signing_request_id=signing_request_id,
+        )
+        return JSONResponse({"status": "rejected", "reason": "device_not_found_or_revoked"}, status_code=403)
+
+    envelope = _attach_envelope_message(
+        challenge_nonce=challenge_nonce, device_id=device_id, signing_request_id=signing_request_id,
+        http_method="POST", path=path, body_hash=body_hash, issued_at=issued_at,
+    )
+    if not verify_ed25519(device.public_key, envelope, auth_signature):
+        return JSONResponse({"status": "rejected", "reason": "signature_invalid"}, status_code=403)
+
+    # Gate 1: nonce binding — must be the exact, unconsumed, current nonce.
+    if not db.consume_challenge_nonce(signing_request_id=signing_request_id, nonce=challenge_nonce, now=now):
+        db.append_audit_event(
+            audit_event_id=str(uuid.uuid4()), occurred_at=now,
+            event_type="signature_rejected_stale_nonce",
+            device_id=device_id, signing_request_id=signing_request_id,
+        )
+        return JSONResponse({"status": "rejected", "reason": "stale_nonce"}, status_code=409)
+
+    conn = cdb._get_conn()
+    try:
+        row = conn.execute(
+            "SELECT signing_request_id, workflow_id, canonical_payload_hash, signing_method, status "
+            "FROM commit_signing_requests WHERE signing_request_id = ?",
+            (signing_request_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return JSONResponse({"status": "rejected", "reason": "signing_request_not_found"}, status_code=404)
+
+    # Gate 2: hash-display gate (S5) — a string check the client controls
+    # both sides of, so it is never sufficient alone; gate 3 is what
+    # actually proves the signature is over the real bytes.
+    if displayed_payload_hash != row["canonical_payload_hash"]:
+        db.append_audit_event(
+            audit_event_id=str(uuid.uuid4()), occurred_at=now,
+            event_type="signature_rejected_hash_mismatch",
+            device_id=device_id, signing_request_id=signing_request_id,
+        )
+        return JSONResponse({"status": "rejected", "reason": "hash_mismatch"}, status_code=422)
+
+    # Gate 3: cryptographic verification against the ACTUAL trusted-store
+    # bytes filed under this request's own canonical_payload_hash digest —
+    # never the display string, never another request's bytes.
+    if TRUSTED_OBJECT_STORE is None:
+        return JSONResponse({"status": "rejected", "reason": "trusted_object_store_unavailable"}, status_code=500)
+    try:
+        canonical_bytes = TRUSTED_OBJECT_STORE.get(row["canonical_payload_hash"])
+    except KeyError:
+        return JSONResponse({"status": "rejected", "reason": "canonical_payload_not_found"}, status_code=404)
+    except ObjectIntegrityError:
+        return JSONResponse({"status": "rejected", "reason": "trusted_store_object_tampered"}, status_code=500)
+
+    verification_key = VERIFICATION_KEY_PROVIDER(operator_id=device.operator_id, signing_kind=row["signing_method"])
+    if verification_key is None:
+        return JSONResponse({"status": "rejected", "reason": "no_verification_key_registered"}, status_code=422)
+    if not _verify_ssh_signature(
+        payload=canonical_bytes, armored_signature=armored_signature, allowed_signer_public_key=verification_key,
+    ):
+        return JSONResponse({"status": "rejected", "reason": "signature_verification_failed"}, status_code=422)
+
+    signed_commit_sha = hashlib.sha256(canonical_bytes + armored_signature.encode()).hexdigest()
+    conn = cdb._get_conn()
+    try:
+        conn.execute(
+            "UPDATE commit_signing_requests SET status = 'signed', device_id = ?, "
+            "signature_ref = ?, completed_at = ? WHERE signing_request_id = ?",
+            (device_id, signed_commit_sha, now, signing_request_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    db.append_audit_event(
+        audit_event_id=str(uuid.uuid4()),
+        occurred_at=now,
+        event_type="signature_submitted",
+        device_id=device_id,
+        signing_request_id=signing_request_id,
+    )
+    return JSONResponse({"status": "accepted", "signed_commit_sha": signed_commit_sha})
+
+
 ROUTES = [
     Route("/api/capabilities/local-signer/v1/pairing/start", api_local_signer_pairing_start, methods=["POST"]),
     Route("/api/capabilities/local-signer/v1/pairing/complete", api_local_signer_pairing_complete, methods=["POST"]),
@@ -576,4 +760,5 @@ ROUTES = [
     Route("/api/dashboard/local-signer/key-material/step-up", api_local_signer_step_up, methods=["POST"]),
     Route("/api/capabilities/local-signer/v1/key-material/provision", api_local_signer_key_material_provision, methods=["POST"]),
     Route("/api/capabilities/local-signer/v1/requests/{signing_request_id}", api_local_signer_get_request, methods=["GET"]),
+    Route("/api/capabilities/local-signer/v1/requests/{signing_request_id}/signature", api_local_signer_attach_signature, methods=["POST"]),
 ]
