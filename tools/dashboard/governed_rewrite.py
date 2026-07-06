@@ -20,21 +20,32 @@ original SHA's ``commit_workflow_commits`` row survives a projection
 rebuild with ``role="rewrite_source"``, ``position=0``, rather than the
 default ``workflow_commit``/1-indexed behavior every other caller gets.
 
-``construct_corrected_metadata`` (§3 step 3) is deliberately independent
-of D4-9's snapshot mechanism (DN2, not yet built) — it takes tree_oid,
-parent_oids, original author/committer identity lines, and message bytes
-as plain parameters, shaped to match exactly what a snapshot will
-eventually supply, so wiring it to a real snapshot later is a thin
-adapter rather than a rewrite.
+``construct_corrected_metadata`` (§3 step 3) takes tree_oid, parent_oids,
+original author/committer identity lines, and message bytes as plain
+parameters — the exact shape ``snapshot_original_commit`` (§3 step 2,
+D4-9) below now supplies from a real DN2 snapshot.
+
+``snapshot_original_commit`` (§3 step 2) calls DN2's ``capture_snapshot``
+(Fable, tools.dashboard.services.trusted_git_object_store) to freeze the
+original commit's tree into the trusted object store, then appends a
+second event to the SAME workflow recording ``snapshot_ref`` in
+``state_json`` — merged with the state D4-8 already wrote, since a new
+event's payload replaces state_json wholesale on projection rebuild, it
+is never merged automatically. This is what makes the snapshot
+"referenced by the workflow": a later step reads the workflow's own
+state_json for the ref rather than needing to know the trusted-store
+DB's shape.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from tools.dashboard.dao import commit_workflow_db
+from tools.dashboard.services.trusted_git_object_store import capture_snapshot
 from tools.dashboard.commit_compliance import ComplianceReport
 
 REASON_VIOLATIONS = "rewritten_for_violations"
@@ -206,3 +217,68 @@ def construct_corrected_metadata(
         committer=committer,
         message=final_message,
     )
+
+
+# ── D4-9: snapshot the original commit tree into the trusted object store ─
+
+
+def _current_state_json(workflow_id: str, db_path=None) -> dict:
+    conn = commit_workflow_db._get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT state_json FROM commit_workflow_states WHERE workflow_id = ?",
+            (workflow_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise ValueError(f"no such workflow: {workflow_id!r}")
+    return json.loads(row["state_json"])
+
+
+def snapshot_original_commit(
+    *,
+    workflow_id: str,
+    repo_slug: str,
+    original_sha: str,
+    tree_sha: str,
+    parent_shas: Sequence[str],
+    git_dir,
+    store,
+    trusted_store_conn,
+    workflow_db_path=None,
+) -> str:
+    """Freeze the original commit's tree into the trusted object store and
+    bind the resulting snapshot_ref to the SAME workflow (§3 step 2).
+
+    This is the boundary that makes ``construct_corrected_metadata`` safe
+    to call later against a tree_sha that can no longer be altered by any
+    subsequent worktree/index/HEAD change: the caller should read
+    ``snapshot_ref`` back out of the workflow's own ``state_json`` (never
+    re-derive it from a live git read) and resolve the tree via
+    ``dao.trusted_git_object_store.get_snapshot(ref)['tree_sha']``.
+    """
+    snapshot_ref = capture_snapshot(
+        workflow_id=workflow_id,
+        repo_slug=repo_slug,
+        commit_sha=original_sha,
+        tree_sha=tree_sha,
+        parent_shas=parent_shas,
+        git_dir=git_dir,
+        store=store,
+        dao_conn=trusted_store_conn,
+        snapshot_type=ROLE_REWRITE_SOURCE,
+    )
+
+    current_state = _current_state_json(workflow_id, db_path=workflow_db_path)
+    updated_state = {**current_state, "snapshot_ref": snapshot_ref}
+    commit_workflow_db.append_event(
+        event_id=uuid.uuid4().hex,
+        workflow_id=workflow_id,
+        event_type="governed_rewrite_snapshot_captured",
+        status_after="draft",
+        repo_slug=repo_slug,
+        payload=updated_state,
+        db_path=workflow_db_path,
+    )
+    return snapshot_ref
