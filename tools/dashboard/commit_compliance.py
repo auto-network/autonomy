@@ -155,13 +155,22 @@ def _default_operator_identity_provider() -> dict | None:
 OPERATOR_IDENTITY_PROVIDER = _default_operator_identity_provider
 
 
-def _required_identity(author_policy: dict) -> dict | None:
+def _resolve_required_identity(author_policy: dict) -> tuple[bool, dict | None]:
+    """Returns (identity_required, identity). When the policy requires an
+    identity but ``OPERATOR_IDENTITY_PROVIDER`` hasn't been wired to a real
+    lookup yet, identity is ``{"unresolved": True}`` — a fail-closed marker,
+    never ``None`` treated the same as "policy imposes no constraint". A
+    stubbed-out provider must never make an unverifiable commit look
+    compliant."""
     explicit = author_policy.get("required_identity")
     if explicit:
-        return explicit
+        return True, explicit
     if author_policy.get("require_operator_confirmation"):
-        return OPERATOR_IDENTITY_PROVIDER()
-    return None
+        identity = OPERATOR_IDENTITY_PROVIDER()
+        if identity is None:
+            return True, {"unresolved": True}
+        return True, identity
+    return False, None
 
 
 # ── D4-3: sign-off axis ─────────────────────────────────────────────────
@@ -182,7 +191,7 @@ def _check_signoff(commit_sha: str, cwd: Path, author_policy: dict) -> tuple[Sig
     required = bool(author_policy.get("require_signoff"))
     trailer_value = _signoff_trailer(commit_sha, cwd)
     present = trailer_value is not None
-    required_identity = _required_identity(author_policy)
+    identity_required, required_identity = _resolve_required_identity(author_policy)
     matches = True
     violations: list[str] = []
 
@@ -190,9 +199,12 @@ def _check_signoff(commit_sha: str, cwd: Path, author_policy: dict) -> tuple[Sig
         matches = False
         if required:
             violations.append("signoff_missing")
-    elif required_identity:
-        expected = f"{required_identity.get('name')} <{required_identity.get('email')}>"
-        matches = trailer_value == expected
+    elif identity_required:
+        if required_identity.get("unresolved"):
+            matches = False  # fail closed: nothing to compare the trailer against
+        else:
+            expected = f"{required_identity.get('name')} <{required_identity.get('email')}>"
+            matches = trailer_value == expected
         if required and not matches:
             violations.append("signoff_identity_mismatch")
 
@@ -215,12 +227,19 @@ def _commit_identities(commit_sha: str, cwd: Path) -> tuple[dict, dict]:
 
 def _check_authorship(commit_sha: str, cwd: Path, author_policy: dict) -> tuple[AuthorshipStatus, list[str]]:
     actual_author, actual_committer = _commit_identities(commit_sha, cwd)
-    required_identity = _required_identity(author_policy)
+    identity_required, required_identity = _resolve_required_identity(author_policy)
     violations: list[str] = []
 
-    if not required_identity:
+    if not identity_required:
         author_matches = True
         committer_matches = True
+    elif required_identity.get("unresolved"):
+        # Fail closed: the policy requires an identity match but the
+        # lookup never resolved one — never silently treat this as passing.
+        author_matches = False
+        committer_matches = False
+        violations.append("author_mismatch")
+        violations.append("committer_mismatch")
     else:
         author_matches = (
             actual_author["email"] == required_identity.get("email")
