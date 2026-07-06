@@ -43,11 +43,22 @@ per new SHA, sharing ``position`` at each chain slot. It takes the
 chain's ``(original_sha, new_sha)`` pairs as a plain parameter — how
 each new SHA gets determined (D4-17/18/19's sequential signing) is a
 separate concern.
+
+``check_publish_approval_gate`` (D4-14, §3 step 4) plus
+``record_supersede_approval``/``record_force_with_lease_approval``/
+``get_binding_lease`` (D4-15) are pure logic + bookkeeping over the
+already-landed ``commit_workflow_approvals`` table — no dependency on
+Codex's not-yet-built ``commit.publish``/``commit.approve`` handlers.
+The T0/T2 split matters: the supersede approval (T0) can only ever
+record a PROVISIONAL ref-tip, since the ref may move again before the
+force_with_lease approval (T2) — only T2's observed ref-tip is ever the
+binding lease a publish may act on.
 """
 
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -372,3 +383,88 @@ def check_publish_approval_gate(*, workflow_id: str, db_path=None) -> PublishApp
 
     reason = f"publish blocked: missing approved {' and '.join(missing)} approval"
     return PublishApprovalGateResult(allowed=False, missing_approval_types=missing, reason=reason)
+
+
+# ── D4-15: capture the binding lease at T2, provisional at T0 ──────────
+
+
+def record_supersede_approval(
+    *,
+    workflow_id: str,
+    repo_slug: str,
+    approval_id: str,
+    observed_ref_tip: str,
+    operator_id: str | None = None,
+    db_path=None,
+) -> None:
+    """T0: record the supersede approval with a PROVISIONAL ref-tip only.
+
+    Never the binding lease — a rewrite must not be published against a
+    ref-tip observed this early, since the ref may advance again before
+    T2 (force_with_lease). See ``record_force_with_lease_approval``.
+    """
+    now = time.time()
+    conn = commit_workflow_db._get_conn(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO commit_workflow_approvals "
+            "(approval_id, workflow_id, repo_slug, approval_type, status, "
+            "operator_id, requested_at, decided_at, payload_json) "
+            "VALUES (?, ?, ?, 'supersede', 'approved', ?, ?, ?, ?)",
+            (
+                approval_id, workflow_id, repo_slug, operator_id, now, now,
+                json.dumps({"ref_tip": observed_ref_tip, "binding": False}),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def record_force_with_lease_approval(
+    *,
+    workflow_id: str,
+    repo_slug: str,
+    approval_id: str,
+    observed_ref_tip: str,
+    operator_id: str | None = None,
+    db_path=None,
+) -> None:
+    """T2 (strictly after T0): record the force_with_lease approval with
+    the BINDING lease — the ref-tip observed AT THIS CALL, never reused
+    from the T0 supersede record even if the ref never moved."""
+    now = time.time()
+    conn = commit_workflow_db._get_conn(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO commit_workflow_approvals "
+            "(approval_id, workflow_id, repo_slug, approval_type, status, "
+            "operator_id, requested_at, decided_at, payload_json) "
+            "VALUES (?, ?, ?, 'force_with_lease', 'approved', ?, ?, ?, ?)",
+            (
+                approval_id, workflow_id, repo_slug, operator_id, now, now,
+                json.dumps({"ref_tip": observed_ref_tip, "binding": True}),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_binding_lease(*, workflow_id: str, db_path=None) -> str | None:
+    """Return the binding lease (the force_with_lease approval's observed
+    ref-tip), or ``None`` if not yet captured. Never reads the T0
+    supersede record's provisional value."""
+    conn = commit_workflow_db._get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT payload_json FROM commit_workflow_approvals "
+            "WHERE workflow_id = ? AND approval_type = 'force_with_lease' AND status = 'approved'",
+            (workflow_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    payload = json.loads(row["payload_json"])
+    return payload["ref_tip"] if payload.get("binding") else None
