@@ -154,6 +154,9 @@ CREATE TABLE IF NOT EXISTS commit_signing_requests (
     trusted_object_store_ref  TEXT NOT NULL,
     canonical_payload_hash    TEXT NOT NULL,
     device_id                 TEXT,
+    batch_group_id            TEXT,
+    position_in_batch         INTEGER,
+    batch_size                INTEGER,
     encrypted_key_ref         TEXT,
     operator_id               TEXT,
     requested_at              REAL NOT NULL,
@@ -295,9 +298,23 @@ def init_db(db_path: Path | str | None = None) -> None:
         conn.executescript(CREATE_TABLES)
         conn.executescript(CREATE_INDEXES)
         conn.executescript(CREATE_TRIGGERS)
+        _migrate_commit_signing_request_batch_columns(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def _migrate_commit_signing_request_batch_columns(conn: sqlite3.Connection) -> None:
+    cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(commit_signing_requests)").fetchall()
+    }
+    if "batch_group_id" not in cols:
+        conn.execute("ALTER TABLE commit_signing_requests ADD COLUMN batch_group_id TEXT")
+    if "position_in_batch" not in cols:
+        conn.execute("ALTER TABLE commit_signing_requests ADD COLUMN position_in_batch INTEGER")
+    if "batch_size" not in cols:
+        conn.execute("ALTER TABLE commit_signing_requests ADD COLUMN batch_size INTEGER")
 
 
 def append_event(

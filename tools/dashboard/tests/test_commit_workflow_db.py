@@ -229,6 +229,9 @@ def test_commit_signing_requests_table_includes_nullable_device_id(tmp_path):
             "trusted_object_store_ref",
             "canonical_payload_hash",
             "device_id",
+            "batch_group_id",
+            "position_in_batch",
+            "batch_size",
             "encrypted_key_ref",
             "operator_id",
             "requested_at",
@@ -243,6 +246,58 @@ def test_commit_signing_requests_table_includes_nullable_device_id(tmp_path):
         )
         assert device_id_row["notnull"] == 0
         assert device_id_row["dflt_value"] is None
+
+        for column_name in ("batch_group_id", "position_in_batch", "batch_size"):
+            row = next(
+                row for row in conn.execute("PRAGMA table_info(commit_signing_requests)").fetchall()
+                if row["name"] == column_name
+            )
+            assert row["notnull"] == 0
+            assert row["dflt_value"] is None
+    finally:
+        conn.close()
+
+
+def test_commit_signing_requests_batch_columns_migrate_on_existing_db(tmp_path):
+    path = tmp_path / "commit_workflow.db"
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE commit_signing_requests (
+            signing_request_id        TEXT PRIMARY KEY,
+            workflow_id               TEXT NOT NULL,
+            repo_slug                 TEXT NOT NULL,
+            status                    TEXT NOT NULL,
+            signing_method            TEXT NOT NULL,
+            trusted_object_store_ref  TEXT NOT NULL,
+            canonical_payload_hash    TEXT NOT NULL,
+            device_id                 TEXT,
+            encrypted_key_ref         TEXT,
+            operator_id               TEXT,
+            requested_at              REAL NOT NULL,
+            completed_at              REAL,
+            signature_ref             TEXT,
+            payload_json              TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db.init_db(path)
+
+    conn = db._get_conn(path)
+    try:
+        cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(commit_signing_requests)").fetchall()
+        }
+        assert {
+            "batch_group_id",
+            "position_in_batch",
+            "batch_size",
+        }.issubset(cols)
     finally:
         conn.close()
 
