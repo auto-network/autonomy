@@ -1077,16 +1077,19 @@ function _hideSessionOverlayChrome() {
 }
 
 function _closeSessionOverlayToList() {
-  if (!sessionViewLayer || !sessionViewLayer.classList.contains('active')) return false;
   const basePath = _sessionOverlayBasePath || '/sessions';
-  _hideSessionOverlayChrome();
-  if (window.location.pathname !== basePath) {
-    history.replaceState({ scrollY: window.scrollY }, '', basePath);
+  if (sessionViewLayer && sessionViewLayer.classList.contains('active')) {
+    _hideSessionOverlayChrome();
+    if (window.location.pathname !== basePath) {
+      history.replaceState({ scrollY: window.scrollY }, '', basePath);
+    }
+    pageTitle.textContent = 'Sessions';
+    window.dispatchEvent(new CustomEvent('app:navigated', {
+      detail: { path: window.location.pathname },
+    }));
+    return true;
   }
-  pageTitle.textContent = 'Sessions';
-  window.dispatchEvent(new CustomEvent('app:navigated', {
-    detail: { path: window.location.pathname },
-  }));
+  navigateTo('/sessions');
   return true;
 }
 
