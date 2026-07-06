@@ -109,6 +109,13 @@ CREATE TABLE IF NOT EXISTS local_signer_step_up_tokens (
     expires_at          REAL NOT NULL,
     consumed_at         REAL
 );
+
+CREATE TABLE IF NOT EXISTS local_signer_challenge_nonces (
+    signing_request_id  TEXT PRIMARY KEY,
+    nonce               TEXT NOT NULL,
+    minted_at           REAL NOT NULL,
+    expires_at          REAL NOT NULL
+);
 """
 
 CREATE_INDEXES = """\
@@ -635,3 +642,47 @@ def consume_step_up_token(
         raise
     finally:
         conn.close()
+
+
+def mint_challenge_nonce(
+    *, signing_request_id: str, nonce: str, minted_at: float, ttl_seconds: float,
+    db_path: Path | str | None = None,
+) -> None:
+    """Record ``nonce`` as the current challenge nonce for a signing
+    request (D3-12). This is the ONLY place a signing-flow nonce is
+    minted — unlike ``local_signer_request_nonces`` (single-use,
+    INSERT-only), this table holds exactly one row per
+    ``signing_request_id`` and each mint OVERWRITES the prior nonce, so
+    only the most-recently-minted GET's nonce is ever current."""
+    conn = _get_conn(db_path)
+    try:
+        conn.execute(
+            """INSERT INTO local_signer_challenge_nonces (
+                   signing_request_id, nonce, minted_at, expires_at
+               ) VALUES (?, ?, ?, ?)
+               ON CONFLICT(signing_request_id) DO UPDATE SET
+                   nonce = excluded.nonce,
+                   minted_at = excluded.minted_at,
+                   expires_at = excluded.expires_at""",
+            (signing_request_id, nonce, minted_at, minted_at + ttl_seconds),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_current_challenge_nonce(
+    signing_request_id: str, db_path: Path | str | None = None,
+) -> dict | None:
+    """Return ``{"nonce", "minted_at", "expires_at"}`` for the current
+    challenge nonce, or ``None`` if none has been minted yet."""
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT nonce, minted_at, expires_at FROM local_signer_challenge_nonces "
+            "WHERE signing_request_id = ?",
+            (signing_request_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row is not None else None
