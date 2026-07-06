@@ -152,6 +152,7 @@ CREATE TABLE IF NOT EXISTS commit_signing_requests (
     signing_method            TEXT NOT NULL,
     trusted_object_store_ref  TEXT NOT NULL,
     canonical_payload_hash    TEXT NOT NULL,
+    device_id                 TEXT,
     encrypted_key_ref         TEXT,
     operator_id               TEXT,
     requested_at              REAL NOT NULL,

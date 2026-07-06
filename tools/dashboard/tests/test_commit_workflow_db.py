@@ -160,6 +160,43 @@ def test_idempotency_table_created_with_unique_key_and_indexes(tmp_path):
         conn.close()
 
 
+def test_commit_signing_requests_table_includes_nullable_device_id(tmp_path):
+    path = tmp_path / "commit_workflow.db"
+    db.init_db(path)
+
+    conn = db._get_conn(path)
+    try:
+        cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(commit_signing_requests)").fetchall()
+        }
+        assert cols == {
+            "signing_request_id",
+            "workflow_id",
+            "repo_slug",
+            "status",
+            "signing_method",
+            "trusted_object_store_ref",
+            "canonical_payload_hash",
+            "device_id",
+            "encrypted_key_ref",
+            "operator_id",
+            "requested_at",
+            "completed_at",
+            "signature_ref",
+            "payload_json",
+        }
+
+        device_id_row = next(
+            row for row in conn.execute("PRAGMA table_info(commit_signing_requests)").fetchall()
+            if row["name"] == "device_id"
+        )
+        assert device_id_row["notnull"] == 0
+        assert device_id_row["dflt_value"] is None
+    finally:
+        conn.close()
+
+
 def test_g8_idempotency_key_hash_stored_not_raw_key():
     digest = db.hash_idempotency_key("commit_workflow", "raw-key-123")
     assert digest != "raw-key-123"
