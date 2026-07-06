@@ -6,10 +6,12 @@ This is instance data for Worktrees/lifecycle tracking, not graph Settings.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -588,3 +590,199 @@ def _status_rank(status: str) -> int:
     if status in REOPEN_TERMINAL_STATUSES:
         return 2
     return 1
+
+
+IDEMPOTENCY_NAMESPACE = "commit_workflow"
+IDEMPOTENCY_WORKFLOW_RETENTION_SECONDS = 7 * 24 * 60 * 60
+IDEMPOTENCY_PUBLISH_RETENTION_SECONDS = 30 * 24 * 60 * 60
+_IDEMPOTENCY_FINGERPRINT_IGNORED_KEYS = frozenset({
+    "authorization",
+    "bearer_token",
+    "correlation_id",
+    "idempotency_key",
+    "access_token",
+    "refresh_token",
+})
+
+
+def hash_idempotency_key(namespace: str, raw_key: str) -> str:
+    """Return the stored idempotency key hash.
+
+    The raw key never leaves the request path; the DB stores only a
+    namespace-scoped SHA-256 hex digest.
+    """
+    payload = f"{namespace}\0{raw_key}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def scope_key(repo_slug: str, workflow_id: str) -> str:
+    return f"{repo_slug}:{workflow_id}"
+
+
+def _fingerprint_sanitize(value):
+    if isinstance(value, dict):
+        return {
+            key: _fingerprint_sanitize(item)
+            for key, item in sorted(value.items())
+            if str(key) not in _IDEMPOTENCY_FINGERPRINT_IGNORED_KEYS
+        }
+    if isinstance(value, list):
+        return [_fingerprint_sanitize(item) for item in value]
+    if isinstance(value, tuple):
+        return [_fingerprint_sanitize(item) for item in value]
+    return value
+
+
+def request_fingerprint(operation: str, resolved_request_fields: dict) -> str:
+    """Return a canonical JSON fingerprint for the resolved request fields."""
+    payload = {
+        "operation": operation,
+        "request": _fingerprint_sanitize(resolved_request_fields),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _idempotency_retention_seconds(operation: str) -> int:
+    if operation == "publish":
+        return IDEMPOTENCY_PUBLISH_RETENTION_SECONDS
+    return IDEMPOTENCY_WORKFLOW_RETENTION_SECONDS
+
+
+def reserve_idempotency(
+    conn: sqlite3.Connection,
+    *,
+    actor_type: str,
+    actor_id: str,
+    scope_key: str,
+    operation: str,
+    raw_idempotency_key: str,
+    request_fields: dict,
+    workflow_id: str | None = None,
+    namespace: str = IDEMPOTENCY_NAMESPACE,
+    now: float | None = None,
+    idempotency_id: str | None = None,
+) -> dict[str, object]:
+    """Insert an ``in_flight`` idempotency row and return its stored shape."""
+    created_at = float(now if now is not None else time.time())
+    record = {
+        "idempotency_id": idempotency_id or uuid.uuid4().hex,
+        "actor_type": actor_type,
+        "actor_id": actor_id,
+        "scope_key": scope_key,
+        "operation": operation,
+        "workflow_id": workflow_id,
+        "idempotency_key_hash": hash_idempotency_key(namespace, raw_idempotency_key),
+        "request_fingerprint": request_fingerprint(operation, request_fields),
+        "status": "in_flight",
+        "response_json": None,
+        "event_ids_json": "[]",
+        "side_effect_ref": None,
+        "created_at": created_at,
+        "updated_at": created_at,
+        "expires_at": created_at + _idempotency_retention_seconds(operation),
+    }
+    conn.execute(
+        """\
+        INSERT INTO commit_workflow_idempotency (
+            idempotency_id, actor_type, actor_id, scope_key, operation,
+            workflow_id, idempotency_key_hash, request_fingerprint, status,
+            response_json, event_ids_json, side_effect_ref,
+            created_at, updated_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record["idempotency_id"],
+            record["actor_type"],
+            record["actor_id"],
+            record["scope_key"],
+            record["operation"],
+            record["workflow_id"],
+            record["idempotency_key_hash"],
+            record["request_fingerprint"],
+            record["status"],
+            record["response_json"],
+            record["event_ids_json"],
+            record["side_effect_ref"],
+            record["created_at"],
+            record["updated_at"],
+            record["expires_at"],
+        ),
+    )
+    return record
+
+
+def finalize_idempotency(
+    conn: sqlite3.Connection,
+    *,
+    idempotency_id: str,
+    status: str,
+    response_json: dict | None = None,
+    event_ids: Iterable[str] = (),
+    side_effect_ref: str | None = None,
+    updated_at: float | None = None,
+    expires_at: float | None = None,
+) -> None:
+    now = float(updated_at if updated_at is not None else time.time())
+    event_ids_json = json.dumps([str(item) for item in event_ids], sort_keys=True)
+    payload = json.dumps(response_json or {}, sort_keys=True) if response_json is not None else None
+    params: list[object] = [status, payload, event_ids_json, side_effect_ref, now]
+    sql = (
+        "UPDATE commit_workflow_idempotency SET "
+        "status = ?, response_json = ?, event_ids_json = ?, side_effect_ref = ?, updated_at = ?"
+    )
+    if expires_at is not None:
+        sql += ", expires_at = ?"
+        params.append(float(expires_at))
+    sql += " WHERE idempotency_id = ?"
+    params.append(idempotency_id)
+    conn.execute(sql, params)
+
+
+def lookup_idempotency(
+    conn: sqlite3.Connection,
+    *,
+    actor_type: str,
+    actor_id: str,
+    scope_key: str,
+    operation: str,
+    raw_idempotency_key: str,
+    request_fields: dict,
+    namespace: str = IDEMPOTENCY_NAMESPACE,
+    now: float | None = None,
+) -> dict[str, object]:
+    """Return the current idempotency state for a request key."""
+    key_hash = hash_idempotency_key(namespace, raw_idempotency_key)
+    fp = request_fingerprint(operation, request_fields)
+    current_time = float(now if now is not None else time.time())
+    row = conn.execute(
+        """\
+        SELECT *
+        FROM commit_workflow_idempotency
+        WHERE actor_type = ?
+          AND actor_id = ?
+          AND scope_key = ?
+          AND operation = ?
+          AND idempotency_key_hash = ?
+        """,
+        (actor_type, actor_id, scope_key, operation, key_hash),
+    ).fetchone()
+    if row is None or float(row["expires_at"]) <= current_time:
+        return {"kind": "fresh_reserve"}
+    if row["request_fingerprint"] != fp:
+        return {"kind": "conflict", "row": dict(row)}
+    status = row["status"]
+    if status == "in_flight":
+        return {"kind": "in_flight", "row": dict(row)}
+    if status == "completed":
+        response_json = json.loads(row["response_json"] or "{}")
+        event_ids = json.loads(row["event_ids_json"] or "[]")
+        return {
+            "kind": "completed_replay",
+            "row": dict(row),
+            "response_json": response_json,
+            "event_ids": event_ids,
+            "side_effect_ref": row["side_effect_ref"],
+        }
+    if status == "failed_retryable":
+        return {"kind": "failed_retryable", "row": dict(row)}
+    return {"kind": "failed_terminal", "row": dict(row)}

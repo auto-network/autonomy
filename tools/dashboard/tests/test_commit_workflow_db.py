@@ -160,6 +160,162 @@ def test_idempotency_table_created_with_unique_key_and_indexes(tmp_path):
         conn.close()
 
 
+def test_g8_idempotency_key_hash_stored_not_raw_key():
+    digest = db.hash_idempotency_key("commit_workflow", "raw-key-123")
+    assert digest != "raw-key-123"
+    assert len(digest) == 64
+    assert all(ch in "0123456789abcdef" for ch in digest)
+
+
+def test_g8_request_fingerprint_excludes_tokens_and_correlation_ids():
+    base = {
+        "scope": {"repo_slug": "repo-slug", "workspace_id": "ws-1"},
+        "message": {"subject": "subject", "body": "body"},
+        "authorization": "Bearer token-a",
+        "correlation_id": "corr-a",
+        "idempotency_key": "raw-idem-a",
+    }
+    reordered = {
+        "message": {"body": "body", "subject": "subject"},
+        "scope": {"workspace_id": "ws-1", "repo_slug": "repo-slug"},
+        "authorization": "Bearer token-b",
+        "correlation_id": "corr-b",
+        "idempotency_key": "raw-idem-b",
+    }
+    changed = {
+        "scope": {"repo_slug": "repo-slug", "workspace_id": "ws-2"},
+        "message": {"subject": "subject", "body": "body"},
+        "authorization": "Bearer token-c",
+        "correlation_id": "corr-c",
+    }
+
+    fp1 = db.request_fingerprint("propose", base)
+    fp2 = db.request_fingerprint("propose", reordered)
+    fp3 = db.request_fingerprint("propose", changed)
+
+    assert fp1 == fp2
+    assert fp1 != fp3
+
+
+def test_scope_key_forms():
+    assert db.scope_key("repo-slug", "workflow-1") == "repo-slug:workflow-1"
+    assert db.scope_key("repo-slug", "pre-workflow") == "repo-slug:pre-workflow"
+
+
+def test_idempotency_lifecycle_reserves_replays_and_conflicts(tmp_path):
+    path = tmp_path / "commit_workflow.db"
+    db.init_db(path)
+    conn = db._get_conn(path)
+    try:
+        request_fields = {
+            "scope": {"repo_slug": "repo-slug", "workspace_id": "ws-1"},
+            "message": {"subject": "subject", "body": "body"},
+            "authorization": "Bearer token-a",
+            "correlation_id": "corr-a",
+        }
+        scope = db.scope_key("repo-slug", "pre-workflow")
+        reserved = db.reserve_idempotency(
+            conn,
+            actor_type="agent_session",
+            actor_id="actor-1",
+            scope_key=scope,
+            operation="propose",
+            raw_idempotency_key="raw-idem-1",
+            request_fields=request_fields,
+            workflow_id=None,
+            now=100.0,
+        )
+        assert reserved["status"] == "in_flight"
+        assert reserved["expires_at"] - reserved["created_at"] >= 7 * 24 * 60 * 60
+
+        in_flight = db.lookup_idempotency(
+            conn,
+            actor_type="agent_session",
+            actor_id="actor-1",
+            scope_key=scope,
+            operation="propose",
+            raw_idempotency_key="raw-idem-1",
+            request_fields=request_fields,
+            now=101.0,
+        )
+        assert in_flight["kind"] == "in_flight"
+
+        db.finalize_idempotency(
+            conn,
+            idempotency_id=reserved["idempotency_id"],
+            status="completed",
+            response_json={"ok": True},
+            event_ids=["evt-1"],
+            side_effect_ref="provider://ref",
+            updated_at=102.0,
+        )
+
+        replay = db.lookup_idempotency(
+            conn,
+            actor_type="agent_session",
+            actor_id="actor-1",
+            scope_key=scope,
+            operation="propose",
+            raw_idempotency_key="raw-idem-1",
+            request_fields=request_fields,
+            now=103.0,
+        )
+        assert replay["kind"] == "completed_replay"
+        assert replay["response_json"] == {"ok": True}
+        assert replay["event_ids"] == ["evt-1"]
+        assert replay["side_effect_ref"] == "provider://ref"
+
+        conflict = db.lookup_idempotency(
+            conn,
+            actor_type="agent_session",
+            actor_id="actor-1",
+            scope_key=scope,
+            operation="propose",
+            raw_idempotency_key="raw-idem-1",
+            request_fields={
+                "scope": {"repo_slug": "repo-slug", "workspace_id": "ws-2"},
+                "message": {"subject": "subject", "body": "body"},
+            },
+            now=104.0,
+        )
+        assert conflict["kind"] == "conflict"
+    finally:
+        conn.close()
+
+
+def test_idempotency_retention_windows(tmp_path):
+    path = tmp_path / "commit_workflow.db"
+    db.init_db(path)
+    conn = db._get_conn(path)
+    try:
+        workflow = db.reserve_idempotency(
+            conn,
+            actor_type="agent_session",
+            actor_id="actor-1",
+            scope_key=db.scope_key("repo-slug", "workflow-1"),
+            operation="propose",
+            raw_idempotency_key="raw-idem-1",
+            request_fields={"scope": {"repo_slug": "repo-slug"}},
+            workflow_id="workflow-1",
+            now=50.0,
+        )
+        publish = db.reserve_idempotency(
+            conn,
+            actor_type="agent_session",
+            actor_id="actor-1",
+            scope_key=db.scope_key("repo-slug", "workflow-1"),
+            operation="publish",
+            raw_idempotency_key="raw-idem-2",
+            request_fields={"scope": {"repo_slug": "repo-slug"}},
+            workflow_id="workflow-1",
+            now=60.0,
+        )
+        assert workflow["expires_at"] - workflow["created_at"] >= 7 * 24 * 60 * 60
+        assert publish["expires_at"] - publish["created_at"] >= 30 * 24 * 60 * 60
+    finally:
+        conn.close()
+
+
 def test_resolver_t1_no_double_count_terminal_workflow_suppresses_git(tmp_path):
     _event(tmp_path, workflow_id="wf1", status="landed", shas=["A"])
 
