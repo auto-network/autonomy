@@ -568,6 +568,8 @@
       _isSessionOverlayMounted() {
         if (typeof document === 'undefined') return false;
         var layer = document.getElementById('session-view-layer');
+        var root = this.$root || this.$el || null;
+        if (layer && root && layer.contains(root)) return true;
         return !!(
           layer &&
           layer.classList.contains('active') &&
