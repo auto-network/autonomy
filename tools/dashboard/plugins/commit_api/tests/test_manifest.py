@@ -36,5 +36,8 @@ def test_plugin_discovers_and_loads_routes():
         "/api/capabilities/commit/v1/resolve-policy",
         "/api/capabilities/commit/v1/policy/describe",
         "/api/capabilities/commit/v1/proposals",
+        "/api/capabilities/commit/v1/workflows/{workflow_id}/commit",
+        "/api/capabilities/commit/v1/workflows/{workflow_id}/signature-request",
+        "/api/capabilities/commit/v1/signing-requests/{signing_request_id}/attach",
+        "/api/capabilities/commit/v1/workflows/{workflow_id}/publish",
     }
-
