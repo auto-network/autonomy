@@ -1659,7 +1659,8 @@ async function _ensureHtml2Canvas(doc, win) {
  * Returns true on success, false on failure.
  */
 async function _captureViaIframeHtml2Canvas(expId, sessionName) {
-  const iframe = document.querySelector('iframe.design-variant-iframe[data-variant]');
+  const iframe = document.querySelector('iframe.design-variant-iframe[data-variant]') ||
+    document.getElementById('design-iframe');
   if (!iframe) return false;
   try {
     const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;

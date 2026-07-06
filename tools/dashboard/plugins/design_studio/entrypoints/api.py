@@ -216,6 +216,81 @@ def _set_design_series_status(design_id: str, status: str) -> dict | None:
     return _series_from_rows(rows)[0] if rows else None
 
 
+def _update_revision_metadata(
+    revision_id: str,
+    *,
+    title: str | None = None,
+    description: str | None = None,
+) -> dict | None:
+    rev_id = _safe_revision_id(revision_id)
+    if not rev_id:
+        return None
+    updates: list[str] = []
+    values: list[Any] = []
+    if title is not None:
+        updates.append("title = ?")
+        values.append(title)
+    if description is not None:
+        updates.append("description = ?")
+        values.append(description)
+    if not updates:
+        raise ValueError("no metadata fields")
+
+    if os.environ.get("DASHBOARD_MOCK"):
+        rows = [row for row in _design_rows() if str(row.get("id") or "") == rev_id]
+        if not rows:
+            return None
+        row = dict(rows[0])
+        if title is not None:
+            row["title"] = title
+        if description is not None:
+            row["description"] = description
+        return row
+
+    from agents.design_db import _get_conn
+
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT id FROM designs WHERE id = ?",
+            (rev_id,),
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute(
+            "UPDATE designs SET " + ", ".join(updates) + " WHERE id = ?",
+            (*values, rev_id),
+        )
+        conn.commit()
+        updated = conn.execute("""\
+            SELECT
+              d.id,
+              COALESCE(d.design_id, d.id) AS design_id,
+              d.title,
+              d.description,
+              d.status,
+              COALESCE(d.revision_seq, 1) AS revision_seq,
+              d.created_at,
+              d.creator_session_id,
+              d.creator_session_label,
+              CASE WHEN d.fixture IS NOT NULL AND d.fixture != '' THEN 1 ELSE 0 END AS has_fixture
+            FROM designs d
+            WHERE d.id = ?
+        """, (rev_id,)).fetchone()
+        if not updated:
+            return None
+        item = {k: updated[k] for k in updated.keys()}
+        variant_count = conn.execute(
+            "SELECT COUNT(*) FROM revision_variants WHERE revision_id = ?",
+            (rev_id,),
+        ).fetchone()[0]
+        item["variant_count"] = int(variant_count or 0)
+        item["thumbnail_url"] = _thumbnail_url(rev_id)
+        return item
+    finally:
+        conn.close()
+
+
 def _all_series() -> list[dict]:
     if os.environ.get("DASHBOARD_MOCK"):
         return _series_from_rows(_design_rows())
@@ -345,6 +420,66 @@ async def get_revision_thumbnail(request: Request):
     return FileResponse(path, media_type="image/png")
 
 
+async def update_revision_metadata(request: Request) -> JSONResponse:
+    revision_id = request.path_params["revision_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    allowed = {"title", "description"}
+    unknown = set(body) - allowed
+    if unknown:
+        return JSONResponse(
+            {"error": "unknown field(s)", "fields": sorted(unknown)},
+            status_code=400,
+        )
+    if not any(key in body for key in allowed):
+        return JSONResponse(
+            {"error": "title or description is required"},
+            status_code=400,
+        )
+    title = body.get("title") if "title" in body else None
+    description = body.get("description") if "description" in body else None
+    if title is not None:
+        title = str(title).strip()
+        if not title:
+            return JSONResponse({"error": "title must not be blank"}, status_code=400)
+    if description is not None:
+        description = str(description).strip()
+        if len(description) > 1000:
+            return JSONResponse(
+                {"error": "description exceeds 1000 characters"},
+                status_code=400,
+            )
+    try:
+        revision = _update_revision_metadata(
+            revision_id,
+            title=title,
+            description=description,
+        )
+    except ValueError:
+        return JSONResponse(
+            {"error": "title or description is required"},
+            status_code=400,
+        )
+    if revision is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    _clear_catalog_cache()
+    try:
+        from tools.dashboard.event_bus import event_bus
+        await event_bus.broadcast(
+            f"design:{revision.get('design_id') or revision_id}",
+            {
+                "revision_id": revision_id,
+                "design_id": revision.get("design_id") or revision_id,
+                "metadata_updated": True,
+            },
+        )
+    except Exception:
+        logger.exception("design-studio: failed to broadcast metadata update")
+    return JSONResponse({"ok": True, "revision": revision})
+
+
 async def update_design_status(request: Request) -> JSONResponse:
     design_id = request.path_params["design_id"]
     try:
@@ -383,5 +518,6 @@ routes: list[Route] = [
     Route("/api/design-studio/designs", list_designs, methods=["GET"]),
     Route("/api/design-studio/designs/{design_id}/status", update_design_status, methods=["POST"]),
     Route("/api/design-studio/designs/{design_id}", get_design_series, methods=["GET"]),
+    Route("/api/design-studio/revisions/{revision_id}/metadata", update_revision_metadata, methods=["PATCH", "PUT"]),
     Route("/api/design-studio/revisions/{revision_id}/thumbnail", get_revision_thumbnail, methods=["GET"]),
 ]
