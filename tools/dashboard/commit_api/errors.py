@@ -4,13 +4,51 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import uuid
-from typing import Any, ClassVar, Mapping
+from typing import Any, Mapping
 
 from .types import CommitApiModel, NextAction
 
 
 def _new_correlation_id() -> str:
     return uuid.uuid4().hex
+
+
+REDACTION_MASK = "[redacted]"
+DEFAULT_REDACTION_RULES: dict[str, str] = {
+    "provider_request": REDACTION_MASK,
+    "provider_request_body": REDACTION_MASK,
+    "token": REDACTION_MASK,
+    "passphrase": REDACTION_MASK,
+    "decrypted_key_material": REDACTION_MASK,
+    "local_signer_secret": REDACTION_MASK,
+    "encrypted_key_ciphertext": REDACTION_MASK,
+}
+
+
+def redact(payload: Any, redaction_rules: Mapping[str, str] | None = None) -> Any:
+    rules = dict(DEFAULT_REDACTION_RULES)
+    if redaction_rules is not None:
+        rules.update(redaction_rules)
+    if isinstance(payload, dict):
+        redacted: dict[str, Any] = {}
+        for key, value in payload.items():
+            if key in rules:
+                redacted[key] = rules[key]
+            else:
+                redacted[key] = redact(value, redaction_rules=redaction_rules)
+        return redacted
+    if isinstance(payload, list):
+        return [redact(item, redaction_rules=redaction_rules) for item in payload]
+    if isinstance(payload, tuple):
+        return tuple(redact(item, redaction_rules=redaction_rules) for item in payload)
+    return payload
+
+
+def redaction_misconfigured(operation: str) -> "CommitApiError":
+    return commit_api_error(
+        "redaction_misconfigured",
+        f"missing redaction rule for {operation}",
+    )
 
 
 COMMIT_API_ERROR_HTTP_STATUS: dict[str, int] = {
@@ -91,8 +129,11 @@ class CommitApiError(CommitApiModel):
             correlation_id=correlation_id or _new_correlation_id(),
         )
 
-    def to_response(self) -> dict[str, Any]:
-        return self.to_dict()
+    def to_response(self, *, redaction_rules: Mapping[str, str] | None = None) -> dict[str, Any]:
+        return redact(self.to_dict(), redaction_rules=redaction_rules)
+
+    def to_log_payload(self, *, redaction_rules: Mapping[str, str] | None = None) -> dict[str, Any]:
+        return self.to_response(redaction_rules=redaction_rules)
 
 
 def commit_api_error(
@@ -114,4 +155,3 @@ def commit_api_error(
         safe_to_display=safe_to_display,
         correlation_id=correlation_id,
     )
-

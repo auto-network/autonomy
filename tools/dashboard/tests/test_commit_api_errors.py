@@ -5,6 +5,8 @@ from tools.dashboard.commit_api.errors import (
     COMMIT_API_ERROR_HTTP_STATUS,
     CommitApiError,
     commit_api_error,
+    redact,
+    redaction_misconfigured,
 )
 
 
@@ -36,9 +38,41 @@ def test_error_codes_complete_with_http_status():
 
 
 def test_error_has_correlation_id():
-    err = commit_api_error("invalid_request", "bad input")
+    err = commit_api_error(
+        "provider_error",
+        "bad input",
+        details={
+            "provider_request": {"token": "secret-token", "body": "payload"},
+            "nested": [{"passphrase": "s3cr3t"}],
+            "encrypted_key_ciphertext": "ciphertext",
+        },
+    )
     assert err.correlation_id
     assert isinstance(err, CommitApiError)
-    assert err.http_status == 400
-    assert err.to_response()["code"] == "invalid_request"
+    assert err.http_status == 502
+    response = err.to_response()
+    assert response["code"] == "provider_error"
+    assert response["details"]["provider_request"] == "[redacted]"
+    assert response["details"]["nested"][0]["passphrase"] == "[redacted]"
+    assert response["details"]["encrypted_key_ciphertext"] == "[redacted]"
+    assert "secret-token" not in repr(response)
 
+
+def test_redaction_misconfigured_helper_returns_error():
+    err = redaction_misconfigured("credential-bearing operation")
+    assert err.code == "redaction_misconfigured"
+    assert err.http_status == 500
+
+
+def test_redact_nested_payload_masks_secret_keys():
+    payload = {
+        "outer": {
+            "token": "abc",
+            "body": {"passphrase": "def"},
+        },
+        "items": [{"local_signer_secret": "ghi"}],
+    }
+    redacted = redact(payload)
+    assert redacted["outer"]["token"] == "[redacted]"
+    assert redacted["outer"]["body"]["passphrase"] == "[redacted]"
+    assert redacted["items"][0]["local_signer_secret"] == "[redacted]"
