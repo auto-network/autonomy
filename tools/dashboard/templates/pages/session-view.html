@@ -45,15 +45,12 @@
       <div class="sv-header" data-testid="session-header"
            :class="{ 'open': headerOpen }"
            @click="headerOpen = !headerOpen">
-        <div class="sv-header-inner"
-             :class="{ 'sv-header-inner--with-back': _showSessionsBack }">
+        <div class="sv-header-inner sv-header-inner--with-back">
           <button type="button"
                   class="sv-back-button"
-                  x-show="_showSessionsBack"
                   @click.stop="backToSessionsList()"
                   aria-label="Back to sessions"
-                  title="Back to sessions"
-                  style="display:none;">
+                  title="Back to sessions">
             <svg viewBox="0 0 24 24"
                  fill="none"
                  stroke="currentColor"
