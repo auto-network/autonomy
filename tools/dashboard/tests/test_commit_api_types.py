@@ -142,7 +142,6 @@ def test_types_roundtrip():
             idempotency_key="idempo-3",
             workflow_id="wf-1",
             approval_id="approval-1",
-            approval_type="force_with_lease",
             decision="approved",
             operator_edits={"note": "ok"},
             constraints=t.ApprovalConstraints("diff-fp", "msg-fp", "sha-1", "2026-07-07T00:00:00Z"),
