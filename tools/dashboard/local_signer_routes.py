@@ -284,7 +284,14 @@ async def api_local_signer_pairing_decide(request):
         device_id = str(uuid.uuid4())
         import json as _json
         meta = _json.loads(row.pending_device_meta or "{}")
-        db.insert_device(
+        # Device-create and the pairing decision must be ATOMIC: two
+        # concurrent approves must not both insert a device row (an
+        # orphaned active device with no completed pairing could sign).
+        # The status re-check, the insert, and the decision update all
+        # happen inside one transaction in approve_pairing_and_create_device
+        # so a lost race writes nothing at all, not just a losing decision.
+        ok = db.approve_pairing_and_create_device(
+            pairing_id=pairing_id,
             device_id=device_id,
             operator_id=row.operator_id,
             device_label=meta.get("device_label") or "Paired device",
@@ -293,7 +300,6 @@ async def api_local_signer_pairing_decide(request):
             app_version=meta.get("app_version"),
             paired_at=now,
         )
-        ok = db.decide_pairing(pairing_id=pairing_id, approve=True, device_id=device_id, now=now)
         if not ok:
             return JSONResponse({"error": "not awaiting a decision"}, status_code=409)
         db.append_audit_event(

@@ -297,6 +297,99 @@ def test_decide_deny_creates_no_device(client):
     assert count == 0
 
 
+def test_concurrent_approve_creates_exactly_one_device(client):
+    """Two concurrent approves of the same pairing must not leave an
+    orphaned device row for the loser -- device-create and the pairing
+    decision must be atomic together, not two separate writes racing
+    independently (Codex's finding on the signer batch review). Same
+    bare-thread-race shape as test_L2b_concurrent_completions_exactly_one_wins
+    above, which reliably catches the equivalent race on
+    complete_pairing_to_awaiting_confirm."""
+    import threading
+
+    start = _start(client)
+    private, public_b64 = _keypair()
+    _complete(client, device_code=start["device_code"], private_key=private, public_key_b64=public_b64)
+
+    results = []
+    lock = threading.Lock()
+
+    def approve():
+        r = client.post(
+            f"/api/dashboard/local-signer/pairing/{start['pairing_id']}/decide",
+            json={"decision": "approve"},
+        )
+        with lock:
+            results.append(r.status_code)
+
+    threads = [threading.Thread(target=approve) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sorted(results) == [200, 409]
+
+    conn = db._get_conn()
+    try:
+        count = conn.execute("SELECT COUNT(*) AS n FROM local_signer_devices").fetchone()["n"]
+    finally:
+        conn.close()
+    assert count == 1, f"expected exactly one device row, got {count} (orphaned loser row)"
+
+    row = db.get_pairing_request(start["pairing_id"])
+    assert row.status == "completed"
+    assert row.completed_device_id is not None
+
+
+def test_approve_pairing_and_create_device_dao_race_exactly_one_device_row(tmp_path):
+    """DAO-level race, no HTTP/TestClient threading involved: two threads
+    call approve_pairing_and_create_device directly for the same pairing.
+    Only one may win; the loser must write NOTHING (not even a device
+    row), because the status re-check, the device insert, and the
+    pairing-completion update are one BEGIN IMMEDIATE transaction."""
+    import threading
+
+    path = tmp_path / "local_signer.db"
+    db.init_db(path)
+    now = time.time()
+    db.insert_pairing_request(
+        pairing_id="pr-1", device_code="CODE1234", verifier_hash="vh",
+        operator_id="op-1", created_at=now, expires_at=now + 120, db_path=path,
+    )
+    db.complete_pairing_to_awaiting_confirm(
+        device_code="CODE1234", pending_public_key="pub-key",
+        pending_device_meta="{}", verifier_presented=True, now=now, db_path=path,
+    )
+
+    results = []
+    lock = threading.Lock()
+
+    def approve(device_id):
+        ok = db.approve_pairing_and_create_device(
+            pairing_id="pr-1", device_id=device_id, operator_id="op-1",
+            device_label="Test Device", public_key="pub-key", platform="ios",
+            paired_at=now, db_path=path,
+        )
+        with lock:
+            results.append(ok)
+
+    threads = [threading.Thread(target=approve, args=(f"dev-{i}",)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sorted(results) == [False, True]
+
+    conn = db._get_conn(path)
+    try:
+        count = conn.execute("SELECT COUNT(*) AS n FROM local_signer_devices").fetchone()["n"]
+    finally:
+        conn.close()
+    assert count == 1, f"expected exactly one device row, got {count} (loser wrote an orphaned row)"
+
+
 def test_decide_by_different_operator_denied(client, monkeypatch):
     start = _start(client)
     private, public_b64 = _keypair()

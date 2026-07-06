@@ -434,6 +434,68 @@ def decide_pairing(
         conn.close()
 
 
+def approve_pairing_and_create_device(
+    *,
+    pairing_id: str,
+    device_id: str,
+    operator_id: str,
+    device_label: str,
+    public_key: str,
+    platform: str,
+    paired_at: float,
+    app_version: str | None = None,
+    pairing_ip_hash: str | None = None,
+    db_path: Path | str | None = None,
+) -> bool:
+    """Atomically create the device row AND complete the pairing decision
+    in one ``BEGIN IMMEDIATE`` transaction.
+
+    Two concurrent approve calls for the same pairing must not both
+    insert a device row — only one can win the status re-check, and the
+    loser must insert NOTHING (an orphaned active device row with no
+    completed pairing is a real security defect: it could sign). Doing
+    the status re-check, the device insert, and the pairing-completion
+    update inside a single transaction is what makes the loser's
+    rollback undo the device insert too, not just the pairing update.
+
+    Returns ``False`` (no-op, nothing written) if the row is not
+    currently ``awaiting_operator_confirm``.
+    """
+    conn = _get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM local_signer_pairing_requests WHERE pairing_id = ?",
+            (pairing_id,),
+        ).fetchone()
+        if row is None or row["status"] != "awaiting_operator_confirm":
+            conn.rollback()
+            return False
+        conn.execute(
+            """INSERT INTO local_signer_devices (
+                   device_id, operator_id, device_label, public_key, platform,
+                   app_version, paired_at, pairing_ip_hash
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                device_id, operator_id, device_label, public_key, platform,
+                app_version, paired_at, pairing_ip_hash,
+            ),
+        )
+        conn.execute(
+            """UPDATE local_signer_pairing_requests
+               SET status = 'completed', completed_device_id = ?
+               WHERE pairing_id = ?""",
+            (device_id, pairing_id),
+        )
+        conn.commit()
+        return True
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def expire_stale_pairing_requests(
     *, now: float, db_path: Path | str | None = None,
 ) -> int:
