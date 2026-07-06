@@ -112,6 +112,32 @@ def _reject_agent_session(request) -> JSONResponse | None:
     return None
 
 
+# ── D3-14: per-request client auth (device signature + live revocation) ─
+#
+# No bearer token exists anywhere after pairing (DN3 §4). Every
+# authenticated device call signs a message specific to that call and the
+# server: (1) verifies it against the device's registered public key,
+# (2) re-reads revoked_at fresh on this exact call — never a decision
+# cached from an earlier call in the same client run (T7) — and
+# (3) enforces the accompanying client_nonce is single-use. Each endpoint
+# builds its own canonical ``message`` (the thing that's actually being
+# authorized); this function only owns the three checks above.
+
+
+def verify_device_request(
+    *, device_id: str, message: bytes, signature: str, client_nonce: str, now: float,
+) -> tuple[Any, str | None]:
+    """Returns ``(device, None)`` on success or ``(None, error_code)``."""
+    device = db.get_device(device_id)
+    if device is None or not device.active:
+        return None, "device_not_found_or_revoked"
+    if not verify_ed25519(device.public_key, message, signature):
+        return None, "signature_invalid"
+    if not db.consume_request_nonce(device_id=device_id, nonce=client_nonce, now=now):
+        return None, "nonce_replayed"
+    return device, None
+
+
 # ── POST /api/capabilities/local-signer/v1/pairing/start ─────────────
 
 
@@ -285,8 +311,158 @@ async def api_local_signer_pairing_decide(request):
     return JSONResponse({"status": "denied"})
 
 
+# ── D3-20: POST /key-material/provision (+ operator step-up) ──────────
+
+
+class KeyMaterial:
+    """What a real credential store hands back for one ``key_id``.
+
+    ``public_material`` is never secret (it's the public half); a real
+    store can return it in the clear alongside the encrypted private
+    blob. Deliberately NOT a dataclass with a fixed schema yet — the real
+    credential store (out of scope for this backlog, see the index note's
+    "Not in this backlog") owns the final shape. This is the seam a
+    future integration replaces.
+    """
+
+    def __init__(self, ciphertext: bytes, public_material: bytes, key_fingerprint: str):
+        self.ciphertext = ciphertext
+        self.public_material = public_material
+        self.key_fingerprint = key_fingerprint
+
+
+def _default_key_material_provider(key_id: str) -> KeyMaterial | None:
+    """No real credential store exists yet — tests monkeypatch
+    ``KEY_MATERIAL_PROVIDER``. Production wiring is a follow-up task once
+    that store exists."""
+    return None
+
+
+KEY_MATERIAL_PROVIDER = _default_key_material_provider
+
+STEP_UP_TTL_SECONDS = 60
+
+
+async def api_local_signer_step_up(request):
+    """Operator-only: mint a short-lived, single-use, device/key-scoped
+    token proving a live operator re-affirmed this specific provisioning
+    intent (DN3 §11: "operator-authorized, audited, short-window")."""
+    denied = _reject_agent_session(request)
+    if denied is not None:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    device_id = body.get("device_id")
+    key_id = body.get("key_id")
+    if not device_id or not key_id:
+        return JSONResponse({"error": "device_id and key_id are required"}, status_code=400)
+
+    now = time.time()
+    token = secrets.token_urlsafe(24)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    db.insert_step_up_token(
+        token_hash=token_hash,
+        operator_id=_current_operator_id(),
+        device_id=device_id,
+        key_id=key_id,
+        created_at=now,
+        expires_at=now + STEP_UP_TTL_SECONDS,
+    )
+    return JSONResponse({"step_up_token": token, "expires_at": now + STEP_UP_TTL_SECONDS})
+
+
+def _provision_message(*, device_id: str, key_id: str, client_nonce: str, issued_at: float) -> bytes:
+    return f"autonomy-local-signer-provision:{device_id}:{key_id}:{client_nonce}:{issued_at}".encode()
+
+
+async def api_local_signer_key_material_provision(request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    device_id = body.get("device_id")
+    key_id = body.get("key_id")
+    client_nonce = body.get("client_nonce")
+    issued_at = body.get("issued_at")
+    signature = body.get("signature")
+    step_up_token = body.get("step_up_token")
+    if not all([device_id, key_id, client_nonce, issued_at, signature, step_up_token]):
+        return JSONResponse(
+            {"error": "device_id, key_id, client_nonce, issued_at, signature, step_up_token are all required"},
+            status_code=400,
+        )
+
+    now = time.time()
+
+    # Gate 1: per-request client auth (D3-14) — proves a live, non-revoked
+    # paired device is making this exact call.
+    message = _provision_message(device_id=device_id, key_id=key_id, client_nonce=client_nonce, issued_at=issued_at)
+    device, error = verify_device_request(
+        device_id=device_id, message=message, signature=signature,
+        client_nonce=client_nonce, now=now,
+    )
+    if device is None:
+        return JSONResponse({"error": error}, status_code=403)
+
+    # Gate 2: fresh operator step-up, scoped to this exact device/key and
+    # consumed atomically — missing or already-used is rejected the same way.
+    token_hash = hashlib.sha256(step_up_token.encode()).hexdigest()
+    if not db.consume_step_up_token(token_hash=token_hash, device_id=device_id, key_id=key_id, now=now):
+        return JSONResponse({"error": "step_up_required_or_expired"}, status_code=403)
+
+    material = KEY_MATERIAL_PROVIDER(key_id)
+    if material is None:
+        return JSONResponse({"error": "unknown key_id"}, status_code=404)
+
+    from tools.dashboard.local_signer_s2k import evaluate_floor, parse_s2k_packet, MalformedS2KPacket
+
+    try:
+        params = parse_s2k_packet(material.ciphertext)
+        violations = evaluate_floor(params)
+    except MalformedS2KPacket as e:
+        violations = [str(e)]
+        params = None
+
+    kdf_summary = params.to_kdf_params() if params is not None else {"error": "malformed_packet"}
+    if violations:
+        db.append_audit_event(
+            audit_event_id=str(uuid.uuid4()),
+            occurred_at=now,
+            event_type="key_provision_rejected_weak_kdf",
+            device_id=device_id,
+            operator_id=device.operator_id,
+            kdf_summary_json=_json_dumps(kdf_summary),
+            reason="; ".join(violations),
+        )
+        return JSONResponse(
+            {"status": "rejected_weak_kdf", "kdf_params": kdf_summary, "floor_violated": violations},
+            status_code=422,
+        )
+
+    encrypted_key_blob = base64.b64encode(material.ciphertext).decode()
+    db.append_audit_event(
+        audit_event_id=str(uuid.uuid4()),
+        occurred_at=now,
+        event_type="key_provisioned",
+        device_id=device_id,
+        operator_id=device.operator_id,
+        kdf_summary_json=_json_dumps(kdf_summary),
+    )
+    return JSONResponse({
+        "encrypted_key_blob": encrypted_key_blob,
+        "kdf_params": kdf_summary,
+        "key_fingerprint": material.key_fingerprint,
+        "provisioned_at": now,
+    })
+
+
 ROUTES = [
     Route("/api/capabilities/local-signer/v1/pairing/start", api_local_signer_pairing_start, methods=["POST"]),
     Route("/api/capabilities/local-signer/v1/pairing/complete", api_local_signer_pairing_complete, methods=["POST"]),
     Route("/api/dashboard/local-signer/pairing/{pairing_id}/decide", api_local_signer_pairing_decide, methods=["POST"]),
+    Route("/api/dashboard/local-signer/key-material/step-up", api_local_signer_step_up, methods=["POST"]),
+    Route("/api/capabilities/local-signer/v1/key-material/provision", api_local_signer_key_material_provision, methods=["POST"]),
 ]

@@ -92,6 +92,23 @@ CREATE TABLE IF NOT EXISTS local_signer_audit_events (
     kdf_summary_json    TEXT,
     reason              TEXT
 );
+
+CREATE TABLE IF NOT EXISTS local_signer_request_nonces (
+    device_id           TEXT NOT NULL,
+    nonce               TEXT NOT NULL,
+    used_at             REAL NOT NULL,
+    PRIMARY KEY (device_id, nonce)
+);
+
+CREATE TABLE IF NOT EXISTS local_signer_step_up_tokens (
+    token_hash          TEXT PRIMARY KEY,
+    operator_id         TEXT NOT NULL,
+    device_id           TEXT NOT NULL,
+    key_id              TEXT NOT NULL,
+    created_at          REAL NOT NULL,
+    expires_at          REAL NOT NULL,
+    consumed_at         REAL
+);
 """
 
 CREATE_INDEXES = """\
@@ -109,6 +126,12 @@ CREATE INDEX IF NOT EXISTS idx_lsae_device_time
 
 CREATE INDEX IF NOT EXISTS idx_lsae_signing_request
     ON local_signer_audit_events(signing_request_id);
+
+CREATE INDEX IF NOT EXISTS idx_lsrn_used_at
+    ON local_signer_request_nonces(used_at);
+
+CREATE INDEX IF NOT EXISTS idx_lsst_device_key
+    ON local_signer_step_up_tokens(device_id, key_id, expires_at);
 """
 
 CREATE_TRIGGERS = """\
@@ -461,5 +484,92 @@ def append_audit_event(
             ),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+# ── Per-request nonces (D3-14 anti-replay) ────────────────────────────
+
+
+def consume_request_nonce(
+    *, device_id: str, nonce: str, now: float, db_path: Path | str | None = None,
+) -> bool:
+    """Single-use per (device_id, nonce). Returns True if this is the
+    first use (the INSERT succeeded), False if already consumed."""
+    conn = _get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "INSERT INTO local_signer_request_nonces (device_id, nonce, used_at) VALUES (?, ?, ?)",
+                (device_id, nonce, now),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            return False
+    finally:
+        conn.close()
+
+
+# ── Step-up tokens (D3-20 operator re-affirmation) ────────────────────
+
+
+def insert_step_up_token(
+    *,
+    token_hash: str,
+    operator_id: str,
+    device_id: str,
+    key_id: str,
+    created_at: float,
+    expires_at: float,
+    db_path: Path | str | None = None,
+) -> None:
+    conn = _get_conn(db_path)
+    try:
+        conn.execute(
+            """INSERT INTO local_signer_step_up_tokens (
+                   token_hash, operator_id, device_id, key_id, created_at, expires_at
+               ) VALUES (?, ?, ?, ?, ?, ?)""",
+            (token_hash, operator_id, device_id, key_id, created_at, expires_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def consume_step_up_token(
+    *, token_hash: str, device_id: str, key_id: str, now: float,
+    db_path: Path | str | None = None,
+) -> bool:
+    """Atomically consume a step-up token. Returns True only if a row
+    exists, is unexpired, unconsumed, and scoped to this exact
+    device_id/key_id — otherwise False, with no state change."""
+    conn = _get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM local_signer_step_up_tokens WHERE token_hash = ?",
+            (token_hash,),
+        ).fetchone()
+        if (
+            row is None
+            or row["consumed_at"] is not None
+            or row["expires_at"] <= now
+            or row["device_id"] != device_id
+            or row["key_id"] != key_id
+        ):
+            conn.rollback()
+            return False
+        conn.execute(
+            "UPDATE local_signer_step_up_tokens SET consumed_at = ? WHERE token_hash = ?",
+            (now, token_hash),
+        )
+        conn.commit()
+        return True
+    except BaseException:
+        conn.rollback()
+        raise
     finally:
         conn.close()
