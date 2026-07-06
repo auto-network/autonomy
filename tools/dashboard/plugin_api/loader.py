@@ -400,12 +400,18 @@ def load_all(
     return out
 
 
-def reconcile_declared_settings(plugins: list[LoadedPlugin]) -> list[dict[str, Any]]:
+def reconcile_declared_settings(
+    plugins: list[LoadedPlugin],
+    *,
+    force: bool = False,
+) -> list[dict[str, Any]]:
     """Reconcile plugin-declared graph Settings for the current enable state.
 
     Enabled plugins install/update/adopt their declared Settings. Explicitly
     disabled plugins uninstall their owned Settings according to each
     declaration's uninstall policy. Mock mode is intentionally read-only.
+    ``force`` overwrites drifted plugin-owned Settings with the manifest
+    payload; normal reconciliation remains conservative.
     """
     if os.environ.get("DASHBOARD_MOCK"):
         return []
@@ -436,6 +442,7 @@ def reconcile_declared_settings(plugins: list[LoadedPlugin]) -> list[dict[str, A
                 results.extend(plugin_settings.reconcile_plugin_settings(
                     plugin,
                     effective_org=effective_org,
+                    force=force,
                 ))
             elif payload is not None:
                 results.extend(plugin_settings.uninstall_plugin_settings(

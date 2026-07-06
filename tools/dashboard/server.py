@@ -14839,9 +14839,14 @@ async def api_plugins(request):
     stamps it as ``X-Graph-Org`` on plugin-originated fetches.
     """
     try:
+        force_settings = (
+            request.query_params.get("force_settings", "").lower()
+            in {"1", "true", "yes"}
+        )
         await asyncio.to_thread(
             plugin_loader.reconcile_declared_settings,
             PLUGIN_REGISTRY,
+            force=force_settings,
         )
     except Exception:
         logger.exception("plugin declared-settings reconcile failed")
