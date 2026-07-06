@@ -17,6 +17,7 @@ Revision history:
 
 from __future__ import annotations
 
+import string
 from typing import Any
 
 from .registry import SchemaValidationError, SettingSchema
@@ -50,6 +51,52 @@ _ALLOWED_FIELDS = {
 }
 
 _CARD_SUMMARY_FORMATS = ("text", "badge", "stars", "code")
+
+
+AGENT_ACTION_TEMPLATE_ROOTS = (
+    "asset",
+    "source",
+    "bead",
+    "design",
+    "tags",
+    "dispatched_by_session",
+    "member_key",
+    "custom_input",
+)
+
+
+def _template_field_root(field_name: str) -> str:
+    root = field_name.split("[", 1)[0]
+    return root.split(".", 1)[0]
+
+
+def validate_prompt_template(template: str) -> None:
+    """Validate prompt-template syntax and allowed placeholder roots.
+
+    Agent action prompts render through Python ``str.format`` at dispatch
+    time. Literal braces in shell/Python examples must therefore be escaped as
+    ``{{`` and ``}}``. This schema-level check rejects malformed templates
+    before they can be installed as graph Settings.
+    """
+    try:
+        referenced = {
+            field for _, field, _, _ in string.Formatter().parse(template)
+            if field and not field[0].isdigit()
+        }
+    except ValueError as exc:
+        raise SchemaValidationError(
+            f"AgentAction: invalid prompt_template format syntax: {exc}"
+        ) from exc
+
+    unknown = {
+        field for field in referenced
+        if _template_field_root(field) not in AGENT_ACTION_TEMPLATE_ROOTS
+    }
+    if unknown:
+        raise SchemaValidationError(
+            "AgentAction: prompt_template references undefined placeholder(s) "
+            f"{sorted(unknown)}"
+        )
 
 
 class AgentActionV2(SettingSchema):
@@ -182,6 +229,8 @@ class AgentActionV2(SettingSchema):
                     raise SchemaValidationError(
                         f"{cls.__name__}: {key!r} must be a string or null"
                     )
+        if isinstance(payload.get("prompt_template"), str):
+            validate_prompt_template(payload["prompt_template"])
 
         if "estimated_seconds" in payload:
             v = payload["estimated_seconds"]
