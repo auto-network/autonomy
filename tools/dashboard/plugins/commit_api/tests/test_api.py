@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 from types import SimpleNamespace
 from unittest.mock import patch
+from pathlib import Path
 
 import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
+from tools.dashboard.dao import auth_db, dashboard_db
 from tools.dashboard.dao import commit_workflow_db as cdb
 from tools.dashboard.plugins.commit_api.entrypoints import api as commit_api
 from tools.graph import ops
@@ -25,6 +28,21 @@ def workflow_db_env(tmp_path, monkeypatch):
     db_path = tmp_path / "commit_workflow.db"
     monkeypatch.setenv("COMMIT_WORKFLOW_DB", str(db_path))
     cdb.init_db(db_path)
+    yield db_path
+
+
+@pytest.fixture
+def dashboard_db_env(tmp_path, monkeypatch):
+    db_path = tmp_path / "dashboard.db"
+    monkeypatch.setenv("DASHBOARD_DB", str(db_path))
+    dashboard_db.init_db(db_path)
+    yield db_path
+
+
+@pytest.fixture
+def auth_db_env(tmp_path):
+    db_path = tmp_path / "auth.db"
+    auth_db.init_db(db_path)
     yield db_path
 
 
@@ -52,6 +70,20 @@ def _seed_policy(org: str, workspace_id: str, profile: str):
         org=org,
         state="canonical",
     )
+
+
+def _seed_session(tmux_name: str, project: str):
+    dashboard_db.upsert_session(
+        tmux_name,
+        "host",
+        project,
+        is_live=True,
+        harness="claude",
+    )
+
+
+def _seed_token(tmux_name: str, raw_token: str):
+    auth_db.insert_token(hashlib.sha256(raw_token.encode("utf-8")).hexdigest(), tmux_name)
 
 
 def test_resolve_policy_and_describe_policy_round_trip(graph_db_env, client, monkeypatch):
@@ -117,12 +149,30 @@ def test_describe_policy_missing_named_workspace_fails_loudly(graph_db_env, clie
     assert "no workspace 'missing' found in organization" in resp.json()["message"]
 
 
-def test_propose_creates_workflow_and_replays_idempotently(graph_db_env, workflow_db_env, client, monkeypatch):
+def test_propose_creates_workflow_and_replays_idempotently(
+    graph_db_env,
+    dashboard_db_env,
+    auth_db_env,
+    workflow_db_env,
+    client,
+    monkeypatch,
+):
     _enable_plugin(monkeypatch)
     _seed_policy(ops.CALLER_ORG, "enterprise-ng", "enterprise.signed-pr-no-issue")
     fake_ws = SimpleNamespace(id="enterprise-ng", graph_project="autonomy")
     monkeypatch.setattr(commit_api, "get_workspace", lambda wid: fake_ws)
     monkeypatch.setattr(commit_api, "resolve_capabilities", lambda workspace_id, org=None: [])
+    _seed_session("sess-1", "enterprise-ng")
+    _seed_token("sess-1", "tok-1")
+    fake_row = SimpleNamespace(
+        session_name="sess-1",
+        repo_name="autonomy",
+        managed_clone=Path("/workspace/repo"),
+        branch="session/sess-1",
+        worktree_path=Path("/workspace/repo"),
+    )
+    monkeypatch.setattr(commit_api.worktree_monitor, "get_all", lambda: [fake_row])
+    monkeypatch.setattr(commit_api, "derive_repo_slug", lambda _path: "autonomy/autonomy")
 
     payload = {
         "idempotency_key": "idem-1",
@@ -177,20 +227,32 @@ def test_propose_creates_workflow_and_replays_idempotently(graph_db_env, workflo
         "client_observed_policy_version": None,
     }
 
-    first = client.post("/api/capabilities/commit/v1/proposals", json=payload)
+    first = client.post(
+        "/api/capabilities/commit/v1/proposals",
+        json=payload,
+        headers={"Authorization": "Bearer tok-1"},
+    )
     assert first.status_code == 200, first.text
     body = first.json()
     assert body["workflow"]["repo_slug"] == "autonomy/autonomy"
     assert body["workflow"]["status"] == "awaiting_approval"
     assert body["duplicate_of_workflow_id"] is None
 
-    replay = client.post("/api/capabilities/commit/v1/proposals", json=payload)
+    replay = client.post(
+        "/api/capabilities/commit/v1/proposals",
+        json=payload,
+        headers={"Authorization": "Bearer tok-1"},
+    )
     assert replay.status_code == 200, replay.text
     assert replay.json()["workflow"]["workflow_id"] == body["workflow"]["workflow_id"]
 
     second = dict(payload)
     second["idempotency_key"] = "idem-2"
-    dup = client.post("/api/capabilities/commit/v1/proposals", json=second)
+    dup = client.post(
+        "/api/capabilities/commit/v1/proposals",
+        json=second,
+        headers={"Authorization": "Bearer tok-1"},
+    )
     assert dup.status_code == 200, dup.text
     dup_body = dup.json()
     assert dup_body["workflow"]["status"] == "duplicate_active"
@@ -205,5 +267,168 @@ def test_propose_creates_workflow_and_replays_idempotently(graph_db_env, workflo
         assert state["status"] == "awaiting_approval"
         assert state["repo_slug"] == "autonomy/autonomy"
         assert state["content_fingerprint"] == "fingerprint-1"
+    finally:
+        conn.close()
+
+
+def test_propose_requires_bearer_session_token(
+    graph_db_env,
+    dashboard_db_env,
+    auth_db_env,
+    workflow_db_env,
+    client,
+    monkeypatch,
+):
+    _enable_plugin(monkeypatch)
+    _seed_session("sess-1", "enterprise-ng")
+    fake_ws = SimpleNamespace(id="enterprise-ng", graph_project="autonomy")
+    monkeypatch.setattr(commit_api, "get_workspace", lambda wid: fake_ws)
+    monkeypatch.setattr(commit_api.worktree_monitor, "get_all", lambda: [])
+
+    resp = client.post("/api/capabilities/commit/v1/proposals", json={
+        "idempotency_key": "idem-1",
+        "scope": {
+            "workspace_id": "enterprise-ng",
+            "repo_slug": "autonomy/autonomy",
+            "repo_name_alias": None,
+            "session_name": "sess-1",
+            "worktree_path": "/workspace/repo",
+            "branch": "session/sess-1",
+            "target_branch": "main",
+        },
+        "target": {
+            "target_branch": "main",
+            "ref_strategy": "current_branch",
+            "intended_visibility": "workspace_shared",
+            "review_target": None,
+        },
+        "content": {
+            "head_sha": "head-1",
+            "tree_sha": "tree-1",
+            "patch_id": "patch-1",
+            "content_fingerprint": "fingerprint-1",
+        },
+        "drift_token": {
+            "head_sha": "head-1",
+            "tree_sha": "tree-1",
+            "index_sha": "index-1",
+            "worktree_status_hash": "status-1",
+            "generated_at": "2026-07-06T19:00:00Z",
+        },
+        "message": {
+            "subject": "subject",
+            "body": "body",
+            "trailers": {},
+        },
+        "author": {
+            "name": "Ada",
+            "email": "ada@example.com",
+            "timestamp": None,
+            "timezone": None,
+        },
+        "committer": {
+            "name": "Ada",
+            "email": "ada@example.com",
+            "timestamp": None,
+            "timezone": None,
+        },
+        "signoff_present": True,
+        "issue_refs": ["#1"],
+        "push_pr_intent": None,
+        "client_observed_policy_version": None,
+    })
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "unauthenticated"
+
+
+def test_propose_rejects_foreign_workspace_scope(
+    graph_db_env,
+    dashboard_db_env,
+    auth_db_env,
+    workflow_db_env,
+    client,
+    monkeypatch,
+):
+    _enable_plugin(monkeypatch)
+    _seed_session("sess-1", "enterprise-ng")
+    _seed_token("sess-1", "tok-1")
+    fake_ws = SimpleNamespace(id="enterprise-ng", graph_project="autonomy")
+    monkeypatch.setattr(commit_api, "get_workspace", lambda wid: fake_ws)
+    monkeypatch.setattr(commit_api, "resolve_capabilities", lambda workspace_id, org=None: [])
+    fake_row = SimpleNamespace(
+        session_name="sess-1",
+        repo_name="autonomy",
+        managed_clone=Path("/workspace/repo"),
+        branch="session/sess-1",
+        worktree_path=Path("/workspace/repo"),
+    )
+    monkeypatch.setattr(commit_api.worktree_monitor, "get_all", lambda: [fake_row])
+    monkeypatch.setattr(commit_api, "derive_repo_slug", lambda _path: "autonomy/autonomy")
+
+    payload = {
+        "idempotency_key": "idem-1",
+        "scope": {
+            "workspace_id": "foreign-workspace",
+            "repo_slug": "foreign/foreign",
+            "repo_name_alias": None,
+            "session_name": "sess-1",
+            "worktree_path": "/workspace/repo",
+            "branch": "session/sess-1",
+            "target_branch": "main",
+        },
+        "target": {
+            "target_branch": "main",
+            "ref_strategy": "current_branch",
+            "intended_visibility": "workspace_shared",
+            "review_target": None,
+        },
+        "content": {
+            "head_sha": "head-1",
+            "tree_sha": "tree-1",
+            "patch_id": "patch-1",
+            "content_fingerprint": "fingerprint-1",
+        },
+        "drift_token": {
+            "head_sha": "head-1",
+            "tree_sha": "tree-1",
+            "index_sha": "index-1",
+            "worktree_status_hash": "status-1",
+            "generated_at": "2026-07-06T19:00:00Z",
+        },
+        "message": {
+            "subject": "subject",
+            "body": "body",
+            "trailers": {},
+        },
+        "author": {
+            "name": "Ada",
+            "email": "ada@example.com",
+            "timestamp": None,
+            "timezone": None,
+        },
+        "committer": {
+            "name": "Ada",
+            "email": "ada@example.com",
+            "timestamp": None,
+            "timezone": None,
+        },
+        "signoff_present": True,
+        "issue_refs": ["#1"],
+        "push_pr_intent": None,
+        "client_observed_policy_version": None,
+    }
+
+    conn = cdb._get_conn()
+    before = conn.execute("SELECT COUNT(*) AS n FROM commit_workflow_events").fetchone()["n"]
+    resp = client.post(
+        "/api/capabilities/commit/v1/proposals",
+        json=payload,
+        headers={"Authorization": "Bearer tok-1"},
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["code"] == "scope_mismatch"
+    try:
+        rows = conn.execute("SELECT COUNT(*) AS n FROM commit_workflow_events").fetchone()
+        assert rows["n"] == before
     finally:
         conn.close()
