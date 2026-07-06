@@ -763,3 +763,28 @@ def test_D4_16_no_ref_movement_allows_combined_confirmation_without_disclosure(t
     )
 
     assert get_binding_lease(workflow_id=workflow_id, db_path=path) == "sha-A"
+
+
+def test_D4_16_force_with_lease_without_a_prior_supersede_raises(tmp_path):
+    """Codex's review finding: without this guard, T2 could be recorded
+    before any T0 supersede approval exists, since _get_provisional_ref_tip
+    returns None and the disclosure check was (wrongly) skipped entirely --
+    silently satisfying D4-14's dual-approval gate out of order."""
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    report = _report("sha1", compliant=False, violations=("signature_absent",))
+    workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha="sha1", compliance_report=report, db_path=path,
+    )
+
+    with pytest.raises(ValueError):
+        record_force_with_lease_approval(
+            workflow_id=workflow_id, repo_slug="autonomy", approval_id="ap-lease",
+            observed_ref_tip="sha-A", db_path=path,
+        )
+
+    # No row should exist, and the publish gate must still be fully blocked.
+    assert get_binding_lease(workflow_id=workflow_id, db_path=path) is None
+    result = check_publish_approval_gate(workflow_id=workflow_id, db_path=path)
+    assert result.allowed is False
+    assert set(result.missing_approval_types) == {"supersede", "force_with_lease"}
