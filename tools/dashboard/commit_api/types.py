@@ -473,14 +473,12 @@ class CommitApproveRequest(CommitApiModel):
     idempotency_key: str
     workflow_id: str
     approval_id: str
-    approval_type: str
     decision: str
     operator_edits: dict[str, Any] | None
     constraints: ApprovalConstraints
     provider_entitlement_proof: dict[str, Any] | None
 
     _ENUM_FIELDS = {
-        "approval_type": APPROVAL_TYPES,
         "decision": APPROVE_DECISIONS,
     }
 
