@@ -11,9 +11,11 @@ import json
 import logging
 import os
 import sqlite3
+import shutil
 import subprocess
 import time
 import uuid
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,11 @@ from tools.graph.schemas.commit_policy import (
     COMMIT_POLICY_SET_ID,
 )
 from tools.dashboard.commit_api.errors import commit_api_error
+from tools.dashboard.commit_broker.keys import (
+    InMemoryBrokerKeyStore,
+    VerificationKeyNotRegistered,
+    resolve_verification_key,
+)
 from tools.dashboard.commit_api.types import (
     CommitAttachSignatureRequest,
     CommitAttachSignatureResponse,
@@ -82,6 +89,7 @@ logger = logging.getLogger(__name__)
 PLUGIN_ID = "commit-api"
 PLUGIN_ORG = "autonomy"
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
+_BROKER_VERIFICATION_KEY_STORE = InMemoryBrokerKeyStore()
 
 
 def _json_error(code: str, message: str, *, details: dict[str, Any] | None = None):
@@ -357,6 +365,10 @@ def _signing_request_row(conn: sqlite3.Connection, signing_request_id: str) -> d
         (signing_request_id,),
     ).fetchone()
     return dict(row) if row is not None else None
+
+
+def _verification_key_store() -> InMemoryBrokerKeyStore:
+    return _BROKER_VERIFICATION_KEY_STORE
 
 
 def _current_drift(worktree_path: Path | str) -> DriftToken:
@@ -1535,6 +1547,75 @@ def _reconstruct_unsigned_commit_payload(
     return tree_sha, payload, parent_shas
 
 
+def _verify_attached_signature(
+    *,
+    signing_method: str,
+    operator_id: str,
+    payload: bytes,
+    armored_signature: str,
+) -> bool:
+    if not armored_signature:
+        return False
+    verification_key = resolve_verification_key(
+        operator_id=operator_id,
+        signing_kind=signing_method,
+        keystore=_verification_key_store(),
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        payload_path = tmp / "payload"
+        signature_path = tmp / "signature.asc"
+        payload_path.write_bytes(payload)
+        signature_path.write_text(armored_signature, encoding="utf-8")
+        if signing_method == "ssh":
+            allowed_signers = tmp / "allowed_signers"
+            allowed_signers.write_text(
+                f"{operator_id} {verification_key.material.decode('utf-8').strip()}\n",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [
+                    "ssh-keygen",
+                    "-Y",
+                    "verify",
+                    "-f",
+                    str(allowed_signers),
+                    "-I",
+                    operator_id,
+                    "-n",
+                    "git",
+                    "-s",
+                    str(signature_path),
+                ],
+                input=payload,
+                capture_output=True,
+            )
+            return proc.returncode == 0
+        if signing_method == "gpg":
+            gpg = shutil.which("gpg")
+            if gpg is None:
+                return False
+            gnupg_home = tmp / "gnupg"
+            gnupg_home.mkdir()
+            env = os.environ.copy()
+            env["GNUPGHOME"] = str(gnupg_home)
+            import_proc = subprocess.run(
+                [gpg, "--batch", "--yes", "--import"],
+                input=verification_key.material,
+                capture_output=True,
+                env=env,
+            )
+            if import_proc.returncode != 0:
+                return False
+            verify_proc = subprocess.run(
+                [gpg, "--batch", "--yes", "--verify", str(signature_path), str(payload_path)],
+                capture_output=True,
+                env=env,
+            )
+            return verify_proc.returncode == 0
+        return False
+
+
 async def attach_signature(request: Request) -> JSONResponse:
     if not _plugin_enabled():
         return _json_error("route_not_trusted", "commit API plugin is disabled")
@@ -1610,6 +1691,11 @@ async def attach_signature(request: Request) -> JSONResponse:
                 "signature_verification_failed",
                 "local signer attestation does not match the trusted payload hash",
             )
+        if not parsed.armored_signature:
+            return _json_error("signature_verification_failed", "armored signature is required for attach")
+        operator_id = str(signing_row.get("operator_id") or "")
+        if not operator_id:
+            return _json_error("signature_verification_failed", "signature request is missing a registered operator")
         snapshot_ref = str(signing_row["trusted_object_store_ref"])
         store = _trusted_store()
         snapshot_conn = snapshot_dao._get_conn()
@@ -1619,14 +1705,24 @@ async def attach_signature(request: Request) -> JSONResponse:
                 return _json_error("signature_verification_failed", "trusted snapshot failed integrity verification")
 
             _tree_sha, unsigned_payload, _parent_shas = _reconstruct_unsigned_commit_payload(proposal_request, state_payload)
-            if parsed.armored_signature:
-                signed_payload, computed_signed_sha = assemble_signed_commit(
-                    unsigned_payload,
-                    fold_gpgsig_block(parsed.armored_signature.encode("utf-8")),
+            try:
+                signature_ok = _verify_attached_signature(
+                    signing_method=str(signing_row["signing_method"]),
+                    operator_id=operator_id,
+                    payload=unsigned_payload,
+                    armored_signature=parsed.armored_signature,
                 )
-            else:
-                signed_payload = unsigned_payload
-                computed_signed_sha = commit_object_sha(unsigned_payload)
+            except (VerificationKeyNotRegistered, ValueError, UnicodeDecodeError, OSError, subprocess.CalledProcessError):
+                signature_ok = False
+            if not signature_ok:
+                return _json_error(
+                    "signature_verification_failed",
+                    "armored signature failed verification against the operator's registered key",
+                )
+            signed_payload, computed_signed_sha = assemble_signed_commit(
+                unsigned_payload,
+                fold_gpgsig_block(parsed.armored_signature.encode("utf-8")),
+            )
             signed_commit_ref = parsed.signed_commit_object_ref or computed_signed_sha
             if parsed.signed_commit_object_ref and parsed.signed_commit_object_ref != computed_signed_sha:
                 return _json_error(
@@ -1830,21 +1926,25 @@ async def publish(request: Request) -> JSONResponse:
             return _json_error("ref_update_rejected", "publish intent new_sha does not match the workflow's signed commit")
 
         approval_expected_old_sha = _approval_expected_old_sha(conn, parsed.workflow_id)
-        parsed_ref_update = parsed.ref_update_intent
-        if approval_expected_old_sha is not None:
-            if parsed_ref_update.expected_old_sha and parsed_ref_update.expected_old_sha != approval_expected_old_sha:
-                return _json_error(
-                    "approval_stale_requires_reapproval",
-                    "caller supplied lease does not match the stored approval lease",
-                )
-            parsed_ref_update = CommitPublishRefUpdateIntent(
-                provider=parsed_ref_update.provider,
-                repo_slug=parsed_ref_update.repo_slug,
-                ref=parsed_ref_update.ref,
-                operation=parsed_ref_update.operation,
-                expected_old_sha=approval_expected_old_sha,
-                new_sha=parsed_ref_update.new_sha,
+        if approval_expected_old_sha is None:
+            return _json_error(
+                "ref_update_rejected",
+                "publish requires an approved force_with_lease constraint",
             )
+        parsed_ref_update = parsed.ref_update_intent
+        if parsed_ref_update.expected_old_sha and parsed_ref_update.expected_old_sha != approval_expected_old_sha:
+            return _json_error(
+                "approval_stale_requires_reapproval",
+                "caller supplied lease does not match the stored approval lease",
+            )
+        parsed_ref_update = CommitPublishRefUpdateIntent(
+            provider=parsed_ref_update.provider,
+            repo_slug=parsed_ref_update.repo_slug,
+            ref=parsed_ref_update.ref,
+            operation=parsed_ref_update.operation,
+            expected_old_sha=approval_expected_old_sha,
+            new_sha=parsed_ref_update.new_sha,
+        )
 
         event_id = uuid.uuid4().hex
         skipped = parsed.publish_mode == "local_only_noop"

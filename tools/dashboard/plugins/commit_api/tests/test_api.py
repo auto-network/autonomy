@@ -14,6 +14,7 @@ from starlette.testclient import TestClient
 from tools.dashboard.dao import auth_db, dashboard_db
 from tools.dashboard.dao import commit_workflow_db as cdb
 from tools.dashboard.dao import trusted_git_object_store as snapshot_dao
+from tools.dashboard.commit_broker.keys import InMemoryBrokerKeyStore, register_verification_key
 from tools.dashboard.plugins.commit_api.entrypoints import api as commit_api
 from tools.dashboard.services.trusted_git_object_store import ContentAddressedStore, verify_snapshot
 from tools.graph import ops
@@ -44,6 +45,13 @@ def trusted_store_env(tmp_path, monkeypatch):
     monkeypatch.setenv("TRUSTED_GIT_OBJECT_STORE_ROOT", str(root_path))
     monkeypatch.setattr(snapshot_dao, "DB_PATH", db_path)
     yield db_path, root_path
+
+
+@pytest.fixture
+def broker_keystore(monkeypatch):
+    store = InMemoryBrokerKeyStore()
+    monkeypatch.setattr(commit_api, "_BROKER_VERIFICATION_KEY_STORE", store)
+    return store
 
 
 @pytest.fixture
@@ -119,6 +127,27 @@ def _init_repo(tmp_path: Path) -> Path:
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "initial")
     return repo
+
+
+def _ssh_keypair(tmp_path: Path) -> tuple[Path, bytes]:
+    key_path = tmp_path / "ssh_signing_key"
+    subprocess.run(
+        ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(key_path)],
+        capture_output=True,
+        check=True,
+    )
+    return key_path, (key_path.with_suffix(".pub")).read_bytes()
+
+
+def _ssh_sign(key_path: Path, payload: bytes, tmp_path: Path) -> str:
+    msg_path = tmp_path / "payload.txt"
+    msg_path.write_bytes(payload)
+    subprocess.run(
+        ["ssh-keygen", "-Y", "sign", "-f", str(key_path), "-n", "git", str(msg_path)],
+        capture_output=True,
+        check=True,
+    )
+    return (msg_path.parent / f"{msg_path.name}.sig").read_text()
 
 
 def _proposal_payload(*, repo: Path, session_name: str, workspace_id: str, repo_slug: str) -> dict:
@@ -553,15 +582,34 @@ def test_commit_create_request_signature_attach_and_publish_round_trip(
     auth_db_env,
     workflow_db_env,
     trusted_store_env,
+    broker_keystore,
     client,
     monkeypatch,
 ):
     _enable_plugin(monkeypatch)
     repo, session_name, workspace_id, repo_slug = _commit_flow_setup(monkeypatch, Path(graph_db_env).parent)
+    key_path, pubkey = _ssh_keypair(Path(graph_db_env).parent)
+    register_verification_key(
+        operator_id="op-1",
+        signing_kind="ssh",
+        public_material=pubkey,
+        keystore=broker_keystore,
+    )
+
+    proposal_payload = _proposal_payload(repo=repo, session_name=session_name, workspace_id=workspace_id, repo_slug=repo_slug)
+    proposal = commit_api.CommitProposeRequest.from_dict(proposal_payload)
+    unsigned_payload = commit_api.serialize_unsigned_commit_payload(
+        tree_oid=proposal.content.tree_sha,
+        parent_oids=[],
+        author_line=commit_api._git_identity_line(proposal.author),
+        committer_line=commit_api._git_identity_line(proposal.committer),
+        message=commit_api._commit_message_bytes(proposal.message),
+    )
+    armored_signature = _ssh_sign(key_path, unsigned_payload, Path(graph_db_env).parent)
 
     propose = client.post(
         "/api/capabilities/commit/v1/proposals",
-        json=_proposal_payload(repo=repo, session_name=session_name, workspace_id=workspace_id, repo_slug=repo_slug),
+        json=proposal_payload,
         headers={"Authorization": "Bearer tok-1"},
     )
     assert propose.status_code == 200, propose.text
@@ -605,7 +653,7 @@ def test_commit_create_request_signature_attach_and_publish_round_trip(
         json={
             "idempotency_key": "idem-request-signature",
             "workflow_id": workflow_id,
-            "signing_method": "gpg",
+            "signing_method": "ssh",
             "signer_policy_version": "policy-v1",
             "requested_operator_id": "op-1",
         },
@@ -622,7 +670,7 @@ def test_commit_create_request_signature_attach_and_publish_round_trip(
             "idempotency_key": "idem-attach",
             "signing_request_id": signing_request_id,
             "signature_ref": "sig-1",
-            "armored_signature": "-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----\n",
+            "armored_signature": armored_signature,
             "signed_commit_object_ref": None,
             "local_signer_attestation": {
                 "device_id": "device-1",
@@ -690,6 +738,196 @@ def test_commit_create_request_signature_attach_and_publish_round_trip(
     assert publish_body["ref_update_result"]["expected_old_sha"] == repo_head_sha
     assert publish_body["pushed_ref"] == "refs/heads/main"
     assert publish_body["provider_url"] == "https://github.com/autonomy/autonomy"
+
+
+def test_attach_signature_rejects_bogus_signature(
+    graph_db_env,
+    dashboard_db_env,
+    auth_db_env,
+    workflow_db_env,
+    trusted_store_env,
+    broker_keystore,
+    client,
+    monkeypatch,
+):
+    _enable_plugin(monkeypatch)
+    repo, session_name, workspace_id, repo_slug = _commit_flow_setup(monkeypatch, Path(graph_db_env).parent)
+    key_path, pubkey = _ssh_keypair(Path(graph_db_env).parent)
+    register_verification_key(
+        operator_id="op-1",
+        signing_kind="ssh",
+        public_material=pubkey,
+        keystore=broker_keystore,
+    )
+    proposal_payload = _proposal_payload(repo=repo, session_name=session_name, workspace_id=workspace_id, repo_slug=repo_slug)
+    proposal = commit_api.CommitProposeRequest.from_dict(proposal_payload)
+    unsigned_payload = commit_api.serialize_unsigned_commit_payload(
+        tree_oid=proposal.content.tree_sha,
+        parent_oids=[],
+        author_line=commit_api._git_identity_line(proposal.author),
+        committer_line=commit_api._git_identity_line(proposal.committer),
+        message=commit_api._commit_message_bytes(proposal.message),
+    )
+
+    propose = client.post(
+        "/api/capabilities/commit/v1/proposals",
+        json=proposal_payload,
+        headers={"Authorization": "Bearer tok-1"},
+    )
+    assert propose.status_code == 200, propose.text
+    workflow_id = propose.json()["workflow"]["workflow_id"]
+
+    create = client.post(
+        f"/api/capabilities/commit/v1/workflows/{workflow_id}/commit",
+        json={
+            "idempotency_key": "idem-create",
+            "workflow_id": workflow_id,
+            "drift_token": proposal_payload["drift_token"],
+            "create_mode": "snapshot_for_signature",
+        },
+        headers={"Authorization": "Bearer tok-1"},
+    )
+    assert create.status_code == 200, create.text
+
+    request_signature = client.post(
+        f"/api/capabilities/commit/v1/workflows/{workflow_id}/signature-request",
+        json={
+            "idempotency_key": "idem-request-signature",
+            "workflow_id": workflow_id,
+            "signing_method": "ssh",
+            "signer_policy_version": "policy-v1",
+            "requested_operator_id": "op-1",
+        },
+        headers={"Authorization": "Bearer tok-1"},
+    )
+    assert request_signature.status_code == 200, request_signature.text
+    request_body = request_signature.json()
+
+    attach = client.post(
+        f"/api/capabilities/commit/v1/signing-requests/{request_body['signing']['signing_request_id']}/attach",
+        json={
+            "idempotency_key": "idem-attach",
+            "signing_request_id": request_body["signing"]["signing_request_id"],
+            "signature_ref": "sig-1",
+            "armored_signature": "-----BEGIN SSH SIGNATURE-----\nZm9yZ2Vk\n-----END SSH SIGNATURE-----\n",
+            "signed_commit_object_ref": None,
+            "local_signer_attestation": {
+                "device_id": "device-1",
+                "request_nonce": "nonce-1",
+                "canonical_payload_hash": request_body["signing"]["canonical_payload_hash"],
+                "displayed_payload_hash": request_body["signing"]["canonical_payload_hash"],
+                "signed_at": "2026-07-06T19:00:00Z",
+            },
+        },
+        headers={"Authorization": "Bearer tok-1"},
+    )
+    assert attach.status_code == 422, attach.text
+    assert attach.json()["code"] == "signature_verification_failed"
+
+
+def test_publish_rejects_missing_force_with_lease_approval(
+    graph_db_env,
+    dashboard_db_env,
+    auth_db_env,
+    workflow_db_env,
+    trusted_store_env,
+    broker_keystore,
+    client,
+    monkeypatch,
+):
+    _enable_plugin(monkeypatch)
+    repo, session_name, workspace_id, repo_slug = _commit_flow_setup(monkeypatch, Path(graph_db_env).parent)
+    key_path, pubkey = _ssh_keypair(Path(graph_db_env).parent)
+    register_verification_key(
+        operator_id="op-1",
+        signing_kind="ssh",
+        public_material=pubkey,
+        keystore=broker_keystore,
+    )
+    proposal_payload = _proposal_payload(repo=repo, session_name=session_name, workspace_id=workspace_id, repo_slug=repo_slug)
+    proposal = commit_api.CommitProposeRequest.from_dict(proposal_payload)
+    unsigned_payload = commit_api.serialize_unsigned_commit_payload(
+        tree_oid=proposal.content.tree_sha,
+        parent_oids=[],
+        author_line=commit_api._git_identity_line(proposal.author),
+        committer_line=commit_api._git_identity_line(proposal.committer),
+        message=commit_api._commit_message_bytes(proposal.message),
+    )
+    armored_signature = _ssh_sign(key_path, unsigned_payload, Path(graph_db_env).parent)
+
+    propose = client.post(
+        "/api/capabilities/commit/v1/proposals",
+        json=proposal_payload,
+        headers={"Authorization": "Bearer tok-1"},
+    )
+    assert propose.status_code == 200, propose.text
+    workflow_id = propose.json()["workflow"]["workflow_id"]
+
+    create = client.post(
+        f"/api/capabilities/commit/v1/workflows/{workflow_id}/commit",
+        json={
+            "idempotency_key": "idem-create",
+            "workflow_id": workflow_id,
+            "drift_token": proposal_payload["drift_token"],
+            "create_mode": "snapshot_for_signature",
+        },
+        headers={"Authorization": "Bearer tok-1"},
+    )
+    assert create.status_code == 200, create.text
+
+    request_signature = client.post(
+        f"/api/capabilities/commit/v1/workflows/{workflow_id}/signature-request",
+        json={
+            "idempotency_key": "idem-request-signature",
+            "workflow_id": workflow_id,
+            "signing_method": "ssh",
+            "signer_policy_version": "policy-v1",
+            "requested_operator_id": "op-1",
+        },
+        headers={"Authorization": "Bearer tok-1"},
+    )
+    assert request_signature.status_code == 200, request_signature.text
+    request_body = request_signature.json()
+
+    attach = client.post(
+        f"/api/capabilities/commit/v1/signing-requests/{request_body['signing']['signing_request_id']}/attach",
+        json={
+            "idempotency_key": "idem-attach",
+            "signing_request_id": request_body["signing"]["signing_request_id"],
+            "signature_ref": "sig-1",
+            "armored_signature": armored_signature,
+            "signed_commit_object_ref": None,
+            "local_signer_attestation": {
+                "device_id": "device-1",
+                "request_nonce": "nonce-1",
+                "canonical_payload_hash": request_body["signing"]["canonical_payload_hash"],
+                "displayed_payload_hash": request_body["signing"]["canonical_payload_hash"],
+                "signed_at": "2026-07-06T19:00:00Z",
+            },
+        },
+        headers={"Authorization": "Bearer tok-1"},
+    )
+    assert attach.status_code == 200, attach.text
+
+    publish = client.post(
+        f"/api/capabilities/commit/v1/workflows/{workflow_id}/publish",
+        json={
+            "idempotency_key": "idem-publish",
+            "workflow_id": workflow_id,
+            "ref_update_intent": {
+                "provider": "github",
+                "repo_slug": repo_slug,
+                "ref": "refs/heads/main",
+                "operation": "fast_forward_existing_ref",
+                "expected_old_sha": None,
+                "new_sha": attach.json()["signed_commit_sha"],
+            },
+            "publish_mode": "workspace_shared",
+        },
+        headers={"Authorization": "Bearer tok-1"},
+    )
+    assert publish.status_code == 409, publish.text
+    assert publish.json()["code"] == "ref_update_rejected"
 
 
 def test_commit_create_rejects_foreign_scope_before_writing_events(
