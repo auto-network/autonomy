@@ -32,6 +32,7 @@ def test_scan_filters_displayed_commits_but_keeps_git_topology_flags(tmp_path, m
 
     worktree = tmp_path / "worktrees" / "auto-x" / "autonomy"
     worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: /elsewhere")
     clone = tmp_path / "repos" / "autonomy.git"
     clone.mkdir(parents=True)
 
@@ -97,6 +98,7 @@ def test_scan_reverted_back_on_target_is_absent_when_git_prefilter_removes_it(tm
 
     worktree = tmp_path / "worktrees" / "auto-x" / "autonomy"
     worktree.mkdir(parents=True)
+    (worktree / ".git").write_text("gitdir: /elsewhere")
     clone = tmp_path / "repos" / "autonomy.git"
     clone.mkdir(parents=True)
 
