@@ -8,15 +8,20 @@ audit_compliance since only the ``compliant`` flag matters here.
 
 from __future__ import annotations
 
+import json
+
 from tools.dashboard.commit_compliance import (
     AuthorshipStatus,
     ComplianceReport,
     SignatureStatus,
     SignOffStatus,
 )
+from tools.dashboard.dao import commit_workflow_db
 from tools.dashboard.governed_rewrite import (
     REASON_ANCESTOR_CHANGED,
     REASON_VIOLATIONS,
+    ROLE_REWRITE_SOURCE,
+    create_governed_rewrite_workflow,
     determine_rewrite_membership,
 )
 
@@ -111,3 +116,80 @@ def test_D4_13_not_needing_rewrite_has_no_reason():
 
     assert membership[0].needs_rewrite is False
     assert membership[0].reason is None
+
+
+# ── D4-8: create the governed-rewrite workflow instance ────────────────
+
+
+def test_D4_8_mints_a_fresh_workflow_with_origin_kind_and_source_sha(tmp_path):
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    report = _report("orig-sha", compliant=False, violations=("signature_absent",))
+
+    workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha="orig-sha", compliance_report=report, db_path=path,
+    )
+
+    conn = commit_workflow_db._get_conn(path)
+    try:
+        state_row = conn.execute(
+            "SELECT state_json FROM commit_workflow_states WHERE workflow_id = ?", (workflow_id,),
+        ).fetchone()
+        state = json.loads(state_row["state_json"])
+        assert state["origin_kind"] == "governed_rewrite"
+        assert state["source_commit_shas"] == ["orig-sha"]
+        assert state["compliance_report"]["commit_sha"] == "orig-sha"
+
+        commit_row = conn.execute(
+            "SELECT commit_sha, role, position FROM commit_workflow_commits WHERE workflow_id = ?", (workflow_id,),
+        ).fetchone()
+        assert commit_row["commit_sha"] == "orig-sha"
+        assert commit_row["role"] == ROLE_REWRITE_SOURCE
+        assert commit_row["position"] == 0
+    finally:
+        conn.close()
+
+
+def test_D4_8_never_reuses_a_pre_existing_workflow_for_the_same_sha(tmp_path):
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    report = _report("orig-sha", compliant=False, violations=("signature_absent",))
+
+    first_workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha="orig-sha", compliance_report=report, db_path=path,
+    )
+    second_workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha="orig-sha", compliance_report=report, db_path=path,
+    )
+
+    assert first_workflow_id != second_workflow_id
+
+    conn = commit_workflow_db._get_conn(path)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT workflow_id FROM commit_workflow_states WHERE repo_slug = 'autonomy'"
+        ).fetchall()
+        assert {r["workflow_id"] for r in rows} == {first_workflow_id, second_workflow_id}
+    finally:
+        conn.close()
+
+
+def test_D4_8_survives_projection_rebuild(tmp_path):
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    report = _report("orig-sha", compliant=False, violations=("signature_absent",))
+
+    workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha="orig-sha", compliance_report=report, db_path=path,
+    )
+    commit_workflow_db.rebuild_projection(path)
+
+    conn = commit_workflow_db._get_conn(path)
+    try:
+        commit_row = conn.execute(
+            "SELECT role, position FROM commit_workflow_commits WHERE workflow_id = ?", (workflow_id,),
+        ).fetchone()
+        assert commit_row["role"] == ROLE_REWRITE_SOURCE
+        assert commit_row["position"] == 0
+    finally:
+        conn.close()
