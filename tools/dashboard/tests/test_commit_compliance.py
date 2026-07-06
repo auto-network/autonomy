@@ -293,6 +293,45 @@ def test_D4_4_no_constraint_policy_both_pass(repo, monkeypatch):
     assert not report.violations
 
 
+# ── operator-identity seam: unresolved must fail closed ────────────────
+
+
+def test_unresolved_operator_identity_fails_closed_not_silently_compliant(repo, monkeypatch):
+    """Do NOT patch OPERATOR_IDENTITY_PROVIDER — exercise the real default
+    stub (returns None). Even a commit whose trailer/author/committer
+    literally spell out the operator's identity string must NOT be
+    reported as matching, because there is no real identity to compare
+    against — a stubbed-out provider must never make a commit look
+    compliant. (Fable's finding on the D4-1..D4-7 review.)"""
+    _patch_resolver(monkeypatch, {"r": SIG_REQUIRED_STRICT})
+    sha = _commit(
+        repo, content="x", message="msg\n\nSigned-off-by: Op <op@example.com>",
+        author=("Op", "op@example.com"), committer=("Op", "op@example.com"),
+    )
+
+    report = cc.audit_compliance(repo_slug="r", commit_shas=[sha], cwd=repo, target_branch="master")[0]
+    assert report.sign_off.matches_policy_identity is False
+    assert report.authorship.author_matches is False
+    assert report.authorship.committer_matches is False
+    assert report.authorship.required_identity == {"unresolved": True}
+    assert report.compliant is False
+    assert "signoff_identity_mismatch" in report.violations
+    assert "author_mismatch" in report.violations
+    assert "committer_mismatch" in report.violations
+
+
+def test_unresolved_operator_identity_still_reports_signoff_missing_when_absent(repo, monkeypatch):
+    """The unresolved-identity fail-closed path must not mask a more basic
+    violation — no trailer at all is still signoff_missing, not
+    signoff_identity_mismatch."""
+    _patch_resolver(monkeypatch, {"r": SIG_REQUIRED_STRICT})
+    sha = _commit(repo, content="x", message="no trailer")
+
+    report = cc.audit_compliance(repo_slug="r", commit_shas=[sha], cwd=repo, target_branch="master")[0]
+    assert "signoff_missing" in report.violations
+    assert "signoff_identity_mismatch" not in report.violations
+
+
 # ── D4-5: signature axis via git verify-commit ─────────────────────────
 
 
