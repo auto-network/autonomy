@@ -38,6 +38,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from tools.dashboard.dao import auth_db, local_signer_db as db
+from tools.dashboard.dao import commit_workflow_db as cdb
 
 PAIRING_TTL_SECONDS = 120
 POLL_INTERVAL_SECONDS = 3
@@ -499,10 +500,80 @@ async def api_local_signer_key_material_provision(request):
     })
 
 
+# ── D3-12/D3-13: GET /requests/{signing_request_id} ────────────────────
+
+CHALLENGE_NONCE_TTL_SECONDS = 180  # a few minutes, per D3-12
+
+
+def _fetch_request_message(*, device_id: str, signing_request_id: str, client_nonce: str) -> bytes:
+    return f"autonomy-local-signer-fetch:{device_id}:{signing_request_id}:{client_nonce}".encode()
+
+
+async def api_local_signer_get_request(request):
+    """D3-12: mint the single-use challenge_nonce for this exact GET call
+    — the ONLY place a signing-flow nonce is minted. D3-13's fuller
+    response shape (canonical_payload_preview, batch fields) is layered
+    on incrementally: canonical_payload_preview depends on what
+    commit.request_signature eventually stores in commit_signing_requests
+    .payload_json (not built yet), so it's omitted here rather than
+    guessed at; batch fields are correctly null for every request today
+    since no caller can create a batch (D4-18) yet.
+    """
+    signing_request_id = request.path_params["signing_request_id"]
+    device_id = request.query_params.get("device_id")
+    client_nonce = request.query_params.get("client_nonce")
+    signature = request.query_params.get("signature")
+    if not all([device_id, client_nonce, signature]):
+        return JSONResponse(
+            {"error": "device_id, client_nonce, and signature query params are all required"},
+            status_code=400,
+        )
+
+    now = time.time()
+    message = _fetch_request_message(device_id=device_id, signing_request_id=signing_request_id, client_nonce=client_nonce)
+    device, error = verify_device_request(
+        device_id=device_id, message=message, signature=signature,
+        client_nonce=client_nonce, now=now,
+    )
+    if device is None:
+        return JSONResponse({"error": error}, status_code=403)
+
+    conn = cdb._get_conn()
+    try:
+        row = conn.execute(
+            "SELECT signing_request_id, workflow_id, status, signing_method, canonical_payload_hash "
+            "FROM commit_signing_requests WHERE signing_request_id = ?",
+            (signing_request_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return JSONResponse({"error": "signing_request_not_found"}, status_code=404)
+
+    nonce = secrets.token_urlsafe(24)
+    db.mint_challenge_nonce(
+        signing_request_id=signing_request_id, nonce=nonce, minted_at=now,
+        ttl_seconds=CHALLENGE_NONCE_TTL_SECONDS,
+    )
+
+    return JSONResponse({
+        "signing_request_id": row["signing_request_id"],
+        "workflow_id": row["workflow_id"],
+        "canonical_payload_hash": row["canonical_payload_hash"],
+        "signing_kind": row["signing_method"],
+        "challenge_nonce": nonce,
+        "batch_group_id": None,
+        "position_in_batch": None,
+        "batch_size": None,
+        "batch_status": None,
+    })
+
+
 ROUTES = [
     Route("/api/capabilities/local-signer/v1/pairing/start", api_local_signer_pairing_start, methods=["POST"]),
     Route("/api/capabilities/local-signer/v1/pairing/complete", api_local_signer_pairing_complete, methods=["POST"]),
     Route("/api/dashboard/local-signer/pairing/{pairing_id}/decide", api_local_signer_pairing_decide, methods=["POST"]),
     Route("/api/dashboard/local-signer/key-material/step-up", api_local_signer_step_up, methods=["POST"]),
     Route("/api/capabilities/local-signer/v1/key-material/provision", api_local_signer_key_material_provision, methods=["POST"]),
+    Route("/api/capabilities/local-signer/v1/requests/{signing_request_id}", api_local_signer_get_request, methods=["GET"]),
 ]
