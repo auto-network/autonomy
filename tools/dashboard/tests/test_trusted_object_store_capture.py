@@ -116,3 +116,52 @@ def test_verify_fails_when_a_captured_object_is_tampered_in_the_store(tmp_path):
     entry = dao.list_entries(conn, ref)[0]
     store._path_for(entry["object_sha256"]).write_bytes(b"swapped bytes")
     assert verify_snapshot(snapshot_ref=ref, store=store, dao_conn=conn) is False
+
+
+def test_verify_fails_on_poisoned_canonical_preview_hash(tmp_path):
+    """Codex's reproduction: swapping canonical_preview_sha256 in the metadata
+    row must fail verification, not pass."""
+    repo = _repo(tmp_path)
+    (repo / "a.txt").write_text("x\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c1")
+    tree = _git_out(repo, "rev-parse", "HEAD^{tree}")
+    store = ContentAddressedStore(tmp_path / "store")
+    conn = _conn()
+    ref = capture_snapshot(
+        workflow_id="wf", repo_slug="r", commit_sha=_git_out(repo, "rev-parse", "HEAD"),
+        tree_sha=tree, parent_shas=[], git_dir=repo, store=store, dao_conn=conn,
+        snapshot_type="commit_create", canonical_payload=b"preview bytes",
+    )
+    assert verify_snapshot(snapshot_ref=ref, store=store, dao_conn=conn) is True
+    conn.execute(
+        "UPDATE trusted_git_object_snapshots SET canonical_preview_sha256 = ? WHERE snapshot_ref = ?",
+        ("0" * 64, ref),
+    )
+    conn.commit()
+    assert verify_snapshot(snapshot_ref=ref, store=store, dao_conn=conn) is False
+
+
+def test_verify_fails_on_tampered_entry_even_when_repointed_object_exists(tmp_path):
+    """Repointing an entry's object hash to a different but present object must
+    still fail verify via the manifest recompute — object presence alone isn't trust."""
+    repo = _repo(tmp_path)
+    (repo / "a.txt").write_text("y\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c1")
+    tree = _git_out(repo, "rev-parse", "HEAD^{tree}")
+    store = ContentAddressedStore(tmp_path / "store")
+    conn = _conn()
+    ref = capture_snapshot(
+        workflow_id="wf", repo_slug="r", commit_sha=_git_out(repo, "rev-parse", "HEAD"),
+        tree_sha=tree, parent_shas=[], git_dir=repo, store=store, dao_conn=conn,
+        snapshot_type="commit_create",
+    )
+    other = store.put(b"unrelated but present in the store")  # a valid, present object
+    entry = dao.list_entries(conn, ref)[0]
+    conn.execute(
+        "UPDATE trusted_git_object_entries SET object_sha256 = ? WHERE snapshot_ref = ? AND object_oid = ?",
+        (other, ref, entry["object_oid"]),
+    )
+    conn.commit()
+    assert verify_snapshot(snapshot_ref=ref, store=store, dao_conn=conn) is False
