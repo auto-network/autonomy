@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS commit_workflow_events (
     repo_slug             TEXT NOT NULL,
     branch                TEXT,
     commit_shas_json      TEXT NOT NULL DEFAULT '[]',
+    commit_roles_json     TEXT NOT NULL DEFAULT '[]',
     content_fingerprint   TEXT,
     provider              TEXT,
     provider_review_id    TEXT,
@@ -307,6 +308,7 @@ def append_event(
     status_after: str | None,
     repo_slug: str,
     commit_shas: Iterable[str] = (),
+    commit_roles: Iterable[str] | None = None,
     occurred_at: float | None = None,
     actor_type: str = "dashboard",
     actor_id: str | None = None,
@@ -324,6 +326,9 @@ def append_event(
     the event table is append-only audit history.
     """
     shas = [str(sha) for sha in commit_shas if str(sha)]
+    roles = [str(role) for role in commit_roles] if commit_roles is not None else []
+    if roles and len(roles) != len(shas):
+        raise ValueError("commit_roles must match commit_shas length when provided")
     if status_after is not None and status_after not in ALL_STATUSES:
         raise ValueError(f"invalid commit workflow status: {status_after}")
     conn = _get_conn(db_path)
@@ -334,9 +339,9 @@ def append_event(
             INSERT INTO commit_workflow_events (
                 event_id, workflow_id, event_type, status_after, occurred_at,
                 actor_type, actor_id, session_name, repo_slug, branch,
-                commit_shas_json, content_fingerprint, provider,
+                commit_shas_json, commit_roles_json, content_fingerprint, provider,
                 provider_review_id, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_id,
@@ -350,6 +355,7 @@ def append_event(
                 repo_slug,
                 branch,
                 json.dumps(shas),
+                json.dumps(roles),
                 content_fingerprint,
                 provider,
                 provider_review_id,
@@ -440,15 +446,18 @@ def _rebuild_projection_for_workflow(conn: sqlite3.Connection, workflow_id: str)
         "DELETE FROM commit_workflow_commits WHERE workflow_id = ?",
         (workflow_id,),
     )
-    shas = _latest_non_empty_commit_shas(rows)
-    for idx, sha in enumerate(shas, start=1):
+    shas, roles = _latest_non_empty_commit_data(rows)
+    role_override = bool(roles)
+    for idx, sha in enumerate(shas):
+        role = roles[idx] if idx < len(roles) else "workflow_commit"
+        position = idx if role_override else idx + 1
         conn.execute(
             """\
             INSERT INTO commit_workflow_commits (
                 workflow_id, repo_slug, commit_sha, position, role, created_at
-            ) VALUES (?, ?, ?, ?, 'workflow_commit', ?)
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (workflow_id, latest["repo_slug"], sha, idx, float(latest["occurred_at"])),
+            (workflow_id, latest["repo_slug"], sha, position, role, float(latest["occurred_at"])),
         )
 
 
@@ -466,11 +475,18 @@ def _loads_shas(raw: str | None) -> list[str]:
 
 def _latest_non_empty_commit_shas(rows: list[sqlite3.Row]) -> list[str]:
     """Return the newest non-empty commit set in a workflow event stream."""
+    shas, _roles = _latest_non_empty_commit_data(rows)
+    return shas
+
+
+def _latest_non_empty_commit_data(rows: list[sqlite3.Row]) -> tuple[list[str], list[str]]:
+    """Return the newest non-empty commit set and any persisted roles."""
     for row in reversed(rows):
         shas = _loads_shas(row["commit_shas_json"])
         if shas:
-            return shas
-    return []
+            roles = _loads_shas(row["commit_roles_json"])
+            return shas, roles
+    return [], []
 
 
 def resolve_worktree_outstanding(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -7,7 +8,15 @@ import pytest
 from tools.dashboard.dao import commit_workflow_db as db
 
 
-def _event(tmp_path, *, workflow_id: str, status: str, shas: list[str], event_id: str | None = None) -> None:
+def _event(
+    tmp_path,
+    *,
+    workflow_id: str,
+    status: str,
+    shas: list[str],
+    event_id: str | None = None,
+    commit_roles: list[str] | None = None,
+) -> None:
     db.append_event(
         event_id=event_id or f"event-{workflow_id}-{status}",
         workflow_id=workflow_id,
@@ -15,6 +24,7 @@ def _event(tmp_path, *, workflow_id: str, status: str, shas: list[str], event_id
         status_after=status,
         repo_slug="autonomy",
         commit_shas=shas,
+        commit_roles=commit_roles,
         db_path=tmp_path / "commit_workflow.db",
     )
 
@@ -51,6 +61,46 @@ def test_events_are_append_only_even_with_insert_or_replace(tmp_path):
             conn.execute("UPDATE commit_workflow_events SET status_after='landed' WHERE event_id='e1'")
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute("DELETE FROM commit_workflow_events WHERE event_id='e1'")
+    finally:
+        conn.close()
+
+
+def test_commit_workflow_events_table_includes_commit_roles_json(tmp_path):
+    path = tmp_path / "commit_workflow.db"
+    db.init_db(path)
+
+    conn = db._get_conn(path)
+    try:
+        cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(commit_workflow_events)").fetchall()
+        }
+        assert cols == {
+            "seq",
+            "event_id",
+            "workflow_id",
+            "event_type",
+            "status_after",
+            "occurred_at",
+            "actor_type",
+            "actor_id",
+            "session_name",
+            "repo_slug",
+            "branch",
+            "commit_shas_json",
+            "commit_roles_json",
+            "content_fingerprint",
+            "provider",
+            "provider_review_id",
+            "payload_json",
+        }
+
+        commit_roles_row = next(
+            row for row in conn.execute("PRAGMA table_info(commit_workflow_events)").fetchall()
+            if row["name"] == "commit_roles_json"
+        )
+        assert commit_roles_row["notnull"] == 1
+        assert commit_roles_row["dflt_value"] == "'[]'"
     finally:
         conn.close()
 
@@ -259,6 +309,88 @@ def test_workflow_state_and_commit_tables_have_expected_schema(tmp_path):
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='commit_workflow_commits'"
         ).fetchone()["sql"]
         assert "FOREIGN KEY(workflow_id) REFERENCES commit_workflow_states(workflow_id)" in commit_schema
+    finally:
+        conn.close()
+
+
+def test_commit_roles_override_survives_projection_rebuild(tmp_path):
+    path = tmp_path / "commit_workflow.db"
+    db.init_db(path)
+
+    db.append_event(
+        event_id="e1",
+        workflow_id="wf1",
+        event_type="proposed",
+        status_after="proposed",
+        repo_slug="autonomy",
+        commit_shas=["source-sha", "result-sha"],
+        commit_roles=["rewrite_source", "workflow_commit"],
+        db_path=path,
+    )
+
+    conn = db._get_conn(path)
+    try:
+        event_row = conn.execute(
+            "SELECT commit_shas_json, commit_roles_json FROM commit_workflow_events WHERE event_id='e1'"
+        ).fetchone()
+        assert json.loads(event_row["commit_shas_json"]) == ["source-sha", "result-sha"]
+        assert json.loads(event_row["commit_roles_json"]) == ["rewrite_source", "workflow_commit"]
+
+        before = conn.execute(
+            """
+            SELECT commit_sha, position, role
+            FROM commit_workflow_commits
+            WHERE workflow_id='wf1'
+            ORDER BY position, commit_sha
+            """
+        ).fetchall()
+        assert [(row["commit_sha"], row["position"], row["role"]) for row in before] == [
+            ("source-sha", 0, "rewrite_source"),
+            ("result-sha", 1, "workflow_commit"),
+        ]
+    finally:
+        conn.close()
+
+    db.rebuild_projection(path)
+
+    conn = db._get_conn(path)
+    try:
+        after = conn.execute(
+            """
+            SELECT commit_sha, position, role
+            FROM commit_workflow_commits
+            WHERE workflow_id='wf1'
+            ORDER BY position, commit_sha
+            """
+        ).fetchall()
+        assert [(row["commit_sha"], row["position"], row["role"]) for row in after] == [
+            ("source-sha", 0, "rewrite_source"),
+            ("result-sha", 1, "workflow_commit"),
+        ]
+    finally:
+        conn.close()
+
+
+def test_commit_projection_defaults_to_workflow_commit_roles(tmp_path):
+    path = tmp_path / "commit_workflow.db"
+    db.init_db(path)
+
+    _event(tmp_path, workflow_id="wf1", status="proposed", shas=["A", "B"], event_id="e1")
+
+    conn = db._get_conn(path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT commit_sha, position, role
+            FROM commit_workflow_commits
+            WHERE workflow_id='wf1'
+            ORDER BY position, commit_sha
+            """
+        ).fetchall()
+        assert [(row["commit_sha"], row["position"], row["role"]) for row in rows] == [
+            ("A", 1, "workflow_commit"),
+            ("B", 2, "workflow_commit"),
+        ]
     finally:
         conn.close()
 
