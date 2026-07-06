@@ -277,3 +277,79 @@ def test_step_up_requires_operator_not_agent_session(client, monkeypatch):
         headers={"Authorization": "Bearer fake-agent-token"},
     )
     assert r.status_code == 403
+
+
+# ── D3-22: register the operator's public signing key (DN3<->DN5 seam) ─
+
+
+def test_successful_provision_registers_operators_signing_key(client, monkeypatch):
+    device_id, private, device_public_key = _register_device(client)
+    signing_public_material = b"THIS-IS-THE-SIGNING-KEYS-PUBLIC-HALF-NOT-THE-PAIRING-KEY"
+    monkeypatch.setattr(
+        routes, "KEY_MATERIAL_PROVIDER",
+        lambda key_id: routes.KeyMaterial(
+            ciphertext=_iterated_salted_packet(), public_material=signing_public_material,
+            key_fingerprint="fp-signing-1", signing_kind="gpg",
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(
+        routes, "REGISTER_VERIFICATION_KEY",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    token = _step_up(client, device_id=device_id, key_id="key-1")
+    r = _provision(client, device_id=device_id, private_key=private, key_id="key-1", step_up_token=token)
+    assert r.status_code == 200
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["operator_id"] == db.get_device(device_id).operator_id
+    assert call["signing_kind"] == "gpg"
+    # The registered key is the signing key's public half — NOT the
+    # device's own pairing keypair.
+    assert call["public_material"] == signing_public_material
+    assert call["public_material"] != device_public_key.encode()
+
+
+def test_weak_kdf_rejection_never_registers_a_key(client, monkeypatch):
+    device_id, private, _pub = _register_device(client)
+    monkeypatch.setattr(
+        routes, "KEY_MATERIAL_PROVIDER",
+        lambda key_id: routes.KeyMaterial(
+            ciphertext=_weak_packet(), public_material=b"pub", key_fingerprint="fp-weak",
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(routes, "REGISTER_VERIFICATION_KEY", lambda **kwargs: calls.append(kwargs))
+
+    token = _step_up(client, device_id=device_id, key_id="key-1")
+    r = _provision(client, device_id=device_id, private_key=private, key_id="key-1", step_up_token=token)
+    assert r.status_code == 422
+    assert calls == []
+
+
+def test_device_revocation_does_not_affect_verification_key_registration_call(client, monkeypatch):
+    """Revoking the device after a successful provision must not retract
+    the already-made registration call — this test documents that the
+    two are independent actions with independent lifecycles (the actual
+    keystore's persistence is DN5's concern; this only proves local
+    signer code never tries to undo a registration on device revoke)."""
+    device_id, private, _pub = _register_device(client)
+    monkeypatch.setattr(
+        routes, "KEY_MATERIAL_PROVIDER",
+        lambda key_id: routes.KeyMaterial(
+            ciphertext=_iterated_salted_packet(), public_material=b"signing-pub", key_fingerprint="fp-1",
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(routes, "REGISTER_VERIFICATION_KEY", lambda **kwargs: calls.append(kwargs))
+    token = _step_up(client, device_id=device_id, key_id="key-1")
+    _provision(client, device_id=device_id, private_key=private, key_id="key-1", step_up_token=token)
+    assert len(calls) == 1
+
+    db.revoke_device(device_id, revoked_at=time.time(), reason="lost")
+    # No deregistration call of any kind exists in this module — the
+    # absence of one is the point (revocation never touches the
+    # verification-key store, per DN3 §5's device-scoped revocation).
+    assert len(calls) == 1
