@@ -9,6 +9,7 @@ audit_compliance since only the ``compliant`` flag matters here.
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -19,6 +20,8 @@ from tools.dashboard.commit_compliance import (
     SignOffStatus,
 )
 from tools.dashboard.dao import commit_workflow_db
+from tools.dashboard.dao import trusted_git_object_store as object_store_dao
+from tools.dashboard.services.trusted_git_object_store import ContentAddressedStore
 from tools.dashboard.governed_rewrite import (
     REASON_ANCESTOR_CHANGED,
     REASON_VIOLATIONS,
@@ -27,6 +30,7 @@ from tools.dashboard.governed_rewrite import (
     construct_corrected_metadata,
     create_governed_rewrite_workflow,
     determine_rewrite_membership,
+    snapshot_original_commit,
 )
 
 
@@ -333,3 +337,104 @@ def test_D4_10_unresolved_identity_raises_rather_than_silently_correcting():
             original_author=identity, original_committer=identity,
             message=b"msg\n", report=report,
         )
+
+
+# ── D4-9: snapshot the original commit tree into the trusted object store ─
+
+
+
+def _git(repo, *args):
+    subprocess.run(["git", "-C", str(repo), *args], capture_output=True, check=True)
+
+
+def _git_out(repo, *args) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, check=True
+    ).stdout.decode().strip()
+
+
+def _fixture_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "wrong@example.com")
+    _git(repo, "config", "user.name", "Wrong Author")
+    (repo / "file.txt").write_text("original\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "fix thing")
+    return repo, _git_out(repo, "rev-parse", "HEAD"), _git_out(repo, "rev-parse", "HEAD^{tree}")
+
+
+def test_D4_9_snapshot_is_referenced_by_the_workflow(tmp_path):
+    workflow_db_path = tmp_path / "wf.db"
+    trusted_store_path = tmp_path / "trusted.db"
+    commit_workflow_db.init_db(workflow_db_path)
+    trusted_conn = object_store_dao._get_conn(trusted_store_path)
+    object_store_dao.init_schema_on_connection(trusted_conn)
+    store = ContentAddressedStore(tmp_path / "store")
+    repo, orig_sha, orig_tree = _fixture_repo(tmp_path)
+
+    report = _correction_report(author_matches=False, committer_matches=False, signoff_matches=False)
+    workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha=orig_sha, compliance_report=report, db_path=workflow_db_path,
+    )
+
+    snapshot_ref = snapshot_original_commit(
+        workflow_id=workflow_id, repo_slug="autonomy", original_sha=orig_sha,
+        tree_sha=orig_tree, parent_shas=[], git_dir=repo, store=store,
+        trusted_store_conn=trusted_conn, workflow_db_path=workflow_db_path,
+    )
+    trusted_conn.close()
+
+    conn = commit_workflow_db._get_conn(workflow_db_path)
+    try:
+        row = conn.execute(
+            "SELECT state_json FROM commit_workflow_states WHERE workflow_id = ?", (workflow_id,),
+        ).fetchone()
+        state = json.loads(row["state_json"])
+        # The snapshot ref is now readable from the workflow itself...
+        assert state["snapshot_ref"] == snapshot_ref
+        # ...and D4-8's fields are still present -- the new event must not
+        # have clobbered the state D4-8 already wrote.
+        assert state["origin_kind"] == "governed_rewrite"
+        assert state["source_commit_shas"] == [orig_sha]
+
+        # D4-8's role/position row must survive this second event too.
+        commit_row = conn.execute(
+            "SELECT role, position FROM commit_workflow_commits WHERE workflow_id = ?", (workflow_id,),
+        ).fetchone()
+        assert commit_row["role"] == ROLE_REWRITE_SOURCE
+        assert commit_row["position"] == 0
+    finally:
+        conn.close()
+
+
+def test_D4_9_snapshot_tree_survives_worktree_and_branch_mutation(tmp_path):
+    workflow_db_path = tmp_path / "wf.db"
+    trusted_store_path = tmp_path / "trusted.db"
+    commit_workflow_db.init_db(workflow_db_path)
+    trusted_conn = object_store_dao._get_conn(trusted_store_path)
+    object_store_dao.init_schema_on_connection(trusted_conn)
+    store = ContentAddressedStore(tmp_path / "store")
+    repo, orig_sha, orig_tree = _fixture_repo(tmp_path)
+
+    report = _correction_report(author_matches=False, committer_matches=False, signoff_matches=False)
+    workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha=orig_sha, compliance_report=report, db_path=workflow_db_path,
+    )
+    snapshot_ref = snapshot_original_commit(
+        workflow_id=workflow_id, repo_slug="autonomy", original_sha=orig_sha,
+        tree_sha=orig_tree, parent_shas=[], git_dir=repo, store=store,
+        trusted_store_conn=trusted_conn, workflow_db_path=workflow_db_path,
+    )
+
+    # Mutate the working tree AND advance the branch to a whole new commit.
+    (repo / "file.txt").write_text("mutated after snapshot\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "later work")
+    new_head = _git_out(repo, "rev-parse", "HEAD")
+    assert new_head != orig_sha
+
+    snap = object_store_dao.get_snapshot(trusted_conn, snapshot_ref)
+    assert snap["tree_sha"] == orig_tree
+    trusted_conn.close()
