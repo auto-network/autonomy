@@ -82,3 +82,22 @@ def test_gc_deletes_shared_object_only_once_all_referencers_are_collected(tmp_pa
     assert summary["snapshots_collected"] == 2
     assert not store.exists(shared)  # no live referencer left -> deleted
     assert summary["objects_deleted"] == 1  # counted once, not per-snapshot
+
+
+def test_gc_resumes_an_interrupted_sweep_and_frees_stranded_bytes(tmp_path):
+    """A crash between phase 1 (mark gc_pending, commit) and phase 2 (delete
+    bytes) must be recovered by the next run — not leave bytes stranded forever.
+    Regression for the storage leak Sonnet found: gc_deleted rows were excluded
+    from every future sweep, so an interrupted collection never finished."""
+    conn, store = _conn(), ContentAddressedStore(tmp_path)
+    digests = _snap(conn, store, "s1", [b"a", b"b"], expires_at=100.0)
+    # Simulate a crash: phase 1 ran (snapshot committed gc_pending) but phase 2
+    # never removed the bytes.
+    dao.update_snapshot_status(conn, "s1", "gc_pending")
+    conn.commit()
+    assert all(store.exists(d) for d in digests)  # bytes still on disk after the crash
+    # A later sweep (process restart) must resume and finish it.
+    summary = collect_garbage(dao_conn=conn, store=store, now=200.0)
+    assert summary["snapshots_collected"] == 1
+    assert dao.get_snapshot(conn, "s1")["status"] == "gc_deleted"
+    assert all(not store.exists(d) for d in digests)  # bytes now freed, not stranded
