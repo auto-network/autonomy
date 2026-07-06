@@ -458,6 +458,13 @@ def record_force_with_lease_approval(
     the BINDING lease — the ref-tip observed AT THIS CALL, never reused
     from the T0 supersede record even if the ref never moved.
 
+    Requires a prior T0 supersede approval to already exist — T2 can
+    never be recorded first. Without this, an out-of-order caller could
+    record force_with_lease before any supersede approval, satisfying
+    D4-14's dual-approval publish gate without the T0→T2 disclosure
+    check ever running (there would be nothing to disclose a delta
+    against). Codex's review finding.
+
     D4-16 disclosure gate: if the ref advanced between T0 and T2 (the T0
     supersede record's provisional ref-tip differs from ``observed_ref_tip``
     here), the T0→T2 delta must have been shown to the operator before
@@ -466,7 +473,11 @@ def record_force_with_lease_approval(
     required and a single combined confirmation is allowed.
     """
     t0_ref_tip = _get_provisional_ref_tip(workflow_id, db_path=db_path)
-    ref_advanced = t0_ref_tip is not None and t0_ref_tip != observed_ref_tip
+    if t0_ref_tip is None:
+        raise ValueError(
+            "force_with_lease (T2) requires a prior supersede (T0) approval to already exist"
+        )
+    ref_advanced = t0_ref_tip != observed_ref_tip
     if ref_advanced and not delta_disclosed:
         raise ValueError(
             "force_with_lease approval blocked: the ref advanced between T0 and T2 "
