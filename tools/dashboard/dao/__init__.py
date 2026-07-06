@@ -5,4 +5,5 @@ Modules:
 - dispatch: SQLite read-only access to data/dispatch.db
 - beads: pymysql read-only access to Dolt on :3306
 - sessions: Session queries backed by dashboard.db + graph.db
+- trusted_git_object_store: host-owned snapshot metadata for commit signing
 """
