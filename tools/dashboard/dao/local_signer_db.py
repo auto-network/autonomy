@@ -114,7 +114,8 @@ CREATE TABLE IF NOT EXISTS local_signer_challenge_nonces (
     signing_request_id  TEXT PRIMARY KEY,
     nonce               TEXT NOT NULL,
     minted_at           REAL NOT NULL,
-    expires_at          REAL NOT NULL
+    expires_at          REAL NOT NULL,
+    consumed_at         REAL
 );
 """
 
@@ -658,15 +659,51 @@ def mint_challenge_nonce(
     try:
         conn.execute(
             """INSERT INTO local_signer_challenge_nonces (
-                   signing_request_id, nonce, minted_at, expires_at
-               ) VALUES (?, ?, ?, ?)
+                   signing_request_id, nonce, minted_at, expires_at, consumed_at
+               ) VALUES (?, ?, ?, ?, NULL)
                ON CONFLICT(signing_request_id) DO UPDATE SET
                    nonce = excluded.nonce,
                    minted_at = excluded.minted_at,
-                   expires_at = excluded.expires_at""",
+                   expires_at = excluded.expires_at,
+                   consumed_at = NULL""",
             (signing_request_id, nonce, minted_at, minted_at + ttl_seconds),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def consume_challenge_nonce(*, signing_request_id: str, nonce: str, now: float, db_path: Path | str | None = None) -> bool:
+    """D3-15/16 nonce-binding gate: atomically check that ``nonce`` is the
+    CURRENT, unconsumed, unexpired challenge nonce for ``signing_request_id``
+    and mark it consumed. Returns False (no-op) for a mismatched, already
+    consumed, or expired nonce — a stale or replayed nonce must never pass.
+    """
+    conn = _get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT nonce, expires_at, consumed_at FROM local_signer_challenge_nonces "
+            "WHERE signing_request_id = ?",
+            (signing_request_id,),
+        ).fetchone()
+        if (
+            row is None
+            or row["nonce"] != nonce
+            or row["consumed_at"] is not None
+            or row["expires_at"] <= now
+        ):
+            conn.rollback()
+            return False
+        conn.execute(
+            "UPDATE local_signer_challenge_nonces SET consumed_at = ? WHERE signing_request_id = ?",
+            (now, signing_request_id),
+        )
+        conn.commit()
+        return True
+    except BaseException:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
