@@ -53,6 +53,14 @@ The T0/T2 split matters: the supersede approval (T0) can only ever
 record a PROVISIONAL ref-tip, since the ref may move again before the
 force_with_lease approval (T2) — only T2's observed ref-tip is ever the
 binding lease a publish may act on.
+
+D4-16's disclosure gate is folded directly into
+``record_force_with_lease_approval``: it reads T0's own provisional
+ref-tip back out of the ``commit_workflow_approvals`` table itself
+(never trusts a caller-supplied claim of what T0 was) and refuses to
+record the T2 approval if the ref advanced and the caller hasn't passed
+``delta_disclosed=True``. No ref movement means no disclosure
+requirement — a single combined confirmation is allowed.
 """
 
 from __future__ import annotations
@@ -421,18 +429,50 @@ def record_supersede_approval(
         conn.close()
 
 
+def _get_provisional_ref_tip(workflow_id: str, db_path=None) -> str | None:
+    conn = commit_workflow_db._get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT payload_json FROM commit_workflow_approvals "
+            "WHERE workflow_id = ? AND approval_type = 'supersede' AND status = 'approved'",
+            (workflow_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return json.loads(row["payload_json"])["ref_tip"]
+
+
 def record_force_with_lease_approval(
     *,
     workflow_id: str,
     repo_slug: str,
     approval_id: str,
     observed_ref_tip: str,
+    delta_disclosed: bool = False,
     operator_id: str | None = None,
     db_path=None,
 ) -> None:
     """T2 (strictly after T0): record the force_with_lease approval with
     the BINDING lease — the ref-tip observed AT THIS CALL, never reused
-    from the T0 supersede record even if the ref never moved."""
+    from the T0 supersede record even if the ref never moved.
+
+    D4-16 disclosure gate: if the ref advanced between T0 and T2 (the T0
+    supersede record's provisional ref-tip differs from ``observed_ref_tip``
+    here), the T0→T2 delta must have been shown to the operator before
+    this approval can be granted — raises unless the caller passes
+    ``delta_disclosed=True``. When the ref never moved, disclosure isn't
+    required and a single combined confirmation is allowed.
+    """
+    t0_ref_tip = _get_provisional_ref_tip(workflow_id, db_path=db_path)
+    ref_advanced = t0_ref_tip is not None and t0_ref_tip != observed_ref_tip
+    if ref_advanced and not delta_disclosed:
+        raise ValueError(
+            "force_with_lease approval blocked: the ref advanced between T0 and T2 "
+            "and the intervening delta was not disclosed to the operator"
+        )
+
     now = time.time()
     conn = commit_workflow_db._get_conn(db_path)
     try:
@@ -443,7 +483,10 @@ def record_force_with_lease_approval(
             "VALUES (?, ?, ?, 'force_with_lease', 'approved', ?, ?, ?, ?)",
             (
                 approval_id, workflow_id, repo_slug, operator_id, now, now,
-                json.dumps({"ref_tip": observed_ref_tip, "binding": True}),
+                json.dumps({
+                    "ref_tip": observed_ref_tip, "binding": True,
+                    "ref_advanced": ref_advanced, "delta_disclosed": delta_disclosed,
+                }),
             ),
         )
         conn.commit()
