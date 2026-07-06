@@ -535,3 +535,58 @@ def test_deploy_seed_only_autonomy_workspaces(graph_db_env):
     resolved = resolve_commit_policy(workspace_id="autonomy", org=ops.CALLER_ORG)
     assert resolved.profile == AUTONOMY_PROFILE
     assert resolve_commit_policy(workspace_id="enterprise", org=ops.CALLER_ORG).profile == "safe.default"
+
+
+def test_enterprise_no_issue_profile_matches_enterprise_signed_pr_except_linkage():
+    """The dedicated no-issue profile is enterprise.signed-pr in every
+    dimension except issue linkage — a ticket reference is a branch-naming
+    convention (operator decision, 2026), not a policy requirement."""
+    with_issue = expand_commit_policy_payload({
+        "profile": "enterprise.signed-pr",
+        "override_mode": "none",
+    })
+    without_issue = expand_commit_policy_payload({
+        "profile": "enterprise.signed-pr-no-issue",
+        "override_mode": "none",
+    })
+    diff_keys = {
+        k for k in with_issue
+        if with_issue[k] != without_issue.get(k)
+    }
+    assert diff_keys == {"profile", "issue_linkage"}
+    assert without_issue["issue_linkage"]["required"] is False
+
+    errors = validate_commit_policy(
+        without_issue,
+        context=WorkspaceCapabilityContext(),
+        raise_on_error=False,
+    )
+    assert not any("issue_linkage" in e for e in errors)
+
+
+def test_anchore_workspace_policies_seeded_and_resolve_without_issue_linkage(multi_org_env):
+    """P0-1: the two Anchore workspace commit-policy Settings rows exist in
+    the anchore org DB and resolve to the enterprise workflow shape without
+    requiring issue linkage."""
+    from tools.graph.commit_policy import seed_workspace_policy
+
+    for workspace_id in ("enterprise-ng", "enterprise-v5"):
+        inserted = seed_workspace_policy(
+            workspace_id=workspace_id,
+            org="anchore",
+            profile="enterprise.signed-pr-no-issue",
+        )
+        assert inserted is True
+
+        resolved = resolve_commit_policy(workspace_id=workspace_id, org="anchore")
+        assert resolved.key == f"workspace:{workspace_id}"
+        assert resolved.profile == "enterprise.signed-pr-no-issue"
+        assert resolved.payload["issue_linkage"]["required"] is False
+        assert resolved.payload["branch_mode"] == "pr_branch"
+        assert resolved.payload["signature_requirement"] == "signoff_and_gpg"
+        assert resolved.errors == ()
+
+        # Not visible from the autonomy org — proves the row genuinely lives
+        # in anchore, not merely resolvable from anywhere.
+        wrong_org = resolve_commit_policy(workspace_id=workspace_id, org="autonomy")
+        assert wrong_org.key == "built-in:safe.default"

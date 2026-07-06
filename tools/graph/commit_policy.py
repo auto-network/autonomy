@@ -82,6 +82,7 @@ class ResolvedCommitPolicy:
 SAFE_DEFAULT_PROFILE = "safe.default"
 AUTONOMY_PROFILE = "autonomy.direct-master"
 ENTERPRISE_PROFILE = "enterprise.signed-pr"
+ENTERPRISE_NO_ISSUE_PROFILE = "enterprise.signed-pr-no-issue"
 
 
 BUILTIN_PROFILES: dict[str, dict] = {
@@ -136,6 +137,27 @@ BUILTIN_PROFILES: dict[str, dict] = {
         "author_policy": {"require_operator_confirmation": True, "require_signoff": True},
         "watch_policy": {"mode": "nag_when_terminal"},
         "issue_linkage": {"required": True, "capability_contract": "issue_tracker"},
+        "operation_overrides": {},
+        "override_mode": "none",
+    },
+    ENTERPRISE_NO_ISSUE_PROFILE: {
+        "profile": ENTERPRISE_NO_ISSUE_PROFILE,
+        "commit_destination": "provider_review",
+        "branch_mode": "pr_branch",
+        "visibility": "provider_review_published",
+        "push_requirement": "required",
+        "review_integration": "required_pr_watch",
+        "signature_requirement": "signoff_and_gpg",
+        "signing_boundary": "human_local_crypto_required",
+        "provider_credential_boundary": "broker_required",
+        "ref_update_permissions": "fast_forward_only",
+        "reviewer_audience": ["operator", "provider_reviewers"],
+        "author_policy": {"require_operator_confirmation": True, "require_signoff": True},
+        "watch_policy": {"mode": "nag_when_terminal"},
+        # Ticket reference is a branch-naming convention, not a policy
+        # requirement (operator decision, 2026) — same as enterprise.signed-pr
+        # in every other dimension, but issue linkage is not required.
+        "issue_linkage": {"required": False},
         "operation_overrides": {},
         "override_mode": "none",
     },
