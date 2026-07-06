@@ -178,6 +178,7 @@ def reconcile_plugin_settings(
     plugin,
     *,
     effective_org: str | None = None,
+    force: bool = False,
 ) -> list[dict[str, Any]]:
     """Install/update settings declared by one enabled plugin."""
     results: list[dict[str, Any]] = []
@@ -203,6 +204,9 @@ def reconcile_plugin_settings(
                 action = "installed"
             elif current_hash == decl.payload_hash:
                 action = "adopted"
+            elif force:
+                should_write = True
+                action = "forced"
             else:
                 status = "drifted"
                 action = "conflict"
@@ -216,6 +220,9 @@ def reconcile_plugin_settings(
                     action = "updated"
                 else:
                     action = "unchanged"
+            elif force:
+                should_write = True
+                action = "forced"
             else:
                 status = "drifted"
                 action = "drifted"

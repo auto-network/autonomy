@@ -604,6 +604,47 @@ def test_plugin_declared_setting_drift_is_not_overwritten(tmp_path, org_graph):
     assert owner.payload["status"] == "drifted"
 
 
+def test_plugin_declared_setting_force_overwrites_drift(tmp_path, org_graph):
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    pdir = _write_setting_plugin(
+        plugins_dir,
+        payload=_agent_action_payload("Plugin Primer"),
+    )
+    loaded = loader.load_all(plugins_dir=plugins_dir)
+    loader.reconcile_declared_settings(loaded)
+
+    operator_payload = _agent_action_payload("Operator Primer")
+    graph_ops.upsert_by_key(
+        "dashboard.agent-actions",
+        2,
+        "design.refresh-preview",
+        operator_payload,
+        state="canonical",
+        org="autonomy",
+    )
+    plugin_update = _agent_action_payload("Plugin Update")
+    (pdir / "agent_actions" / "refresh_preview.json").write_text(json.dumps(plugin_update))
+    loaded = loader.load_all(plugins_dir=plugins_dir)
+    results = loader.reconcile_declared_settings(loaded, force=True)
+
+    assert results[0]["action"] == "forced"
+    action = graph_ops.read_set(
+        "dashboard.agent-actions",
+        org="autonomy",
+        peers=[],
+    ).to_dict()["design.refresh-preview"]
+    assert action.payload["label"] == "Plugin Update"
+    owner = graph_ops.read_set(
+        PLUGIN_OWNED_SETTING_SET_ID,
+        org="autonomy",
+        peers=[],
+    ).to_dict()["settingplug:dashboard.agent-actions#2:design.refresh-preview"]
+    assert owner.payload["status"] == "managed"
+    assert owner.payload["plugin_payload_hash"] == owner.payload["installed_payload_hash"]
+    assert owner.payload["current_payload_hash"] == owner.payload["installed_payload_hash"]
+
+
 def test_plugin_declared_setting_disabled_deprecates_unchanged_row(
     tmp_path,
     org_graph,
