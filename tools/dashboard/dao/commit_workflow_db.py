@@ -158,6 +158,25 @@ CREATE TABLE IF NOT EXISTS commit_signing_requests (
     payload_json              TEXT NOT NULL DEFAULT '{{}}',
     FOREIGN KEY(workflow_id) REFERENCES commit_workflow_states(workflow_id)
 );
+
+CREATE TABLE IF NOT EXISTS commit_workflow_idempotency (
+    idempotency_id        TEXT PRIMARY KEY,
+    actor_type            TEXT NOT NULL,
+    actor_id              TEXT NOT NULL,
+    scope_key             TEXT NOT NULL,
+    operation             TEXT NOT NULL,
+    workflow_id           TEXT,
+    idempotency_key_hash  TEXT NOT NULL,
+    request_fingerprint   TEXT NOT NULL,
+    status                TEXT NOT NULL CHECK (status IN ('in_flight', 'completed', 'failed_retryable', 'failed_terminal')),
+    response_json         TEXT,
+    event_ids_json        TEXT NOT NULL DEFAULT '[]',
+    side_effect_ref       TEXT,
+    created_at            REAL NOT NULL,
+    updated_at            REAL NOT NULL,
+    expires_at            REAL NOT NULL,
+    UNIQUE(actor_type, actor_id, scope_key, operation, idempotency_key_hash)
+);
 """
 
 CREATE_INDEXES = """\
@@ -208,6 +227,12 @@ CREATE INDEX IF NOT EXISTS idx_csr_workflow_status
 
 CREATE INDEX IF NOT EXISTS idx_csr_payload_hash
     ON commit_signing_requests(canonical_payload_hash);
+
+CREATE INDEX IF NOT EXISTS idx_cwi_workflow
+    ON commit_workflow_idempotency(workflow_id, operation);
+
+CREATE INDEX IF NOT EXISTS idx_cwi_expiry
+    ON commit_workflow_idempotency(expires_at);
 """
 
 CREATE_TRIGGERS = """\
