@@ -14,7 +14,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # plus Chrome shared-library dependencies (24 libs from ldd)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-pip git sqlite3 ca-certificates curl \
-        openssh-client \
+        openssh-client gnupg \
         nodejs npm \
         gh \
         jq \
@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libdbus-1-3 libcups2 \
         libnss3 libnspr4 libasound2t64 \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --break-system-packages --no-cache-dir pytest pytest-xdist pyyaml "pydantic>=2,<3"
+    && pip install --break-system-packages --no-cache-dir pytest pytest-xdist pyyaml python-gnupg "pydantic>=2,<3"
 
 # ── bd CLI (Go binary, statically-ish linked — just needs libc) ──
 COPY bin/bd /usr/local/bin/bd
