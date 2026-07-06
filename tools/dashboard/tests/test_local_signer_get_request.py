@@ -185,3 +185,76 @@ def test_D3_12_no_separate_mint_endpoint_exists(client):
     paths = {route.path for route in routes.ROUTES}
     nonce_specific_routes = {p for p in paths if "nonce" in p.lower() or "challenge" in p.lower()}
     assert nonce_specific_routes == set()
+
+
+# ── D3-19/L13: sequential chain batch (waiting_on_predecessor) ─────────
+
+
+def _seed_batch_signing_request(
+    *, signing_request_id, workflow_id, batch_group_id, position_in_batch, batch_size,
+    canonical_payload_hash="",
+):
+    conn = cdb._get_conn()
+    try:
+        event_id = f"evt-{workflow_id}"
+        conn.execute(
+            "INSERT OR IGNORE INTO commit_workflow_events (event_id, workflow_id, event_type, occurred_at, actor_type, repo_slug) "
+            "VALUES (?, ?, 'proposed', 1.0, 'agent_session', 'repo')",
+            (event_id, workflow_id),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO commit_workflow_states (workflow_id, repo_slug, status, last_event_id, created_at, updated_at, state_json) "
+            "VALUES (?, 'repo', 'awaiting_signature', ?, 1.0, 1.0, '{}')",
+            (workflow_id, event_id),
+        )
+        conn.execute(
+            "INSERT INTO commit_signing_requests (signing_request_id, workflow_id, repo_slug, status, "
+            "signing_method, trusted_object_store_ref, canonical_payload_hash, "
+            "batch_group_id, position_in_batch, batch_size, requested_at) "
+            "VALUES (?, ?, 'repo', 'pending', 'ssh', 'store://ref', ?, ?, ?, ?, 1.0)",
+            (signing_request_id, workflow_id, canonical_payload_hash, batch_group_id, position_in_batch, batch_size),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_D3_19_not_yet_ready_chain_member_reports_waiting_on_predecessor(client):
+    device_id, private, _pub = _register_device(client)
+    _seed_batch_signing_request(
+        signing_request_id="sr-3", workflow_id="wf-chain", batch_group_id="batch-1",
+        position_in_batch=3, batch_size=3, canonical_payload_hash="",
+    )
+
+    r = _get(client, signing_request_id="sr-3", device_id=device_id, private_key=private)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["batch_status"] == "waiting_on_predecessor"
+    assert body["canonical_payload_hash"] is None
+    assert body["challenge_nonce"] is None
+    assert body["batch_group_id"] == "batch-1"
+    assert body["position_in_batch"] == 3
+    assert body["batch_size"] == 3
+
+    # Never a 404 -- it's a real ordered member, just not ready.
+    assert r.status_code != 404
+    # And no nonce was actually persisted for it.
+    assert db.get_current_challenge_nonce("sr-3") is None
+
+
+def test_D3_19_ready_batch_member_reports_null_batch_status_with_real_fields(client):
+    device_id, private, _pub = _register_device(client)
+    _seed_batch_signing_request(
+        signing_request_id="sr-1", workflow_id="wf-chain", batch_group_id="batch-1",
+        position_in_batch=1, batch_size=3, canonical_payload_hash="hash-1",
+    )
+
+    r = _get(client, signing_request_id="sr-1", device_id=device_id, private_key=private)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["batch_status"] is None
+    assert body["canonical_payload_hash"] == "hash-1"
+    assert body["challenge_nonce"]
+    assert body["batch_group_id"] == "batch-1"
+    assert body["position_in_batch"] == 1
+    assert body["batch_size"] == 3
