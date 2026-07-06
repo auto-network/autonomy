@@ -58,13 +58,17 @@ def broker_keystore(monkeypatch):
 def dashboard_db_env(tmp_path, monkeypatch):
     db_path = tmp_path / "dashboard.db"
     monkeypatch.setenv("DASHBOARD_DB", str(db_path))
+    monkeypatch.setattr(dashboard_db, "_DB_PATH", db_path)
+    monkeypatch.setattr(dashboard_db, "_conn", None)
     dashboard_db.init_db(db_path)
     yield db_path
 
 
 @pytest.fixture
-def auth_db_env(tmp_path):
+def auth_db_env(tmp_path, monkeypatch):
     db_path = tmp_path / "auth.db"
+    monkeypatch.setattr(auth_db, "_DB_PATH", db_path)
+    monkeypatch.setattr(auth_db, "_conn", None)
     auth_db.init_db(db_path)
     yield db_path
 
