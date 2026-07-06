@@ -277,13 +277,33 @@ def test_enterprise_policy_requires_issue_tracker_and_gpg_signer():
     })
     errors = validate_commit_policy(payload, raise_on_error=False)
     assert any("issue_tracker" in err for err in errors)
-    assert any("GPG signature required" in err for err in errors)
+    # signing_boundary=human_local_crypto_required means signing happens on the
+    # operator's device, so a missing local GPG/SSH signer is not an error.
+    assert not any("GPG signature required" in err for err in errors)
 
     ok_ctx = WorkspaceCapabilityContext(
         issue_tracker_enabled=True,
         gpg_signer_available=True,
     )
     assert validate_commit_policy(payload, context=ok_ctx, raise_on_error=False) == []
+
+
+def test_human_local_crypto_boundary_skips_signer_available_check():
+    payload = expand_commit_policy_payload({
+        "profile": "enterprise.signed-pr",
+        "override_mode": "none",
+    })
+    ctx = WorkspaceCapabilityContext(issue_tracker_enabled=True)
+    errors = validate_commit_policy(payload, context=ctx, raise_on_error=False)
+    assert not any("GPG signature required" in e for e in errors)
+
+    ssh_payload = dict(payload, signature_requirement="signoff_and_ssh")
+    errors = validate_commit_policy(ssh_payload, context=ctx, raise_on_error=False)
+    assert not any("SSH signature required" in e for e in errors)
+
+    none_boundary_payload = dict(payload, signing_boundary="none")
+    errors = validate_commit_policy(none_boundary_payload, context=ctx, raise_on_error=False)
+    assert any("signing_boundary=none" in e for e in errors)
 
 
 def test_operation_policy_cannot_remove_required_execution_class():
