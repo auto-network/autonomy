@@ -197,6 +197,72 @@ def test_commit_signing_requests_table_includes_nullable_device_id(tmp_path):
         conn.close()
 
 
+def test_workflow_state_and_commit_tables_have_expected_schema(tmp_path):
+    path = tmp_path / "commit_workflow.db"
+    db.init_db(path)
+
+    conn = db._get_conn(path)
+    try:
+        state_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(commit_workflow_states)").fetchall()
+        }
+        assert state_cols == {
+            "workflow_id",
+            "repo_slug",
+            "session_name",
+            "branch",
+            "status",
+            "content_fingerprint",
+            "target_branch",
+            "provider",
+            "provider_review_id",
+            "last_event_id",
+            "created_at",
+            "updated_at",
+            "state_json",
+        }
+
+        state_xcols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_xinfo(commit_workflow_states)").fetchall()
+        }
+        assert "terminal" in state_xcols
+
+        state_schema = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='commit_workflow_states'"
+        ).fetchone()["sql"]
+        assert "status IN (" in state_schema
+        assert "FOREIGN KEY(last_event_id) REFERENCES commit_workflow_events(event_id)" in state_schema
+
+        commit_cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(commit_workflow_commits)").fetchall()
+        }
+        assert commit_cols == {
+            "workflow_id",
+            "repo_slug",
+            "commit_sha",
+            "position",
+            "role",
+            "created_at",
+        }
+
+        commit_pk = [
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(commit_workflow_commits)").fetchall()
+            if row["pk"]
+        ]
+        assert commit_pk == ["workflow_id", "commit_sha"]
+
+        commit_schema = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='commit_workflow_commits'"
+        ).fetchone()["sql"]
+        assert "FOREIGN KEY(workflow_id) REFERENCES commit_workflow_states(workflow_id)" in commit_schema
+    finally:
+        conn.close()
+
+
 def test_g8_idempotency_key_hash_stored_not_raw_key():
     digest = db.hash_idempotency_key("commit_workflow", "raw-key-123")
     assert digest != "raw-key-123"
