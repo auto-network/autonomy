@@ -512,9 +512,10 @@ def validate_commit_policy(
     if issue_linkage.get("required") and not ctx.issue_tracker_enabled:
         errors.append("issue_linkage is required but issue_tracker is not enabled")
     signature = str(payload.get("signature_requirement", "none"))
-    if _requires_gpg(signature) and not ctx.gpg_signer_available:
+    local_signer_required = payload.get("signing_boundary") != "human_local_crypto_required"
+    if _requires_gpg(signature) and not ctx.gpg_signer_available and local_signer_required:
         errors.append("GPG signature required but no GPG signer is available")
-    if _requires_ssh(signature) and not ctx.ssh_signer_available:
+    if _requires_ssh(signature) and not ctx.ssh_signer_available and local_signer_required:
         errors.append("SSH signature required but no SSH signer is available")
     if (_requires_gpg(signature) or _requires_ssh(signature)) \
             and payload.get("signing_boundary") == "none":
