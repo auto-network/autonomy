@@ -1116,6 +1116,44 @@
     .sv-header-inner {
       padding: max(0px, calc(var(--sat) - 5px)) 0.75rem 6px;
     }
+    .sv-header-inner--with-back {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr);
+      column-gap: 4px;
+      align-items: stretch;
+    }
+    .sv-header-content {
+      min-width: 0;
+    }
+    .sv-back-button {
+      align-self: stretch;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      min-height: 62px;
+      margin: 1px 0 0 -3px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: #d7deeb;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .sv-back-button svg {
+      width: 24px;
+      height: 24px;
+      flex: 0 0 auto;
+    }
+    .sv-back-button:hover,
+    .sv-back-button:focus-visible {
+      color: #f8fafc;
+    }
+    .sv-back-button:focus-visible {
+      outline: 2px solid rgba(96, 165, 250, 0.75);
+      outline-offset: 2px;
+      border-radius: 6px;
+    }
 
     /* Expanded header — revealed when .sv-header has .open class. Pure CSS
        max-height animation; no x-show fighting the transition. Sections

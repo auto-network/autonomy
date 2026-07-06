@@ -45,7 +45,26 @@
       <div class="sv-header" data-testid="session-header"
            :class="{ 'open': headerOpen }"
            @click="headerOpen = !headerOpen">
-        <div class="sv-header-inner">
+        <div class="sv-header-inner"
+             :class="{ 'sv-header-inner--with-back': _showSessionsBack }">
+          <button type="button"
+                  class="sv-back-button"
+                  x-show="_showSessionsBack"
+                  @click.stop="backToSessionsList()"
+                  aria-label="Back to sessions"
+                  title="Back to sessions"
+                  style="display:none;">
+            <svg viewBox="0 0 24 24"
+                 fill="none"
+                 stroke="currentColor"
+                 stroke-width="2.6"
+                 stroke-linecap="round"
+                 stroke-linejoin="round"
+                 aria-hidden="true">
+              <polyline points="15 18 9 12 15 6"></polyline>
+            </svg>
+          </button>
+          <div class="sv-header-content">
           <!-- Header row 1: status dot, role badge, indicator rail, terminal toggle, chevron -->
           <div class="sv-header-row1" style="display:flex;align-items:center;gap:12px;margin-top:3px;">
             <button type="button"
@@ -187,6 +206,7 @@
             <span class="tokens" x-show="contextTokens > 0"
                   style="font-size:11px;font-variant-numeric:tabular-nums;color:#6b7280;"
                   x-text="Math.round(contextTokens / 1000) + 'k'"></span>
+          </div>
           </div>
 
         </div>

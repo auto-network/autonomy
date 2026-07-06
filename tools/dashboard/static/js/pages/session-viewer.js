@@ -558,12 +558,30 @@
 
       // Header expand/collapse
       headerOpen: false,
+      _showSessionsBack: false,
       // Drawer tab: 'topics' | 'todos'. Only meaningful when hasTodos is true.
       // Auto-resets to 'topics' whenever hasTodos transitions true → false
       // (handled by the $watch in init(), so there's no stuck-tab state).
       selectedDrawerTab: 'topics',
       copiedField: '',
       _copyFeedbackTimer: null,
+      _isSessionOverlayMounted() {
+        if (typeof document === 'undefined') return false;
+        var layer = document.getElementById('session-view-layer');
+        return !!(
+          layer &&
+          layer.classList.contains('active') &&
+          document.body &&
+          document.body.classList.contains('session-overlay-active')
+        );
+      },
+      backToSessionsList() {
+        if (!this._isSessionOverlayMounted()) return;
+        var app = window.Autonomy || {};
+        if (typeof app.closeSessionOverlayToList === 'function') {
+          app.closeSessionOverlayToList();
+        }
+      },
 
       // Terminal toggle (full-screen xterm.js swaps the chat body)
       showTerminal: false,
@@ -1415,6 +1433,8 @@
           // Panel: wait for configure() from design.js
           return;
         }
+
+        this._showSessionsBack = this._isSessionOverlayMounted();
 
         // Page mode: parse URL and configure
         var m = window.location.pathname.match(/^\/session\/([^/]+)\/(.+)$/);
