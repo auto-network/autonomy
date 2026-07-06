@@ -163,6 +163,9 @@ def capture_snapshot(
         )
         manifest_lines.append(f"{position} {oid} {otype} {object_sha256}")
     manifest_sha256 = sha256_hex("\n".join(manifest_lines).encode())
+    # Store the canonical preview as a real content-addressed artifact so it is
+    # independently verifiable — its digest IS canonical_preview_sha256.
+    canonical_preview_sha256 = store.put(canonical_payload)
     snapshot_dao.insert_snapshot(
         dao_conn,
         snapshot_ref=snapshot_ref,
@@ -172,7 +175,7 @@ def capture_snapshot(
         tree_sha=tree_sha,
         parent_shas=parent_shas,
         manifest_sha256=manifest_sha256,
-        canonical_preview_sha256=sha256_hex(canonical_payload),
+        canonical_preview_sha256=canonical_preview_sha256,
         snapshot_type=snapshot_type,
         store_root=store_root,
         retention_class=retention_class,
@@ -185,8 +188,30 @@ def capture_snapshot(
 
 
 def verify_snapshot(*, snapshot_ref: str, store: ContentAddressedStore, dao_conn) -> bool:
-    """True iff every captured object is present in the store and un-tampered."""
+    """True iff the snapshot is internally consistent and un-tampered.
+
+    Checks all three trust-boundary bindings, not just the object bytes:
+      1. every captured object is present in the store and hashes to its digest;
+      2. the entry set recomputes to the stored ``manifest_sha256`` — so entries
+         can't be added, dropped, reordered, or repointed without detection;
+      3. the canonical preview artifact is present and un-tampered.
+    A poisoned metadata row (e.g. a swapped preview or manifest hash) fails here
+    rather than passing as a usable snapshot reference.
+    """
+    snapshot = snapshot_dao.get_snapshot(dao_conn, snapshot_ref)
+    if snapshot is None:
+        return False
     entries = snapshot_dao.list_entries(dao_conn, snapshot_ref)
     if not entries:
         return False
-    return all(store.verify(entry["object_sha256"]) for entry in entries)
+    if not all(store.verify(entry["object_sha256"]) for entry in entries):
+        return False
+    manifest_lines = [
+        f"{entry['position']} {entry['object_oid']} {entry['object_type']} {entry['object_sha256']}"
+        for entry in entries
+    ]
+    if sha256_hex("\n".join(manifest_lines).encode()) != snapshot["manifest_sha256"]:
+        return False
+    if not store.verify(snapshot["canonical_preview_sha256"]):
+        return False
+    return True
