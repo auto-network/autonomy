@@ -634,11 +634,11 @@ def test_D4_15_binding_lease_is_the_t2_value_not_t0_when_ref_advanced(tmp_path):
         workflow_id=workflow_id, repo_slug="autonomy", approval_id="ap-supersede",
         observed_ref_tip="sha-A", db_path=path,
     )
-    # ...the ref advances to B between T0 and T2...
+    # ...the ref advances to B between T0 and T2 -- disclosed per D4-16...
     # T2: force_with_lease approved while the ref is now at B.
     record_force_with_lease_approval(
         workflow_id=workflow_id, repo_slug="autonomy", approval_id="ap-lease",
-        observed_ref_tip="sha-B", db_path=path,
+        observed_ref_tip="sha-B", delta_disclosed=True, db_path=path,
     )
 
     binding_lease = get_binding_lease(workflow_id=workflow_id, db_path=path)
@@ -696,4 +696,70 @@ def test_D4_15_binding_lease_equals_t0_ref_tip_when_ref_never_moved(tmp_path):
         workflow_id=workflow_id, repo_slug="autonomy", approval_id="ap-lease",
         observed_ref_tip="sha-A", db_path=path,
     )
+    assert get_binding_lease(workflow_id=workflow_id, db_path=path) == "sha-A"
+
+
+# ── D4-16: T0->T2 delta must be disclosed before force_with_lease grants ─
+
+
+def test_D4_16_ref_advanced_undisclosed_blocks_force_with_lease(tmp_path):
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    report = _report("sha1", compliant=False, violations=("signature_absent",))
+    workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha="sha1", compliance_report=report, db_path=path,
+    )
+    record_supersede_approval(
+        workflow_id=workflow_id, repo_slug="autonomy", approval_id="ap-supersede",
+        observed_ref_tip="sha-A", db_path=path,
+    )
+
+    with pytest.raises(ValueError):
+        record_force_with_lease_approval(
+            workflow_id=workflow_id, repo_slug="autonomy", approval_id="ap-lease",
+            observed_ref_tip="sha-B", db_path=path,
+        )
+
+    # The rejected attempt must not have written a row at all.
+    assert get_binding_lease(workflow_id=workflow_id, db_path=path) is None
+
+
+def test_D4_16_ref_advanced_disclosed_allows_force_with_lease(tmp_path):
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    report = _report("sha1", compliant=False, violations=("signature_absent",))
+    workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha="sha1", compliance_report=report, db_path=path,
+    )
+    record_supersede_approval(
+        workflow_id=workflow_id, repo_slug="autonomy", approval_id="ap-supersede",
+        observed_ref_tip="sha-A", db_path=path,
+    )
+
+    record_force_with_lease_approval(
+        workflow_id=workflow_id, repo_slug="autonomy", approval_id="ap-lease",
+        observed_ref_tip="sha-B", delta_disclosed=True, db_path=path,
+    )
+
+    assert get_binding_lease(workflow_id=workflow_id, db_path=path) == "sha-B"
+
+
+def test_D4_16_no_ref_movement_allows_combined_confirmation_without_disclosure(tmp_path):
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    report = _report("sha1", compliant=False, violations=("signature_absent",))
+    workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha="sha1", compliance_report=report, db_path=path,
+    )
+    record_supersede_approval(
+        workflow_id=workflow_id, repo_slug="autonomy", approval_id="ap-supersede",
+        observed_ref_tip="sha-A", db_path=path,
+    )
+
+    # No ref movement -- a single combined confirmation (no delta_disclosed) is fine.
+    record_force_with_lease_approval(
+        workflow_id=workflow_id, repo_slug="autonomy", approval_id="ap-lease",
+        observed_ref_tip="sha-A", db_path=path,
+    )
+
     assert get_binding_lease(workflow_id=workflow_id, db_path=path) == "sha-A"
