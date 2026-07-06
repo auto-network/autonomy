@@ -1095,6 +1095,22 @@ function _closeSessionOverlayToList() {
 
 window.Autonomy.closeSessionOverlayToList = _closeSessionOverlayToList;
 
+function _handleSessionOverlayPopstate(e) {
+  const basePath = _sessionOverlayBasePath || '/sessions';
+  if (
+    !sessionViewLayer ||
+    !sessionViewLayer.classList.contains('active') ||
+    window.location.pathname !== basePath
+  ) {
+    return false;
+  }
+  _closeSessionOverlayToList();
+  if (e && e.state && e.state.scrollY !== undefined) {
+    requestAnimationFrame(() => window.scrollTo(0, e.state.scrollY));
+  }
+  return true;
+}
+
 function _destroySessionOverlay() {
   if (!sessionViewHost || !window.Alpine) {
     if (sessionViewHost) sessionViewHost.innerHTML = '';
@@ -2205,6 +2221,7 @@ document.addEventListener('click', (e) => {
 });
 
 window.addEventListener('popstate', (e) => {
+  if (_handleSessionOverlayPopstate(e)) return;
   route();
   if (e.state && e.state.scrollY !== undefined) {
     requestAnimationFrame(() => window.scrollTo(0, e.state.scrollY));
