@@ -8,6 +8,7 @@ from typing import Any
 from . import ops
 from .commit_policy import (
     AUTONOMY_PROFILE,
+    WorkspaceCapabilityContext,
     describe_commit_policy,
     describe_commit_policy_json,
     resolve_commit_policy,
@@ -15,11 +16,34 @@ from .commit_policy import (
 )
 
 
+def _capability_context_for_workspace(
+    workspace_id: str | None, org: str | None
+) -> WorkspaceCapabilityContext | None:
+    """Best-effort real capability context for a describe call.
+
+    Falls through to ``None`` (all-False context) if the workspace or its
+    capabilities can't be resolved — a policy that doesn't actually require
+    issue linkage still describes cleanly either way.
+    """
+    if not workspace_id:
+        return None
+    try:
+        from agents.workspace_settings import resolve_capabilities
+        caps = resolve_capabilities(workspace_id, org=org)
+    except Exception:
+        return None
+    return WorkspaceCapabilityContext(
+        issue_tracker_enabled=any(cap.contract == "issue_tracker" for cap in caps),
+    )
+
+
 def cmd_commit_policy_describe(args: Any) -> None:
+    org = getattr(args, "org", None) or ops.CALLER_ORG
     resolved = resolve_commit_policy(
         workspace_id=args.workspace,
         repo_slug=args.repo,
-        org=getattr(args, "org", None) or ops.CALLER_ORG,
+        org=org,
+        context=_capability_context_for_workspace(args.workspace, org),
     )
     if args.json:
         sys.stdout.write(describe_commit_policy_json(resolved) + "\n")

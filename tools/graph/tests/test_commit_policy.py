@@ -7,6 +7,7 @@ import pytest
 from tools.graph import ops
 from tools.graph.commit_policy import (
     AUTONOMY_PROFILE,
+    ENTERPRISE_PROFILE,
     BranchProtectionEvidence,
     CommitPolicyError,
     RefUpdateIntent,
@@ -26,7 +27,7 @@ from tools.graph.schemas.commit_policy import (
     OPERATION_POLICY_SET_ID,
 )
 from tools.graph.schemas.registry import get_schema
-from agents.primer_renderer import render_workspace_primer
+from agents.primer_renderer import _commit_policy_block, render_workspace_primer
 from agents.workspace_settings import RepoMount, WorkspaceV1
 
 
@@ -384,6 +385,70 @@ def test_workspace_primer_renders_resolved_commit_policy(graph_db_env):
     assert "## Commit Policy" in out
     assert "Commit policy: autonomy.direct-master." in out
     assert "Never merge master into your session branch" in out
+
+
+def test_commit_policy_block_issue_linkage_uses_real_capability_context(graph_db_env):
+    from agents.workspace_settings import MaterializedCapability
+
+    # issue_linkage.required == False: no issue-linkage error regardless of
+    # whether an issue tracker is configured for the workspace.
+    seed_workspace_policy(
+        workspace_id="no-linkage-ws",
+        org=ops.CALLER_ORG,
+        profile=AUTONOMY_PROFILE,
+    )
+    no_linkage_workspace = WorkspaceV1(
+        id="no-linkage-ws",
+        name="No Linkage",
+        description="",
+        image="autonomy-agent:dashboard",
+        graph_project=ops.CALLER_ORG,
+        repos=(RepoMount(url="u", mount="/workspace/repo", writable=True),),
+    )
+    block = _commit_policy_block(no_linkage_workspace)
+    assert "issue_linkage is required" not in " ".join(block["errors"])
+
+    # issue_linkage.required == True and the workspace really has no issue
+    # tracker enabled: the error must still fire (regression guard).
+    seed_workspace_policy(
+        workspace_id="enterprise-no-tracker-ws",
+        org=ops.CALLER_ORG,
+        profile=ENTERPRISE_PROFILE,
+    )
+    no_tracker_workspace = WorkspaceV1(
+        id="enterprise-no-tracker-ws",
+        name="Enterprise No Tracker",
+        description="",
+        image="autonomy-agent:dashboard",
+        graph_project=ops.CALLER_ORG,
+        repos=(RepoMount(url="u", mount="/workspace/repo", writable=True),),
+    )
+    block = _commit_policy_block(no_tracker_workspace)
+    assert "issue_linkage is required" in " ".join(block["errors"])
+
+    # issue_linkage.required == True and the workspace DOES have an issue
+    # tracker capability enabled: no issue-linkage error.
+    tracker_workspace = WorkspaceV1(
+        id="enterprise-no-tracker-ws",
+        name="Enterprise With Tracker",
+        description="",
+        image="autonomy-agent:dashboard",
+        graph_project=ops.CALLER_ORG,
+        repos=(RepoMount(url="u", mount="/workspace/repo", writable=True),),
+        capabilities=(
+            MaterializedCapability(
+                contract="issue_tracker",
+                contract_version=1,
+                implementation="jira",
+                implementation_version=1,
+                delivery_mode="mounted_tools",
+                package_root="agents/capabilities/jira",
+                mount_target="/opt/autonomy/capabilities/jira",
+            ),
+        ),
+    )
+    block = _commit_policy_block(tracker_workspace)
+    assert "issue_linkage is required" not in " ".join(block["errors"])
 
 
 def test_deploy_seed_only_autonomy_workspaces(graph_db_env):

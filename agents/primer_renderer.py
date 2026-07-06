@@ -26,7 +26,11 @@ from tools.graph.schemas.turn_correction import (
     SET_ID as TURN_CORRECTION_SET_ID,
     resolve_payload as resolve_turn_correction_payload,
 )
-from tools.graph.commit_policy import describe_commit_policy, resolve_commit_policy
+from tools.graph.commit_policy import (
+    WorkspaceCapabilityContext,
+    describe_commit_policy,
+    resolve_commit_policy,
+)
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "primers"
 PROJECTS_DIR = Path(__file__).resolve().parent / "projects"
@@ -180,10 +184,16 @@ def _turn_correction_block(config: WorkspaceV1) -> dict:
 
 def _commit_policy_block(config: WorkspaceV1) -> dict:
     """Render the commit workflow policy primer block for *config*."""
+    context = WorkspaceCapabilityContext(
+        issue_tracker_enabled=any(
+            cap.contract == "issue_tracker" for cap in config.capabilities
+        ),
+    )
     try:
         resolved = resolve_commit_policy(
             workspace_id=config.id,
             org=config.graph_project,
+            context=context,
         )
     except Exception:
         return {"enabled": False, "text": ""}
