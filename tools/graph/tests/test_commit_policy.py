@@ -39,6 +39,24 @@ def graph_db_env(tmp_path, monkeypatch):
     yield db_path
 
 
+@pytest.fixture
+def multi_org_env(tmp_path, monkeypatch):
+    """Real, separate per-org DBs (not the single-file ``graph_db_env``) —
+    needed to prove org-scoped lookups actually route to different
+    physical databases, per graph://bcce359d-a1d's per-org-DB model."""
+    from tools.graph.db import GraphDB
+
+    root = tmp_path / "orgs"
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    GraphDB.create_org_db("autonomy").close()
+    GraphDB.create_org_db("anchore").close()
+    yield root
+    GraphDB.close_all_pooled()
+
+
 def _cross_user_payload() -> dict:
     return expand_commit_policy_payload({
         "profile": "cross-user-shared",
@@ -365,6 +383,59 @@ def test_commit_policy_describe_command_uses_same_projection(graph_db_env, capsy
     out = capsys.readouterr().out
     assert "Commit policy: autonomy.direct-master." in out
     assert "whole-branch Worktrees merge path" in out
+
+
+def test_describe_resolves_workspace_row_from_the_org_it_actually_lives_in(multi_org_env):
+    """A workspace:<id> policy row is only visible when read from the org DB
+    it was seeded in — resolving from a different org must not find it and
+    must fall through to safe.default, proving the org scope is causal
+    rather than incidental."""
+    seed_workspace_policy(
+        workspace_id="enterprise-ng",
+        org="anchore",
+        profile="enterprise.signed-pr",
+    )
+    resolved = resolve_commit_policy(workspace_id="enterprise-ng", org="anchore")
+    assert resolved.key == "workspace:enterprise-ng"
+    assert resolved.profile == "enterprise.signed-pr"
+
+    wrong_org = resolve_commit_policy(workspace_id="enterprise-ng", org="autonomy")
+    assert wrong_org.key == "built-in:safe.default"
+
+
+def test_describe_org_follows_the_workspaces_real_org_not_the_caller(graph_db_env, monkeypatch):
+    """``cmd_commit_policy_describe`` must not silently default a
+    workspace-scoped lookup to the caller's own org — it must follow the
+    workspace's actual registered org when no ``--org`` is supplied."""
+    from tools.graph import commit_policy_cmd
+
+    class _FakeWorkspace:
+        graph_project = "anchore"
+
+    monkeypatch.setattr(
+        "agents.workspace_settings.get_workspace",
+        lambda workspace_id: _FakeWorkspace(),
+    )
+    assert commit_policy_cmd._describe_org("enterprise-ng", None) == "anchore"
+    # An explicit --org always wins over the workspace's registered org.
+    assert commit_policy_cmd._describe_org("enterprise-ng", "autonomy") == "autonomy"
+    # No workspace id at all: falls back to the caller org.
+    assert commit_policy_cmd._describe_org(None, None) == ops.CALLER_ORG
+
+
+def test_describe_org_falls_back_to_caller_org_for_unknown_workspace(graph_db_env):
+    """A workspace id that isn't registered yet (e.g. brand new) must not
+    raise — describe still falls back to the caller org and correctly
+    resolves to safe.default rather than erroring."""
+    from tools.graph import commit_policy_cmd
+    assert commit_policy_cmd._describe_org("does-not-exist", None) == ops.CALLER_ORG
+
+
+def test_missing_workspace_still_resolves_safe_default(graph_db_env):
+    """Regression guard: a workspace with no Setting row anywhere still
+    correctly resolves to safe.default, not an error."""
+    resolved = resolve_commit_policy(workspace_id="never-seeded", org="anchore")
+    assert resolved.key == "built-in:safe.default"
 
 
 def test_workspace_primer_renders_resolved_commit_policy(graph_db_env):

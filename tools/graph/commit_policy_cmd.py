@@ -37,8 +37,32 @@ def _capability_context_for_workspace(
     )
 
 
+def _describe_org(workspace_id: str | None, explicit_org: str | None) -> str | None:
+    """Resolve which org DB a describe call should read from.
+
+    An explicit ``--org`` always wins. Otherwise, when a workspace id is
+    given, follow that workspace's real owning org (``graph_project``) —
+    a ``workspace:<id>`` policy row lives in whichever org DB registered
+    the workspace, which is not necessarily the caller's own org (e.g. the
+    Anchore workspaces live in the ``anchore`` org DB). Falling back to the
+    caller's org here is exactly what silently resolves to
+    ``built-in:safe.default`` for a workspace registered in a different
+    org. Falls back to the caller org when the workspace can't be found
+    (e.g. it doesn't exist yet), or when no workspace id was given at all.
+    """
+    if explicit_org:
+        return explicit_org
+    if workspace_id:
+        try:
+            from agents.workspace_settings import get_workspace
+            return get_workspace(workspace_id).graph_project
+        except KeyError:
+            pass
+    return ops.CALLER_ORG
+
+
 def cmd_commit_policy_describe(args: Any) -> None:
-    org = getattr(args, "org", None) or ops.CALLER_ORG
+    org = _describe_org(args.workspace, getattr(args, "org", None))
     resolved = resolve_commit_policy(
         workspace_id=args.workspace,
         repo_slug=args.repo,
