@@ -1,10 +1,11 @@
-"""Tests for D3-12 (challenge-nonce mint-on-GET) and the D3-13 fields
-buildable now (D3-13's canonical_payload_preview is deferred until
-commit.request_signature exists and establishes what it stores)."""
+"""Tests for D3-12 (challenge-nonce mint-on-GET) and D3-13 (the full
+response shape, including canonical_payload_preview read from
+commit.request_signature's own stored payload_json)."""
 
 from __future__ import annotations
 
 import base64
+import json
 import time
 
 import pytest
@@ -78,7 +79,10 @@ def _register_device(client) -> tuple[str, object, str]:
     return decide.json()["device_id"], private, public_b64
 
 
-def _seed_signing_request(*, signing_request_id: str, workflow_id: str, canonical_payload_hash: str = "hash-1"):
+def _seed_signing_request(
+    *, signing_request_id: str, workflow_id: str, canonical_payload_hash: str = "hash-1",
+    payload_json: str = "{}",
+):
     conn = cdb._get_conn()
     try:
         conn.execute(
@@ -93,9 +97,9 @@ def _seed_signing_request(*, signing_request_id: str, workflow_id: str, canonica
         )
         conn.execute(
             "INSERT INTO commit_signing_requests (signing_request_id, workflow_id, repo_slug, status, "
-            "signing_method, trusted_object_store_ref, canonical_payload_hash, requested_at) "
-            "VALUES (?, ?, 'repo', 'pending', 'ssh', 'store://ref', ?, 1.0)",
-            (signing_request_id, workflow_id, canonical_payload_hash),
+            "signing_method, trusted_object_store_ref, canonical_payload_hash, payload_json, requested_at) "
+            "VALUES (?, ?, 'repo', 'pending', 'ssh', 'store://ref', ?, ?, 1.0)",
+            (signing_request_id, workflow_id, canonical_payload_hash, payload_json),
         )
         conn.commit()
     finally:
@@ -126,6 +130,43 @@ def test_D3_12_get_returns_a_challenge_nonce_bound_to_the_signing_request(client
     stored = db.get_current_challenge_nonce("sr-1")
     assert stored is not None
     assert stored["nonce"] == body["challenge_nonce"]
+
+
+def test_D3_13_canonical_payload_preview_is_read_from_request_signatures_own_payload_json(client):
+    """canonical_payload_preview must reflect exactly what
+    commit.request_signature stored, not a re-derivation -- matches the
+    shape _canonical_preview_payload/_request_signature_preview actually
+    produce (unsigned_commit_sha, tree_sha, parent_shas, message, author,
+    committer)."""
+    device_id, private, _pub = _register_device(client)
+    preview = {
+        "unsigned_commit_sha": "a" * 40,
+        "tree_sha": "b" * 40,
+        "parent_shas": ["c" * 40],
+        "message": {"subject": "fix thing", "body": "body text", "trailers": {}},
+        "author": {"name": "Ada", "email": "ada@example.com", "timestamp": None, "timezone": None},
+        "committer": {"name": "Ada", "email": "ada@example.com", "timestamp": None, "timezone": None},
+    }
+    _seed_signing_request(
+        signing_request_id="sr-1", workflow_id="wf-1",
+        payload_json=json.dumps({
+            "requested_operator_id": "op-1", "signer_policy_version": "v1",
+            "canonical_payload_preview": preview,
+        }),
+    )
+
+    r = _get(client, signing_request_id="sr-1", device_id=device_id, private_key=private)
+    assert r.status_code == 200, r.text
+    assert r.json()["canonical_payload_preview"] == preview
+
+
+def test_D3_13_missing_payload_json_yields_null_preview_not_an_error(client):
+    device_id, private, _pub = _register_device(client)
+    _seed_signing_request(signing_request_id="sr-1", workflow_id="wf-1")  # default payload_json='{}'
+
+    r = _get(client, signing_request_id="sr-1", device_id=device_id, private_key=private)
+    assert r.status_code == 200, r.text
+    assert r.json()["canonical_payload_preview"] is None
 
 
 def test_D3_12_second_get_overwrites_the_current_nonce(client):
