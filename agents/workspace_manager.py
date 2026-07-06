@@ -93,6 +93,19 @@ _SSH_RE = re.compile(r"^(?P<user>[\w.-]+)@(?P<host>[\w.-]+):(?P<path>.+?)/?$")
 _URL_RE = re.compile(r"^(?:https?|ssh|git)://(?:[\w.-]+@)?(?P<host>[\w.-]+)(?::\d+)?/(?P<path>.+?)/?$")
 
 
+def _is_local_url(url: str) -> bool:
+    """True when ``url`` is an absolute host filesystem path, not a git URL.
+
+    Local-first repos (e.g. a ``git svn`` mirror with no git remote) are
+    configured with ``url`` set to the absolute host checkout path. ``git
+    clone``/``fetch`` work against a local path directly, so no network
+    remote is required — only the URL *parsing* and clone-path derivation
+    need to special-case it. SSH scp-form (``user@host:path``) and
+    ``scheme://`` URLs never start with ``/``.
+    """
+    return url.startswith("/")
+
+
 def parse_repo_url(url: str) -> tuple[str, str]:
     """Parse a git URL into (host, path) where path has no trailing ``.git``.
 
@@ -114,6 +127,11 @@ def parse_repo_url(url: str) -> tuple[str, str]:
 
 def managed_clone_path(url: str, *, repos_dir: Path = REPOS_DIR) -> Path:
     """Return the filesystem path where ``url`` is cloned under ``repos_dir``."""
+    if _is_local_url(url):
+        # Local checkout (no host/path URL to parse). Store the managed clone
+        # under a deterministic ``local/`` subtree mirroring the host path so
+        # it is unique and self-describing.
+        return repos_dir / "local" / f"{url.strip('/')}.git"
     host, path = parse_repo_url(url)
     return repos_dir / host / f"{path}.git"
 
@@ -161,11 +179,20 @@ def ensure_managed_clone(
     else:
         logger.info("workspace: cloning %s → %s", url, clone_path)
         clone_path.parent.mkdir(parents=True, exist_ok=True)
-        _run_git(["clone", url, str(clone_path)], timeout=git_timeout)
+        clone_args = ["clone"]
+        if _is_local_url(url):
+            # Local source on the same filesystem: force a self-contained copy
+            # (no object hardlinks into the host checkout) so the managed clone
+            # is safe to mount into containers independently of the checkout.
+            clone_args.append("--no-hardlinks")
+        clone_args += [url, str(clone_path)]
+        _run_git(clone_args, timeout=git_timeout)
     return clone_path
 
 
 def _worktree_basename(url: str) -> str:
+    if _is_local_url(url):
+        return Path(url.rstrip("/")).name
     _host, path = parse_repo_url(url)
     return path.rsplit("/", 1)[-1]
 
@@ -332,6 +359,19 @@ def _sync_managed_clone_from_base_source(
     """
     base_source = repo.base_source
     if base_source is None:
+        return
+    if _is_local_url(repo.url) and _repo_identity(base_source) == _repo_identity(repo.url):
+        # ``url`` IS the host checkout — a local-first repo with no separate git
+        # remote (e.g. a git-svn mirror). ``ensure_managed_clone`` already cloned/
+        # fetched the managed clone directly from it, so it is already in sync, and
+        # there is no ``origin`` on the checkout to reconcile against. (This is
+        # distinct from the base_source feature proper, where ``url`` is a real
+        # remote and ``base_source`` is a *different* local checkout of it.)
+        logger.info(
+            "workspace: repo %r is its own local source — managed clone tracks it "
+            "directly; skipping base_source reconciliation",
+            repo.url,
+        )
         return
     if not base_source.startswith("/"):
         raise WorkspaceError(
