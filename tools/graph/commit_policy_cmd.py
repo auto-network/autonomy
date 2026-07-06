@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import Any
 
 from . import ops
+from .client import get_client
 from .commit_policy import (
     AUTONOMY_PROFILE,
     WorkspaceCapabilityContext,
     describe_commit_policy,
     describe_commit_policy_json,
-    resolve_commit_policy,
-    seed_workspace_policy,
+    resolve_commit_policy_from_members,
+)
+from .schemas.commit_policy import (
+    COMMIT_POLICY_REVISION,
+    COMMIT_POLICY_SET_ID,
 )
 
 
@@ -22,7 +27,7 @@ def _capability_context_for_workspace(
     """Best-effort real capability context for a describe call.
 
     Falls through to ``None`` (all-False context) if the workspace or its
-    capabilities can't be resolved — a policy that doesn't actually require
+    capabilities can't be resolved - a policy that doesn't actually require
     issue linkage still describes cleanly either way.
     """
     if not workspace_id:
@@ -41,7 +46,7 @@ def _describe_org(workspace_id: str | None, explicit_org: str | None) -> str | N
     """Resolve which org DB a describe call should read from.
 
     An explicit ``--org`` always wins. Otherwise, when a workspace id is
-    given, follow that workspace's real owning org (``graph_project``) —
+    given, follow that workspace's real owning org (``graph_project``) -
     a ``workspace:<id>`` policy row lives in whichever org DB registered
     the workspace, which is not necessarily the caller's own org (e.g. the
     Anchore workspaces live in the ``anchore`` org DB). Falling back to the
@@ -61,14 +66,31 @@ def _describe_org(workspace_id: str | None, explicit_org: str | None) -> str | N
     return ops.CALLER_ORG
 
 
+def _display_org(explicit_org: str | None) -> str:
+    return explicit_org or os.environ.get("GRAPH_ORG") or "personal"
+
+
 def cmd_commit_policy_describe(args: Any) -> None:
     org = _describe_org(args.workspace, getattr(args, "org", None))
-    resolved = resolve_commit_policy(
+    client = get_client()
+    members = client.read_set(
+        COMMIT_POLICY_SET_ID,
+        org=org,
+        target_revision=COMMIT_POLICY_REVISION,
+    ).to_dict()
+    resolved = resolve_commit_policy_from_members(
+        members=members,
         workspace_id=args.workspace,
         repo_slug=args.repo,
         org=org,
         context=_capability_context_for_workspace(args.workspace, org),
     )
+    if args.workspace and f"workspace:{args.workspace}" not in members:
+        print(
+            f"Error: no workspace {args.workspace!r} found in organization {_display_org(getattr(args, 'org', None))!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if args.json:
         sys.stdout.write(describe_commit_policy_json(resolved) + "\n")
     else:
@@ -76,12 +98,31 @@ def cmd_commit_policy_describe(args: Any) -> None:
 
 
 def cmd_commit_policy_seed(args: Any) -> None:
-    inserted = seed_workspace_policy(
-        workspace_id=args.workspace,
-        org=getattr(args, "org", None) or ops.CALLER_ORG,
-        profile=args.profile,
-    )
-    action = "inserted" if inserted else "exists"
+    client = get_client()
+    org = getattr(args, "org", None) or ops.CALLER_ORG
+    members = client.read_set(
+        COMMIT_POLICY_SET_ID,
+        org=org,
+        target_revision=COMMIT_POLICY_REVISION,
+    ).to_dict()
+    key = f"workspace:{args.workspace}"
+    if key in members:
+        action = "exists"
+    else:
+        client.add_setting(
+            COMMIT_POLICY_SET_ID,
+            COMMIT_POLICY_REVISION,
+            key,
+            {
+                "workspace_id": args.workspace,
+                "applies_to": "workspace",
+                "profile": args.profile,
+                "override_mode": "none",
+            },
+            org=org,
+            state="canonical",
+        )
+        action = "inserted"
     print(
         f"{action}: autonomy.commit.policy#1 workspace:{args.workspace} "
         f"profile={args.profile}"
@@ -110,7 +151,7 @@ def attach_commit_subparser(sub) -> None:
     p_describe.add_argument(
         "--workspace",
         default=None,
-        help="Workspace id. Defaults to safe.default when omitted and no org/repo row matches.",
+        help="Workspace id. When set, it must exist in the selected org.",
     )
     p_describe.add_argument(
         "--repo",
