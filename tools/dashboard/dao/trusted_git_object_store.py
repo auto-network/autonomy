@@ -212,3 +212,39 @@ def record_integrity(
         "SET latest_integrity_at = ?, latest_integrity_status = ? WHERE snapshot_ref = ?",
         (float(at if at is not None else time.time()), status, snapshot_ref),
     )
+
+
+# ── retention / GC query helpers ─────────────────────────────────────
+
+
+def expired_snapshot_refs(
+    conn: sqlite3.Connection,
+    *,
+    now: float,
+    statuses: tuple[str, ...] = ("captured", "verified", "released"),
+) -> list[str]:
+    """Return snapshot_refs past their retention_expires_at in a collectible
+    status. Snapshots with a NULL expiry are never collected."""
+    placeholders = ",".join("?" for _ in statuses)
+    rows = conn.execute(
+        "SELECT snapshot_ref FROM trusted_git_object_snapshots "
+        "WHERE retention_expires_at IS NOT NULL AND retention_expires_at <= ? "
+        f"AND status IN ({placeholders})",
+        (now, *statuses),
+    ).fetchall()
+    return [row["snapshot_ref"] for row in rows]
+
+
+def object_referenced_by_live_snapshot(conn: sqlite3.Connection, object_sha256: str) -> bool:
+    """True if any snapshot NOT in ``gc_deleted`` still references this object.
+
+    Content-addressed dedup means one stored object can belong to several
+    snapshots, so it may only be physically deleted once every snapshot that
+    references it has been collected."""
+    row = conn.execute(
+        "SELECT 1 FROM trusted_git_object_entries e "
+        "JOIN trusted_git_object_snapshots s ON e.snapshot_ref = s.snapshot_ref "
+        "WHERE e.object_sha256 = ? AND s.status != 'gc_deleted' LIMIT 1",
+        (object_sha256,),
+    ).fetchone()
+    return row is not None
