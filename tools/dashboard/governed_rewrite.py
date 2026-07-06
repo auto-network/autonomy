@@ -332,3 +332,43 @@ def record_chain_source_and_result_roles(
         payload=current_state,
         db_path=db_path,
     )
+
+
+# ── D4-14: require both supersede and force_with_lease before publish ─
+
+REQUIRED_PUBLISH_APPROVAL_TYPES = ("supersede", "force_with_lease")
+
+
+@dataclass(frozen=True)
+class PublishApprovalGateResult:
+    allowed: bool
+    missing_approval_types: tuple[str, ...]
+    reason: str | None
+
+
+def check_publish_approval_gate(*, workflow_id: str, db_path=None) -> PublishApprovalGateResult:
+    """Decide whether ``commit.publish`` may proceed for a rewrite (§3 step
+    4, §6). Both a ``supersede`` and a ``force_with_lease`` approval must
+    reach ``status="approved"`` — a rewrite with only one approved is
+    blocked, never partially executed. This is pure gate-check logic over
+    the already-landed ``commit_workflow_approvals`` table; Codex's
+    eventual ``commit.publish`` handler calls this before doing anything,
+    same decouple pattern as D4-8/D4-9/D4-10.
+    """
+    conn = commit_workflow_db._get_conn(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT approval_type, status FROM commit_workflow_approvals WHERE workflow_id = ?",
+            (workflow_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    approved_types = {row["approval_type"] for row in rows if row["status"] == "approved"}
+    missing = tuple(t for t in REQUIRED_PUBLISH_APPROVAL_TYPES if t not in approved_types)
+
+    if not missing:
+        return PublishApprovalGateResult(allowed=True, missing_approval_types=(), reason=None)
+
+    reason = f"publish blocked: missing approved {' and '.join(missing)} approval"
+    return PublishApprovalGateResult(allowed=False, missing_approval_types=missing, reason=reason)

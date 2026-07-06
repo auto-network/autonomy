@@ -28,6 +28,7 @@ from tools.dashboard.governed_rewrite import (
     ROLE_REWRITE_RESULT,
     ROLE_REWRITE_SOURCE,
     GitIdentityLine,
+    check_publish_approval_gate,
     construct_corrected_metadata,
     create_governed_rewrite_workflow,
     determine_rewrite_membership,
@@ -533,3 +534,82 @@ def test_D4_12_survives_projection_rebuild(tmp_path):
         assert by_role_position[(ROLE_REWRITE_RESULT, 1)] == "new2"
     finally:
         conn.close()
+
+
+# ── D4-14: require both supersede and force_with_lease before publish ─
+
+
+def _insert_approval(conn, *, approval_id, workflow_id, repo_slug, approval_type, status):
+    conn.execute(
+        "INSERT INTO commit_workflow_approvals "
+        "(approval_id, workflow_id, repo_slug, approval_type, status, requested_at) "
+        "VALUES (?, ?, ?, ?, ?, 1.0)",
+        (approval_id, workflow_id, repo_slug, approval_type, status),
+    )
+    conn.commit()
+
+
+def test_D4_14_only_supersede_approved_blocks_publish_naming_force_with_lease(tmp_path):
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    report = _report("sha1", compliant=False, violations=("signature_absent",))
+    workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha="sha1", compliance_report=report, db_path=path,
+    )
+
+    conn = commit_workflow_db._get_conn(path)
+    _insert_approval(conn, approval_id="ap-1", workflow_id=workflow_id, repo_slug="autonomy",
+                      approval_type="supersede", status="approved")
+    _insert_approval(conn, approval_id="ap-2", workflow_id=workflow_id, repo_slug="autonomy",
+                      approval_type="force_with_lease", status="pending")
+
+    result = check_publish_approval_gate(workflow_id=workflow_id, db_path=path)
+    assert result.allowed is False
+    assert result.missing_approval_types == ("force_with_lease",)
+    assert "force_with_lease" in result.reason
+
+    rows = conn.execute(
+        "SELECT approval_id FROM commit_workflow_approvals WHERE workflow_id = ?", (workflow_id,),
+    ).fetchall()
+    assert len(rows) == 2
+    conn.close()
+
+
+def test_D4_14_both_approved_makes_publish_callable(tmp_path):
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    report = _report("sha1", compliant=False, violations=("signature_absent",))
+    workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha="sha1", compliance_report=report, db_path=path,
+    )
+
+    conn = commit_workflow_db._get_conn(path)
+    _insert_approval(conn, approval_id="ap-1", workflow_id=workflow_id, repo_slug="autonomy",
+                      approval_type="supersede", status="approved")
+    _insert_approval(conn, approval_id="ap-2", workflow_id=workflow_id, repo_slug="autonomy",
+                      approval_type="force_with_lease", status="pending")
+    assert check_publish_approval_gate(workflow_id=workflow_id, db_path=path).allowed is False
+
+    conn.execute(
+        "UPDATE commit_workflow_approvals SET status = 'approved' WHERE approval_id = 'ap-2'"
+    )
+    conn.commit()
+
+    result = check_publish_approval_gate(workflow_id=workflow_id, db_path=path)
+    assert result.allowed is True
+    assert result.missing_approval_types == ()
+    assert result.reason is None
+    conn.close()
+
+
+def test_D4_14_neither_approved_names_both_missing_types(tmp_path):
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    report = _report("sha1", compliant=False, violations=("signature_absent",))
+    workflow_id = create_governed_rewrite_workflow(
+        repo_slug="autonomy", original_sha="sha1", compliance_report=report, db_path=path,
+    )
+
+    result = check_publish_approval_gate(workflow_id=workflow_id, db_path=path)
+    assert result.allowed is False
+    assert set(result.missing_approval_types) == {"supersede", "force_with_lease"}
