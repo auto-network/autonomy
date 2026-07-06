@@ -35,9 +35,12 @@ def test_manifest_declares_librarian_agent_action():
     prompt = payload["prompt_template"]
     assert "/api/design/" in prompt
     assert "/metadata" in prompt
-    assert "manualCaptureScreenshot" in prompt
+    assert "screenshot #design-iframe" in prompt
+    assert "--data-binary" in prompt
+    assert "manualCaptureScreenshot" not in prompt
     assert "tools.dashboard.plugins.design_studio.librarian" not in prompt
     assert "Do not read or write data/experiments.db directly" in prompt
+    assert "Do not upload a full-page screenshot" in prompt
 
 
 def test_librarian_agent_action_prompt_renders_through_dispatch_template_engine():
@@ -78,6 +81,8 @@ def test_librarian_agent_action_prompt_renders_through_dispatch_template_engine(
     assert "payload = {'description': 'REPLACE_WITH_CONCISE_RENDERED_DESIGN_SUMMARY'}" in rendered
     assert "f'{dash}/api/design-studio/revisions/{rev}/metadata'" in rendered
     assert 'headers={\'Content-Type\': \'application/json\'}' in rendered
+    assert "screenshot #design-iframe $SHOT" in rendered
+    assert '--data-binary "@$SHOT"' in rendered
     assert "{asset[" not in rendered
 
 
