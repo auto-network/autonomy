@@ -43,6 +43,88 @@ def test_managed_clone_path_layout(tmp_path):
     assert p == tmp_path / "github.com" / "anchore" / "enterprise.git"
 
 
+# ── Local-first repos (no git remote, e.g. a git-svn mirror) ───────
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("/home/jeremy/workspace/dynbench", True),
+        ("/abs/path", True),
+        ("git@github.com:anchore/enterprise.git", False),
+        ("https://github.com/foo/bar.git", False),
+        ("ssh://git@gitlab.example.com:22/group/project.git", False),
+        ("admin@5.161.244.118:/opt/git/infra.git", False),
+    ],
+)
+def test_is_local_url(url, expected):
+    assert wm._is_local_url(url) is expected
+
+
+def test_managed_clone_path_local(tmp_path):
+    p = wm.managed_clone_path("/home/jeremy/workspace/dynbench", repos_dir=tmp_path)
+    assert p == tmp_path / "local" / "home/jeremy/workspace/dynbench.git"
+
+
+def test_worktree_basename_local():
+    assert wm._worktree_basename("/home/jeremy/workspace/dynbench") == "dynbench"
+    # parse_repo_url stays strict for non-URLs — only the local helpers accept paths.
+    with pytest.raises(wm.WorkspaceError):
+        wm.parse_repo_url("/home/jeremy/workspace/dynbench")
+
+
+def _make_local_checkout(tmp_path: Path) -> Path:
+    """A non-bare git checkout with a commit and NO remote (git-svn-mirror shape)."""
+    src = tmp_path / "local-checkout"
+    src.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "master"], cwd=src, check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
+    (src / "Solution.sln").write_text("solution\n")
+    subprocess.run(["git", "-C", str(src), "add", "Solution.sln"], check=True)
+    subprocess.run([
+        "git", "-C", str(src), "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init",
+    ], check=True)
+    # Deliberately NO `git remote add origin` — this is the crux of the case.
+    return src
+
+
+def test_prepare_session_mounts_local_repo_no_remote(tmp_path):
+    """A local checkout with no git remote provisions cleanly (option C).
+
+    No monkeypatching of managed_clone_path/_worktree_basename: the local-path
+    handling must work natively, and base_source reconciliation (which would
+    fail on a remote-less checkout) must be skipped.
+    """
+    checkout = _make_local_checkout(tmp_path)
+    url = str(checkout)
+    repos_dir = tmp_path / "repos"
+    worktrees_dir = tmp_path / "worktrees"
+
+    proj = ProjectConfig(
+        id="db", name="db", description="", image="img", graph_project="gp",
+        repos=(RepoMount(url=url, base_source=url, mount="/workspace/db", writable=True),),
+    )
+    mounts = wm.prepare_session_mounts(
+        proj, "sess-db", repos_dir=repos_dir, worktrees_dir=worktrees_dir,
+    )
+
+    worktree = worktrees_dir / "sess-db" / "local-checkout"
+    clone = repos_dir / "local" / f"{url.strip('/')}.git"
+    # Managed clone is self-contained under repos_dir/local/… and mounted rw.
+    # (Non-bare clone, so its git dir is under .git/.)
+    assert clone.exists() and (clone / ".git").exists()
+    assert mounts[str(worktree)] == "/workspace/db"
+    assert mounts[str(clone)] == str(clone)
+    # Real worktree (not a hollow shell), on a fresh session branch, tree present.
+    assert (worktree / ".git").exists()
+    assert (worktree / "Solution.sln").exists()
+    branch = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert branch == "session/sess-db"
+
+
 # ── Clone + worktree round-trip against a local bare repo ──────────
 
 def _make_upstream(tmp_path: Path) -> Path:
