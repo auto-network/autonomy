@@ -1633,7 +1633,18 @@ def test_merge_session_worktree_rejects_non_autonomy_repo(tmp_path, monkeypatch)
 
 
 def _run(args, cwd):
-    subprocess.run(["git", "-C", str(cwd), *args], check=True)
+    # Neutralize GPG signing for every fixture git op, not just `commit`:
+    # `cherry-pick` also creates commits, and a host with global
+    # commit.gpgsign=true fails the fixture before the code under test runs.
+    subprocess.run(
+        [
+            "git", "-C", str(cwd),
+            "-c", "commit.gpgsign=false",
+            "-c", "gpg.program=/bin/true",
+            *args,
+        ],
+        check=True,
+    )
 
 
 def _rev_parse(cwd, ref="HEAD"):
@@ -1660,22 +1671,22 @@ def _make_cherry_pick_fixture(tmp_path):
     _run(["config", "user.name", "t"], repo)
     (repo / "base.txt").write_text("base\n")
     _run(["add", "base.txt"], repo)
-    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "base"], repo)
+    _run(["commit", "-q", "-m", "base"], repo)
 
     _run(["checkout", "-q", "-b", "feature"], repo)
     (repo / "merged.txt").write_text("merged\n")
     _run(["add", "merged.txt"], repo)
-    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "merged commit"], repo)
+    _run(["commit", "-q", "-m", "merged commit"], repo)
     merged_sha = _rev_parse(repo)
 
     (repo / "cherry.txt").write_text("cherry\n")
     _run(["add", "cherry.txt"], repo)
-    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "cherry commit"], repo)
+    _run(["commit", "-q", "-m", "cherry commit"], repo)
     cherry_sha = _rev_parse(repo)
 
     (repo / "pending.txt").write_text("pending\n")
     _run(["add", "pending.txt"], repo)
-    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "pending commit"], repo)
+    _run(["commit", "-q", "-m", "pending commit"], repo)
     pending_sha = _rev_parse(repo)
 
     _run(["checkout", "-q", "master"], repo)
@@ -1683,7 +1694,7 @@ def _make_cherry_pick_fixture(tmp_path):
     _run(["cherry-pick", cherry_sha], repo)
     (repo / "mastermove.txt").write_text("mastermove\n")
     _run(["add", "mastermove.txt"], repo)
-    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "mastermove"], repo)
+    _run(["commit", "-q", "-m", "mastermove"], repo)
 
     _run(["checkout", "-q", "feature"], repo)
     return repo, merged_sha, cherry_sha, pending_sha
@@ -1728,7 +1739,7 @@ def _make_commit_detail_fixture(tmp_path):
     _run(["config", "user.name", "t"], repo)
     (repo / "base.txt").write_text("base\n")
     _run(["add", "base.txt"], repo)
-    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "base"], repo)
+    _run(["commit", "-q", "-m", "base"], repo)
 
     shas = []
 
@@ -1743,16 +1754,16 @@ def _make_commit_detail_fixture(tmp_path):
 
     (repo / "add.txt").write_text("hello world\n")
     _run(["add", "add.txt"], repo)
-    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "modify file"], repo)
+    _run(["commit", "-q", "-m", "modify file"], repo)
     shas.append(_rev_parse(repo))
 
     _run(["mv", "add.txt", "renamed.txt"], repo)
-    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "rename file"], repo)
+    _run(["commit", "-q", "-m", "rename file"], repo)
     shas.append(_rev_parse(repo))
 
     (repo / "blob.bin").write_bytes(bytes(range(256)))
     _run(["add", "blob.bin"], repo)
-    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "add binary"], repo)
+    _run(["commit", "-q", "-m", "add binary"], repo)
     shas.append(_rev_parse(repo))
 
     return repo, shas
