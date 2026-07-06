@@ -47,10 +47,15 @@ def _ssh_keygen(*args, input_bytes=None):
     return subprocess.run(["ssh-keygen", *args], input=input_bytes, capture_output=True)
 
 
+_ssh_sign_counter = [0]
+
+
 def _ssh_sign(signing_key_path: Path, payload: bytes) -> str:
-    msg_path = signing_key_path.parent / "msg.bin"
+    _ssh_sign_counter[0] += 1
+    msg_path = signing_key_path.parent / f"msg-{_ssh_sign_counter[0]}.bin"
     msg_path.write_bytes(payload)
-    _ssh_keygen("-Y", "sign", "-f", str(signing_key_path), "-n", "file", str(msg_path))
+    result = _ssh_keygen("-Y", "sign", "-f", str(signing_key_path), "-n", "file", str(msg_path))
+    assert result.returncode == 0, result.stderr
     return (msg_path.parent / (msg_path.name + ".sig")).read_text()
 
 
@@ -124,15 +129,16 @@ def _register_device(client) -> tuple[str, object, str]:
 def _seed_signing_request(*, signing_request_id, workflow_id, canonical_payload_hash):
     conn = cdb._get_conn()
     try:
+        event_id = f"evt-{workflow_id}"
         conn.execute(
-            "INSERT INTO commit_workflow_events (event_id, workflow_id, event_type, occurred_at, actor_type, repo_slug) "
-            "VALUES ('evt-1', ?, 'proposed', 1.0, 'agent_session', 'repo')",
-            (workflow_id,),
+            "INSERT OR IGNORE INTO commit_workflow_events (event_id, workflow_id, event_type, occurred_at, actor_type, repo_slug) "
+            "VALUES (?, ?, 'proposed', 1.0, 'agent_session', 'repo')",
+            (event_id, workflow_id),
         )
         conn.execute(
-            "INSERT INTO commit_workflow_states (workflow_id, repo_slug, status, last_event_id, created_at, updated_at, state_json) "
-            "VALUES (?, 'repo', 'awaiting_signature', 'evt-1', 1.0, 1.0, '{}')",
-            (workflow_id,),
+            "INSERT OR IGNORE INTO commit_workflow_states (workflow_id, repo_slug, status, last_event_id, created_at, updated_at, state_json) "
+            "VALUES (?, 'repo', 'awaiting_signature', ?, 1.0, 1.0, '{}')",
+            (workflow_id, event_id),
         )
         conn.execute(
             "INSERT INTO commit_signing_requests (signing_request_id, workflow_id, repo_slug, status, "
@@ -338,3 +344,66 @@ def test_D3_24_device_revoked_between_get_and_post_is_rejected_on_post(client, s
     )
     assert r.status_code == 403
     assert r.json()["reason"] == "device_not_found_or_revoked"
+
+
+# ── D3-18: batch cross-wire (L8) ────────────────────────────────────────
+
+
+def test_D3_18_L8_request_1_signature_rejected_against_request_2_even_with_matching_displayed_hash(
+    client, signing_setup, tmp_path,
+):
+    """Adversarial L8: two independent signing requests (the batch case --
+    each commit in a chain gets its own signing_request_id + its own
+    canonical_payload_hash bound to its own trusted-store bytes). Submit
+    request 1's REAL signature against request 2, with displayed_payload_hash
+    deliberately set to request 2's own canonical_payload_hash so the
+    string gate is satisfied -- must still be rejected on the crypto gate,
+    never accepted."""
+    device_id, private, _pub = _register_device(client)
+
+    store = signing_setup["store"]
+    payload_1 = signing_setup["canonical_payload"]
+    hash_1 = signing_setup["canonical_payload_hash"]
+    payload_2 = b"tree def\nparent " + b"a" * 40 + b"\nauthor A <a@example.com> 2 +0000\ncommitter A <a@example.com> 2 +0000\n\nmsg2\n"
+    hash_2 = store.put(payload_2)
+    assert hash_1 != hash_2, "the two requests must have genuinely different payload bytes"
+
+    _seed_signing_request(signing_request_id="sr-1", workflow_id="wf-1", canonical_payload_hash=hash_1)
+    _seed_signing_request(signing_request_id="sr-2", workflow_id="wf-1", canonical_payload_hash=hash_2)
+
+    sig_1 = _ssh_sign(signing_setup["signing_key_path"], payload_1)
+    sig_2 = _ssh_sign(signing_setup["signing_key_path"], payload_2)
+
+    nonce_for_2 = _get_nonce(client, signing_request_id="sr-2", device_id=device_id, private_key=private, client_nonce="get-2")
+
+    # The cross-wire attempt: request 1's real signature, submitted
+    # against request 2, with the displayed hash deliberately forged to
+    # request 2's own hash so the string gate alone would pass it.
+    cross_wired = _post_signature(
+        client, signing_request_id="sr-2", device_id=device_id, device_private_key=private,
+        challenge_nonce=nonce_for_2, displayed_payload_hash=hash_2, armored_signature=sig_1,
+    )
+    assert cross_wired.status_code == 422
+    assert cross_wired.json()["reason"] == "signature_verification_failed"
+
+    conn = cdb._get_conn()
+    try:
+        row2 = conn.execute("SELECT status FROM commit_signing_requests WHERE signing_request_id = 'sr-2'").fetchone()
+    finally:
+        conn.close()
+    assert row2["status"] == "pending", "the cross-wired attempt must not have signed request 2"
+
+    # Positive control: each request's OWN correctly-matched signature is accepted.
+    nonce_for_1 = _get_nonce(client, signing_request_id="sr-1", device_id=device_id, private_key=private, client_nonce="get-1")
+    ok_1 = _post_signature(
+        client, signing_request_id="sr-1", device_id=device_id, device_private_key=private,
+        challenge_nonce=nonce_for_1, displayed_payload_hash=hash_1, armored_signature=sig_1,
+    )
+    assert ok_1.status_code == 200, ok_1.text
+
+    nonce_for_2_retry = _get_nonce(client, signing_request_id="sr-2", device_id=device_id, private_key=private, client_nonce="get-2-retry")
+    ok_2 = _post_signature(
+        client, signing_request_id="sr-2", device_id=device_id, device_private_key=private,
+        challenge_nonce=nonce_for_2_retry, displayed_payload_hash=hash_2, armored_signature=sig_2,
+    )
+    assert ok_2.status_code == 200, ok_2.text
