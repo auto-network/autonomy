@@ -753,6 +753,62 @@ async def api_local_signer_attach_signature(request):
     return JSONResponse({"status": "accepted", "signed_commit_sha": signed_commit_sha})
 
 
+# ── D3-23: POST /key-material/{device_id}/revoke ───────────────────────
+
+
+async def api_local_signer_device_revoke(request):
+    """Operator-authenticated device revocation (§4). A compromised device
+    must not un-revoke itself — no device credential ever reaches this
+    route (agent-session bearer tokens are rejected the same as every
+    other operator-only endpoint in this module).
+
+    Fails exactly this device's own pending commit_signing_requests rows,
+    matched by device_id — NEVER by encrypted_key_ref or operator_id, so
+    two devices sharing one encrypted_key_ref never share revocation
+    blast radius. Does not touch the operator's shared verification-key
+    registration (D3-22) — that key is the operator's, not the device's,
+    and revoking one paired device must not deregister it.
+    """
+    denied = _reject_agent_session(request)
+    if denied is not None:
+        return denied
+
+    device_id = request.path_params["device_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    reason = body.get("reason") or "revoked by operator"
+
+    device = db.get_device(device_id)
+    if device is None:
+        return JSONResponse({"error": "device_not_found"}, status_code=404)
+
+    now = time.time()
+    db.revoke_device(device_id, revoked_at=now, reason=reason)
+
+    conn = cdb._get_conn()
+    try:
+        conn.execute(
+            "UPDATE commit_signing_requests SET status = 'failed' "
+            "WHERE device_id = ? AND status = 'pending'",
+            (device_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db.append_audit_event(
+        audit_event_id=str(uuid.uuid4()),
+        occurred_at=now,
+        event_type="device_revoked",
+        device_id=device_id,
+        operator_id=_current_operator_id(),
+        reason=reason,
+    )
+    return JSONResponse({"revoked_at": now})
+
+
 ROUTES = [
     Route("/api/capabilities/local-signer/v1/pairing/start", api_local_signer_pairing_start, methods=["POST"]),
     Route("/api/capabilities/local-signer/v1/pairing/complete", api_local_signer_pairing_complete, methods=["POST"]),
@@ -761,4 +817,5 @@ ROUTES = [
     Route("/api/capabilities/local-signer/v1/key-material/provision", api_local_signer_key_material_provision, methods=["POST"]),
     Route("/api/capabilities/local-signer/v1/requests/{signing_request_id}", api_local_signer_get_request, methods=["GET"]),
     Route("/api/capabilities/local-signer/v1/requests/{signing_request_id}/signature", api_local_signer_attach_signature, methods=["POST"]),
+    Route("/api/dashboard/local-signer/key-material/{device_id}/revoke", api_local_signer_device_revoke, methods=["POST"]),
 ]
