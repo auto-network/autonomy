@@ -664,6 +664,7 @@ def reserve_idempotency(
 ) -> dict[str, object]:
     """Insert an ``in_flight`` idempotency row and return its stored shape."""
     created_at = float(now if now is not None else time.time())
+    key_hash = hash_idempotency_key(namespace, raw_idempotency_key)
     record = {
         "idempotency_id": idempotency_id or uuid.uuid4().hex,
         "actor_type": actor_type,
@@ -671,7 +672,7 @@ def reserve_idempotency(
         "scope_key": scope_key,
         "operation": operation,
         "workflow_id": workflow_id,
-        "idempotency_key_hash": hash_idempotency_key(namespace, raw_idempotency_key),
+        "idempotency_key_hash": key_hash,
         "request_fingerprint": request_fingerprint(operation, request_fields),
         "status": "in_flight",
         "response_json": None,
@@ -681,6 +682,25 @@ def reserve_idempotency(
         "updated_at": created_at,
         "expires_at": created_at + _idempotency_retention_seconds(operation),
     }
+    conn.execute(
+        """\
+        DELETE FROM commit_workflow_idempotency
+        WHERE actor_type = ?
+          AND actor_id = ?
+          AND scope_key = ?
+          AND operation = ?
+          AND idempotency_key_hash = ?
+          AND expires_at <= ?
+        """,
+        (
+            record["actor_type"],
+            record["actor_id"],
+            record["scope_key"],
+            record["operation"],
+            record["idempotency_key_hash"],
+            created_at,
+        ),
+    )
     conn.execute(
         """\
         INSERT INTO commit_workflow_idempotency (
