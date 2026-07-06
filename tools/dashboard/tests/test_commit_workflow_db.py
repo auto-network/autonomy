@@ -15,7 +15,7 @@ def _event(
     status: str,
     shas: list[str],
     event_id: str | None = None,
-    commit_roles: list[str] | None = None,
+    commit_roles: dict[str, tuple[str, int]] | None = None,
 ) -> None:
     db.append_event(
         event_id=event_id or f"event-{workflow_id}-{status}",
@@ -100,7 +100,7 @@ def test_commit_workflow_events_table_includes_commit_roles_json(tmp_path):
             if row["name"] == "commit_roles_json"
         )
         assert commit_roles_row["notnull"] == 1
-        assert commit_roles_row["dflt_value"] == "'[]'"
+        assert commit_roles_row["dflt_value"] == "'{}'"
     finally:
         conn.close()
 
@@ -324,7 +324,7 @@ def test_commit_roles_override_survives_projection_rebuild(tmp_path):
         status_after="proposed",
         repo_slug="autonomy",
         commit_shas=["source-sha", "result-sha"],
-        commit_roles=["rewrite_source", "workflow_commit"],
+        commit_roles={"source-sha": ("rewrite_source", 0), "result-sha": ("workflow_commit", 1)},
         db_path=path,
     )
 
@@ -334,7 +334,10 @@ def test_commit_roles_override_survives_projection_rebuild(tmp_path):
             "SELECT commit_shas_json, commit_roles_json FROM commit_workflow_events WHERE event_id='e1'"
         ).fetchone()
         assert json.loads(event_row["commit_shas_json"]) == ["source-sha", "result-sha"]
-        assert json.loads(event_row["commit_roles_json"]) == ["rewrite_source", "workflow_commit"]
+        assert json.loads(event_row["commit_roles_json"]) == {
+            "source-sha": ["rewrite_source", 0],
+            "result-sha": ["workflow_commit", 1],
+        }
 
         before = conn.execute(
             """
@@ -390,6 +393,42 @@ def test_commit_projection_defaults_to_workflow_commit_roles(tmp_path):
         assert [(row["commit_sha"], row["position"], row["role"]) for row in rows] == [
             ("A", 1, "workflow_commit"),
             ("B", 2, "workflow_commit"),
+        ]
+    finally:
+        conn.close()
+
+
+def test_commit_roles_override_allows_same_position_for_rewrite_pair(tmp_path):
+    path = tmp_path / "commit_workflow.db"
+    db.init_db(path)
+
+    db.append_event(
+        event_id="e1",
+        workflow_id="wf1",
+        event_type="proposed",
+        status_after="proposed",
+        repo_slug="autonomy",
+        commit_shas=["orig-sha", "new-sha"],
+        commit_roles={
+            "orig-sha": ("rewrite_source", 0),
+            "new-sha": ("rewrite_result", 0),
+        },
+        db_path=path,
+    )
+
+    conn = db._get_conn(path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT commit_sha, position, role
+            FROM commit_workflow_commits
+            WHERE workflow_id='wf1'
+            ORDER BY position, commit_sha
+            """
+        ).fetchall()
+        assert [(row["commit_sha"], row["position"], row["role"]) for row in rows] == [
+            ("new-sha", 0, "rewrite_result"),
+            ("orig-sha", 0, "rewrite_source"),
         ]
     finally:
         conn.close()

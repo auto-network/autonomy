@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS commit_workflow_events (
     repo_slug             TEXT NOT NULL,
     branch                TEXT,
     commit_shas_json      TEXT NOT NULL DEFAULT '[]',
-    commit_roles_json     TEXT NOT NULL DEFAULT '[]',
+    commit_roles_json     TEXT NOT NULL DEFAULT '{{}}',
     content_fingerprint   TEXT,
     provider              TEXT,
     provider_review_id    TEXT,
@@ -308,7 +308,7 @@ def append_event(
     status_after: str | None,
     repo_slug: str,
     commit_shas: Iterable[str] = (),
-    commit_roles: Iterable[str] | None = None,
+    commit_roles: dict[str, tuple[str, int]] | None = None,
     occurred_at: float | None = None,
     actor_type: str = "dashboard",
     actor_id: str | None = None,
@@ -326,9 +326,17 @@ def append_event(
     the event table is append-only audit history.
     """
     shas = [str(sha) for sha in commit_shas if str(sha)]
-    roles = [str(role) for role in commit_roles] if commit_roles is not None else []
-    if roles and len(roles) != len(shas):
-        raise ValueError("commit_roles must match commit_shas length when provided")
+    roles: dict[str, tuple[str, int]] = {}
+    if commit_roles is not None:
+        for sha, value in commit_roles.items():
+            if str(sha) not in shas:
+                raise ValueError("commit_roles keys must match commit_shas values when provided")
+            if not isinstance(value, (list, tuple)) or len(value) != 2:
+                raise ValueError("commit_roles values must be (role, position) pairs")
+            role, position = value
+            if not isinstance(position, int) or isinstance(position, bool):
+                raise ValueError("commit_roles positions must be integers")
+            roles[str(sha)] = (str(role), int(position))
     if status_after is not None and status_after not in ALL_STATUSES:
         raise ValueError(f"invalid commit workflow status: {status_after}")
     conn = _get_conn(db_path)
@@ -355,7 +363,7 @@ def append_event(
                 repo_slug,
                 branch,
                 json.dumps(shas),
-                json.dumps(roles),
+                json.dumps(roles, sort_keys=True),
                 content_fingerprint,
                 provider,
                 provider_review_id,
@@ -447,10 +455,16 @@ def _rebuild_projection_for_workflow(conn: sqlite3.Connection, workflow_id: str)
         (workflow_id,),
     )
     shas, roles = _latest_non_empty_commit_data(rows)
-    role_override = bool(roles)
     for idx, sha in enumerate(shas):
-        role = roles[idx] if idx < len(roles) else "workflow_commit"
-        position = idx if role_override else idx + 1
+        override = roles.get(sha)
+        if override is None:
+            role = "workflow_commit"
+            # Default projection remains 1-indexed unless an explicit override is stored.
+            position = idx + 1
+        else:
+            # Explicit overrides preserve the caller-provided chain slot, so two SHAs
+            # can share the same position when rewrite source/result land together.
+            role, position = override
         conn.execute(
             """\
             INSERT INTO commit_workflow_commits (
@@ -479,14 +493,44 @@ def _latest_non_empty_commit_shas(rows: list[sqlite3.Row]) -> list[str]:
     return shas
 
 
-def _latest_non_empty_commit_data(rows: list[sqlite3.Row]) -> tuple[list[str], list[str]]:
+def _latest_non_empty_commit_data(rows: list[sqlite3.Row]) -> tuple[list[str], dict[str, tuple[str, int]]]:
     """Return the newest non-empty commit set and any persisted roles."""
     for row in reversed(rows):
         shas = _loads_shas(row["commit_shas_json"])
         if shas:
-            roles = _loads_shas(row["commit_roles_json"])
+            roles = _loads_commit_roles(row["commit_roles_json"], shas)
             return shas, roles
     return [], []
+
+
+def _loads_commit_roles(raw: str | None, shas: list[str]) -> dict[str, tuple[str, int]]:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(value, dict):
+        out: dict[str, tuple[str, int]] = {}
+        for sha, entry in value.items():
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                continue
+            role, position = entry
+            if not isinstance(position, int) or isinstance(position, bool):
+                continue
+            out[str(sha)] = (str(role), int(position))
+        return out
+    if isinstance(value, list):
+        out: dict[str, tuple[str, int]] = {}
+        for sha, entry in zip(shas, value):
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                continue
+            role, position = entry
+            if not isinstance(position, int) or isinstance(position, bool):
+                continue
+            out[str(sha)] = (str(role), int(position))
+        return out
+    return {}
 
 
 def resolve_worktree_outstanding(
