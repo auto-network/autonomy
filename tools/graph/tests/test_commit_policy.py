@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from argparse import Namespace
+from types import SimpleNamespace
 
 import pytest
 
@@ -55,6 +56,47 @@ def multi_org_env(tmp_path, monkeypatch):
     GraphDB.create_org_db("anchore").close()
     yield root
     GraphDB.close_all_pooled()
+
+
+class _FakeSetMembers:
+    def __init__(self, members):
+        self.members = members
+
+    def to_dict(self):
+        return {member.key: member for member in self.members}
+
+
+class _FakeClient:
+    def __init__(self, members=None):
+        if isinstance(members, dict):
+            self.members_by_set_id = {
+                key: list(value) for key, value in members.items()
+            }
+        else:
+            self.members_by_set_id = {
+                COMMIT_POLICY_SET_ID: list(members or []),
+            }
+        self.read_calls = []
+        self.add_calls = []
+
+    def read_set(self, set_id, *, org, target_revision=None, min_revision=None):
+        self.read_calls.append((set_id, org, target_revision, min_revision))
+        return _FakeSetMembers(self.members_by_set_id.get(set_id, []))
+
+    def add_setting(
+        self,
+        set_id,
+        schema_revision,
+        key,
+        payload,
+        *,
+        org,
+        state="raw",
+    ):
+        self.add_calls.append(
+            (set_id, schema_revision, key, payload, org, state)
+        )
+        return "fake-setting-id"
 
 
 def _cross_user_payload() -> dict:
@@ -401,6 +443,99 @@ def test_describe_resolves_workspace_row_from_the_org_it_actually_lives_in(multi
 
     wrong_org = resolve_commit_policy(workspace_id="enterprise-ng", org="autonomy")
     assert wrong_org.key == "built-in:safe.default"
+
+
+def test_commit_policy_describe_uses_client_settings(monkeypatch, capsys):
+    fake_client = _FakeClient([
+        SimpleNamespace(
+            id="setting-1",
+            key="workspace:autonomy",
+            payload={
+                "profile": AUTONOMY_PROFILE,
+                "override_mode": "none",
+            },
+        ),
+    ])
+    monkeypatch.setattr(
+        "tools.graph.commit_policy_cmd.get_client",
+        lambda: fake_client,
+    )
+    cmd_commit_policy_describe(Namespace(
+        workspace="autonomy",
+        repo=None,
+        org=None,
+        json=False,
+    ))
+    out = capsys.readouterr().out
+    assert "Commit policy: autonomy.direct-master." in out
+    assert "whole-branch Worktrees merge path" in out
+    assert fake_client.read_calls == [
+        (COMMIT_POLICY_SET_ID, ops.CALLER_ORG, COMMIT_POLICY_REVISION, None)
+    ]
+
+
+def test_commit_policy_describe_unknown_workspace_errors(monkeypatch, capsys):
+    fake_client = _FakeClient([
+        SimpleNamespace(
+            id="setting-1",
+            key="org:personal",
+            payload={
+                "profile": AUTONOMY_PROFILE,
+                "override_mode": "none",
+            },
+        ),
+    ])
+    monkeypatch.setattr(
+        "tools.graph.commit_policy_cmd.get_client",
+        lambda: fake_client,
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        cmd_commit_policy_describe(Namespace(
+            workspace="missing-workspace",
+            repo=None,
+            org=None,
+            json=False,
+        ))
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "no workspace 'missing-workspace' found in organization 'personal'" in err
+    assert fake_client.read_calls == [
+        (COMMIT_POLICY_SET_ID, ops.CALLER_ORG, COMMIT_POLICY_REVISION, None)
+    ]
+
+
+def test_commit_policy_seed_uses_client_settings(monkeypatch, capsys):
+    fake_client = _FakeClient([])
+    monkeypatch.setattr(
+        "tools.graph.commit_policy_cmd.get_client",
+        lambda: fake_client,
+    )
+    from tools.graph.commit_policy_cmd import cmd_commit_policy_seed
+    cmd_commit_policy_seed(Namespace(
+        workspace="autonomy",
+        org=None,
+        profile=AUTONOMY_PROFILE,
+    ))
+    out = capsys.readouterr().out
+    assert "inserted: autonomy.commit.policy#1 workspace:autonomy" in out
+    assert fake_client.read_calls == [
+        (COMMIT_POLICY_SET_ID, ops.CALLER_ORG, COMMIT_POLICY_REVISION, None)
+    ]
+    assert fake_client.add_calls == [
+        (
+            COMMIT_POLICY_SET_ID,
+            COMMIT_POLICY_REVISION,
+            "workspace:autonomy",
+            {
+                "workspace_id": "autonomy",
+                "applies_to": "workspace",
+                "profile": AUTONOMY_PROFILE,
+                "override_mode": "none",
+            },
+            ops.CALLER_ORG,
+            "canonical",
+        )
+    ]
 
 
 def test_describe_org_follows_the_workspaces_real_org_not_the_caller(graph_db_env, monkeypatch):

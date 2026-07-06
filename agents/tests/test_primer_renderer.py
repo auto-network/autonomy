@@ -254,6 +254,14 @@ def test_enterprise_v5_shape(shipped_workspaces):
     assert "GRAPH_TAGS=enterprise,enterprise-v5" in out
 
 
+def test_enterprise_commit_policy_does_not_report_false_issue_tracker_error(
+    shipped_workspaces,
+):
+    out = render_workspace_primer(get_workspace("enterprise-ng"))
+    assert "issue_tracker is not enabled" not in out
+    assert "## Commit Policy" in out
+
+
 # ── Output hygiene ───────────────────────────────────────────────────
 
 def test_no_unrendered_template_syntax():

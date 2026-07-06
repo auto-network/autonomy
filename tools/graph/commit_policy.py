@@ -350,27 +350,28 @@ def _candidate_keys(
     return keys
 
 
-def resolve_commit_policy(
+def resolve_commit_policy_from_members(
     *,
+    members: Mapping[str, Any],
     workspace_id: str | None = None,
     repo_slug: str | None = None,
     org: str | None | settings_ops._CallerOrgSentinel = settings_ops.CALLER_ORG,
     context: WorkspaceCapabilityContext | None = None,
 ) -> ResolvedCommitPolicy:
-    """Resolve the effective commit policy for a workspace/repo."""
+    """Resolve the effective commit policy from a preloaded Settings map."""
     org_slug = _effective_org_slug(org)
-    members = settings_ops.read_set(
-        COMMIT_POLICY_SET_ID,
-        org=org,
-        peers=[],
-        target_revision=COMMIT_POLICY_REVISION,
-    ).to_dict()
-    for key in _candidate_keys(workspace_id=workspace_id, repo_slug=repo_slug, org_slug=org_slug):
+    for key in _candidate_keys(
+        workspace_id=workspace_id,
+        repo_slug=repo_slug,
+        org_slug=org_slug,
+    ):
         member = members.get(key)
         if member is None:
             continue
         payload = expand_commit_policy_payload(member.payload)
-        errors = tuple(validate_commit_policy(payload, context=context, raise_on_error=False))
+        errors = tuple(
+            validate_commit_policy(payload, context=context, raise_on_error=False)
+        )
         return ResolvedCommitPolicy(
             key=key,
             source=member.id,
@@ -386,6 +387,31 @@ def resolve_commit_policy(
         profile=SAFE_DEFAULT_PROFILE,
         payload=payload,
         errors=errors,
+    )
+
+
+def resolve_commit_policy(
+    *,
+    workspace_id: str | None = None,
+    repo_slug: str | None = None,
+    org: str | None | settings_ops._CallerOrgSentinel = settings_ops.CALLER_ORG,
+    context: WorkspaceCapabilityContext | None = None,
+    members: Mapping[str, Any] | None = None,
+) -> ResolvedCommitPolicy:
+    """Resolve the effective commit policy for a workspace/repo."""
+    if members is None:
+        members = settings_ops.read_set(
+            COMMIT_POLICY_SET_ID,
+            org=org,
+            peers=[],
+            target_revision=COMMIT_POLICY_REVISION,
+        ).to_dict()
+    return resolve_commit_policy_from_members(
+        members=members,
+        workspace_id=workspace_id,
+        repo_slug=repo_slug,
+        org=org,
+        context=context,
     )
 
 
