@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 
+from tools.dashboard.dao import commit_workflow_db as workflow_db
 from tools.dashboard.dao import local_signer_db as db
 
 
@@ -177,3 +178,74 @@ def test_invalid_event_type_rejected(tmp_path):
             audit_event_id="ae-3", occurred_at=1000.0, event_type="not_a_real_event",
             db_path=path,
         )
+
+
+# ── D3-4 commit_signing_requests.device_id — revocation query shape ────
+
+
+def _seed_workflow(conn, workflow_id: str) -> None:
+    conn.execute(
+        "INSERT INTO commit_workflow_events (event_id, workflow_id, event_type, occurred_at, actor_type, repo_slug) "
+        "VALUES (?, ?, 'proposed', 1.0, 'agent_session', 'repo')",
+        (f"evt-{workflow_id}", workflow_id),
+    )
+    conn.execute(
+        "INSERT INTO commit_workflow_states (workflow_id, repo_slug, status, last_event_id, created_at, updated_at, state_json) "
+        "VALUES (?, 'repo', 'draft', ?, 1.0, 1.0, '{}')",
+        (workflow_id, f"evt-{workflow_id}"),
+    )
+
+
+def test_device_id_filtered_query_isolates_requests_sharing_one_encrypted_key_ref(tmp_path):
+    path = tmp_path / "local_signer.db"
+    workflow_db.init_db(path)
+    conn = workflow_db._get_conn(path)
+    try:
+        _seed_workflow(conn, "wf-1")
+        _seed_workflow(conn, "wf-2")
+        conn.execute(
+            "INSERT INTO commit_signing_requests (signing_request_id, workflow_id, repo_slug, status, "
+            "signing_method, trusted_object_store_ref, canonical_payload_hash, device_id, encrypted_key_ref, requested_at) "
+            "VALUES ('sr-a','wf-1','repo','pending','ssh','store://ref','hash-a','device-a','key-shared',1.0)"
+        )
+        conn.execute(
+            "INSERT INTO commit_signing_requests (signing_request_id, workflow_id, repo_slug, status, "
+            "signing_method, trusted_object_store_ref, canonical_payload_hash, device_id, encrypted_key_ref, requested_at) "
+            "VALUES ('sr-b','wf-2','repo','pending','ssh','store://ref','hash-b','device-b','key-shared',1.0)"
+        )
+        conn.commit()
+
+        rows = conn.execute(
+            "SELECT signing_request_id FROM commit_signing_requests WHERE device_id = ?",
+            ("device-a",),
+        ).fetchall()
+        assert [r["signing_request_id"] for r in rows] == ["sr-a"]
+
+        # Same encrypted_key_ref on both rows -- confirms the filter isolates by
+        # device_id specifically, not by the (shared) key material reference.
+        both = conn.execute(
+            "SELECT DISTINCT encrypted_key_ref FROM commit_signing_requests"
+        ).fetchall()
+        assert [r["encrypted_key_ref"] for r in both] == ["key-shared"]
+    finally:
+        conn.close()
+
+
+def test_device_id_column_survives_across_existing_rows(tmp_path):
+    path = tmp_path / "local_signer.db"
+    workflow_db.init_db(path)
+    conn = workflow_db._get_conn(path)
+    try:
+        _seed_workflow(conn, "wf-1")
+        conn.execute(
+            "INSERT INTO commit_signing_requests (signing_request_id, workflow_id, repo_slug, status, "
+            "signing_method, trusted_object_store_ref, canonical_payload_hash, requested_at) "
+            "VALUES ('sr-legacy','wf-1','repo','pending','ssh','store://ref','hash-legacy',1.0)"
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT device_id FROM commit_signing_requests WHERE signing_request_id = 'sr-legacy'"
+        ).fetchone()
+        assert row["device_id"] is None
+    finally:
+        conn.close()
