@@ -28,6 +28,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import json
 import os
 import secrets
 import time
@@ -520,9 +521,11 @@ async def api_local_signer_get_request(request):
     nonce, which alone is sufficient to make any signature submission
     against it fail the existing nonce-binding gate — no separate reject
     check is needed on the POST side. D3-13's canonical_payload_preview
-    remains deferred: it depends on what commit.request_signature
-    eventually stores in commit_signing_requests.payload_json, so it's
-    omitted here rather than guessed at.
+    is read straight out of commit_signing_requests.payload_json
+    ("canonical_payload_preview" key), which the now-landed
+    commit.request_signature handler populates from the workflow's own
+    unsigned_commit_sha/tree_sha/parent_shas/message/author/committer —
+    this reads what request_signature actually stores, not a guess.
     """
     signing_request_id = request.path_params["signing_request_id"]
     device_id = request.query_params.get("device_id")
@@ -547,7 +550,7 @@ async def api_local_signer_get_request(request):
     try:
         row = conn.execute(
             "SELECT signing_request_id, workflow_id, status, signing_method, canonical_payload_hash, "
-            "batch_group_id, position_in_batch, batch_size "
+            "batch_group_id, position_in_batch, batch_size, payload_json "
             "FROM commit_signing_requests WHERE signing_request_id = ?",
             (signing_request_id,),
         ).fetchone()
@@ -555,6 +558,13 @@ async def api_local_signer_get_request(request):
         conn.close()
     if row is None:
         return JSONResponse({"error": "signing_request_not_found"}, status_code=404)
+
+    canonical_payload_preview = None
+    if row["payload_json"]:
+        try:
+            canonical_payload_preview = json.loads(row["payload_json"]).get("canonical_payload_preview")
+        except (TypeError, ValueError):
+            canonical_payload_preview = None
 
     if not row["canonical_payload_hash"]:
         # D3-19/L13: a real, ordered chain member whose payload cannot
@@ -572,6 +582,7 @@ async def api_local_signer_get_request(request):
             "signing_request_id": row["signing_request_id"],
             "workflow_id": row["workflow_id"],
             "canonical_payload_hash": None,
+            "canonical_payload_preview": None,
             "signing_kind": row["signing_method"],
             "challenge_nonce": None,
             "batch_group_id": row["batch_group_id"],
@@ -590,6 +601,7 @@ async def api_local_signer_get_request(request):
         "signing_request_id": row["signing_request_id"],
         "workflow_id": row["workflow_id"],
         "canonical_payload_hash": row["canonical_payload_hash"],
+        "canonical_payload_preview": canonical_payload_preview,
         "signing_kind": row["signing_method"],
         "challenge_nonce": nonce,
         "batch_group_id": row["batch_group_id"],
