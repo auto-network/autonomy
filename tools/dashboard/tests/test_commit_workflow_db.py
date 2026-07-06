@@ -55,6 +55,111 @@ def test_events_are_append_only_even_with_insert_or_replace(tmp_path):
         conn.close()
 
 
+def test_idempotency_table_created_with_unique_key_and_indexes(tmp_path):
+    path = tmp_path / "commit_workflow.db"
+    db.init_db(path)
+
+    conn = db._get_conn(path)
+    try:
+        cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(commit_workflow_idempotency)").fetchall()
+        }
+        assert cols == {
+            "idempotency_id",
+            "actor_type",
+            "actor_id",
+            "scope_key",
+            "operation",
+            "workflow_id",
+            "idempotency_key_hash",
+            "request_fingerprint",
+            "status",
+            "response_json",
+            "event_ids_json",
+            "side_effect_ref",
+            "created_at",
+            "updated_at",
+            "expires_at",
+        }
+
+        schema_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='commit_workflow_idempotency'"
+        ).fetchone()["sql"]
+        assert "status IN ('in_flight', 'completed', 'failed_retryable', 'failed_terminal')" in schema_sql
+
+        index_names = {
+            row["name"]
+            for row in conn.execute("PRAGMA index_list('commit_workflow_idempotency')").fetchall()
+        }
+        assert "idx_cwi_workflow" in index_names
+        assert "idx_cwi_expiry" in index_names
+
+        unique_index = next(
+            row["name"]
+            for row in conn.execute("PRAGMA index_list('commit_workflow_idempotency')").fetchall()
+            if row["unique"]
+        )
+        unique_cols = [
+            row["name"]
+            for row in conn.execute(f"PRAGMA index_info('{unique_index}')").fetchall()
+        ]
+        assert unique_cols == [
+            "actor_type",
+            "actor_id",
+            "scope_key",
+            "operation",
+            "idempotency_key_hash",
+        ]
+
+        conn.execute(
+            """
+            INSERT INTO commit_workflow_idempotency (
+                idempotency_id, actor_type, actor_id, scope_key, operation,
+                workflow_id, idempotency_key_hash, request_fingerprint, status,
+                response_json, event_ids_json, side_effect_ref,
+                created_at, updated_at, expires_at
+            ) VALUES (
+                'idempo-1', 'agent_session', 'actor-1', 'repo:pre-workflow',
+                'propose', NULL, 'hash-1', 'fingerprint-1', 'in_flight',
+                NULL, '[]', NULL, 1.0, 1.0, 8.0
+            )
+            """
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO commit_workflow_idempotency (
+                    idempotency_id, actor_type, actor_id, scope_key, operation,
+                    workflow_id, idempotency_key_hash, request_fingerprint,
+                    status, response_json, event_ids_json, side_effect_ref,
+                    created_at, updated_at, expires_at
+                ) VALUES (
+                    'idempo-2', 'agent_session', 'actor-1', 'repo:pre-workflow',
+                    'propose', NULL, 'hash-1', 'fingerprint-2', 'in_flight',
+                    NULL, '[]', NULL, 2.0, 2.0, 9.0
+                )
+                """
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO commit_workflow_idempotency (
+                    idempotency_id, actor_type, actor_id, scope_key, operation,
+                    workflow_id, idempotency_key_hash, request_fingerprint,
+                    status, response_json, event_ids_json, side_effect_ref,
+                    created_at, updated_at, expires_at
+                ) VALUES (
+                    'idempo-3', 'agent_session', 'actor-2', 'repo:pre-workflow',
+                    'propose', NULL, 'hash-2', 'fingerprint-3', 'not-a-status',
+                    NULL, '[]', NULL, 3.0, 3.0, 10.0
+                )
+                """
+            )
+    finally:
+        conn.close()
+
+
 def test_resolver_t1_no_double_count_terminal_workflow_suppresses_git(tmp_path):
     _event(tmp_path, workflow_id="wf1", status="landed", shas=["A"])
 
