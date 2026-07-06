@@ -6,5 +6,7 @@ from .errors import (
     COMMIT_API_ERROR_HTTP_STATUS,
     CommitApiError,
     commit_api_error,
+    redact,
+    redaction_misconfigured,
 )
 from .types import *  # noqa: F401,F403
