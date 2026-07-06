@@ -1,0 +1,4 @@
+Alpine.data('commitApiPage', () => ({
+  init() {},
+}));
+
