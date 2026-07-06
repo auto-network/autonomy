@@ -9,7 +9,6 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from tools.dashboard.plugin_api.manifest import PluginManifest
-from tools.dashboard.plugins.design_studio import librarian
 from tools.dashboard.plugins.design_studio.entrypoints import api as design_api
 
 
@@ -33,10 +32,15 @@ def test_manifest_declares_librarian_agent_action():
     payload = json.loads((plugin_dir / (decl.payload_file or "")).read_text())
     assert payload["asset_type"] == "design"
     assert payload["writes"] == ["design.thumbnail", "design.description"]
-    assert "tools.dashboard.plugins.design_studio.librarian" in payload["prompt_template"]
+    prompt = payload["prompt_template"]
+    assert "/api/design/" in prompt
+    assert "/metadata" in prompt
+    assert "manualCaptureScreenshot" in prompt
+    assert "tools.dashboard.plugins.design_studio.librarian" not in prompt
+    assert "Do not read or write data/experiments.db directly" in prompt
 
 
-def test_librarian_updates_stale_description_without_touching_provenance(tmp_path, monkeypatch):
+def test_update_revision_metadata_helper_preserves_revision_provenance(tmp_path):
     from agents import design_db
 
     old_db_path = design_db.DB_PATH
@@ -57,25 +61,15 @@ def test_librarian_updates_stale_description_without_touching_provenance(tmp_pat
             creator_session_id="auto-designer",
             creator_session_label="Designer",
         )
-        screenshot = tmp_path / "screenshot.png"
-
-        def fake_capture(html_path, screenshot_path, *, viewport):
-            assert "Fast catalog" in html_path.read_text()
-            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
-            screenshot_path.write_bytes(screenshot.read_bytes())
-
-        screenshot.write_bytes(b"\x89PNG\r\n\x1a\nfake")
-        monkeypatch.setattr(librarian, "_capture_with_agent_browser", fake_capture)
-        monkeypatch.setattr(librarian, "_repo_root", lambda: tmp_path)
-
-        result = librarian.run_librarian(revision_id)
+        result = design_api._update_revision_metadata(
+            revision_id,
+            description="Shows active work and recent previews.",
+        )
         refreshed = design_db.get_design(revision_id)
 
-        assert result.screenshot_written is True
-        assert (tmp_path / "data" / "experiments" / revision_id / "screenshot.png").is_file()
-        assert result.description_updated is True
-        assert "Fast catalog" in result.description_after
-        assert refreshed["description"] == result.description_after
+        assert result is not None
+        assert result["description"] == "Shows active work and recent previews."
+        assert refreshed["description"] == "Shows active work and recent previews."
         assert refreshed["creator_session_id"] == "auto-designer"
         assert refreshed["creator_session_label"] == "Designer"
         assert refreshed["design_id"] == revision_id
@@ -199,6 +193,64 @@ def test_revision_thumbnail_rejects_missing_file(tmp_path):
     missing = tmp_path / "missing.png"
     with patch.object(design_api, "_screenshot_path", return_value=missing):
         resp = _client().get("/api/design-studio/revisions/rev-a2/thumbnail")
+
+    assert resp.status_code == 404
+
+
+def test_update_revision_metadata_updates_description_and_clears_cache():
+    updated = dict(_rows()[1], description="Updated summary")
+    with patch.object(design_api, "_update_revision_metadata", return_value=updated) as update, \
+         patch.object(design_api, "_clear_catalog_cache") as clear_cache:
+        resp = _client().patch(
+            "/api/design-studio/revisions/rev-a2/metadata",
+            json={"description": "Updated summary"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["revision"]["description"] == "Updated summary"
+    update.assert_called_once_with("rev-a2", title=None, description="Updated summary")
+    assert clear_cache.called
+
+
+def test_update_revision_metadata_accepts_put_title_and_description():
+    updated = dict(_rows()[1], title="New title", description="Updated summary")
+    with patch.object(design_api, "_update_revision_metadata", return_value=updated) as update:
+        resp = _client().put(
+            "/api/design-studio/revisions/rev-a2/metadata",
+            json={"title": " New title ", "description": " Updated summary "},
+        )
+
+    assert resp.status_code == 200
+    update.assert_called_once_with(
+        "rev-a2",
+        title="New title",
+        description="Updated summary",
+    )
+
+
+def test_update_revision_metadata_rejects_unknown_fields():
+    resp = _client().patch(
+        "/api/design-studio/revisions/rev-a2/metadata",
+        json={"status": "completed"},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "unknown field(s)"
+
+
+def test_update_revision_metadata_rejects_empty_body():
+    resp = _client().patch("/api/design-studio/revisions/rev-a2/metadata", json={})
+
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "title or description is required"
+
+
+def test_update_revision_metadata_returns_404_for_missing_revision():
+    with patch.object(design_api, "_update_revision_metadata", return_value=None):
+        resp = _client().patch(
+            "/api/design-studio/revisions/missing/metadata",
+            json={"description": "Updated summary"},
+        )
 
     assert resp.status_code == 404
 
