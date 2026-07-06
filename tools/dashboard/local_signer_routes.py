@@ -325,10 +325,11 @@ class KeyMaterial:
     future integration replaces.
     """
 
-    def __init__(self, ciphertext: bytes, public_material: bytes, key_fingerprint: str):
+    def __init__(self, ciphertext: bytes, public_material: bytes, key_fingerprint: str, signing_kind: str = "gpg"):
         self.ciphertext = ciphertext
         self.public_material = public_material
         self.key_fingerprint = key_fingerprint
+        self.signing_kind = signing_kind
 
 
 def _default_key_material_provider(key_id: str) -> KeyMaterial | None:
@@ -339,6 +340,28 @@ def _default_key_material_provider(key_id: str) -> KeyMaterial | None:
 
 
 KEY_MATERIAL_PROVIDER = _default_key_material_provider
+
+
+# ── D3-22: register the operator's PUBLIC signing key at provision time
+# (the DN3<->DN5 seam) ──────────────────────────────────────────────────
+#
+# tools.dashboard.commit_broker.keys (DN5, Fable) isn't on master yet.
+# This indirection is the same shape as KEY_MATERIAL_PROVIDER above:
+# production wiring swaps in the real import once that module lands;
+# tests monkeypatch REGISTER_VERIFICATION_KEY directly until then. The
+# signing key registered here is the key provisioned above — distinct
+# from the device's own pairing keypair (§2/§3), which never signs
+# commits and is never written to any verification store.
+
+
+def _default_register_verification_key(*, operator_id: str, signing_kind: str, public_material: bytes):
+    """No-op placeholder — see module docstring. Swapped for the real
+    ``tools.dashboard.commit_broker.keys.register_verification_key`` once
+    DN5's branch lands; tests monkeypatch this directly until then."""
+    return None
+
+
+REGISTER_VERIFICATION_KEY = _default_register_verification_key
 
 STEP_UP_TTL_SECONDS = 60
 
@@ -441,6 +464,17 @@ async def api_local_signer_key_material_provision(request):
             {"status": "rejected_weak_kdf", "kdf_params": kdf_summary, "floor_violated": violations},
             status_code=422,
         )
+
+    # Load-bearing seam (D3-22, DN5 §3.1): register the signing key's
+    # PUBLIC half the moment it's provisioned — never deferred, never a
+    # separate operator step, since the public half isn't secret. Without
+    # this, DN5's request_signature pre-flight has nothing to verify
+    # against and every signed commit dead-ends unverifiable.
+    REGISTER_VERIFICATION_KEY(
+        operator_id=device.operator_id,
+        signing_kind=material.signing_kind,
+        public_material=material.public_material,
+    )
 
     encrypted_key_blob = base64.b64encode(material.ciphertext).decode()
     db.append_audit_event(
