@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tools.dashboard.commit_compliance import (
     AuthorshipStatus,
     ComplianceReport,
@@ -21,6 +23,8 @@ from tools.dashboard.governed_rewrite import (
     REASON_ANCESTOR_CHANGED,
     REASON_VIOLATIONS,
     ROLE_REWRITE_SOURCE,
+    GitIdentityLine,
+    construct_corrected_metadata,
     create_governed_rewrite_workflow,
     determine_rewrite_membership,
 )
@@ -193,3 +197,139 @@ def test_D4_8_survives_projection_rebuild(tmp_path):
         assert commit_row["position"] == 0
     finally:
         conn.close()
+
+
+# ── D4-10: construct corrected metadata without changing file contents ─
+
+REQUIRED_IDENTITY = {"name": "Ada Operator", "email": "ada@example.com"}
+
+
+def _correction_report(
+    *, author_matches: bool, committer_matches: bool, signoff_matches: bool,
+    required_identity: dict | None = REQUIRED_IDENTITY,
+) -> ComplianceReport:
+    return ComplianceReport(
+        commit_sha="orig-sha",
+        resolved_policy_version="repo:demo",
+        sign_off=SignOffStatus(
+            required=True, present=True, trailer_value="whatever",
+            matches_policy_identity=signoff_matches,
+        ),
+        authorship=AuthorshipStatus(
+            required_identity=required_identity,
+            actual_author={"name": "Wrong Author", "email": "wrong@example.com"},
+            actual_committer={"name": "Wrong Author", "email": "wrong@example.com"},
+            author_matches=author_matches, committer_matches=committer_matches,
+        ),
+        signature=SignatureStatus(
+            required="none", present=False, kind=None, valid=False,
+            verified_key_fingerprint=None, verification_method="git verify-commit",
+        ),
+        compliant=author_matches and committer_matches and signoff_matches,
+        violations=(),
+    )
+
+
+def test_D4_10_tree_and_parent_are_byte_identical_to_original():
+    report = _correction_report(author_matches=False, committer_matches=False, signoff_matches=False)
+    original_id = GitIdentityLine("Wrong Author", "wrong@example.com", "1700000000", "+0000")
+
+    corrected = construct_corrected_metadata(
+        tree_oid="tree-abc", parent_oids=["parent-abc"],
+        original_author=original_id, original_committer=original_id,
+        message=b"fix thing\n", report=report,
+    )
+
+    assert corrected.tree_oid == "tree-abc"
+    assert corrected.parent_oids == ("parent-abc",)
+
+
+def test_D4_10_wrong_author_and_missing_signoff_gets_corrected_identity_and_trailer():
+    report = _correction_report(author_matches=False, committer_matches=False, signoff_matches=False)
+    original_id = GitIdentityLine("Wrong Author", "wrong@example.com", "1700000000", "+0000")
+
+    corrected = construct_corrected_metadata(
+        tree_oid="tree-abc", parent_oids=["parent-abc"],
+        original_author=original_id, original_committer=original_id,
+        message=b"fix thing\n", report=report,
+    )
+
+    assert corrected.author.name == "Ada Operator"
+    assert corrected.author.email == "ada@example.com"
+    assert corrected.committer.name == "Ada Operator"
+    assert corrected.committer.email == "ada@example.com"
+    # Original timestamp/tzoffset preserved -- a compliance fix corrects who, never when.
+    assert corrected.author.timestamp == "1700000000"
+    assert corrected.author.tzoffset == "+0000"
+    assert corrected.message == b"fix thing\n\nSigned-off-by: Ada Operator <ada@example.com>\n"
+
+
+def test_D4_10_message_byte_identical_when_no_edit_and_signoff_already_correct():
+    report = _correction_report(author_matches=False, committer_matches=False, signoff_matches=True)
+    original_id = GitIdentityLine("Wrong Author", "wrong@example.com", "1700000000", "+0000")
+    original_message = b"fix thing\n\nSigned-off-by: Ada Operator <ada@example.com>\n"
+
+    corrected = construct_corrected_metadata(
+        tree_oid="tree-abc", parent_oids=["parent-abc"],
+        original_author=original_id, original_committer=original_id,
+        message=original_message, report=report,
+    )
+
+    assert corrected.message == original_message
+
+
+def test_D4_10_only_the_mismatched_identity_axis_is_corrected():
+    report = _correction_report(author_matches=True, committer_matches=False, signoff_matches=True)
+    original_author_id = GitIdentityLine("Ada Operator", "ada@example.com", "1700000000", "+0000")
+    original_committer_id = GitIdentityLine("Agent Bot", "bot@example.com", "1700000000", "+0000")
+
+    corrected = construct_corrected_metadata(
+        tree_oid="tree-abc", parent_oids=["parent-abc"],
+        original_author=original_author_id, original_committer=original_committer_id,
+        message=b"msg\n", report=report,
+    )
+
+    assert corrected.author == original_author_id
+    assert corrected.committer.name == "Ada Operator"
+    assert corrected.committer.email == "ada@example.com"
+
+
+def test_D4_10_existing_wrong_signoff_trailer_replaced_in_place():
+    report = _correction_report(author_matches=True, committer_matches=True, signoff_matches=False)
+    identity = GitIdentityLine("Ada Operator", "ada@example.com", "1700000000", "+0000")
+
+    corrected = construct_corrected_metadata(
+        tree_oid="tree-abc", parent_oids=["parent-abc"],
+        original_author=identity, original_committer=identity,
+        message=b"fix thing\n\nSigned-off-by: Eve <eve@example.com>\n", report=report,
+    )
+
+    assert corrected.message == b"fix thing\n\nSigned-off-by: Ada Operator <ada@example.com>\n"
+
+
+def test_D4_10_explicit_edited_message_used_instead_of_original():
+    report = _correction_report(author_matches=True, committer_matches=True, signoff_matches=True)
+    identity = GitIdentityLine("Ada Operator", "ada@example.com", "1700000000", "+0000")
+
+    corrected = construct_corrected_metadata(
+        tree_oid="tree-abc", parent_oids=["parent-abc"],
+        original_author=identity, original_committer=identity,
+        message=b"original\n", report=report, edited_message=b"operator revised subject\n",
+    )
+
+    assert corrected.message == b"operator revised subject\n"
+
+
+def test_D4_10_unresolved_identity_raises_rather_than_silently_correcting():
+    report = _correction_report(
+        author_matches=False, committer_matches=False, signoff_matches=False,
+        required_identity={"unresolved": True},
+    )
+    identity = GitIdentityLine("Wrong Author", "wrong@example.com", "1700000000", "+0000")
+
+    with pytest.raises(ValueError):
+        construct_corrected_metadata(
+            tree_oid="tree-abc", parent_oids=["parent-abc"],
+            original_author=identity, original_committer=identity,
+            message=b"msg\n", report=report,
+        )

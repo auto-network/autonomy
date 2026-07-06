@@ -1,5 +1,5 @@
-"""Governed rewrite — chain membership rule (D4-11/D4-13) and workflow
-instance creation (D4-8).
+"""Governed rewrite — chain membership rule (D4-11/D4-13), workflow
+instance creation (D4-8), and corrected-metadata construction (D4-10).
 
 DN4 (graph note ``175ff7fc-850``) §4: deciding which commits in a chain
 get rewritten is NOT purely per-commit compliance. Every descendant of a
@@ -19,11 +19,19 @@ on the ``commit_roles`` override (Codex, commit_workflow_db.py) so the
 original SHA's ``commit_workflow_commits`` row survives a projection
 rebuild with ``role="rewrite_source"``, ``position=0``, rather than the
 default ``workflow_commit``/1-indexed behavior every other caller gets.
+
+``construct_corrected_metadata`` (§3 step 3) is deliberately independent
+of D4-9's snapshot mechanism (DN2, not yet built) — it takes tree_oid,
+parent_oids, original author/committer identity lines, and message bytes
+as plain parameters, shaped to match exactly what a snapshot will
+eventually supply, so wiring it to a real snapshot later is a thin
+adapter rather than a rewrite.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from tools.dashboard.dao import commit_workflow_db
@@ -100,3 +108,101 @@ def create_governed_rewrite_workflow(
         db_path=db_path,
     )
     return workflow_id
+
+
+# ── D4-10: construct corrected metadata without changing file contents ─
+
+
+@dataclass(frozen=True)
+class GitIdentityLine:
+    """The identity+time bytes that follow ``author ``/``committer `` in a
+    commit object (``Name <email> <unix_ts> <tzoffset>``)."""
+
+    name: str
+    email: str
+    timestamp: str
+    tzoffset: str
+
+    def to_bytes(self) -> bytes:
+        return f"{self.name} <{self.email}> {self.timestamp} {self.tzoffset}".encode()
+
+
+@dataclass(frozen=True)
+class CorrectedCommitMetadata:
+    tree_oid: str
+    parent_oids: tuple[str, ...]
+    author: GitIdentityLine
+    committer: GitIdentityLine
+    message: bytes
+
+
+def _fix_signoff_trailer(message: bytes, identity: dict) -> bytes:
+    """Replace an existing (wrong) Signed-off-by line in place, or append a
+    correct one as a new trailing paragraph if none exists. Every other
+    byte of the message is untouched."""
+    expected_line = f"Signed-off-by: {identity['name']} <{identity['email']}>".encode()
+    lines = message.split(b"\n")
+    for i, line in enumerate(lines):
+        if line.startswith(b"Signed-off-by:"):
+            lines[i] = expected_line
+            return b"\n".join(lines)
+    trimmed = message.rstrip(b"\n")
+    return trimmed + b"\n\n" + expected_line + b"\n"
+
+
+def construct_corrected_metadata(
+    *,
+    tree_oid: str,
+    parent_oids: Sequence[str],
+    original_author: GitIdentityLine,
+    original_committer: GitIdentityLine,
+    message: bytes,
+    report: ComplianceReport,
+    edited_message: bytes | None = None,
+) -> CorrectedCommitMetadata:
+    """Build corrected commit metadata per the audit's findings (§3 step 3).
+
+    ``tree_oid``/``parent_oids`` pass through byte-identical — a
+    compliance fix never changes file contents, and for a standalone
+    single-commit rewrite the parent is unchanged. ``author``/
+    ``committer`` are corrected only on the axis (author or committer)
+    that the report says mismatched, using the report's own resolved
+    ``required_identity`` — the same identity D4-4 already compared
+    against — and preserving the ORIGINAL timestamp/tzoffset (a
+    compliance fix corrects who, never when). The Signed-off-by trailer
+    is fixed independently of the message body: ``message`` is passed
+    through byte-identical unless ``edited_message`` is supplied (the
+    operator's explicit message-revision review step), and the trailer
+    correction is layered on top of whichever message body is in play.
+    """
+    required_identity = report.authorship.required_identity
+    if required_identity is not None and required_identity.get("unresolved"):
+        raise ValueError(
+            "cannot construct corrected metadata: the report's required identity never resolved"
+        )
+
+    author = original_author
+    if not report.authorship.author_matches and required_identity:
+        author = GitIdentityLine(
+            name=required_identity["name"], email=required_identity["email"],
+            timestamp=original_author.timestamp, tzoffset=original_author.tzoffset,
+        )
+
+    committer = original_committer
+    if not report.authorship.committer_matches and required_identity:
+        committer = GitIdentityLine(
+            name=required_identity["name"], email=required_identity["email"],
+            timestamp=original_committer.timestamp, tzoffset=original_committer.tzoffset,
+        )
+
+    final_message = edited_message if edited_message is not None else message
+    if not report.sign_off.matches_policy_identity and required_identity:
+        final_message = _fix_signoff_trailer(final_message, required_identity)
+
+    return CorrectedCommitMetadata(
+        tree_oid=tree_oid,
+        parent_oids=tuple(parent_oids),
+        author=author,
+        committer=committer,
+        message=final_message,
+    )
