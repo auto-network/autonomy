@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 
@@ -1626,3 +1627,179 @@ def test_merge_session_worktree_rejects_non_autonomy_repo(tmp_path, monkeypatch)
         wm.merge_session_worktree(
             session, "upstream", worktrees_dir=worktrees_dir,
         )
+
+
+# ── Phase 0 perf redesign (auto-0peos): batched git calls ──────────
+
+
+def _run(args, cwd):
+    subprocess.run(["git", "-C", str(cwd), *args], check=True)
+
+
+def _rev_parse(cwd, ref="HEAD"):
+    return subprocess.run(
+        ["git", "-C", str(cwd), "rev-parse", ref],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def _make_cherry_pick_fixture(tmp_path):
+    """One repo, ``master`` + ``feature``, with all three merge dispositions.
+
+    Returns ``(repo, merged_sha, cherry_sha, pending_sha)`` where, relative
+    to ``master``:
+      - ``merged_sha`` was fast-forward merged (SHA-identical ancestor).
+      - ``cherry_sha`` was cherry-picked onto master with a *different* SHA
+        but the same patch-id.
+      - ``pending_sha`` never landed on master at all.
+    """
+    repo = tmp_path / "cherry-fixture"
+    repo.mkdir()
+    _run(["init", "-q", "-b", "master"], repo)
+    _run(["config", "user.email", "t@t"], repo)
+    _run(["config", "user.name", "t"], repo)
+    (repo / "base.txt").write_text("base\n")
+    _run(["add", "base.txt"], repo)
+    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "base"], repo)
+
+    _run(["checkout", "-q", "-b", "feature"], repo)
+    (repo / "merged.txt").write_text("merged\n")
+    _run(["add", "merged.txt"], repo)
+    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "merged commit"], repo)
+    merged_sha = _rev_parse(repo)
+
+    (repo / "cherry.txt").write_text("cherry\n")
+    _run(["add", "cherry.txt"], repo)
+    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "cherry commit"], repo)
+    cherry_sha = _rev_parse(repo)
+
+    (repo / "pending.txt").write_text("pending\n")
+    _run(["add", "pending.txt"], repo)
+    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "pending commit"], repo)
+    pending_sha = _rev_parse(repo)
+
+    _run(["checkout", "-q", "master"], repo)
+    _run(["merge", "-q", "--ff-only", merged_sha], repo)
+    _run(["cherry-pick", cherry_sha], repo)
+    (repo / "mastermove.txt").write_text("mastermove\n")
+    _run(["add", "mastermove.txt"], repo)
+    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "mastermove"], repo)
+
+    _run(["checkout", "-q", "feature"], repo)
+    return repo, merged_sha, cherry_sha, pending_sha
+
+
+def test_target_branch_merged_shas_matches_per_sha_classification(tmp_path):
+    """Batched ``git cherry`` classification == the old per-SHA loop.
+
+    Covers all three dispositions in one fixture: SHA-identical ancestor
+    (fast-forwarded), patch-id equivalent under a different SHA
+    (cherry-picked), and genuinely still pending.
+    """
+    repo, merged_sha, cherry_sha, pending_sha = _make_cherry_pick_fixture(tmp_path)
+    candidates = [merged_sha, cherry_sha, pending_sha]
+
+    old_merged = {
+        sha for sha in candidates
+        if wm._target_branch_contains_commit(repo, "master", sha)
+    }
+    new_merged = wm._target_branch_merged_shas(repo, "master", pending_sha, candidates)
+
+    assert old_merged == {merged_sha, cherry_sha}
+    assert new_merged == old_merged
+
+
+def test_dashboard_pending_commit_shas_uses_batched_classification(tmp_path, monkeypatch):
+    """End-to-end: the per-row helper filters merged/cherry-picked SHAs
+    via the batched path and leaves only the truly pending commit."""
+    repo, merged_sha, cherry_sha, pending_sha = _make_cherry_pick_fixture(tmp_path)
+    monkeypatch.setattr(wm, "REPO_ROOT", repo)
+
+    pending = wm._dashboard_pending_commit_shas(repo, "autonomy", base_ref="master")
+    assert pending == [pending_sha]
+
+
+def _make_commit_detail_fixture(tmp_path):
+    """A repo with an add, a modify, a rename, and a binary-file commit."""
+    repo = tmp_path / "detail-fixture"
+    repo.mkdir()
+    _run(["init", "-q", "-b", "master"], repo)
+    _run(["config", "user.email", "t@t"], repo)
+    _run(["config", "user.name", "t"], repo)
+    (repo / "base.txt").write_text("base\n")
+    _run(["add", "base.txt"], repo)
+    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "base"], repo)
+
+    shas = []
+
+    (repo / "add.txt").write_text("hello\n")
+    _run(["add", "add.txt"], repo)
+    _run(
+        ["-c", "commit.gpgsign=false", "commit", "-q", "-m",
+         "add file\n\nwith a multi-line body\nsecond line"],
+        repo,
+    )
+    shas.append(_rev_parse(repo))
+
+    (repo / "add.txt").write_text("hello world\n")
+    _run(["add", "add.txt"], repo)
+    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "modify file"], repo)
+    shas.append(_rev_parse(repo))
+
+    _run(["mv", "add.txt", "renamed.txt"], repo)
+    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "rename file"], repo)
+    shas.append(_rev_parse(repo))
+
+    (repo / "blob.bin").write_bytes(bytes(range(256)))
+    _run(["add", "blob.bin"], repo)
+    _run(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "add binary"], repo)
+    shas.append(_rev_parse(repo))
+
+    return repo, shas
+
+
+def test_read_worktree_commits_batch_matches_per_commit_reads(tmp_path):
+    """The batched ``git log`` parser must match the old per-commit reads
+    exactly, quirks (rename numstat mismatch) included — this is a
+    data-source change only, not a parsing-behavior change."""
+    repo, shas = _make_commit_detail_fixture(tmp_path)
+
+    expected = [wm._read_worktree_commit(repo, sha) for sha in shas]
+    batch = wm._read_worktree_commits_batch(repo, shas)
+    actual = [batch[sha] for sha in shas]
+
+    assert actual == expected
+    assert any(f.status == "R" for commit in actual for f in commit.files)
+    assert any(f.path == "blob.bin" for commit in actual for f in commit.files)
+
+
+def test_cleanup_preserve_verdict_demotes_repeat_warning_to_debug(tmp_path, monkeypatch, caplog):
+    """First preserve verdict for a worktree logs WARNING; an unchanged
+    repeat (same path, same reason) logs DEBUG instead — the fix for the
+    45-line WARNING burst every prune tick on a stable set of old
+    worktrees."""
+    session = "sess-preserve-repeat"
+    worktrees_dir, _clone, worktree = _make_writable_session_worktree(
+        tmp_path, session, monkeypatch,
+    )
+    (worktree / "README.md").write_text("edited but not committed\n")
+
+    caplog.set_level(logging.DEBUG, logger="agents.workspace_manager")
+
+    wm.cleanup_session_worktrees(session, worktrees_dir=worktrees_dir)
+    first_preserve = [
+        r for r in caplog.records
+        if "preserving" in r.getMessage()
+    ]
+    assert len(first_preserve) == 1
+    assert first_preserve[0].levelno == logging.WARNING
+
+    caplog.clear()
+
+    wm.cleanup_session_worktrees(session, worktrees_dir=worktrees_dir)
+    second_preserve = [
+        r for r in caplog.records
+        if "preserving" in r.getMessage()
+    ]
+    assert len(second_preserve) == 1
+    assert second_preserve[0].levelno == logging.DEBUG

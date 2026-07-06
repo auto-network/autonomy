@@ -572,8 +572,29 @@ class WorktreeDirtyDetail:
     reason: str | None = None
 
 
+# Process-lifetime count of ``_git_output`` invocations. Coarse and
+# unscoped by design: callers that want a sweep-scoped count take a
+# before/after snapshot via :func:`git_call_count` rather than us
+# threading a counter object through every helper's signature (which
+# would touch every call site in this module). Approximate under
+# concurrent git usage from other paths (an operator action racing a
+# sweep) — acceptable for attribution logging, not a hard metric.
+_git_call_total = 0
+
+
+def git_call_count() -> int:
+    """Return the process-lifetime ``_git_output`` call count.
+
+    Callers scope this to one operation by diffing two snapshots, e.g.
+    ``before = git_call_count(); ...; calls = git_call_count() - before``.
+    """
+    return _git_call_total
+
+
 def _git_output(args: list[str], cwd: Path, *, timeout: int = 15) -> tuple[int, str, str]:
     """Run git and return (rc, stdout, stderr); never raises on non-zero exit."""
+    global _git_call_total
+    _git_call_total += 1
     try:
         r = subprocess.run(
             ["git", *args],
@@ -902,13 +923,27 @@ def worktree_target_branch_name(
     return default_branch
 
 
-def _worktree_dashboard_base_ref(worktree: Path, repo_name: str) -> str | None:
-    """Return the review base ref used by the dashboard for a worktree."""
+def _worktree_dashboard_base_ref(
+    worktree: Path,
+    repo_name: str,
+    *,
+    target_branch_and_head: tuple[str | None, str | None] | None = None,
+) -> str | None:
+    """Return the review base ref used by the dashboard for a worktree.
+
+    ``target_branch_and_head`` lets a caller that already resolved
+    :func:`_autonomy_target_branch_and_head` once (e.g. ``scan_all_worktrees``
+    doing it once per sweep instead of once per row) pass it in; standalone
+    callers omit it and it's resolved internally, unchanged.
+    """
     fallback = _worktree_merge_base_ref(worktree)
     if repo_name != "autonomy":
         return fallback
 
-    _target_branch, target_head = _autonomy_target_branch_and_head()
+    _target_branch, target_head = (
+        target_branch_and_head if target_branch_and_head is not None
+        else _autonomy_target_branch_and_head()
+    )
     if not target_head:
         return fallback
 
@@ -1131,33 +1166,85 @@ def _target_branch_contains_commit(repo: Path, branch: str, sha: str) -> bool:
     return line.startswith("-")
 
 
+def _target_branch_merged_shas(
+    repo: Path,
+    branch: str,
+    head_sha: str,
+    candidates: list[str],
+) -> set[str]:
+    """Classify which of ``candidates`` are merged into ``branch``, in one call.
+
+    Replaces a per-SHA ``_target_branch_contains_commit`` loop (a
+    ``merge-base --is-ancestor`` plus a ``git cherry`` patch-id check per
+    commit) with a single ``git cherry <branch> <head_sha>``. ``git cherry``
+    lists every commit reachable from ``head_sha`` but not ``branch``,
+    prefixed ``+`` (patch not yet on branch) or ``-`` (patch-id equivalent
+    already on branch, e.g. a cherry-pick with a different SHA). A commit
+    that's a direct SHA-identical ancestor of ``branch`` doesn't appear in
+    the output at all (nothing unique to report) — also correctly
+    classified here as merged, since only ``+`` lines mean "still pending."
+
+    ``candidates`` must all be reachable from ``head_sha`` (e.g. the
+    ordered output of :func:`_worktree_commit_shas`, whose tip is
+    ``head_sha``). On any git failure, returns an empty set — the same
+    conservative "treat as still pending" default the old per-SHA loop
+    fell back to when a SHA/branch couldn't be resolved.
+    """
+    if not candidates:
+        return set()
+    rc, out, _ = _git_output(
+        ["cherry", f"refs/heads/{branch}", head_sha],
+        repo,
+        timeout=30,
+    )
+    if rc != 0:
+        return set()
+    still_pending: set[str] = set()
+    for line in out.splitlines():
+        marker, _, sha = line.strip().partition(" ")
+        if marker == "+":
+            still_pending.add(sha.strip())
+    candidate_set = set(candidates)
+    return candidate_set - still_pending
+
+
 def _dashboard_pending_commit_shas(
     worktree: Path,
     repo_name: str,
     *,
     base_ref: str | None = None,
+    target_branch_and_head: tuple[str | None, str | None] | None = None,
 ) -> list[str]:
     """Return worktree ahead SHAs that are not already merged into the target repo."""
     pending = _worktree_commit_shas(worktree, base_ref=base_ref)
-    if repo_name != "autonomy":
+    if repo_name != "autonomy" or not pending:
         return pending
 
-    target_branch, _target_head = _autonomy_target_branch_and_head()
+    target_branch, _target_head = (
+        target_branch_and_head if target_branch_and_head is not None
+        else _autonomy_target_branch_and_head()
+    )
     if target_branch is None:
         return pending
 
-    return [
-        sha for sha in pending
-        if not _target_branch_contains_commit(REPO_ROOT, target_branch, sha)
-    ]
+    merged = _target_branch_merged_shas(REPO_ROOT, target_branch, pending[-1], pending)
+    return [sha for sha in pending if sha not in merged]
 
 
-def _worktree_clone_stale(repo_name: str, clone: Path | None) -> bool:
+def _worktree_clone_stale(
+    repo_name: str,
+    clone: Path | None,
+    *,
+    target_branch_and_head: tuple[str | None, str | None] | None = None,
+) -> bool:
     """Return True when the managed clone lags the host integration branch."""
     if repo_name != "autonomy" or clone is None:
         return False
 
-    target_branch, target_head = _autonomy_target_branch_and_head()
+    target_branch, target_head = (
+        target_branch_and_head if target_branch_and_head is not None
+        else _autonomy_target_branch_and_head()
+    )
     if target_branch is None or target_head is None:
         return False
 
@@ -1173,12 +1260,16 @@ def _worktree_rebase_required(
     *,
     has_pending_commits: bool,
     clone_stale: bool,
+    target_branch_and_head: tuple[str | None, str | None] | None = None,
 ) -> bool:
     """Return True when the target branch has advanced past the worktree fork point."""
     if repo_name != "autonomy" or not has_pending_commits or clone_stale:
         return False
 
-    _target_branch, target_head = _autonomy_target_branch_and_head()
+    _target_branch, target_head = (
+        target_branch_and_head if target_branch_and_head is not None
+        else _autonomy_target_branch_and_head()
+    )
     if not target_head:
         return False
 
@@ -1186,30 +1277,39 @@ def _worktree_rebase_required(
     return rc != 0
 
 
-def _commit_file_changes(worktree: Path, sha: str) -> list[GitFileChange]:
-    """Return file-level status and numstat details for one commit."""
-    numstats: dict[str, tuple[int, int]] = {}
-    rc, out, _ = _git_output(
-        ["show", "--numstat", "--format=", "--find-renames", sha],
-        worktree,
-        timeout=30,
-    )
-    if rc == 0:
-        for line in out.splitlines():
-            parts = line.split("\t")
-            if len(parts) < 3:
-                continue
-            path = parts[-1].strip()
-            if not path:
-                continue
-            numstats[path] = (_parse_numstat(parts[0]), _parse_numstat(parts[1]))
+def _parse_commit_file_changes(
+    numstat_text: str,
+    name_status_text: str,
+) -> list[GitFileChange]:
+    """Parse paired ``--numstat``/``--name-status`` bodies into file changes.
 
-    rc, out, _ = _git_output(
-        ["show", "--name-status", "--format=", "--find-renames", sha],
-        worktree,
-        timeout=30,
-    )
-    if rc != 0:
+    Shared by the single-commit path (:func:`_commit_file_changes`) and the
+    batched per-row path (:func:`_read_worktree_commits_batch`) so both
+    produce byte-identical results from the same underlying git data —
+    including the pre-existing quirk that a renamed file reports
+    additions=0/deletions=0: numstat's compact ``old => new`` rename path
+    never matches name-status's bare new-path key, so the lookup misses and
+    the trailing "unseen numstat entries" pass appends a second, spurious
+    ``status="?"`` row keyed on the arrow-joined path. That's existing
+    dashboard behavior; this function preserves it rather than fixing it.
+
+    An empty string for either argument is treated the same whether it
+    came from "the git call failed" or "the git call succeeded with no
+    output" — both cases produce the same result in the original
+    per-commit code (verified by inspection), so no separate rc signal is
+    needed here.
+    """
+    numstats: dict[str, tuple[int, int]] = {}
+    for line in numstat_text.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        path = parts[-1].strip()
+        if not path:
+            continue
+        numstats[path] = (_parse_numstat(parts[0]), _parse_numstat(parts[1]))
+
+    if not name_status_text:
         return [
             GitFileChange(status="?", path=path, additions=adds, deletions=dels)
             for path, (adds, dels) in sorted(numstats.items())
@@ -1217,7 +1317,7 @@ def _commit_file_changes(worktree: Path, sha: str) -> list[GitFileChange]:
 
     files: list[GitFileChange] = []
     seen: set[str] = set()
-    for line in out.splitlines():
+    for line in name_status_text.splitlines():
         parts = line.split("\t")
         if len(parts) < 2:
             continue
@@ -1245,6 +1345,25 @@ def _commit_file_changes(worktree: Path, sha: str) -> list[GitFileChange]:
             ))
 
     return files
+
+
+def _commit_file_changes(worktree: Path, sha: str) -> list[GitFileChange]:
+    """Return file-level status and numstat details for one commit."""
+    rc, out, _ = _git_output(
+        ["show", "--numstat", "--format=", "--find-renames", sha],
+        worktree,
+        timeout=30,
+    )
+    numstat_text = out if rc == 0 else ""
+
+    rc, out, _ = _git_output(
+        ["show", "--name-status", "--format=", "--find-renames", sha],
+        worktree,
+        timeout=30,
+    )
+    name_status_text = out if rc == 0 else ""
+
+    return _parse_commit_file_changes(numstat_text, name_status_text)
 
 
 def _read_worktree_commit(
@@ -1288,19 +1407,122 @@ def _read_worktree_commit(
     )
 
 
+# Record separator prefixed to each commit's fields in the batched ``git
+# log`` calls below, so splitting the whole blob on it yields one clean
+# chunk per commit. Field separator matches ``_read_worktree_commit``'s
+# single-commit ``--format`` exactly.
+_LOG_RECORD_SEP = "\x1e"
+_LOG_FIELD_SEP = "\x1f"
+
+
+def _batch_log_diffstat_chunks(
+    worktree: Path,
+    diff_flag: str,
+    shas: list[str],
+) -> dict[str, str]:
+    """Run one ``git log <diff_flag> --find-renames`` over all of ``shas``.
+
+    Returns ``{sha: diffstat_text}`` where each value is byte-identical to
+    what ``git show <diff_flag> --format= --find-renames <sha>`` would have
+    produced for that sha alone — so :func:`_parse_commit_file_changes` can
+    consume it unchanged. One call replaces N per-commit ``git show`` calls.
+    """
+    if not shas:
+        return {}
+    rc, out, _ = _git_output(
+        [
+            "log", "--no-walk=unsorted", f"--format={_LOG_RECORD_SEP}%H",
+            diff_flag, "--find-renames", *shas,
+        ],
+        worktree,
+        timeout=30,
+    )
+    if rc != 0:
+        return {}
+    chunks: dict[str, str] = {}
+    for chunk in out.split(_LOG_RECORD_SEP):
+        if not chunk:
+            continue
+        sha, _, rest = chunk.partition("\n")
+        chunks[sha.strip()] = rest
+    return chunks
+
+
+def _read_worktree_commits_batch(
+    worktree: Path,
+    shas: list[str],
+) -> dict[str, WorktreeCommit]:
+    """Batched equivalent of calling ``_read_worktree_commit`` once per sha.
+
+    Three ``git log`` invocations total for the whole list (header fields,
+    numstat, name-status) instead of three ``git show``/``git diff`` style
+    invocations PER COMMIT — the dominant cost the sweep redesign targets.
+    Patch text is never populated here (``_worktree_commits`` never asked
+    ``_read_worktree_commit`` for it either — only the explicit single-commit
+    detail readers pass ``include_patch=True``).
+    """
+    if not shas:
+        return {}
+
+    fmt = f"{_LOG_RECORD_SEP}%H{_LOG_FIELD_SEP}%h{_LOG_FIELD_SEP}%an{_LOG_FIELD_SEP}%ad{_LOG_FIELD_SEP}%s{_LOG_FIELD_SEP}%b"
+    rc, header_out, _ = _git_output(
+        ["log", "--no-walk=unsorted", f"--format={fmt}", "--date=format:%Y-%m-%d %H:%M", *shas],
+        worktree,
+        timeout=30,
+    )
+    if rc != 0:
+        return {}
+
+    numstat_chunks = _batch_log_diffstat_chunks(worktree, "--numstat", shas)
+    name_status_chunks = _batch_log_diffstat_chunks(worktree, "--name-status", shas)
+
+    commits: dict[str, WorktreeCommit] = {}
+    for chunk in header_out.split(_LOG_RECORD_SEP):
+        if not chunk:
+            continue
+        parts = chunk.rstrip("\n").split(_LOG_FIELD_SEP, 5)
+        if len(parts) != 6:
+            continue
+        sha = parts[0].strip()
+        files = _parse_commit_file_changes(
+            numstat_chunks.get(sha, ""),
+            name_status_chunks.get(sha, ""),
+        )
+        commits[sha] = WorktreeCommit(
+            sha=sha,
+            short_sha=parts[1].strip(),
+            author=parts[2].strip(),
+            date=parts[3].strip(),
+            subject=parts[4].strip(),
+            body=parts[5].strip(),
+            files=files,
+            patch=None,
+        )
+    return commits
+
+
 def _worktree_commits(
     worktree: Path,
     repo_name: str,
     *,
     base_ref: str | None = None,
+    target_branch_and_head: tuple[str | None, str | None] | None = None,
 ) -> list[WorktreeCommit]:
     """Return dashboard-pending commit details for one worktree."""
-    commits: list[WorktreeCommit] = []
-    for sha in _dashboard_pending_commit_shas(worktree, repo_name, base_ref=base_ref):
-        commit = _read_worktree_commit(worktree, sha)
-        if commit is not None:
-            commits.append(commit)
-    return commits
+    shas = _dashboard_pending_commit_shas(
+        worktree,
+        repo_name,
+        base_ref=base_ref,
+        target_branch_and_head=target_branch_and_head,
+    )
+    if not shas:
+        return []
+    by_sha = _read_worktree_commits_batch(worktree, shas)
+    # Order follows ``shas`` (oldest ahead-commit first, as before); a sha
+    # the batch failed to read (should only happen if the whole git log
+    # invocation errored) is dropped, mirroring the old per-commit
+    # "skip on None" behavior.
+    return [by_sha[sha] for sha in shas if sha in by_sha]
 
 
 def _workflow_resolved_commits(
@@ -1391,6 +1613,12 @@ def scan_all_worktrees(
     live = set(live_session_names) if live_session_names is not None else _live_session_names()
     out: list[WorktreeState] = []
 
+    # Resolved once per sweep rather than once per row (previously ~2-4
+    # identical git spawns per row just to answer "what's the host
+    # integration branch/head" — the same answer for every row in this
+    # pass since it's a single host-side value, not per-worktree state).
+    target_branch_and_head = _autonomy_target_branch_and_head()
+
     try:
         session_dirs = sorted(worktrees_dir.iterdir())
     except OSError:
@@ -1419,8 +1647,14 @@ def scan_all_worktrees(
                 continue
             clone = _find_managed_clone_for_worktree(repo_dir)
             branch = _worktree_branch_name(repo_dir)
-            base_ref = _worktree_dashboard_base_ref(repo_dir, repo_dir.name)
-            clone_stale = _worktree_clone_stale(repo_dir.name, clone)
+            base_ref = _worktree_dashboard_base_ref(
+                repo_dir, repo_dir.name,
+                target_branch_and_head=target_branch_and_head,
+            )
+            clone_stale = _worktree_clone_stale(
+                repo_dir.name, clone,
+                target_branch_and_head=target_branch_and_head,
+            )
             dirty_files_or_none = _worktree_dirty_files(repo_dir)
             dirty_files = dirty_files_or_none or []
             # Tracked-only dirty: untracked '??' entries do not block rebase /
@@ -1431,7 +1665,10 @@ def scan_all_worktrees(
             # Preserve the previous safety behavior: if git status fails,
             # treat the worktree as dirty even though paths are unavailable.
             is_dirty = True if dirty_files_or_none is None else bool(tracked_dirty)
-            raw_commits = _worktree_commits(repo_dir, repo_dir.name, base_ref=base_ref)
+            raw_commits = _worktree_commits(
+                repo_dir, repo_dir.name, base_ref=base_ref,
+                target_branch_and_head=target_branch_and_head,
+            )
             commits = _workflow_resolved_commits(repo_dir.name, raw_commits)
             commits_ahead = len(commits)
             raw_commits_ahead = _worktree_commits_ahead(repo_dir, base_ref=base_ref)
@@ -1440,6 +1677,7 @@ def scan_all_worktrees(
                 repo_dir.name,
                 has_pending_commits=bool(raw_commits),
                 clone_stale=clone_stale,
+                target_branch_and_head=target_branch_and_head,
             )
             git_ff_eligible = (
                 branch is not None
@@ -1457,6 +1695,7 @@ def scan_all_worktrees(
                     commits_ahead=raw_commits_ahead,
                     ff_eligible=git_ff_eligible,
                     clone_stale=clone_stale,
+                    target_branch_and_head=target_branch_and_head,
                 )
             )
             if commits_ahead == 0:
@@ -1508,6 +1747,7 @@ def _compute_cherry_pick_eligibility(
     commits_ahead: int,
     ff_eligible: bool,
     clone_stale: bool,
+    target_branch_and_head: tuple[str | None, str | None] | None = None,
 ) -> tuple[bool, str | None]:
     """Decide whether to surface a "Cherry Pick to <branch>" button.
 
@@ -1527,7 +1767,10 @@ def _compute_cherry_pick_eligibility(
         return False, None
     if commits_ahead != 1 or not commits:
         return False, None
-    target_branch, _ = _autonomy_target_branch_and_head()
+    target_branch, _ = (
+        target_branch_and_head if target_branch_and_head is not None
+        else _autonomy_target_branch_and_head()
+    )
     if target_branch is None:
         return False, None
     sha = commits[0].sha
@@ -1636,6 +1879,27 @@ def _worktree_prune(clone: Path) -> None:
     _git_output(["worktree", "prune"], clone, timeout=15)
 
 
+# Process-lifetime memo of the last logged preserve verdict per worktree
+# path. ``prune_orphan_worktrees`` re-derives the same "preserve" decision
+# for the same stale worktree every 600s forever — before this, that was a
+# WARNING every time (a 45-line burst each prune tick for a stable set of
+# old worktrees). Only a NEW or CHANGED verdict is worth an operator's
+# attention; an unchanged repeat is DEBUG. Module-level dict is acceptable
+# for Phase 0 (no persistence across process restarts needed — a fresh
+# process logging the first WARNING again is fine).
+_preserve_verdict_seen: dict[str, str] = {}
+
+
+def _log_preserve_verdict(entry: Path, reason: str) -> None:
+    """Log a worktree-preserve verdict, demoted to DEBUG on an exact repeat."""
+    key = str(entry)
+    if _preserve_verdict_seen.get(key) == reason:
+        logger.debug("workspace cleanup: preserving %s (%s)", entry, reason)
+        return
+    _preserve_verdict_seen[key] = reason
+    logger.warning("workspace cleanup: preserving %s (%s)", entry, reason)
+
+
 def cleanup_session_worktrees(
     session_name: str,
     *,
@@ -1682,11 +1946,9 @@ def cleanup_session_worktrees(
                 # treating a mid-edit worktree as "local commits".
                 reasons.append("local commits")
             if reasons:
-                result.preserved.append((str(entry), ", ".join(reasons)))
-                logger.warning(
-                    "workspace cleanup: preserving %s (%s)",
-                    entry, ", ".join(reasons),
-                )
+                reason = ", ".join(reasons)
+                result.preserved.append((str(entry), reason))
+                _log_preserve_verdict(entry, reason)
                 continue
 
         if clone is None:

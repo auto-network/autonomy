@@ -49,7 +49,14 @@ def test_scan_filters_displayed_commits_but_keeps_git_topology_flags(tmp_path, m
     monkeypatch.setattr(wm, "_worktree_commits_ahead", lambda *_args, **_kwargs: len(raw_commits))
     monkeypatch.setattr(wm, "_worktree_ff_only_safe", lambda *_args, **_kwargs: True)
 
-    def fake_rebase_required(_path: Path, _repo: str, *, has_pending_commits: bool, clone_stale: bool) -> bool:
+    def fake_rebase_required(
+        _path: Path,
+        _repo: str,
+        *,
+        has_pending_commits: bool,
+        clone_stale: bool,
+        target_branch_and_head: tuple[str | None, str | None] | None = None,
+    ) -> bool:
         rebase_calls.append(has_pending_commits)
         return has_pending_commits and not clone_stale
 

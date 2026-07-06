@@ -37,6 +37,7 @@ from agents.workspace_manager import (
     WorktreeState,
     _git_output,
     _worktree_dashboard_base_ref,
+    git_call_count,
     scan_all_worktrees,
 )
 from tools.graph import settings_ops
@@ -369,6 +370,25 @@ def _read_bindings(row: WorktreeState) -> list:
     return sorted(chosen["members"], key=lambda member: member.key)
 
 
+def _read_bindings_batch(
+    rows: list[WorktreeState],
+) -> dict[tuple[str, str], list]:
+    """Read bindings for multiple rows inside one thread hop.
+
+    ``_read_bindings`` is a synchronous sqlite settings read
+    (``settings_ops.read_set``); calling it once per row on the event
+    loop is exactly the on-loop-DB-read pattern bead auto-3ylck flagged
+    for the sibling harness.usage call site. Callers on the cache-miss
+    path batch all rows needing a lookup into a single
+    ``asyncio.to_thread(_read_bindings_batch, rows)`` instead of N
+    per-row hops.
+    """
+    return {
+        (row.session_name, row.repo_name): _read_bindings(row)
+        for row in rows
+    }
+
+
 def _read_review_state_cache(repo_slug: str | None) -> dict[str, dict]:
     """Read the per-repo cache map ``{key: payload}`` for ``repo_slug``.
 
@@ -692,7 +712,13 @@ async def _fetch_source_control(
     )
     if review_stack:
         try:
-            _seed_bindings_from_legacy_reviews(row, review_stack)
+            # ``_seed_bindings_from_legacy_reviews`` reads
+            # ``_default_binding_base_sha``'s sync ``_git_output`` call
+            # (rev-parse in the worktree) plus sync settings_ops writes —
+            # all off the event loop via one thread hop.
+            await asyncio.to_thread(
+                _seed_bindings_from_legacy_reviews, row, review_stack,
+            )
         except Exception:
             logger.warning(
                 "worktree_monitor: auto-seed bindings failed for %s/%s",
@@ -1136,8 +1162,17 @@ class WorktreeMonitor:
         if self._lock is None:
             self._lock = asyncio.Lock()
         async with self._lock:
+            sweep_start = time.monotonic()
+            calls_before = git_call_count()
             rows = await asyncio.to_thread(scan_all_worktrees)
+            sweep_seconds = time.monotonic() - sweep_start
+            git_calls = git_call_count() - calls_before
             self._cache = rows
+            live_count = sum(1 for row in rows if row.session_live)
+            logger.info(
+                "worktree_monitor: sweep took %.2fs rows=%d live=%d git_calls=%d",
+                sweep_seconds, len(rows), live_count, git_calls,
+            )
             await self._refresh_source_control(
                 rows, force_capabilities=force_capabilities,
             )
@@ -1452,6 +1487,7 @@ class WorktreeMonitor:
         # to the rate-limit backoff above).
         rows_to_fetch: list[WorktreeState] = []
         carried: dict[tuple[str, str], dict] = {}
+        binding_lookup_rows: list[WorktreeState] = []
         for row in live_rows:
             key = (row.session_name, row.repo_name)
             cached = self._source_control_cache.get(key)
@@ -1473,7 +1509,24 @@ class WorktreeMonitor:
                 rows_to_fetch.append(row)
                 continue
             if cached is None:
-                bindings = _read_bindings(row)
+                # Defer the sync sqlite read — batched into one
+                # ``to_thread`` hop below instead of one per row on
+                # the event loop.
+                binding_lookup_rows.append(row)
+                continue
+            # Default background path: keep the cached snapshot
+            # untouched. Unbound rows with no cache stay absent from
+            # the snapshot map until an operator refresh seeds them.
+            if cached is not None:
+                carried[key] = cached
+
+        if binding_lookup_rows:
+            bindings_by_key = await asyncio.to_thread(
+                _read_bindings_batch, binding_lookup_rows,
+            )
+            for row in binding_lookup_rows:
+                key = (row.session_name, row.repo_name)
+                bindings = bindings_by_key.get(key) or []
                 if bindings:
                     # Restart resilience: rebuild the visible row from
                     # persistent bindings + review_state cache instead
@@ -1484,12 +1537,8 @@ class WorktreeMonitor:
                         bindings=bindings,
                         watch_mode=self.get_nag_mode(*key),
                     )
-                    continue
-            # Default background path: keep the cached snapshot
-            # untouched. Unbound rows with no cache stay absent from
-            # the snapshot map until an operator refresh seeds them.
-            if cached is not None:
-                carried[key] = cached
+                # Unbound rows with no cache stay absent from the
+                # snapshot map until an operator refresh seeds them.
 
         # Fan out only the rows that actually need a fresh fetch.
         # Binding-backed watch rows must go through the REST path once
@@ -1501,7 +1550,7 @@ class WorktreeMonitor:
         async def _fetch_for_row(row: WorktreeState):
             row_key = (row.session_name, row.repo_name)
             row_mode = self.get_nag_mode(*row_key)
-            bindings = _read_bindings(row)
+            bindings = await asyncio.to_thread(_read_bindings, row)
             if bindings and row_mode in (NAG_WHEN_DONE, NAG_ALL_CHANGES):
                 snapshot, _rl = await _refresh_bindings_via_rest(
                     row, rows, bindings, watch_mode=row_mode,
