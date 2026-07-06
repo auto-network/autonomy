@@ -40,6 +40,47 @@ def test_manifest_declares_librarian_agent_action():
     assert "Do not read or write data/experiments.db directly" in prompt
 
 
+def test_librarian_agent_action_prompt_renders_through_dispatch_template_engine():
+    from tools.dashboard.server import _render_agent_action_prompt
+
+    plugin_dir = design_api.Path(__file__).resolve().parents[1]
+    manifest = PluginManifest.model_validate(
+        yaml.safe_load((plugin_dir / "plugin.yaml").read_text())
+    )
+    decl = {decl.key: decl for decl in manifest.settings}["design.refresh-preview"]
+    payload = json.loads((plugin_dir / (decl.payload_file or "")).read_text())
+
+    rendered = _render_agent_action_prompt(
+        payload["prompt_template"],
+        page_context={
+            "asset": {
+                "id": "rev-a2",
+                "title": "Session card refined",
+                "short_description": "",
+                "url": "https://localhost:8080/design/rev-a2",
+            },
+            "design": {
+                "design_id": "series-a",
+                "status": "pending",
+                "revision_count": 2,
+                "variant_count": 4,
+                "creator_session_id": "auto-designer",
+            },
+            "source": {},
+            "bead": {},
+            "tags": {"values": [], "list": ""},
+        },
+        dispatched_by_session="auto-test",
+        member_key="design.refresh-preview",
+    )
+
+    assert 'export DASHBOARD="${DASHBOARD:-https://localhost:8080}"' in rendered
+    assert "payload = {'description': 'REPLACE_WITH_CONCISE_RENDERED_DESIGN_SUMMARY'}" in rendered
+    assert "f'{dash}/api/design-studio/revisions/{rev}/metadata'" in rendered
+    assert 'headers={\'Content-Type\': \'application/json\'}' in rendered
+    assert "{asset[" not in rendered
+
+
 def test_update_revision_metadata_helper_preserves_revision_provenance(tmp_path):
     from agents import design_db
 
