@@ -283,6 +283,64 @@ def test_idempotency_lifecycle_reserves_replays_and_conflicts(tmp_path):
         conn.close()
 
 
+def test_reserve_after_expiry_reuses_key(tmp_path):
+    path = tmp_path / "commit_workflow.db"
+    db.init_db(path)
+    conn = db._get_conn(path)
+    try:
+        key_hash = db.hash_idempotency_key("commit_workflow", "raw-idem-expired")
+        conn.execute(
+            """
+            INSERT INTO commit_workflow_idempotency (
+                idempotency_id, actor_type, actor_id, scope_key, operation,
+                workflow_id, idempotency_key_hash, request_fingerprint, status,
+                response_json, event_ids_json, side_effect_ref,
+                created_at, updated_at, expires_at
+            ) VALUES (
+                'expired-row', 'agent_session', 'actor-1', 'repo-slug:pre-workflow',
+                'propose', NULL, ?, 'fingerprint-old', 'completed',
+                '{}', '[]', NULL, 1.0, 1.0, 5.0
+            )
+            """,
+            (key_hash,),
+        )
+
+        reserved = db.reserve_idempotency(
+            conn,
+            actor_type="agent_session",
+            actor_id="actor-1",
+            scope_key=db.scope_key("repo-slug", "pre-workflow"),
+            operation="propose",
+            raw_idempotency_key="raw-idem-expired",
+            request_fields={"scope": {"repo_slug": "repo-slug"}},
+            workflow_id=None,
+            now=10.0,
+            idempotency_id="fresh-row",
+            namespace="commit_workflow",
+        )
+
+        rows = conn.execute(
+            """
+            SELECT idempotency_id, status, expires_at
+            FROM commit_workflow_idempotency
+            WHERE actor_type = 'agent_session'
+              AND actor_id = 'actor-1'
+              AND scope_key = 'repo-slug:pre-workflow'
+              AND operation = 'propose'
+              AND idempotency_key_hash = ?
+            """,
+            (key_hash,),
+        ).fetchall()
+
+        assert reserved["idempotency_id"] == "fresh-row"
+        assert len(rows) == 1
+        assert rows[0]["idempotency_id"] == "fresh-row"
+        assert rows[0]["status"] == "in_flight"
+        assert rows[0]["expires_at"] > 10.0
+    finally:
+        conn.close()
+
+
 def test_idempotency_retention_windows(tmp_path):
     path = tmp_path / "commit_workflow.db"
     db.init_db(path)
