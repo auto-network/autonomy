@@ -232,27 +232,32 @@ def verify_snapshot(*, snapshot_ref: str, store: ContentAddressedStore, dao_conn
 def collect_garbage(*, dao_conn, store: ContentAddressedStore, now: float) -> dict:
     """Collect snapshots past their retention window.
 
-    Two-phase so the metadata is authoritative before any bytes are removed:
-    (1) mark every expired snapshot ``gc_deleted`` and commit; (2) delete each
-    of their stored objects that no surviving snapshot still references
-    (content-addressed dedup means a shared object is only removed once its last
-    referencer is collected). Objects belonging to a still-live snapshot are
-    kept. Returns a summary count.
-    """
-    refs = snapshot_dao.expired_snapshot_refs(dao_conn, now=now)
-    if not refs:
-        return {"snapshots_collected": 0, "objects_deleted": 0}
+    Three lifecycle states drive a crash-resumable sweep:
+    ``captured/verified/released`` -> ``gc_pending`` (marked for collection,
+    committed) -> ``gc_deleted`` (bytes removed, done). Two phases:
+    (1) mark every newly-expired snapshot ``gc_pending`` and commit; (2) for
+    every ``gc_pending`` snapshot — the ones just marked PLUS any left behind by
+    a crashed prior sweep — delete each stored object no live snapshot still
+    references, then mark it ``gc_deleted``.
 
-    # Phase 1: metadata first — a crash mid-GC leaves gc_deleted rows whose
-    # orphaned objects a later sweep cleans, never a live snapshot with missing bytes.
-    for ref in refs:
-        snapshot_dao.update_snapshot_status(dao_conn, ref, "gc_deleted")
+    Because phase 2 re-scans all ``gc_pending`` rows, a crash between the two
+    phases is recovered: the interrupted snapshot stays ``gc_pending`` and the
+    next run finishes it, so orphaned bytes are never permanently stranded.
+    Crash-safety direction still holds — a snapshot's bytes are only removed
+    after its metadata already reads collected, never before. Content-addressed
+    dedup is respected: a shared object is only removed once its last live
+    referencer is gone. Returns a summary count.
+    """
+    # Phase 1: mark newly-expired snapshots gc_pending (the in-progress marker).
+    for ref in snapshot_dao.expired_snapshot_refs(dao_conn, now=now):
+        snapshot_dao.update_snapshot_status(dao_conn, ref, "gc_pending")
     dao_conn.commit()
 
-    # Phase 2: delete objects no non-gc_deleted snapshot references.
+    # Phase 2: finish every gc_pending snapshot (fresh + crash-recovered).
+    pending = snapshot_dao.pending_gc_snapshot_refs(dao_conn)
     seen: set[str] = set()
     objects_deleted = 0
-    for ref in refs:
+    for ref in pending:
         for entry in snapshot_dao.list_entries(dao_conn, ref):
             digest = entry["object_sha256"]
             if digest in seen:
@@ -261,4 +266,6 @@ def collect_garbage(*, dao_conn, store: ContentAddressedStore, now: float) -> di
             if not snapshot_dao.object_referenced_by_live_snapshot(dao_conn, digest):
                 if store.delete(digest):
                     objects_deleted += 1
-    return {"snapshots_collected": len(refs), "objects_deleted": objects_deleted}
+        snapshot_dao.update_snapshot_status(dao_conn, ref, "gc_deleted")
+    dao_conn.commit()
+    return {"snapshots_collected": len(pending), "objects_deleted": objects_deleted}
