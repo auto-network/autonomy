@@ -22,6 +22,31 @@
     return sha ? sha.slice(0, 7) : '';
   }
 
+  function _b64ToBytes(b64) {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  function _parseCommitPayload(text) {
+    // commit object bytes -> {subject, body, author}; headers end at first blank line
+    const lines = text.split('\n');
+    let i = 0, author = '';
+    for (; i < lines.length; i++) {
+      if (lines[i] === '') { i++; break; }
+      if (lines[i].startsWith('author ')) {
+        const m = lines[i].slice(7).match(/^(.*<[^>]*>)/);
+        author = m ? m[1] : lines[i].slice(7);
+      }
+    }
+    const message = lines.slice(i).join('\n');
+    const nl = message.indexOf('\n');
+    const subject = (nl >= 0 ? message.slice(0, nl) : message).trim();
+    const body = nl >= 0 ? message.slice(nl + 1).replace(/^\n+/, '') : '';
+    return { subject, body, author };
+  }
+
   function _toast(message, type) {
     if (window.showToast) {
       window.showToast(message, type || 'error');
@@ -325,6 +350,10 @@
       lastUpdated: '',
       viewMode: 'commits',
       selectedCommit: null,
+      // commit-signing overlay state
+      signPassphrase: '',
+      signing: false,
+      signError: null,
       selectedDirtyRow: null,
       confirmDiscardRow: null,
       showDiff: false,
@@ -1760,6 +1789,85 @@
         }
       },
 
+      async _ensureOpenpgp() {
+        if (window.openpgp) return window.openpgp;
+        await new Promise((resolve, reject) => {
+          const el = document.createElement('script');
+          el.src = '/static/vendor/openpgp.min.js';
+          el.onload = resolve;
+          el.onerror = () => reject(new Error('failed to load the signing library'));
+          document.head.appendChild(el);
+        });
+        return window.openpgp;
+      },
+
+      async openSignRequest(id) {
+        // Render a pending sign-request in THIS overlay, in sign mode.
+        this.signPassphrase = ''; this.signing = false; this.signError = null;
+        this.detailLoading = true;
+        try {
+          const r = await (await fetch('/api/sign-requests/' + encodeURIComponent(id))).json();
+          const parsed = _parseCommitPayload(new TextDecoder().decode(_b64ToBytes(r.payload_b64)));
+          this.selectedCommit = {
+            row: { session_name: r.session, repo_name: r.repo, session_live: true },
+            commit: {
+              sha: null, subject: parsed.subject, body: parsed.body, author: parsed.author,
+              files: r.files || [], patch: r.patch || '',
+              stats: _commitStats({ files: r.files || [] }),
+            },
+            patchFiles: _patchIndex(r.patch || ''),
+            commitIndex: 0, position: 1, total: 1, pr: null,
+            signMode: true, signRequestId: id, payloadB64: r.payload_b64,
+          };
+          this.showDiff = true;
+        } catch (e) {
+          _toast('Could not load the sign request: ' + (e.message || e), 'error');
+        } finally {
+          this.detailLoading = false;
+        }
+      },
+
+      async signCommit() {
+        const sc = this.selectedCommit;
+        if (!sc || !sc.signMode) return;
+        this.signing = true; this.signError = null;
+        try {
+          const openpgp = await this._ensureOpenpgp();
+          const encArmored = await (await fetch('/api/sign-key')).text();
+          if (!encArmored || encArmored.indexOf('PRIVATE KEY') < 0) {
+            throw new Error('no signing key is configured for this org');
+          }
+          const encPriv = await openpgp.readPrivateKey({ armoredKey: encArmored });
+          const priv = await openpgp.decryptKey({ privateKey: encPriv, passphrase: this.signPassphrase });
+          const bytes = _b64ToBytes(sc.payloadB64);   // sign the EXACT bytes
+          const message = await openpgp.createMessage({ binary: bytes });
+          const sig = await openpgp.sign({ message, signingKeys: priv, detached: true, format: 'armored' });
+          const resp = await fetch('/api/sign-requests/' + encodeURIComponent(sc.signRequestId) + '/signature', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ armored_signature: sig }),
+          });
+          if (!resp.ok) throw new Error('the dashboard rejected the signature');
+          this.selectedCommit = null;
+          _toast('Commit signed', 'success');
+        } catch (e) {
+          this.signError = (e && e.message) ? e.message : String(e);
+        } finally {
+          this.signing = false;
+        }
+      },
+
+      async declineSign() {
+        const sc = this.selectedCommit;
+        if (!sc || !sc.signMode) return;
+        try {
+          await fetch('/api/sign-requests/' + encodeURIComponent(sc.signRequestId) + '/signature', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ armored_signature: '' }),
+          });
+        } catch (e) { /* best-effort */ }
+        this.selectedCommit = null;
+      },
+
       async openCommitAt(row, index, options) {
         const opts = options || {};
         const next = this.commitAt(row, index);
@@ -2333,5 +2441,13 @@
       return false;
     }
     return await window._worktreeReviewOverlay.openCommitOverlay(opts);
+  };
+
+  window.openSignRequestOverlay = async function (id) {
+    if (!window._worktreeReviewOverlay || typeof window._worktreeReviewOverlay.openSignRequest !== 'function') {
+      return false;
+    }
+    await window._worktreeReviewOverlay.openSignRequest(id);
+    return true;
   };
 })();

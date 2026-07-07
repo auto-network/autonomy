@@ -2664,6 +2664,18 @@ def sign_request_diff(
     """
     worktree = _session_worktree_path(session_name, repo_name, worktrees_dir=worktrees_dir)
     base = parent_sha or _EMPTY_TREE
+    # per-file add/delete counts, so the overlay's "+N -N" summary renders
+    counts: dict[str, tuple[int, int]] = {}
+    rc_num, numstat, _ = _git_output(
+        ["diff-tree", "-r", "--numstat", "--find-renames", base, tree_sha], worktree
+    )
+    if rc_num == 0:
+        for line in numstat.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                add = 0 if parts[0] == "-" else int(parts[0])
+                dele = 0 if parts[1] == "-" else int(parts[1])
+                counts[parts[-1]] = (add, dele)
     rc_ns, name_status, _ = _git_output(
         ["diff-tree", "-r", "--name-status", "--find-renames", base, tree_sha], worktree
     )
@@ -2672,7 +2684,10 @@ def sign_request_diff(
         for line in name_status.splitlines():
             parts = line.split("\t")
             if len(parts) >= 2:
-                files.append({"status": parts[0], "path": parts[-1]})
+                path = parts[-1]
+                add, dele = counts.get(path, (0, 0))
+                files.append({"status": parts[0], "path": path,
+                              "additions": add, "deletions": dele})
     rc_p, patch, _ = _git_output(
         ["diff-tree", "-p", "--find-renames", base, tree_sha], worktree
     )
