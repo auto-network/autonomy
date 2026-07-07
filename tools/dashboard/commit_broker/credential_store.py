@@ -6,6 +6,12 @@ directory that must sit OUTSIDE every agent-mounted path — so no agent contain
 can read the bytes off disk. Every credential read appends an audit record
 (operator / time / provider / scope). Callers above the broker receive only a
 redaction-wrapped :class:`Credential`; the raw file path is never handed out.
+
+Isolation is enforced fail-closed on *every* access, not just at construction:
+the store directory is re-resolved (following any symlinks) and re-checked
+against the agent mounts before each read/write, so an ancestor swapped to a
+symlink into a mount after startup is caught rather than silently followed. The
+final file is opened ``O_NOFOLLOW`` so it can never be a symlink either.
 """
 
 from __future__ import annotations
@@ -25,8 +31,10 @@ _STORE_MODE = 0o600
 
 
 class CredentialStoreLocationError(Exception):
-    """The store path is inside an agent-mounted directory — refused at build
-    time, because a store an agent can read is not a broker secret at all."""
+    """The store path resolves inside an agent-mounted directory — refused,
+    because a store an agent can read is not a broker secret at all. Raised at
+    construction AND on every access (a symlinked ancestor swapped in after
+    startup resolves into a mount and is caught here, not silently followed)."""
 
 
 @dataclass(frozen=True)
@@ -50,9 +58,11 @@ def _is_within(path: Path, root: Path) -> bool:
 class FileCredentialStore:
     """Per-provider 0600 files under an agent-isolated directory, audited reads.
 
-    Satisfies the :class:`CredentialProvider` protocol. Construction fails closed
-    if ``store_dir`` is inside any of ``agent_mount_roots``; that check is the
-    physical half of "no agent process ever touches a credential".
+    Satisfies the :class:`CredentialProvider` protocol. Isolation from every
+    ``agent_mount_roots`` entry is the physical half of "no agent process ever
+    touches a credential", and it is re-verified on each access — a construction
+    -time-only check would be a TOCTOU (swap the store's ancestor to a symlink
+    into a mount afterward and the next write lands the secret in the mount).
     """
 
     def __init__(
@@ -63,32 +73,48 @@ class FileCredentialStore:
         audit_sink: Callable[[CredentialAuditRecord], None],
         clock: Callable[[], float] = time.time,
     ) -> None:
-        self._dir = Path(store_dir).resolve()
-        roots = [Path(r).resolve() for r in agent_mount_roots]
-        for root in roots:
-            if _is_within(self._dir, root):
-                raise CredentialStoreLocationError(
-                    f"credential store {self._dir} is inside agent mount {root}"
-                )
-        self._dir.mkdir(parents=True, exist_ok=True)
+        # Keep the configured path UNRESOLVED so each access re-resolves it and
+        # re-checks isolation (catches an ancestor symlinked in after startup).
+        self._configured_dir = Path(store_dir)
+        self._roots = [Path(r).resolve() for r in agent_mount_roots]
         self._audit_sink = audit_sink
         self._clock = clock
+        resolved = self._resolved_dir(create=True)
+        self._assert_isolated(resolved)
 
-    def _path_for(self, provider: str) -> Path:
+    def _resolved_dir(self, *, create: bool = False) -> Path:
+        if create:
+            self._configured_dir.mkdir(parents=True, exist_ok=True)
+        return self._configured_dir.resolve()
+
+    def _assert_isolated(self, resolved_dir: Path) -> None:
+        for root in self._roots:
+            if _is_within(resolved_dir, root):
+                raise CredentialStoreLocationError(
+                    f"credential store {resolved_dir} is inside agent mount {root}"
+                )
+
+    def _path_for(self, resolved_dir: Path, provider: str) -> Path:
         # provider is a fixed vocabulary ("github", ...), not a request field;
         # guard anyway so it can never escape the store directory.
         if "/" in provider or "\\" in provider or provider in ("", ".", ".."):
             raise ValueError(f"invalid provider name {provider!r}")
-        return self._dir / f"{provider}.cred"
+        return resolved_dir / f"{provider}.cred"
 
     def put_secret(self, provider: str, secret: str) -> None:
-        """Write ``secret`` for ``provider`` as a fresh 0600 file (atomic)."""
+        """Write ``secret`` for ``provider`` as a fresh 0600 file.
+
+        Re-checks isolation against the freshly-resolved store dir first, then
+        opens the file ``O_NOFOLLOW`` with mode 0600 from creation so the secret
+        is never briefly world-readable and the target can never be a symlink.
+        """
         if not secret:
             raise ValueError("secret must be non-empty")
-        path = self._path_for(provider)
-        # Open with O_CREAT|O_EXCL-free truncation but force 0600 from the start:
-        # create via a mode-0600 fd so the secret is never briefly world-readable.
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _STORE_MODE)
+        resolved = self._resolved_dir(create=True)
+        self._assert_isolated(resolved)
+        path = self._path_for(resolved, provider)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+        fd = os.open(str(path), flags, _STORE_MODE)
         try:
             with os.fdopen(fd, "w") as handle:
                 handle.write(secret)
@@ -100,11 +126,19 @@ class FileCredentialStore:
         self, provider: str, authorized_scope: AuthorizedScope
     ) -> Credential:
         """Read the provider secret, append one audit record, return a wrapped
-        :class:`Credential`. The file path is never exposed to the caller."""
-        path = self._path_for(provider)
+        :class:`Credential`. Isolation is re-verified on this access too; the
+        file path is never exposed to the caller."""
+        resolved = self._resolved_dir()
+        self._assert_isolated(resolved)
+        path = self._path_for(resolved, provider)
         if not path.exists():
             raise KeyError(f"no credential stored for provider {provider!r}")
-        secret = path.read_text()
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            with os.fdopen(fd, "r") as handle:
+                secret = handle.read()
+        finally:
+            pass
         self._audit_sink(
             CredentialAuditRecord(
                 operator_id=authorized_scope.operator_id,
