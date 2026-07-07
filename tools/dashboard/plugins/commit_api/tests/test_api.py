@@ -1339,3 +1339,38 @@ def test_operator_read_endpoints_blocked_when_plugin_disabled(workflow_db_env, c
     assert queue.json()["code"] == "route_not_trusted"
     detail = client.get("/api/capabilities/commit/v1/operator/workflows/anything")
     assert detail.json()["code"] == "route_not_trusted"
+
+
+def test_operator_queue_survives_non_object_payload_json(workflow_db_env, client, monkeypatch):
+    # A row whose payload_json is valid JSON but NOT an object (e.g. a corrupted
+    # or out-of-band write) must degrade to an empty preview, never a 500.
+    import uuid as _uuid
+    _enable_plugin(monkeypatch)
+    cdb.append_event(
+        event_id=_uuid.uuid4().hex, workflow_id="wf-bad", event_type="seed",
+        status_after="awaiting_signature", repo_slug="org/repo", branch="b",
+        payload={"canonical_payload_preview": {"message": {"subject": "ok"}}})
+    conn = cdb._get_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO commit_signing_requests (
+                signing_request_id, workflow_id, repo_slug, status, signing_method,
+                trusted_object_store_ref, canonical_payload_hash, requested_at, payload_json
+            ) VALUES (?, ?, ?, 'pending', 'ssh', 'snap', 'h', 1.0, ?)
+            """,
+            (_uuid.uuid4().hex, "wf-bad", "org/repo", "[]"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    resp = client.get("/api/capabilities/commit/v1/operator/signing-requests")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["count"] == 1
+    assert body["queue"][0]["message_subject"] is None
+
+    detail = client.get("/api/capabilities/commit/v1/operator/workflows/wf-bad")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["signing_requests"][0]["payload"] == {}
