@@ -34,6 +34,7 @@ Design refs:
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -419,6 +420,59 @@ def _sync_managed_clone_from_base_source(
     _sync_managed_clone_branch_ref(clone, host_path, branch, timeout=git_timeout)
 
 
+COMMIT_SIGN_SHIM = os.environ.get("COMMIT_SIGN_SHIM", "/usr/local/bin/commit-sign-shim")
+
+
+def configure_commit_signing(
+    worktree: Path,
+    *,
+    session_name: str,
+    repo_slug: str,
+    org: str | None = None,
+    workspace_id: str | None = None,
+    shim_path: str = COMMIT_SIGN_SHIM,
+) -> bool:
+    """Configure a worktree to sign commits via the operator when its policy says so.
+
+    If the workspace's resolved commit policy requires a GPG signature, write the
+    git config so an ordinary ``git commit`` routes through the signing shim (the
+    operator reviews + signs in their browser; the agent never sees a key):
+    ``commit.gpgSign true``, ``gpg.program`` -> the shim, the org signing identity
+    for GitHub "Verified", and ``autonomy.sign.session``/``repo`` for the shim to
+    read. Returns True if signing was configured. Idempotent and best-effort —
+    never raises into worktree setup.
+    """
+    try:
+        from tools.graph.commit_policy import resolve_commit_policy
+        resolved = resolve_commit_policy(
+            workspace_id=workspace_id, repo_slug=repo_slug, org=org,
+        )
+        payload = resolved.payload or {}
+        if "gpg" not in str(payload.get("signature_requirement", "none")):
+            return False
+        cfg: list[tuple[str, str]] = [
+            ("commit.gpgSign", "true"),
+            ("gpg.program", shim_path),
+            ("autonomy.sign.session", session_name),
+            ("autonomy.sign.repo", repo_slug),
+        ]
+        # Org signing identity so GitHub shows "Verified" (committer email must
+        # match a verified email on the key's account). Best-effort from policy.
+        ident = payload.get("author_policy", {}).get("required_identity") or {}
+        if isinstance(ident, dict):
+            if ident.get("email"):
+                cfg.append(("user.email", str(ident["email"])))
+                cfg.append(("user.signingKey", str(ident["email"])))
+            if ident.get("name"):
+                cfg.append(("user.name", str(ident["name"])))
+        for key, value in cfg:
+            _run_git(["config", key, value], cwd=worktree)
+        return True
+    except Exception:
+        logger.exception("configure_commit_signing failed for %s", worktree)
+        return False
+
+
 def prepare_session_mounts(
     workspace: WorkspaceV1,
     session_name: str,
@@ -457,6 +511,23 @@ def prepare_session_mounts(
                 f"session/{session_name}",
                 refresh_existing=refresh_existing_worktree,
                 git_timeout=git_timeout,
+            )
+            # If the workspace's commit policy requires a GPG signature, wire the
+            # worktree to sign via the operator's browser (best-effort; a policy
+            # that doesn't require signing writes nothing, and any failure is
+            # swallowed so it never breaks mount prep).
+            try:
+                from agents.capabilities.github.service import derive_repo_slug
+                _repo_slug = derive_repo_slug(repo.url)
+            except Exception:
+                _repo_slug = _worktree_basename(repo.url)
+            configure_commit_signing(
+                worktree,
+                session_name=session_name,
+                repo_slug=_repo_slug,
+                org=getattr(workspace, "org", None),
+                workspace_id=getattr(workspace, "workspace_id", None)
+                or getattr(workspace, "id", None),
             )
             mounts[str(worktree)] = repo.mount
             # Worktree's .git file points at an absolute host path inside the
