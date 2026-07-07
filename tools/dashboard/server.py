@@ -2409,7 +2409,6 @@ async def api_search(request):
         _enrich_search_results(results)
         return JSONResponse(results)
     limit = int(request.query_params.get("limit", "20"))
-    project = request.query_params.get("project")
     or_mode = bool(request.query_params.get("or"))
     tag = request.query_params.get("tag")
     states_param = request.query_params.get("states")
@@ -2429,7 +2428,7 @@ async def api_search(request):
     results = await asyncio.to_thread(
         graph_ops.search,
         q, org=org, peers=peers, only_org=only_org,
-        limit=limit, project=project, or_mode=or_mode, tag=tag,
+        limit=limit, or_mode=or_mode, tag=tag,
         states=states, include_raw=include_raw,
         excluded_source_types=excluded_source_types,
         order=order, session_type=session_type,
@@ -2603,12 +2602,11 @@ async def api_sources(request):
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse({"results": "", "error": None})
     org = request.headers.get("X-Graph-Org") or None
-    project = request.query_params.get("project")
     stype = request.query_params.get("type")
     limit = int(request.query_params.get("limit", "30"))
     rows = await asyncio.to_thread(
         graph_ops.list_sources,
-        org=org, project=project, source_type=stype, limit=limit,
+        org=org, source_type=stype, limit=limit,
     )
     # Render a CLI-equivalent text body so existing UI consumers that parse
     # ``results`` as a pre-formatted list keep working. Structured clients
