@@ -237,3 +237,63 @@ def test_connector_seeds_existing_ref_before_pushing_a_rewrite_commit(tmp_path):
     )
     assert out.ok, out.reason
     assert read_remote_tip(repo_dir=str(src), remote=str(remote), target_ref=REF) == rewrite_sha
+
+
+def test_chain_pusher_lands_tip_with_full_ancestry_and_single_pusher_cannot(tmp_path):
+    # A 2-link rewrite chain (base -> link1 -> link2). The chain pusher must
+    # materialize BOTH links so the tip pushes with its full ancestry; the
+    # single-commit pusher, given only the tip, must FAIL for lack of the parent.
+    import sqlite3
+
+    from tools.dashboard.commit_broker.pusher import build_chain_pusher, build_trusted_store_pusher
+    from tools.dashboard.dao import trusted_git_object_store as snapshot_dao
+    from tools.dashboard.services.trusted_git_object_store import ContentAddressedStore
+
+    src = _init(tmp_path / "src")
+    base_sha = _commit(src, "a.txt", "base\n", "base")
+    link1_sha = _commit(src, "a.txt", "one\n", "link1")
+    link2_sha = _commit(src, "a.txt", "two\n", "link2")
+
+    store = ContentAddressedStore(tmp_path / "store")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    snapshot_dao.init_schema_on_connection(conn)
+
+    def _stash_link(idx, sha):
+        tree = _git(src, "rev-parse", f"{sha}^{{tree}}").stdout.decode().strip()
+        blob = _git(src, "rev-parse", f"{sha}:a.txt").stdout.decode().strip()
+        tb, bb, cb = (_git(src, "cat-file", t, o).stdout for t, o in (("tree", tree), ("blob", blob), ("commit", sha)))
+        td, bd, sd = store.put(tb), store.put(bb), store.put(cb)
+        ref = f"snap-{idx}"
+        snapshot_dao.insert_snapshot(
+            conn, snapshot_ref=ref, workflow_id="w", repo_slug="r", commit_sha=sha, tree_sha=tree,
+            parent_shas=[], manifest_sha256="m" * 64, canonical_preview_sha256=sd,
+            snapshot_type="rewrite_result", store_root="root", retention_class="active",
+        )
+        snapshot_dao.add_entries(conn, ref, [
+            {"object_oid": tree, "object_type": "tree", "object_size": len(tb), "object_path": "", "object_sha256": td, "position": 0},
+            {"object_oid": blob, "object_type": "blob", "object_size": len(bb), "object_path": "a.txt", "object_sha256": bd, "position": 1},
+        ])
+        return (ref, sd)
+
+    links = [_stash_link(1, link1_sha), _stash_link(2, link2_sha)]
+    conn.commit()
+
+    # remote starts at the base commit on main
+    remote = _init(tmp_path / "remote.git", bare=True)
+    push_signed_commit(repo_dir=str(src), remote=str(remote), signed_commit_sha=base_sha, target_ref=REF, expected_ref_sha=None, is_new_ref=True)
+
+    # single-commit pusher with only the tip -> FAILS (missing link1 ancestry)
+    single = build_trusted_store_pusher(store=store, snapshot_dao=snapshot_dao, dao_conn=conn,
+                                        snapshot_ref=links[1][0], signed_object_sha256=links[1][1],
+                                        remote=str(remote), staging_dir=str(tmp_path / "stage-single"))
+    out_single = single(signed_commit_sha=link2_sha, target_ref=REF, expected_ref_sha=base_sha, is_new_ref=False, credential=None)
+    assert not out_single.ok
+    assert read_remote_tip(repo_dir=str(src), remote=str(remote), target_ref=REF) == base_sha  # unchanged
+
+    # chain pusher with both links -> tip lands with full ancestry
+    chain = build_chain_pusher(store=store, snapshot_dao=snapshot_dao, dao_conn=conn, links=links,
+                               remote=str(remote), staging_dir=str(tmp_path / "stage-chain"))
+    out_chain = chain(signed_commit_sha=link2_sha, target_ref=REF, expected_ref_sha=base_sha, is_new_ref=False, credential=None)
+    assert out_chain.ok, out_chain.reason
+    assert read_remote_tip(repo_dir=str(src), remote=str(remote), target_ref=REF) == link2_sha

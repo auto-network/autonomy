@@ -114,34 +114,34 @@ def read_remote_tip(*, repo_dir: str, remote: str, target_ref: str) -> str | Non
     return out.split()[0]
 
 
-def build_trusted_store_pusher(
+def build_chain_pusher(
     *,
     store,
     snapshot_dao,
     dao_conn,
-    snapshot_ref: str,
-    signed_object_sha256: str,
+    links: Sequence[tuple[str, str]],
     remote: str,
     staging_dir: str,
 ):
-    """Build the ``push_objects`` callable the publish executor invokes.
+    """Build the ``push_objects`` callable for publishing a governed-rewrite
+    CHAIN (a single commit is just a 1-element chain).
 
-    It reads the signed commit and the tree/blob objects it needs FROM THE
-    TRUSTED STORE (the broker's frozen bytes — never live agent git state),
-    writes them into a staging repository, and pushes. ``snapshot_ref`` is the
-    snapshot whose tree/blobs back the commit; ``signed_object_sha256`` is the
-    content digest of the assembled signed commit bytes stored at attach time.
+    ``links`` is the ordered ``(snapshot_ref, signed_object_sha256)`` for every
+    link, root-to-tip. Every link's tree/blob objects AND its signed commit are
+    materialized into the staging repo IN ORDER, so each link's parent (the
+    previous link, or the seeded base) is present before the tip is pushed. Only
+    the tip's signed commit is pushed to the target ref; its whole ancestry
+    travels with it in the same pack. All bytes come FROM THE TRUSTED STORE
+    (frozen bytes, never live git state).
 
-    The returned callable matches the executor's contract:
-    ``push_objects(signed_commit_sha, target_ref, expected_ref_sha, is_new_ref,
-    credential)``. For a local file remote no credential is needed; for a real
-    provider the credential's secret is passed to git via the environment, never
-    on the command line.
+    For an existing-ref update the base commit (the first link's parent) is
+    seeded from the remote so the chain connects to real history.
     """
+    if not links:
+        raise ValueError("links must be a non-empty ordered list of (snapshot_ref, signed_object_sha256)")
     subprocess.run(["git", "init", "-q", staging_dir], capture_output=True, check=True)
 
     def push_objects(*, signed_commit_sha, target_ref, expected_ref_sha, is_new_ref, credential=None):
-        objects: list[tuple[str, bytes]] = []
         if not is_new_ref:
             if not expected_ref_sha:
                 return PushOutcome(False, "expected_ref_sha required to update an existing ref")
@@ -151,13 +151,15 @@ def build_trusted_store_pusher(
                     False,
                     f"could not seed staging repo from remote tip: {seed.stderr.decode().strip()}",
                 )
-        # Tree + blobs backing the commit, from the frozen snapshot.
-        for entry in snapshot_dao.list_entries(dao_conn, snapshot_ref):
-            if entry["object_type"] == "commit":
-                continue  # the unsigned commit is not what we publish
-            objects.append((entry["object_type"], store.get(entry["object_sha256"])))
-        # The signed commit itself, from its stored bytes.
-        objects.append(("commit", store.get(signed_object_sha256)))
+        objects: list[tuple[str, bytes]] = []
+        for snapshot_ref, signed_digest in links:
+            # Tree + blobs backing this link, from its frozen snapshot.
+            for entry in snapshot_dao.list_entries(dao_conn, snapshot_ref):
+                if entry["object_type"] == "commit":
+                    continue  # the unsigned commit is not what we publish
+                objects.append((entry["object_type"], store.get(entry["object_sha256"])))
+            # This link's signed commit, from its stored bytes.
+            objects.append(("commit", store.get(signed_digest)))
         materialize_objects(repo_dir=staging_dir, objects=objects)
         return push_signed_commit(
             repo_dir=staging_dir,
@@ -169,3 +171,29 @@ def build_trusted_store_pusher(
         )
 
     return push_objects
+
+
+def build_trusted_store_pusher(
+    *,
+    store,
+    snapshot_dao,
+    dao_conn,
+    snapshot_ref: str,
+    signed_object_sha256: str,
+    remote: str,
+    staging_dir: str,
+):
+    """Single-commit publish — a 1-element chain. Backward-compatible wrapper
+    over :func:`build_chain_pusher` so the publish handler's existing
+    single-commit path is unchanged. ``snapshot_ref`` backs the commit's
+    tree/blobs; ``signed_object_sha256`` is the assembled signed commit bytes
+    stored at attach time.
+    """
+    return build_chain_pusher(
+        store=store,
+        snapshot_dao=snapshot_dao,
+        dao_conn=dao_conn,
+        links=[(snapshot_ref, signed_object_sha256)],
+        remote=remote,
+        staging_dir=staging_dir,
+    )
