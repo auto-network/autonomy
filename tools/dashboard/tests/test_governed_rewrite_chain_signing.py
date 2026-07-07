@@ -185,6 +185,7 @@ def _init_repo_with_bad_chain(tmp_path: Path) -> tuple[Path, str, list[str], lis
 
 def _commit_flow_setup(monkeypatch, tmp_path, *, repo_slug: str = "autonomy/autonomy", workspace_id: str = "autonomy"):
     repo, base_sha, shas, trees = _init_repo_with_bad_chain(tmp_path)
+    _git(repo, "branch", "-f", "main", base_sha)
     session_name = "sess-1"
     ops.upsert_by_key(
         "autonomy.commit.policy", 1, f"workspace:{workspace_id}",

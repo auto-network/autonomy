@@ -142,6 +142,15 @@ def build_trusted_store_pusher(
 
     def push_objects(*, signed_commit_sha, target_ref, expected_ref_sha, is_new_ref, credential=None):
         objects: list[tuple[str, bytes]] = []
+        if not is_new_ref:
+            if not expected_ref_sha:
+                return PushOutcome(False, "expected_ref_sha required to update an existing ref")
+            seed = _git(staging_dir, "fetch", "--no-tags", remote, target_ref)
+            if seed.returncode != 0:
+                return PushOutcome(
+                    False,
+                    f"could not seed staging repo from remote tip: {seed.stderr.decode().strip()}",
+                )
         # Tree + blobs backing the commit, from the frozen snapshot.
         for entry in snapshot_dao.list_entries(dao_conn, snapshot_ref):
             if entry["object_type"] == "commit":

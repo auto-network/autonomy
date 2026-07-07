@@ -2045,12 +2045,7 @@ async def publish(request: Request) -> JSONResponse:
                     "invalid_transition",
                     "workflow has no trusted snapshot artifact to publish",
                 )
-            resolved_plan = _resolved_plan_for_workflow(conn, parsed.workflow_id, state_payload)
-            if not isinstance(resolved_plan, dict) or not resolved_plan:
-                return _json_error(
-                    "invalid_transition",
-                    "workflow has no resolved plan to publish",
-                )
+            resolved_plan = _resolved_plan_for_workflow(conn, parsed.workflow_id, state_payload) or {}
             resolved_plan = dict(resolved_plan)
             resolved_plan.setdefault("publish_mode", parsed.publish_mode)
             signed_object_sha256 = _signed_object_sha256_for_workflow(conn, parsed.workflow_id, state_payload)
