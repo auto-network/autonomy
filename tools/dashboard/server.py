@@ -4718,8 +4718,17 @@ async def api_session_get(request):
     # Read-side reconcile so a drifted/empty stored ID does not leak out
     # the session-detail surface (auto-4nr14 §A).
     resolved_source_id = dashboard_db.reconcile_session_graph_source_id(session)
+    # Is a commit from this session blocked awaiting the operator's signature?
+    # id (or None) — the viewer opens the sign dialog when set. Guarded so the
+    # session surface never breaks on a rendezvous-store hiccup.
+    try:
+        from tools.dashboard.dao import sign_requests as _sign_requests
+        commit_sign_pending = _sign_requests.pending_id_for_session(tmux_name)
+    except Exception:
+        commit_sign_pending = None
     return JSONResponse({
         "session_id": session["tmux_name"],
+        "commit_sign_pending": commit_sign_pending,
         "session_uuid": session.get("session_uuid"),
         "graph_source_id": resolved_source_id or None,
         # The tmux_sessions transcript column is ``jsonl_path`` (the graph
