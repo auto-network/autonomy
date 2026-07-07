@@ -2013,8 +2013,8 @@ async def publish(request: Request) -> JSONResponse:
 
         event_id = uuid.uuid4().hex
         skipped = parsed.publish_mode == "local_only_noop"
-        event_type = "publish_skipped_by_policy" if skipped else "published"
-        status_after = "awaiting_publish" if skipped else "published"
+        event_type = "publish_skipped_by_policy" if skipped else None
+        status_after = "awaiting_publish" if skipped else None
         ref_update_result = {
             "skipped": skipped,
             "publish_mode": parsed.publish_mode,
@@ -2106,6 +2106,8 @@ async def publish(request: Request) -> JSONResponse:
                         "publish lease no longer matches the target ref",
                     )
                 return _json_error("ref_update_rejected", f"publish rejected: {publish_result.reason}")
+            event_type = "published"
+            status_after = "published"
             ref_update_result["push_target"] = publish_result.target
             ref_update_result["observed_remote_tip"] = publish_result.observed_remote_tip
             ref_update_result["pushed_ref"] = publish_result.pushed_ref
