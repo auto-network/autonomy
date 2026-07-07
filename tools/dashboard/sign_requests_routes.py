@@ -35,22 +35,49 @@ async def create_sign_request(request: Request) -> JSONResponse:
     return JSONResponse({"id": rid})
 
 
+def _tree_and_parent(payload: bytes) -> tuple[str | None, str | None]:
+    """Pull the tree SHA and first parent SHA out of the commit payload headers
+    (headers end at the first blank line)."""
+    tree = parent = None
+    for line in payload.decode("utf-8", "replace").splitlines():
+        if line == "":
+            break
+        if line.startswith("tree "):
+            tree = line[5:].strip()
+        elif line.startswith("parent ") and parent is None:
+            parent = line[7:].strip()
+    return tree, parent
+
+
 async def get_sign_request(request: Request) -> JSONResponse:
-    """GET /api/sign-requests/{id} -> the bytes to sign + signature state.
+    """GET /api/sign-requests/{id} -> the bytes to sign + signature state + diff.
 
     ``payload_b64`` is base64 so the browser recovers the EXACT bytes to sign
     (byte-exactness is the property GitHub's Verified check depends on).
-    ``signature`` is null (pending), '' (declined), or the armored signature."""
+    ``signature`` is null (pending), '' (declined), or the armored signature.
+    ``files``/``patch`` are the live diff-tree of the pending commit (parent -> tree)
+    so the existing commit overlay can render it; empty if the worktree/tree is gone."""
     r = sr.get(request.path_params["id"])
     if not r:
         return JSONResponse({"error": "not found"}, status_code=404)
+    payload = r["payload"]
+    tree, parent = _tree_and_parent(payload)
+    files, patch = [], ""
+    if tree:
+        try:
+            from agents.workspace_manager import sign_request_diff
+            d = sign_request_diff(r["session"], r["repo"], parent, tree)
+            files, patch = d["files"], d["patch"]
+        except Exception:
+            pass  # worktree/tree unavailable (e.g. agent moved on) -> render without diff
     return JSONResponse({
         "id": r["id"],
         "session": r["session"],
         "repo": r["repo"],
-        "payload_b64": base64.b64encode(r["payload"]).decode("ascii"),
+        "payload_b64": base64.b64encode(payload).decode("ascii"),
         "signature": r["signature"],
-        # TODO(viewer-integration): add live diff-tree "files" + "patch" for the overlay
+        "files": files,
+        "patch": patch,
     })
 
 
