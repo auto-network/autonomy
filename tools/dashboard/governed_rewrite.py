@@ -72,7 +72,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from tools.dashboard.dao import commit_workflow_db
+from tools.dashboard.dao import trusted_git_object_store as snapshot_dao
 from tools.dashboard.services.trusted_git_object_store import capture_snapshot
+from tools.dashboard.commit_broker.assembly import commit_object_sha, serialize_unsigned_commit_payload
 from tools.dashboard.commit_compliance import ComplianceReport
 
 REASON_VIOLATIONS = "rewritten_for_violations"
@@ -522,3 +524,94 @@ def get_binding_lease(*, workflow_id: str, db_path=None) -> str | None:
         return None
     payload = json.loads(row["payload_json"])
     return payload["ref_tip"] if payload.get("binding") else None
+
+
+# ── D4-17: prepare a rewrite for commit.request_signature ──────────────
+
+ROLE_REWRITE_RESULT_SNAPSHOT_TYPE = "rewrite_result"
+
+
+def prepare_rewrite_for_signing(
+    *,
+    workflow_id: str,
+    repo_slug: str,
+    corrected: CorrectedCommitMetadata,
+    git_dir,
+    store,
+    trusted_store_conn,
+    workflow_db_path=None,
+) -> dict:
+    """Prepare a governed rewrite's workflow so the UNMODIFIED
+    ``commit.request_signature`` handler can fire a signing request for
+    it exactly as for any ordinary proposal (§3 step 5) — no
+    rewrite-specific branch in the signing path.
+
+    Captures a SECOND, ``rewrite_result`` snapshot rather than mutating
+    the D4-9 ``rewrite_source`` snapshot — N3's guarantee is that a
+    snapshot's manifest/preview bindings freeze at capture and never
+    change afterward, so a rewrite is two snapshots (source untouched,
+    result correct-by-construction), never one snapshot edited in
+    place. This is exactly what the ``rewrite_source``/``rewrite_result``
+    snapshot_type enum and D4-12's source/result commit_roles chain
+    already anticipate.
+
+    Then merges ``unsigned_commit_sha``/``trusted_object_store_ref``/
+    ``canonical_payload_hash`` into the workflow's state_json via a new
+    event, transitioning status to ``awaiting_signature`` — the exact
+    shape ``commit.request_signature``'s own precondition check reads
+    (``state_payload.get("unsigned_commit_sha"/"trusted_object_store_ref"
+    /"canonical_payload_hash")``), so the unmodified handler works
+    against it with zero new fields it needs to know about.
+    """
+    unsigned_payload = serialize_unsigned_commit_payload(
+        tree_oid=corrected.tree_oid,
+        parent_oids=corrected.parent_oids,
+        author_line=corrected.author.to_bytes(),
+        committer_line=corrected.committer.to_bytes(),
+        message=corrected.message,
+    )
+    unsigned_commit_sha = commit_object_sha(unsigned_payload)
+
+    result_snapshot_ref = capture_snapshot(
+        workflow_id=workflow_id,
+        repo_slug=repo_slug,
+        commit_sha=unsigned_commit_sha,
+        tree_sha=corrected.tree_oid,
+        parent_shas=list(corrected.parent_oids),
+        git_dir=git_dir,
+        store=store,
+        dao_conn=trusted_store_conn,
+        snapshot_type=ROLE_REWRITE_RESULT_SNAPSHOT_TYPE,
+        canonical_payload=unsigned_payload,
+    )
+    snapshot = snapshot_dao.get_snapshot(trusted_store_conn, result_snapshot_ref)
+    canonical_payload_hash = snapshot["canonical_preview_sha256"]
+
+    current_state = _current_state_json(workflow_id, db_path=workflow_db_path)
+    updated_state = {
+        **current_state,
+        "unsigned_commit_sha": unsigned_commit_sha,
+        "tree_sha": corrected.tree_oid,
+        "parent_shas": list(corrected.parent_oids),
+        "trusted_object_store_ref": result_snapshot_ref,
+        "canonical_payload_hash": canonical_payload_hash,
+        "canonical_payload_preview": {
+            "unsigned_commit_sha": unsigned_commit_sha,
+            "tree_sha": corrected.tree_oid,
+            "parent_shas": list(corrected.parent_oids),
+        },
+    }
+    commit_workflow_db.append_event(
+        event_id=uuid.uuid4().hex,
+        workflow_id=workflow_id,
+        event_type="governed_rewrite_ready_for_signature",
+        status_after="awaiting_signature",
+        repo_slug=repo_slug,
+        payload=updated_state,
+        db_path=workflow_db_path,
+    )
+    return {
+        "unsigned_commit_sha": unsigned_commit_sha,
+        "trusted_object_store_ref": result_snapshot_ref,
+        "canonical_payload_hash": canonical_payload_hash,
+    }
