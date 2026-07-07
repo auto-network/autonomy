@@ -49,8 +49,8 @@ def test_search_calls_api_graph_search_with_params():
     assert results == [{"id": "abc", "content": "hit"}]
 
 
-def test_search_passes_project_and_or_mode():
-    """Optional params (project, or, tag) flow through to query string."""
+def test_search_passes_or_mode_and_tag():
+    """Optional params (or, tag) flow through to query string."""
     client = _make_client()
     captured = {}
 
@@ -59,9 +59,8 @@ def test_search_passes_project_and_or_mode():
         return _FakeResponse([])
 
     with patch("urllib.request.urlopen", fake_urlopen):
-        client.search("q", project="autonomy", or_mode=True, tag="pitfall")
+        client.search("q", or_mode=True, tag="pitfall")
 
-    assert "project=autonomy" in captured["url"]
     assert "or=1" in captured["url"]
     assert "tag=pitfall" in captured["url"]
 

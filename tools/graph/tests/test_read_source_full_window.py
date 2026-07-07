@@ -35,7 +35,6 @@ def _seed_long_session(db: GraphDB, *, turns: int = 50,
     src = Source(
         type="session",
         platform="claude-code",
-        project=project,
         title="long session",
         file_path="session:long",
         metadata={"author": "test"},
@@ -96,7 +95,6 @@ def test_read_source_full_default_carries_entry_created_at(graph_db_env):
     src = Source(
         type="session",
         platform="claude-code",
-        project="autonomy",
         title="timestamped session",
         file_path="session:timestamped",
         metadata={"author": "test"},
@@ -334,7 +332,6 @@ def test_read_source_full_tail_n_empty_source(graph_db_env):
     src = Source(
         type="session",
         platform="claude-code",
-        project="autonomy",
         title="empty",
         file_path="session:empty",
         metadata={},

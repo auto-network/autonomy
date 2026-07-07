@@ -271,11 +271,7 @@ def _credentials_org() -> str:
     ``graph claude install`` so all three paths converge on the same
     rows.
     """
-    return (
-        os.environ.get("GRAPH_ORG")
-        or os.environ.get("GRAPH_SCOPE")
-        or "autonomy"
-    )
+    return os.environ.get("GRAPH_ORG") or "autonomy"
 
 
 def _setup_token_rows() -> list[Any]:
@@ -834,14 +830,13 @@ def launch_session(
     sessions_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Write .session_meta.json (skip for resumed sessions) ──
-    # graph_project / graph_tags come in via `metadata` and are also exported
-    # as GRAPH_SCOPE / GRAPH_TAGS env vars below so the in-container graph CLI
-    # respects the project's hard boundary and soft tags.
+    # org / graph_tags come in via `metadata` and are also exported as
+    # GRAPH_ORG / GRAPH_TAGS env vars below so the in-container graph CLI
+    # routes to the right org DB and applies tags.
     #
-    # graph_org (the per-org DB routing slug) is derived from graph_project
-    # if the caller didn't supply it explicitly — after the workspaces→orgs
-    # consolidation (auto-0wj9) the yaml's ``graph_project`` field IS the
-    # owning org slug, so a single source of truth carries both concerns.
+    # graph_org (the per-org DB routing slug ingest.py reads) is derived
+    # from "org" (canonical, auto-nuupw) or the legacy "graph_project" key
+    # if the caller didn't supply "graph_org" explicitly.
     if not resume_uuid:
         meta_doc: dict = {
             "type": session_type,
@@ -860,9 +855,9 @@ def launch_session(
         if metadata:
             meta_doc.update(metadata)
             if "graph_org" not in meta_doc:
-                gp = meta_doc.get("graph_project")
-                if gp:
-                    meta_doc["graph_org"] = gp
+                resolved = meta_doc.get("org") or meta_doc.get("graph_project")
+                if resolved:
+                    meta_doc["graph_org"] = resolved
         (sessions_dir / ".session_meta.json").write_text(json.dumps(meta_doc, indent=2))
 
     # ── Auth args (may copy creds file into run_dir) ───────────
@@ -962,25 +957,27 @@ def launch_session(
         *auth_args,
     ]
 
-    # Project / org scoping:
-    #   GRAPH_SCOPE — hard project boundary (search/list filter).
+    # Org scoping:
+    #   GRAPH_ORG   — per-org write + search routing slug. Every ops.*
+    #                 write in this container lands in that org's DB, and
+    #                 search/list reads are scoped to that DB (+ peers) —
+    #                 the database is the only scope boundary (auto-p6vn7).
+    #                 Resolved from metadata["org"] (canonical, auto-nuupw)
+    #                 with "graph_org" / "graph_project" (legacy caller
+    #                 keys — dispatcher.py, server.py) as back-compat
+    #                 fallbacks.
     #   GRAPH_TAGS  — soft tags auto-applied to notes.
-    #   GRAPH_ORG   — per-org write routing slug (auto-txg5.3). Every
-    #                 ops.* write in this container lands in that org's DB.
-    #                 Defaults to the same value as graph_project (the yaml
-    #                 field IS the org slug after auto-0wj9).
     if metadata:
-        graph_project = metadata.get("graph_project")
-        if graph_project:
-            cmd.extend(["-e", f"GRAPH_SCOPE={graph_project}"])
+        resolved_org = (
+            metadata.get("org") or metadata.get("graph_org") or metadata.get("graph_project")
+        )
+        if resolved_org:
+            cmd.extend(["-e", f"GRAPH_ORG={resolved_org}"])
         graph_tags = metadata.get("graph_tags")
         if graph_tags:
             if isinstance(graph_tags, (list, tuple)):
                 graph_tags = ",".join(str(t) for t in graph_tags)
             cmd.extend(["-e", f"GRAPH_TAGS={graph_tags}"])
-        graph_org = metadata.get("graph_org") or graph_project
-        if graph_org:
-            cmd.extend(["-e", f"GRAPH_ORG={graph_org}"])
 
     for host_path, container_spec in default_mounts.items():
         cmd.extend(["-v", f"{host_path}:{container_spec}"])

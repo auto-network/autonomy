@@ -54,8 +54,7 @@ def _make_peer_note(db_path: Path, *, title: str, state: str = "raw") -> str:
     db = GraphDB(db_path)
     try:
         src = Source(
-            type="note", platform="local", project="autonomy",
-            title=title, file_path=f"note:{title.replace(' ', '_')}",
+            type="note", platform="local", title=title, file_path=f"note:{title.replace(' ', '_')}",
             metadata={"tags": [], "author": "test"},
             publication_state=state,
         )

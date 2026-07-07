@@ -32,7 +32,6 @@ class AgentRun:
     prompt: str = ""                      # the prompt sent to the agent
     trace_path: Path | None = None        # path to JSONL trace file
     parent_session_id: str | None = None  # parent session that spawned this agent
-    project: str | None = None            # project scope
     model: str | None = None              # model used (extracted from trace)
     status: str = "unknown"               # completed/failed/partial (extracted from trace)
     total_input_tokens: int = 0
@@ -198,7 +197,6 @@ def ingest_agent_run(db: GraphDB, run: AgentRun, force: bool = False) -> dict:
     source = Source(
         type="agent-run",
         platform="claude-code",
-        project=run.project,
         title=title,
         file_path=abs_path,
         metadata={

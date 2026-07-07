@@ -57,7 +57,6 @@ def _seed_session_with_hits(
     kwargs: dict = dict(
         type=type_,
         platform="local",
-        project="autonomy",
         title=title,
         file_path=f"{type_}:{title.replace(' ', '_').lower()}",
         metadata=metadata,

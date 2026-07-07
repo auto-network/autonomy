@@ -18,7 +18,6 @@ CREATE TABLE IF NOT EXISTS sources (
     id                TEXT PRIMARY KEY,
     type              TEXT NOT NULL,          -- 'conversation', 'musing', 'document', 'url', 'session', 'note', 'agentic'
     platform          TEXT,                   -- 'chatgpt', 'claude', 'claude-code', 'local', etc.
-    project           TEXT,                   -- project identifier (e.g. '-home-jeremy-workspace-autonomy')
     title             TEXT,
     url               TEXT,
     file_path         TEXT UNIQUE,            -- local file path (for dedup on re-ingest)

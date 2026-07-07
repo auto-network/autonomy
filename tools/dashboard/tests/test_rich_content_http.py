@@ -30,7 +30,7 @@ def test_graph_db(tmp_path):
 
     # ── Rich-content note ──
     rc_source = Source(
-        type="note", platform="local", project="test",
+        type="note", platform="local",
         title="Pause Mechanisms",
         file_path=f"note:{new_id()}",
         metadata={"tags": ["test"], "author": "user", "rich_content": True},

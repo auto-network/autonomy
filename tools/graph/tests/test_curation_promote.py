@@ -19,7 +19,6 @@ def _insert_note(db, *, id: str, title: str, tags=None, state: str = "raw") -> S
         id=id,
         type="note",
         platform="local",
-        project=None,
         title=title,
         file_path=f"note:{id}",
         metadata={"tags": tags or [], "author": "librarian"},

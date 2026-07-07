@@ -251,7 +251,6 @@ def _file_audit_note(
     source = Source(
         type="note",
         platform="local",
-        project=None,
         title=f"Bootstrap allowlist audit — {plan.org} @ {ts}",
         file_path=source_key,
         metadata={

@@ -872,7 +872,8 @@ def session_target_org(file_path: Path | str, default: str | None = None) -> str
     Resolution order:
 
     1. ``.session_meta.json`` near *file_path* (container sessions) —
-       returns ``graph_org`` or the legacy ``graph_project`` if set.
+       returns ``org`` (canonical, auto-nuupw), else the legacy
+       ``graph_org`` or ``graph_project`` if set.
     2. Claude-Code host project dir lookup
        (:data:`_HOST_PROJECT_TO_ORG`) — for bare host ``.jsonl`` files
        that have no meta alongside them.
@@ -886,7 +887,7 @@ def session_target_org(file_path: Path | str, default: str | None = None) -> str
     """
     file_path = Path(file_path)
     meta = _load_session_meta(file_path)
-    from_meta = meta.get("graph_org") or meta.get("graph_project")
+    from_meta = meta.get("org") or meta.get("graph_org") or meta.get("graph_project")
     if from_meta:
         return from_meta
     from_host = _org_from_host_project_path(file_path)
@@ -901,7 +902,7 @@ def _open_db_for_session(
     """Open the GraphDB that *file_path*'s session should write to.
 
     Returns ``None`` when the session has no resolvable org (no meta or
-    meta lacking ``graph_org``/``graph_project``). The caller is expected
+    meta lacking ``org``/``graph_org``/``graph_project``). The caller is expected
     to skip ingest in that case so an unscoped session can never be
     silently filed in ``personal.db``.
     """
@@ -1033,7 +1034,7 @@ def _build_summary_meta(existing_meta: dict, parsed_meta: dict, file_path: Path,
     # immutable across the session lifetime, so write them every time in case
     # .session_meta.json appeared after first ingest.
     for key in ("type", "bead_id", "job_id", "job_type", "context_id",
-                "container_name", "launched_at", "graph_project", "graph_tags"):
+                "container_name", "launched_at", "org", "graph_project", "graph_tags"):
         if key in session_meta:
             out[f"session_{key}" if key == "type" else key] = session_meta[key]
     return out
@@ -1373,15 +1374,12 @@ def _ingest_text_session(
     platform: str,
     default_model: str,
     force: bool = False,
-    project: str | None = None,
 ) -> dict:
     """Shared ingest path for text-only JSONL session harnesses."""
     file_path = Path(file_path)
     abs_path = _normalize_session_path(file_path)
 
     session_meta = _load_session_meta(file_path)
-    if project is None:
-        project = session_meta.get("graph_project")
 
     # ── Agentic session routing (auto-gh2iv) ────────────────────
     # When .session_meta.json carries type='agentic' + agentic_source_id,
@@ -1485,7 +1483,6 @@ def _ingest_text_session(
     source = Source(
         type="session",
         platform=platform,
-        project=project,
         title=title,
         file_path=abs_path,
         metadata=source_meta,
@@ -1598,7 +1595,7 @@ def _ingest_text_session(
 
 
 def ingest_claude_code_session(
-    db: GraphDB, file_path: str | Path, force: bool = False, project: str | None = None,
+    db: GraphDB, file_path: str | Path, force: bool = False,
 ) -> dict:
     """Ingest a Claude Code JSONL session into the graph."""
     return _ingest_text_session(
@@ -1608,12 +1605,11 @@ def ingest_claude_code_session(
         platform="claude-code",
         default_model="claude-code",
         force=force,
-        project=project,
     )
 
 
 def ingest_codex_session(
-    db: GraphDB, file_path: str | Path, force: bool = False, project: str | None = None,
+    db: GraphDB, file_path: str | Path, force: bool = False,
 ) -> dict:
     """Ingest a Codex rollout JSONL session into the graph."""
     return _ingest_text_session(
@@ -1623,18 +1619,17 @@ def ingest_codex_session(
         platform="codex-cli",
         default_model="codex-cli",
         force=force,
-        project=project,
     )
 
 
 def ingest_session_file(
-    db: GraphDB, file_path: str | Path, force: bool = False, project: str | None = None,
+    db: GraphDB, file_path: str | Path, force: bool = False,
 ) -> dict:
     """Ingest a JSONL session file, routing by detected harness format."""
     path = Path(file_path)
     if detect_session_format(path) == "codex":
-        return ingest_codex_session(db, path, force=force, project=project)
-    return ingest_claude_code_session(db, path, force=force, project=project)
+        return ingest_codex_session(db, path, force=force)
+    return ingest_claude_code_session(db, path, force=force)
 
 
 def refresh_session_source(source: dict) -> dict:
@@ -1684,7 +1679,7 @@ def _ingest_session_routed(jsonl_file: Path, force: bool) -> dict:
     session lands in the DB named by its own ``.session_meta.json``.
 
     Fail-closed: if the session has no resolvable org (missing meta or
-    meta without ``graph_org``/``graph_project``), the file is skipped
+    meta without ``org``/``graph_org``/``graph_project``), the file is skipped
     rather than dumped into ``personal.db``. This prevents the cross-org
     duplicates we got when re-ingest passes filed autonomy sessions
     twice — once routed correctly at session-end, once into personal
@@ -1765,7 +1760,7 @@ def ingest_all_claude_code(
     """Ingest all Claude Code sessions across all projects.
 
     Org routing comes from each session's ``.session_meta.json``
-    (``graph_org`` / legacy ``graph_project`` field). Sessions launched
+    (``org`` / legacy ``graph_org``/``graph_project`` field). Sessions launched
     via the autonomy infrastructure always carry meta; sessions without
     meta default to ``personal.db`` (auto-txg5.3 scopeless convergence).
     Passing an explicit ``db`` short-circuits routing — every session is
@@ -1898,7 +1893,7 @@ def _extract_status_category(file_path: Path) -> str:
     return "unknown"
 
 
-def ingest_doc_file(db: GraphDB, file_path: str | Path, project: str | None = None, force: bool = False) -> dict:
+def ingest_doc_file(db: GraphDB, file_path: str | Path, force: bool = False) -> dict:
     """Ingest a documentation markdown file (TOOL.md, CLAUDE.md, README.md) as a searchable source."""
     file_path = Path(file_path)
     abs_path = str(file_path.resolve())
@@ -1920,7 +1915,6 @@ def ingest_doc_file(db: GraphDB, file_path: str | Path, project: str | None = No
     source = Source(
         type="docs",
         platform="local",
-        project=project,
         title=title,
         file_path=abs_path,
         metadata={"filename": file_path.name, "authorship": "human"},
@@ -1966,7 +1960,7 @@ def ingest_doc_file(db: GraphDB, file_path: str | Path, project: str | None = No
     }
 
 
-def ingest_docs_dir(db: GraphDB, dir_path: str | Path, project: str | None = None, force: bool = False) -> list[dict]:
+def ingest_docs_dir(db: GraphDB, dir_path: str | Path, force: bool = False) -> list[dict]:
     """Recursively ingest documentation markdown files (TOOL.md, CLAUDE.md, README.md, etc.)."""
     dir_path = Path(dir_path)
     doc_patterns = ["**/TOOL.md", "**/CLAUDE.md", "**/README.md", "**/ABOUT.md", "**/docs/**/*.md"]
@@ -1978,14 +1972,14 @@ def ingest_docs_dir(db: GraphDB, dir_path: str | Path, project: str | None = Non
             if str(md_file) in seen:
                 continue
             seen.add(str(md_file))
-            result = ingest_doc_file(db, md_file, project=project, force=force)
+            result = ingest_doc_file(db, md_file, force=force)
             result["file"] = str(md_file)
             results.append(result)
 
     return results
 
 
-def ingest_status_file(db: GraphDB, file_path: str | Path, project: str | None = None, authorship: str = "mixed", force: bool = False) -> dict:
+def ingest_status_file(db: GraphDB, file_path: str | Path, authorship: str = "mixed", force: bool = False) -> dict:
     """Ingest a status markdown file into the graph."""
     file_path = Path(file_path)
     abs_path = str(file_path.resolve())
@@ -2017,7 +2011,6 @@ def ingest_status_file(db: GraphDB, file_path: str | Path, project: str | None =
     source = Source(
         type="status",
         platform="local",
-        project=project,
         title=title,
         file_path=abs_path,
         metadata={"category": category, "filename": file_path.name, "authorship": authorship},
@@ -2063,13 +2056,13 @@ def ingest_status_file(db: GraphDB, file_path: str | Path, project: str | None =
     }
 
 
-def ingest_status_dir(db: GraphDB, dir_path: str | Path, project: str | None = None, authorship: str = "mixed", force: bool = False) -> list[dict]:
+def ingest_status_dir(db: GraphDB, dir_path: str | Path, authorship: str = "mixed", force: bool = False) -> list[dict]:
     """Recursively ingest all status markdown files under a directory."""
     dir_path = Path(dir_path)
     results = []
 
     for md_file in sorted(dir_path.rglob("*.md")):
-        result = ingest_status_file(db, md_file, project=project, authorship=authorship, force=force)
+        result = ingest_status_file(db, md_file, authorship=authorship, force=force)
         result["file"] = str(md_file)
         results.append(result)
 
@@ -2112,7 +2105,7 @@ def parse_git_log(repo_path: Path, since: str | None = None) -> list[dict]:
 
 
 def ingest_git_commits(
-    db: GraphDB, repo_path: str | Path, project: str | None = None,
+    db: GraphDB, repo_path: str | Path,
     since: str | None = None, force: bool = False,
 ) -> dict:
     """Ingest git commit history as a source with thoughts."""
@@ -2151,7 +2144,6 @@ def ingest_git_commits(
         source = Source(
             type="git-log",
             platform="git",
-            project=project,
             title=f"Git log: {repo_path.name}",
             file_path=source_key,
             metadata={

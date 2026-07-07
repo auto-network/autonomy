@@ -114,7 +114,7 @@ def test_metadata_graph_project_exported(tmp_path, fake_creds, fake_crosstalk, c
         metadata={"graph_project": "anchore", "graph_tags": ["enterprise", "ng"]},
     )
     cmd = captured_run[0]
-    assert "GRAPH_SCOPE=anchore" in cmd
+    assert "GRAPH_ORG=anchore" in cmd
     assert "GRAPH_TAGS=enterprise,ng" in cmd
 
     # Meta doc on disk also carries them.
@@ -135,7 +135,7 @@ def test_graph_tags_string_passed_through_unchanged(tmp_path, fake_creds, fake_c
 def test_no_graph_env_without_metadata(tmp_path, fake_creds, fake_crosstalk, captured_run):
     _run(output_dir=str(tmp_path / "run"))
     cmd = captured_run[0]
-    assert not any(s.startswith("GRAPH_SCOPE=") for s in cmd)
+    assert not any(s.startswith("GRAPH_ORG=") for s in cmd)
     assert not any(s.startswith("GRAPH_TAGS=") for s in cmd)
 
 

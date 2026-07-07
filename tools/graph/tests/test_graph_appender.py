@@ -62,7 +62,6 @@ def _insert_eager_source(orgs_dir: Path, org: str, file_path: Path, *, eager: bo
     source = Source(
         type="session",
         platform="claude-code",
-        project=org,
         title=None,
         file_path=str(file_path),
         metadata={

@@ -40,7 +40,6 @@ def _seed(db: GraphDB, *, title: str, kind: str, term: str) -> Source:
     src = Source(
         type=kind,
         platform="local",
-        project="autonomy",
         title=title,
         file_path=f"{kind}:{title.replace(' ', '_').lower()}",
         metadata={},

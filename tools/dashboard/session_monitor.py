@@ -166,11 +166,7 @@ def _advance_startup_state_sql(tmux_name: str, proposed: str | None) -> bool:
 
 
 def _harness_usage_org() -> str:
-    return (
-        os.environ.get("GRAPH_ORG")
-        or os.environ.get("GRAPH_SCOPE")
-        or "autonomy"
-    )
+    return os.environ.get("GRAPH_ORG") or "autonomy"
 
 
 def _codex_identity_for_row(row: dict[str, Any]) -> tuple[str, str]:

@@ -51,9 +51,9 @@ def isolated_sessions_dao(tmp_path, monkeypatch):
     # A vanilla bead-run session — should appear under both All and Dispatch chips.
     g.conn.execute(
         """INSERT INTO sources
-           (id, type, platform, project, title, file_path, metadata, created_at,
+           (id, type, platform, title, file_path, metadata, created_at,
             ingested_at, last_activity_at)
-           VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         (
             "src-bead-run",
             "auto-foo run",
@@ -73,9 +73,9 @@ def isolated_sessions_dao(tmp_path, monkeypatch):
     # An agentic source — Round 5's dashboard agent-action run.
     g.conn.execute(
         """INSERT INTO sources
-           (id, type, platform, project, title, file_path, metadata, created_at,
+           (id, type, platform, title, file_path, metadata, created_at,
             ingested_at, last_activity_at)
-           VALUES (?, 'agentic', 'local', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, 'agentic', 'local', ?, ?, ?, ?, ?, ?)""",
         (
             "src-agentic-run",
             "Update summary on src-target",
@@ -99,9 +99,9 @@ def isolated_sessions_dao(tmp_path, monkeypatch):
     # An interactive session — must remain in the interactive bucket.
     g.conn.execute(
         """INSERT INTO sources
-           (id, type, platform, project, title, file_path, metadata, created_at,
+           (id, type, platform, title, file_path, metadata, created_at,
             ingested_at, last_activity_at)
-           VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         (
             "src-interactive",
             "user terminal",

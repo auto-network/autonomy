@@ -103,7 +103,6 @@ class TestAgenticIngestRouting:
             id=src_id,
             type="agentic",
             platform="local",
-            project="autonomy",
             title="Update Title & Summary",  # set by dashboard endpoint
             file_path="agentic:agentic-update-summary-test",
             metadata={

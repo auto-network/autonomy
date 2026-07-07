@@ -258,7 +258,7 @@ def _insert_note_source(*, org: str, source_id: str, title: str) -> None:
     """Insert a ``type='docs'`` source row in *org*'s DB to act as a note."""
     from tools.graph.models import Source
     src = Source(
-        id=source_id, type="docs", platform="local", project=org,
+        id=source_id, type="docs", platform="local",
         title=title, file_path=f"note:{source_id}",
         publication_state="canonical",
     )
@@ -1228,7 +1228,7 @@ def _list_agentic_sources() -> list[dict]:
         db = GraphDB(Path(ref.db_path))
         try:
             rows = db.conn.execute(
-                "SELECT id, type, metadata, project FROM sources "
+                "SELECT id, type, metadata FROM sources "
                 "WHERE type = 'agentic'"
             ).fetchall()
         finally:
@@ -1240,5 +1240,5 @@ def _list_agentic_sources() -> list[dict]:
                     md = json.loads(md)
                 except json.JSONDecodeError:
                     md = {}
-            out.append({"id": r["id"], "metadata": md, "project": r["project"]})
+            out.append({"id": r["id"], "metadata": md, "project": ref.slug})
     return out

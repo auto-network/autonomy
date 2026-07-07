@@ -198,7 +198,7 @@ class TestStartLibrarianHarness:
 
 
 class TestLaunchSessionCliMetadata:
-    """launch_session_cli --graph-project/--graph-tags → launch_session metadata."""
+    """launch_session_cli --org/--graph-tags → launch_session metadata."""
 
     def _invoke_cli(self, tmp_path, *, argv_extra: list[str], harness: str = "claude"):
         """Run launch_session_cli.main() in --detach mode with launch_session stubbed."""
@@ -231,26 +231,56 @@ class TestLaunchSessionCliMetadata:
         assert rc == 0
         return captured
 
-    def test_graph_project_and_tags_reach_launch_session(self, tmp_path):
+    def test_org_and_tags_reach_launch_session(self, tmp_path):
         captured = self._invoke_cli(
             tmp_path,
-            argv_extra=["--graph-project", "autonomy", "--graph-tags", "dashboard,ui"],
+            argv_extra=["--org", "autonomy", "--graph-tags", "dashboard,ui"],
         )
         meta = captured["metadata"]
         assert meta["bead_id"] == "auto-xyz"
-        assert meta["graph_project"] == "autonomy"
+        assert meta["org"] == "autonomy"
         assert meta["graph_tags"] == ["dashboard", "ui"]
         assert captured["image"] == "autonomy-agent:dashboard"
         assert captured["detach"] is True
 
-    def test_no_graph_scope_when_flags_omitted(self, tmp_path):
-        captured = self._invoke_cli(tmp_path, argv_extra=[])
-        meta = captured.get("metadata") or {}
+    def test_graph_project_alias_reaches_launch_session_as_org(self, tmp_path):
+        """--graph-project is a deprecated, warned alias for --org."""
+        captured = self._invoke_cli(
+            tmp_path, argv_extra=["--graph-project", "autonomy"],
+        )
+        meta = captured["metadata"]
+        assert meta["org"] == "autonomy"
         assert "graph_project" not in meta
+
+    def test_missing_org_fails_with_no_silent_default(self, tmp_path):
+        """Org is required — omitting both --org and --graph-project fails
+        loudly instead of silently routing to personal.db."""
+        prompt_file = tmp_path / "prompt.md"
+        prompt_file.write_text("prompt body")
+        output_dir = tmp_path / "run"
+        output_dir.mkdir()
+        argv = [
+            "launch_session_cli",
+            "--session-type", "dispatch",
+            "--name", "agent-auto-xyz-1234",
+            "--prompt-file", str(prompt_file),
+            "--bead-id", "auto-xyz",
+            "--output-dir", str(output_dir),
+            "--image", "autonomy-agent:dashboard",
+            "--harness", "claude",
+            "--detach",
+        ]
+        with patch("sys.argv", argv):
+            rc = launch_session_cli.main()
+        assert rc == 1
+
+    def test_no_graph_tags_when_flag_omitted(self, tmp_path):
+        captured = self._invoke_cli(tmp_path, argv_extra=["--org", "autonomy"])
+        meta = captured.get("metadata") or {}
         assert "graph_tags" not in meta
 
     def test_harness_reaches_launch_session(self, tmp_path):
-        captured = self._invoke_cli(tmp_path, argv_extra=[], harness="codex")
+        captured = self._invoke_cli(tmp_path, argv_extra=["--org", "autonomy"], harness="codex")
         assert captured["harness"] == "codex"
         assert captured["model"] is None
 
@@ -287,7 +317,7 @@ class TestLaunchSessionMetaAndEnv:
     def test_end_to_end_meta_and_env(
         self, tmp_path, fake_creds, fake_crosstalk, captured_run
     ):
-        """Metadata dict → .session_meta.json on disk + GRAPH_SCOPE/GRAPH_TAGS env."""
+        """Metadata dict → .session_meta.json on disk + GRAPH_ORG/GRAPH_TAGS env."""
         run_dir = tmp_path / "run"
         session_launcher.launch_session(
             session_type="dispatch",
@@ -311,7 +341,7 @@ class TestLaunchSessionMetaAndEnv:
         assert meta["graph_tags"] == ["dashboard", "ui"]
 
         cmd = captured_run[0]
-        assert "GRAPH_SCOPE=autonomy" in cmd
+        assert "GRAPH_ORG=autonomy" in cmd
         assert "GRAPH_TAGS=dashboard,ui" in cmd
 
 
@@ -387,10 +417,9 @@ class TestIngestHonorsSessionMeta:
         assert result["status"] == "ingested"
 
         row = graph_db.conn.execute(
-            "SELECT project, metadata FROM sources WHERE id = ?",
+            "SELECT metadata FROM sources WHERE id = ?",
             (result["source_id"],),
         ).fetchone()
-        assert row["project"] == "autonomy"
 
         meta = json.loads(row["metadata"])
         assert meta["graph_project"] == "autonomy"
@@ -414,15 +443,14 @@ class TestIngestHonorsSessionMeta:
                 result = ingest_claude_code_session(graph_db, jsonl)
 
         row = graph_db.conn.execute(
-            "SELECT project, metadata FROM sources WHERE id = ?",
+            "SELECT metadata FROM sources WHERE id = ?",
             (result["source_id"],),
         ).fetchone()
-        assert row["project"] == "anchore"
         meta = json.loads(row["metadata"])
         assert meta["graph_tags"] == ["enterprise", "enterprise-ng"]
 
-    def test_missing_graph_project_leaves_project_null(self, graph_db, tmp_path):
-        """Legacy / unlabeled sessions without graph_project → project remains null."""
+    def test_missing_graph_project_leaves_meta_unset(self, graph_db, tmp_path):
+        """Legacy / unlabeled sessions without graph_project → no graph_project/graph_tags in meta."""
         jsonl = self._write_session(
             tmp_path,
             meta={"type": "dispatch", "container_name": "agent-legacy"},
@@ -432,10 +460,9 @@ class TestIngestHonorsSessionMeta:
                 result = ingest_claude_code_session(graph_db, jsonl)
 
         row = graph_db.conn.execute(
-            "SELECT project, metadata FROM sources WHERE id = ?",
+            "SELECT metadata FROM sources WHERE id = ?",
             (result["source_id"],),
         ).fetchone()
-        assert row["project"] is None
         meta = json.loads(row["metadata"])
         assert "graph_project" not in meta
         assert "graph_tags" not in meta

@@ -19,7 +19,6 @@ class Source:
     id: str = field(default_factory=new_id)
     type: str = "conversation"
     platform: str | None = None
-    project: str | None = None
     title: str | None = None
     url: str | None = None
     file_path: str | None = None

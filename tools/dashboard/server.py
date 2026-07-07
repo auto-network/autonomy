@@ -10701,11 +10701,7 @@ def _dashboard_default_org() -> str:
     ``Schema.of('dashboard.harness.usage').all()`` fall through to the
     server's scopeless default and silently return ``[]``.
     """
-    return (
-        os.environ.get("GRAPH_ORG")
-        or os.environ.get("GRAPH_SCOPE")
-        or "autonomy"
-    )
+    return os.environ.get("GRAPH_ORG") or "autonomy"
 
 
 def _harness_usage_org() -> str:
@@ -11459,7 +11455,6 @@ async def api_graph_note(request):
         tags_raw = form.get("tags")
         if tags_raw and not _GRAPH_TAGS_RE.match(str(tags_raw)):
             return JSONResponse({"error": f"invalid tags: {tags_raw!r}"}, status_code=400)
-        project = str(form["project"]) if form.get("project") else None
         author = str(form["author"]) if form.get("author") else None
         short_description = str(form["short_description"]) if form.get("short_description") else None
         keywords = str(form["keywords"]) if form.get("keywords") else None
@@ -11483,7 +11478,6 @@ async def api_graph_note(request):
         tags_raw = body.get("tags")
         if tags_raw and not _GRAPH_TAGS_RE.match(tags_raw):
             return JSONResponse({"error": f"invalid tags: {tags_raw!r}"}, status_code=400)
-        project = body.get("project")
         author = body.get("author")
         short_description = body.get("short_description")
         keywords = body.get("keywords")
@@ -11498,7 +11492,6 @@ async def api_graph_note(request):
             content,
             tags=tags,
             author=author,
-            project=project,
             attachments=tmp_paths or None,
             html_path=html_path,
             short_description=short_description,
@@ -12330,7 +12323,6 @@ async def api_graph_search(request):
     if not q:
         return JSONResponse({"error": "missing q parameter"}, status_code=400)
     limit = int(request.query_params.get("limit", "25"))
-    project = request.query_params.get("project")
     or_mode = bool(request.query_params.get("or"))
     tag = request.query_params.get("tag")
     states_param = request.query_params.get("states")
@@ -12347,7 +12339,7 @@ async def api_graph_search(request):
     source_type = [t for t in type_param.split(",") if t] if type_param else None
     results = graph_ops.search(
         q, org=org, peers=peers, only_org=only_org,
-        limit=limit, project=project, or_mode=or_mode, tag=tag,
+        limit=limit, or_mode=or_mode, tag=tag,
         states=states, include_raw=include_raw,
         session_source_ids=session_source_ids,
         session_author_pattern=session_author_pattern,
@@ -12385,7 +12377,6 @@ async def api_graph_sources_list(request):
     a single DB; ``X-Graph-Org`` header supplies ``org``.
     """
     limit = int(request.query_params.get("limit", "50"))
-    project = request.query_params.get("project")
     source_type = request.query_params.get("type")
     tags_param = request.query_params.get("tags")
     tags = [t for t in tags_param.split(",") if t] if tags_param else None
@@ -12395,7 +12386,7 @@ async def api_graph_sources_list(request):
     org = request.headers.get("X-Graph-Org")
     sources = graph_ops.list_sources(
         org=org, peers=peers, only_org=only_org,
-        limit=limit, project=project, source_type=source_type, tags=tags,
+        limit=limit, source_type=source_type, tags=tags,
     )
     return JSONResponse({"sources": sources})
 

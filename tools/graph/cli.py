@@ -16,14 +16,10 @@ from .db import GraphDB, DEFAULT_DB, resolve_caller_db_path
 
 
 # ── Scoped Access ────────────────────────────────────────────
-# GRAPH_SCOPE env var transparently restricts all queries to a project.
-# GRAPH_DB env var overrides the database path.
-# Agents never see these — they just run `graph search "foo"`.
-
-def _get_scope() -> str | None:
-    """Get the active scope from env. Returns project name or None."""
-    return os.environ.get("GRAPH_SCOPE")
-
+# GRAPH_ORG env var selects the org DB every read/write in this process
+# routes to — that database is the only scope boundary. GRAPH_DB env var
+# overrides the database path. Agents never see these — they just run
+# `graph search "foo"`.
 
 class _pin_db:
     """Context manager that pins ``GRAPH_DB`` env to ``args.db`` for the
@@ -100,15 +96,6 @@ def _get_db_path(org: str | None = None) -> Path:
     if org is None:
         org = os.environ.get("GRAPH_ORG")
     return resolve_caller_db_path(org)
-
-
-def _apply_scope(args) -> None:
-    """If GRAPH_SCOPE is set and args has a project field, enforce it."""
-    scope = _get_scope()
-    if scope:
-        # Override project on any command that supports it
-        if hasattr(args, 'project') and args.project is None:
-            args.project = scope
 
 
 _VALID_STATES = ("raw", "curated", "published", "canonical")
@@ -304,7 +291,6 @@ def cmd_search(args):
     results = get_client().search(
         args.query,
         limit=args.limit,
-        project=getattr(args, 'project', None),
         or_mode=getattr(args, 'or_mode', False),
         tag=getattr(args, 'tag', None),
         states=states,
@@ -331,17 +317,15 @@ def cmd_search(args):
     width = args.width
     for r in results:
         rtype = r["result_type"]
-        project = r.get("project", "")
-        proj_tag = f" [{project}]" if project else ""
         org = r.get("org") or ""
-        org_tag = f" [{org}]" if org and not project else (f" [{org}]" if org and project != org else "")
+        org_tag = f" [{org}]" if org else ""
         sid = r.get("source_id", "?")[:12]
 
         if rtype == "source":
             stype = r.get("source_type", "")
             platform = r.get("platform", "")
             created = (r.get("created_at") or "")[:10]
-            print(f"  [S] {r.get('source_title', '?')[:60]} (src:{sid}){proj_tag}{org_tag}")
+            print(f"  [S] {r.get('source_title', '?')[:60]} (src:{sid}){org_tag}")
             detail_parts = [p for p in [stype, platform, created] if p]
             print(f"    {' | '.join(detail_parts)}")
             print()
@@ -351,7 +335,7 @@ def cmd_search(args):
             title = r.get("source_title") or "?"
             turn = r.get("turn_number")
             turn_tag = f" t{turn}" if turn else ""
-            print(f"  [{direction}] {title[:50]}{turn_tag} (src:{sid}){proj_tag}{org_tag}")
+            print(f"  [{direction}] {title[:50]}{turn_tag} (src:{sid}){org_tag}")
             print(f"    relation: {relation}")
             print()
         else:
@@ -362,7 +346,7 @@ def cmd_search(args):
             if len(content) > width:
                 content = content[:width] + "…"
             lines = content.replace("\n", "\n    ").rstrip()
-            print(f"  [{tag}] {source[:50]} t{turn} (src:{sid}){proj_tag}{org_tag}")
+            print(f"  [{tag}] {source[:50]} t{turn} (src:{sid}){org_tag}")
             print(f"    {lines}")
             print()
 
@@ -396,9 +380,6 @@ def _resolve_source(db, source_arg, first=False):
     source = db.get_source(source_arg)
     if not source:
         sources = db.find_sources(source_arg, limit=5)
-        scope = _get_scope()
-        if scope:
-            sources = [s for s in sources if s.get("project") == scope]
         if not sources:
             if db.is_immutable:
                 print("  (immutable mode — WAL data may not be visible)", file=sys.stderr)
@@ -445,9 +426,6 @@ def _resolve_source_cross_org(args, source_arg, *, first=False, allow_title=True
         immutable_hint = own_db.is_immutable
         if own_result is None and allow_title:
             matches = own_db.find_sources(source_arg, limit=5)
-            scope = _get_scope()
-            if scope:
-                matches = [s for s in matches if s.get("project") == scope]
             own_title_matches = matches or None
     finally:
         own_db.close()
@@ -703,9 +681,8 @@ def _format_source_header(source: dict) -> str:
 
     Shape: ``{type} · {pub_state} · {id12} · {time} [{org}] — {title}``.
     Pub-state is omitted when missing. Time format varies by source
-    kind (see :func:`_format_source_time`). Org tag is suppressed when
-    redundant with project. Used by both the host and API read paths
-    so the two modes converge on the same shape.
+    kind (see :func:`_format_source_time`). Used by both the host and
+    API read paths so the two modes converge on the same shape.
     """
     sid = (source.get("id") or "")[:12]
     stype = source.get("type") or "?"
@@ -713,13 +690,8 @@ def _format_source_header(source: dict) -> str:
     when = _format_source_time(source)
     pub_state = source.get("publication_state") or ""
 
-    project = source.get("project") or ""
     org = source.get("org") or ""
-    tag = ""
-    if org and (not project or project != org):
-        tag = f" [{org}]"
-    elif project:
-        tag = f" [{project}]"
+    tag = f" [{org}]" if org else ""
 
     parts = [stype]
     if pub_state:
@@ -1023,8 +995,8 @@ def cmd_read(args):
     if isinstance(result, list):
         print(f"Multiple sources match '{args.source}':")
         for s in result:
-            proj = f" [{s['project']}]" if s.get('project') else ""
-            print(f"  {s['id'][:12]}  {s['type']:10s}  {s.get('title', '?')[:60]}{proj}")
+            org_tag = f" [{s['org']}]" if s.get('org') else ""
+            print(f"  {s['id'][:12]}  {s['type']:10s}  {s.get('title', '?')[:60]}{org_tag}")
         print(f"\nUse the source ID to read a specific one, or --first to read the top match.")
         return
     source = result
@@ -1168,7 +1140,6 @@ def _cmd_read_via_api(args, source_arg: str, version_req, client: "HttpClient") 
                 "id": source.get("id"),
                 "type": source.get("type"),
                 "title": source.get("title"),
-                "project": source.get("project"),
                 "platform": source.get("platform"),
                 "created_at": source.get("created_at"),
                 "file_path": source.get("file_path"),
@@ -1275,8 +1246,8 @@ def _cmd_read_body(args, source, db, version_req, _json):
             if not ver:
                 print(f"Version {version_req} not found for {source['id'][:12]}", file=sys.stderr)
                 return
-            proj = f" [{source['project']}]" if source.get('project') else ""
-            print(f"Source: {source['id'][:12]}  {source['type']}{proj}  (version {version_req})")
+            org_tag = f" [{source['org']}]" if source.get('org') else ""
+            print(f"Source: {source['id'][:12]}  {source['type']}{org_tag}  (version {version_req})")
             print(f"Title:  {source.get('title', '?')}")
             print(f"Date:   {ver['created_at'][:10]}")
             print(f"{'─' * 72}")
@@ -1332,7 +1303,6 @@ def _cmd_read_body(args, source, db, version_req, _json):
                 "id": source["id"],
                 "type": source.get("type"),
                 "title": source.get("title"),
-                "project": source.get("project"),
                 "platform": source.get("platform"),
                 "created_at": source.get("created_at"),
                 "file_path": source.get("file_path") or None,
@@ -1471,7 +1441,7 @@ def cmd_sources(args):
             db.close()
 
     sources = get_client().list_sources(
-        project=args.project, source_type=args.type, limit=args.limit,
+        source_type=args.type, limit=args.limit,
         since=args.since, until=getattr(args, 'until', None), author=args.author,
         states=states, include_raw=include_raw,
         only_org=only_org, peers=peers,
@@ -1484,11 +1454,10 @@ def cmd_sources(args):
         return
 
     for s in sources:
-        proj = f" [{s['project']}]" if s.get('project') else ""
         org = s.get('org') or ""
-        org_tag = f" [{org}]" if org and (not proj or proj.strip(' []') != org) else ""
+        org_tag = f" [{org}]" if org else ""
         date = (s.get("created_at") or "")[:10]
-        print(f"  {s['id'][:12]}  {s['type']:10s}  {date}  {s.get('title', '?')[:55]}{proj}{org_tag}")
+        print(f"  {s['id'][:12]}  {s['type']:10s}  {date}  {s.get('title', '?')[:55]}{org_tag}")
         if args.verbose:
             fp = s.get("file_path")
             print(f"                {fp if fp else '(no file)'}")
@@ -1615,8 +1584,8 @@ def cmd_context(args):
                 e for e in entries
                 if (e.get("turn_number") or 0) >= lo
             ]
-            proj = f" [{source['project']}]" if source.get('project') else ""
-            print(f"Source: {source.get('title', '?')[:60]}{proj}")
+            org_tag = f" [{source['org']}]" if source.get('org') else ""
+            print(f"Source: {source.get('title', '?')[:60]}{org_tag}")
             print(f"Showing last {tail_n} turns ({lo}–{max_turn})")
             print(f"{'─' * 72}")
             for e in relevant:
@@ -1653,8 +1622,8 @@ def cmd_context(args):
         # the filter so both modes converge on the same output.
         relevant = [e for e in entries if abs((e.get("turn_number") or 0) - target_turn) <= window]
 
-        proj = f" [{source['project']}]" if source.get('project') else ""
-        print(f"Source: {source.get('title', '?')[:60]}{proj}")
+        org_tag = f" [{source['org']}]" if source.get('org') else ""
+        print(f"Source: {source.get('title', '?')[:60]}{org_tag}")
         print(f"Showing turns {target_turn - window}–{target_turn + window}")
         print(f"{'─' * 72}")
 
@@ -2268,7 +2237,7 @@ def cmd_ingest_session(args):
     else:
         db = _open_db_for_session(file_path)
     try:
-        result = ingest_session_file(db, file_path, project=args.project)
+        result = ingest_session_file(db, file_path)
     finally:
         db.close()
     source_id = result.get("source_id")
@@ -2286,10 +2255,10 @@ def cmd_docs_ingest(args):
     path = Path(args.path)
 
     if path.is_file():
-        result = ingest_doc_file(db, path, project=args.project, force=args.force)
+        result = ingest_doc_file(db, path, force=args.force)
         print(json.dumps(result, indent=2))
     elif path.is_dir():
-        results = ingest_docs_dir(db, path, project=args.project, force=args.force)
+        results = ingest_docs_dir(db, path, force=args.force)
         ingested = [r for r in results if r["status"] == "ingested"]
         skipped = [r for r in results if r["status"] == "skipped"]
 
@@ -2312,10 +2281,10 @@ def cmd_status_ingest(args):
     path = Path(args.path)
 
     if path.is_file():
-        result = ingest_status_file(db, path, project=args.project, authorship=args.authorship, force=args.force)
+        result = ingest_status_file(db, path, authorship=args.authorship, force=args.force)
         print(json.dumps(result, indent=2))
     elif path.is_dir():
-        results = ingest_status_dir(db, path, project=args.project, authorship=args.authorship, force=args.force)
+        results = ingest_status_dir(db, path, authorship=args.authorship, force=args.force)
         ingested = [r for r in results if r["status"] == "ingested"]
         skipped = [r for r in results if r["status"] == "skipped"]
 
@@ -2337,7 +2306,7 @@ def cmd_git_ingest(args):
     """Ingest git commit history."""
     db = GraphDB(args.db)
     result = ingest_git_commits(
-        db, args.repo, project=args.project,
+        db, args.repo,
         since=args.since, force=args.force,
     )
     if result["status"] == "skipped":
@@ -3153,7 +3122,6 @@ def cmd_notes(args):
     try:
         sources = client.list_sources(
             source_type="note",
-            project=args.project,
             since=since_iso,
             tags=tags,
             limit=args.limit,
@@ -3194,7 +3162,7 @@ def cmd_notes(args):
             sid = s["id"][:11]
             date = (s.get("created_at") or "")[:10]
             title = (s.get("title") or "")[:60]
-            project = s.get("project") or ""
+            org = s.get("org") or ""
             tags_str = ""
             meta = s.get("metadata")
             if meta and isinstance(meta, str):
@@ -3205,7 +3173,7 @@ def cmd_notes(args):
                     meta = {}
             if isinstance(meta, dict) and meta.get("tags"):
                 tags_str = ",".join(meta["tags"])
-            print(f"  {sid}  {date}  [{project}]  {title}")
+            print(f"  {sid}  {date}  [{org}]  {title}")
             if tags_str:
                 print(f"           tags: {tags_str}")
     except LookupError as e:
@@ -3347,7 +3315,6 @@ def cmd_journal_write(args):
             if field not in data:
                 print(f"Error: missing required field: {field}", file=sys.stderr)
                 sys.exit(1)
-        data.setdefault("project", _get_scope() or "autonomy")
         _attach_source_session_id(data)
         result = get_client().write_journal_entry(
             data, org=os.environ.get("GRAPH_ORG"),
@@ -3431,7 +3398,6 @@ def cmd_journal_write(args):
         "timestamp_end": ts_end,
         "entry_type": getattr(args, "entry_type", None) or "attention",
         "edges": edges,
-        "project": _get_scope() or "autonomy",
     }
     _attach_source_session_id(data)
 
@@ -3605,7 +3571,6 @@ def cmd_note(args):
                 text,
                 tags=tags,
                 author=args.author,
-                project=args.project or _get_scope(),
                 attachments=attach_paths,
                 html_path=html_path,
                 auto_provenance_source_id=auto_src_id,
@@ -3905,56 +3870,6 @@ def cmd_agent_runs(args):
         print(f"  ({len(skipped)} already ingested)")
     print(f"\nTotal: {len(ingested)} ingested, {len(skipped)} skipped")
     db.close()
-
-
-def cmd_projects(args):
-    """List projects and their source counts by type."""
-    db = GraphDB(args.db)
-
-    # All sources grouped by project and type
-    rows = db.conn.execute(
-        """SELECT project, type, COUNT(*) as count,
-                  MIN(created_at) as first, MAX(created_at) as last
-           FROM sources
-           WHERE project IS NOT NULL
-           GROUP BY project, type
-           ORDER BY project, type"""
-    ).fetchall()
-
-    if not rows:
-        print("No projects found.")
-        db.close()
-        return
-
-    # Group by project
-    projects = {}
-    for r in rows:
-        p = r["project"]
-        if p not in projects:
-            projects[p] = {"types": {}, "total": 0, "last": ""}
-        projects[p]["types"][r["type"]] = r["count"]
-        projects[p]["total"] += r["count"]
-        if r["last"] and r["last"] > projects[p]["last"]:
-            projects[p]["last"] = r["last"]
-
-    print(f"  {'Project':30s}  {'Total':>6s}  {'Sessions':>8s}  {'Status':>7s}  {'Git':>5s}  {'Other':>6s}  {'Last':>12s}")
-    print(f"  {'─' * 30}  {'─' * 6}  {'─' * 8}  {'─' * 7}  {'─' * 5}  {'─' * 6}  {'─' * 12}")
-    for name, info in sorted(projects.items(), key=lambda x: -x[1]["total"]):
-        display = name
-        if display.startswith("-home-jeremy-"):
-            display = display[13:] or "(home)"
-        if display.startswith("workspace-"):
-            display = display[10:]
-        sessions = info["types"].get("session", 0)
-        status = info["types"].get("status", 0)
-        git = info["types"].get("git-log", 0)
-        other = info["total"] - sessions - status - git
-        last = info["last"][:10] if info["last"] else "—"
-        print(f"  {display:30s}  {info['total']:6d}  {sessions:8d}  {status:7d}  {git:5d}  {other:6d}  {last:>12s}")
-
-    db.close()
-
-
 
 
 def cmd_ui_design(args):
@@ -5029,13 +4944,12 @@ def main():
     # search
     p = sub.add_parser("search", help="Full-text search")
     p.add_argument("query", help="Search query")
-    p.add_argument("--project", "-p", help="Filter by project name")
     p.add_argument("--limit", type=int, default=10, help="Max results")
     p.add_argument("--width", "-w", type=int, default=500, help="Max chars per result (default 500)")
     p.add_argument("--or", dest="or_mode", action="store_true", help="Join terms with OR instead of AND")
     p.add_argument("--tag", help="Filter results to sources with this tag")
     p.add_argument("--type", "-t", dest="source_type",
-                   help="Filter by source kind (comma-separated: session, note, bead, …); composes with --project / --tag / --state")
+                   help="Filter by source kind (comma-separated: session, note, bead, …); composes with --tag / --state")
     p.add_argument("--state", help="Filter by publication_state (comma-separated: raw,curated,published,canonical)")
     p.add_argument("--include", choices=["raw"], help="Include additional state categories (use 'raw' to surface raw sources from other sessions)")
     p.add_argument(
@@ -5069,7 +4983,6 @@ def main():
 
     # sources
     p = sub.add_parser("sources", help="List sources")
-    p.add_argument("--project", "-p", help="Filter by project")
     p.add_argument("--type", "-t", help="Filter by type (session, status, git-log, etc.)")
     p.add_argument("--verbose", "-v", action="store_true", help="Show file paths under each source")
     p.add_argument("--limit", type=int, default=20, help="Max results")
@@ -5177,7 +5090,6 @@ def main():
     # ingest-session
     p = sub.add_parser("ingest-session", help="Ingest a single JSONL session file and print its graph source ID")
     p.add_argument("file", help="Path to JSONL session file")
-    p.add_argument("--project", help="Project name (auto-detected from path if omitted)")
     p.set_defaults(func=cmd_ingest_session)
 
     # seed
@@ -5188,14 +5100,12 @@ def main():
     # docs-ingest
     p = sub.add_parser("docs-ingest", help="Ingest documentation files (TOOL.md, README.md, etc.)")
     p.add_argument("path", help="File or directory to scan")
-    p.add_argument("--project", "-p", help="Project name to tag with")
     p.add_argument("--force", action="store_true", help="Re-ingest existing files")
     p.set_defaults(func=cmd_docs_ingest)
 
     # status-ingest
     p = sub.add_parser("status-ingest", help="Ingest status files from a directory")
     p.add_argument("path", help="File or directory to ingest")
-    p.add_argument("--project", "-p", help="Project name to tag these with")
     p.add_argument("--authorship", "-a", default="mixed",
                    choices=["human", "agent", "mixed"],
                    help="Provenance: human, agent, or mixed (default: mixed)")
@@ -5205,7 +5115,6 @@ def main():
     # git-ingest
     p = sub.add_parser("git-ingest", help="Ingest git commit history")
     p.add_argument("repo", help="Path to git repository")
-    p.add_argument("--project", "-p", help="Project name to tag with")
     p.add_argument("--since", help="Only commits after this date (e.g. 2025-10-01)")
     p.add_argument("--force", action="store_true", help="Re-ingest from scratch")
     p.set_defaults(func=cmd_git_ingest)
@@ -5261,7 +5170,6 @@ def main():
                             formatter_class=argparse.RawDescriptionHelpFormatter)
     p_note.add_argument("text", nargs="*", help="Note text (or 'update <src_id>' to update an existing note)")
     p_note.add_argument("-c", dest="content_stdin", nargs="?", const="-", default=None, help="Read content from stdin")
-    p_note.add_argument("--project", "-p", help="Project to tag with")
     p_note.add_argument("--tags", "-t", help="Comma-separated tags")
     p_note.add_argument("--author", help="Who wrote this (default: user)")
     p_note.add_argument("--force", action="store_true", help="Bypass single-line length check")
@@ -5279,7 +5187,6 @@ def main():
     # notes (list notes with optional recency filter)
     p_notes = sub.add_parser("notes", help="List notes")
     p_notes.add_argument("--since", help="Duration filter, e.g. 1h, 30m, 2d, 1w")
-    p_notes.add_argument("--project", help="Filter by project")
     p_notes.add_argument("--tags", help="Filter by tag (comma-separated)")
     p_notes.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
     p_notes.add_argument("--short", action="store_true", help="One-line compact output")
@@ -5375,10 +5282,6 @@ def main():
     p.add_argument("--list", dest="list_only", action="store_true", help="List traces without ingesting")
     p.add_argument("--force", action="store_true", help="Re-ingest existing traces")
     p.set_defaults(func=cmd_agent_runs)
-
-    # projects
-    p = sub.add_parser("projects", help="List projects and session counts")
-    p.set_defaults(func=cmd_projects)
 
     # playbooks
     p = sub.add_parser("playbooks", help="Show playbook catalog and status")
@@ -5763,13 +5666,10 @@ def main():
     if getattr(args, "force_host", False):
         _client_mod._FORCE_HOST_DIRECT = True
 
-    # Apply scope from environment
-    _apply_scope(args)
-
-    # Show scope banner if active
-    scope = _get_scope()
-    if scope and args.command in ("search", "sources", "read", "context", "entities", "related"):
-        print(f"  [scope: {scope}]", file=sys.stderr)
+    # Show org banner if active — the org DB is the only scope boundary.
+    org = os.environ.get("GRAPH_ORG")
+    if org and args.command in ("search", "sources", "read", "context", "entities", "related"):
+        print(f"  [org: {org}]", file=sys.stderr)
 
     args.func(args)
 

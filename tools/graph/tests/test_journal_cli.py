@@ -135,8 +135,7 @@ def test_flag_form_link_creates_edge(graph_db_env, tmp_path):
     from tools.graph.models import Source
     from tools.graph.db import GraphDB
     target_src = Source(
-        type="note", platform="local", project="autonomy",
-        title="target", file_path="note:target",
+        type="note", platform="local", title="target", file_path="note:target",
     )
     db = GraphDB(str(graph_db_env), mode="rw")
     try:
@@ -166,8 +165,7 @@ def test_flag_form_link_with_turn_parses(graph_db_env, tmp_path):
     from tools.graph.models import Source
     from tools.graph.db import GraphDB
     target_src = Source(
-        type="note", platform="local", project="autonomy",
-        title="target", file_path="note:t2",
+        type="note", platform="local", title="target", file_path="note:t2",
     )
     db = GraphDB(str(graph_db_env), mode="rw")
     try:

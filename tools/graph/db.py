@@ -229,6 +229,7 @@ class GraphDB:
         self._migrate_source_moves()
         self._migrate_source_short_description()
         self._migrate_source_keywords()
+        self._migrate_drop_source_project()
         # sources_fts depends on `short_description` + `keywords` columns, so
         # it must run AFTER both column migrations above.
         self._migrate_sources_fts()
@@ -331,6 +332,20 @@ class GraphDB:
         scols = {r[1] for r in self.conn.execute("PRAGMA table_info(sources)").fetchall()}
         if "keywords" not in scols:
             self.conn.execute("ALTER TABLE sources ADD COLUMN keywords TEXT")
+            self.conn.commit()
+
+    def _migrate_drop_source_project(self):
+        """Drop the legacy ``project`` column from sources (idempotent).
+
+        Org scoping is which database a row lives in (auto-p6vn7) — the
+        ``project`` field duplicated that as a second, driftable value and
+        is no longer written or read. No index, trigger, or FTS table
+        references it (FTS indexes title/short_description/keywords),
+        so the drop is safe on its own.
+        """
+        scols = {r[1] for r in self.conn.execute("PRAGMA table_info(sources)").fetchall()}
+        if "project" in scols:
+            self.conn.execute("ALTER TABLE sources DROP COLUMN project")
             self.conn.commit()
 
     def _migrate_sources_fts(self):
@@ -669,12 +684,12 @@ class GraphDB:
 
     def insert_source(self, src: Source) -> Source:
         self.conn.execute(
-            """INSERT INTO sources (id, type, platform, project, title, url, file_path, metadata,
+            """INSERT INTO sources (id, type, platform, title, url, file_path, metadata,
                                     created_at, ingested_at, last_activity_at,
                                     publication_state, deprecated, successor_id, moved_to_org,
                                     short_description, keywords)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (src.id, src.type, src.platform, src.project, src.title, src.url,
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (src.id, src.type, src.platform, src.title, src.url,
              src.file_path, json.dumps(src.metadata), src.created_at, src.ingested_at,
              src.last_activity_at,
              src.publication_state, int(bool(src.deprecated)), src.successor_id,
@@ -1126,7 +1141,7 @@ class GraphDB:
         )
         return clause, list(session_type)
 
-    def search(self, query: str, limit: int = 20, project: str | None = None, or_mode: bool = False, tag: str | None = None,
+    def search(self, query: str, limit: int = 20, or_mode: bool = False, tag: str | None = None,
                states: list[str] | None = None, include_raw: bool = False,
                session_source_ids: list[str] | None = None,
                session_author_pattern: str | None = None,
@@ -1134,7 +1149,12 @@ class GraphDB:
                order: str = "relevance",
                session_type: list[str] | None = None,
                source_type: list[str] | None = None) -> list[dict]:
-        """Full-text search across thoughts and derivations. Optionally filter by project.
+        """Full-text search across thoughts and derivations, scoped to this DB.
+
+        Org scoping is which database this method runs against — callers
+        that want another org's content open that org's DB (or merge
+        across DBs at the ``ops.search`` layer); this method never
+        filters rows by a ``project`` field (auto-p6vn7).
 
         If *query* looks like a hex source ID (6+ hex chars), resolves it
         directly via prefix lookup and returns the source plus linked sources
@@ -1170,7 +1190,7 @@ class GraphDB:
         if _is_source_id(query):
             # Explicit ID lookup — user asked for this specific source, do not filter by state.
             return self._search_source_id(
-                query.strip(), limit=limit, project=project, tag=tag,
+                query.strip(), limit=limit, tag=tag,
                 excluded_source_types=excluded_source_types,
             )
 
@@ -1204,13 +1224,11 @@ class GraphDB:
                 type_clause = f" AND s.type IN ({placeholders})"
                 type_params = list(source_type)
 
-        project_clause = " AND s.project = ?" if project else ""
-        project_params: list = [project] if project else []
         common_filters = (
-            project_clause + tag_clause + state_clause + excl_clause + st_clause + type_clause
+            tag_clause + state_clause + excl_clause + st_clause + type_clause
         )
         common_params: list = (
-            project_params + tag_params + state_params + excl_params + st_params + type_params
+            tag_params + state_params + excl_params + st_params + type_params
         )
 
         # ── Phase 1: collect hit-rows per FTS table ─────────────────────
@@ -1226,7 +1244,7 @@ class GraphDB:
                       NULL as turn_number,
                       NULL as tags,
                       s.id as id,
-                      s.title as source_title, s.platform, s.project,
+                      s.title as source_title, s.platform,
                       s.type as source_type,
                       s.created_at as source_created_at,
                       s.short_description, s.keywords,
@@ -1248,7 +1266,7 @@ class GraphDB:
                       t.turn_number as turn_number,
                       t.tags as tags,
                       t.id as id,
-                      s.title as source_title, s.platform, s.project,
+                      s.title as source_title, s.platform,
                       s.type as source_type,
                       s.created_at as source_created_at,
                       s.short_description, s.keywords,
@@ -1271,7 +1289,7 @@ class GraphDB:
                       d.turn_number as turn_number,
                       NULL as tags,
                       d.id as id,
-                      s.title as source_title, s.platform, s.project,
+                      s.title as source_title, s.platform,
                       s.type as source_type,
                       s.created_at as source_created_at,
                       s.short_description, s.keywords,
@@ -1309,7 +1327,7 @@ class GraphDB:
                 # hits enrich the excerpt list and update best-rank.
                 source_row = {
                     k: h.get(k) for k in (
-                        "source_id", "source_title", "platform", "project",
+                        "source_id", "source_title", "platform",
                         "source_type", "source_created_at",
                         "short_description", "keywords", "source_metadata",
                     )
@@ -1427,7 +1445,7 @@ class GraphDB:
 
         return results
 
-    def _search_source_id(self, query: str, limit: int = 20, project: str | None = None, tag: str | None = None,
+    def _search_source_id(self, query: str, limit: int = 20, tag: str | None = None,
                           excluded_source_types: list[str] | None = None) -> list[dict]:
         """Resolve a source-ID-shaped query directly.
 
@@ -1448,9 +1466,7 @@ class GraphDB:
         # 1. Direct prefix lookup
         source = self.get_source(query)
         if source:
-            if project and source.get("project") != project:
-                source = None  # skip if wrong project
-            if source and tag:
+            if tag:
                 meta = source.get("metadata")
                 if isinstance(meta, str):
                     try:
@@ -1477,7 +1493,6 @@ class GraphDB:
                 "source_title": source.get("title") or sid,
                 "short_description": source.get("short_description"),
                 "platform": source.get("platform"),
-                "project": source.get("project"),
                 "result_type": "source",
                 "rank": -1000,  # always first
                 "source_type": source.get("type"),
@@ -1514,8 +1529,6 @@ class GraphDB:
                             other_id = parent_sid
 
                 if other_source and other_id not in seen_source_ids:
-                    if project and other_source.get("project") != project:
-                        continue
                     if tag:
                         ometa = other_source.get("metadata")
                         if isinstance(ometa, str):
@@ -1541,7 +1554,6 @@ class GraphDB:
                         "source_id": other_id,
                         "source_title": other_source.get("title") or other_id,
                         "platform": other_source.get("platform"),
-                        "project": other_source.get("project"),
                         "result_type": "edge",
                         "rank": -500,
                         "relation": relation,
@@ -1564,38 +1576,21 @@ class GraphDB:
                     ("thoughts_fts", "thoughts", "thought"),
                     ("derivations_fts", "derivations", "derivation"),
                 ]:
-                    if project:
-                        rows = self.conn.execute(
-                            f"""SELECT t.id, t.content, t.turn_number, t.source_id,
-                                       s.title as source_title, s.platform, s.project,
-                                       s.type as source_type,
-                                       s.created_at as source_created_at,
-                                       s.short_description, s.keywords,
-                                       s.metadata as source_metadata,
-                                       '{rtype}' as result_type, rank
-                                FROM {table} fts
-                                JOIN {content_table} t ON t.rowid = fts.rowid
-                                JOIN sources s ON s.id = t.source_id
-                                WHERE {table} MATCH ? AND s.project = ?{tag_clause}{excl_clause}
-                                ORDER BY rank LIMIT ?""",
-                            (fts_query, project, *tag_params, *excl_params, remaining),
-                        ).fetchall()
-                    else:
-                        rows = self.conn.execute(
-                            f"""SELECT t.id, t.content, t.turn_number, t.source_id,
-                                       s.title as source_title, s.platform, s.project,
-                                       s.type as source_type,
-                                       s.created_at as source_created_at,
-                                       s.short_description, s.keywords,
-                                       s.metadata as source_metadata,
-                                       '{rtype}' as result_type, rank
-                                FROM {table} fts
-                                JOIN {content_table} t ON t.rowid = fts.rowid
-                                JOIN sources s ON s.id = t.source_id
-                                WHERE {table} MATCH ?{tag_clause}{excl_clause}
-                                ORDER BY rank LIMIT ?""",
-                            (fts_query, *tag_params, *excl_params, remaining),
-                        ).fetchall()
+                    rows = self.conn.execute(
+                        f"""SELECT t.id, t.content, t.turn_number, t.source_id,
+                                   s.title as source_title, s.platform,
+                                   s.type as source_type,
+                                   s.created_at as source_created_at,
+                                   s.short_description, s.keywords,
+                                   s.metadata as source_metadata,
+                                   '{rtype}' as result_type, rank
+                            FROM {table} fts
+                            JOIN {content_table} t ON t.rowid = fts.rowid
+                            JOIN sources s ON s.id = t.source_id
+                            WHERE {table} MATCH ?{tag_clause}{excl_clause}
+                            ORDER BY rank LIMIT ?""",
+                        (fts_query, *tag_params, *excl_params, remaining),
+                    ).fetchall()
                     for r in rows:
                         rd = dict(r)
                         if rd["source_id"] not in seen_source_ids:
@@ -1788,13 +1783,16 @@ class GraphDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def list_sources(self, project: str | None = None, source_type: str | None = None, limit: int = 20,
+    def list_sources(self, source_type: str | None = None, limit: int = 20,
                      since: str | None = None, until: str | None = None, author: str | None = None,
                      tags: list[str] | None = None,
                      states: list[str] | None = None, include_raw: bool = False,
                      session_source_ids: list[str] | None = None,
                      session_author_pattern: str | None = None) -> list[dict]:
-        """List sources with optional filters.
+        """List sources with optional filters, scoped to this DB.
+
+        Org scoping is which database this method runs against; it never
+        filters rows by a ``project`` field (auto-p6vn7).
 
         Publication-state defaults: excludes raw sources from other sessions.
         Pass `include_raw=True` to disable the filter, or `states=[...]` to
@@ -1802,9 +1800,6 @@ class GraphDB:
         """
         query = "SELECT * FROM sources s WHERE 1=1"
         params: list = []
-        if project:
-            query += " AND s.project = ?"
-            params.append(project)
         if source_type:
             query += " AND s.type = ?"
             params.append(source_type)

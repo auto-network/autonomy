@@ -284,7 +284,6 @@ def search(
     peers: list[str] | None = None,
     only_org: str | None = None,
     limit: int = 25,
-    project: str | None = None,
     or_mode: bool = False,
     tag: str | None = None,
     states: list[str] | None = None,
@@ -332,7 +331,7 @@ def search(
         org_lists: list[tuple[str, list[dict]]] = []
         for slug, slug_db in _iter_org_dbs():
             rows = slug_db.search(
-                q, limit=limit, project=project, or_mode=or_mode, tag=tag,
+                q, limit=limit, or_mode=or_mode, tag=tag,
                 states=states, include_raw=include_raw,
                 excluded_source_types=excluded_source_types,
                 order=order, session_type=session_type, source_type=source_type,
@@ -360,7 +359,7 @@ def search(
             db = _open(org)
             try:
                 rows = db.search(
-                    q, limit=limit, project=project, or_mode=or_mode, tag=tag,
+                    q, limit=limit, or_mode=or_mode, tag=tag,
                     states=states, include_raw=include_raw,
                     session_source_ids=session_source_ids,
                     session_author_pattern=session_author_pattern,
@@ -377,7 +376,7 @@ def search(
         if peer_db is None:
             return []
         rows = peer_db.search(
-            q, limit=limit, project=project, or_mode=or_mode, tag=tag,
+            q, limit=limit, or_mode=or_mode, tag=tag,
             states=list(PEER_VISIBLE_STATES), include_raw=False,
             excluded_source_types=excluded_source_types,
             order=order, session_type=session_type, source_type=source_type,
@@ -390,7 +389,7 @@ def search(
 
     def fetch_own(db: GraphDB) -> list[dict]:
         return db.search(
-            q, limit=limit, project=project, or_mode=or_mode, tag=tag,
+            q, limit=limit, or_mode=or_mode, tag=tag,
             states=states, include_raw=include_raw,
             session_source_ids=session_source_ids,
             session_author_pattern=session_author_pattern,
@@ -400,7 +399,7 @@ def search(
 
     def fetch_peer(db: GraphDB, _slug: str) -> list[dict]:
         return db.search(
-            q, limit=limit, project=project, or_mode=or_mode, tag=tag,
+            q, limit=limit, or_mode=or_mode, tag=tag,
             states=list(PEER_VISIBLE_STATES), include_raw=False,
             excluded_source_types=excluded_source_types,
             order=order, session_type=session_type, source_type=source_type,
@@ -633,7 +632,6 @@ def list_sources(
     peers: list[str] | None = None,
     only_org: str | None = None,
     limit: int = 50,
-    project: str | None = None,
     source_type: str | None = None,
     since: str | None = None,
     until: str | None = None,
@@ -663,7 +661,7 @@ def list_sources(
         merged: list[dict] = []
         for slug, slug_db in _iter_org_dbs():
             rows = slug_db.list_sources(
-                project=project, source_type=source_type, limit=per_db_limit,
+                source_type=source_type, limit=per_db_limit,
                 since=since, until=until, author=author, tags=tags,
                 states=states, include_raw=include_raw,
                 session_source_ids=session_source_ids,
@@ -680,7 +678,7 @@ def list_sources(
             db = _open(org)
             try:
                 rows = db.list_sources(
-                    project=project, source_type=source_type, limit=limit,
+                    source_type=source_type, limit=limit,
                     since=since, until=until, author=author, tags=tags,
                     states=states, include_raw=include_raw,
                     session_source_ids=session_source_ids,
@@ -695,7 +693,7 @@ def list_sources(
         if peer_db is None:
             return []
         rows = peer_db.list_sources(
-            project=project, source_type=source_type, limit=limit,
+            source_type=source_type, limit=limit,
             since=since, until=until, author=author, tags=tags,
             states=list(PEER_VISIBLE_STATES),
         )
@@ -707,7 +705,7 @@ def list_sources(
 
     def fetch_own(db: GraphDB) -> list[dict]:
         return db.list_sources(
-            project=project, source_type=source_type, limit=per_db_limit,
+            source_type=source_type, limit=per_db_limit,
             since=since, until=until, author=author, tags=tags,
             states=states, include_raw=include_raw,
             session_source_ids=session_source_ids,
@@ -716,7 +714,7 @@ def list_sources(
 
     def fetch_peer(db: GraphDB, _slug: str) -> list[dict]:
         return db.list_sources(
-            project=project, source_type=source_type, limit=per_db_limit,
+            source_type=source_type, limit=per_db_limit,
             since=since, until=until, author=author, tags=tags,
             states=list(PEER_VISIBLE_STATES),
         )
@@ -1455,7 +1453,6 @@ def tag_merge(
         note_source = Source(
             type="note",
             platform="local",
-            project="autonomy",
             title=f"Tag merge: {from_tag} → {to_tag}",
             file_path=f"note:{new_id()}",
             metadata={"tags": ["taxonomy", "tag-merge"], "author": "api"},
@@ -1746,7 +1743,6 @@ def insert_eager_session_source(
         source = Source(
             type="session",
             platform=platform,
-            project=org,
             title=None,
             file_path=file_path,
             metadata=metadata,
@@ -1804,7 +1800,6 @@ def insert_agentic_session(
     source = Source(
         type="agentic",
         platform="local",
-        project=target_org or org,
         title=title,
         file_path=f"agentic:{slug}",
         metadata=metadata,
@@ -1821,7 +1816,6 @@ def insert_agentic_session(
         "id": source.id,
         "type": source.type,
         "platform": source.platform,
-        "project": source.project,
         "title": source.title,
         "file_path": source.file_path,
         "metadata": metadata,
@@ -2054,12 +2048,12 @@ def move_source(
 
         conn.execute(
             "INSERT INTO target.sources("
-            "id, type, platform, project, title, url, file_path, metadata, "
+            "id, type, platform, title, url, file_path, metadata, "
             "created_at, ingested_at, last_activity_at, publication_state, "
             "deprecated, successor_id, moved_to_org"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
             (
-                row["id"], row["type"], row["platform"], row["project"],
+                row["id"], row["type"], row["platform"],
                 row["title"], row["url"], row["file_path"],
                 json.dumps(target_meta), row["created_at"], row["ingested_at"],
                 row["last_activity_at"], row["publication_state"],
@@ -2301,7 +2295,6 @@ def create_note(
     title: str | None = None,
     tags: list[str] | None = None,
     author: str | None = None,
-    project: str | None = None,
     attachments: list[str] | None = None,
     html_path: str | None = None,
     auto_provenance_source_id: str | None = None,
@@ -2350,7 +2343,6 @@ def create_note(
     source = Source(
         type="note",
         platform="local",
-        project=project or "autonomy",
         title=title if title is not None else _title_from_content(content),
         file_path=source_key,
         metadata=meta,
@@ -3193,7 +3185,6 @@ def write_journal_entry(
         if field not in data:
             raise ValueError(f"missing required field: {field}")
 
-    project = data.get("project") or "autonomy"
     source_key = f"journal:{new_id()}"
     metadata = {
         "expanded": data.get("expanded", ""),
@@ -3207,7 +3198,6 @@ def write_journal_entry(
     src = Source(
         type="journal",
         platform="autonomy",
-        project=project,
         title=data["compact"],
         file_path=source_key,
         metadata=metadata,

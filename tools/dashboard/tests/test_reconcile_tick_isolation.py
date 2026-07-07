@@ -85,9 +85,9 @@ def _insert_org_source(db_path: Path, *, source_id: str, file_path: str) -> None
     g = GraphDB(db_path)
     g.conn.execute(
         "INSERT INTO sources"
-        " (id, type, platform, project, title, file_path,"
+        " (id, type, platform, title, file_path,"
         "  metadata, created_at, ingested_at, last_activity_at)"
-        " VALUES (?, 'session', 'claude-code', 'autonomy', 'test', ?, ?,"
+        " VALUES (?, 'session', 'claude-code', 'test', ?, ?,"
         "         '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z')",
         (source_id, file_path, json.dumps({"session_uuid": Path(file_path).stem})),
     )

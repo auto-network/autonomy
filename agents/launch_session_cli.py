@@ -13,6 +13,7 @@ Usage:
         --git-dir /path/to/.git \
         --output-dir /path/to/output \
         --image autonomy-agent \
+        --org <org-slug> \
         [--detach]
         [--harness claude|codex]
 
@@ -29,6 +30,30 @@ from pathlib import Path
 
 from agents.session_launcher import launch_session, DEFAULT_IMAGE, DEFAULT_OPUS_MODEL, REPO_ROOT
 from agents.workspace_settings import load_workspaces
+
+
+def _workspace_org(workspace_id: str) -> str | None:
+    """Return the owning org slug for the workspace ``workspace_id``, if any.
+
+    Fallback source for ``--org`` when the caller didn't pass it explicitly
+    (A3: org is required, but may be resolved from workspace config).
+    """
+    if not workspace_id:
+        return None
+    try:
+        ws = load_workspaces().get(workspace_id)
+        return ws.graph_project if ws else None
+    except Exception:
+        return None
+
+
+def _available_orgs() -> list[str]:
+    """Best-effort list of known org slugs, for the missing-org error message."""
+    try:
+        orgs_dir = REPO_ROOT / "data" / "orgs"
+        return sorted(p.stem for p in orgs_dir.glob("*.db"))
+    except Exception:
+        return []
 
 
 def _workspace_model(workspace_id: str) -> str | None:
@@ -82,13 +107,35 @@ def main() -> int:
     parser.add_argument("--harness", default="claude", choices=["claude", "codex"],
                         help="Harness to launch inside the container")
     parser.add_argument("--detach", action="store_true", help="Run container in background")
+    parser.add_argument("--org", default="",
+                        help="Organization slug — selects data/orgs/<org>.db for this "
+                             "session's graph writes (GRAPH_ORG env + .session_meta.json "
+                             "'org' field). Required.")
     parser.add_argument("--graph-project", default="",
-                        help="Graph scope (GRAPH_SCOPE env + .session_meta.json field)")
+                        help="DEPRECATED — use --org. Kept as a warned back-compat alias.")
     parser.add_argument("--workspace-id", default="",
-                        help="Workspace id (Setting key) for per-workspace model resolution")
+                        help="Workspace id (Setting key) for per-workspace model resolution "
+                             "and as a fallback org source when --org is omitted")
     parser.add_argument("--graph-tags", default="",
                         help="Comma-separated graph tags (GRAPH_TAGS env + .session_meta.json field)")
     args = parser.parse_args()
+
+    org = args.org
+    if not org and args.graph_project:
+        print("WARNING: --graph-project is deprecated, use --org instead", file=sys.stderr)
+        org = args.graph_project
+    if not org:
+        org = _workspace_org(args.workspace_id)
+    if not org:
+        available = _available_orgs()
+        print(
+            "ERROR: No organization specified for this session. Pass --org <slug>. "
+            "The org selects which database (data/orgs/<slug>.db) your notes and "
+            f"settings are written to. Available: {', '.join(available) if available else '(none found)'}",
+            file=sys.stderr,
+        )
+        return 1
+    args.org = org
 
     # Read prompt from file if provided
     prompt: str | None = None
@@ -114,8 +161,7 @@ def main() -> int:
         bead_title = _bead_title(args.bead_id)
         if bead_title:
             metadata["bead_title"] = bead_title
-    if args.graph_project:
-        metadata["graph_project"] = args.graph_project
+    metadata["org"] = org
     if args.graph_tags:
         # Stored as a list so .session_meta.json round-trips cleanly; the
         # session_launcher converts back to comma-separated for GRAPH_TAGS.
@@ -188,9 +234,9 @@ def main() -> int:
         if metadata:
             meta_doc.update(metadata)
             if "graph_org" not in meta_doc:
-                gp = meta_doc.get("graph_project")
-                if gp:
-                    meta_doc["graph_org"] = gp
+                resolved = meta_doc.get("org") or meta_doc.get("graph_project")
+                if resolved:
+                    meta_doc["graph_org"] = resolved
         (sessions_dir / ".session_meta.json").write_text(json.dumps(meta_doc, indent=2))
 
         auth_args: list[str] = []
@@ -229,8 +275,11 @@ def main() -> int:
             "-e", "CODEX_HOME=/home/agent/.codex",
             *auth_args,
         ]
-        if args.graph_project:
-            cmd.extend(["-e", f"GRAPH_SCOPE={args.graph_project}"])
+        # GRAPH_ORG selects the org DB (data/orgs/<org>.db) every ops.*
+        # write and search/list read in this container lands in — this is
+        # the fix for the personal.db-misfiling bug (auto-nuupw): this
+        # branch (foreground mode) previously never exported it at all.
+        cmd.extend(["-e", f"GRAPH_ORG={org}"])
         if args.graph_tags:
             cmd.extend(["-e", f"GRAPH_TAGS={args.graph_tags}"])
         for host_path, container_spec in mounts.items():
