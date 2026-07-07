@@ -75,8 +75,7 @@ def test_existing_data_unaffected(tmp_path):
     p = tmp_path / "graph.db"
     db = GraphDB(p)
     src = Source(
-        type="note", platform="local", project="autonomy",
-        title="probe", file_path="note:probe",
+        type="note", platform="local", title="probe", file_path="note:probe",
         metadata={"tags": []},
     )
     db.insert_source(src)

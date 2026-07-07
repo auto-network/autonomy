@@ -22,8 +22,7 @@ def db(tmp_path) -> GraphDB:
 
 
 def _make_source(db: GraphDB, *, title: str = "test") -> str:
-    source = Source(type="session", platform="codex-cli", project="autonomy",
-                     title=title, file_path=f"/tmp/{title}.jsonl")
+    source = Source(type="session", platform="codex-cli", title=title, file_path=f"/tmp/{title}.jsonl")
     db.insert_source(source)
     return source.id
 

@@ -135,8 +135,7 @@ def seeded_source_id(orgs_root):
     try:
         sid = str(uuid.uuid4())
         src = Source(
-            id=sid, type="note", platform="local", project="autonomy",
-            title="Dispatch Lifecycle Signpost", file_path=f"note:{sid}",
+            id=sid, type="note", platform="local", title="Dispatch Lifecycle Signpost", file_path=f"note:{sid}",
             metadata={"tags": ["signpost"], "author": "test"},
             publication_state="canonical",
         )
@@ -382,7 +381,7 @@ def test_cmd_context_role_labels_match_seeded_roles(
     try:
         src = Source(
             id=sid, type="session", platform="claude-code",
-            project="autonomy", title="mixed-role context fixture",
+            title="mixed-role context fixture",
             file_path=f"session:{sid}", metadata={"author": "test"},
         )
         db.insert_source(src)
@@ -434,7 +433,7 @@ def test_cmd_context_last_n_role_labels_match_seeded_roles(
     try:
         src = Source(
             id=sid, type="session", platform="claude-code",
-            project="autonomy", title="tail role-label fixture",
+            title="tail role-label fixture",
             file_path=f"session:{sid}", metadata={"author": "test"},
         )
         db.insert_source(src)
@@ -561,7 +560,7 @@ def test_cmd_tail_routes_through_api(
     try:
         src = Source(
             id=sid, type="session", platform="claude-code",
-            project="autonomy", title="long tail session",
+            title="long tail session",
             file_path=f"session:{sid}", metadata={"author": "test"},
         )
         db.insert_source(src)
@@ -604,7 +603,7 @@ def test_cmd_context_last_n_routes_through_api(
     try:
         src = Source(
             id=sid, type="session", platform="claude-code",
-            project="autonomy", title="context-last session",
+            title="context-last session",
             file_path=f"session:{sid}", metadata={"author": "test"},
         )
         db.insert_source(src)
@@ -1230,8 +1229,7 @@ def seeded_note_with_comments(orgs_root):
     try:
         sid = str(uuid.uuid4())
         db.insert_source(Source(
-            id=sid, type="note", platform="local", project="autonomy",
-            title="Comment Render Note", file_path=f"note:{sid}",
+            id=sid, type="note", platform="local", title="Comment Render Note", file_path=f"note:{sid}",
             metadata={"tags": ["signpost"], "author": "test"},
             publication_state="canonical",
         ))
@@ -1342,8 +1340,7 @@ def _seed_curated_note(org: str, *, content: str, tags: list[str] | None = None)
     try:
         sid = str(uuid.uuid4())
         src = Source(
-            id=sid, type="note", platform="local", project=org,
-            title=content[:80], file_path=f"note:{sid}",
+            id=sid, type="note", platform="local", title=content[:80], file_path=f"note:{sid}",
             metadata={"tags": tags or [], "author": "test"},
             publication_state="curated",
         )
@@ -1429,8 +1426,7 @@ def test_scopeless_resolve_finds_curated_note_in_any_org(
     try:
         seed_id = str(uuid.uuid4())
         seed = Source(
-            id=seed_id, type="note", platform="local", project="autonomy",
-            title="global-resolve probe",
+            id=seed_id, type="note", platform="local", title="global-resolve probe",
             file_path=f"note:{seed_id}",
             metadata={"tags": ["probe"], "author": "test"},
             publication_state="curated",

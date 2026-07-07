@@ -56,9 +56,9 @@ def isolated_dao(tmp_path, monkeypatch):
     g = GraphDB(graph_db_path)
     # Insert three sessions with varying last_activity_at timestamps
     g.conn.execute("""INSERT INTO sources
-        (id, type, platform, project, title, file_path, metadata, created_at,
+        (id, type, platform, title, file_path, metadata, created_at,
          ingested_at, last_activity_at)
-        VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+        VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         ("src-old-active", "[Image #1]",
          "/home/jeremy/sessions/old-active.jsonl",
          json.dumps({"session_uuid": "uuid-old-active",
@@ -69,9 +69,9 @@ def isolated_dao(tmp_path, monkeypatch):
          "2026-04-18T22:00:00Z"),  # but active 30 min ago
     )
     g.conn.execute("""INSERT INTO sources
-        (id, type, platform, project, title, file_path, metadata, created_at,
+        (id, type, platform, title, file_path, metadata, created_at,
          ingested_at, last_activity_at)
-        VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+        VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         ("src-fresh-stale", "Some title",
          "/home/jeremy/sessions/fresh-stale.jsonl",
          json.dumps({"session_uuid": "uuid-fresh-stale",
@@ -81,9 +81,9 @@ def isolated_dao(tmp_path, monkeypatch):
          "2026-04-17T23:00:00Z"),
     )
     g.conn.execute("""INSERT INTO sources
-        (id, type, platform, project, title, file_path, metadata, created_at,
+        (id, type, platform, title, file_path, metadata, created_at,
          ingested_at, last_activity_at)
-        VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+        VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         ("src-with-label", "Stale graph title — should be overridden",
          "/home/jeremy/sessions/with-label.jsonl",
          json.dumps({"session_uuid": "uuid-with-label",
@@ -314,9 +314,9 @@ def duration_dao(tmp_path, monkeypatch):
 
     # Row A: 30 min duration (created 2h ago, active 90 min ago)
     g.conn.execute("""INSERT INTO sources
-        (id, type, platform, project, title, file_path, metadata, created_at,
+        (id, type, platform, title, file_path, metadata, created_at,
          ingested_at, last_activity_at)
-        VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+        VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         ("src-short", "Short session",
          "/home/jeremy/sessions/short.jsonl",
          json.dumps({"session_uuid": "uuid-short", "session_type": "interactive"}),
@@ -325,9 +325,9 @@ def duration_dao(tmp_path, monkeypatch):
     )
     # Row B: 2 hour duration
     g.conn.execute("""INSERT INTO sources
-        (id, type, platform, project, title, file_path, metadata, created_at,
+        (id, type, platform, title, file_path, metadata, created_at,
          ingested_at, last_activity_at)
-        VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+        VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         ("src-long", "Long session",
          "/home/jeremy/sessions/long.jsonl",
          json.dumps({"session_uuid": "uuid-long", "session_type": "interactive"}),
@@ -336,9 +336,9 @@ def duration_dao(tmp_path, monkeypatch):
     )
     # Row C: 5 min duration (most recent)
     g.conn.execute("""INSERT INTO sources
-        (id, type, platform, project, title, file_path, metadata, created_at,
+        (id, type, platform, title, file_path, metadata, created_at,
          ingested_at, last_activity_at)
-        VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+        VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         ("src-tiny", "Tiny session",
          "/home/jeremy/sessions/tiny.jsonl",
          json.dumps({"session_uuid": "uuid-tiny", "session_type": "interactive"}),
@@ -398,9 +398,9 @@ def librarian_dao(tmp_path, monkeypatch):
     # Librarian session — metadata carries job_id + job_type so the DAO can
     # join to librarian_jobs.payload and extract the target bead_id.
     g.conn.execute("""INSERT INTO sources
-        (id, type, platform, project, title, file_path, metadata, created_at,
+        (id, type, platform, title, file_path, metadata, created_at,
          ingested_at, last_activity_at)
-        VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+        VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         ("src-lib-1", "librarian-review_report-781221-65a80c94",
          "/home/jeremy/sessions/lib.jsonl",
          json.dumps({
@@ -415,9 +415,9 @@ def librarian_dao(tmp_path, monkeypatch):
     # Interactive session as a control to ensure non-librarian rows are
     # not annotated with librarian_type.
     g.conn.execute("""INSERT INTO sources
-        (id, type, platform, project, title, file_path, metadata, created_at,
+        (id, type, platform, title, file_path, metadata, created_at,
          ingested_at, last_activity_at)
-        VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+        VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         ("src-inter-1", "Some interactive",
          "/home/jeremy/sessions/inter.jsonl",
          json.dumps({"session_uuid": "uuid-inter", "session_type": "interactive"}),
@@ -517,9 +517,9 @@ class TestLibrarianTitleFields:
         from tools.graph.db import GraphDB
         g = GraphDB(graph_db_path)
         g.conn.execute("""INSERT INTO sources
-            (id, type, platform, project, title, file_path, metadata, created_at,
+            (id, type, platform, title, file_path, metadata, created_at,
              ingested_at, last_activity_at)
-            VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
             ("src-orphan", "librarian-review_report-1-deadbeef",
              "/home/jeremy/sessions/orphan.jsonl",
              json.dumps({
@@ -619,9 +619,9 @@ def quota_dao(tmp_path, monkeypatch):
     for i in range(50):
         g.conn.execute(
             """INSERT INTO sources
-            (id, type, platform, project, title, file_path, metadata, created_at,
+            (id, type, platform, title, file_path, metadata, created_at,
              ingested_at, last_activity_at)
-            VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
             (
                 f"src-dispatch-{i:03d}",
                 f"Dispatch run {i}",
@@ -641,9 +641,9 @@ def quota_dao(tmp_path, monkeypatch):
     for i in range(5):
         g.conn.execute(
             """INSERT INTO sources
-            (id, type, platform, project, title, file_path, metadata, created_at,
+            (id, type, platform, title, file_path, metadata, created_at,
              ingested_at, last_activity_at)
-            VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
             (
                 f"src-librarian-{i:03d}",
                 f"Librarian task {i}",
@@ -661,9 +661,9 @@ def quota_dao(tmp_path, monkeypatch):
     for i in range(3):
         g.conn.execute(
             """INSERT INTO sources
-            (id, type, platform, project, title, file_path, metadata, created_at,
+            (id, type, platform, title, file_path, metadata, created_at,
              ingested_at, last_activity_at)
-            VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
             (
                 f"src-interactive-{i:03d}",
                 f"Interactive session {i}",
@@ -795,9 +795,9 @@ class TestSessionStatusGraphSourceRepair:
         g = GraphDB.for_org("autonomy", mode="rw")
         g.conn.execute(
             """INSERT INTO sources
-               (id, type, platform, project, title, file_path, metadata, created_at,
+               (id, type, platform, title, file_path, metadata, created_at,
                 ingested_at, last_activity_at)
-               VALUES (?, 'session', 'claude-code', 'autonomy', ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
             (
                 "src-live-current",
                 "Live stale repaired",

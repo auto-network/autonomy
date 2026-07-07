@@ -157,7 +157,7 @@ def test_dind_section_omitted_when_disabled():
 
 def test_graph_scope_env_var_rendered():
     out = render_workspace_primer(_cfg(graph_project="anchore"))
-    assert "GRAPH_SCOPE=anchore" in out
+    assert "GRAPH_ORG=anchore" in out
     assert "**anchore** org" in out
 
 
@@ -213,8 +213,8 @@ def test_widgets_ng_shape(shipped_workspaces):
     # 4. Background startup check section
     assert "## Background Setup" in out
 
-    # 5. Correct GRAPH_SCOPE and GRAPH_TAGS
-    assert "GRAPH_SCOPE=anchore" in out
+    # 5. Correct GRAPH_ORG and GRAPH_TAGS
+    assert "GRAPH_ORG=anchore" in out
     assert "GRAPH_TAGS=enterprise,widgets-ng" in out
 
     # 6. CrossTalk legitimized
@@ -233,7 +233,7 @@ def test_autonomy_shape(shipped_workspaces):
     assert "## Background Setup" not in out
     assert "## Editing and Committing" not in out
     assert "## Limits" in out
-    assert "GRAPH_SCOPE=autonomy" in out
+    assert "GRAPH_ORG=autonomy" in out
     # No default_tags for autonomy
     assert "GRAPH_TAGS=" not in out
     # Default host networking
@@ -250,7 +250,7 @@ def test_enterprise_v5_shape(shipped_workspaces):
     assert "`/workspace/widgets` — **writable**" in out
     # v5 is the lean subset — does not mount widgets_ng.
     assert "`/workspace/widgets_ng`" not in out
-    assert "GRAPH_SCOPE=anchore" in out
+    assert "GRAPH_ORG=anchore" in out
     assert "GRAPH_TAGS=enterprise,widgets-v5" in out
 
 

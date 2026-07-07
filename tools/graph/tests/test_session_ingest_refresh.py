@@ -551,7 +551,6 @@ def _insert_eager_source(graph_db: GraphDB, jsonl_path: Path) -> str:
     source = Source(
         type="session",
         platform="claude-code",
-        project="autonomy",
         title=None,
         file_path=abs_path,
         metadata={

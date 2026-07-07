@@ -78,7 +78,7 @@ def _make_peer_note(db_path: Path, *, title: str, state: str = "raw") -> str:
     db = GraphDB(db_path)
     try:
         src = Source(
-            type="note", platform="local", project="autonomy",
+            type="note", platform="local",
             title=title, file_path=f"note:{title.replace(' ', '_')}",
             metadata={"tags": [], "author": "test"},
             publication_state=state,
@@ -481,11 +481,11 @@ def test_api_graph_note_version_endpoints_reject_non_notes(dashboard_client, org
     conn = sqlite3.connect(str(db_path))
     try:
         conn.execute(
-            "INSERT INTO sources(id, type, platform, project, title, file_path, "
-            "metadata, publication_state) VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT INTO sources(id, type, platform, title, file_path, "
+            "metadata, publication_state) VALUES(?,?,?,?,?,?,?)",
             (
                 "11111111-2222-3333-4444-555555555555",
-                "session", "claude-code", "autonomy",
+                "session", "claude-code",
                 "session source", "session:test",
                 _json.dumps({}), "raw",
             ),

@@ -35,7 +35,6 @@ def _seed_source_with_thought(
     src = Source(
         type=type_,
         platform="local",
-        project=project,
         title=title,
         file_path=f"{type_}:{title.replace(' ', '_')}",
         metadata={"tags": ["test"]},

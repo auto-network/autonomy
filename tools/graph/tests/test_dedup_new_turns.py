@@ -22,8 +22,7 @@ def _turn(turn_number: int, message_id: str | None, content: str = "x") -> dict:
 
 def _db_with_source(tmp_path) -> tuple[GraphDB, str]:
     db = GraphDB(tmp_path / "org.db")
-    source = Source(type="session", platform="codex-cli", project="autonomy",
-                     title="t", file_path="/tmp/t.jsonl")
+    source = Source(type="session", platform="codex-cli", title="t", file_path="/tmp/t.jsonl")
     db.insert_source(source)
     return db, source.id
 

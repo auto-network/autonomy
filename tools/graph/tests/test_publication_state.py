@@ -227,7 +227,6 @@ def _seed_fts_source(db, *, source_id, title, content, author, state="raw"):
         id=source_id,
         type="note",
         platform="local",
-        project=None,
         title=title,
         file_path=f"note:{source_id}",
         metadata={"author": author, "tags": []},

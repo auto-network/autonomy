@@ -206,7 +206,6 @@ def save_playbook(db: GraphDB, playbook_id: str, content: str, generated_by: str
     source = Source(
         type="playbook",
         platform="generated",
-        project=catalog_entry.get("source_projects", [None])[0],
         title=catalog_entry["title"],
         file_path=source_key,
         metadata={

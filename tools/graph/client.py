@@ -197,13 +197,11 @@ class HttpClient:
 
     def search(
         self, q, *, org=None, peers=None, only_org=None, limit=25,
-        project=None, or_mode=False, tag=None, states=None,
+        or_mode=False, tag=None, states=None,
         include_raw=False, session_source_ids=None,
         session_author_pattern=None, source_type=None,
     ):
         params: dict[str, Any] = {"q": q, "limit": str(limit)}
-        if project:
-            params["project"] = project
         if or_mode:
             params["or"] = "1"
         if tag:
@@ -289,14 +287,12 @@ class HttpClient:
         return []
 
     def list_sources(
-        self, *, org=None, peers=None, only_org=None, limit=50, project=None,
+        self, *, org=None, peers=None, only_org=None, limit=50,
         source_type=None, tags=None, since=None, until=None, author=None,
         states=None, include_raw=False,
         session_source_ids=None, session_author_pattern=None,
     ):
         params: dict[str, Any] = {"limit": str(limit)}
-        if project:
-            params["project"] = project
         if source_type:
             params["type"] = source_type
         if tags:
@@ -394,7 +390,7 @@ class HttpClient:
     # ── writes ─────────────────────────────────────────────
 
     def create_note(
-        self, content, *, tags=None, author=None, project=None,
+        self, content, *, tags=None, author=None,
         attachments=None, html_path=None,
         auto_provenance_source_id=None, auto_provenance_turn=None,
         short_description=None,
@@ -404,7 +400,7 @@ class HttpClient:
         if attachments or html_path:
             return self._create_note_multipart(
                 content,
-                tags=tags, author=author, project=project,
+                tags=tags, author=author,
                 attachments=attachments, html_path=html_path,
                 auto_provenance_source_id=auto_provenance_source_id,
                 auto_provenance_turn=auto_provenance_turn,
@@ -417,8 +413,6 @@ class HttpClient:
             body["tags"] = ",".join(tags)
         if author:
             body["author"] = author
-        if project:
-            body["project"] = project
         if auto_provenance_source_id:
             body["auto_provenance_source_id"] = auto_provenance_source_id
         if auto_provenance_turn:
@@ -431,7 +425,7 @@ class HttpClient:
         return _normalize_note_result(result, content)
 
     def _create_note_multipart(
-        self, content, *, tags, author, project,
+        self, content, *, tags, author,
         attachments, html_path,
         auto_provenance_source_id, auto_provenance_turn,
         short_description, keywords, org,
@@ -441,8 +435,6 @@ class HttpClient:
             fields["tags"] = ",".join(tags)
         if author:
             fields["author"] = author
-        if project:
-            fields["project"] = project
         if auto_provenance_source_id:
             fields["auto_provenance_source_id"] = auto_provenance_source_id
         if auto_provenance_turn is not None:

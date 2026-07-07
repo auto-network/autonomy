@@ -504,14 +504,14 @@ def get_recent_sessions(
         has_la = _graph_sources_have_last_activity_column(conn)
         if has_la:
             sql = (
-                "SELECT id, type, project, title, created_at, last_activity_at,"
+                "SELECT id, type, title, created_at, last_activity_at,"
                 " file_path, metadata FROM sources"
                 " WHERE type IN ('session', 'agentic')"
                 " ORDER BY COALESCE(last_activity_at, created_at) DESC LIMIT ?"
             )
         else:
             sql = (
-                "SELECT id, type, project, title, created_at, NULL as last_activity_at,"
+                "SELECT id, type, title, created_at, NULL as last_activity_at,"
                 " file_path, metadata FROM sources"
                 " WHERE type IN ('session', 'agentic')"
                 " ORDER BY created_at DESC LIMIT ?"
@@ -531,7 +531,9 @@ def get_recent_sessions(
                 "id": r["id"],
                 "type": r["type"],
                 "title": r["title"] or "",
-                "project": r["project"] or "",
+                # The org a session belongs to is which DB it was read
+                # from (slug) — not a stored field that can drift from it.
+                "project": slug,
                 "session_uuid": session_uuid,
                 "file_path": file_path,
                 "session_type": _derive_session_type(meta, file_path),

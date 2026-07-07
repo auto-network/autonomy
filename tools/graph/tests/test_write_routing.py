@@ -84,8 +84,7 @@ def _count_settings(db_path: Path) -> int:
 def _seed_note_source(db: GraphDB, *, title: str) -> str:
     from tools.graph.models import Source
     src = Source(
-        type="note", platform="local", project="autonomy",
-        title=title, file_path=f"note:{title.replace(' ', '_')}",
+        type="note", platform="local", title=title, file_path=f"note:{title.replace(' ', '_')}",
         metadata={"tags": [], "author": "test"},
     )
     db.insert_source(src)

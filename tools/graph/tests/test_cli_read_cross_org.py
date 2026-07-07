@@ -85,7 +85,6 @@ def _seed_note(
         id=sid,
         type="note",
         platform="local",
-        project="autonomy",
         title=title,
         file_path=f"note:{sid}",
         metadata={"tags": tags or [], "author": "test"},

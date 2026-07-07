@@ -46,7 +46,6 @@ def _seed_source_with_thought(
     src = Source(
         type=type_,
         platform="local",
-        project=project,
         title=title,
         file_path=file_path or f"{type_}:{title.replace(' ', '_')}",
         metadata=metadata or {"tags": ["test"]},
@@ -153,56 +152,6 @@ def test_insert_agentic_session_persists_bead_identity(graph_db_env):
 # ── search exclusion at every FTS entry point ─────────────────
 
 
-def test_search_excludes_agentic_by_default_project_scope_thoughts(graph_db_env):
-    db = GraphDB(str(graph_db_env))
-    note, agentic = _seed_agentic_and_note(db, "alpha-token")
-    db.close()
-
-    results = ops.search("alpha-token", project="autonomy", include_raw=True)
-    types = {r.get("source_type") for r in results}
-    ids = {r.get("source_id") for r in results}
-
-    assert "agentic" not in types, "agentic source must not appear by default"
-    assert agentic.id not in ids
-    assert note.id in ids
-
-
-def test_search_excludes_agentic_by_default_project_scope_derivations(graph_db_env):
-    db = GraphDB(str(graph_db_env))
-    note = _seed_source_with_thought(
-        db, type_="note", title="deriv note", term="deriv-token-pj",
-    )
-    agentic = Source(
-        type="agentic",
-        platform="local",
-        project="autonomy",
-        title="agentic deriv carrier",
-        file_path="agentic:proj-deriv",
-        metadata={"kind": "agent-action"},
-    )
-    db.insert_source(agentic)
-    from tools.graph.models import Derivation
-    db.insert_derivation(Derivation(
-        source_id=agentic.id,
-        content="agentic derivation about deriv-token-pj",
-        turn_number=1,
-    ))
-    db.insert_derivation(Derivation(
-        source_id=note.id,
-        content="note derivation about deriv-token-pj",
-        turn_number=2,
-    ))
-    db.conn.commit()
-    db.close()
-
-    results = ops.search("deriv-token-pj", project="autonomy", include_raw=True)
-    types = {r.get("source_type") for r in results}
-    ids = {r.get("source_id") for r in results}
-
-    assert "agentic" not in types
-    assert agentic.id not in ids
-
-
 def test_search_excludes_agentic_by_default_global_thoughts(graph_db_env):
     db = GraphDB(str(graph_db_env))
     note, agentic = _seed_agentic_and_note(db, "beta-token")
@@ -226,7 +175,6 @@ def test_search_excludes_agentic_by_default_global_derivations(graph_db_env):
     agentic = Source(
         type="agentic",
         platform="local",
-        project="autonomy",
         title="g agentic carrier",
         file_path="agentic:gl-deriv",
         metadata={"kind": "agent-action"},
@@ -299,18 +247,10 @@ def test_search_includes_agentic_when_excluded_source_types_empty(graph_db_env):
     note, agentic = _seed_agentic_and_note(db, "gamma-token")
     db.close()
 
-    # Global path
-    results_global = ops.search(
+    results = ops.search(
         "gamma-token", include_raw=True, excluded_source_types=[]
     )
-    assert any(r.get("source_id") == agentic.id for r in results_global)
-
-    # Project-scoped path
-    results_proj = ops.search(
-        "gamma-token", project="autonomy", include_raw=True,
-        excluded_source_types=[],
-    )
-    assert any(r.get("source_id") == agentic.id for r in results_proj)
+    assert any(r.get("source_id") == agentic.id for r in results)
 
 
 def test_search_includes_agentic_in_id_fallback_when_override(graph_db_env):

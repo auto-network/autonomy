@@ -62,7 +62,6 @@ def _seed_note(
         id=sid,
         type="note",
         platform="local",
-        project="autonomy",
         title=title,
         file_path=f"note:{sid}",
         metadata={"tags": tags or [], "author": "test"},
@@ -188,8 +187,7 @@ def test_resolve_uuid_own_first_beats_peer(orgs_root):
     anchore_db = GraphDB.open_org_db("anchore")
     try:
         anchore_db.insert_source(Source(
-            id=shared_id, type="note", platform="local", project="autonomy",
-            title="anchore-shared", file_path=f"note:a-{shared_id}",
+            id=shared_id, type="note", platform="local", title="anchore-shared", file_path=f"note:a-{shared_id}",
             metadata={}, publication_state="raw",
         ))
         anchore_db.conn.commit()
@@ -198,8 +196,7 @@ def test_resolve_uuid_own_first_beats_peer(orgs_root):
     autonomy_db = GraphDB.open_org_db("autonomy")
     try:
         autonomy_db.insert_source(Source(
-            id=shared_id, type="note", platform="local", project="autonomy",
-            title="autonomy-shared", file_path=f"note:b-{shared_id}",
+            id=shared_id, type="note", platform="local", title="autonomy-shared", file_path=f"note:b-{shared_id}",
             metadata={}, publication_state="canonical",
         ))
         autonomy_db.conn.commit()
@@ -229,7 +226,7 @@ def test_pitfall_note_lands_in_org_only(orgs_root):
     try:
         sid = str(uuid.uuid4())
         anchore_db.insert_source(Src(
-            id=sid, type="note", platform="local", project="autonomy",
+            id=sid, type="note", platform="local",
             title="fresh pitfall",
             file_path=f"note:fresh-{sid}",
             metadata={"tags": ["pitfall"]},

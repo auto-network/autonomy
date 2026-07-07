@@ -32,7 +32,6 @@ def _seed_note(db: GraphDB, *, title: str, tags: list[str], project: str = "auto
     src = Source(
         type="note",
         platform="local",
-        project=project,
         title=title,
         file_path=f"note:{title.replace(' ', '_')}",
         metadata={"tags": tags, "author": "test"},
