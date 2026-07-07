@@ -18,6 +18,7 @@ const COMMIT_API_BASE = '/api/capabilities/commit/v1/operator';
 // "just now" / "Nm" / "Nh" / "Nd". Defensive: bad input -> ''.
 function commitRelativeTime(epochSeconds) {
   if (typeof epochSeconds !== 'number' || !isFinite(epochSeconds)) return '';
+  if (epochSeconds <= 0) return '';  // unset/zeroed timestamp — no bogus "20641d"
   const diffMs = Date.now() - epochSeconds * 1000;
   if (diffMs < 0) return 'just now';
   if (diffMs < 60_000) return 'just now';
@@ -113,14 +114,19 @@ function commitApiPage() {
           { headers: { Accept: 'application/json' } },
         );
         if (!res.ok) {
-          this.detailError = await this._errorFrom(res);
+          const errInfo = await this._errorFrom(res);
+          // Stale response (selection moved on): drop it, don't stomp the
+          // panel for the commit that is now selected.
+          if (this.selectedWorkflowId !== workflowId) return;
+          this.detailError = errInfo;
           return;
         }
-        // Guard against the selection changing while this was in flight.
         const data = await res.json();
         if (this.selectedWorkflowId !== workflowId) return;
         this.detail = data && typeof data === 'object' ? data : null;
       } catch (err) {
+        // Same staleness guard on the network-error path.
+        if (this.selectedWorkflowId !== workflowId) return;
         this.detailError = { status: null, message: this._msg(err) };
       } finally {
         if (this.selectedWorkflowId === workflowId) {
