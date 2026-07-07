@@ -130,6 +130,7 @@ def _init_repo(tmp_path: Path) -> Path:
     (repo / "README.md").write_text("hello\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "initial")
+    _git(repo, "branch", "-M", "main")
     return repo
 
 
@@ -684,6 +685,9 @@ def test_commit_create_request_signature_attach_and_publish_round_trip(
     signed_commit_sha = attach_body["signed_commit_sha"]
     assert attach_body["workflow"]["status"] == "signed"
     assert attach_body["next_action"]["action"] == "publish"
+    signed_object_sha256 = attach_body["verification"]["signed_object_sha256"]
+    assert signed_object_sha256
+    assert ContentAddressedStore(trusted_store_env[1]).get(signed_object_sha256)
 
     conn = cdb._get_conn()
     try:
@@ -735,6 +739,7 @@ def test_commit_create_request_signature_attach_and_publish_round_trip(
     assert publish_body["ref_update_result"]["expected_old_sha"] == repo_head_sha
     assert publish_body["pushed_ref"] == "refs/heads/main"
     assert publish_body["provider_url"] == "https://github.com/autonomy/autonomy"
+    assert _git_out(repo, "rev-parse", "refs/heads/main") == signed_commit_sha
 
     snapshot_conn = snapshot_dao._get_conn()
     try:
