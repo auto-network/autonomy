@@ -14,6 +14,7 @@ from tools.dashboard.commit_broker.publish_executor import (
     NEW_REF_ALREADY_EXISTS,
     NOOP_ALREADY_PUBLISHED,
     OUT_OF_SCOPE,
+    PUSH_FAILED,
     PUSHED,
     REF_ADVANCED,
     SKIPPED_LOCAL_ONLY,
@@ -35,6 +36,18 @@ class _Pusher:
         # (expected_ref_sha/is_new_ref) it must enforce atomically at the push;
         # record that a push happened and that the secret is reachable via reveal().
         self.calls.append((signed_commit_sha, target_ref, expected_ref_sha, is_new_ref, credential.reveal()))
+
+
+class _FailedPusher:
+    def __init__(self, reason="simulated push failure"):
+        self.reason = reason
+        self.calls = []
+
+    def __call__(self, *, signed_commit_sha, target_ref, expected_ref_sha, is_new_ref, credential):
+        self.calls.append((signed_commit_sha, target_ref, expected_ref_sha, is_new_ref, credential.reveal()))
+        from tools.dashboard.commit_broker.pusher import PushOutcome
+
+        return PushOutcome(False, self.reason)
 
 
 def _scope(repo=REPO):
@@ -122,6 +135,15 @@ def test_out_of_scope_repo_denied_before_push():
     assert r.outcome == OUT_OF_SCOPE
     assert r.pushed is False
     assert pusher.calls == []
+
+
+def test_push_failure_propagates_out_of_executor():
+    pusher = _FailedPusher("simulated push failure")
+    r = _run(pusher=pusher)
+    assert r.outcome == PUSH_FAILED
+    assert r.pushed is False
+    assert r.reason == "simulated push failure"
+    assert len(pusher.calls) == 1
 
 
 def test_gates_run_before_credential_is_even_resolved():

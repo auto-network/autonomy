@@ -56,6 +56,7 @@ NOOP_ALREADY_PUBLISHED = "noop_already_published"
 REF_ADVANCED = "ref_advanced"
 NEW_REF_ALREADY_EXISTS = "new_ref_already_exists"
 OUT_OF_SCOPE = "out_of_scope"
+PUSH_FAILED = "push_failed"
 
 
 @dataclass(frozen=True)
@@ -160,12 +161,28 @@ def execute_publish(
     # precondition), never a raw `git push --force-with-lease`, which cannot prove
     # which ref-update a pack contains (R1/R2, see lease.py). expected_ref_sha and
     # is_new_ref are passed through for exactly that atomic precondition.
-    push_objects(
+    push_result = push_objects(
         signed_commit_sha=signed_commit_sha,
         target_ref=target_ref,
         expected_ref_sha=expected_ref_sha,
         is_new_ref=is_new_ref,
         credential=credential,
     )
+    if push_result is not None:
+        if not getattr(push_result, "ok", True):
+            return PublishResult(
+                PUSH_FAILED,
+                getattr(push_result, "reason", "push failed"),
+                False,
+                observed_remote_tip=observed_tip,
+            )
+        pushed_sha = getattr(push_result, "pushed_sha", None)
+        if pushed_sha and pushed_sha != signed_commit_sha:
+            return PublishResult(
+                PUSH_FAILED,
+                f"push reported unexpected sha {pushed_sha!r}",
+                False,
+                observed_remote_tip=observed_tip,
+            )
     return PublishResult(PUSHED, "published to remote", True,
                          observed_remote_tip=observed_tip, pushed_ref=target_ref, target=target_repo)
