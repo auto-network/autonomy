@@ -21,10 +21,16 @@ from starlette.routing import Route
 
 from tools.dashboard.dao import sign_requests as sr
 
+# Importing the schema module registers the ``autonomy.commit.signing-key#1``
+# Setting schema at startup (its SettingSchema self-registers on import). Done
+# here rather than in tools/graph/schemas/__init__.py to avoid touching that file
+# while unrelated work sits uncommitted in it.
+from tools.graph.schemas import commit_signing_key as _sign_key_schema  # noqa: F401
+
 # The per-org signing key lives in this Setting as a passphrase-encrypted armored
 # private key. The browser fetches it, decrypts locally, and signs; the server
 # only ever holds (and serves) the ENCRYPTED blob.
-SIGN_KEY_SET_ID = "autonomy.commit.signing-key"
+SIGN_KEY_SET_ID = _sign_key_schema.SIGN_KEY_SET_ID
 
 
 async def get_sign_key(request: Request) -> PlainTextResponse:

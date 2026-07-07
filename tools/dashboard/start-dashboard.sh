@@ -18,7 +18,7 @@ PID_FILE="$REPO_ROOT/data/dashboard.pid"
 LOG_FILE="$REPO_ROOT/data/dashboard.log"
 VENV="$REPO_ROOT/.venv/bin/python"
 
-TAILWIND_BIN="$(command -v tailwindcss || echo "$SCRIPT_DIR/tailwindcss")"  # prefer baked-in binary
+TAILWIND_BIN="$SCRIPT_DIR/tailwindcss"
 CSS_INPUT="$SCRIPT_DIR/tailwind.input.css"
 CSS_OUTPUT="$SCRIPT_DIR/static/tailwind.css"
 
