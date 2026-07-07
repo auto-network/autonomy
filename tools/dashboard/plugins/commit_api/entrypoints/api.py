@@ -78,6 +78,7 @@ from tools.dashboard.commit_broker.assembly import (
 )
 from tools.dashboard.services.trusted_git_object_store import (
     ContentAddressedStore,
+    ObjectIntegrityError,
     capture_snapshot,
     verify_snapshot,
 )
@@ -1531,22 +1532,6 @@ async def request_signature(request: Request) -> JSONResponse:
         conn.close()
 
 
-def _reconstruct_unsigned_commit_payload(
-    proposal_request: CommitProposeRequest,
-    state_payload: dict[str, Any],
-) -> tuple[str, bytes, list[str]]:
-    tree_sha = str(state_payload.get("tree_sha") or proposal_request.content.tree_sha)
-    parent_shas = [str(item) for item in (state_payload.get("parent_shas") or []) if str(item)]
-    payload = serialize_unsigned_commit_payload(
-        tree_oid=tree_sha,
-        parent_oids=parent_shas,
-        author_line=_git_identity_line(proposal_request.author),
-        committer_line=_git_identity_line(proposal_request.committer),
-        message=_commit_message_bytes(proposal_request.message),
-    )
-    return tree_sha, payload, parent_shas
-
-
 def _verify_attached_signature(
     *,
     signing_method: str,
@@ -1704,7 +1689,13 @@ async def attach_signature(request: Request) -> JSONResponse:
             if not verify_snapshot(snapshot_ref=snapshot_ref, store=store, dao_conn=snapshot_conn):
                 return _json_error("signature_verification_failed", "trusted snapshot failed integrity verification")
 
-            _tree_sha, unsigned_payload, _parent_shas = _reconstruct_unsigned_commit_payload(proposal_request, state_payload)
+            snapshot = snapshot_dao.get_snapshot(snapshot_conn, snapshot_ref)
+            if snapshot is None:
+                return _json_error("signature_verification_failed", "trusted snapshot metadata is missing")
+            try:
+                unsigned_payload = store.get(str(snapshot["canonical_preview_sha256"]))
+            except (KeyError, ObjectIntegrityError):
+                return _json_error("signature_verification_failed", "trusted snapshot preview failed integrity verification")
             try:
                 signature_ok = _verify_attached_signature(
                     signing_method=str(signing_row["signing_method"]),
