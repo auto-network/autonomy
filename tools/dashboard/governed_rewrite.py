@@ -525,6 +525,16 @@ def record_force_with_lease_approval(
     this approval can be granted — raises unless the caller passes
     ``delta_disclosed=True``. When the ref never moved, disclosure isn't
     required and a single combined confirmation is allowed.
+
+    Payload carries ``ref_tip``/``binding`` (this module's own reader,
+    ``get_binding_lease``) AND a ``constraints.expected_ref_sha`` mirror of
+    the same value — that second shape is what the REAL, landed
+    ``commit.publish`` handler's own ``_approval_expected_old_sha`` reads
+    (tools/dashboard/plugins/commit_api/entrypoints/api.py). Without it,
+    publish's lease check silently finds no usable constraint and rejects
+    every governed-rewrite publish attempt no matter how correctly T0/T2
+    were recorded — found by reading the real handler before building
+    D4-23, not by assuming this module's own shape was sufficient.
     """
     t0_ref_tip = _get_provisional_ref_tip(workflow_id, db_path=db_path)
     if t0_ref_tip is None:
@@ -551,6 +561,7 @@ def record_force_with_lease_approval(
                 json.dumps({
                     "ref_tip": observed_ref_tip, "binding": True,
                     "ref_advanced": ref_advanced, "delta_disclosed": delta_disclosed,
+                    "constraints": {"expected_ref_sha": observed_ref_tip},
                 }),
             ),
         )
@@ -869,6 +880,81 @@ def block_chain_link_on_signing_failure(
         workflow_id=workflow_id,
         event_type="governed_rewrite_chain_blocked",
         status_after=CHAIN_BLOCKED_STATUS,
+        repo_slug=repo_slug,
+        payload=updated_state,
+        db_path=db_path,
+    )
+
+
+# ── D4-23: publish with the T2 lease, fail closed on any divergence ────
+
+PUBLISH_LEASE_STALE_STATUS = "failed_retryable"
+
+
+def block_workflow_on_publish_lease_failure(
+    *,
+    workflow_id: str,
+    repo_slug: str,
+    reason: str,
+    db_path=None,
+) -> None:
+    """React to commit.publish rejecting a stale T2 lease (§3 step 7,
+    D4-23): transition the workflow to ``failed_retryable`` naming the
+    cause.
+
+    commit.publish's own lease check (``_approval_expected_old_sha``)
+    already fails closed on a stale lease with NO mutation at all — an
+    early return before any INSERT/UPDATE, so the ref is left unchanged
+    and the workflow's prior status/signatures are already untouched by
+    construction; nothing here needs to preserve them, they were never
+    at risk. This call is the governed-rewrite-specific reaction layered
+    on top: it makes the failure VISIBLE on the workflow itself (an
+    operator watching status sees ``failed_retryable``, not a workflow
+    that silently looks like nothing happened), distinct from D4-20's
+    ``blocked`` — a stale lease only needs a fresh T2 re-approval at the
+    new ref-tip (T0 is still valid, D4-15's dual-approval gate doesn't
+    need re-running from scratch), not the harder intervention a signing
+    failure requires.
+    """
+    current_state = _current_state_json(workflow_id, db_path=db_path)
+    updated_state = {**current_state, "publish_lease_failure_reason": reason}
+    commit_workflow_db.append_event(
+        event_id=uuid.uuid4().hex,
+        workflow_id=workflow_id,
+        event_type="governed_rewrite_publish_lease_stale",
+        status_after=PUBLISH_LEASE_STALE_STATUS,
+        repo_slug=repo_slug,
+        payload=updated_state,
+        db_path=db_path,
+    )
+
+
+def clear_publish_lease_failure_for_retry(
+    *,
+    workflow_id: str,
+    repo_slug: str,
+    db_path=None,
+) -> None:
+    """After a fresh T2 approval lands at the new ref-tip, restore the
+    workflow to ``signed`` so ``commit.publish``'s own precondition
+    (``status in {"signed", "awaiting_publish", "published"}``) accepts a
+    retry (§3 step 7, D4-23).
+
+    Deliberately a separate call from ``record_force_with_lease_approval``
+    rather than a side effect of it: recording an approval is pure
+    bookkeeping over ``commit_workflow_approvals`` with no opinion on
+    workflow status, and not every ``force_with_lease`` approval follows a
+    ``failed_retryable`` rejection (the very first T2 approval on a
+    workflow that's never failed has nothing to clear). The caller decides
+    when a retry is actually being attempted.
+    """
+    current_state = _current_state_json(workflow_id, db_path=db_path)
+    updated_state = {k: v for k, v in current_state.items() if k != "publish_lease_failure_reason"}
+    commit_workflow_db.append_event(
+        event_id=uuid.uuid4().hex,
+        workflow_id=workflow_id,
+        event_type="governed_rewrite_publish_lease_retry_cleared",
+        status_after="signed",
         repo_slug=repo_slug,
         payload=updated_state,
         db_path=db_path,
