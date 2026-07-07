@@ -807,6 +807,12 @@ class HttpClient:
             body["reason"] = reason
         return self._post(f"/api/graph/source/{source_id}/move", body, org=org) or {}
 
+    def promote_source(self, source_id, to_state, *, org=None):
+        return self._post(
+            f"/api/graph/source/{source_id}/promote",
+            {"to_state": to_state}, org=org,
+        ) or {}
+
     def tag_merge(self, from_tag, to_tag, *, reason="", force=False, org=None):
         body = {"from": from_tag, "to": to_tag, "reason": reason, "force": force}
         return self._post("/api/graph/tag/merge", body, org=org) or {}

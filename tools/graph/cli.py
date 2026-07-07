@@ -2874,6 +2874,33 @@ def cmd_move(args):
     print(msg)
 
 
+def cmd_promote(args):
+    """Transition a source's publication_state (raw|curated|published|canonical)."""
+    client = get_client()
+    org = args.org or os.environ.get("GRAPH_ORG")
+    resolved_id, title = _resolve_source_for_tag(client, args.source_id)
+    if resolved_id is None:
+        sys.exit(1)
+    from . import ops as _ops
+    try:
+        result = client.promote_source(resolved_id, args.to_state, org=org)
+    except _ops.CrossOrgWriteError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
+    except LookupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    prev = result.get("prev_state", "?")
+    new = result.get("new_state", args.to_state)
+    if result.get("changed") is False and prev == new:
+        print(f"  = {resolved_id[:12]} \"{title[:50]}\" already {new}")
+    else:
+        print(f"  ✓ Promoted {resolved_id[:12]} \"{title[:50]}\" {prev} → {new}")
+
+
 def _resolve_source_for_tag(client, sid: str) -> tuple[str | None, str]:
     """Resolve a source id/prefix to ``(full_id, title)`` via the client.
 
@@ -5006,6 +5033,22 @@ def main():
     p.add_argument("--to", dest="to_org", required=True, help="Destination org slug")
     p.add_argument("--reason", help="Optional move reason recorded in metadata")
     p.set_defaults(func=cmd_move)
+
+    # promote
+    p = sub.add_parser(
+        "promote",
+        help="Transition a source's publication_state (published/canonical make "
+             "it visible to cross-org readers)",
+    )
+    p.add_argument("source_id", help="Source ID or prefix")
+    p.add_argument(
+        "to_state",
+        choices=("raw", "curated", "published", "canonical"),
+        help="Target publication_state",
+    )
+    p.add_argument("--org", dest="org", default=None,
+                   help="Org the source lives in (default: current scope)")
+    p.set_defaults(func=cmd_promote)
 
     # context
     p = sub.add_parser("context", help="Show turns around a search hit")
