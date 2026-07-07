@@ -145,6 +145,7 @@ from tools.dashboard.session_lifecycle_worker import (
 from tools.dashboard.worktree_monitor import worktree_monitor
 from tools.dashboard import session_trace
 from tools.dashboard.dao import auth_db, dashboard_db
+from tools.dashboard import sign_requests_routes
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
     from tools.dashboard.dao import mock as dao_dispatch
@@ -15161,6 +15162,9 @@ routes = [
     Route("/api/plugins", api_plugins),
     *_build_plugin_routes(),
 
+
+    # Commit-signing rendezvous (agent shim <-> operator browser)
+    *sign_requests_routes.ROUTES,
 
     # Static (catch-all — plugin static mounts above take precedence)
     Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),
