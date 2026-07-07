@@ -898,12 +898,16 @@ def lookup_idempotency(
 def _decode_payload_column(record: dict[str, Any], column: str, into: str) -> None:
     """Parse a JSON text column into ``into`` on ``record``, dropping the raw
     column. A malformed/absent value degrades to an empty dict rather than
-    raising — a display projection must never fail on one bad row."""
+    raising — a display projection must never fail on one bad row. This includes
+    JSON that parses but is not an object (e.g. ``"[]"`` or ``"null"``): callers
+    index into the result with ``.get(...)``, so a non-dict is coerced to ``{}``
+    rather than left to raise ``AttributeError`` downstream."""
     raw = record.pop(column, None)
     try:
-        record[into] = json.loads(raw or "{}")
+        value = json.loads(raw or "{}")
     except Exception:
-        record[into] = {}
+        value = {}
+    record[into] = value if isinstance(value, dict) else {}
 
 
 def list_operator_signing_queue(
