@@ -115,12 +115,14 @@ class FileCredentialStore:
         path = self._path_for(resolved, provider)
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
         fd = os.open(str(path), flags, _STORE_MODE)
-        try:
-            with os.fdopen(fd, "w") as handle:
-                handle.write(secret)
-        finally:
-            # If the file pre-existed with looser perms, tighten it.
-            os.chmod(path, _STORE_MODE)
+        with os.fdopen(fd, "w") as handle:
+            # Tighten a pre-existing loose file via the OPEN fd (fchmod), never
+            # chmod-by-path: chmod would follow a symlink and could mutate a
+            # target elsewhere, and would run even when O_NOFOLLOW already
+            # refused a planted symlink. fchmod acts only on the file we
+            # actually opened here.
+            os.fchmod(fd, _STORE_MODE)
+            handle.write(secret)
 
     def get_real_credential(
         self, provider: str, authorized_scope: AuthorizedScope
