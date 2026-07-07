@@ -1003,3 +1003,60 @@ def validate_single_target_ref(target_refs: Sequence[str]) -> str:
             "split it into independent rewrites, one per target branch, before proceeding"
         )
     return distinct[0]
+
+
+# ── chain publish: the ordered links a chain-aware push needs ──────────
+
+
+def get_chain_publish_links(*, batch_group_id: str, db_path=None) -> list[tuple[str, str]]:
+    """Return the ordered ``(snapshot_ref, signed_object_sha256)`` for every
+    link in a chain-signing batch, root to tip (§4, D4-18/19) -- exactly the
+    ``links`` shape ``commit_broker.pusher.build_chain_pusher`` needs to
+    materialize a governed-rewrite chain's full ancestry before pushing the
+    tip.
+
+    Every link in a batch already carries what's needed once fully signed:
+    its own ``trusted_object_store_ref`` (the rewrite_result snapshot
+    ``prepare_rewrite_for_signing``/``advance_chain_link`` captured for that
+    link) and its own ``signed_object_sha256`` (recorded on the signing
+    request's ``payload_json`` once ``attach_signature`` assembles and
+    stores the signed bytes). No new data needs capturing here -- this is
+    purely a read, ordered by ``position_in_batch``, which is already
+    exactly how ``stamp_batch_fields``/``get_batch_member_status`` order a
+    batch elsewhere in this module.
+
+    Raises if any link in the batch hasn't actually been signed yet
+    (no ``signed_object_sha256`` recorded) -- a caller building the publish
+    links must only do so once every position in the batch is signed;
+    D4-20's own blocking guard is what should have stopped a caller from
+    reaching this point on an incomplete chain in the first place.
+    """
+    conn = commit_workflow_db._get_conn(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT signing_request_id, position_in_batch, trusted_object_store_ref, payload_json "
+            "FROM commit_signing_requests WHERE batch_group_id = ? ORDER BY position_in_batch",
+            (batch_group_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        raise ValueError(f"no signing requests found for batch_group_id={batch_group_id!r}")
+
+    links: list[tuple[str, str]] = []
+    for row in rows:
+        payload = json.loads(row["payload_json"] or "{}")
+        signed_object_sha256 = payload.get("signed_object_sha256")
+        if not signed_object_sha256:
+            raise ValueError(
+                f"signing request {row['signing_request_id']!r} (position {row['position_in_batch']!r} "
+                f"in batch {batch_group_id!r}) has no signed_object_sha256 yet -- the chain isn't fully signed"
+            )
+        trusted_object_store_ref = row["trusted_object_store_ref"]
+        if not trusted_object_store_ref:
+            raise ValueError(
+                f"signing request {row['signing_request_id']!r} (position {row['position_in_batch']!r} "
+                f"in batch {batch_group_id!r}) has no trusted_object_store_ref"
+            )
+        links.append((trusted_object_store_ref, signed_object_sha256))
+    return links
