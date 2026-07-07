@@ -80,7 +80,7 @@ RUN userdel -r ubuntu 2>/dev/null; useradd -m -s /bin/bash -u 1000 agent \
 # ── Codex CLI + agent-browser (needs node + agent user to exist) ──
 # Codex is an npm package plus platform-specific optional dependency, not a
 # standalone host ELF like Claude, so install it inside the image directly.
-ARG CODEX_VERSION=0.139.0
+ARG CODEX_VERSION=0.142.4
 RUN npm install -g "@openai/codex@${CODEX_VERSION}" agent-browser \
     && su agent -c "agent-browser install"
 
