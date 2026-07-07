@@ -199,6 +199,18 @@ def capture_snapshot(
     snapshot_dao.add_entries(dao_conn, snapshot_ref, entries)
     if not verify_snapshot(snapshot_ref=snapshot_ref, store=store, dao_conn=dao_conn):
         dao_conn.rollback()
+        # Reap the objects THIS failed capture wrote so they don't leak: rollback
+        # dropped the snapshot's rows, but store.put already wrote the bytes to
+        # the filesystem, and collect_garbage only reclaims objects of expired
+        # snapshots — an orphan with no snapshot row is invisible to it. Delete
+        # each digest this capture put, but ONLY if no LIVE snapshot references
+        # it: content-addressed dedup means a byte-identical object may be shared
+        # with a healthy snapshot, and that must not be deleted out from under it.
+        # Running after the rollback is what makes the live-reference check
+        # non-tautological — this snapshot's own rows are already gone.
+        for digest in {entry["object_sha256"] for entry in entries} | {canonical_preview_sha256}:
+            if not snapshot_dao.object_referenced_by_live_snapshot(dao_conn, digest):
+                store.delete(digest)
         raise RuntimeError("trusted snapshot capture failed integrity verification")
     snapshot_dao.update_snapshot_status(dao_conn, snapshot_ref, "verified")
     snapshot_dao.record_integrity(dao_conn, snapshot_ref, status="verified")

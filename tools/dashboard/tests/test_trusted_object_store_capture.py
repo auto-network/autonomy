@@ -199,3 +199,93 @@ def test_verify_fails_on_tampered_entry_even_when_repointed_object_exists(tmp_pa
     )
     conn.commit()
     assert verify_snapshot(snapshot_ref=ref, store=store, dao_conn=conn) is False
+
+
+def _store_files(store):
+    import os
+    return [f for _root, _dirs, files in os.walk(store.root) for f in files]
+
+
+def test_capture_verify_failure_reaps_the_orphaned_objects_it_wrote(tmp_path, monkeypatch):
+    # On a verify failure the rollback drops the snapshot rows, but the bytes were
+    # already written. With no other snapshot referencing them they must be reaped,
+    # not left as store orphans that collect_garbage can never see.
+    repo = _repo(tmp_path)
+    (repo / "a.txt").write_text("orphan-data\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c1")
+    tree = _git_out(repo, "rev-parse", "HEAD^{tree}")
+    store = ContentAddressedStore(tmp_path / "store")
+    conn = _conn()
+    monkeypatch.setattr(snapshot_service, "verify_snapshot", lambda **_kwargs: False)
+    with pytest.raises(RuntimeError, match="integrity verification"):
+        capture_snapshot(
+            workflow_id="wf", repo_slug="r", commit_sha=_git_out(repo, "rev-parse", "HEAD"),
+            tree_sha=tree, parent_shas=[], git_dir=repo, store=store, dao_conn=conn,
+            snapshot_type="commit_create", canonical_payload=b"unique-preview-orphan",
+        )
+    assert conn.execute("SELECT COUNT(*) AS n FROM trusted_git_object_snapshots").fetchone()["n"] == 0
+    assert _store_files(store) == []  # nothing left orphaned
+
+
+def test_capture_verify_failure_preserves_an_object_shared_with_a_live_snapshot(tmp_path, monkeypatch):
+    # Content-addressed dedup: a failing capture whose bytes are identical to a
+    # healthy snapshot's objects must NOT delete them out from under it.
+    repo = _repo(tmp_path)
+    (repo / "a.txt").write_text("shared\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c1")
+    tree = _git_out(repo, "rev-parse", "HEAD^{tree}")
+    store = ContentAddressedStore(tmp_path / "store")
+    conn = _conn()
+
+    # a genuine, verified snapshot of this tree
+    good_ref = capture_snapshot(
+        workflow_id="wf", repo_slug="r", commit_sha=_git_out(repo, "rev-parse", "HEAD"),
+        tree_sha=tree, parent_shas=[], git_dir=repo, store=store, dao_conn=conn,
+        snapshot_type="commit_create", canonical_payload=b"good-preview",
+    )
+    shared_digests = {e["object_sha256"] for e in dao.list_entries(conn, good_ref)}
+    assert shared_digests and all(store.exists(d) for d in shared_digests)
+
+    # a failing capture of the SAME tree (identical object bytes -> same digests)
+    monkeypatch.setattr(snapshot_service, "verify_snapshot", lambda **_kwargs: False)
+    with pytest.raises(RuntimeError, match="integrity verification"):
+        capture_snapshot(
+            workflow_id="wf2", repo_slug="r", commit_sha=_git_out(repo, "rev-parse", "HEAD"),
+            tree_sha=tree, parent_shas=[], git_dir=repo, store=store, dao_conn=conn,
+            snapshot_type="rewrite_source", canonical_payload=b"good-preview",
+        )
+    # the shared objects survive — the healthy snapshot still references them
+    for d in shared_digests:
+        assert store.exists(d), "a deduped object shared with a live snapshot was wrongly reaped"
+    # and the healthy snapshot still verifies AS A WHOLE — its shared preview
+    # bytes (both captures used b"good-preview") weren't reaped either.
+    assert verify_snapshot(snapshot_ref=good_ref, store=store, dao_conn=conn)
+
+
+def test_capture_verify_failure_preserves_shared_empty_preview_of_rewrite_sources(tmp_path, monkeypatch):
+    # Every rewrite_source capture defaults to empty canonical_payload, so they
+    # all share ONE canonical_preview_sha256. A verify failure on one must not
+    # reap that shared empty-preview digest and break the others' verification.
+    repo = _repo(tmp_path)
+    (repo / "a.txt").write_text("src\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c1")
+    tree = _git_out(repo, "rev-parse", "HEAD^{tree}")
+    store = ContentAddressedStore(tmp_path / "store")
+    conn = _conn()
+
+    good_ref = capture_snapshot(
+        workflow_id="wf", repo_slug="r", commit_sha=_git_out(repo, "rev-parse", "HEAD"),
+        tree_sha=tree, parent_shas=[], git_dir=repo, store=store, dao_conn=conn,
+        snapshot_type="rewrite_source",  # no canonical_payload -> empty preview
+    )
+    monkeypatch.setattr(snapshot_service, "verify_snapshot", lambda **_kwargs: False)
+    with pytest.raises(RuntimeError, match="integrity verification"):
+        capture_snapshot(
+            workflow_id="wf2", repo_slug="r", commit_sha=_git_out(repo, "rev-parse", "HEAD"),
+            tree_sha=tree, parent_shas=[], git_dir=repo, store=store, dao_conn=conn,
+            snapshot_type="rewrite_source",  # same empty preview digest
+        )
+    assert verify_snapshot(snapshot_ref=good_ref, store=store, dao_conn=conn)
