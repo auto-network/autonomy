@@ -13,7 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # System packages: Python 3.12 (ships with 24.04), git, sqlite3, node, tmux,
 # plus Chrome shared-library dependencies (24 libs from ldd)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-venv python3-pip git sqlite3 ca-certificates curl \
+        python3 python3-venv python3-pip git sqlite3 ca-certificates curl rsync \
         openssh-client gnupg \
         nodejs npm \
         gh \
