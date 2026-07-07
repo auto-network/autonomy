@@ -1193,3 +1193,149 @@ def test_e2e_full_flow_verifies_real_git_outcome(
     assert verify.returncode == 0, verify.stderr.decode()
     # 4. Origin was never touched: the target repo has no remote configured.
     assert _git_out(repo, "remote") == ""
+
+
+# ── operator review-and-sign read surface ────────────────────────────
+
+
+def _seed_workflow_with_signing_request(
+    *,
+    workflow_id: str,
+    repo_slug: str,
+    branch: str,
+    status: str,
+    subject: str,
+    signing_status: str = "pending",
+    requested_at: float | None = None,
+    batch_group_id: str | None = None,
+    position_in_batch: int | None = None,
+    batch_size: int | None = None,
+):
+    """Seed one workflow (via an event, which builds the state projection) plus
+    a signing request row whose payload mirrors what the real request_signature
+    handler writes — so the read endpoints are exercised against the true shape.
+    """
+    import time as _time
+    import uuid as _uuid
+
+    requested_at = requested_at if requested_at is not None else _time.time()
+    preview = {
+        "unsigned_commit_sha": "0" * 40,
+        "tree_sha": "1" * 40,
+        "parent_shas": [],
+        "message": {"subject": subject, "body": ""},
+        "author": {"name": "Dev", "email": "dev@example.com"},
+        "committer": {"name": "Dev", "email": "dev@example.com"},
+    }
+    cdb.append_event(
+        event_id=_uuid.uuid4().hex,
+        workflow_id=workflow_id,
+        event_type="seed",
+        status_after=status,
+        repo_slug=repo_slug,
+        branch=branch,
+        session_name="auto-seed",
+        payload={"canonical_payload_preview": preview},
+    )
+    conn = cdb._get_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO commit_signing_requests (
+                signing_request_id, workflow_id, repo_slug, status, signing_method,
+                trusted_object_store_ref, canonical_payload_hash, device_id,
+                batch_group_id, position_in_batch, batch_size,
+                encrypted_key_ref, operator_id, requested_at, completed_at,
+                signature_ref, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _uuid.uuid4().hex, workflow_id, repo_slug, signing_status, "ssh",
+                "snap-ref", "hash-" + workflow_id, None,
+                batch_group_id, position_in_batch, batch_size,
+                None, "operator-1", requested_at, None, None,
+                json.dumps({"canonical_payload_preview": preview}),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_operator_signing_queue_oldest_first_and_excludes_terminal(workflow_db_env, client, monkeypatch):
+    _enable_plugin(monkeypatch)
+    _seed_workflow_with_signing_request(
+        workflow_id="wf-old", repo_slug="org/repo", branch="session/a",
+        status="awaiting_signature", subject="Older change", requested_at=100.0)
+    _seed_workflow_with_signing_request(
+        workflow_id="wf-new", repo_slug="org/repo", branch="session/b",
+        status="awaiting_signature", subject="Newer change", requested_at=200.0)
+    _seed_workflow_with_signing_request(
+        workflow_id="wf-dead", repo_slug="org/repo", branch="session/c",
+        status="abandoned", subject="Abandoned", requested_at=150.0)
+
+    resp = client.get("/api/capabilities/commit/v1/operator/signing-requests")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # Terminal workflow excluded; remaining ordered oldest-first (FIFO).
+    assert body["count"] == 2
+    assert [i["workflow_id"] for i in body["queue"]] == ["wf-old", "wf-new"]
+    top = body["queue"][0]
+    assert top["message_subject"] == "Older change"
+    assert top["repo_slug"] == "org/repo"
+    assert top["branch"] == "session/a"
+    assert top["workflow_status"] == "awaiting_signature"
+    assert top["signing_status"] == "pending"
+
+
+def test_operator_signing_queue_filters_by_repo(workflow_db_env, client, monkeypatch):
+    _enable_plugin(monkeypatch)
+    _seed_workflow_with_signing_request(
+        workflow_id="wf-1", repo_slug="org/one", branch="b1",
+        status="awaiting_signature", subject="s1")
+    _seed_workflow_with_signing_request(
+        workflow_id="wf-2", repo_slug="org/two", branch="b2",
+        status="awaiting_signature", subject="s2")
+
+    resp = client.get("/api/capabilities/commit/v1/operator/signing-requests?repo_slug=org/two")
+    assert resp.status_code == 200, resp.text
+    assert [i["workflow_id"] for i in resp.json()["queue"]] == ["wf-2"]
+
+
+def test_operator_signing_queue_empty_when_no_pending(workflow_db_env, client, monkeypatch):
+    _enable_plugin(monkeypatch)
+    resp = client.get("/api/capabilities/commit/v1/operator/signing-requests")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"queue": [], "count": 0}
+
+
+def test_operator_workflow_detail_returns_state_and_requests(workflow_db_env, client, monkeypatch):
+    _enable_plugin(monkeypatch)
+    _seed_workflow_with_signing_request(
+        workflow_id="wf-x", repo_slug="org/repo", branch="b",
+        status="awaiting_signature", subject="Detail me")
+
+    resp = client.get("/api/capabilities/commit/v1/operator/workflows/wf-x")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["workflow"]["workflow_id"] == "wf-x"
+    assert body["workflow"]["status"] == "awaiting_signature"
+    assert isinstance(body["workflow"]["state"], dict)
+    assert len(body["signing_requests"]) == 1
+    preview = body["signing_requests"][0]["payload"]["canonical_payload_preview"]
+    assert preview["message"]["subject"] == "Detail me"
+
+
+def test_operator_workflow_detail_unknown_returns_not_found(workflow_db_env, client, monkeypatch):
+    _enable_plugin(monkeypatch)
+    resp = client.get("/api/capabilities/commit/v1/operator/workflows/does-not-exist")
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "workflow_not_found"
+
+
+def test_operator_read_endpoints_blocked_when_plugin_disabled(workflow_db_env, client, monkeypatch):
+    monkeypatch.setattr(commit_api, "_plugin_enabled", lambda: False)
+    queue = client.get("/api/capabilities/commit/v1/operator/signing-requests")
+    assert queue.json()["code"] == "route_not_trusted"
+    detail = client.get("/api/capabilities/commit/v1/operator/workflows/anything")
+    assert detail.json()["code"] == "route_not_trusted"

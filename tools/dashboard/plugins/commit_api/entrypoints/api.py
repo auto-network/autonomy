@@ -2241,6 +2241,80 @@ async def publish(request: Request) -> JSONResponse:
         conn.close()
 
 
+# ── operator review-and-sign read surface ────────────────────────────
+#
+# These GET endpoints back the operator's dashboard page. They are OPERATOR
+# facing, not agent facing: they follow the dashboard's own operator-endpoint
+# posture (same-origin, single-operator trust — as the bead and dispatch read
+# endpoints do), NOT the bearer-token capability auth the agent write path uses.
+# They are read-only projections and mutate nothing. A cold system that has
+# never created a workflow has no tables yet; that is reported as an empty
+# queue / not-found rather than a 500.
+
+
+def _operator_signing_queue_payload(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Shape the DAO queue rows into the page's list response.
+
+    Each item carries what the queue view renders directly (repo, branch,
+    message subject, waiting time) plus the identifiers the detail view needs.
+    The commit message subject is lifted from the stored canonical preview so
+    the list needs no second lookup."""
+    items = []
+    for row in rows:
+        preview = row.get("payload", {}).get("canonical_payload_preview", {})
+        message = preview.get("message") if isinstance(preview, dict) else None
+        subject = message.get("subject") if isinstance(message, dict) else None
+        items.append(
+            {
+                "signing_request_id": row.get("signing_request_id"),
+                "workflow_id": row.get("workflow_id"),
+                "repo_slug": row.get("repo_slug"),
+                "branch": row.get("branch"),
+                "target_branch": row.get("target_branch"),
+                "session_name": row.get("session_name"),
+                "signing_method": row.get("signing_method"),
+                "signing_status": row.get("signing_status"),
+                "workflow_status": row.get("workflow_status"),
+                "requested_at": row.get("requested_at"),
+                "canonical_payload_hash": row.get("canonical_payload_hash"),
+                "batch_group_id": row.get("batch_group_id"),
+                "position_in_batch": row.get("position_in_batch"),
+                "batch_size": row.get("batch_size"),
+                "message_subject": subject,
+            }
+        )
+    return {"queue": items, "count": len(items)}
+
+
+async def operator_signing_queue(request: Request) -> JSONResponse:
+    if not _plugin_enabled():
+        return _json_error("route_not_trusted", "commit API plugin is disabled")
+    repo_slug = request.query_params.get("repo_slug")
+    try:
+        rows = cdb.list_operator_signing_queue(repo_slug=repo_slug or None)
+    except sqlite3.OperationalError:
+        # No workflow tables yet (cold system) — an empty queue, not an error.
+        return JSONResponse({"queue": [], "count": 0})
+    return JSONResponse(_operator_signing_queue_payload(rows))
+
+
+async def operator_workflow_detail(request: Request) -> JSONResponse:
+    if not _plugin_enabled():
+        return _json_error("route_not_trusted", "commit API plugin is disabled")
+    workflow_id = request.path_params["workflow_id"]
+    try:
+        detail = cdb.get_operator_workflow_detail(workflow_id=workflow_id)
+    except sqlite3.OperationalError:
+        detail = None
+    if detail is None:
+        return _json_error(
+            "workflow_not_found",
+            f"no commit workflow {workflow_id!r}",
+            details={"workflow_id": workflow_id},
+        )
+    return JSONResponse(detail)
+
+
 routes: list[Route] = [
     Route("/api/capabilities/commit/v1/resolve-policy", resolve_policy, methods=["POST"]),
     Route("/api/capabilities/commit/v1/policy/describe", describe_policy, methods=["GET"]),
@@ -2249,4 +2323,6 @@ routes: list[Route] = [
     Route("/api/capabilities/commit/v1/workflows/{workflow_id}/signature-request", request_signature, methods=["POST"]),
     Route("/api/capabilities/commit/v1/signing-requests/{signing_request_id}/attach", attach_signature, methods=["POST"]),
     Route("/api/capabilities/commit/v1/workflows/{workflow_id}/publish", publish, methods=["POST"]),
+    Route("/api/capabilities/commit/v1/operator/signing-requests", operator_signing_queue, methods=["GET"]),
+    Route("/api/capabilities/commit/v1/operator/workflows/{workflow_id}", operator_workflow_detail, methods=["GET"]),
 ]

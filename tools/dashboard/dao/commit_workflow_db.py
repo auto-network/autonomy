@@ -14,7 +14,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -884,3 +884,113 @@ def lookup_idempotency(
     if status == "failed_retryable":
         return {"kind": "failed_retryable", "row": dict(row)}
     return {"kind": "failed_terminal", "row": dict(row)}
+
+
+# ── operator review-and-sign read surface ────────────────────────────
+#
+# These are READ-ONLY projections for the operator-facing dashboard page.
+# They are consumed by the dashboard operator (same-origin, single-operator
+# trust model — the same posture as the bead and dispatch read endpoints),
+# NOT by the agent capability path, which authenticates by bearer token.
+# Nothing here mutates state.
+
+
+def _decode_payload_column(record: dict[str, Any], column: str, into: str) -> None:
+    """Parse a JSON text column into ``into`` on ``record``, dropping the raw
+    column. A malformed/absent value degrades to an empty dict rather than
+    raising — a display projection must never fail on one bad row."""
+    raw = record.pop(column, None)
+    try:
+        record[into] = json.loads(raw or "{}")
+    except Exception:
+        record[into] = {}
+
+
+def list_operator_signing_queue(
+    *,
+    repo_slug: str | None = None,
+    limit: int = 100,
+    db_path: Path | str | None = None,
+) -> list[dict]:
+    """Signing requests awaiting the operator, oldest-first (FIFO queue).
+
+    Returns each ``pending`` signing request joined to its workflow's current
+    state, so the operator page can render repo, branch, and a message preview
+    without a second lookup. Workflows in a terminal status are excluded — a
+    signing request whose workflow was abandoned, superseded, or otherwise
+    closed is not actionable and must not sit in the queue. A chain rewrite
+    contributes one row per link; ``batch_group_id`` / ``position_in_batch`` /
+    ``batch_size`` are included so the page can group a chain into one item.
+    """
+    conn = _get_conn(db_path)
+    try:
+        where = ["sr.status = 'pending'", "st.terminal = 0"]
+        params: list[Any] = []
+        if repo_slug is not None:
+            where.append("sr.repo_slug = ?")
+            params.append(repo_slug)
+        params.append(int(limit))
+        rows = conn.execute(
+            f"""
+            SELECT
+                sr.signing_request_id, sr.workflow_id, sr.repo_slug,
+                sr.status AS signing_status, sr.signing_method,
+                sr.canonical_payload_hash, sr.trusted_object_store_ref,
+                sr.requested_at, sr.operator_id,
+                sr.batch_group_id, sr.position_in_batch, sr.batch_size,
+                sr.payload_json,
+                st.status AS workflow_status, st.branch, st.target_branch,
+                st.session_name, st.updated_at AS workflow_updated_at
+            FROM commit_signing_requests sr
+            JOIN commit_workflow_states st ON sr.workflow_id = st.workflow_id
+            WHERE {' AND '.join(where)}
+            ORDER BY sr.requested_at ASC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        queue = []
+        for row in rows:
+            record = dict(row)
+            _decode_payload_column(record, "payload_json", "payload")
+            queue.append(record)
+        return queue
+    finally:
+        conn.close()
+
+
+def get_operator_workflow_detail(
+    *,
+    workflow_id: str,
+    db_path: Path | str | None = None,
+) -> dict | None:
+    """Full detail for one workflow for the operator detail view.
+
+    Returns the current workflow-state row (with ``state_json`` decoded into
+    ``state``) plus every signing request against the workflow (each with its
+    ``payload_json`` decoded into ``payload``), oldest-first. Returns ``None``
+    if the workflow does not exist. Read-only.
+    """
+    conn = _get_conn(db_path)
+    try:
+        state_row = conn.execute(
+            "SELECT * FROM commit_workflow_states WHERE workflow_id = ?",
+            (workflow_id,),
+        ).fetchone()
+        if state_row is None:
+            return None
+        workflow = dict(state_row)
+        _decode_payload_column(workflow, "state_json", "state")
+        signing_rows = conn.execute(
+            "SELECT * FROM commit_signing_requests WHERE workflow_id = ? "
+            "ORDER BY requested_at ASC",
+            (workflow_id,),
+        ).fetchall()
+        signing_requests = []
+        for row in signing_rows:
+            record = dict(row)
+            _decode_payload_column(record, "payload_json", "payload")
+            signing_requests.append(record)
+        return {"workflow": workflow, "signing_requests": signing_requests}
+    finally:
+        conn.close()
