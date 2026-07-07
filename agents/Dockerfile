@@ -38,6 +38,12 @@ RUN chmod +x /usr/local/bin/dolt
 COPY bin/claude /usr/local/bin/claude
 RUN chmod +x /usr/local/bin/claude
 
+# Commit-signing shim (git gpg.program). Worktree setup points gpg.program
+# here when a workspace's policy requires a GPG signature; needs python3 + curl
+# (both present above).
+COPY commit_sign_shim.sh /usr/local/bin/commit-sign-shim
+RUN chmod +x /usr/local/bin/commit-sign-shim
+
 # ── graph CLI wrapper (resolves tools.graph via runtime repo mount) ──
 # The repo is bind-mounted at /workspace/repo by session_launcher, so there is
 # no need to bake a second copy of tools/graph/ into the image — see
