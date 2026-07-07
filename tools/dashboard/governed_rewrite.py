@@ -287,6 +287,20 @@ def _current_state_json(workflow_id: str, db_path=None) -> dict:
     return json.loads(row["state_json"])
 
 
+def _current_status(workflow_id: str, db_path=None) -> str:
+    conn = commit_workflow_db._get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT status FROM commit_workflow_states WHERE workflow_id = ?",
+            (workflow_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise ValueError(f"no such workflow: {workflow_id!r}")
+    return str(row["status"])
+
+
 def snapshot_original_commit(
     *,
     workflow_id: str,
@@ -354,6 +368,21 @@ def record_chain_source_and_result_roles(
     ``position`` — safe because original and new SHAs are always distinct
     strings, so the dict-by-sha ``commit_roles`` shape holds both without
     needing a list-of-entries form.
+
+    Passes the workflow's OWN CURRENT status through as ``status_after``
+    rather than hardcoding one: for a chain, every ``new_sha`` is only
+    known once its own link has actually signed (D4-18/19), so this is
+    necessarily called AFTER the whole chain is signed. Hardcoding
+    ``status_after="draft"`` here regressed a freshly-``signed`` workflow
+    back to ``draft`` and left it permanently unpublishable — found by
+    running a real chain through request_signature and attach_signature
+    end to end, not by inspection. Passing ``status_after=None`` instead
+    is ALSO wrong: ``_rebuild_projection_for_workflow`` returns before
+    projecting ``commit_workflow_commits`` at all when the latest event's
+    status_after is None, which would silently drop this call's entire
+    role/position write. Reading the current status and passing it back
+    unchanged keeps both the status AND the commit-role projection
+    correct regardless of when in the workflow's lifecycle this runs.
     """
     commit_shas: list[str] = []
     commit_roles: dict[str, tuple[str, int]] = {}
@@ -364,11 +393,12 @@ def record_chain_source_and_result_roles(
         commit_roles[new_sha] = (ROLE_REWRITE_RESULT, position)
 
     current_state = _current_state_json(workflow_id, db_path=db_path)
+    current_status = _current_status(workflow_id, db_path=db_path)
     commit_workflow_db.append_event(
         event_id=uuid.uuid4().hex,
         workflow_id=workflow_id,
         event_type="governed_rewrite_chain_recorded",
-        status_after="draft",
+        status_after=current_status,
         repo_slug=repo_slug,
         commit_shas=commit_shas,
         commit_roles=commit_roles,

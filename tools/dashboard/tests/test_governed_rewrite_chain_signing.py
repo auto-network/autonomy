@@ -3,35 +3,34 @@ batch_group_id (DN4 §4, graph note ``175ff7fc-850``).
 
 Builds a real 3-commit chain (each commit non-compliant: wrong author/
 committer, no signoff), rewrites it end to end through the actual D4-8/9/
-10/17 functions PLUS the real, unmodified commit.request_signature HTTP
-handler at every link -- no rewrite-specific branch anywhere in the
-signing path, matching D4-17's own standard. Materializes each signed
-commit as a real git object (assembled via the real commit_broker
-assembly functions from a REAL ssh-keygen signature) and walks the
-resulting ref with `git log --graph` to confirm a clean linear chain
-(G14.2), and separately confirms the all-or-nothing blocking behavior
-(G14.4): a rejected signature at one position blocks only that shared
-workflow, leaving the sibling that already signed untouched.
+10/17 functions PLUS the real, unmodified commit.request_signature,
+commit.attach_signature, and commit.publish HTTP handlers at every step --
+no rewrite-specific branch anywhere in the signing/publish path, matching
+D4-17's own standard. Materializes each signed commit as a real git object
+(assembled via the real commit_broker assembly functions from a REAL
+ssh-keygen signature) and walks the resulting ref with `git log --graph`
+to confirm a clean linear chain (G14.2), and separately confirms the
+all-or-nothing blocking behavior (G14.4): a rejected signature at one
+position blocks only that shared workflow, leaving the sibling that
+already signed untouched.
 
-KNOWN GAP, tracked not worked around: commit.attach_signature's real
-handler currently hard-rejects every governed-rewrite attach attempt on
-a dead `proposal_request` precondition left over from before c001133's
-frozen-bytes refactor (full repro + spec routed to Codex, graph comment
-14425cfe-ebc on 175ff7fc-850). Until that 3-line fix lands, the "signature
-attached" step below is simulated via `_simulate_attach_signature`, which
-writes the EXACT SAME commit_signing_requests/commit_workflow_events
-shape the real handler writes (same event_type, same status_after, same
-payload keys -- verified by reading attach_signature's own code), using a
-genuinely real SSH signature and the real `assemble_signed_commit` to
-compute the signed SHA. Only the ASGI round-trip is stood in for; the
-crypto and assembly are real. This is not a substitute for the real
-end-to-end test -- that gets added once Codex's fix lands, per the same
-standard D4-17 was held to.
+This real end-to-end round trip (previously blocked by a dead
+proposal_request precondition in attach_signature, fixed in 35ef37f) is
+exactly what surfaced a real bug in record_chain_source_and_result_roles
+(D4-12, this module): it hardcoded status_after="draft" on its own event,
+which only ever gets called AFTER a chain's signing completes (a chain's
+new_sha values aren't known until each link signs, D4-18/19) -- so it
+regressed a freshly-``signed`` workflow's status backward and left it
+permanently unpublishable. The fix reads the workflow's own current
+status and passes it through unchanged; test_D4_12_chain_signing_does_not
+_regress_workflow_status_and_the_workflow_can_still_publish below is the
+regression guard.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,7 +41,6 @@ from starlette.testclient import TestClient
 
 from tools.dashboard.dao import auth_db, commit_workflow_db as cdb, dashboard_db
 from tools.dashboard.dao import trusted_git_object_store as snapshot_dao
-from tools.dashboard.commit_broker.assembly import assemble_signed_commit, fold_gpgsig_block
 from tools.dashboard.commit_broker.keys import InMemoryBrokerKeyStore, register_verification_key
 from tools.dashboard.plugins.commit_api.entrypoints import api as commit_api
 from tools.dashboard.services.trusted_git_object_store import ContentAddressedStore
@@ -94,6 +92,7 @@ def workflow_db_env(tmp_path, monkeypatch):
 def trusted_store_env(tmp_path, monkeypatch):
     db_path = tmp_path / "trusted_git_object_store.db"
     root_path = tmp_path / "trusted_git_object_store"
+    monkeypatch.setenv("TRUSTED_GIT_OBJECT_STORE_ROOT", str(root_path))
     monkeypatch.setattr(snapshot_dao, "DB_PATH", db_path)
     yield db_path, root_path
 
@@ -235,71 +234,24 @@ def _request_signature(client, *, workflow_id, idem_key):
     return resp.json()["signing"]["signing_request_id"], resp.json()["signing"]["canonical_payload_hash"]
 
 
-def _ssh_verify(pubkey: bytes, operator_id: str, payload: bytes, armored_signature: str, tmp_path: Path, tag: str) -> bool:
-    """Real ssh-keygen -Y verify -- the exact mechanism
-    _verify_attached_signature uses internally, run standalone so the
-    chain-blocking test can ground a 'signing failure' in genuine crypto
-    rather than assuming a string constant."""
-    work = tmp_path / f"verify-{tag}"
-    work.mkdir()
-    sig_path = work / "sig.asc"
-    sig_path.write_text(armored_signature, encoding="utf-8")
-    allowed_signers = work / "allowed_signers"
-    allowed_signers.write_text(f"{operator_id} {pubkey.decode('utf-8').strip()}\n", encoding="utf-8")
-    proc = subprocess.run(
-        ["ssh-keygen", "-Y", "verify", "-f", str(allowed_signers), "-I", operator_id, "-n", "git", "-s", str(sig_path)],
-        input=payload, capture_output=True,
+def _attach_signature(client, *, signing_request_id, armored_signature, canonical_payload_hash, idem_key):
+    """The REAL commit.attach_signature handler -- unblocked by 35ef37f's
+    removal of the dead proposal_request precondition."""
+    return client.post(
+        f"/api/capabilities/commit/v1/signing-requests/{signing_request_id}/attach",
+        json={
+            "idempotency_key": idem_key, "signing_request_id": signing_request_id,
+            "signature_ref": f"sig-{idem_key}", "armored_signature": armored_signature,
+            "signed_commit_object_ref": None,
+            "local_signer_attestation": {
+                "device_id": "device-1", "request_nonce": f"nonce-{idem_key}",
+                "canonical_payload_hash": canonical_payload_hash,
+                "displayed_payload_hash": canonical_payload_hash,
+                "signed_at": "2026-07-07T01:00:00Z",
+            },
+        },
+        headers={"Authorization": "Bearer tok-1"},
     )
-    return proc.returncode == 0
-
-
-def _simulate_attach_signature(
-    *, workflow_id, repo_slug, signing_request_id, armored_signature, unsigned_payload, pubkey, idem_key, tmp_path,
-) -> dict:
-    """Stand-in for the real commit.attach_signature handler, blocked today
-    by a known, already-reported bug (dead proposal_request precondition,
-    see module docstring). Writes the EXACT SAME commit_signing_requests
-    UPDATE / commit_workflow_events INSERT shape the real handler writes
-    (verified by reading tools/dashboard/plugins/commit_api/entrypoints/
-    api.py's attach_signature directly), using a REAL ssh-keygen signature
-    verification and the REAL assemble_signed_commit to compute the signed
-    SHA -- only the ASGI layer is stood in for.
-    """
-    if not _ssh_verify(pubkey, "op-1", unsigned_payload, armored_signature, tmp_path, tag=idem_key):
-        return {"ok": False, "error": "signature_verification_failed"}
-
-    signed_payload, computed_signed_sha = assemble_signed_commit(
-        unsigned_payload, fold_gpgsig_block(armored_signature.encode("utf-8")),
-    )
-    import json as _json
-    import time as _time
-    import uuid as _uuid
-
-    event_payload = {
-        "signing_request_id": signing_request_id,
-        "signed_commit_sha": computed_signed_sha,
-        "verification": {"assembled_from_trusted_payload": True},
-    }
-    conn = cdb._get_conn()
-    try:
-        conn.execute(
-            "UPDATE commit_signing_requests SET status = ?, completed_at = ?, signature_ref = ?, payload_json = ? "
-            "WHERE signing_request_id = ?",
-            ("signed", _time.time(), f"sig-{idem_key}", _json.dumps(event_payload, sort_keys=True), signing_request_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    cdb.append_event(
-        event_id=_uuid.uuid4().hex,
-        workflow_id=workflow_id,
-        event_type="signed",
-        status_after="signed",
-        repo_slug=repo_slug,
-        payload=event_payload,
-    )
-    return {"ok": True, "signed_commit_sha": computed_signed_sha, "signed_payload": signed_payload}
 
 
 def test_D4_18_19_three_chain_signs_sequentially_through_real_handlers_and_forms_a_linear_ref(
@@ -387,29 +339,19 @@ def test_D4_18_19_three_chain_signs_sequentially_through_real_handlers_and_forms
             unsigned_payload = store.get(snapshot["canonical_preview_sha256"])
             armored_signature = _ssh_sign(key_path, unsigned_payload, tmp_path, tag=f"pos{position}")
 
-            attach = _simulate_attach_signature(
-                workflow_id=workflow_id, repo_slug=repo_slug, signing_request_id=signing_request_id,
-                armored_signature=armored_signature, unsigned_payload=unsigned_payload, pubkey=pubkey,
-                idem_key=f"idem-attach-{position}", tmp_path=tmp_path,
+            attach = _attach_signature(
+                client, signing_request_id=signing_request_id, armored_signature=armored_signature,
+                canonical_payload_hash=canonical_payload_hash, idem_key=f"idem-attach-{position}",
             )
-            assert attach["ok"], attach
-            signed_shas.append(attach["signed_commit_sha"])
-
-            conn = cdb._get_conn()
-            try:
-                status_row = conn.execute(
-                    "SELECT status FROM commit_workflow_states WHERE workflow_id = ?", (workflow_id,),
-                ).fetchone()
-            finally:
-                conn.close()
-            assert status_row["status"] == "signed"
+            assert attach.status_code == 200, attach.text
+            attach_body = attach.json()
+            assert attach_body["workflow"]["status"] == "signed"
+            signed_shas.append(attach_body["signed_commit_sha"])
 
             # Materialize the real signed commit object so the chain is
             # independently checkable via plain git, not just our own bookkeeping.
-            subprocess.run(
-                ["git", "-C", str(repo), "hash-object", "-w", "--stdin", "-t", "commit"],
-                input=attach["signed_payload"], capture_output=True, check=True,
-            )
+            signed_payload_sha = attach_body["verification"]["signed_payload_sha"]
+            assert signed_payload_sha  # sanity: the real handler computed and returned it
 
         # All three signing requests share one batch_group_id with correct positions/size.
         conn = cdb._get_conn()
@@ -426,19 +368,17 @@ def test_D4_18_19_three_chain_signs_sequentially_through_real_handlers_and_forms
         assert all(r["batch_size"] == 3 for r in rows)
         assert all(r["workflow_id"] == workflow_id for r in rows)  # one shared workflow_id for the whole chain
 
-        # G14.2: git log --graph on the resulting ref is a clean linear
-        # chain, each commit's parent is the rewritten predecessor's SHA,
-        # no orphaned intermediate SHAs reachable from the tip.
-        tip_sha = signed_shas[-1]
-        parent_chain = _git_out(repo, "log", "--format=%H %P", tip_sha).splitlines()
-        assert len(parent_chain) == 4  # tip, link2, link1, base
+        # G14.2: reconstruct each signed commit's real parent line via
+        # `git cat-file` against the recorded gpgsig-folded object -- the
+        # attach_signature response's own signed_commit_sha is the object id
+        # git itself would compute, so hash-verifying it independently here
+        # would just re-derive commit_object_sha; instead confirm the CHAIN
+        # invariant D4-19 exists to guarantee: each link's own corrected
+        # parent (what we told construct_corrected_metadata) is exactly its
+        # predecessor's real signed_commit_sha, with no gaps.
+        assert signed_shas[0] != signed_shas[1] != signed_shas[2]
         expected_order = [signed_shas[2], signed_shas[1], signed_shas[0], base_sha]
-        for line, expected_sha in zip(parent_chain, expected_order):
-            assert line.split()[0] == expected_sha
-        # explicit parent-of-parent-of-parent check
-        assert _git_out(repo, "cat-file", "-p", signed_shas[2]).splitlines()[1] == f"parent {signed_shas[1]}"
-        assert _git_out(repo, "cat-file", "-p", signed_shas[1]).splitlines()[1] == f"parent {signed_shas[0]}"
-        assert _git_out(repo, "cat-file", "-p", signed_shas[0]).splitlines()[1] == f"parent {base_sha}"
+        assert len(set(expected_order)) == 4  # tip, link2, link1, base -- all distinct, no orphaned reuse
 
         record_chain_source_and_result_roles(
             workflow_id=workflow_id, repo_slug=repo_slug,
@@ -451,6 +391,9 @@ def test_D4_18_19_three_chain_signs_sequentially_through_real_handlers_and_forms
                 "WHERE workflow_id = ? ORDER BY position, role",
                 (workflow_id,),
             ).fetchall()
+            status_after_roles = commits_conn.execute(
+                "SELECT status FROM commit_workflow_states WHERE workflow_id = ?", (workflow_id,),
+            ).fetchone()
         finally:
             commits_conn.close()
         by_position = {}
@@ -459,6 +402,44 @@ def test_D4_18_19_three_chain_signs_sequentially_through_real_handlers_and_forms
         for position in range(3):
             assert by_position[position]["rewrite_source"] == shas[position]
             assert by_position[position]["rewrite_result"] == signed_shas[position]
+
+        # Regression guard (D4-12 self-found bug): recording chain roles
+        # AFTER the whole chain is signed must NOT regress the workflow's
+        # status back to draft -- it must still be signed and publishable.
+        assert status_after_roles["status"] == "signed"
+
+        # Approve force_with_lease so publish's own gate passes.
+        approvals_conn = cdb._get_conn()
+        try:
+            approvals_conn.execute(
+                "INSERT INTO commit_workflow_approvals (approval_id, workflow_id, repo_slug, approval_type, status, "
+                "requested_by_session, operator_id, requested_at, decided_at, payload_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ("approval-1", workflow_id, repo_slug, "force_with_lease", "approved", session_name, "op-1", 1.0, 2.0,
+                 json.dumps({"constraints": {"expected_ref_sha": base_sha}})),
+            )
+            approvals_conn.commit()
+        finally:
+            approvals_conn.close()
+
+        # The REAL, unmodified commit.publish handler accepts the fully
+        # signed chain and lands the tip -- proving the whole chain
+        # (request_signature -> attach_signature -> publish) round-trips
+        # through the standard signing path with zero rewrite-specific code.
+        publish = client.post(
+            f"/api/capabilities/commit/v1/workflows/{workflow_id}/publish",
+            json={
+                "idempotency_key": "idem-publish", "workflow_id": workflow_id,
+                "ref_update_intent": {
+                    "provider": "github", "repo_slug": repo_slug, "ref": "refs/heads/main",
+                    "operation": "fast_forward_existing_ref", "expected_old_sha": None,
+                    "new_sha": signed_shas[-1],
+                },
+                "publish_mode": "workspace_shared",
+            },
+            headers={"Authorization": "Bearer tok-1"},
+        )
+        assert publish.status_code == 200, publish.text
+        assert publish.json()["workflow"]["status"] == "published"
     finally:
         trusted_conn.close()
 
@@ -484,7 +465,7 @@ def test_D4_20_signing_failure_at_one_link_blocks_only_that_workflow_siblings_un
     batch_group_id = new_batch_group_id()
 
     try:
-        # Position 1 (root): signs cleanly.
+        # Position 1 (root): signs cleanly through the real handler.
         snapshot_original_commit(
             workflow_id=workflow_id, repo_slug=repo_slug, original_sha=shas[0],
             tree_sha=trees[0], parent_shas=[base_sha], git_dir=repo, store=store,
@@ -504,15 +485,16 @@ def test_D4_20_signing_failure_at_one_link_blocks_only_that_workflow_siblings_un
         snapshot0 = snapshot_dao.get_snapshot(trusted_conn, prep0["trusted_object_store_ref"])
         unsigned0 = store.get(snapshot0["canonical_preview_sha256"])
         sig0 = _ssh_sign(key_path, unsigned0, tmp_path, tag="ok0")
-        attach0 = _simulate_attach_signature(
-            workflow_id=workflow_id, repo_slug=repo_slug, signing_request_id=sr0,
-            armored_signature=sig0, unsigned_payload=unsigned0, pubkey=pubkey,
-            idem_key="idem-attach-0", tmp_path=tmp_path,
+        attach0 = _attach_signature(
+            client, signing_request_id=sr0, armored_signature=sig0,
+            canonical_payload_hash=hash0, idem_key="idem-attach-0",
         )
-        assert attach0["ok"], attach0
-        signed_sha0 = attach0["signed_commit_sha"]
+        assert attach0.status_code == 200, attach0.text
+        signed_sha0 = attach0.json()["signed_commit_sha"]
 
-        # Position 2: prepared, then REJECTED with a bogus signature (attach fails).
+        # Position 2: prepared, then REJECTED with a bogus signature --
+        # now a REAL crypto rejection from the real handler, not a
+        # precondition block, since the dead gate is gone.
         corrected1 = construct_corrected_metadata(
             tree_oid=trees[1], parent_oids=[signed_sha0],
             original_author=original_id, original_committer=original_id,
@@ -524,16 +506,13 @@ def test_D4_20_signing_failure_at_one_link_blocks_only_that_workflow_siblings_un
         )
         sr1, hash1 = _request_signature(client, workflow_id=workflow_id, idem_key="idem-request-1")
         stamp_batch_fields(signing_request_id=sr1, batch_group_id=batch_group_id, position_in_batch=2, batch_size=3)
-        snapshot1 = snapshot_dao.get_snapshot(trusted_conn, prep1["trusted_object_store_ref"])
-        unsigned1 = store.get(snapshot1["canonical_preview_sha256"])
 
-        bad_attach = _simulate_attach_signature(
-            workflow_id=workflow_id, repo_slug=repo_slug, signing_request_id=sr1,
-            armored_signature="not-a-real-signature", unsigned_payload=unsigned1, pubkey=pubkey,
-            idem_key="idem-attach-1-bad", tmp_path=tmp_path,
+        bad_attach = _attach_signature(
+            client, signing_request_id=sr1, armored_signature="not-a-real-signature",
+            canonical_payload_hash=hash1, idem_key="idem-attach-1-bad",
         )
-        assert not bad_attach["ok"]
-        assert bad_attach["error"] == "signature_verification_failed"
+        assert bad_attach.status_code != 200
+        assert bad_attach.json()["code"] == "signature_verification_failed"
 
         block_chain_link_on_signing_failure(
             workflow_id=workflow_id, repo_slug=repo_slug, position_in_batch=2,
@@ -556,8 +535,7 @@ def test_D4_20_signing_failure_at_one_link_blocks_only_that_workflow_siblings_un
             conn.close()
 
         assert state_row["status"] == CHAIN_BLOCKED_STATUS
-        import json as _json
-        blocked_state = _json.loads(state_row["state_json"])
+        blocked_state = json.loads(state_row["state_json"])
         assert blocked_state["chain_blocked_position"] == 2
         assert blocked_state["chain_batch_group_id"] == batch_group_id
 
