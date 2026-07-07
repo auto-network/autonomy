@@ -93,3 +93,39 @@ def test_provider_name_cannot_escape_the_store_dir(tmp_path):
     for bad in ("../etc/passwd", "a/b", "", "."):
         with pytest.raises(ValueError):
             store.put_secret(bad, SECRET)
+
+
+def test_toctou_ancestor_symlinked_into_mount_after_construction_is_caught(tmp_path):
+    """Regression for Sonnet's D5-10 finding: isolation was checked only at
+    __init__. Swap the store dir's ancestor to a symlink into the agent mount
+    AFTER construction and the next put_secret must fail closed, not write the
+    secret into the mount."""
+    mount = tmp_path / "agent-mounts"
+    mount.mkdir()
+    real_parent = tmp_path / "real-parent"
+    (real_parent / "creds").mkdir(parents=True)
+    store = FileCredentialStore(
+        store_dir=real_parent / "creds",
+        agent_mount_roots=[mount],
+        audit_sink=[].append,
+    )
+    store.put_secret("github", SECRET)  # fine while ancestor is real
+    # Now swap the ancestor to a symlink pointing into the agent mount.
+    inside_mount = mount / "creds"
+    inside_mount.mkdir()
+    (real_parent / "creds").rename(tmp_path / "creds-backup")
+    (real_parent / "creds").symlink_to(inside_mount, target_is_directory=True)
+    # The next write must be refused, and nothing must land in the mount.
+    with pytest.raises(CredentialStoreLocationError):
+        store.put_secret("github", "ghp_should_never_be_written_2222")
+    assert not (inside_mount / "github.cred").exists()
+
+
+def test_final_cred_file_cannot_be_a_symlink(tmp_path):
+    """O_NOFOLLOW: a pre-planted symlink at the target path is not followed."""
+    store = _store(tmp_path, [])
+    store.put_secret("github", SECRET)  # creates the dir
+    path = (tmp_path / "broker-creds" / "evil.cred")
+    path.symlink_to(tmp_path / "elsewhere.txt")
+    with pytest.raises(OSError):
+        store.put_secret("evil", "ghp_via_symlink_3333")
