@@ -959,3 +959,47 @@ def clear_publish_lease_failure_for_retry(
         payload=updated_state,
         db_path=db_path,
     )
+
+
+# ── single-target-branch restriction ────────────────────────────────────
+
+
+class MultiTargetRefError(ValueError):
+    """A rewrite's commits would land on more than one target branch."""
+
+
+def validate_single_target_ref(target_refs: Sequence[str]) -> str:
+    """Reject a chain of commits that would span more than one target
+    branch (§3, §6).
+
+    There is no mechanism here for updating two branches as a single
+    all-or-nothing operation, so a rewrite that landed a signed commit on
+    one branch and then failed partway through a second branch would have
+    no way to undo the first branch's change. Restricting every rewrite
+    to exactly one target branch avoids that half-finished, unrecoverable
+    state entirely rather than trying to build a rollback for it.
+
+    ``target_refs`` is the target branch resolved for each commit in the
+    chain (whatever the caller's own policy resolution decided per
+    commit) — this function does no resolution of its own, it only
+    checks that they all agree. Returns the single branch name if the
+    chain is valid.
+
+    NOT YET WIRED INTO ANY REAL CALL PATH: nothing in this codebase calls
+    this function outside its own tests. A caller starting a real rewrite
+    must call this BEFORE its own first ``create_governed_rewrite_
+    workflow`` call for the guarantee to actually hold — today nothing
+    enforces that ordering, because no such caller/orchestrator exists
+    yet. This function is a validated building block, not live
+    enforcement, until it is wired into whatever entry point starts a
+    real rewrite.
+    """
+    distinct = sorted(set(target_refs))
+    if not distinct:
+        raise ValueError("no target refs supplied")
+    if len(distinct) > 1:
+        raise MultiTargetRefError(
+            f"this rewrite's commits target more than one branch ({', '.join(distinct)}) -- "
+            "split it into independent rewrites, one per target branch, before proceeding"
+        )
+    return distinct[0]

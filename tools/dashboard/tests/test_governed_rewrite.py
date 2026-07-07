@@ -28,6 +28,7 @@ from tools.dashboard.governed_rewrite import (
     ROLE_REWRITE_RESULT,
     ROLE_REWRITE_SOURCE,
     GitIdentityLine,
+    MultiTargetRefError,
     check_publish_approval_gate,
     construct_corrected_metadata,
     create_governed_rewrite_workflow,
@@ -37,6 +38,7 @@ from tools.dashboard.governed_rewrite import (
     record_force_with_lease_approval,
     record_supersede_approval,
     snapshot_original_commit,
+    validate_single_target_ref,
 )
 
 
@@ -788,3 +790,89 @@ def test_D4_16_force_with_lease_without_a_prior_supersede_raises(tmp_path):
     result = check_publish_approval_gate(workflow_id=workflow_id, db_path=path)
     assert result.allowed is False
     assert set(result.missing_approval_types) == {"supersede", "force_with_lease"}
+
+
+# ── restrict a rewrite to a single target branch ────────────────────────
+
+
+def test_single_target_branch_chain_is_accepted(tmp_path):
+    ref = validate_single_target_ref(["refs/heads/main", "refs/heads/main", "refs/heads/main"])
+    assert ref == "refs/heads/main"
+
+
+def test_multiple_target_branches_are_rejected_with_a_clear_message():
+    with pytest.raises(MultiTargetRefError) as excinfo:
+        validate_single_target_ref(["refs/heads/main", "refs/heads/release-1.0"])
+    message = str(excinfo.value)
+    assert "refs/heads/main" in message
+    assert "refs/heads/release-1.0" in message
+    assert "independent rewrites" in message
+
+
+def test_no_target_refs_supplied_raises():
+    with pytest.raises(ValueError):
+        validate_single_target_ref([])
+
+
+def test_multi_branch_rejection_happens_before_any_workflow_row_is_created(tmp_path):
+    """Documents the ordering a real caller MUST follow once one exists:
+    check validate_single_target_ref before calling
+    create_governed_rewrite_workflow for any commit in the chain.
+    Nothing enforces this ordering today -- there is no real caller yet
+    (grepped the tree: create_governed_rewrite_workflow is invoked only
+    from its own tests) -- so this proves the function's own behavior
+    and pins the intended call order, not that the restriction is
+    actually live in a running system."""
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    reports = [
+        _report("sha1", compliant=False, violations=("signature_absent",)),
+        _report("sha2", compliant=False, violations=("signature_absent",)),
+    ]
+    target_refs = ["refs/heads/main", "refs/heads/release-1.0"]
+
+    with pytest.raises(MultiTargetRefError):
+        validate_single_target_ref(target_refs)
+        # A real caller would only reach this line -- and therefore only
+        # ever create a workflow -- once validate_single_target_ref has
+        # already returned successfully. It never does here, so this
+        # never executes.
+        for report in reports:
+            create_governed_rewrite_workflow(
+                repo_slug="autonomy", original_sha=report.commit_sha,
+                compliance_report=report, db_path=path,
+            )
+
+    conn = commit_workflow_db._get_conn(path)
+    try:
+        row_count = conn.execute("SELECT COUNT(*) AS n FROM commit_workflow_states").fetchone()["n"]
+    finally:
+        conn.close()
+    assert row_count == 0
+
+
+def test_single_target_branch_chain_still_proceeds_to_create_workflows(tmp_path):
+    """Positive control: a genuinely single-branch chain is accepted and
+    workflow creation for every member proceeds normally."""
+    path = tmp_path / "wf.db"
+    commit_workflow_db.init_db(path)
+    reports = [
+        _report("sha1", compliant=False, violations=("signature_absent",)),
+        _report("sha2", compliant=False, violations=("signature_absent",)),
+    ]
+    target_refs = ["refs/heads/main", "refs/heads/main"]
+
+    ref = validate_single_target_ref(target_refs)
+    assert ref == "refs/heads/main"
+    for report in reports:
+        create_governed_rewrite_workflow(
+            repo_slug="autonomy", original_sha=report.commit_sha,
+            compliance_report=report, db_path=path,
+        )
+
+    conn = commit_workflow_db._get_conn(path)
+    try:
+        row_count = conn.execute("SELECT COUNT(*) AS n FROM commit_workflow_states").fetchone()["n"]
+    finally:
+        conn.close()
+    assert row_count == 2
