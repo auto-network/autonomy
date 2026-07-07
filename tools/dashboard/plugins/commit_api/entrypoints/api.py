@@ -79,7 +79,8 @@ from tools.dashboard.commit_broker.assembly import (
 )
 from tools.dashboard.commit_broker.lease import REF_ADVANCED, REF_UNEXPECTEDLY_ABSENT
 from tools.dashboard.commit_broker.publish_executor import execute_publish
-from tools.dashboard.commit_broker.pusher import build_trusted_store_pusher, read_remote_tip
+from tools.dashboard.commit_broker.pusher import build_chain_pusher, build_trusted_store_pusher, read_remote_tip
+from tools.dashboard.governed_rewrite import get_chain_publish_links
 from tools.dashboard.services.trusted_git_object_store import (
     ContentAddressedStore,
     ObjectIntegrityError,
@@ -1930,6 +1931,35 @@ def _signed_object_sha256_for_workflow(
     return None
 
 
+def _chain_publish_links_for_workflow(
+    conn: sqlite3.Connection,
+    workflow_id: str,
+) -> list[tuple[str, str]] | None:
+    """Return the ordered trusted-store links for a governed-rewrite chain.
+
+    A single-commit publish has no batch group and returns ``None`` so the
+    existing single-link pusher stays in place. A chain publish resolves the
+    batch group from the workflow and delegates the ordered-link lookup to the
+    shared governed-rewrite helper.
+    """
+    batch_row = conn.execute(
+        """
+        SELECT batch_group_id, batch_size
+        FROM commit_signing_requests
+        WHERE workflow_id = ? AND batch_group_id IS NOT NULL
+        ORDER BY position_in_batch ASC, requested_at ASC, signing_request_id ASC
+        LIMIT 1
+        """,
+        (workflow_id,),
+    ).fetchone()
+    if batch_row is None:
+        return None
+    batch_group_id = str(batch_row["batch_group_id"] or "")
+    if not batch_group_id:
+        return None
+    return get_chain_publish_links(batch_group_id=batch_group_id)
+
+
 async def publish(request: Request) -> JSONResponse:
     if not _plugin_enabled():
         return _json_error("route_not_trusted", "commit API plugin is disabled")
@@ -2065,15 +2095,29 @@ async def publish(request: Request) -> JSONResponse:
             try:
                 snapshot_dao.init_schema_on_connection(snapshot_conn)
                 with tempfile.TemporaryDirectory(prefix="commit-publish-") as staging_dir:
-                    push_objects = build_trusted_store_pusher(
-                        store=_trusted_store(),
-                        snapshot_dao=snapshot_dao,
-                        dao_conn=snapshot_conn,
-                        snapshot_ref=str(trusted_object_store_ref),
-                        signed_object_sha256=signed_object_sha256,
-                        remote=str(target_remote),
-                        staging_dir=staging_dir,
-                    )
+                    try:
+                        chain_links = _chain_publish_links_for_workflow(conn, parsed.workflow_id)
+                    except ValueError as exc:
+                        return _json_error("invalid_transition", str(exc))
+                    if chain_links and len(chain_links) > 1:
+                        push_objects = build_chain_pusher(
+                            store=_trusted_store(),
+                            snapshot_dao=snapshot_dao,
+                            dao_conn=snapshot_conn,
+                            links=chain_links,
+                            remote=str(target_remote),
+                            staging_dir=staging_dir,
+                        )
+                    else:
+                        push_objects = build_trusted_store_pusher(
+                            store=_trusted_store(),
+                            snapshot_dao=snapshot_dao,
+                            dao_conn=snapshot_conn,
+                            snapshot_ref=str(trusted_object_store_ref),
+                            signed_object_sha256=signed_object_sha256,
+                            remote=str(target_remote),
+                            staging_dir=staging_dir,
+                        )
                     publish_result = execute_publish(
                         resolved_plan=resolved_plan,
                         target_repo=str(target_remote),
