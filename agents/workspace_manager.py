@@ -2643,6 +2643,42 @@ def get_session_worktree_commit_detail(
     return commit
 
 
+_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # git's canonical empty tree
+
+
+def sign_request_diff(
+    session_name: str,
+    repo_name: str,
+    parent_sha: str | None,
+    tree_sha: str,
+    *,
+    worktrees_dir: Path = WORKTREES_DIR,
+) -> dict:
+    """Files + unified patch for a commit that is not yet in history.
+
+    A commit blocked awaiting its signature has no SHA, but git has already
+    written its tree object, so the change can be diffed live from the payload's
+    parent and tree — the same subprocess-git-on-the-worktree pattern the commit
+    overlay already uses. Returns ``{"files": [{"status","path"}], "patch": str}``.
+    A root commit (no parent) diffs against the empty tree.
+    """
+    worktree = _session_worktree_path(session_name, repo_name, worktrees_dir=worktrees_dir)
+    base = parent_sha or _EMPTY_TREE
+    rc_ns, name_status, _ = _git_output(
+        ["diff-tree", "-r", "--name-status", "--find-renames", base, tree_sha], worktree
+    )
+    files = []
+    if rc_ns == 0:
+        for line in name_status.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                files.append({"status": parts[0], "path": parts[-1]})
+    rc_p, patch, _ = _git_output(
+        ["diff-tree", "-p", "--find-renames", base, tree_sha], worktree
+    )
+    return {"files": files, "patch": patch if rc_p == 0 else ""}
+
+
 def get_repo_commit_detail(
     repo_path: Path,
     sha: str,
