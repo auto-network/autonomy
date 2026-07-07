@@ -23,5 +23,14 @@ RUN pip install --break-system-packages --no-cache-dir \
         # ↑ websockets added in S3-4a (graph://86fd1897-d4d). Outbound async
         # ws client to WhisperLive on 127.0.0.1:9090 plus the uvicorn
         # server-side ws protocol implementation production needs.
+
+# ── Tailwind standalone binary (v4, matches tailwind.input.css) ──
+# The dashboard's CSS (static/tailwind.css) is built from tailwind.input.css by
+# start-dashboard.sh and by dashboard-mock. Baking the binary in means no network
+# fetch at startup; the launchers prefer this on PATH over downloading.
+RUN curl -sL "https://github.com/tailwindlabs/tailwindcss/releases/download/v4.3.2/tailwindcss-linux-x64" \
+        -o /usr/local/bin/tailwindcss \
+    && chmod +x /usr/local/bin/tailwindcss
+
 USER agent
 ENTRYPOINT ["claude", "--dangerously-skip-permissions"]

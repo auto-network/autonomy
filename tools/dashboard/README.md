@@ -58,7 +58,7 @@ The dashboard is a **thin rendering layer over the CLI tools.** It calls `bd` an
 
 ### Stack
 - **Backend:** Starlette + uvicorn (already in .venv)
-- **Frontend:** Tailwind CSS (CDN), vanilla JS, marked.js for markdown
+- **Frontend:** Tailwind CSS (built to `static/tailwind.css` from `tailwind.input.css`; `start-dashboard.sh` and `dashboard-mock` build it automatically on start), vanilla JS, marked.js for markdown
 - **Rendering:** Client-side markdown rendering with syntax highlighting
 - **Data:** JSON API endpoints that shell out to `bd` and `graph`
 - **No framework:** No React, no Vue, no build step. HTML + JS + CSS.

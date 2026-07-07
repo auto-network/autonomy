@@ -92,6 +92,42 @@ def _wait_for_server(port: int, timeout: float = 10.0) -> bool:
     return False
 
 
+def _ensure_tailwind_css() -> None:
+    """Build ``static/tailwind.css`` so the dashboard renders styled.
+
+    ``static/tailwind.css`` is a built, gitignored file — a fresh checkout /
+    session worktree has none, and without it the whole dashboard renders
+    unstyled (black-on-black text, default buttons) even though it works. This
+    downloads the standalone Tailwind v4 binary once, then builds. Best-effort:
+    any failure logs a warning but never blocks startup.
+    """
+    import shutil
+    dash_dir = Path(__file__).resolve().parent
+    css_in = dash_dir / "tailwind.input.css"
+    if not css_in.exists():
+        return
+    # Prefer a tailwindcss on PATH (baked into the image); fall back to a local
+    # binary; download only if neither exists.
+    binary = shutil.which("tailwindcss") or str(dash_dir / "tailwindcss")
+    try:
+        if not os.access(binary, os.X_OK):
+            print("  Tailwind: downloading standalone binary...")
+            binary = str(dash_dir / "tailwindcss")
+            url = ("https://github.com/tailwindlabs/tailwindcss/releases/latest/"
+                   "download/tailwindcss-linux-x64")
+            subprocess.run(["curl", "-sL", url, "-o", binary], check=True, timeout=180)
+            os.chmod(binary, 0o755)
+        subprocess.run(
+            [str(binary), "--cwd", str(dash_dir), "-i", "tailwind.input.css",
+             "-o", "static/tailwind.css"],
+            check=True, timeout=180,
+        )
+        print("  Tailwind: built static/tailwind.css")
+    except Exception as exc:  # noqa: BLE001 — never block startup on styling
+        print(f"  WARNING: tailwind build skipped ({exc}); dashboard may render "
+              "unstyled. See tools/dashboard/start-dashboard.sh.", file=sys.stderr)
+
+
 def cmd_start(args: argparse.Namespace) -> int:
     port = args.port
 
