@@ -214,6 +214,21 @@ def record_integrity(
     )
 
 
+def update_snapshot_retention(
+    conn: sqlite3.Connection,
+    snapshot_ref: str,
+    *,
+    retention_class: str,
+    retention_expires_at: float | None,
+) -> None:
+    """Update a snapshot's retention class and expiry schedule."""
+    conn.execute(
+        "UPDATE trusted_git_object_snapshots "
+        "SET retention_class = ?, retention_expires_at = ? WHERE snapshot_ref = ?",
+        (retention_class, retention_expires_at, snapshot_ref),
+    )
+
+
 # ── retention / GC query helpers ─────────────────────────────────────
 
 
