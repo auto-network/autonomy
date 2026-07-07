@@ -76,6 +76,9 @@ from tools.dashboard.commit_broker.assembly import (
     fold_gpgsig_block,
     serialize_unsigned_commit_payload,
 )
+from tools.dashboard.commit_broker.lease import REF_ADVANCED, REF_UNEXPECTEDLY_ABSENT
+from tools.dashboard.commit_broker.publish_executor import execute_publish
+from tools.dashboard.commit_broker.pusher import build_trusted_store_pusher, read_remote_tip
 from tools.dashboard.services.trusted_git_object_store import (
     ContentAddressedStore,
     ObjectIntegrityError,
@@ -1713,6 +1716,7 @@ async def attach_signature(request: Request) -> JSONResponse:
                 unsigned_payload,
                 fold_gpgsig_block(parsed.armored_signature.encode("utf-8")),
             )
+            signed_object_sha256 = store.put(signed_payload)
             signed_commit_ref = parsed.signed_commit_object_ref or computed_signed_sha
             if parsed.signed_commit_object_ref and parsed.signed_commit_object_ref != computed_signed_sha:
                 return _json_error(
@@ -1729,6 +1733,7 @@ async def attach_signature(request: Request) -> JSONResponse:
                 "armored_signature_present": bool(parsed.armored_signature),
                 "signed_commit_object_ref": signed_commit_ref,
                 "signed_payload_sha": computed_signed_sha,
+                "signed_object_sha256": signed_object_sha256,
                 "assembled_from_trusted_payload": True,
             }
             event_id = uuid.uuid4().hex
@@ -1768,6 +1773,7 @@ async def attach_signature(request: Request) -> JSONResponse:
                 "attach_signature_response": response.to_dict(),
                 "local_signer_attestation": parsed.local_signer_attestation.to_dict(),
                 "signed_payload_sha": commit_object_sha(signed_payload),
+                "signed_object_sha256": signed_object_sha256,
             }
             conn.execute(
                 "UPDATE commit_signing_requests SET status = ?, completed_at = ?, signature_ref = ?, payload_json = ? WHERE signing_request_id = ?",
@@ -1853,6 +1859,37 @@ def _approval_expected_old_sha(conn: sqlite3.Connection, workflow_id: str) -> st
         return None
     expected = constraints.get("expected_ref_sha")
     return str(expected) if expected else None
+
+
+def _signed_object_sha256_for_workflow(
+    conn: sqlite3.Connection,
+    workflow_id: str,
+    state_payload: dict[str, Any],
+) -> str | None:
+    signed_object_sha256 = state_payload.get("signed_object_sha256")
+    if isinstance(signed_object_sha256, str) and signed_object_sha256:
+        return signed_object_sha256
+
+    row = conn.execute(
+        """
+        SELECT payload_json
+        FROM commit_signing_requests
+        WHERE workflow_id = ?
+        ORDER BY completed_at DESC, requested_at DESC, signing_request_id DESC
+        LIMIT 1
+        """,
+        (workflow_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row["payload_json"] or "{}")
+    except Exception:
+        return None
+    signed_object_sha256 = payload.get("signed_object_sha256")
+    if isinstance(signed_object_sha256, str) and signed_object_sha256:
+        return signed_object_sha256
+    return None
 
 
 async def publish(request: Request) -> JSONResponse:
@@ -1949,6 +1986,90 @@ async def publish(request: Request) -> JSONResponse:
             "new_sha": parsed_ref_update.new_sha,
             "repo_slug": parsed_ref_update.repo_slug,
         }
+        trusted_object_store_ref = state_payload.get("trusted_object_store_ref")
+        if not isinstance(trusted_object_store_ref, str) or not trusted_object_store_ref:
+            snapshot_row = conn.execute(
+                """
+                SELECT trusted_object_store_ref
+                FROM commit_signing_requests
+                WHERE workflow_id = ? AND trusted_object_store_ref IS NOT NULL
+                ORDER BY requested_at DESC, signing_request_id DESC
+                LIMIT 1
+                """,
+                (parsed.workflow_id,),
+            ).fetchone()
+            if snapshot_row is not None:
+                trusted_object_store_ref = str(snapshot_row["trusted_object_store_ref"])
+
+        signed_object_sha256 = _signed_object_sha256_for_workflow(conn, parsed.workflow_id, state_payload)
+        if not skipped:
+            if not isinstance(trusted_object_store_ref, str) or not trusted_object_store_ref:
+                return _json_error(
+                    "invalid_transition",
+                    "workflow has no trusted snapshot artifact to publish",
+                )
+            if not signed_object_sha256:
+                return _json_error(
+                    "invalid_transition",
+                    "workflow has no signed payload artifact to publish",
+                )
+            target_remote = _row_value(worktree_row, "managed_clone") or _row_value(worktree_row, "worktree_path")
+            if not target_remote:
+                return _json_error(
+                    "invalid_transition",
+                    "workflow has no target repository to publish to",
+                )
+            snapshot_conn = snapshot_dao._get_conn()
+            try:
+                snapshot_dao.init_schema_on_connection(snapshot_conn)
+                with tempfile.TemporaryDirectory(prefix="commit-publish-") as staging_dir:
+                    push_objects = build_trusted_store_pusher(
+                        store=_trusted_store(),
+                        snapshot_dao=snapshot_dao,
+                        dao_conn=snapshot_conn,
+                        snapshot_ref=str(trusted_object_store_ref),
+                        signed_object_sha256=signed_object_sha256,
+                        remote=str(target_remote),
+                        staging_dir=staging_dir,
+                    )
+                    publish_result = execute_publish(
+                        expected_old_sha=approval_expected_old_sha,
+                        signed_commit_sha=current_signed_sha,
+                        ref=parsed_ref_update.ref,
+                        read_remote_tip=lambda: read_remote_tip(str(target_remote), parsed_ref_update.ref),
+                        push_objects=lambda: push_objects(
+                            signed_commit_sha=current_signed_sha,
+                            ref=parsed_ref_update.ref,
+                            expected_old_sha=approval_expected_old_sha,
+                        ),
+                    )
+            finally:
+                snapshot_conn.close()
+            if not publish_result.published:
+                if publish_result.reason in {REF_ADVANCED, REF_UNEXPECTEDLY_ABSENT}:
+                    return _json_error(
+                        "approval_stale_requires_reapproval",
+                        "publish lease no longer matches the target ref",
+                    )
+                return _json_error("ref_update_rejected", f"publish rejected: {publish_result.reason}")
+            ref_update_result["push_target"] = publish_result.target
+            ref_update_result["observed_remote_tip"] = publish_result.observed_remote_tip
+            ref_update_result["pushed_ref"] = publish_result.pushed_ref
+
+        if isinstance(trusted_object_store_ref, str) and trusted_object_store_ref and not skipped:
+            snapshot_conn = snapshot_dao._get_conn()
+            try:
+                snapshot_dao.init_schema_on_connection(snapshot_conn)
+                snapshot_dao.update_snapshot_retention(
+                    snapshot_conn,
+                    trusted_object_store_ref,
+                    retention_class="published",
+                    retention_expires_at=time.time() + cdb.IDEMPOTENCY_PUBLISH_RETENTION_SECONDS,
+                )
+                snapshot_conn.commit()
+                sweep_expired_snapshots(dao_conn=snapshot_conn, store=_trusted_store())
+            finally:
+                snapshot_conn.close()
         conn.execute(
             """
             INSERT INTO commit_workflow_events (
@@ -1979,39 +2100,12 @@ async def publish(request: Request) -> JSONResponse:
                         "ref_update_intent": parsed_ref_update.to_dict(),
                         "publish_mode": parsed.publish_mode,
                         "ref_update_result": ref_update_result,
+                        "signed_object_sha256": signed_object_sha256,
                     },
                     sort_keys=True,
                 ),
             ),
         )
-        trusted_object_store_ref = state_payload.get("trusted_object_store_ref")
-        if not isinstance(trusted_object_store_ref, str) or not trusted_object_store_ref:
-            snapshot_row = conn.execute(
-                """
-                SELECT trusted_object_store_ref
-                FROM commit_signing_requests
-                WHERE workflow_id = ? AND trusted_object_store_ref IS NOT NULL
-                ORDER BY requested_at DESC, signing_request_id DESC
-                LIMIT 1
-                """,
-                (parsed.workflow_id,),
-            ).fetchone()
-            if snapshot_row is not None:
-                trusted_object_store_ref = str(snapshot_row["trusted_object_store_ref"])
-        if isinstance(trusted_object_store_ref, str) and trusted_object_store_ref and not skipped:
-            snapshot_conn = snapshot_dao._get_conn()
-            try:
-                snapshot_dao.init_schema_on_connection(snapshot_conn)
-                snapshot_dao.update_snapshot_retention(
-                    snapshot_conn,
-                    trusted_object_store_ref,
-                    retention_class="published",
-                    retention_expires_at=time.time() + cdb.IDEMPOTENCY_PUBLISH_RETENTION_SECONDS,
-                )
-                snapshot_conn.commit()
-                sweep_expired_snapshots(dao_conn=snapshot_conn, store=_trusted_store())
-            finally:
-                snapshot_conn.close()
         cdb._rebuild_projection_for_workflow(conn, parsed.workflow_id)
         current_state = _workflow_state_row(conn, parsed.workflow_id)
         if current_state is None:
