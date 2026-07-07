@@ -16,10 +16,32 @@ import base64
 import time
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from tools.dashboard.dao import sign_requests as sr
+
+# The per-org signing key lives in this Setting as a passphrase-encrypted armored
+# private key. The browser fetches it, decrypts locally, and signs; the server
+# only ever holds (and serves) the ENCRYPTED blob.
+SIGN_KEY_SET_ID = "autonomy.commit.signing-key"
+
+
+async def get_sign_key(request: Request) -> PlainTextResponse:
+    """GET /api/sign-key -> the org's passphrase-encrypted armored private key,
+    or 404 if none is configured. Read-only; serves an already-encrypted value."""
+    org = request.query_params.get("org") or None
+    try:
+        from tools.graph import ops as graph_ops
+        members = graph_ops.read_set(SIGN_KEY_SET_ID, org=org)
+        for m in (getattr(members, "members", []) or []):
+            payload = m.payload if isinstance(m.payload, dict) else {}
+            armored = payload.get("armored_private_key") or payload.get("armored")
+            if isinstance(armored, str) and "PRIVATE KEY" in armored:
+                return PlainTextResponse(armored)
+    except Exception:
+        pass
+    return PlainTextResponse("no signing key configured", status_code=404)
 
 
 async def create_sign_request(request: Request) -> JSONResponse:
@@ -101,4 +123,5 @@ ROUTES = [
     Route("/api/sign-requests", create_sign_request, methods=["POST"]),
     Route("/api/sign-requests/{id}", get_sign_request, methods=["GET"]),
     Route("/api/sign-requests/{id}/signature", submit_signature, methods=["POST"]),
+    Route("/api/sign-key", get_sign_key, methods=["GET"]),
 ]
