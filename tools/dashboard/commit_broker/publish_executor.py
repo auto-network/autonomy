@@ -63,12 +63,21 @@ class PublishResult:
     outcome: str
     reason: str
     pushed: bool
+    # What the publish handler surfaces on the workflow after a publish attempt.
+    observed_remote_tip: str | None = None  # the remote tip the gates read
+    pushed_ref: str | None = None           # the ref that was updated (on success)
+    target: str | None = None               # what it pushed to (on success)
+
+    @property
+    def published(self) -> bool:
+        """True iff the signed commit was actually pushed (alias of ``pushed``)."""
+        return self.pushed
 
     @property
     def routes_to_reapproval(self) -> bool:
         # A lease that no longer holds sends the workflow back to re-approval.
         # A new-ref collision is a distinct 'someone created it' state, NOT a
-        # lease-reapproval (per D5-12 review) — so it is excluded here.
+        # lease-reapproval — so it is excluded here.
         return self.outcome == REF_ADVANCED
 
 
@@ -121,7 +130,7 @@ def execute_publish(
         read_remote_tip=_cached_tip,
     )
     if idem.is_noop:
-        return PublishResult(NOOP_ALREADY_PUBLISHED, idem.reason, False)
+        return PublishResult(NOOP_ALREADY_PUBLISHED, idem.reason, False, observed_remote_tip=observed_tip)
 
     if is_new_ref:
         lease = check_new_ref(read_remote_tip=_cached_tip)
@@ -131,12 +140,12 @@ def execute_publish(
         lease = check_update_lease(expected_ref_sha=expected_ref_sha, read_remote_tip=_cached_tip)
     if not lease.ok:
         outcome = NEW_REF_ALREADY_EXISTS if lease.reason == NEW_REF_EXISTS else REF_ADVANCED
-        return PublishResult(outcome, f"lease pre-flight failed: {lease.reason}", False)
+        return PublishResult(outcome, f"lease pre-flight failed: {lease.reason}", False, observed_remote_tip=observed_tip)
 
     # Credential is resolved for the server-resolved scope only; an out-of-scope
     # repo is denied BEFORE any push.
     if not authorized_scope.permits(target_repo):
-        return PublishResult(OUT_OF_SCOPE, f"repo {target_repo!r} outside authorized scope", False)
+        return PublishResult(OUT_OF_SCOPE, f"repo {target_repo!r} outside authorized scope", False, observed_remote_tip=observed_tip)
     credential: Credential = credential_provider.get_real_credential(provider, authorized_scope)
 
     # Push the signed object + needed objects from the trusted store. The pusher
@@ -158,4 +167,5 @@ def execute_publish(
         is_new_ref=is_new_ref,
         credential=credential,
     )
-    return PublishResult(PUSHED, "published to remote", True)
+    return PublishResult(PUSHED, "published to remote", True,
+                         observed_remote_tip=observed_tip, pushed_ref=target_ref, target=target_repo)
