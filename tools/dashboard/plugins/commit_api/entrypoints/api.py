@@ -81,6 +81,7 @@ from tools.dashboard.services.trusted_git_object_store import (
     ObjectIntegrityError,
     capture_snapshot,
     verify_snapshot,
+    sweep_expired_snapshots,
 )
 from tools.dashboard.worktree_monitor import worktree_monitor
 
@@ -2008,6 +2009,7 @@ async def publish(request: Request) -> JSONResponse:
                     retention_expires_at=time.time() + cdb.IDEMPOTENCY_PUBLISH_RETENTION_SECONDS,
                 )
                 snapshot_conn.commit()
+                sweep_expired_snapshots(dao_conn=snapshot_conn, store=_trusted_store())
             finally:
                 snapshot_conn.close()
         cdb._rebuild_projection_for_workflow(conn, parsed.workflow_id)

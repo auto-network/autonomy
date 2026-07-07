@@ -14,13 +14,18 @@ the metadata half lives in ``dao.trusted_git_object_store``.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
 from tools.dashboard.dao import trusted_git_object_store as snapshot_dao
+
+
+logger = logging.getLogger(__name__)
 
 
 class ObjectIntegrityError(Exception):
@@ -192,7 +197,16 @@ def capture_snapshot(
         retention_expires_at=retention_expires_at,
     )
     snapshot_dao.add_entries(dao_conn, snapshot_ref, entries)
+    if not verify_snapshot(snapshot_ref=snapshot_ref, store=store, dao_conn=dao_conn):
+        dao_conn.rollback()
+        raise RuntimeError("trusted snapshot capture failed integrity verification")
+    snapshot_dao.update_snapshot_status(dao_conn, snapshot_ref, "verified")
+    snapshot_dao.record_integrity(dao_conn, snapshot_ref, status="verified")
     dao_conn.commit()
+    # Capture is also the first opportunity to sweep any now-expired snapshots.
+    # This keeps the trusted store moving forward even if the only traffic is
+    # through snapshot-producing paths.
+    sweep_expired_snapshots(dao_conn=dao_conn, store=store)
     return snapshot_ref
 
 
@@ -269,3 +283,12 @@ def collect_garbage(*, dao_conn, store: ContentAddressedStore, now: float) -> di
         snapshot_dao.update_snapshot_status(dao_conn, ref, "gc_deleted")
     dao_conn.commit()
     return {"snapshots_collected": len(pending), "objects_deleted": objects_deleted}
+
+
+def sweep_expired_snapshots(*, dao_conn, store: ContentAddressedStore) -> dict | None:
+    """Best-effort GC trigger for callers that just updated snapshot retention."""
+    try:
+        return collect_garbage(dao_conn=dao_conn, store=store, now=time.time())
+    except Exception:
+        logger.warning("trusted snapshot GC sweep failed", exc_info=True)
+        return None

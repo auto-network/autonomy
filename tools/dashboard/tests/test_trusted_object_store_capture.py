@@ -3,7 +3,10 @@ from __future__ import annotations
 import sqlite3
 import subprocess
 
+import pytest
+
 from tools.dashboard.dao import trusted_git_object_store as dao
+from tools.dashboard.services import trusted_git_object_store as snapshot_service
 from tools.dashboard.services.trusted_git_object_store import (
     ContentAddressedStore,
     capture_snapshot,
@@ -58,6 +61,9 @@ def test_capture_records_snapshot_and_every_reachable_object(tmp_path):
 
     snap = dao.get_snapshot(conn, ref)
     assert snap["tree_sha"] == tree
+    assert snap["status"] == "verified"
+    assert snap["latest_integrity_status"] == "verified"
+    assert snap["latest_integrity_at"] is not None
     entries = dao.list_entries(conn, ref)
     types = {e["object_type"] for e in entries}
     assert "tree" in types and "blob" in types  # root tree + subtree + blobs
@@ -97,6 +103,34 @@ def test_n3_snapshot_survives_index_advance(tmp_path):
     assert after == before
     assert verify_snapshot(snapshot_ref=ref, store=store, dao_conn=conn)
     assert store.get(blob_digest) == b"original\n"  # the captured bytes, not the staged tamper
+
+
+def test_capture_rolls_back_when_integrity_check_fails(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    (repo / "a.txt").write_text("data\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c1")
+    tree = _git_out(repo, "rev-parse", "HEAD^{tree}")
+
+    store = ContentAddressedStore(tmp_path / "store")
+    conn = _conn()
+    monkeypatch.setattr(snapshot_service, "verify_snapshot", lambda **_kwargs: False)
+
+    with pytest.raises(RuntimeError, match="integrity verification"):
+        capture_snapshot(
+            workflow_id="wf",
+            repo_slug="r",
+            commit_sha=_git_out(repo, "rev-parse", "HEAD"),
+            tree_sha=tree,
+            parent_shas=[],
+            git_dir=repo,
+            store=store,
+            dao_conn=conn,
+            snapshot_type="commit_create",
+        )
+
+    row = conn.execute("SELECT COUNT(*) AS n FROM trusted_git_object_snapshots").fetchone()
+    assert row["n"] == 0
 
 
 def test_verify_fails_when_a_captured_object_is_tampered_in_the_store(tmp_path):
