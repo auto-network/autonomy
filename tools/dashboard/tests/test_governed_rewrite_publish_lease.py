@@ -28,6 +28,8 @@ writing both shapes additively.
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
 
 import pytest
 from starlette.applications import Starlette
@@ -271,6 +273,18 @@ def test_D4_23_ref_advanced_since_t2_fails_closed_and_workflow_reacts_failed_ret
         conn.close()
     assert row["status"] == PUBLISH_LEASE_STALE_STATUS
     assert json.loads(row["state_json"])["publish_lease_failure_reason"] == "ref advanced since T2 approval"
+
+    # Simulate the remote actually advancing since the first attempt: a new
+    # commit becomes the tip of refs/heads/main, then the fresh T2 approval
+    # pins that new tip and the retry can succeed.
+    repo = Path(commit_api.worktree_monitor.get_all()[0].managed_clone)
+    (repo / "advance.txt").write_text("advance\n")
+    subprocess.run(["git", "-C", str(repo), "add", "advance.txt"], capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "advance main"], capture_output=True, check=True)
+    concurrently_advanced_sha = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, check=True
+    ).stdout.decode().strip()
+    subprocess.run(["git", "-C", str(repo), "branch", "-f", "main", concurrently_advanced_sha], capture_output=True, check=True)
 
     # A fresh T2 approval at the NEW ref-tip (T0 is still valid, no need to
     # redo it) lets publish succeed on retry -- the signature is still there.
