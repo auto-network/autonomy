@@ -61,6 +61,28 @@ ref-tip back out of the ``commit_workflow_approvals`` table itself
 record the T2 approval if the ref advanced and the caller hasn't passed
 ``delta_disclosed=True``. No ref movement means no disclosure
 requirement — a single combined confirmation is allowed.
+
+D4-18/D4-19 (§4) sequential chain signing: a whole chain is ONE
+workflow_id (``record_chain_source_and_result_roles`` already assumes
+this — one workflow, N ``rewrite_source``/``rewrite_result`` pairs
+distinguished by ``position``). ``advance_chain_link`` re-runs D4-17's
+``prepare_rewrite_for_signing`` on that SAME workflow_id once per link,
+after reading the previous link's ``signed_commit_sha`` back out of the
+workflow's own state — never re-deriving or trusting a caller-supplied
+parent. ``stamp_batch_fields``/``get_batch_member_status`` are the
+chain-specific bookkeeping layered on top of ``commit.request_signature``
+(never touched or branched): each link's row is created by the real
+handler exactly like an ordinary proposal, then batch_group_id/
+position_in_batch/batch_size are stamped on as an additive follow-up
+write, and a not-yet-reached position (no row yet) reports
+``waiting_on_predecessor`` — matching the already-landed local-signer
+read side (D3-19) exactly.
+
+D4-20 (§4): ``block_chain_link_on_signing_failure`` transitions the
+chain's shared workflow to ``blocked`` naming the failing position. No
+force-push code path exists to guard against here — this module never
+calls ``commit.publish``, so a blocked link intrinsically prevents the
+whole chain from reaching publish.
 """
 
 from __future__ import annotations
@@ -615,3 +637,209 @@ def prepare_rewrite_for_signing(
         "trusted_object_store_ref": result_snapshot_ref,
         "canonical_payload_hash": canonical_payload_hash,
     }
+
+
+# ── D4-18/D4-19: sequential chain signing sharing one batch_group_id ───
+#
+# Each chain link is its OWN governed-rewrite workflow (its own D4-8
+# call, its own D4-9/17 snapshots) -- "chain" is purely a cross-workflow
+# concept added here via a shared batch_group_id on each link's
+# commit_signing_requests row. commit.request_signature itself is never
+# touched or branched (D4-17's own acceptance criterion): this module
+# calls it exactly like an ordinary proposal for whichever link is ready,
+# then stamps the batch_group_id/position_in_batch/batch_size columns
+# onto the row it just created as a strictly-additive follow-up write --
+# those columns are chain-signing bookkeeping the ordinary single-commit
+# path has no reason to know about.
+#
+# NOTE on indexing: position_in_batch/batch_size below are 1-indexed,
+# matching the already-landed local-signer read side (D3-19,
+# local_signer_routes.py) exactly. This is a different axis from
+# record_chain_source_and_result_roles' 0-indexed commit_workflow_commits
+# `position` (D4-12) -- one indexes commit ROLES within a workflow, the
+# other indexes SIGNING REQUESTS within a batch; they are not the same
+# number space and are kept named distinctly on purpose.
+
+CHAIN_BATCH_WAITING_STATUS = "waiting_on_predecessor"
+
+
+def new_batch_group_id() -> str:
+    """Mint one shared id for every signing request in a chain (§4)."""
+    return uuid.uuid4().hex
+
+
+def stamp_batch_fields(
+    *,
+    signing_request_id: str,
+    batch_group_id: str,
+    position_in_batch: int,
+    batch_size: int,
+    db_path=None,
+) -> None:
+    """Stamp batch_group_id/position_in_batch/batch_size onto a
+    commit_signing_requests row that commit.request_signature already
+    created. Called strictly AFTER request_signature returns -- the
+    handler's own INSERT has no batch columns and is never modified to
+    add them; this is out-of-band chain bookkeeping this module owns.
+    """
+    conn = commit_workflow_db._get_conn(db_path)
+    try:
+        conn.execute(
+            "UPDATE commit_signing_requests "
+            "SET batch_group_id = ?, position_in_batch = ?, batch_size = ? "
+            "WHERE signing_request_id = ?",
+            (batch_group_id, position_in_batch, batch_size, signing_request_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_batch_member_status(
+    *,
+    batch_group_id: str,
+    position_in_batch: int,
+    batch_size: int,
+    db_path=None,
+) -> dict:
+    """Query one position of a chain-signing batch (§4, D4-18).
+
+    Rows are created one at a time in chain order -- a not-yet-reached
+    position has no commit_signing_requests row at all yet. Rather than
+    404/None, this synthesizes the same ``waiting_on_predecessor`` answer
+    the already-landed local-signer GET path (D3-19) returns for a row
+    that exists but lacks a real payload hash: a not-yet-reachable
+    position is a real, ordered chain member, just not ready.
+    """
+    conn = commit_workflow_db._get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT signing_request_id, workflow_id, canonical_payload_hash, status "
+            "FROM commit_signing_requests WHERE batch_group_id = ? AND position_in_batch = ?",
+            (batch_group_id, position_in_batch),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return {
+            "signing_request_id": None,
+            "workflow_id": None,
+            "batch_group_id": batch_group_id,
+            "position_in_batch": position_in_batch,
+            "batch_size": batch_size,
+            "canonical_payload_hash": None,
+            "status": None,
+            "batch_status": CHAIN_BATCH_WAITING_STATUS,
+        }
+    return {
+        "signing_request_id": row["signing_request_id"],
+        "workflow_id": row["workflow_id"],
+        "batch_group_id": batch_group_id,
+        "position_in_batch": position_in_batch,
+        "batch_size": batch_size,
+        "canonical_payload_hash": row["canonical_payload_hash"],
+        "status": row["status"],
+        "batch_status": None,
+    }
+
+
+def advance_chain_link(
+    *,
+    workflow_id: str,
+    repo_slug: str,
+    corrected: CorrectedCommitMetadata,
+    git_dir,
+    store,
+    trusted_store_conn,
+    workflow_db_path=None,
+) -> dict:
+    """Root-to-tip walk (§4, D4-19): fix a descendant's parent to its
+    predecessor's FINAL post-signing SHA, then run it through D4-17
+    exactly as the root link.
+
+    A whole chain is ONE workflow_id (D4-12's ``record_chain_source_and_
+    result_roles`` already establishes this -- one workflow spanning every
+    ``rewrite_source``/``rewrite_result`` pair in the chain, distinguished
+    by ``position``, not by separate workflow_ids). ``prepare_rewrite_for_
+    signing`` is called again and again on that SAME workflow_id, once per
+    link: each call overwrites the workflow's ``awaiting_signature``
+    fields with the NEXT link's payload and flips status back to
+    ``awaiting_signature`` (even after a prior link left it ``signed``),
+    which is exactly what lets ``commit.request_signature`` fire again,
+    unmodified, for the next link.
+
+    Once a link's signature is attached, the workflow's state_json
+    carries ``signed_commit_sha`` -- the final post-signing SHA
+    (inserting ``gpgsig`` changes the object id per spec §11), never
+    ``unsigned_commit_sha``. This reads that value BEFORE overwriting
+    state for the next link, fails closed if it isn't there yet (the
+    current link's own signature isn't attached), and fails closed if
+    ``corrected`` wasn't actually built with that exact SHA as its sole
+    parent -- a caller mistake here would silently orphan the next link
+    from the real signed chain, so this is checked rather than trusted.
+    """
+    current_state = _current_state_json(workflow_id, db_path=workflow_db_path)
+    predecessor_signed_sha = current_state.get("signed_commit_sha")
+    if not predecessor_signed_sha:
+        raise ValueError(
+            f"workflow {workflow_id!r} has no signed_commit_sha yet -- "
+            "the current link's signature must be attached before the next link's parent can be fixed"
+        )
+    if list(corrected.parent_oids) != [predecessor_signed_sha]:
+        raise ValueError(
+            "corrected metadata's parent must be exactly the predecessor's signed_commit_sha "
+            f"({predecessor_signed_sha!r}), got {list(corrected.parent_oids)!r}"
+        )
+    return prepare_rewrite_for_signing(
+        workflow_id=workflow_id,
+        repo_slug=repo_slug,
+        corrected=corrected,
+        git_dir=git_dir,
+        store=store,
+        trusted_store_conn=trusted_store_conn,
+        workflow_db_path=workflow_db_path,
+    )
+
+
+# ── D4-20: all-or-nothing chain -- block on any signing failure ────────
+
+CHAIN_BLOCKED_STATUS = "blocked"
+
+
+def block_chain_link_on_signing_failure(
+    *,
+    workflow_id: str,
+    repo_slug: str,
+    position_in_batch: int,
+    batch_group_id: str,
+    reason: str,
+    db_path=None,
+) -> None:
+    """A chain link's own signing attempt failed (hash mismatch, revoked
+    device mid-batch, operator cancel) -- transition ONLY that position's
+    workflow to ``blocked``, naming the position and cause (§4, G14.4).
+
+    No force-push happens for any position while a link is blocked:
+    commit.publish is a separate, later step this module never calls as
+    part of chain orchestration, so there is no partial-force-push code
+    path to guard against here -- nothing in this module ever
+    force-pushes. Already-signed sibling positions are untouched by this
+    call (their own workflows are simply never named here), so a retry
+    can reuse their signatures rather than restarting the whole batch.
+    """
+    current_state = _current_state_json(workflow_id, db_path=db_path)
+    updated_state = {
+        **current_state,
+        "chain_blocked_reason": reason,
+        "chain_blocked_position": position_in_batch,
+        "chain_batch_group_id": batch_group_id,
+    }
+    commit_workflow_db.append_event(
+        event_id=uuid.uuid4().hex,
+        workflow_id=workflow_id,
+        event_type="governed_rewrite_chain_blocked",
+        status_after=CHAIN_BLOCKED_STATUS,
+        repo_slug=repo_slug,
+        payload=updated_state,
+        db_path=db_path,
+    )
