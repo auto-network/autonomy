@@ -1,2 +1,268 @@
-<div x-data="commitApiPage()" data-testid="commit-api-root"></div>
+<div x-data="commitApiPage()"
+     data-testid="commit-api-root"
+     class="max-w-3xl mx-auto px-3 md:px-6 pb-10 text-slate-100">
 
+  <!-- Header -->
+  <div class="flex items-center justify-between gap-3 pt-4 pb-3">
+    <div class="min-w-0">
+      <h1 class="text-base md:text-lg font-semibold text-slate-100 truncate">
+        Commits awaiting your signature
+      </h1>
+      <p class="text-[11px] uppercase tracking-wider text-slate-400 mt-0.5">
+        <span class="tabular-nums" x-text="count"></span>
+        <span x-text="count === 1 ? 'commit' : 'commits'"></span>
+        pending review
+      </p>
+    </div>
+    <button type="button"
+            @click="loadQueue()"
+            :disabled="queueLoading"
+            class="shrink-0 text-xs font-medium px-3 py-1.5 rounded-lg border border-slate-800
+                   bg-slate-900/60 text-slate-300 hover:text-violet-300 hover:border-violet-400/40
+                   disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            data-testid="commit-api-refresh">
+      <span x-show="!queueLoading">Refresh</span>
+      <span x-show="queueLoading" x-cloak>Refreshing…</span>
+    </button>
+  </div>
+
+  <div class="md:grid md:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] md:gap-4">
+
+    <!-- ============ QUEUE (left / top) ============ -->
+    <div class="space-y-2">
+
+      <!-- Queue loading -->
+      <div x-show="queueLoading && queue.length === 0" x-cloak
+           class="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-sm text-slate-400"
+           data-testid="commit-api-queue-loading">
+        Loading the signing queue…
+      </div>
+
+      <!-- Queue error -->
+      <div x-show="!queueLoading && queueError" x-cloak
+           class="rounded-xl border border-rose-400/30 bg-rose-500/5 p-4"
+           data-testid="commit-api-queue-error">
+        <p class="text-sm font-medium text-rose-300">Could not load the queue.</p>
+        <p class="text-xs text-slate-400 mt-1">
+          <template x-if="queueError && queueError.status">
+            <span class="tabular-nums" x-text="'HTTP ' + queueError.status + ' — '"></span>
+          </template>
+          <span x-text="queueError && queueError.message"></span>
+        </p>
+        <button type="button" @click="loadQueue()"
+                class="mt-2 text-xs font-medium px-3 py-1 rounded-lg border border-slate-800
+                       bg-slate-900/60 text-slate-300 hover:text-violet-300
+                       hover:border-violet-400/40 transition-colors">
+          Retry
+        </button>
+      </div>
+
+      <!-- Queue empty -->
+      <div x-show="!queueLoading && !queueError && count === 0" x-cloak
+           class="rounded-xl border border-slate-800 bg-slate-900/60 p-6 text-center"
+           data-testid="commit-api-empty">
+        <p class="text-sm text-slate-300">No commits are waiting for your signature.</p>
+        <p class="text-xs text-slate-500 mt-1">New requests will appear here.</p>
+      </div>
+
+      <!-- Queue rows -->
+      <template x-for="row in queue" :key="row.signing_request_id">
+        <button type="button"
+                @click="selectRow(row)"
+                class="w-full text-left rounded-xl border p-4 transition-colors focus:outline-none"
+                :class="row.signing_request_id === selectedId
+                          ? 'border-violet-400/50 bg-violet-500/10'
+                          : 'border-slate-800 bg-slate-900/60 hover:border-slate-700 hover:bg-slate-900'"
+                data-testid="commit-api-queue-row">
+          <!-- subject + chain -->
+          <div class="flex items-start justify-between gap-2">
+            <p class="text-sm font-medium text-slate-100 leading-snug min-w-0 break-words"
+               x-text="subjectOf(row)"></p>
+            <template x-if="isChain(row)">
+              <span class="shrink-0 text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full
+                           bg-violet-500/15 text-violet-300 font-medium tabular-nums"
+                    x-text="chainLabel(row)"></span>
+            </template>
+          </div>
+
+          <!-- repo · branch flow -->
+          <p class="text-[11px] text-slate-400 mt-1.5 flex items-center gap-1.5 flex-wrap min-w-0">
+            <span class="font-mono text-slate-300 break-all" x-text="row.repo_slug"></span>
+            <span class="text-slate-600">·</span>
+            <span class="font-mono text-slate-400 break-all" x-text="row.branch"></span>
+            <span class="text-slate-600">→</span>
+            <span class="font-mono text-slate-400 break-all" x-text="row.target_branch"></span>
+          </p>
+
+          <!-- meta row -->
+          <div class="flex items-center justify-between gap-2 mt-2 flex-wrap">
+            <div class="flex items-center gap-2 flex-wrap text-[11px] text-slate-500 min-w-0">
+              <span class="font-mono truncate" x-text="row.session_name"></span>
+              <span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full
+                           bg-slate-800 text-slate-300 font-medium"
+                    x-text="row.signing_method"></span>
+            </div>
+            <span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full
+                         bg-amber-500/10 text-amber-300 font-medium tabular-nums shrink-0"
+                  x-text="'waiting ' + waitingLabel(row.requested_at)"></span>
+          </div>
+        </button>
+      </template>
+    </div>
+
+    <!-- ============ DETAIL (right / below) ============ -->
+    <div class="mt-3 md:mt-0">
+
+      <!-- No selection prompt -->
+      <div x-show="!selectedWorkflowId && !queueLoading && count > 0" x-cloak
+           class="rounded-xl border border-slate-800 bg-slate-900/60 p-6 text-center"
+           data-testid="commit-api-detail-idle">
+        <p class="text-sm text-slate-400">Select a commit to review what you would be signing.</p>
+      </div>
+
+      <!-- Detail loading -->
+      <div x-show="selectedWorkflowId && detailLoading" x-cloak
+           class="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-sm text-slate-400"
+           data-testid="commit-api-detail-loading">
+        Loading commit detail…
+      </div>
+
+      <!-- Detail error -->
+      <div x-show="selectedWorkflowId && !detailLoading && detailError" x-cloak
+           class="rounded-xl border border-rose-400/30 bg-rose-500/5 p-4"
+           data-testid="commit-api-detail-error">
+        <p class="text-sm font-medium text-rose-300">Could not load this commit.</p>
+        <p class="text-xs text-slate-400 mt-1">
+          <template x-if="detailError && detailError.status">
+            <span class="tabular-nums" x-text="'HTTP ' + detailError.status + ' — '"></span>
+          </template>
+          <span x-text="detailError && detailError.message"></span>
+        </p>
+        <button type="button" @click="retryDetail()"
+                class="mt-2 text-xs font-medium px-3 py-1 rounded-lg border border-slate-800
+                       bg-slate-900/60 text-slate-300 hover:text-violet-300
+                       hover:border-violet-400/40 transition-colors">
+          Retry
+        </button>
+      </div>
+
+      <!-- Detail content -->
+      <div x-show="selectedWorkflowId && !detailLoading && !detailError && detail" x-cloak
+           class="rounded-xl border border-slate-800 bg-slate-900/60 p-4 space-y-4"
+           data-testid="commit-api-detail">
+
+        <!-- workflow status header -->
+        <div class="flex items-center justify-between gap-2 flex-wrap">
+          <p class="text-[11px] uppercase tracking-wider text-slate-400">Reviewing commit</p>
+          <span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full
+                       bg-amber-500/10 text-amber-300 font-medium"
+                x-text="(activeWorkflow && activeWorkflow.status) || 'unknown'"></span>
+        </div>
+
+        <!-- commit message -->
+        <div>
+          <p class="text-base font-semibold text-slate-100 leading-snug break-words"
+             x-text="(activePreview && activePreview.message && activePreview.message.subject) || '(no subject)'"></p>
+          <template x-if="activePreview && activePreview.message && activePreview.message.body">
+            <pre class="mt-2 text-xs text-slate-300 font-mono whitespace-pre-wrap break-words
+                        rounded-lg border border-slate-800 bg-slate-950 p-3 overflow-x-auto"
+                 x-text="activePreview.message.body"></pre>
+          </template>
+        </div>
+
+        <!-- author / committer -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <p class="text-[10px] uppercase tracking-wider text-slate-400">Author</p>
+            <p class="text-xs text-slate-200 mt-0.5 break-all"
+               x-text="identityLabel(activePreview && activePreview.author) || '—'"></p>
+          </div>
+          <div>
+            <p class="text-[10px] uppercase tracking-wider text-slate-400">Committer</p>
+            <p class="text-xs text-slate-200 mt-0.5 break-all"
+               x-text="identityLabel(activePreview && activePreview.committer) || '—'"></p>
+          </div>
+        </div>
+
+        <!-- repo / branch -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <p class="text-[10px] uppercase tracking-wider text-slate-400">Repository</p>
+            <p class="text-xs font-mono text-slate-200 mt-0.5 break-all"
+               x-text="(activeWorkflow && activeWorkflow.repo_slug) || '—'"></p>
+          </div>
+          <div>
+            <p class="text-[10px] uppercase tracking-wider text-slate-400">Branch → target</p>
+            <p class="text-xs font-mono text-slate-200 mt-0.5 break-all">
+              <span x-text="(activeWorkflow && activeWorkflow.branch) || '—'"></span>
+              <span class="text-slate-600"> → </span>
+              <span x-text="(activeWorkflow && activeWorkflow.target_branch) || '—'"></span>
+            </p>
+          </div>
+        </div>
+
+        <!-- git object identifiers -->
+        <div class="space-y-2 rounded-lg border border-slate-800 bg-slate-950 p-3">
+          <div>
+            <p class="text-[10px] uppercase tracking-wider text-slate-400">Unsigned commit SHA</p>
+            <p class="text-xs font-mono text-violet-300 mt-0.5 break-all"
+               x-text="(activePreview && activePreview.unsigned_commit_sha) || '—'"></p>
+          </div>
+          <div>
+            <p class="text-[10px] uppercase tracking-wider text-slate-400">Tree SHA</p>
+            <p class="text-xs font-mono text-slate-300 mt-0.5 break-all"
+               x-text="(activePreview && activePreview.tree_sha) || '—'"></p>
+          </div>
+          <div>
+            <p class="text-[10px] uppercase tracking-wider text-slate-400">
+              Parent SHA<span x-show="parentShas(activePreview).length !== 1">s</span>
+            </p>
+            <template x-if="parentShas(activePreview).length === 0">
+              <p class="text-xs font-mono text-slate-500 mt-0.5">— (root commit)</p>
+            </template>
+            <template x-for="p in parentShas(activePreview)" :key="p">
+              <p class="text-xs font-mono text-slate-300 mt-0.5 break-all" x-text="p"></p>
+            </template>
+          </div>
+        </div>
+
+        <!-- signing / provenance -->
+        <div class="space-y-2 rounded-lg border border-slate-800 bg-slate-950 p-3">
+          <div class="flex items-center justify-between gap-2 flex-wrap">
+            <div>
+              <p class="text-[10px] uppercase tracking-wider text-slate-400">Signing method</p>
+              <p class="text-xs font-mono text-slate-200 mt-0.5"
+                 x-text="(activeSigningRequest && activeSigningRequest.signing_method) || '—'"></p>
+            </div>
+            <span class="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full
+                         bg-amber-500/10 text-amber-300 font-medium"
+                  x-text="(activeSigningRequest && activeSigningRequest.status) || 'unknown'"></span>
+          </div>
+          <div>
+            <p class="text-[10px] uppercase tracking-wider text-slate-400">Canonical payload hash</p>
+            <p class="text-xs font-mono text-slate-300 mt-0.5 break-all"
+               x-text="(activeSigningRequest && activeSigningRequest.canonical_payload_hash) || '—'"></p>
+          </div>
+          <div>
+            <p class="text-[10px] uppercase tracking-wider text-slate-400">Trusted object store ref</p>
+            <p class="text-xs font-mono text-slate-300 mt-0.5 break-all"
+               x-text="(activeSigningRequest && activeSigningRequest.trusted_object_store_ref) || '—'"></p>
+          </div>
+          <template x-if="activeSigningRequest && typeof activeSigningRequest.batch_size === 'number' && activeSigningRequest.batch_size > 1">
+            <div>
+              <p class="text-[10px] uppercase tracking-wider text-slate-400">Chain position</p>
+              <p class="text-xs font-mono text-slate-300 mt-0.5 tabular-nums"
+                 x-text="((activeSigningRequest.position_in_batch ?? '?')) + ' / ' + activeSigningRequest.batch_size"></p>
+            </div>
+          </template>
+        </div>
+
+        <!-- signing placeholder -->
+        <p class="text-[11px] text-slate-500 leading-relaxed border-t border-slate-800 pt-3">
+          Signing happens on your own device. This screen is for review only —
+          the sign / attach step arrives in a later increment.
+        </p>
+      </div>
+    </div>
+  </div>
+</div>
