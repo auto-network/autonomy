@@ -1077,3 +1077,119 @@ def test_commit_create_rejects_foreign_scope_before_writing_events(
     finally:
         conn.close()
     assert after == before
+
+
+def test_e2e_full_flow_verifies_real_git_outcome(
+    graph_db_env,
+    dashboard_db_env,
+    auth_db_env,
+    workflow_db_env,
+    trusted_store_env,
+    broker_keystore,
+    client,
+    monkeypatch,
+):
+    """End-to-end: run the whole flow through the real handlers, then verify the
+    REAL git outcome — the branch actually moved to the signed commit, git itself
+    verifies the signature, and origin is never touched. The response-only
+    round-trip test proves the flow completes; this proves the push worked.
+    All local: the target is a throwaway repo with no remote configured.
+    """
+    _enable_plugin(monkeypatch)
+    repo, session_name, workspace_id, repo_slug = _commit_flow_setup(monkeypatch, Path(graph_db_env).parent)
+    key_path, pubkey = _ssh_keypair(Path(graph_db_env).parent)
+    register_verification_key(
+        operator_id="op-1", signing_kind="ssh", public_material=pubkey, keystore=broker_keystore,
+    )
+    starting_head = _git_out(repo, "rev-parse", "HEAD")
+    # _init_repo already renamed the initial branch to "main" via `branch -M main`.
+
+    # propose -> create (freeze the exact bytes)
+    proposal_payload = _proposal_payload(repo=repo, session_name=session_name, workspace_id=workspace_id, repo_slug=repo_slug)
+    propose = client.post("/api/capabilities/commit/v1/proposals", json=proposal_payload, headers={"Authorization": "Bearer tok-1"})
+    assert propose.status_code == 200, propose.text
+    workflow_id = propose.json()["workflow"]["workflow_id"]
+    create = client.post(
+        f"/api/capabilities/commit/v1/workflows/{workflow_id}/commit",
+        json={"idempotency_key": "idem-create", "workflow_id": workflow_id,
+              "drift_token": proposal_payload["drift_token"], "create_mode": "snapshot_for_signature"},
+        headers={"Authorization": "Bearer tok-1"},
+    )
+    assert create.status_code == 200, create.text
+    create_body = create.json()
+
+    # read the frozen unsigned bytes and sign exactly those
+    snapshot_conn = snapshot_dao._get_conn()
+    try:
+        snapshot_dao.init_schema_on_connection(snapshot_conn)
+        snapshot = snapshot_dao.get_snapshot(snapshot_conn, create_body["trusted_object_store_ref"])
+        unsigned_payload = ContentAddressedStore(trusted_store_env[1]).get(snapshot["canonical_preview_sha256"])
+    finally:
+        snapshot_conn.close()
+    armored_signature = _ssh_sign(key_path, unsigned_payload, Path(graph_db_env).parent)
+
+    # request signature -> attach (checks the signature against the frozen bytes)
+    request_signature = client.post(
+        f"/api/capabilities/commit/v1/workflows/{workflow_id}/signature-request",
+        json={"idempotency_key": "idem-request-signature", "workflow_id": workflow_id,
+              "signing_method": "ssh", "signer_policy_version": "policy-v1", "requested_operator_id": "op-1"},
+        headers={"Authorization": "Bearer tok-1"},
+    )
+    assert request_signature.status_code == 200, request_signature.text
+    request_body = request_signature.json()
+    signing_request_id = request_body["signing"]["signing_request_id"]
+    canonical_payload_hash = request_body["signing"]["canonical_payload_hash"]
+    attach = client.post(
+        f"/api/capabilities/commit/v1/signing-requests/{signing_request_id}/attach",
+        json={"idempotency_key": "idem-attach", "signing_request_id": signing_request_id,
+              "signature_ref": "sig-1", "armored_signature": armored_signature, "signed_commit_object_ref": None,
+              "local_signer_attestation": {"device_id": "device-1", "request_nonce": "nonce-1",
+                                           "canonical_payload_hash": canonical_payload_hash,
+                                           "displayed_payload_hash": canonical_payload_hash,
+                                           "signed_at": "2026-07-06T19:00:00Z"}},
+        headers={"Authorization": "Bearer tok-1"},
+    )
+    assert attach.status_code == 200, attach.text
+    signed_commit_sha = attach.json()["signed_commit_sha"]
+
+    # record the operator's force-with-lease approval, then publish
+    conn = cdb._get_conn()
+    try:
+        conn.execute(
+            "INSERT INTO commit_workflow_approvals (approval_id, workflow_id, repo_slug, approval_type, status, "
+            "requested_by_session, operator_id, requested_at, decided_at, payload_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("approval-1", workflow_id, repo_slug, "force_with_lease", "approved", session_name, "op-1", 1.0, 2.0,
+             json.dumps({"constraints": {"expected_ref_sha": starting_head}})),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    publish = client.post(
+        f"/api/capabilities/commit/v1/workflows/{workflow_id}/publish",
+        json={"idempotency_key": "idem-publish", "workflow_id": workflow_id,
+              "ref_update_intent": {"provider": "github", "repo_slug": repo_slug, "ref": "refs/heads/main",
+                                    "operation": "fast_forward_existing_ref", "expected_old_sha": None, "new_sha": signed_commit_sha},
+              "publish_mode": "workspace_shared"},
+        headers={"Authorization": "Bearer tok-1"},
+    )
+    assert publish.status_code == 200, publish.text
+    assert publish.json()["workflow"]["status"] == "published"
+
+    # === THE REAL GIT OUTCOME (what a response-only check can't prove) ===
+    # 1. The branch actually moved to the signed commit.
+    assert _git_out(repo, "rev-parse", "refs/heads/main") == signed_commit_sha
+    assert signed_commit_sha != starting_head
+    # 2. The landed object is a real signed commit carrying the signature block.
+    landed_obj = _git_out(repo, "cat-file", "commit", signed_commit_sha)
+    assert "gpgsig" in landed_obj
+    # 3. git itself verifies the signature against the operator's registered key.
+    committer_line = next(line for line in landed_obj.splitlines() if line.startswith("committer "))
+    committer_email = committer_line.split("<", 1)[1].split(">", 1)[0]
+    allowed = Path(graph_db_env).parent / "allowed_signers"
+    allowed.write_text(f"{committer_email} {pubkey.decode().strip()}\n")
+    _git_out(repo, "config", "gpg.format", "ssh")
+    _git_out(repo, "config", "gpg.ssh.allowedSignersFile", str(allowed))
+    verify = subprocess.run(["git", "-C", str(repo), "verify-commit", signed_commit_sha], capture_output=True)
+    assert verify.returncode == 0, verify.stderr.decode()
+    # 4. Origin was never touched: the target repo has no remote configured.
+    assert _git_out(repo, "remote") == ""
