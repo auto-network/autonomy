@@ -1,2 +1,0 @@
-"""Commit API capability plugin."""
-
