@@ -16,7 +16,7 @@ from tools.dashboard.dao import commit_workflow_db as cdb
 from tools.dashboard.dao import trusted_git_object_store as snapshot_dao
 from tools.dashboard.commit_broker.keys import InMemoryBrokerKeyStore, register_verification_key
 from tools.dashboard.plugins.commit_api.entrypoints import api as commit_api
-from tools.dashboard.services.trusted_git_object_store import ContentAddressedStore, verify_snapshot
+from tools.dashboard.services.trusted_git_object_store import ContentAddressedStore
 from tools.graph import ops
 
 
@@ -601,15 +601,6 @@ def test_commit_create_request_signature_attach_and_publish_round_trip(
     )
 
     proposal_payload = _proposal_payload(repo=repo, session_name=session_name, workspace_id=workspace_id, repo_slug=repo_slug)
-    proposal = commit_api.CommitProposeRequest.from_dict(proposal_payload)
-    unsigned_payload = commit_api.serialize_unsigned_commit_payload(
-        tree_oid=proposal.content.tree_sha,
-        parent_oids=[],
-        author_line=commit_api._git_identity_line(proposal.author),
-        committer_line=commit_api._git_identity_line(proposal.committer),
-        message=commit_api._commit_message_bytes(proposal.message),
-    )
-    armored_signature = _ssh_sign(key_path, unsigned_payload, Path(graph_db_env).parent)
 
     propose = client.post(
         "/api/capabilities/commit/v1/proposals",
@@ -644,13 +635,12 @@ def test_commit_create_request_signature_attach_and_publish_round_trip(
     snapshot_conn = snapshot_dao._get_conn()
     try:
         snapshot_dao.init_schema_on_connection(snapshot_conn)
-        assert verify_snapshot(
-            snapshot_ref=create_body["trusted_object_store_ref"],
-            store=ContentAddressedStore(trusted_store_env[1]),
-            dao_conn=snapshot_conn,
-        )
+        snapshot = snapshot_dao.get_snapshot(snapshot_conn, create_body["trusted_object_store_ref"])
+        assert snapshot is not None
+        unsigned_payload = ContentAddressedStore(trusted_store_env[1]).get(snapshot["canonical_preview_sha256"])
     finally:
         snapshot_conn.close()
+    armored_signature = _ssh_sign(key_path, unsigned_payload, Path(graph_db_env).parent)
 
     request_signature = client.post(
         f"/api/capabilities/commit/v1/workflows/{workflow_id}/signature-request",
@@ -764,14 +754,6 @@ def test_attach_signature_rejects_bogus_signature(
         keystore=broker_keystore,
     )
     proposal_payload = _proposal_payload(repo=repo, session_name=session_name, workspace_id=workspace_id, repo_slug=repo_slug)
-    proposal = commit_api.CommitProposeRequest.from_dict(proposal_payload)
-    unsigned_payload = commit_api.serialize_unsigned_commit_payload(
-        tree_oid=proposal.content.tree_sha,
-        parent_oids=[],
-        author_line=commit_api._git_identity_line(proposal.author),
-        committer_line=commit_api._git_identity_line(proposal.committer),
-        message=commit_api._commit_message_bytes(proposal.message),
-    )
 
     propose = client.post(
         "/api/capabilities/commit/v1/proposals",
@@ -849,15 +831,6 @@ def test_publish_rejects_missing_force_with_lease_approval(
         keystore=broker_keystore,
     )
     proposal_payload = _proposal_payload(repo=repo, session_name=session_name, workspace_id=workspace_id, repo_slug=repo_slug)
-    proposal = commit_api.CommitProposeRequest.from_dict(proposal_payload)
-    unsigned_payload = commit_api.serialize_unsigned_commit_payload(
-        tree_oid=proposal.content.tree_sha,
-        parent_oids=[],
-        author_line=commit_api._git_identity_line(proposal.author),
-        committer_line=commit_api._git_identity_line(proposal.committer),
-        message=commit_api._commit_message_bytes(proposal.message),
-    )
-    armored_signature = _ssh_sign(key_path, unsigned_payload, Path(graph_db_env).parent)
 
     propose = client.post(
         "/api/capabilities/commit/v1/proposals",
@@ -878,6 +851,17 @@ def test_publish_rejects_missing_force_with_lease_approval(
         headers={"Authorization": "Bearer tok-1"},
     )
     assert create.status_code == 200, create.text
+    create_body = create.json()
+
+    snapshot_conn = snapshot_dao._get_conn()
+    try:
+        snapshot_dao.init_schema_on_connection(snapshot_conn)
+        snapshot = snapshot_dao.get_snapshot(snapshot_conn, create_body["trusted_object_store_ref"])
+        assert snapshot is not None
+        unsigned_payload = ContentAddressedStore(trusted_store_env[1]).get(snapshot["canonical_preview_sha256"])
+    finally:
+        snapshot_conn.close()
+    armored_signature = _ssh_sign(key_path, unsigned_payload, Path(graph_db_env).parent)
 
     request_signature = client.post(
         f"/api/capabilities/commit/v1/workflows/{workflow_id}/signature-request",
