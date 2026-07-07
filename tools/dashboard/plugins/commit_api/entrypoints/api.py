@@ -38,6 +38,7 @@ from tools.graph.schemas.commit_policy import (
     COMMIT_POLICY_SET_ID,
 )
 from tools.dashboard.commit_api.errors import commit_api_error
+from tools.dashboard.commit_broker.credentials import AuthorizedScope, InMemoryCredentialProvider
 from tools.dashboard.commit_broker.keys import (
     InMemoryBrokerKeyStore,
     VerificationKeyNotRegistered,
@@ -95,6 +96,8 @@ PLUGIN_ID = "commit-api"
 PLUGIN_ORG = "autonomy"
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 _BROKER_VERIFICATION_KEY_STORE = InMemoryBrokerKeyStore()
+_BROKER_CREDENTIAL_PROVIDER = InMemoryCredentialProvider()
+_BROKER_CREDENTIAL_PROVIDER.set_secret("github", "bootstrap-github-token")
 
 
 def _json_error(code: str, message: str, *, details: dict[str, Any] | None = None):
@@ -411,6 +414,11 @@ def _trusted_store() -> ContentAddressedStore:
         str(Path(__file__).resolve().parents[5] / "data" / "trusted_git_object_store"),
     )
     return ContentAddressedStore(root)
+
+
+def _publish_authorized_scope(session_name: str, session_row: dict[str, Any], target_repo: str) -> AuthorizedScope:
+    operator_id = str(session_row.get("operator_id") or session_name)
+    return AuthorizedScope.for_repos(operator_id, [target_repo])
 
 
 def _git_head_commit(worktree_path: Path | str) -> str | None:
@@ -1057,6 +1065,36 @@ def _proposal_request_for_workflow(
         proposal_request = _proposal_request_from_state_payload(payload if isinstance(payload, dict) else {})
         if proposal_request is not None:
             return proposal_request
+    return None
+
+
+def _resolved_plan_for_workflow(
+    conn: sqlite3.Connection,
+    workflow_id: str,
+    state_payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    plan = state_payload.get("resolved_plan")
+    if isinstance(plan, dict) and plan:
+        return plan
+    rows = conn.execute(
+        """
+        SELECT payload_json
+        FROM commit_workflow_events
+        WHERE workflow_id = ?
+        ORDER BY occurred_at DESC, seq DESC
+        """,
+        (workflow_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        plan = payload.get("resolved_plan")
+        if isinstance(plan, dict) and plan:
+            return plan
     return None
 
 
@@ -2001,13 +2039,21 @@ async def publish(request: Request) -> JSONResponse:
             if snapshot_row is not None:
                 trusted_object_store_ref = str(snapshot_row["trusted_object_store_ref"])
 
-        signed_object_sha256 = _signed_object_sha256_for_workflow(conn, parsed.workflow_id, state_payload)
         if not skipped:
             if not isinstance(trusted_object_store_ref, str) or not trusted_object_store_ref:
                 return _json_error(
                     "invalid_transition",
                     "workflow has no trusted snapshot artifact to publish",
                 )
+            resolved_plan = _resolved_plan_for_workflow(conn, parsed.workflow_id, state_payload)
+            if not isinstance(resolved_plan, dict) or not resolved_plan:
+                return _json_error(
+                    "invalid_transition",
+                    "workflow has no resolved plan to publish",
+                )
+            resolved_plan = dict(resolved_plan)
+            resolved_plan.setdefault("publish_mode", parsed.publish_mode)
+            signed_object_sha256 = _signed_object_sha256_for_workflow(conn, parsed.workflow_id, state_payload)
             if not signed_object_sha256:
                 return _json_error(
                     "invalid_transition",
@@ -2019,6 +2065,7 @@ async def publish(request: Request) -> JSONResponse:
                     "invalid_transition",
                     "workflow has no target repository to publish to",
                 )
+            authorized_scope = _publish_authorized_scope(session_name, _session_row, str(target_remote))
             snapshot_conn = snapshot_dao._get_conn()
             try:
                 snapshot_dao.init_schema_on_connection(snapshot_conn)
@@ -2033,20 +2080,27 @@ async def publish(request: Request) -> JSONResponse:
                         staging_dir=staging_dir,
                     )
                     publish_result = execute_publish(
-                        expected_old_sha=approval_expected_old_sha,
+                        resolved_plan=resolved_plan,
+                        target_repo=str(target_remote),
+                        target_ref=parsed_ref_update.ref,
                         signed_commit_sha=current_signed_sha,
-                        ref=parsed_ref_update.ref,
-                        read_remote_tip=lambda: read_remote_tip(str(target_remote), parsed_ref_update.ref),
-                        push_objects=lambda: push_objects(
-                            signed_commit_sha=current_signed_sha,
-                            ref=parsed_ref_update.ref,
-                            expected_old_sha=approval_expected_old_sha,
+                        expected_ref_sha=approval_expected_old_sha,
+                        is_new_ref=parsed_ref_update.operation == "create_new_ref",
+                        idempotency_key=parsed.idempotency_key,
+                        key_already_finalized=lambda _key: False,
+                        authorized_scope=authorized_scope,
+                        credential_provider=_BROKER_CREDENTIAL_PROVIDER,
+                        read_remote_tip=lambda: read_remote_tip(
+                            repo_dir=str(target_remote),
+                            remote=str(target_remote),
+                            target_ref=parsed_ref_update.ref,
                         ),
+                        push_objects=push_objects,
                     )
             finally:
                 snapshot_conn.close()
             if not publish_result.published:
-                if publish_result.reason in {REF_ADVANCED, REF_UNEXPECTEDLY_ABSENT}:
+                if publish_result.outcome == REF_ADVANCED:
                     return _json_error(
                         "approval_stale_requires_reapproval",
                         "publish lease no longer matches the target ref",

@@ -127,6 +127,7 @@ def _init_repo(tmp_path: Path) -> Path:
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "t@example.com")
     _git(repo, "config", "user.name", "T")
+    _git(repo, "config", "receive.denyCurrentBranch", "updateInstead")
     (repo / "README.md").write_text("hello\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "initial")
