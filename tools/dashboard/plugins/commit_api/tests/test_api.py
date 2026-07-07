@@ -637,6 +637,9 @@ def test_commit_create_request_signature_attach_and_publish_round_trip(
         snapshot_dao.init_schema_on_connection(snapshot_conn)
         snapshot = snapshot_dao.get_snapshot(snapshot_conn, create_body["trusted_object_store_ref"])
         assert snapshot is not None
+        assert snapshot["retention_class"] == "active"
+        assert snapshot["retention_expires_at"] is not None
+        create_retention_expires_at = snapshot["retention_expires_at"]
         unsigned_payload = ContentAddressedStore(trusted_store_env[1]).get(snapshot["canonical_preview_sha256"])
     finally:
         snapshot_conn.close()
@@ -732,6 +735,17 @@ def test_commit_create_request_signature_attach_and_publish_round_trip(
     assert publish_body["ref_update_result"]["expected_old_sha"] == repo_head_sha
     assert publish_body["pushed_ref"] == "refs/heads/main"
     assert publish_body["provider_url"] == "https://github.com/autonomy/autonomy"
+
+    snapshot_conn = snapshot_dao._get_conn()
+    try:
+        snapshot_dao.init_schema_on_connection(snapshot_conn)
+        snapshot = snapshot_dao.get_snapshot(snapshot_conn, create_body["trusted_object_store_ref"])
+        assert snapshot is not None
+        assert snapshot["retention_class"] == "published"
+        assert snapshot["retention_expires_at"] is not None
+        assert snapshot["retention_expires_at"] > create_retention_expires_at
+    finally:
+        snapshot_conn.close()
 
 
 def test_attach_signature_rejects_bogus_signature(

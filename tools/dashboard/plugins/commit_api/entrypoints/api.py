@@ -1247,6 +1247,7 @@ async def create(request: Request) -> JSONResponse:
                 dao_conn=snapshot_conn,
                 snapshot_type="commit_create",
                 retention_class="active",
+                retention_expires_at=time.time() + cdb.IDEMPOTENCY_WORKFLOW_RETENTION_SECONDS,
                 store_root=str(store.root),
                 canonical_payload=unsigned_payload,
             )
@@ -1627,9 +1628,6 @@ async def attach_signature(request: Request) -> JSONResponse:
         if isinstance(auth_scope, JSONResponse):
             return auth_scope
         session_name, _session_row, worktree_row, repo_slug, state_row, state_payload = auth_scope
-        proposal_request = _proposal_request_for_workflow(conn, workflow_id, state_payload)
-        if proposal_request is None:
-            return _json_error("invalid_transition", "workflow has no proposal request to attach against")
 
         request_fields = parsed.to_dict()
         scope_key = cdb.scope_key(repo_slug, workflow_id)
@@ -1985,6 +1983,33 @@ async def publish(request: Request) -> JSONResponse:
                 ),
             ),
         )
+        trusted_object_store_ref = state_payload.get("trusted_object_store_ref")
+        if not isinstance(trusted_object_store_ref, str) or not trusted_object_store_ref:
+            snapshot_row = conn.execute(
+                """
+                SELECT trusted_object_store_ref
+                FROM commit_signing_requests
+                WHERE workflow_id = ? AND trusted_object_store_ref IS NOT NULL
+                ORDER BY requested_at DESC, signing_request_id DESC
+                LIMIT 1
+                """,
+                (parsed.workflow_id,),
+            ).fetchone()
+            if snapshot_row is not None:
+                trusted_object_store_ref = str(snapshot_row["trusted_object_store_ref"])
+        if isinstance(trusted_object_store_ref, str) and trusted_object_store_ref and not skipped:
+            snapshot_conn = snapshot_dao._get_conn()
+            try:
+                snapshot_dao.init_schema_on_connection(snapshot_conn)
+                snapshot_dao.update_snapshot_retention(
+                    snapshot_conn,
+                    trusted_object_store_ref,
+                    retention_class="published",
+                    retention_expires_at=time.time() + cdb.IDEMPOTENCY_PUBLISH_RETENTION_SECONDS,
+                )
+                snapshot_conn.commit()
+            finally:
+                snapshot_conn.close()
         cdb._rebuild_projection_for_workflow(conn, parsed.workflow_id)
         current_state = _workflow_state_row(conn, parsed.workflow_id)
         if current_state is None:
