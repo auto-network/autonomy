@@ -261,17 +261,26 @@ def pending_gc_snapshot_refs(conn: sqlite3.Connection) -> list[str]:
 
 
 def object_referenced_by_live_snapshot(conn: sqlite3.Connection, object_sha256: str) -> bool:
-    """True if any snapshot NOT being collected still references this object.
+    """True if any snapshot NOT being collected still references this object,
+    either as a captured ENTRY or as its own ``canonical_preview_sha256``.
 
     Content-addressed dedup means one stored object can belong to several
     snapshots, so it may only be physically deleted once every referencing
-    snapshot is being collected. Both ``gc_pending`` (mid-collection) and
-    ``gc_deleted`` (done) are excluded — an object referenced only by those is
-    free to remove."""
+    snapshot is being collected. A digest can be referenced two ways: an object
+    entry (tree/blob/commit) OR a snapshot's canonical preview — the preview is
+    NOT stored as an entry, so both must be checked, or a preview shared across
+    snapshots (e.g. every rewrite_source snapshot shares the empty-preview
+    digest) could be deleted out from under a healthy snapshot. Both
+    ``gc_pending`` (mid-collection) and ``gc_deleted`` (done) are excluded — an
+    object referenced only by those is free to remove."""
     row = conn.execute(
         "SELECT 1 FROM trusted_git_object_entries e "
         "JOIN trusted_git_object_snapshots s ON e.snapshot_ref = s.snapshot_ref "
-        "WHERE e.object_sha256 = ? AND s.status NOT IN ('gc_pending', 'gc_deleted') LIMIT 1",
-        (object_sha256,),
+        "WHERE e.object_sha256 = ? AND s.status NOT IN ('gc_pending', 'gc_deleted') "
+        "UNION "
+        "SELECT 1 FROM trusted_git_object_snapshots p "
+        "WHERE p.canonical_preview_sha256 = ? AND p.status NOT IN ('gc_pending', 'gc_deleted') "
+        "LIMIT 1",
+        (object_sha256, object_sha256),
     ).fetchone()
     return row is not None
