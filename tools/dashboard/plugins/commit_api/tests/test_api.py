@@ -748,6 +748,94 @@ def test_commit_create_request_signature_attach_and_publish_round_trip(
         snapshot_conn.close()
 
 
+def test_commit_create_triggers_trusted_store_gc_for_expired_snapshots(
+    graph_db_env,
+    dashboard_db_env,
+    auth_db_env,
+    workflow_db_env,
+    trusted_store_env,
+    client,
+    monkeypatch,
+):
+    _enable_plugin(monkeypatch)
+    repo, session_name, workspace_id, repo_slug = _commit_flow_setup(monkeypatch, Path(graph_db_env).parent)
+
+    store = ContentAddressedStore(trusted_store_env[1])
+    stale_digest = store.put(b"stale bytes")
+    snapshot_conn = snapshot_dao._get_conn()
+    try:
+        snapshot_dao.init_schema_on_connection(snapshot_conn)
+        snapshot_dao.insert_snapshot(
+            snapshot_conn,
+            snapshot_ref="snap-stale",
+            workflow_id="wf-stale",
+            repo_slug=repo_slug,
+            commit_sha="c" * 40,
+            tree_sha="t" * 40,
+            parent_shas=[],
+            manifest_sha256="m" * 64,
+            canonical_preview_sha256=stale_digest,
+            snapshot_type="commit_create",
+            store_root=str(store.root),
+            retention_class="active",
+            status="captured",
+            retention_expires_at=1.0,
+        )
+        snapshot_dao.add_entries(
+            snapshot_conn,
+            "snap-stale",
+            [
+                {
+                    "object_oid": "oid-stale",
+                    "object_type": "blob",
+                    "object_size": len(b"stale bytes"),
+                    "object_path": "stale.txt",
+                    "object_sha256": stale_digest,
+                    "position": 0,
+                }
+            ],
+        )
+        snapshot_conn.commit()
+    finally:
+        snapshot_conn.close()
+
+    propose = client.post(
+        "/api/capabilities/commit/v1/proposals",
+        json=_proposal_payload(repo=repo, session_name=session_name, workspace_id=workspace_id, repo_slug=repo_slug),
+        headers={"Authorization": "Bearer tok-1"},
+    )
+    assert propose.status_code == 200, propose.text
+    workflow_id = propose.json()["workflow"]["workflow_id"]
+
+    create = client.post(
+        f"/api/capabilities/commit/v1/workflows/{workflow_id}/commit",
+        json={
+            "idempotency_key": "idem-create",
+            "workflow_id": workflow_id,
+            "drift_token": {
+                "head_sha": _git_out(repo, "rev-parse", "HEAD"),
+                "tree_sha": _git_out(repo, "rev-parse", "HEAD^{tree}"),
+                "index_sha": _git_out(repo, "rev-parse", "HEAD^{tree}"),
+                "worktree_status_hash": hashlib.sha256(b"").hexdigest(),
+                "generated_at": "2026-07-06T19:00:00Z",
+            },
+            "create_mode": "snapshot_for_signature",
+        },
+        headers={"Authorization": "Bearer tok-1"},
+    )
+    assert create.status_code == 200, create.text
+
+    snapshot_conn = snapshot_dao._get_conn()
+    try:
+        snapshot_dao.init_schema_on_connection(snapshot_conn)
+        stale = snapshot_dao.get_snapshot(snapshot_conn, "snap-stale")
+        assert stale is not None
+        assert stale["status"] == "gc_deleted"
+    finally:
+        snapshot_conn.close()
+    assert not store.exists(stale_digest)
+
+
 def test_attach_signature_rejects_bogus_signature(
     graph_db_env,
     dashboard_db_env,
