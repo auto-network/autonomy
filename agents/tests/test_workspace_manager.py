@@ -1060,6 +1060,17 @@ def test_cleanup_removes_worktree_after_cherry_pick(tmp_path, monkeypatch):
          "refs/heads/main", new_main_sha],
         check=True,
     )
+    # A real landing reaches origin too (push, or the host sync that also
+    # stamps the synced-source marker). Keep the remote-tracking ref in
+    # step: the preserve-check's base (``_repo_integration_base_ref``)
+    # prefers ``origin/main`` when local and remote diverge without a
+    # synced-source marker.
+    subprocess.run(
+        ["git", "-C", str(worktree), "update-ref",
+         "refs/remotes/origin/main", new_main_sha],
+        check=True,
+    )
+
     # Sanity: SHAs differ, but ``git cherry`` reports zero "+ " lines.
     assert session_sha != new_main_sha
     cherry_out = subprocess.run(
