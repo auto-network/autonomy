@@ -14,7 +14,9 @@
 
 set -uo pipefail
 
-DASH="${AUTONOMY_DASHBOARD:-https://localhost:8080}"
+# Reach the dashboard at the same URL every other call in this container uses:
+# GRAPH_API (host.docker.internal on the bridge network, localhost on host net).
+DASH="${AUTONOMY_DASHBOARD:-${GRAPH_API:-https://localhost:8080}}"
 # session + repo are written into the worktree's git config by worktree setup;
 # fall back to the session env var for session.
 SESSION="$(git config --get autonomy.sign.session 2>/dev/null || true)"
