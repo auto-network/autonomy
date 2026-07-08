@@ -239,6 +239,107 @@ def test_wait_get_times_out_pending_and_decided_returns_immediately(tmp_path, mo
     asyncio.run(scenario())
 
 
+# ── post-approval executors: verdict now, backend execution, outcome in result ──
+
+
+def _jira_write(client_or_none=None):
+    return {"kind": "jira_write", "session": "auto-2",
+            "request": {"op": "comment", "key": "ENT-1", "body_markdown": "hi"}}
+
+
+def test_executor_runs_after_verdict_and_delivers_outcome(tmp_path, monkeypatch):
+    """Approve on an executor kind: the operator's POST is acknowledged
+    immediately, the operation runs as a backend task, and the requester's held
+    GET receives the execution outcome in the single result write."""
+    monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approval_requests.db")
+    calls = []
+
+    async def fake_executor(row):
+        calls.append(row["request"])
+        await asyncio.sleep(0.05)
+        return {"ok": True, "ticket": "ENT-1"}
+
+    monkeypatch.setitem(approvals_routes.EXECUTORS, "jira_write", fake_executor)
+
+    async def scenario():
+        async with _async_client() as c:
+            rid = (await c.post("/api/approvals", json=_jira_write())).json()["id"]
+            held_task = asyncio.create_task(c.get(f"/api/approvals/{rid}?wait=30"))
+            await asyncio.sleep(0.05)
+            d = await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
+            assert d.json() == {"ok": True}   # acknowledged before execution completes
+            held = await held_task
+            assert held.json()["result"] == {
+                "approved": True, "execution": {"ok": True, "ticket": "ENT-1"}}
+            assert calls == [{"op": "comment", "key": "ENT-1", "body_markdown": "hi"}]
+            # after completion the result row is decided; further decisions refused
+            again = await c.post(f"/api/approvals/{rid}/decision", json={"approved": False})
+            assert again.json() == {"ok": False}
+
+    asyncio.run(scenario())
+
+
+def test_executor_never_runs_on_decline(tmp_path, monkeypatch):
+    monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approval_requests.db")
+    calls = []
+
+    async def fake_executor(row):
+        calls.append(row)
+        return {"ok": True}
+
+    monkeypatch.setitem(approvals_routes.EXECUTORS, "jira_write", fake_executor)
+    client = TestClient(Starlette(routes=approvals_routes.ROUTES))
+    rid = client.post("/api/approvals", json=_jira_write()).json()["id"]
+    assert client.post(f"/api/approvals/{rid}/decision",
+                       json={"approved": False}).json() == {"ok": True}
+    assert client.get(f"/api/approvals/{rid}").json()["result"] == {"approved": False}
+    assert calls == []
+
+
+def test_executor_failure_reported_not_hung(tmp_path, monkeypatch):
+    monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approval_requests.db")
+
+    async def fake_executor(row):
+        raise ValueError("boom")
+
+    monkeypatch.setitem(approvals_routes.EXECUTORS, "jira_write", fake_executor)
+
+    async def scenario():
+        async with _async_client() as c:
+            rid = (await c.post("/api/approvals", json=_jira_write())).json()["id"]
+            await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
+            d = (await c.get(f"/api/approvals/{rid}?wait=10")).json()
+            assert d["result"]["approved"] is True
+            assert d["result"]["execution"] == {"ok": False, "error": "boom"}
+
+    asyncio.run(scenario())
+
+
+def test_double_approve_executes_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approval_requests.db")
+    calls = []
+
+    async def slow_executor(row):
+        calls.append(1)
+        await asyncio.sleep(0.2)
+        return {"ok": True}
+
+    monkeypatch.setitem(approvals_routes.EXECUTORS, "jira_write", slow_executor)
+
+    async def scenario():
+        async with _async_client() as c:
+            rid = (await c.post("/api/approvals", json=_jira_write())).json()["id"]
+            first = await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
+            second = await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
+            assert first.json() == {"ok": True}
+            assert second.json() == {"ok": False}   # already executing
+            d = (await c.get(f"/api/approvals/{rid}?wait=10")).json()
+            assert d["result"]["execution"] == {"ok": True}
+            assert calls == [1]
+
+    asyncio.run(scenario())
+
+
 def test_sse_events_on_create_and_decision(tmp_path, monkeypatch):
     """The viewer trigger: creating a request broadcasts approval:pending on the
     event bus; deciding it broadcasts approval:decided. No poll anywhere."""
