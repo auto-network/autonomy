@@ -11,5 +11,5 @@ ISSUETYPE="${2:-${JIRA_ISSUETYPE:-Bug}}"
 resp="$(curl -sk "$DASH/api/jira/createmeta?project=$PROJECT&issuetype=$ISSUETYPE&version_prefix=Enterprise&org=$ORG")"
 echo "$resp" | python3 -c 'import sys,json
 d=json.load(sys.stdin)
-if "error" in d: sys.exit(f"jira: {d[\"error\"]}")
+if "error" in d: sys.exit("jira: " + str(d["error"]))
 print(json.dumps(d, indent=2))'
