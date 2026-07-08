@@ -379,6 +379,71 @@ def test_secret_token_is_not_injected_as_env(
         assert "/etc/autonomy/secrets/jira_token" not in env_spec
 
 
+def test_capability_skill_installed_at_claude_discovery_path(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    """The SKILL.md of an enabled capability is copied per-session and mounted
+    where Claude Code actually discovers skills — the project's
+    .claude/skills/<name>/ — under its frontmatter name."""
+    _run(
+        output_dir=str(tmp_path / "run"),
+        capabilities=(_github_capability(),),
+    )
+    docker_cmd = next(c for c in captured_run if c and c[0] == "docker")
+    mounts = _mounts(docker_cmd)
+    assert any(
+        m.endswith("cap-skills/github:/workspace/repo/.claude/skills/github:ro")
+        for m in mounts
+    )
+    installed = tmp_path / "run" / "cap-skills" / "github" / "SKILL.md"
+    fm = session_launcher._skill_frontmatter(installed.read_text())
+    assert fm["name"] == "github" and fm["description"]
+
+
+def test_capability_skill_requires_frontmatter_and_slug_name(tmp_path, monkeypatch):
+    """A SKILL.md the harness would silently ignore is not installed: missing
+    name/description frontmatter, an unterminated block, or a non-slug name
+    (e.g. vendor/product) all skip with a warning instead of a dead mount."""
+    import dataclasses
+    monkeypatch.setattr(session_launcher, "REPO_ROOT", tmp_path)
+    cap_dir = tmp_path / "cap"
+    cap_dir.mkdir()
+    run_dir = tmp_path / "run"
+
+    def cap_with(skill_text):
+        (cap_dir / "SKILL.md").write_text(skill_text)
+        return dataclasses.replace(_github_capability(), skill_path="cap/SKILL.md")
+
+    no_fm = cap_with("# Just a doc\nno frontmatter here\n")
+    assert session_launcher._capability_skill_surface([no_fm], run_dir, "claude") == {}
+
+    bad_name = cap_with("---\nname: vendor/product\ndescription: d\n---\nbody\n")
+    assert session_launcher._capability_skill_surface([bad_name], run_dir, "claude") == {}
+
+    no_desc = cap_with("---\nname: good-name\n---\nbody\n")
+    assert session_launcher._capability_skill_surface([no_desc], run_dir, "claude") == {}
+
+    good = cap_with("---\nname: good-name\ndescription: does things\n---\nbody\n")
+    mounts = session_launcher._capability_skill_surface([good], run_dir, "claude")
+    assert list(mounts.values()) == ["/workspace/repo/.claude/skills/good-name:ro"]
+    # codex projection is a deliberate gap (host-home bind) — nothing installed
+    assert session_launcher._capability_skill_surface([good], run_dir, "codex") == {}
+
+
+def test_all_checked_in_capability_skills_load(tmp_path):
+    """Every capability SKILL.md in the repo satisfies the harness contract —
+    frontmatter with name (plain slug) + description."""
+    skills = sorted(
+        (session_launcher.REPO_ROOT / "agents" / "capabilities").glob("*/SKILL.md"))
+    assert skills, "expected at least one capability SKILL.md"
+    for skill in skills:
+        fm = session_launcher._skill_frontmatter(skill.read_text())
+        assert fm, f"{skill} has no frontmatter block"
+        assert fm.get("name") and fm.get("description"), f"{skill} missing keys"
+        assert session_launcher._SKILL_NAME_RE.match(fm["name"]), \
+            f"{skill} name {fm['name']!r} is not a plain slug"
+
+
 def test_both_capabilities_render_without_clobber(
     tmp_path, fake_creds, fake_crosstalk, captured_run,
 ):

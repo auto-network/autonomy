@@ -1,3 +1,8 @@
+---
+name: jira
+description: Jira issue tracker (broker-backed, no credentials in the workspace). Read tickets and attachments; post comments, set the Confirm Plan field, create tickets, upload attachments — every write pauses for operator approval.
+---
+
 # Jira capability — agent skill
 
 Implementation: `autonomy/jira` · Contract: `issue_tracker@1` · Delivery:

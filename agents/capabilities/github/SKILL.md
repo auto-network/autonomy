@@ -1,5 +1,5 @@
 ---
-name: autonomy/github
+name: github
 description: GitHub source-control capability. Inspect branches, read PRs and reviews, watch merge-gates from inside the workspace.
 ---
 
