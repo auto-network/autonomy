@@ -448,8 +448,10 @@ def configure_commit_signing(
             workspace_id=workspace_id, repo_slug=repo_slug, org=org,
         )
         payload = resolved.payload or {}
-        if "gpg" not in str(payload.get("signature_requirement", "none")):
+        sig_req = str(payload.get("signature_requirement", "none"))
+        if "gpg" not in sig_req:
             return False
+        signoff_required = "signoff" in sig_req
         cfg: list[tuple[str, str]] = [
             ("commit.gpgSign", "true"),
             ("gpg.program", shim_path),
@@ -457,6 +459,9 @@ def configure_commit_signing(
             # Worktree dir name — the dashboard locates the worktree by it.
             ("autonomy.sign.repo", Path(worktree).name),
         ]
+        if signoff_required:
+            # Read by the commit-msg hook (auto-append) and the shim (enforce).
+            cfg.append(("autonomy.sign.requireSignoff", "true"))
         # Org signing identity so GitHub shows "Verified" (committer email must
         # match a verified email on the key's account). Best-effort from policy.
         ident = payload.get("author_policy", {}).get("required_identity") or {}
@@ -468,9 +473,50 @@ def configure_commit_signing(
                 cfg.append(("user.name", str(ident["name"])))
         for key, value in cfg:
             _run_git(["config", key, value], cwd=worktree)
+        if signoff_required:
+            _install_signoff_hook(worktree)
         return True
     except Exception:
         logger.exception("configure_commit_signing failed for %s", worktree)
+        return False
+
+
+# commit-msg hook: auto-append Signed-off-by when the policy requires it, so the
+# agent never has to remember --signoff. Idempotent (interpret-trailers), gated on
+# the same autonomy.sign.requireSignoff flag the shim enforces, and self-marked so
+# we never clobber a repo's own commit-msg hook.
+_SIGNOFF_HOOK_MARKER = "# autonomy-signoff-hook"
+_SIGNOFF_HOOK = f"""#!/usr/bin/env bash
+{_SIGNOFF_HOOK_MARKER} — auto-append Signed-off-by when the commit policy requires it.
+set -euo pipefail
+[ "$(git config --get autonomy.sign.requireSignoff 2>/dev/null || true)" = "true" ] || exit 0
+name="$(git config user.name 2>/dev/null || true)"
+email="$(git config user.email 2>/dev/null || true)"
+[ -n "$email" ] || exit 0
+git interpret-trailers --if-exists doNothing \\
+  --trailer "Signed-off-by: ${{name}} <${{email}}>" --in-place "$1"
+"""
+
+
+def _install_signoff_hook(worktree: Path) -> bool:
+    """Install the auto-append Signed-off-by commit-msg hook. Best-effort — the
+    shim enforces the trailer regardless, so a failure here is non-fatal."""
+    try:
+        rc, out, _ = _git_output(["rev-parse", "--git-path", "hooks"], cwd=worktree)
+        if rc != 0 or not out.strip():
+            return False
+        raw = out.strip()
+        hooks_dir = Path(raw) if os.path.isabs(raw) else (Path(worktree) / raw)
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        hook = hooks_dir / "commit-msg"
+        # Don't clobber a repo's own commit-msg hook; the shim still enforces.
+        if hook.exists() and _SIGNOFF_HOOK_MARKER not in hook.read_text(errors="ignore"):
+            return False
+        hook.write_text(_SIGNOFF_HOOK)
+        hook.chmod(0o755)
+        return True
+    except Exception:
+        logger.exception("signoff hook install failed for %s", worktree)
         return False
 
 

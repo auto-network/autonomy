@@ -14,6 +14,16 @@
 
 set -uo pipefail
 
+# git also invokes gpg.program to VERIFY signatures (git verify-commit, %G?,
+# log --show-signature, and verify steps inside some rebase/merge ops). We only
+# sign; hand verification to real gpg so a verify never POSTs a phantom
+# sign-request or hangs.
+for _arg in "$@"; do
+  case "$_arg" in
+    --verify) exec gpg "$@" ;;
+  esac
+done
+
 # Reach the dashboard at the same URL every other call in this container uses:
 # GRAPH_API (host.docker.internal on the bridge network, localhost on host net).
 DASH="${AUTONOMY_DASHBOARD:-${GRAPH_API:-https://localhost:8080}}"
@@ -30,6 +40,15 @@ trap 'rm -f "$payload"' EXIT
 cat > "$payload"   # the EXACT commit bytes (no $(...) stripping)
 
 [ -s "$payload" ] && [ -n "$SESSION" ] || fail "commit signing: missing payload or session"
+
+# Enforce the sign-off trailer when the policy requires it (signoff_and_gpg).
+# The commit-msg hook normally adds it automatically; this is the un-bypassable
+# backstop (a hook is skipped by --no-verify, the shim is not). Fail BEFORE
+# posting so the operator isn't asked to sign a commit that will fail DCO.
+if [ "$(git config --get autonomy.sign.requireSignoff 2>/dev/null || true)" = "true" ]; then
+  grep -qiE '^Signed-off-by: .+' "$payload" \
+    || fail "commit signing: policy requires a Signed-off-by trailer and this commit has none. Re-commit with --signoff (the commit-msg hook adds it automatically unless you used --no-verify)."
+fi
 
 # create the sign-request: session/repo as url-encoded query params, the exact
 # commit bytes as the POST body.
