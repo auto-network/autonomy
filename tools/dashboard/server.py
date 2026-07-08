@@ -26,7 +26,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from functools import partial
-from typing import Any
+from typing import Any, Callable
 from urllib import error as urllib_error, request as urllib_request
 
 logger = logging.getLogger(__name__)
@@ -5617,12 +5617,18 @@ def _cleanup_after_lifecycle_failure(
     *,
     tmux_name: str,
     loop: asyncio.AbstractEventLoop | None,
+    cleanup_worktrees: bool = True,
 ) -> list[str]:
     """Best-effort bounded teardown after startup fails.
 
     The worker remains the single lifecycle owner: it marks the session failed,
     cleans up process/worktree state from the same worker thread, then restores
     the failed terminal state for operator visibility.
+
+    ``cleanup_worktrees=False`` for RESUME failures: a resumed session's
+    worktrees carry its whole uncommitted/unmerged history — a failed
+    relaunch must never delete them. Fresh creates own their just-made
+    worktrees, so cleaning those is safe.
     """
     errors: list[str] = []
 
@@ -5681,12 +5687,16 @@ def _cleanup_after_lifecycle_failure(
         if errors:
             raise errors[0]
 
-    for name, timeout, func in (
+    steps: list[tuple[str, float, Callable[[], None]]] = [
         ("stop_container_tmux", _LIFECYCLE_STOP_TIMEOUT_S, _stop_container_and_tmux),
         ("remove_watchers", _LIFECYCLE_REMOVE_WATCHERS_TIMEOUT_S, _remove_watches),
         ("deregister", _LIFECYCLE_DEREGISTER_TIMEOUT_S, _deregister),
-        ("cleanup_worktree", _LIFECYCLE_CLEANUP_WORKTREE_TIMEOUT_S, _cleanup_worktrees),
-    ):
+    ]
+    if cleanup_worktrees:
+        steps.append(
+            ("cleanup_worktree", _LIFECYCLE_CLEANUP_WORKTREE_TIMEOUT_S, _cleanup_worktrees),
+        )
+    for name, timeout, func in steps:
         err = _run_cleanup_step(name=name, timeout=timeout, func=func)
         if err:
             logger.warning(
@@ -5707,6 +5717,7 @@ def _fail_lifecycle_start_with_cleanup(
     reason: str,
     attempt: int,
     loop: asyncio.AbstractEventLoop | None,
+    cleanup_worktrees: bool = True,
 ) -> None:
     writer.fail(tmux_name, phase=phase, reason=reason, attempt=attempt)
     writer.set_state(
@@ -5716,7 +5727,11 @@ def _fail_lifecycle_start_with_cleanup(
         reason="startup failed; cleaning partial session",
         attempt=attempt,
     )
-    cleanup_errors = _cleanup_after_lifecycle_failure(tmux_name=tmux_name, loop=loop)
+    cleanup_errors = _cleanup_after_lifecycle_failure(
+        tmux_name=tmux_name,
+        loop=loop,
+        cleanup_worktrees=cleanup_worktrees,
+    )
     final_reason = reason
     if cleanup_errors:
         final_reason = f"{reason}; cleanup errors: {'; '.join(cleanup_errors)}"
@@ -5957,8 +5972,268 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
         )
 
 
+def _register_resumed_session_from_worker(
+    *,
+    tmux_name: str,
+    cfg: dict,
+    loop: asyncio.AbstractEventLoop | None,
+) -> None:
+    """(Re-)register a relaunched session for tailing, without state writes."""
+    jsonl_path = Path(cfg["jsonl_path"])
+    if cfg.get("revived"):
+        coro = session_monitor.register_revived(
+            tmux_name=tmux_name,
+            jsonl_path=jsonl_path,
+        )
+    else:
+        coro = session_monitor.register(
+            tmux_name=tmux_name,
+            session_type=cfg.get("session_type") or "container",
+            project=cfg.get("register_project") or "autonomy",
+            jsonl_path=jsonl_path,
+            session_uuid=cfg.get("resume_uuid"),
+        )
+    if loop is not None and loop.is_running():
+        fut = asyncio.run_coroutine_threadsafe(coro, loop)
+        fut.result(timeout=_LIFECYCLE_REGISTER_TIMEOUT_S)
+    else:
+        # Test / early-wiring path: the durable row already exists (revive or
+        # register_pending ran in the API handler); monitor watch setup is
+        # the startup wiring's responsibility.
+        coro.close()
+
+
+def _render_resume_message(*, tmux_name: str, cfg: dict) -> str | None:
+    """Resume-appropriate orientation (continue, don't re-orient as fresh)."""
+    from tools.dashboard.session_orientation import render_orientation
+
+    try:
+        return render_orientation(
+            tmux_name=tmux_name,
+            workspace_id=cfg.get("project_id") or "",
+            workspace_name=cfg.get("workspace_name") or (
+                "host" if cfg.get("kind") == "host" else "default"
+            ),
+            org=cfg.get("org") or "autonomy",
+            resumed=True,
+        )
+    except Exception:
+        logger.warning(
+            "session_lifecycle: resume orientation render failed tmux=%s",
+            tmux_name, exc_info=True,
+        )
+        return None
+
+
+def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWriter) -> None:
+    """Worker-thread relaunch of an existing session (container or host).
+
+    The API handler has already resolved identity (tmux_name, jsonl,
+    harness, model), revived/inserted the row, armed the FSM, and built the
+    host command when applicable — everything blocking runs here.
+    """
+    tmux_name = job.tmux_name
+    cfg = job.config
+    kind = cfg.get("kind") or "container"
+    attempt = int(cfg.get("attempt", 1))
+    loop = cfg.get("event_loop")
+    if loop is not None and not isinstance(loop, asyncio.AbstractEventLoop):
+        loop = None
+
+    phase = "start"
+    try:
+        run_dir = Path(cfg["output_dir"]) if cfg.get("output_dir") else None
+        startup_script: Path | None = None
+
+        if kind == "project":
+            phase = "preparing"
+            writer.set_state(tmux_name, "preparing")
+            prepare_deadline = time.monotonic() + _LIFECYCLE_PREPARING_TIMEOUT_S
+            proj = workspace_settings.get_workspace(cfg["project_id"])
+            mounts = prepare_session_mounts(
+                proj,
+                tmux_name,
+                refresh_existing_worktree=False,
+                git_timeout=_LIFECYCLE_PREPARING_TIMEOUT_S,
+            )
+            _remaining_step_timeout(prepare_deadline, "preparing")
+            mounts.update(workspace_settings.artifact_mounts(proj))
+        else:
+            proj = None
+            mounts = None
+
+        phase = "launching"
+        writer.set_state(tmux_name, "launching")
+        launch_deadline = time.monotonic() + _LIFECYCLE_LAUNCHING_TIMEOUT_S
+
+        if kind == "host":
+            cmd_str = cfg["host_cmd"]
+        elif kind == "project":
+            meta: dict = {
+                "tmux_session": tmux_name,
+                "project": proj.id,
+                "graph_project": proj.graph_project,
+            }
+            if proj.default_tags:
+                meta["graph_tags"] = list(proj.default_tags)
+            extra_env: dict[str, str] = dict(proj.env) if proj.env else {}
+            for var in proj.env_from_host:
+                val = os.environ.get(var)
+                if val is not None:
+                    extra_env[var] = val
+            run_dir.mkdir(parents=True, exist_ok=True)
+            primer_path = run_dir / ".claude_md"
+            primer_path.write_text(render_workspace_primer(proj))
+            startup_script = (_REPO_ROOT / proj.startup) if proj.startup else None
+            cmd_str = launch_session(
+                session_type="terminal",
+                name=tmux_name,
+                prompt=None,
+                detach=False,
+                image=proj.image,
+                mounts=mounts or None,
+                metadata=meta,
+                harness=cfg.get("harness"),
+                extra_env=extra_env or None,
+                global_claude_md=primer_path,
+                startup_script=startup_script,
+                privileged=proj.dind,
+                working_dir=proj.working_dir or "/workspace/repo",
+                output_dir=str(run_dir),
+                model=cfg.get("model"),
+                resume_uuid=cfg["resume_uuid"],
+                network_host=proj.network_host,
+                capabilities=proj.capabilities,
+            )
+        else:
+            cmd_str = launch_session(
+                session_type="terminal",
+                name=tmux_name,
+                prompt=None,
+                detach=False,
+                image="autonomy-agent:dashboard",
+                metadata={"tmux_session": tmux_name},
+                harness=cfg.get("harness"),
+                output_dir=str(run_dir),
+                model=cfg.get("model"),
+                resume_uuid=cfg["resume_uuid"],
+                global_claude_md=_REPO_ROOT / "agents/shared/terminal/CLAUDE.md",
+            )
+        _remaining_step_timeout(launch_deadline, "launching")
+        if not cmd_str:
+            raise RuntimeError(f"failed to build resume command for '{tmux_name}'")
+
+        # Resume reuses the original run_dir: leftover markers from the
+        # prior boot would read as instantly-completed setup. Clear before
+        # the relaunched entrypoint rewrites them.
+        if run_dir is not None:
+            for stale in (".setup_phase", ".setup-exit"):
+                try:
+                    (run_dir / stale).unlink()
+                except FileNotFoundError:
+                    pass
+                except Exception:
+                    logger.debug(
+                        "session_lifecycle: stale %s clear failed for %s",
+                        stale, tmux_name, exc_info=True,
+                    )
+
+        tmux_cmd = [
+            "tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40",
+        ]
+        if kind == "host":
+            tmux_cmd += ["-c", str(_REPO_ROOT)]
+        tmux_cmd.append(cmd_str)
+        result = subprocess.run(
+            tmux_cmd,
+            env={**os.environ, "TERM": "xterm-256color"},
+            capture_output=True,
+            timeout=_remaining_step_timeout(launch_deadline, "launching"),
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode().strip()
+            raise RuntimeError(f"tmux creation failed: {stderr}")
+        for opt, val in (
+            ("set-clipboard", "on"),
+            ("mouse", "on"),
+            ("allow-passthrough", "on"),
+        ):
+            subprocess.run(
+                ["tmux", "set-option", "-t", tmux_name, opt, val],
+                capture_output=True,
+                timeout=_remaining_step_timeout(launch_deadline, "launching"),
+            )
+
+        phase = "setup"
+        writer.set_state(tmux_name, "setup")
+        _register_resumed_session_from_worker(tmux_name=tmux_name, cfg=cfg, loop=loop)
+        if startup_script is not None and run_dir is not None:
+            _wait_for_setup_complete(
+                tmux_name=tmux_name,
+                run_dir=run_dir,
+                startup_script=startup_script,
+                deadline=time.monotonic() + _LIFECYCLE_SETUP_TIMEOUT_S,
+            )
+
+        phase = "waiting_ready"
+        writer.set_state(tmux_name, "waiting_ready")
+        _wait_for_prompt(
+            tmux_name=tmux_name,
+            deadline=time.monotonic() + _LIFECYCLE_WAITING_READY_TIMEOUT_S,
+        )
+
+        writer.set_state(tmux_name, "composer_ready")
+        first_message = _render_resume_message(tmux_name=tmux_name, cfg=cfg)
+        if first_message:
+            phase = "injecting"
+            writer.set_state(tmux_name, "injecting")
+            _inject_echo_verified(
+                tmux_name=tmux_name,
+                message=first_message,
+                harness_name=cfg.get("harness"),
+                deadline=time.monotonic() + _LIFECYCLE_INJECTING_TIMEOUT_S,
+            )
+            logger.info(
+                "session_lifecycle: resume message injected tmux=%s len=%d harness=%s",
+                tmux_name, len(first_message), cfg.get("harness") or "claude",
+            )
+        writer.set_state(tmux_name, "running")
+    except TimeoutError as exc:
+        _fail_lifecycle_start_with_cleanup(
+            writer=writer,
+            tmux_name=tmux_name,
+            phase=str(exc).split()[0],
+            reason=str(exc),
+            attempt=attempt,
+            loop=loop,
+            cleanup_worktrees=False,
+        )
+    except Exception as exc:
+        _fail_lifecycle_start_with_cleanup(
+            writer=writer,
+            tmux_name=tmux_name,
+            phase=phase,
+            reason=f"{type(exc).__name__}: {exc}",
+            attempt=attempt,
+            loop=loop,
+            cleanup_worktrees=False,
+        )
+
+
+def _run_session_start(job: LifecycleJob, writer: SessionLifecycleStateWriter) -> None:
+    """Single worker entrypoint for every session launch.
+
+    Fresh workspace creates and resumes share the same FSM and writer;
+    the config decides which step list runs.
+    """
+    if job.config.get("resume"):
+        _run_session_resume_start(job, writer)
+    else:
+        _run_project_session_start(job, writer)
+
+
 _SESSION_LIFECYCLE_WORKER = SessionLifecycleWorker()
-_SESSION_LIFECYCLE_WORKER.register_handler("start", _run_project_session_start)
+_SESSION_LIFECYCLE_WORKER.register_handler("start", _run_session_start)
 
 
 async def _recover_stuck_lifecycle_rows() -> None:
@@ -7060,82 +7335,10 @@ async def api_session_resume(request):
                     },
                     status_code=400,
                 )
-            try:
-                resume_mounts = prepare_session_mounts(
-                    proj_for_resume,
-                    tmux_name,
-                    refresh_existing_worktree=False,
-                )
-            except WorkspaceError as e:
-                logger.error(
-                    "api_session_resume: workspace prep failed  project=%s  err=%s",
-                    proj_for_resume.id, e,
-                )
-                return JSONResponse(
-                    {"error": f"Workspace prep failed: {e}"}, status_code=500,
-                )
-            resume_mounts.update(workspace_settings.artifact_mounts(proj_for_resume))
-            meta: dict = {
-                "tmux_session": tmux_name,
-                "project": proj_for_resume.id,
-                "graph_project": proj_for_resume.graph_project,
-            }
-            if proj_for_resume.default_tags:
-                meta["graph_tags"] = list(proj_for_resume.default_tags)
-            extra_env: dict[str, str] = dict(proj_for_resume.env) if proj_for_resume.env else {}
-            for _var in proj_for_resume.env_from_host:
-                _val = os.environ.get(_var)
-                if _val is not None:
-                    extra_env[_var] = _val
-            extra_env = extra_env or None
-            run_dir = Path(output_dir)
-            run_dir.mkdir(parents=True, exist_ok=True)
-            primer_path = run_dir / ".claude_md"
-            primer_path.write_text(render_workspace_primer(proj_for_resume))
-            global_claude_md = primer_path
-            startup_script = (
-                _REPO_ROOT / proj_for_resume.startup
-                if proj_for_resume.startup else None
-            )
-            working_dir = proj_for_resume.working_dir or "/workspace/repo"
-            docker_cmd = launch_session(
-                session_type="terminal",
-                name=tmux_name,
-                prompt=None,
-                detach=False,
-                image=proj_for_resume.image,
-                mounts=resume_mounts or None,
-                metadata=meta,
-                harness=resume_harness,
-                extra_env=extra_env,
-                global_claude_md=global_claude_md,
-                startup_script=startup_script,
-                privileged=proj_for_resume.dind,
-                working_dir=working_dir,
-                output_dir=output_dir,
-                model=model,
-                resume_uuid=session_uuid,
-                network_host=proj_for_resume.network_host,
-                capabilities=proj_for_resume.capabilities,
-            )
-        else:
-            docker_cmd = launch_session(
-                session_type="terminal",
-                name=tmux_name,
-                prompt=None,
-                detach=False,
-                image="autonomy-agent:dashboard",
-                metadata={"tmux_session": tmux_name},
-                harness=resume_harness,
-                output_dir=output_dir,
-                model=model,
-                resume_uuid=session_uuid,
-                global_claude_md=_REPO_ROOT / "agents/shared/terminal/CLAUDE.md",
-            )
-        if not docker_cmd:
-            return JSONResponse({"error": "Failed to build resume command"}, status_code=500)
-
-        cmd_str = docker_cmd
+        # Everything blocking (git worktree prep, credential resolution,
+        # docker command build, tmux spawn) runs on the lifecycle worker.
+        kind = "project" if proj_for_resume is not None else "container"
+        host_cmd = None
     else:
         # Host session: relaunch the SAME harness CLI on the host. Hardcoding
         # ``claude`` here meant resuming a host Codex session ran the wrong
@@ -7143,6 +7346,7 @@ async def api_session_resume(request):
         _env_prefix = (
             f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
         )
+        kind = "host"
         if resume_harness == "codex":
             # session_uuid is the rollout filename stem; codex resume needs
             # the canonical UUID tail (same extraction the launcher uses).
@@ -7152,164 +7356,84 @@ async def api_session_resume(request):
             )
             _codex_uuid = _m.group(1) if _m else session_uuid
             _model_flag = f"--model {shlex.quote(model)} " if model else ""
-            cmd_str = (
+            host_cmd = (
                 _env_prefix
                 + "codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox "
                 + _model_flag
                 + f"resume {shlex.quote(_codex_uuid)}"
             )
         else:
-            cmd_str = (
+            host_cmd = (
                 _env_prefix
                 + f"claude --dangerously-skip-permissions "
                 + f"--model {shlex.quote(model)} --resume {shlex.quote(session_uuid)}"
             )
+        output_dir = None
 
-    # ── Launch in tmux ──
-    tmux_cmd = ["tmux", "new-session", "-d", "-s", tmux_name, "-x", "120", "-y", "40"]
-    if session_type == "host":
-        tmux_cmd += ["-c", str(_REPO_ROOT)]
-    tmux_cmd.append(cmd_str)
-
-    result = subprocess.run(tmux_cmd, env={**os.environ, "TERM": "xterm-256color"}, capture_output=True)
-    if result.returncode != 0:
-        logger.error("api_session_resume: tmux new-session failed  tmux=%s  rc=%d  stderr=%s",
-                     tmux_name, result.returncode, result.stderr.decode().strip())
-        return JSONResponse(
-            {"error": f"tmux creation failed: {result.stderr.decode().strip()}"},
-            status_code=500,
-        )
-
-    # Enable OSC 52 + mouse + passthrough
-    subprocess.run(["tmux", "set-option", "-t", tmux_name, "set-clipboard", "on"], capture_output=True)
-    subprocess.run(["tmux", "set-option", "-t", tmux_name, "mouse", "on"], capture_output=True)
-    subprocess.run(["tmux", "set-option", "-t", tmux_name, "allow-passthrough", "on"], capture_output=True)
-
-    # ── Register with session monitor ──
+    # ── Revive/seed the row, arm the FSM, enqueue the relaunch ──
+    # Everything blocking (worktree prep, credential resolution, docker
+    # command build, tmux spawn, setup/composer waits, resume-message
+    # injection) runs on the lifecycle worker; this handler only writes the
+    # row and returns 202. Progress reaches the UI via the worker's
+    # transition broadcasts.
     if dead_session:
-        # Revive the existing row: set is_live=1, reset file_offset for full backfill
+        # Revive the existing row: is_live=1, file_offset=0 for full
+        # backfill, startup_state/harness_state reset for the fresh boot.
         dashboard_db.revive_session(tmux_name, file_offset=0)
-        # Re-register with session_monitor for tailing (uses existing DB row)
-        await session_monitor.register_revived(
-            tmux_name=tmux_name,
-            jsonl_path=Path(file_path),
-        )
-    elif session_type == "container":
-        # New registration with the JSONL file path for immediate backfill
-        await session_monitor.register(
-            tmux_name=tmux_name,
-            session_type="container",
-            project="autonomy",
-            jsonl_path=Path(file_path),
-            session_uuid=session_uuid,
-        )
-    else:
-        # Host session: register with JSONL path for backfill
-        project_folder = str(_REPO_ROOT).replace("/", "-")
-        await session_monitor.register(
-            tmux_name=tmux_name,
-            session_type="host",
-            project=project_folder,
-            jsonl_path=Path(file_path),
-            session_uuid=session_uuid,
-        )
+    register_project = (
+        proj_for_resume.id if (session_type == "container" and proj_for_resume is not None)
+        else ((dead_session or {}).get("project")
+              or (str(_REPO_ROOT).replace("/", "-") if session_type == "host" else "autonomy"))
+    )
+    await session_monitor.register_pending(
+        tmux_name,
+        session_type=session_type,
+        project=register_project,
+        harness=resume_harness,
+    )
 
-    # Arm the startup_state FSM for the relaunched session. Without this a
-    # resumed session keeps the dead row's stale state (potentially NULL
-    # because the session previously cleared on first assistant turn), the
-    # screen-poll never picks it up, and the chip freezes. Resetting to
-    # harness_starting puts it back in the screen-poll's watch window so
-    # composer_ready detection and the orientation injection can run.
-    # arm (not advance): NULL is sticky against advance, and this is one of
-    # the two legitimate FSM entrypoints.
-    try:
-        await session_monitor.arm_startup_state(tmux_name, "harness_starting")
-    except Exception:
+    job = LifecycleJob(
+        "start",
+        tmux_name,
+        {
+            "resume": True,
+            "kind": kind,
+            "attempt": 1,
+            "project_id": proj_for_resume.id if (session_type == "container" and proj_for_resume is not None) else None,
+            "workspace_name": proj_for_resume.name if (session_type == "container" and proj_for_resume is not None) else None,
+            "org": proj_for_resume.graph_project if (session_type == "container" and proj_for_resume is not None) else "autonomy",
+            "resume_uuid": session_uuid,
+            "output_dir": output_dir,
+            "jsonl_path": file_path,
+            "harness": resume_harness,
+            "model": model,
+            "revived": bool(dead_session),
+            "host_cmd": host_cmd,
+            "session_type": session_type,
+            "register_project": register_project,
+            "event_loop": asyncio.get_running_loop(),
+        },
+    )
+    if not _SESSION_LIFECYCLE_WORKER.try_enqueue(job):
+        reason = "session lifecycle queue is full"
+        _SESSION_LIFECYCLE_WORKER.state_writer.fail(
+            tmux_name,
+            phase="requested",
+            reason=reason,
+            retryable=True,
+            attempt=1,
+        )
         logger.warning(
-            "api_session_resume: failed to arm initial state for %s",
-            tmux_name, exc_info=True,
+            "api_session_resume: lifecycle queue full tmux=%s", tmux_name,
         )
-    if session_type == "container":
-        _spawn_setup_exit_watcher(tmux_name, Path(output_dir))
-
-    # ── Bead B2: inject a resume first-message ──
-    # A resumed session reaches composer_ready but, with no prompt, produces no
-    # new assistant turn — it sits silent in awaiting_first_response and the
-    # tile never shows a "ready" reply. Mirror api_session_create's injection,
-    # but with a RESUME-appropriate message (continue, don't re-orient as fresh)
-    # and gated on composer_ready (a9a1e8b drives that on resume now) so the
-    # keystrokes land in a ready composer rather than a fixed-sleep guess.
-    from tools.dashboard.session_orientation import render_orientation as _render_orient
-    try:
-        if session_type == "container" and proj_for_resume is not None:
-            _resume_msg = _render_orient(
-                tmux_name=tmux_name,
-                workspace_id=proj_for_resume.id,
-                workspace_name=proj_for_resume.name,
-                org=proj_for_resume.graph_project,
-                resumed=True,
-            )
-        elif session_type == "container":
-            _resume_msg = _render_orient(
-                tmux_name=tmux_name, workspace_id="",
-                workspace_name="default", org="autonomy", resumed=True,
-            )
-        else:
-            _resume_msg = _render_orient(
-                tmux_name=tmux_name, workspace_id="",
-                workspace_name="host", org="autonomy", resumed=True,
-            )
-    except Exception:
-        logger.warning(
-            "api_session_resume: resume orientation render failed for %s",
-            tmux_name, exc_info=True,
+        return JSONResponse(
+            {"error": reason, "tmux_name": tmux_name, "retryable": True},
+            status_code=503,
         )
-        _resume_msg = None
-
-    if _resume_msg:
-        # phase-trace: resume-side inject scheduled. Symmetric with the
-        # create-side inject so a single phase-trace grep can show
-        # whether resume orientation fired for any session.
-        logger.info(
-            "phase-trace: inject_scheduled  tmux=%s  kind=resume  msg_len=%d",
-            tmux_name, len(_resume_msg),
-        )
-        _resume_inject_t0 = time.monotonic()
-
-        async def _inject_resume_message(msg=_resume_msg):
-            # Wait for the resumed harness to reach composer_ready before
-            # typing — `claude --resume` loads history first, so a fixed sleep
-            # is unreliable. Falls through after 120s (matches the watcher net).
-            # Gate reads the durable harness_state flag too: on resume the
-            # tailer's backfill clear routinely beats the poller's promote,
-            # and startup_state alone would starve (graph://afb67d11-7c4).
-            deadline = time.time() + 120
-            while time.time() < deadline:
-                if _composer_ready_reached(tmux_name):
-                    break
-                await asyncio.sleep(1)
-            else:
-                logger.warning(
-                    "phase-trace: inject_skipped  tmux=%s  kind=resume  reason=composer_ready_timeout_120s",
-                    tmux_name,
-                )
-                return
-            try:
-                await tmux_send(tmux_name, msg)
-                logger.info(
-                    "phase-trace: first_message_injected  tmux=%s  kind=resume  dt_from_inject_scheduled_ms=%d  len=%d",
-                    tmux_name, int((time.monotonic() - _resume_inject_t0) * 1000),
-                    len(msg),
-                )
-                await session_monitor.update_phase(
-                    tmux_name, startup_state="awaiting_first_response",
-                )
-            except Exception:
-                logger.warning(
-                    "phase-trace: inject_failed  tmux=%s  kind=resume  exc=tmux_send_exception",
-                    tmux_name, exc_info=True,
-                )
-        asyncio.create_task(_inject_resume_message())
+    logger.info(
+        "phase-trace: resume queued  tmux=%s  kind=%s  revived=%s",
+        tmux_name, kind, bool(dead_session),
+    )
 
     if not label:
         label = src.get("title", "") if source_id and src else ""
@@ -7320,7 +7444,8 @@ async def api_session_resume(request):
         "tmux_name": tmux_name,
         "label": label,
         "type": session_type,
-    })
+        "pending": True,
+    }, status_code=202)
 
 
 def _deliver_file_to_session(tmux_session: str, host_path: str, container_dest: str | None = None) -> str:
