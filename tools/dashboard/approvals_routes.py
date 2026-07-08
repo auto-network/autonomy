@@ -105,6 +105,29 @@ ENRICH = {
 # number of concurrently-awaited pending requests.
 _decision_waiters: dict[str, asyncio.Event] = {}
 
+# Per-kind post-approval executors: async (row) -> execution outcome dict.
+# For a kind registered here, the operator's approval is acknowledged
+# immediately and the operation runs as a backend task; the single result
+# write happens when it completes — {approved: true, execution: {...}} — so
+# the requester's held GET delivers the actual outcome, not just the verdict.
+# A decline never executes anything. Kinds without an executor (commit_sign:
+# the browser itself produces the signature) store the verdict body directly.
+EXECUTORS: dict = {}
+
+# Requests whose executor is running: the verdict is committed but the result
+# row is written only on completion, so further decisions must be refused here
+# rather than by the result-row first-writer-wins check.
+_executing: set[str] = set()
+
+
+def _finalize_decision(rid: str, kind: str, session: str) -> None:
+    """Wake held ?wait= calls and tell viewers the request is closed."""
+    ev = _decision_waiters.pop(rid, None)
+    if ev:
+        ev.set()
+    event_bus.broadcast_sync("approval:decided",
+                             {"id": rid, "kind": kind, "session": session})
+
 # Cap on ?wait= so a stuck client can't hold a connection open indefinitely;
 # requesters (e.g. the signing shim) loop on the held GET instead.
 MAX_WAIT_S = 60.0
@@ -191,15 +214,29 @@ async def decide_approval(request: Request) -> JSONResponse:
     r = ar.get(rid)
     if r is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    if rid in _executing:
+        return JSONResponse({"ok": False})
+
+    executor = EXECUTORS.get(r["kind"])
+    if body["approved"] and executor:
+        _executing.add(rid)
+
+        async def run_and_record():
+            try:
+                outcome = await executor(r)
+            except Exception as e:  # the requester gets a failure, never a hang
+                outcome = {"ok": False, "error": str(e)}
+            finally:
+                _executing.discard(rid)
+            if ar.set_result(rid, {**body, "execution": outcome}):
+                _finalize_decision(rid, r["kind"], r["session"])
+
+        asyncio.get_running_loop().create_task(run_and_record())
+        return JSONResponse({"ok": True})
+
     updated = ar.set_result(rid, body)
     if updated:
-        # Wake every held ?wait= call, then tell viewers the request is closed
-        # (clears their dedup / any stale replayed open).
-        ev = _decision_waiters.pop(rid, None)
-        if ev:
-            ev.set()
-        await event_bus.broadcast("approval:decided",
-                                  {"id": rid, "kind": r["kind"], "session": r["session"]})
+        _finalize_decision(rid, r["kind"], r["session"])
     return JSONResponse({"ok": updated})
 
 
