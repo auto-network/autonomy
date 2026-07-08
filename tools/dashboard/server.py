@@ -23,46 +23,13 @@ import termios
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from functools import partial
 from typing import Any, Callable
 from urllib import error as urllib_error, request as urllib_request
 
 logger = logging.getLogger(__name__)
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-_SESSION_LAUNCH_EXECUTOR = ThreadPoolExecutor(
-    max_workers=int(os.environ.get("DASHBOARD_SESSION_LAUNCH_WORKERS", "4")),
-    thread_name_prefix="session-launch",
-)
-_SESSION_CREATE_TASKS: set[asyncio.Task] = set()
-
-
-async def _run_session_launch_io(func, /, *args, **kwargs):
-    """Run launch/provisioning blocking I/O away from the default executor."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _SESSION_LAUNCH_EXECUTOR,
-        partial(func, *args, **kwargs),
-    )
-
-
-def _track_session_create_task(task: asyncio.Task) -> None:
-    """Keep detached launch tasks observable and log unexpected failures."""
-    _SESSION_CREATE_TASKS.add(task)
-
-    def _done(done: asyncio.Task) -> None:
-        _SESSION_CREATE_TASKS.discard(done)
-        try:
-            done.result()
-        except asyncio.CancelledError:
-            logger.info("api_session_create: background launch task cancelled")
-        except Exception:
-            logger.exception("api_session_create: background launch task failed")
-
-    task.add_done_callback(_done)
 
 # Allow importing from agents/ (sibling of tools/)
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -5444,36 +5411,11 @@ def _read_harness_state(tmux_name: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _composer_ready_reached(tmux_name: str) -> bool:
-    """True once the session's composer has been confirmed ready.
-
-    Reads BOTH signals: the transient ``startup_state == composer_ready``
-    chip value AND the durable ``harness_state.composer_ready`` JSON flag the
-    pane-poller persists. Injection gates must use this instead of polling
-    ``startup_state`` alone: the tailer's backfill clear can drop
-    ``startup_state`` to NULL before the poller promotes it (the resume
-    race, graph://afb67d11-7c4), and NULL is sticky — a gate watching only
-    ``startup_state`` would starve forever while the composer is ready.
-    """
-    row = dashboard_db.get_session(tmux_name)
-    if not row:
-        return False
-    if row.get("startup_state") == "composer_ready":
-        return True
-    raw = row.get("harness_state")
-    if not raw:
-        return False
-    try:
-        parsed = json.loads(raw)
-    except (TypeError, json.JSONDecodeError):
-        return False
-    return bool(isinstance(parsed, dict) and parsed.get("composer_ready"))
-
-
 def _wait_for_prompt(
     *,
     tmux_name: str,
     deadline: float,
+    writer: SessionLifecycleStateWriter | None = None,
 ) -> None:
     """Wait for the pane-poller's durable composer_ready signal.
 
@@ -5486,10 +5428,25 @@ def _wait_for_prompt(
     there is exactly one detector per session. Two concurrent capture+
     keystroke loops (the pre-signal design) could double-send the trust
     confirmation.
+
+    When a ``writer`` is supplied, the trust dialog surfaces on the chip:
+    the poller only reports ``confirming_trust_prompt`` in harness_state,
+    and the worker — the single state writer — mirrors it into the
+    ``confirming_trust``/``waiting_ready`` states as it flips.
     """
+    in_trust = False
     while time.monotonic() < deadline:
-        if _read_harness_state(tmux_name).get("composer_ready"):
+        state = _read_harness_state(tmux_name)
+        if state.get("composer_ready"):
             return
+        if writer is not None:
+            trust_now = bool(state.get("confirming_trust_prompt"))
+            if trust_now != in_trust:
+                in_trust = trust_now
+                writer.set_state(
+                    tmux_name,
+                    "confirming_trust" if trust_now else "waiting_ready",
+                )
         time.sleep(0.5)
     raise TimeoutError(f"waiting_ready timed out after {_LIFECYCLE_WAITING_READY_TIMEOUT_S}s")
 
@@ -5834,6 +5791,18 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
                 "session_lifecycle: preparing tmux=%s repo_index=%d total=%d current_repo=%s",
                 tmux_name, repo_index, total_repos, repo_name,
             )
+            if loop is not None and loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    session_monitor.update_phase(
+                        tmux_name,
+                        progress={
+                            "repo_index": repo_index,
+                            "total": total_repos,
+                            "current_repo": repo_name,
+                        },
+                    ),
+                    loop,
+                )
 
         project_mounts = prepare_session_mounts(
             proj,
@@ -5940,6 +5909,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
         _wait_for_prompt(
             tmux_name=tmux_name,
             deadline=wait_deadline,
+            writer=writer,
         )
 
         writer.set_state(tmux_name, "composer_ready")
@@ -6204,6 +6174,7 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
         _wait_for_prompt(
             tmux_name=tmux_name,
             deadline=time.monotonic() + _LIFECYCLE_WAITING_READY_TIMEOUT_S,
+            writer=writer,
         )
 
         writer.set_state(tmux_name, "composer_ready")
@@ -6339,6 +6310,7 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
         _wait_for_prompt(
             tmux_name=tmux_name,
             deadline=time.monotonic() + _LIFECYCLE_WAITING_READY_TIMEOUT_S,
+            writer=writer,
         )
 
         writer.set_state(tmux_name, "composer_ready")
@@ -6499,10 +6471,14 @@ async def _recover_stuck_lifecycle_rows() -> None:
             continue
         try:
             if _tmux_session_exists(tmux_name):
-                cleared = await session_monitor.advance_startup_state(tmux_name, None)
+                # Adopt as running through the lifecycle writer — the single
+                # state writer — clearing startup_state and re-asserting
+                # is_live. The activity poller re-derives idle/running on
+                # its next pass.
+                _SESSION_LIFECYCLE_WORKER.state_writer.set_state(tmux_name, "running")
                 logger.info(
-                    "startup_recovery: adopted %s (was %s, tmux alive, cleared=%s)",
-                    tmux_name, state, cleared,
+                    "startup_recovery: adopted %s (was %s, tmux alive)",
+                    tmux_name, state,
                 )
             else:
                 SessionLifecycleStateWriter().fail(
@@ -6517,275 +6493,6 @@ async def _recover_stuck_lifecycle_rows() -> None:
                 )
         except Exception:
             logger.exception("startup_recovery: sweep failed for %s", tmux_name)
-
-
-async def _finish_project_session_create(
-    *,
-    tmux_name: str,
-    proj,
-    primer_url: str | None,
-    phase_t0: float,
-) -> None:
-    """Finish a workspace-backed session create after the HTTP ACK returns."""
-    logger.info("phase-trace: requesting  tmux=%s  dt_from_post_ms=%d",
-                tmux_name, int((time.monotonic() - phase_t0) * 1000))
-    try:
-        loop = asyncio.get_running_loop()
-
-        def _on_repo_prepared(repo_index: int, total_repos: int, repo_name: str):
-            logger.info(
-                "phase-trace: preparing_workspace  tmux=%s  dt_from_post_ms=%d  repo_index=%d  total=%d  current_repo=%s",
-                tmux_name, int((time.monotonic() - phase_t0) * 1000),
-                repo_index, total_repos, repo_name,
-            )
-            asyncio.run_coroutine_threadsafe(
-                session_monitor.update_phase(
-                    tmux_name,
-                    startup_state="preparing_workspace",
-                    progress={
-                        "repo_index": repo_index,
-                        "total": total_repos,
-                        "current_repo": repo_name,
-                    },
-                ),
-                loop,
-            )
-
-        try:
-            project_mounts = await _run_session_launch_io(
-                prepare_session_mounts,
-                proj,
-                tmux_name,
-                refresh_existing_worktree=True,
-                progress_callback=_on_repo_prepared,
-            )
-        except WorkspaceError as e:
-            logger.error(
-                "api_session_create: workspace prep failed  project=%s  err=%s",
-                proj.id, e,
-            )
-            await session_monitor.update_phase(
-                tmux_name, startup_state="setup_failed", progress={"error": str(e)},
-            )
-            return
-
-        project_mounts.update(workspace_settings.artifact_mounts(proj))
-        logger.info("phase-trace: mounts-prepared  tmux=%s  dt_from_post_ms=%d",
-                    tmux_name, int((time.monotonic() - phase_t0) * 1000))
-
-        meta: dict = {
-            "tmux_session": tmux_name,
-            "project": proj.id,
-            "graph_project": proj.graph_project,
-        }
-        if proj.default_tags:
-            meta["graph_tags"] = list(proj.default_tags)
-        extra_env: dict[str, str] = dict(proj.env) if proj.env else {}
-        for var in proj.env_from_host:
-            val = os.environ.get(var)
-            if val is not None:
-                extra_env[var] = val
-        extra_env = extra_env or None
-
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        run_dir = _REPO_ROOT / "data" / "agent-runs" / f"{tmux_name}-{ts}"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        primer_path = run_dir / ".claude_md"
-        primer_path.write_text(render_workspace_primer(proj))
-        startup_script = (_REPO_ROOT / proj.startup) if proj.startup else None
-        working_dir = proj.working_dir or "/workspace/repo"
-
-        cmd_str = await _run_session_launch_io(
-            launch_session,
-            session_type="terminal",
-            name=tmux_name,
-            prompt=None,
-            detach=False,
-            image=proj.image,
-            mounts=project_mounts or None,
-            metadata=meta,
-            harness=proj.harness,
-            model=proj.model or None,
-            extra_env=extra_env,
-            output_dir=str(run_dir),
-            global_claude_md=primer_path,
-            startup_script=startup_script,
-            privileged=proj.dind,
-            working_dir=working_dir,
-            network_host=proj.network_host,
-            capabilities=proj.capabilities,
-        )
-        if not cmd_str:
-            logger.error(
-                "api_session_create: launch_session failed for project %s",
-                proj.id,
-            )
-            await session_monitor.update_phase(
-                tmux_name,
-                startup_state="setup_failed",
-                progress={"error": f"launch_session failed for project '{proj.id}'"},
-            )
-            return
-
-        logger.info("phase-trace: launch-session-built  tmux=%s  dt_from_post_ms=%d",
-                    tmux_name, int((time.monotonic() - phase_t0) * 1000))
-        await session_monitor.update_phase(
-            tmux_name, startup_state="launching_container", progress={},
-        )
-        logger.info("phase-trace: launching_container  tmux=%s  dt_from_post_ms=%d",
-                    tmux_name, int((time.monotonic() - phase_t0) * 1000))
-
-        tmux_cmd = [
-            "tmux", "new-session", "-d", "-s", tmux_name, "-x", "120",
-            "-y", "40", cmd_str,
-        ]
-
-        def _launch_tmux_sync():
-            r = subprocess.run(
-                tmux_cmd,
-                env={**os.environ, "TERM": "xterm-256color"},
-                capture_output=True,
-            )
-            if r.returncode == 0:
-                for opt, val in (
-                    ("set-clipboard", "on"),
-                    ("mouse", "on"),
-                    ("allow-passthrough", "on"),
-                ):
-                    subprocess.run(
-                        ["tmux", "set-option", "-t", tmux_name, opt, val],
-                        capture_output=True,
-                    )
-            return r
-
-        result = await _run_session_launch_io(_launch_tmux_sync)
-        if result.returncode != 0:
-            stderr = result.stderr.decode().strip()
-            logger.error(
-                "api_session_create: tmux new-session failed  tmux=%s  rc=%d  stderr=%s",
-                tmux_name, result.returncode, stderr,
-            )
-            await session_monitor.update_phase(
-                tmux_name,
-                startup_state="setup_failed",
-                progress={"error": f"tmux creation failed: {stderr}"},
-            )
-            return
-
-        logger.info("phase-trace: tmux-spawned  tmux=%s  dt_from_post_ms=%d",
-                    tmux_name, int((time.monotonic() - phase_t0) * 1000))
-        await session_monitor.update_phase(
-            tmux_name, startup_state="harness_starting", progress={},
-        )
-        logger.info("phase-trace: harness_starting  tmux=%s  dt_from_post_ms=%d",
-                    tmux_name, int((time.monotonic() - phase_t0) * 1000))
-
-        sess_dir = run_dir / "sessions"
-        await session_monitor.register(
-            tmux_name=tmux_name,
-            session_type="container",
-            project=proj.id,
-            jsonl_path=sess_dir,
-            harness=proj.harness if proj else "claude",
-            seed_message="Starting..." if not primer_url else "",
-        )
-        _spawn_setup_exit_watcher(tmux_name, run_dir)
-
-        first_message: str | None = None
-        primer_error: str | None = None
-        if primer_url:
-            resolved = await _resolve_primer(primer_url)
-            if resolved:
-                first_message = resolved
-            else:
-                primer_error = f"Could not resolve primer {primer_url!r}, falling back to orientation"
-                logger.warning("api_session_create: %s", primer_error)
-        if first_message is None:
-            from tools.dashboard.session_orientation import render_orientation
-            try:
-                first_message = render_orientation(
-                    tmux_name=tmux_name,
-                    workspace_id=proj.id,
-                    workspace_name=proj.name,
-                    org=proj.graph_project,
-                )
-            except Exception:
-                logger.warning(
-                    "api_session_create: orientation render failed for %s; "
-                    "falling back to literal Hello",
-                    tmux_name, exc_info=True,
-                )
-                first_message = "Hello"
-
-        if first_message:
-            logger.info(
-                "phase-trace: inject_scheduled  tmux=%s  dt_from_post_ms=%d  msg_len=%d  primer=%s  harness=%s",
-                tmux_name, int((time.monotonic() - phase_t0) * 1000),
-                len(first_message), bool(primer_url and not primer_error),
-                proj.harness,
-            )
-            inject_wait_t0 = time.monotonic()
-            harness = proj.harness or "claude"
-
-            async def _inject_first_message(msg=first_message, harness=harness):
-                deadline = time.time() + 60
-                while time.time() < deadline:
-                    row = dashboard_db.get_session(tmux_name)
-                    if row and row.get("startup_state") == "composer_ready":
-                        break
-                    await asyncio.sleep(0.5)
-                else:
-                    logger.warning(
-                        "phase-trace: inject_skipped  tmux=%s  reason=composer_ready_timeout_60s  harness=%s",
-                        tmux_name, harness,
-                    )
-                    return
-                settle = {"codex": 1.5, "claude": 0.0}.get(harness, 0.0)
-                if settle > 0:
-                    logger.info(
-                        "phase-trace: inject_settle  tmux=%s  harness=%s  settle_s=%.1f",
-                        tmux_name, harness, settle,
-                    )
-                    await asyncio.sleep(settle)
-                try:
-                    await tmux_send(tmux_name, msg)
-                    logger.info(
-                        "phase-trace: first_message_injected  tmux=%s  dt_from_inject_scheduled_ms=%d  len=%d  primer=%s  harness=%s  settle_s=%.1f  (composer_ready-gated)",
-                        tmux_name, int((time.monotonic() - inject_wait_t0) * 1000),
-                        len(msg), bool(primer_url and not primer_error), harness, settle,
-                    )
-                    await session_monitor.update_phase(
-                        tmux_name, startup_state="awaiting_first_response",
-                    )
-                except Exception:
-                    logger.warning(
-                        "phase-trace: inject_failed  tmux=%s  harness=%s  exc=tmux_send_exception",
-                        tmux_name, harness, exc_info=True,
-                    )
-
-            asyncio.create_task(_inject_first_message())
-        else:
-            async def _clear_when_ready():
-                deadline = time.time() + 60
-                while time.time() < deadline:
-                    row = dashboard_db.get_session(tmux_name)
-                    if row and row.get("startup_state") == "composer_ready":
-                        await session_monitor.update_phase(
-                            tmux_name, clear_startup_state=True,
-                        )
-                        return
-                    await asyncio.sleep(0.5)
-            asyncio.create_task(_clear_when_ready())
-
-        logger.info("phase-trace: background-complete  tmux=%s  dt_from_post_ms=%d",
-                    tmux_name, int((time.monotonic() - phase_t0) * 1000))
-    except Exception:
-        logger.exception("api_session_create: background launch failed for %s", tmux_name)
-        await session_monitor.update_phase(
-            tmux_name,
-            startup_state="setup_failed",
-            progress={"error": "background launch failed"},
-        )
 
 
 async def api_session_create(request):
@@ -7088,98 +6795,6 @@ async def api_session_create(request):
         if primer_error:
             resp["primer_warning"] = primer_error
         return JSONResponse(resp, status_code=202)
-
-
-def _spawn_setup_exit_watcher(tmux_name: str, run_dir: Path) -> None:
-    """Arm the per-session ``.setup_phase`` / ``.setup-exit`` watcher for a
-    (re)launched container so its dind-entrypoint markers drive the lifecycle
-    chip. Shared by api_session_create and api_session_resume — without it on
-    the resume path the relaunched container's markers went unread,
-    ``harness_phase`` never entered the screen-poll window, and the chip froze
-    on "Queued".
-
-    Clears stale markers from a prior boot first: resume reuses the original
-    run_dir, so a leftover ``.setup-exit`` (exit=0) would make the watcher jump
-    straight to setup_complete and skip the whole boot. On a fresh create dir
-    the unlinks are harmless no-ops.
-    """
-    for _stale in (".setup_phase", ".setup-exit"):
-        try:
-            (run_dir / _stale).unlink()
-        except FileNotFoundError:
-            pass
-        except Exception:
-            logger.debug(
-                "setup-watcher: stale %s clear failed for %s",
-                _stale, tmux_name, exc_info=True,
-            )
-
-    async def _watch_setup_exit():
-        setup_exit = run_dir / ".setup-exit"
-        setup_phase_file = run_dir / ".setup_phase"
-        # Intermediate markers (entrypoint_running / setup_running) are
-        # written by dind-entrypoint.sh into /workspace/output/.setup_phase;
-        # the terminal failure state comes from .setup-exit (non-zero exit).
-        # advance_startup_state enforces forward-only progression and
-        # setup_failed-as-sticky-terminal; the watcher just attempts
-        # transitions and lets the helper decide what takes effect.
-        # setup_complete is intentionally not a startup_state value — by
-        # the time .setup-exit lands with exit=0, the harness has typically
-        # already advanced through harness_starting → composer_ready, so
-        # there's nothing user-visible to render for it.
-        deadline = time.time() + 600  # 10 min
-        while time.time() < deadline:
-            try:
-                if setup_phase_file.exists():
-                    marker = setup_phase_file.read_text().strip()
-                    if marker in ("entrypoint_running", "setup_running"):
-                        if await session_monitor.advance_startup_state(tmux_name, marker):
-                            logger.info(
-                                "watch_setup_exit: %s startup_state=%s (marker)",
-                                tmux_name, marker,
-                            )
-                    elif marker == "setup_failed":
-                        # Terminal failure marker from the entrypoint. The
-                        # .setup-exit read below is the authority for the
-                        # exit code; this covers the window where the marker
-                        # landed first.
-                        if await session_monitor.advance_startup_state(tmux_name, "setup_failed"):
-                            logger.info(
-                                "watch_setup_exit: %s startup_state=setup_failed (marker)",
-                                tmux_name,
-                            )
-                    elif marker == "setup_complete":
-                        # Terminal success marker. setup_complete is
-                        # intentionally not a startup_state value (the
-                        # harness chip has already moved on); nothing to
-                        # render — stop polling once .setup-exit confirms.
-                        pass
-            except Exception:
-                logger.debug(
-                    "watch_setup_exit: .setup_phase marker read failed for %s",
-                    tmux_name, exc_info=True,
-                )
-            if setup_exit.exists():
-                try:
-                    exit_code = setup_exit.read_text().strip()
-                    if exit_code != "0":
-                        if await session_monitor.advance_startup_state(tmux_name, "setup_failed"):
-                            logger.info(
-                                "watch_setup_exit: %s startup_state=setup_failed (exit=%s)",
-                                tmux_name, exit_code,
-                            )
-                except Exception:
-                    logger.warning(
-                        "watch_setup_exit: failed to read .setup-exit for %s",
-                        tmux_name, exc_info=True,
-                    )
-                return
-            await asyncio.sleep(1)
-        logger.info(
-            "watch_setup_exit: .setup-exit watcher for %s timed out (10 min)",
-            tmux_name,
-        )
-    asyncio.create_task(_watch_setup_exit())
 
 
 def _build_host_resume_cmd(

@@ -1,12 +1,15 @@
-"""Tests for SessionMonitor's unified startup_state FSM.
+"""Tests for the worker-owned startup_state FSM's monitor-side surface.
 
-Covers:
-- advance_startup_state: forward-only transitions, setup_failed sticky-terminal,
-  clear-on-None semantics, broadcast-on-real-change.
-- register_pending + update_phase: thin wrappers around the FSM helper.
-- _process_tail_entries clear-on-assistant-role: when a JSONL append carries
-  an assistant-role entry, advance_startup_state(None) must fire AND broadcast,
-  so the chip flips from "Awaiting first reply" the moment the model speaks.
+The lifecycle worker's SessionLifecycleStateWriter owns every transition;
+the monitor contributes exactly two things, covered here:
+
+- ``arm_startup_state``: the explicit FSM entry (create/resume/retry seed
+  the row and arm the pane-poller before enqueueing).
+- ``update_phase``: transient sub-phase progress only (repo N/M during
+  prepare) — it can no longer write lifecycle state at all.
+
+Writer-side transition semantics live in test_session_lifecycle_worker.py;
+the no-other-writers guarantee is pinned by test_no_racing_writers.py.
 """
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from tools.dashboard.dao import dashboard_db
+from tools.dashboard.session_lifecycle_worker import SessionLifecycleStateWriter
 
 
 @pytest.fixture
@@ -66,208 +70,7 @@ def _broadcast_count(monitor) -> int:
     return monitor._event_bus.broadcast.await_count
 
 
-# ── advance_startup_state: forward-only rule ────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_advance_from_null_refused_sticky(db, monitor):
-    """NULL is sticky: advance cannot re-enter the FSM. Only arm can.
-
-    Before this rule NULL ranked 0 and any late writer (the setup-exit
-    watcher's marker read, most often) re-entered 'launching' after the
-    tailer cleared — the resume flip-flop/stuck bug (graph://afb67d11-7c4).
-    """
-    dashboard_db.insert_session(
-        tmux_name="auto-test", session_type="container", project="x",
-    )
-    monitor._event_bus.broadcast.reset_mock()
-    changed = await monitor.advance_startup_state("auto-test", "setup_running")
-    assert changed is False
-    assert _read_state("auto-test") is None
-    assert _broadcast_count(monitor) == 0
-
-
-@pytest.mark.asyncio
-async def test_marker_rearm_after_tailer_clear_refused(db, monitor):
-    """The exact production sequence, end to end: resume arms the FSM, the
-    launch progresses to awaiting_first_response, the tailer's backfill
-    clears to NULL, then the setup-exit watcher reads the marker file and
-    proposes setup_running. The proposal must be refused — before the
-    sticky-NULL rule it WROTE (rank 6 > NULL's rank 0) and parked the
-    running session on the 'Container setup' chip forever."""
-    dashboard_db.insert_session(
-        tmux_name="auto-test", session_type="container", project="x",
-    )
-    await monitor.arm_startup_state("auto-test", "harness_starting")
-    await monitor.advance_startup_state("auto-test", "composer_ready")
-    await monitor.advance_startup_state("auto-test", "awaiting_first_response")
-    await monitor.advance_startup_state("auto-test", None)  # tailer clear
-    monitor._event_bus.broadcast.reset_mock()
-    changed = await monitor.advance_startup_state("auto-test", "setup_running")
-    assert changed is False
-    assert _read_state("auto-test") is None
-    assert _broadcast_count(monitor) == 0
-
-
-@pytest.mark.asyncio
-async def test_arm_re_enters_after_clear(db, monitor):
-    """arm is the explicit FSM entry — it works where advance refuses."""
-    await monitor.register_pending("auto-test", project="x")
-    await monitor.advance_startup_state("auto-test", "awaiting_first_response")
-    await monitor.advance_startup_state("auto-test", None)
-    changed = await monitor.arm_startup_state("auto-test", "harness_starting")
-    assert changed is True
-    assert _read_state("auto-test") == "harness_starting"
-
-
-@pytest.mark.asyncio
-async def test_arm_overwrites_setup_failed(db, monitor):
-    """An explicit relaunch is the retry path — sticky failure must not
-    block it."""
-    await monitor.register_pending("auto-test", project="x")
-    await monitor.advance_startup_state("auto-test", "setup_failed")
-    changed = await monitor.arm_startup_state("auto-test", "harness_starting")
-    assert changed is True
-    assert _read_state("auto-test") == "harness_starting"
-
-
-@pytest.mark.asyncio
-async def test_arm_arms_screen_poll_watch(db, monitor):
-    """arm must put the session in the pane-poller's armed set so composer
-    detection keeps running even after the tailer clears startup_state."""
-    dashboard_db.insert_session(
-        tmux_name="auto-test", session_type="container", project="x",
-    )
-    await monitor.arm_startup_state("auto-test", "harness_starting")
-    assert "auto-test" in monitor._screen_poll_armed
-
-
-@pytest.mark.asyncio
-async def test_setup_failed_still_writes_from_null(db, monitor):
-    """Deliberate exception to sticky NULL: a LATE setup failure (the
-    backgrounded startup script failing after the harness is already
-    running) must stay operator-visible."""
-    dashboard_db.insert_session(
-        tmux_name="auto-test", session_type="container", project="x",
-    )
-    changed = await monitor.advance_startup_state("auto-test", "setup_failed")
-    assert changed is True
-    assert _read_state("auto-test") == "setup_failed"
-
-
-@pytest.mark.asyncio
-async def test_advance_forward_writes_and_broadcasts(db, monitor):
-    await monitor.register_pending("auto-test", project="x")
-    monitor._event_bus.broadcast.reset_mock()
-    changed = await monitor.advance_startup_state("auto-test", "preparing_workspace")
-    assert changed is True
-    assert _read_state("auto-test") == "preparing_workspace"
-    assert _broadcast_count(monitor) == 1
-
-
-@pytest.mark.asyncio
-async def test_advance_backward_refuses_no_broadcast(db, monitor):
-    await monitor.register_pending("auto-test", project="x")
-    await monitor.advance_startup_state("auto-test", "composer_ready")
-    monitor._event_bus.broadcast.reset_mock()
-    changed = await monitor.advance_startup_state("auto-test", "requesting")
-    assert changed is False
-    assert _read_state("auto-test") == "composer_ready"
-    assert _broadcast_count(monitor) == 0
-
-
-@pytest.mark.asyncio
-async def test_advance_same_state_no_broadcast(db, monitor):
-    await monitor.register_pending("auto-test", project="x")
-    monitor._event_bus.broadcast.reset_mock()
-    changed = await monitor.advance_startup_state("auto-test", "requesting")
-    assert changed is False
-    assert _broadcast_count(monitor) == 0
-
-
-# ── setup_failed: sticky terminal off-ramp ──────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_setup_failed_writes_from_any_state(db, monitor):
-    await monitor.register_pending("auto-test", project="x")
-    await monitor.advance_startup_state("auto-test", "preparing_workspace")
-    monitor._event_bus.broadcast.reset_mock()
-    changed = await monitor.advance_startup_state("auto-test", "setup_failed")
-    assert changed is True
-    assert _read_state("auto-test") == "setup_failed"
-    assert _broadcast_count(monitor) == 1
-
-
-@pytest.mark.asyncio
-async def test_setup_failed_writes_from_late_state_too(db, monitor):
-    await monitor.register_pending("auto-test", project="x")
-    await monitor.advance_startup_state("auto-test", "awaiting_first_response")
-    monitor._event_bus.broadcast.reset_mock()
-    changed = await monitor.advance_startup_state("auto-test", "setup_failed")
-    assert changed is True
-    assert _read_state("auto-test") == "setup_failed"
-
-
-@pytest.mark.asyncio
-async def test_setup_failed_idempotent(db, monitor):
-    await monitor.register_pending("auto-test", project="x")
-    await monitor.advance_startup_state("auto-test", "setup_failed")
-    monitor._event_bus.broadcast.reset_mock()
-    changed = await monitor.advance_startup_state("auto-test", "setup_failed")
-    assert changed is False
-    assert _broadcast_count(monitor) == 0
-
-
-# ── Clearing to NULL: terminal-success path ─────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_clear_succeeds_from_non_failed_state(db, monitor):
-    await monitor.register_pending("auto-test", project="x")
-    await monitor.advance_startup_state("auto-test", "awaiting_first_response")
-    monitor._event_bus.broadcast.reset_mock()
-    changed = await monitor.advance_startup_state("auto-test", None)
-    assert changed is True
-    assert _read_state("auto-test") is None
-    assert _broadcast_count(monitor) == 1
-
-
-@pytest.mark.asyncio
-async def test_clear_already_null_no_op(db, monitor):
-    dashboard_db.insert_session(
-        tmux_name="auto-test", session_type="container", project="x",
-    )
-    monitor._event_bus.broadcast.reset_mock()
-    changed = await monitor.advance_startup_state("auto-test", None)
-    assert changed is False
-    assert _read_state("auto-test") is None
-    assert _broadcast_count(monitor) == 0
-
-
-@pytest.mark.asyncio
-async def test_clear_refused_when_setup_failed_sticks(db, monitor):
-    """setup_failed never gets cleared by the tailer — operator must see it."""
-    await monitor.register_pending("auto-test", project="x")
-    await monitor.advance_startup_state("auto-test", "setup_failed")
-    monitor._event_bus.broadcast.reset_mock()
-    changed = await monitor.advance_startup_state("auto-test", None)
-    assert changed is False
-    assert _read_state("auto-test") == "setup_failed"
-    assert _broadcast_count(monitor) == 0
-
-
-# ── Unknown tmux_name ───────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_advance_unknown_session_no_op(db, monitor):
-    changed = await monitor.advance_startup_state("auto-nonexistent", "requesting")
-    assert changed is False
-    assert _broadcast_count(monitor) == 0
-
-
-# ── register_pending: seeds the FSM ─────────────────────────────────
+# ── register_pending: seeds + arms the FSM ──────────────────────────
 
 
 @pytest.mark.asyncio
@@ -288,41 +91,75 @@ async def test_register_pending_idempotent_on_duplicate(db, monitor):
 @pytest.mark.asyncio
 async def test_register_after_pending_preserves_startup_state(db, monitor):
     await monitor.register_pending("host-test", session_type="host", project="host-proj")
-    await monitor.update_phase("host-test", startup_state="harness_starting")
+    SessionLifecycleStateWriter().set_state("host-test", "waiting_ready")
 
     await monitor.register("host-test", session_type="host", project="host-proj")
 
     assert _read_state("host-test") == "harness_starting"
 
 
-# ── update_phase: thin wrapper over advance + progress ──────────────
+# ── arm_startup_state: the explicit FSM entry ───────────────────────
 
 
 @pytest.mark.asyncio
-async def test_update_phase_advances_state(db, monitor):
+async def test_arm_re_enters_after_running(db, monitor):
+    """arm re-enters the FSM on rows the worker already ran to completion
+    (startup_state NULL) — the resume/retry entry path."""
     await monitor.register_pending("auto-test", project="x")
-    monitor._event_bus.broadcast.reset_mock()
-    await monitor.update_phase("auto-test", startup_state="preparing_workspace")
-    assert _read_state("auto-test") == "preparing_workspace"
-    assert _broadcast_count(monitor) == 1
-
-
-@pytest.mark.asyncio
-async def test_update_phase_clear_when_clear_flag_set(db, monitor):
-    await monitor.register_pending("auto-test", project="x")
-    await monitor.update_phase("auto-test", startup_state="awaiting_first_response")
-    monitor._event_bus.broadcast.reset_mock()
-    await monitor.update_phase("auto-test", clear_startup_state=True)
+    SessionLifecycleStateWriter().set_state("auto-test", "running")
     assert _read_state("auto-test") is None
+    changed = await monitor.arm_startup_state("auto-test", "harness_starting")
+    assert changed is True
+    assert _read_state("auto-test") == "harness_starting"
+
+
+@pytest.mark.asyncio
+async def test_arm_overwrites_setup_failed(db, monitor):
+    """An explicit relaunch is the retry path — sticky failure must not
+    block it."""
+    await monitor.register_pending("auto-test", project="x")
+    SessionLifecycleStateWriter().fail("auto-test", phase="setup", reason="boom")
+    changed = await monitor.arm_startup_state("auto-test", "harness_starting")
+    assert changed is True
+    assert _read_state("auto-test") == "harness_starting"
+
+
+@pytest.mark.asyncio
+async def test_arm_arms_screen_poll_watch(db, monitor):
+    """arm must put the session in the pane-poller's armed set — the
+    poller's ONLY watch predicate — so composer detection runs for this
+    launch and stops at composer_ready/death."""
+    dashboard_db.insert_session(
+        tmux_name="auto-test", session_type="container", project="x",
+    )
+    await monitor.arm_startup_state("auto-test", "harness_starting")
+    assert "auto-test" in monitor._screen_poll_armed
+
+
+@pytest.mark.asyncio
+async def test_arm_broadcasts_on_change(db, monitor):
+    dashboard_db.insert_session(
+        tmux_name="auto-test", session_type="container", project="x",
+    )
+    monitor._event_bus.broadcast.reset_mock()
+    await monitor.arm_startup_state("auto-test", "harness_starting")
     assert _broadcast_count(monitor) == 1
+
+
+@pytest.mark.asyncio
+async def test_arm_unknown_session_no_write(db, monitor):
+    changed = await monitor.arm_startup_state("auto-nonexistent", "harness_starting")
+    assert changed is False
+
+
+# ── update_phase: progress-only ─────────────────────────────────────
 
 
 @pytest.mark.asyncio
 async def test_update_phase_progress_only_broadcasts(db, monitor):
-    """progress-only updates broadcast once so the in-memory progress dict
-    flushes to the registry payload."""
+    """progress updates broadcast once so the in-memory progress dict
+    flushes to the registry payload — and never touch startup_state."""
     await monitor.register_pending("auto-test", project="x")
-    await monitor.update_phase("auto-test", startup_state="preparing_workspace")
     monitor._event_bus.broadcast.reset_mock()
     await monitor.update_phase(
         "auto-test",
@@ -330,58 +167,25 @@ async def test_update_phase_progress_only_broadcasts(db, monitor):
     )
     assert _broadcast_count(monitor) == 1
     assert monitor._phase_progress["auto-test"]["repo_index"] == 2
-
-
-# ── Tailer clear-on-assistant-role (the prod outage we just fixed) ──
-
-
-@pytest.mark.asyncio
-async def test_tailer_clears_on_assistant_entry_and_broadcasts(db, monitor):
-    """Models the exact path _process_tail_entries takes when an
-    assistant-role entry is parsed: clear startup_state to NULL AND
-    broadcast. Without the broadcast the chip stays on 'Awaiting first
-    reply' until some unrelated event triggers one."""
-    await monitor.register_pending("auto-test", project="x")
-    await monitor.update_phase("auto-test", startup_state="awaiting_first_response")
-    monitor._event_bus.broadcast.reset_mock()
-
-    new_entries = [{"role": "assistant", "content": "hi"}]
-    if any(e.get("role") == "assistant" for e in new_entries):
-        await monitor.advance_startup_state("auto-test", None)
-
-    assert _read_state("auto-test") is None
-    assert _broadcast_count(monitor) == 1
+    assert _read_state("auto-test") == "requesting"  # untouched
 
 
 @pytest.mark.asyncio
-async def test_tailer_does_not_clear_on_user_only_entries(db, monitor):
-    """Orientation echo lands as a user-role entry. Must NOT clear."""
+async def test_update_phase_empty_dict_clears_progress(db, monitor):
     await monitor.register_pending("auto-test", project="x")
-    await monitor.update_phase("auto-test", startup_state="awaiting_first_response")
+    await monitor.update_phase("auto-test", progress={"repo_index": 1, "total": 2})
+    await monitor.update_phase("auto-test", progress={})
+    assert "auto-test" not in monitor._phase_progress
+
+
+@pytest.mark.asyncio
+async def test_update_phase_none_is_a_no_op(db, monitor):
+    await monitor.register_pending("auto-test", project="x")
+    await monitor.update_phase("auto-test", progress={"repo_index": 1, "total": 2})
     monitor._event_bus.broadcast.reset_mock()
-
-    new_entries = [{"role": "user", "content": "orientation message"}]
-    if any(e.get("role") == "assistant" for e in new_entries):
-        await monitor.advance_startup_state("auto-test", None)
-
-    assert _read_state("auto-test") == "awaiting_first_response"
+    await monitor.update_phase("auto-test", progress=None)
+    assert monitor._phase_progress["auto-test"]["repo_index"] == 1
     assert _broadcast_count(monitor) == 0
-
-
-@pytest.mark.asyncio
-async def test_tailer_clears_on_thinking_entry(db, monitor):
-    """thinking entries are model-authored — role=assistant per the harness
-    adapter. Should clear."""
-    await monitor.register_pending("auto-test", project="x")
-    await monitor.update_phase("auto-test", startup_state="awaiting_first_response")
-    monitor._event_bus.broadcast.reset_mock()
-
-    new_entries = [{"role": "assistant", "type": "thinking", "content": "..."}]
-    if any(e.get("role") == "assistant" for e in new_entries):
-        await monitor.advance_startup_state("auto-test", None)
-
-    assert _read_state("auto-test") is None
-    assert _broadcast_count(monitor) == 1
 
 
 # ── Registry payload includes startup_state ─────────────────────────
@@ -390,17 +194,16 @@ async def test_tailer_clears_on_thinking_entry(db, monitor):
 @pytest.mark.asyncio
 async def test_registry_payload_includes_startup_state(db, monitor):
     await monitor.register_pending("auto-test", project="x")
-    await monitor.update_phase("auto-test", startup_state="preparing_workspace")
+    SessionLifecycleStateWriter().set_state("auto-test", "preparing")
     payload = monitor.get_registry()
     entry = next(e for e in payload if e["session_id"] == "auto-test")
     assert entry["startup_state"] == "preparing_workspace"
 
 
 @pytest.mark.asyncio
-async def test_registry_payload_startup_state_null_after_clear(db, monitor):
+async def test_registry_payload_startup_state_null_after_running(db, monitor):
     await monitor.register_pending("auto-test", project="x")
-    await monitor.update_phase("auto-test", startup_state="awaiting_first_response")
-    await monitor.update_phase("auto-test", clear_startup_state=True)
+    SessionLifecycleStateWriter().set_state("auto-test", "running")
     payload = monitor.get_registry()
     entry = next(e for e in payload if e["session_id"] == "auto-test")
     assert entry["startup_state"] is None

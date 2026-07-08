@@ -92,90 +92,24 @@ except ImportError:
     _HAS_INOTIFY = False
 
 
-# ── Unified startup-state FSM ────────────────────────────────────────
+# ── Unified startup-state FSM (worker-owned) ────────────────────────
 #
 # Single column ``startup_state`` on tmux_sessions. NULL is the meaningful
 # default (existing rows / sessions past launching). Non-NULL values are
-# the in-progress launching states. ``setup_failed`` is the sticky terminal
-# off-ramp (writable from any non-NULL state).
+# the in-progress launching states the session cards render as chips.
 #
-# Transitions are forward-only by rank. ``setup_failed`` can be written
-# from any state regardless of rank. Clearing to NULL (when the tailer
-# parses the first assistant-role entry) is gated on the current state
-# NOT being ``setup_failed`` — failures stick so the operator sees them.
+# WRITERS — exactly two, by contract (musings/
+# session-lifecycle-fsm-contract-2026-06-18.md):
+#   1. The session lifecycle worker's SessionLifecycleStateWriter — every
+#      transition during a launch/stop/retry, including the terminal
+#      NULL(running) and sticky ``setup_failed``.
+#   2. ``arm_startup_state`` below — the explicit FSM entry, called only
+#      from the launch entrypoints (register_pending on create/resume).
 #
-# NULL is STICKY: ``advance`` refuses to move a NULL row into a launching
-# state. Entering the FSM requires the explicit ``arm`` writer, called only
-# from the two launch entrypoints (register_pending on create,
-# api_session_resume after revive). Before this rule, NULL ranked 0 and any
-# late writer re-entered "launching" — the setup-exit watcher's marker read
-# raced the tailer's clear on every resume and could park a running session
-# on ``setup_running`` forever (validated 11×, graph://afb67d11-7c4).
-STARTUP_STATE_RANK = {
-    "requesting": 1,
-    "preparing_workspace": 2,
-    "launching_container": 3,
-    "container_starting": 4,
-    "entrypoint_running": 5,
-    "setup_running": 6,
-    "harness_starting": 7,
-    "confirming_trust": 8,
-    "composer_ready": 9,
-    "awaiting_first_response": 10,
-}
-
-
-def _advance_startup_state_sql(tmux_name: str, proposed: str | None) -> bool:
-    """SQL-only forward-only writer. Returns True if the row was updated.
-
-    Caller is responsible for broadcasting. The public surface is
-    :meth:`SessionMonitor.advance_startup_state`, which wraps this and
-    broadcasts on real change.
-    """
-    from tools.dashboard.dao.dashboard_db import get_conn
-    conn = get_conn()
-    row = conn.execute(
-        "SELECT startup_state FROM tmux_sessions WHERE tmux_name = ?",
-        (tmux_name,),
-    ).fetchone()
-    if row is None:
-        return False
-    current = row["startup_state"] if hasattr(row, "keys") else row[0]
-    if proposed is None:
-        if current is None or current == "setup_failed":
-            return False
-        conn.execute(
-            "UPDATE tmux_sessions SET startup_state = NULL WHERE tmux_name = ?",
-            (tmux_name,),
-        )
-        conn.commit()
-        return True
-    if proposed == "setup_failed":
-        if current == "setup_failed":
-            return False
-        conn.execute(
-            "UPDATE tmux_sessions SET startup_state = ? WHERE tmux_name = ?",
-            (proposed, tmux_name),
-        )
-        conn.commit()
-        return True
-    if current == "setup_failed":
-        return False
-    if current is None:
-        # Sticky NULL: the session is past launching (or never armed).
-        # Late writers (marker watcher, screen-poll, inject tasks) must not
-        # re-enter the FSM; only the explicit arm writer does.
-        return False
-    current_rank = STARTUP_STATE_RANK.get(current, 0)
-    proposed_rank = STARTUP_STATE_RANK.get(proposed, 0)
-    if proposed_rank <= current_rank:
-        return False
-    conn.execute(
-        "UPDATE tmux_sessions SET startup_state = ? WHERE tmux_name = ?",
-        (proposed, tmux_name),
-    )
-    conn.commit()
-    return True
+# Nothing else writes this column. The historical multi-writer design
+# (setup-exit watcher, screen-poller, inject tasks, tailer clear) raced —
+# the launching flip-flop/stuck class validated 11× in
+# graph://afb67d11-7c4 — and was removed with the FSM completion.
 
 
 def _arm_startup_state_sql(tmux_name: str, state: str) -> bool:
@@ -1198,32 +1132,12 @@ class SessionMonitor:
         )
         await self._broadcast_registry()
 
-    async def advance_startup_state(self, tmux_name: str, proposed: str | None) -> bool:
-        """Forward-only writer for the unified startup_state column.
-
-        Rules:
-          - ``proposed=None`` clears (terminal-success), suppressed if current
-            is ``setup_failed`` (sticky terminal failure).
-          - ``proposed="setup_failed"`` writes from any non-NULL state.
-          - Otherwise writes only if ``rank(proposed) > rank(current)``.
-
-        Broadcasts the registry only when the row actually changed — keeps
-        broadcast cardinality bounded by real FSM transitions, not by every
-        JSONL-modify event the tailer fires on. Returns True if the row was
-        updated.
-        """
-        changed = _advance_startup_state_sql(tmux_name, proposed)
-        if changed:
-            await self._broadcast_registry()
-        return changed
-
     async def arm_startup_state(self, tmux_name: str, state: str) -> bool:
         """Explicit FSM entry: put a session INTO a launching state.
 
-        ``advance_startup_state`` refuses to move a NULL (past-launching) row
-        — this is the only writer that can. Call it exactly when a launch
-        begins: create (``register_pending``) and resume
-        (``api_session_resume`` after ``revive_session``). Overwrites
+        The FSM entry writer: only this (and the lifecycle worker's own
+        writer) touch startup_state. Call it exactly when a launch begins:
+        create/resume/retry seed the row here before enqueueing. Overwrites
         ``setup_failed`` (an explicit relaunch is the retry path).
         """
         changed = _arm_startup_state_sql(tmux_name, state)
@@ -1246,9 +1160,8 @@ class SessionMonitor:
         """Register a session row IMMEDIATELY at session-create POST entry,
         before ``prepare_session_mounts`` and ``launch_session`` run.
 
-        Seeds the unified ``startup_state`` FSM at ``requesting``. Subsequent
-        ``advance_startup_state`` calls drive progression as the launch
-        proceeds. The normal :meth:`register` call later (post-tmux-spawn)
+        Seeds the unified ``startup_state`` FSM at ``requesting``; the
+        lifecycle worker's writer drives all subsequent progression. The normal :meth:`register` call later (post-tmux-spawn)
         is idempotent — its INSERT fails, the existing row gets its
         jsonl_path / resolution_dir backfilled, and the tail-state setup
         proceeds.
@@ -1266,7 +1179,7 @@ class SessionMonitor:
             # path. Existing rows just get the state advance below.
             logger.debug(
                 "session_monitor.register_pending: INSERT failed for %s "
-                "(likely already exists; proceeding to advance_startup_state)",
+                "(likely already exists; proceeding to arm_startup_state)",
                 tmux_name,
             )
         await self.arm_startup_state(tmux_name, "requesting")
@@ -1285,46 +1198,28 @@ class SessionMonitor:
         self,
         tmux_name: str,
         *,
-        startup_state: str | None = None,
-        clear_startup_state: bool = False,
         progress: dict | None = None,
     ) -> None:
-        """Advance startup_state + update transient progress, broadcast.
+        """Update transient launch progress and broadcast.
 
-        ``startup_state`` advances the unified FSM forward via
-        :func:`advance_startup_state` (forward-only with setup_failed as
-        sticky terminal).
-
-        ``clear_startup_state=True`` explicitly clears to NULL (terminal
-        success — used by the tailer when the first assistant entry is
-        parsed). The clear is suppressed if current is ``setup_failed``.
-
-        ``progress`` is held only in memory on :attr:`_phase_progress` and
-        surfaced in the registry payload under ``phase_progress`` for
-        sub-phase data like
-        ``{"repo_index": 2, "total": 3, "current_repo": "enterprise_ng"}``.
-        Pass ``progress=None`` (default) to leave the existing progress
-        dict untouched; pass ``progress={}`` to explicitly clear it.
+        Lifecycle STATE writes live on the lifecycle worker's writer (and
+        ``arm_startup_state`` for FSM entry) — this method only carries the
+        sub-phase ``progress`` dict, held in memory on
+        :attr:`_phase_progress` and surfaced in the registry payload under
+        ``phase_progress`` (e.g. ``{"repo_index": 2, "total": 3,
+        "current_repo": "enterprise_ng"}``). Pass ``progress={}`` to clear.
 
         Safe to call from a worker thread via
         ``asyncio.run_coroutine_threadsafe`` — that's the per-repo callback
         path from inside :func:`prepare_session_mounts`.
         """
-        # advance_startup_state broadcasts internally on real change. Only
-        # need an explicit broadcast for the progress-only case (transient
-        # in-memory dict must flush to the registry payload).
-        progress_only = progress is not None and not (clear_startup_state or startup_state)
-        if clear_startup_state:
-            await self.advance_startup_state(tmux_name, None)
-        elif startup_state is not None:
-            await self.advance_startup_state(tmux_name, startup_state)
-        if progress is not None:
-            if progress:
-                self._phase_progress[tmux_name] = dict(progress)
-            else:
-                self._phase_progress.pop(tmux_name, None)
-        if progress_only:
-            await self._broadcast_registry()
+        if progress is None:
+            return
+        if progress:
+            self._phase_progress[tmux_name] = dict(progress)
+        else:
+            self._phase_progress.pop(tmux_name, None)
+        await self._broadcast_registry()
 
     async def register_session(
         self,
@@ -1917,19 +1812,10 @@ class SessionMonitor:
             tmux_name, jsonl_path.name,
         )
 
-        # auto-a1jco: JSONL appearance is the canonical
-        # ``harness_phase = first_turn_written`` signal. Adapters with
-        # working screen-reading (``auto-eerfx``) later advance to
-        # ``composer_ready``; adapters with stubbed screen-reading
-        # (Codex initially) return ``composer_ready=True`` from the
-        # first poll so the transition is immediate.
-        try:
-            update_tail_state(tmux_name, harness_phase="first_turn_written")
-        except Exception:
-            logger.exception(
-                "session_monitor: failed to advance harness_phase for %s",
-                tmux_name,
-            )
+        # (harness_phase — the two-column model vestige — is no longer
+        # written. The columns remain for one release for stray readers;
+        # the unified startup_state FSM on the lifecycle worker is the
+        # only launch-progress signal.)
 
         # Schedule a registry broadcast if we're inside a running loop.
         # Sync startup paths (_init_inotify, _recover_unresolved_sessions)
@@ -2253,15 +2139,10 @@ class SessionMonitor:
         """Dedup, enrich, and broadcast parsed entries from a session tail read."""
         if not new_entries:
             return
-        # Clear startup_state to NULL when the model has emitted its first
-        # turn — covers assistant_text, thinking, tool_use (all role=assistant).
-        # advance_startup_state is forward-only, refuses to clear if current
-        # state is setup_failed, and broadcasts the registry on real change
-        # so the chip flips immediately when the assistant turn lands.
-        # (Lives here because this method is async; the sync _tail_one
-        # cannot await the broadcast.)
-        if any(e.get("role") == "assistant" for e in new_entries):
-            await self.advance_startup_state(tmux_name, None)
+        # (The legacy clear-startup_state-on-first-assistant-turn hook lived
+        # here. The lifecycle worker now writes `running` (startup_state
+        # NULL) itself when the launch completes — the tailer no longer
+        # writes lifecycle state.)
         # Dedup queued messages — tracker persists across unrelated entries
         # (assistant turns, tool_result) because the duplicate typically
         # arrives AFTER the agent's assistant response, not immediately.
@@ -2444,20 +2325,16 @@ class SessionMonitor:
                 self._screen_poll_armed &= live_names
                 for row in rows:
                     tmux_name = row["tmux_name"]
-                    # Watch sessions whose startup_state is in the harness-
-                    # prep range — past container ready, before composer is
-                    # confirmed — OR that are explicitly armed for composer
-                    # detection. The armed set keeps detection alive when the
-                    # tailer's backfill clear drops startup_state to NULL
-                    # mid-launch; startup_state alone stops being a reliable
-                    # watch predicate at that point. Once composer_ready is
-                    # reached the poller disarms and steps out.
-                    # ``confirming_trust`` is included so the loop keeps
-                    # watching while the trust auto-confirm runs and waits
-                    # for the composer to appear.
+                    # Watch exactly the sessions armed for composer
+                    # detection. Arming happens at the launch entrypoints
+                    # (arm_startup_state); the poller disarms itself at
+                    # composer_ready or when the session leaves the live
+                    # set. startup_state is deliberately NOT a watch
+                    # predicate — the poller reads panes and writes
+                    # harness_state; the lifecycle worker owns state.
                     startup_state = row.get("startup_state")
                     armed = tmux_name in self._screen_poll_armed
-                    if startup_state not in ("harness_starting", "confirming_trust") and not armed:
+                    if not armed:
                         continue
                     harness = resolve_harness_for_session_row(row)
                     try:
@@ -2509,10 +2386,10 @@ class SessionMonitor:
                                 tmux_name,
                             )
 
-                    # Persist state delta + advance startup_state.
-                    # The screen adapter signals composer_ready and trust-
-                    # confirm in the new_state dict; we translate those to
-                    # startup_state transitions via advance_startup_state.
+                    # Persist the state delta. The screen adapter signals
+                    # composer_ready and trust-confirm in the new_state
+                    # dict; the lifecycle worker reads them from
+                    # harness_state and mirrors them onto the chip.
                     changed = (new_state != current_state)
                     next_state: str | None = None
                     if new_state.get("confirming_trust_prompt") and startup_state == "harness_starting":
@@ -2526,18 +2403,15 @@ class SessionMonitor:
                     # screen-read hasn't confirmed composer_ready within
                     # HARNESS_READY_GRACE_S of first seeing the session in
                     # this state, promote anyway so the card clears.
-                    # Grace applies in the harness-prep window and to armed
-                    # sessions whose startup_state already cleared (NULL) —
-                    # the composer is expected imminently in both. It must
-                    # NOT apply to armed sessions still in the early states
-                    # (requesting…setup_running): their pane can be blank for
-                    # minutes legitimately and a force-promote would lie.
+                    # Grace applies once the composer is expected imminently
+                    # (chip in the harness window, or already cleared). It
+                    # must NOT apply while the chip still shows the early
+                    # states (requesting…setup_running): the pane can be
+                    # blank for minutes legitimately during worktree prep or
+                    # setup and a force-promote would lie.
                     if (
                         next_state is None
-                        and (
-                            startup_state == "harness_starting"
-                            or (armed and startup_state is None)
-                        )
+                        and startup_state in ("harness_starting", None)
                     ):
                         first = self._harness_ready_grace.setdefault(
                             tmux_name, time.monotonic()
@@ -2567,9 +2441,7 @@ class SessionMonitor:
                         # armed watch; harness_state.composer_ready is now
                         # the durable signal downstream gates read.
                         self._screen_poll_armed.discard(tmux_name)
-                    elif startup_state in ("harness_starting", "confirming_trust") or (
-                        armed and startup_state is None
-                    ):
+                    elif startup_state in ("harness_starting", "confirming_trust", None):
                         # Stuck-tracking only where the composer is expected
                         # imminently — an armed session still in the early
                         # launch states (requesting…setup_running) can sit on
@@ -2619,13 +2491,14 @@ class SessionMonitor:
                                     tmux_name,
                                 )
                                 continue
-                        if next_state is not None:
-                            await self.advance_startup_state(tmux_name, next_state)
-                            if next_state == "composer_ready":
-                                logger.info(
-                                    "phase-trace: composer_ready  tmux=%s  ts_ms=%d",
-                                    tmux_name, int(time.time() * 1000),
-                                )
+                        # The poller is a signal producer only: it persists
+                        # harness_state and the lifecycle worker (the single
+                        # startup_state writer) mirrors it into chip states.
+                        if next_state == "composer_ready":
+                            logger.info(
+                                "phase-trace: composer_ready  tmux=%s  ts_ms=%d",
+                                tmux_name, int(time.time() * 1000),
+                            )
                         if self._event_bus:
                             try:
                                 await self._event_bus.broadcast(
