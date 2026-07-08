@@ -2942,6 +2942,21 @@ async def api_resources(request):
     return JSONResponse(resource_monitor.snapshot(include_history=include_history))
 
 
+async def api_resources_refresh(request):
+    """POST /api/resources/{tmux_name}/refresh — force a full disk re-measure.
+
+    Backs the UI refresh affordance under the disk stat: bypasses the
+    cadence clocks and the idle skip, so the baseline cadence can stay slow.
+    Returns the fresh merged disk dict.
+    """
+    tmux_name = request.path_params["tmux_name"]
+    disk = await resource_monitor.refresh_disk(tmux_name)
+    if disk is None:
+        return JSONResponse(
+            {"error": f"no live session: {tmux_name}"}, status_code=404)
+    return JSONResponse({"tmux_name": tmux_name, "disk": disk})
+
+
 async def api_monitor_register(request):
     """POST /api/monitor/register — register a session with the in-process monitor.
 
@@ -15196,6 +15211,7 @@ routes = [
     # Monitor IPC — dispatcher registers dispatch/librarian sessions here so
     # inotify watches + SSE broadcasts are wired up in-process.
     Route("/api/resources", api_resources),
+    Route("/api/resources/{tmux_name}/refresh", api_resources_refresh, methods=["POST"]),
     Route("/api/monitor/register", api_monitor_register, methods=["POST"]),
     Route("/api/monitor/deregister", api_monitor_deregister, methods=["POST"]),
 

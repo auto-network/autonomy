@@ -59,6 +59,26 @@ _PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
 _TICK_WARN_MS = 100.0
 _DISK_WARN_MS = 2000.0
 
+# Disk components fall into two cost classes, measured on separate clocks:
+# - fast: the session run dir (JSONLs, attachments) — sub-ms to ~40ms walks,
+#   and the component that actually grows with session activity.
+# - heavy: worktrees (a full repo checkout walks in 0.25s warm / 7.5s cold
+#   cache — cost tracks inode count, not bytes) and the container overlay
+#   layer (the docker ps -s fallback costs ~1.4s warm at the daemon).
+# Cadence adapts to session age: young sessions (first 30min) are building
+# up their footprint, so measure more often; old sessions settle and slow
+# down. The force-refresh API bypasses all of this on demand, which is what
+# lets the baseline be slow.
+_FAST, _HEAVY = "fast", "heavy"
+_DISK_CADENCE: dict[str, tuple[float, float]] = {
+    # class: (young interval, old interval) in seconds
+    _FAST: (60.0, 300.0),
+    _HEAVY: (300.0, 1800.0),
+}
+_YOUNG_AGE_S = 30 * 60.0
+_DOCKER_SIZES_TTL = 240.0       # docker ps -s fallback cache lifetime
+_DOCKER_SIZES_FORCE_TTL = 5.0   # …when a force refresh asks for fresh data
+
 # Sessions the liveness loop considers still-booting have no container yet;
 # resolving them would burn a docker-inspect for nothing. Mirrors
 # SessionMonitor._STARTUP_BOOTING_STATES.
@@ -249,7 +269,11 @@ class _SessionState:
     sampled_at: float = 0.0
     disk: dict | None = None
     disk_sampled_at: float = 0.0
-    next_disk_at: float = 0.0           # 0 → due immediately
+    # per-class disk clocks; missing key → due immediately
+    next_disk_at: dict[str, float] = field(default_factory=dict)
+    # entry_count at each class's last scan — unchanged count means an idle
+    # session, and idle sessions don't get rescanned at all
+    disk_entry_count: dict[str, int] = field(default_factory=dict)
     history: deque = field(default_factory=lambda: deque(maxlen=100))
 
 
@@ -280,13 +304,12 @@ class ResourceMonitor:
     def __init__(
         self,
         cpu_interval: float | None = None,
-        disk_interval: float | None = None,
+        disk_cadence: dict[str, tuple[float, float]] | None = None,
         worktrees_dir: Path | None = None,
     ) -> None:
         self.cpu_interval = cpu_interval or float(
             os.environ.get("RESOURCE_CPU_INTERVAL", "6"))
-        self.disk_interval = disk_interval or float(
-            os.environ.get("RESOURCE_DISK_INTERVAL", "60"))
+        self.disk_cadence = disk_cadence or _DISK_CADENCE
         if worktrees_dir is None:
             from agents.workspace_manager import WORKTREES_DIR
             worktrees_dir = WORKTREES_DIR
@@ -310,8 +333,8 @@ class ResourceMonitor:
         if self._task is None:
             self._task = asyncio.create_task(self._loop())
             logger.info(
-                "resource_monitor: started (cpu=%ss disk=%ss)",
-                self.cpu_interval, self.disk_interval)
+                "resource_monitor: started (cpu=%ss disk=%s)",
+                self.cpu_interval, self.disk_cadence)
 
     async def stop(self) -> None:
         if self._task is not None:
@@ -353,10 +376,12 @@ class ResourceMonitor:
         if row is None:
             return
         started = time.monotonic()
-        disk = self._measure_disk(tmux_name, row, state, final=True)
+        disk = self._measure_disk(tmux_name, row, state,
+                                  classes=(_FAST, _HEAVY), final=True)
         elapsed_ms = (time.monotonic() - started) * 1000
         self._disk_timer.record(elapsed_ms)
         if disk is not None:
+            disk["total"] = sum(disk["components"].values())
             update_disk_usage(
                 tmux_name, disk["total"], json.dumps(disk), time.time())
             logger.info(
@@ -384,29 +409,16 @@ class ResourceMonitor:
                 if state.kind == "unresolved":
                     continue
             self._sample_cpu_mem(name, state, now)
-            due = state.next_disk_at
+            due = min((state.next_disk_at.get(c, 0.0)
+                       for c in self.disk_cadence), default=0.0)
             if due <= now and (disk_candidate is None or due < disk_candidate[0]):
                 disk_candidate = (due, row, state)
 
-        # Stagger: at most ONE session's disk per tick.
+        # Stagger: at most ONE session's disk per tick, and only its due
+        # component classes.
         if disk_candidate is not None:
             _, row, state = disk_candidate
-            name = row["tmux_name"]
-            disk_started = time.monotonic()
-            disk = self._measure_disk(name, row, state, final=False)
-            disk_ms = (time.monotonic() - disk_started) * 1000
-            self._disk_timer.record(disk_ms)
-            self._last_disk_session = name
-            if disk_ms > _DISK_WARN_MS:
-                logger.warning(
-                    "resource_monitor: slow disk measure %s: %.0fms (%s)",
-                    name, disk_ms, json.dumps(disk.get("timings_ms", {}))
-                    if disk else "-")
-            state.next_disk_at = now + self.disk_interval
-            if disk is not None:
-                state.disk = disk
-                state.disk_sampled_at = now
-                update_disk_usage(name, disk["total"], json.dumps(disk), now)
+            self._scan_disk(row, state, now)
 
         tick_ms = (time.monotonic() - started) * 1000
         self._tick_timer.record(tick_ms)
@@ -415,6 +427,79 @@ class ResourceMonitor:
             logger.warning(
                 "resource_monitor: slow tick %.0fms over %d sessions",
                 tick_ms, len(rows))
+
+    _COMPONENT_CLASS = {"run_dir": _FAST, "jsonl": _FAST,
+                        "worktrees": _HEAVY, "container_fs": _HEAVY}
+
+    def _next_interval(self, row: dict, cls: str, now: float) -> float:
+        young, old = self.disk_cadence[cls]
+        age = now - (row.get("created_at") or now)
+        return young if age < _YOUNG_AGE_S else old
+
+    def _scan_disk(self, row: dict, state: _SessionState, now: float,
+                   *, force: bool = False) -> dict | None:
+        """Measure the session's due disk component classes and persist.
+
+        Idle skip: a class whose ``entry_count`` hasn't moved since its last
+        scan is rescheduled without walking anything — a completely idle
+        session stops scanning disk entirely. ``force`` (the refresh API)
+        bypasses both the clocks and the idle skip.
+        """
+        name = row["tmux_name"]
+        due = [c for c in self.disk_cadence
+               if force or state.next_disk_at.get(c, 0.0) <= now]
+        for c in due:
+            state.next_disk_at[c] = now + self._next_interval(row, c, now)
+        entry_count = row.get("entry_count") or 0
+        if not force:
+            due = [c for c in due
+                   if state.disk_entry_count.get(c) != entry_count]
+        if not due:
+            return None
+        disk_started = time.monotonic()
+        partial = self._measure_disk(name, row, state,
+                                     classes=due, final=False, force=force)
+        disk_ms = (time.monotonic() - disk_started) * 1000
+        self._disk_timer.record(disk_ms)
+        self._last_disk_session = name
+        if disk_ms > _DISK_WARN_MS:
+            logger.warning(
+                "resource_monitor: slow disk measure %s (%s): %.0fms (%s)",
+                name, ",".join(due), disk_ms,
+                json.dumps(partial.get("timings_ms", {})) if partial else "-")
+        for c in due:
+            state.disk_entry_count[c] = entry_count
+        if partial is None:
+            return None
+        merged = state.disk or {"components": {}, "timings_ms": {}}
+        # A rescanned class fully replaces its components, so anything that
+        # vanished (e.g. a cleaned-up worktree) doesn't linger in the total.
+        for comp, cls in self._COMPONENT_CLASS.items():
+            if cls in due:
+                merged["components"].pop(comp, None)
+                merged["timings_ms"].pop(comp, None)
+        merged["components"].update(partial["components"])
+        merged["timings_ms"].update(partial["timings_ms"])
+        merged["total"] = sum(merged["components"].values())
+        state.disk = merged
+        state.disk_sampled_at = now
+        update_disk_usage(name, merged["total"], json.dumps(merged), now)
+        return merged
+
+    async def refresh_disk(self, tmux_name: str) -> dict | None:
+        """Force-refresh one session's full disk footprint (UI affordance).
+
+        Bypasses the cadence clocks and the idle skip; the docker size
+        fallback cache is also refreshed if stale. Returns the merged disk
+        dict, or None for unknown/dead sessions.
+        """
+        from tools.dashboard.dao.dashboard_db import get_session
+        row = get_session(tmux_name)
+        if row is None or not row.get("is_live"):
+            return None
+        state = self._states.setdefault(tmux_name, _SessionState())
+        return await asyncio.to_thread(
+            self._scan_disk, row, state, time.time(), force=True)
 
     def _resolve(self, name: str, state: _SessionState) -> None:
         """Bind a session to its measurement backend. One-time subprocess."""
@@ -484,7 +569,9 @@ class ResourceMonitor:
     # ── disk ─────────────────────────────────────────────────────
 
     def _measure_disk(self, name: str, row: dict,
-                      state: _SessionState | None, *, final: bool) -> dict | None:
+                      state: _SessionState | None, *,
+                      classes: list[str] | tuple[str, ...],
+                      final: bool, force: bool = False) -> dict | None:
         components: dict[str, int] = {}
         timings: dict[str, float] = {}
 
@@ -498,35 +585,34 @@ class ResourceMonitor:
             if val is not None:
                 components[key] = val
 
-        run_dir = _run_dir_for(row)
-        if run_dir is not None and run_dir.is_dir():
-            timed("run_dir", lambda: _du_bytes(run_dir))
-        elif row.get("jsonl_path"):
-            timed("jsonl", lambda: Path(row["jsonl_path"]).stat().st_size)
+        if _FAST in classes:
+            run_dir = _run_dir_for(row)
+            if run_dir is not None and run_dir.is_dir():
+                timed("run_dir", lambda: _du_bytes(run_dir))
+            elif row.get("jsonl_path"):
+                timed("jsonl", lambda: Path(row["jsonl_path"]).stat().st_size)
 
-        wt_dir = self._worktrees_dir / name
-        if wt_dir.is_dir():
-            timed("worktrees", lambda: _du_bytes(wt_dir))
+        if _HEAVY in classes:
+            wt_dir = self._worktrees_dir / name
+            if wt_dir.is_dir():
+                timed("worktrees", lambda: _du_bytes(wt_dir))
 
-        # Container writable layer — live sessions only; a closed session
-        # has no container storage (its container is gone).
-        if state is not None and state.kind == "container" and not final:
-            layer = self._container_layer_bytes(name, state)
-            if layer is not None:
-                key, val, ms = layer
-                components[key] = val
-                timings[key] = ms
+            # Container writable layer — live sessions only; a closed
+            # session has no container storage (its container is gone).
+            if state is not None and state.kind == "container" and not final:
+                layer = self._container_layer_bytes(name, state, force=force)
+                if layer is not None:
+                    key, val, ms = layer
+                    components[key] = val
+                    timings[key] = ms
 
         if not components:
             return None
-        return {
-            "total": sum(components.values()),
-            "components": components,
-            "timings_ms": timings,
-        }
+        return {"components": components, "timings_ms": timings}
 
     def _container_layer_bytes(
-            self, name: str, state: _SessionState) -> tuple[str, int, float] | None:
+            self, name: str, state: _SessionState,
+            *, force: bool = False) -> tuple[str, int, float] | None:
         t0 = time.monotonic()
         if state.upper_dir is not None and self._upper_dir_readable is not False:
             try:
@@ -545,9 +631,11 @@ class ResourceMonitor:
                     "falling back to docker ps -s")
             except OSError:
                 return None
-        # Amortized fallback: one `docker ps -s` per disk interval, shared.
+        # Amortized fallback: one `docker ps -s` per cache lifetime, shared
+        # by all containers. Force refreshes accept a much shorter TTL.
         now = time.time()
-        if now - self._docker_sizes_at > self.disk_interval:
+        ttl = _DOCKER_SIZES_FORCE_TTL if force else _DOCKER_SIZES_TTL
+        if now - self._docker_sizes_at > ttl:
             try:
                 out = subprocess.run(
                     ["docker", "ps", "-s", "--format",
@@ -595,7 +683,9 @@ class ResourceMonitor:
                       if s.kind == "unresolved"]
         return {
             "cpu_interval_s": self.cpu_interval,
-            "disk_interval_s": self.disk_interval,
+            "disk_cadence_s": {c: {"young": y, "old": o}
+                               for c, (y, o) in self.disk_cadence.items()},
+            "young_age_s": _YOUNG_AGE_S,
             "ncpus": os.cpu_count(),
             "tracked": len(self._states) - len(unresolved),
             "unresolved": unresolved,

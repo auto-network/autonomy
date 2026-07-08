@@ -127,7 +127,7 @@ def test_cgroup_probe_miss(tmp_path, monkeypatch):
 @pytest.fixture
 def monitor(tmp_path, monkeypatch):
     """A monitor with worktrees under tmp and DB writes captured."""
-    m = ResourceMonitor(cpu_interval=6, disk_interval=60,
+    m = ResourceMonitor(cpu_interval=6,
                         worktrees_dir=tmp_path / "worktrees")
     writes: list[tuple] = []
     monkeypatch.setattr(
@@ -137,7 +137,7 @@ def monitor(tmp_path, monkeypatch):
     return m
 
 
-def _host_row(tmp_path, name="auto-t1"):
+def _host_row(tmp_path, name="auto-t1", entry_count=1, created_at=None):
     run_dir = tmp_path / "agent-runs" / f"{name}-123"
     res_dir = run_dir / "sessions" / "autonomy" / "uuid-1"
     res_dir.mkdir(parents=True, exist_ok=True)
@@ -148,6 +148,8 @@ def _host_row(tmp_path, name="auto-t1"):
         "resolution_dir": str(res_dir),
         "jsonl_path": str(res_dir / "log.jsonl"),
         "startup_state": None,
+        "entry_count": entry_count,
+        "created_at": created_at if created_at is not None else time.time(),
     }
 
 
@@ -179,10 +181,11 @@ def test_disk_staggered_one_per_tick(monitor, tmp_path):
     assert len(monitor._test_writes) == 1  # one disk measure only
     monitor._tick(rows, now + 6)
     assert len(monitor._test_writes) == 2  # next session's turn
-    # measured sessions are scheduled out a full disk interval
+    # measured sessions have all class clocks scheduled into the future
     measured = {w[0] for w in monitor._test_writes}
     for name in measured:
-        assert monitor._states[name].next_disk_at > now + 30
+        for due in monitor._states[name].next_disk_at.values():
+            assert due > now + 30
 
 
 def test_disk_measure_components(monitor, tmp_path):
@@ -192,11 +195,72 @@ def test_disk_measure_components(monitor, tmp_path):
     wt = tmp_path / "worktrees" / name / "repo"
     wt.mkdir(parents=True)
     (wt / "f").write_bytes(b"w" * 8000)
-    disk = monitor._measure_disk(name, row, state, final=False)
+    disk = monitor._scan_disk(row, state, time.time())
     assert set(disk["components"]) == {"run_dir", "worktrees"}
     assert disk["total"] == sum(disk["components"].values())
     assert disk["total"] >= 13_000
     assert "run_dir" in disk["timings_ms"]
+
+
+def test_idle_session_stops_scanning(monitor, tmp_path):
+    """No new turns since last scan → no disk walk at all."""
+    row = _host_row(tmp_path, entry_count=5)
+    state = _prime_host_state(monitor, row["tmux_name"])
+    now = time.time()
+    assert monitor._scan_disk(row, state, now) is not None
+    # both class clocks come due again, but entry_count is unchanged
+    assert monitor._scan_disk(row, state, now + 10_000) is None
+    assert len(monitor._test_writes) == 1
+    # a new turn re-enables scanning
+    row["entry_count"] = 6
+    assert monitor._scan_disk(row, state, now + 20_000) is not None
+    assert len(monitor._test_writes) == 2
+
+
+def test_cadence_by_class_and_age(monitor, tmp_path):
+    now = time.time()
+    young = _host_row(tmp_path, "auto-young", created_at=now - 60)
+    old = _host_row(tmp_path, "auto-old", created_at=now - 7200)
+    ys = _prime_host_state(monitor, "auto-young")
+    os_ = _prime_host_state(monitor, "auto-old")
+    monitor._scan_disk(young, ys, now)
+    monitor._scan_disk(old, os_, now)
+    # young: fast=60s heavy=300s; old: fast=300s heavy=1800s
+    assert ys.next_disk_at["fast"] == pytest.approx(now + 60, abs=1)
+    assert ys.next_disk_at["heavy"] == pytest.approx(now + 300, abs=1)
+    assert os_.next_disk_at["fast"] == pytest.approx(now + 300, abs=1)
+    assert os_.next_disk_at["heavy"] == pytest.approx(now + 1800, abs=1)
+
+
+def test_partial_scan_merges_components(monitor, tmp_path):
+    """A fast-only rescan keeps the last heavy components in the total."""
+    row = _host_row(tmp_path, entry_count=1)
+    name = row["tmux_name"]
+    state = _prime_host_state(monitor, name)
+    wt = tmp_path / "worktrees" / name
+    wt.mkdir(parents=True)
+    (wt / "f").write_bytes(b"w" * 8000)
+    now = time.time()
+    full = monitor._scan_disk(row, state, now)
+    assert set(full["components"]) == {"run_dir", "worktrees"}
+    # only fast is due 90s later (young session: fast=60, heavy=300)
+    row["entry_count"] = 2
+    merged = monitor._scan_disk(row, state, now + 90)
+    assert set(merged["components"]) == {"run_dir", "worktrees"}
+    assert merged["total"] == sum(merged["components"].values())
+    assert state.next_disk_at["heavy"] == pytest.approx(now + 300, abs=1)
+
+
+def test_force_refresh_bypasses_clocks_and_idle_skip(monitor, tmp_path):
+    row = _host_row(tmp_path, entry_count=3)
+    state = _prime_host_state(monitor, row["tmux_name"])
+    now = time.time()
+    monitor._scan_disk(row, state, now)
+    # idle + nothing due → a normal scan is a no-op, force still measures
+    assert monitor._scan_disk(row, state, now + 1) is None
+    disk = monitor._scan_disk(row, state, now + 2, force=True)
+    assert disk is not None and "run_dir" in disk["components"]
+    assert len(monitor._test_writes) == 2
 
 
 def test_booting_sessions_not_polled(monitor, tmp_path):
