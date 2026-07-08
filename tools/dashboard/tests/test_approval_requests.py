@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import time
 
+import httpx
 import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from tools.dashboard.dao import approval_requests as ar
 from tools.dashboard import approvals_routes
+from tools.dashboard.event_bus import event_bus
 
 
 @pytest.fixture
@@ -153,3 +157,115 @@ def test_get_degrades_without_worktree(client):
     d = client.get(f"/api/approvals/{rid}").json()
     assert d["files"] == [] and d["patch"] == ""   # no worktree in this test -> graceful
     assert base64.b64decode(d["request"]["payload_b64"]) == COMMIT_PAYLOAD
+
+
+def test_byte_exact_round_trip_hostile_payload(client):
+    """Byte-exactness survives the payloads that broke naive handling: a
+    trailing newline and non-ASCII bytes. This is the property GitHub's
+    Verified check depends on."""
+    payload = ("tree abc\nauthor Dév <d@x> 1 +0000\n"
+               "committer Dév <d@x> 1 +0000\n\nfix \U0001f510\n").encode("utf-8")
+    assert payload.endswith(b"\n") and any(b >= 0x80 for b in payload)
+    r = client.post("/api/approvals", json={
+        "kind": "commit_sign", "session": "auto-1",
+        "request": {"repo": "repo",
+                    "payload_b64": base64.b64encode(payload).decode("ascii")},
+    })
+    d = client.get(f"/api/approvals/{r.json()['id']}").json()
+    assert base64.b64decode(d["request"]["payload_b64"]) == payload
+
+
+# ── push side of the rendezvous: held GETs + SSE events (no polling) ──
+
+
+def _async_client():
+    app = Starlette(routes=approvals_routes.ROUTES)
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                             base_url="http://testserver")
+
+
+def test_wait_get_wakes_on_decision(tmp_path, monkeypatch):
+    """GET ?wait=N is held open server-side and returns the moment the decision
+    is written — the requester never busy-polls."""
+    monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approval_requests.db")
+
+    async def scenario():
+        async with _async_client() as c:
+            r = await c.post("/api/approvals", json={
+                "kind": "commit_sign", "session": "auto-1",
+                "request": {"repo": "repo",
+                            "payload_b64": base64.b64encode(COMMIT_PAYLOAD).decode("ascii")},
+            })
+            rid = r.json()["id"]
+
+            async def decide():
+                await asyncio.sleep(0.15)
+                return await c.post(f"/api/approvals/{rid}/decision",
+                                    json={"approved": True, "signature": "SIG"})
+
+            t0 = time.monotonic()
+            held, decision = await asyncio.gather(
+                c.get(f"/api/approvals/{rid}?wait=30"), decide())
+            elapsed = time.monotonic() - t0
+            assert decision.json() == {"ok": True}
+            assert held.json()["result"]["signature"] == "SIG"
+            assert elapsed < 5, "held GET must wake on the decision, not the wait window"
+            # a held GET is the requester's path: no review enrichment attached
+            assert "files" not in held.json() and "patch" not in held.json()
+
+    asyncio.run(scenario())
+
+
+def test_wait_get_times_out_pending_and_decided_returns_immediately(tmp_path, monkeypatch):
+    monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approval_requests.db")
+
+    async def scenario():
+        async with _async_client() as c:
+            r = await c.post("/api/approvals", json={
+                "kind": "commit_sign", "session": "auto-1",
+                "request": {"repo": "repo",
+                            "payload_b64": base64.b64encode(COMMIT_PAYLOAD).decode("ascii")},
+            })
+            rid = r.json()["id"]
+            # undecided: the held call elapses and reports still-pending
+            d = (await c.get(f"/api/approvals/{rid}?wait=0.1")).json()
+            assert d["result"] is None
+            # decided: a subsequent wait call returns immediately
+            await c.post(f"/api/approvals/{rid}/decision", json={"approved": False})
+            t0 = time.monotonic()
+            d = (await c.get(f"/api/approvals/{rid}?wait=30")).json()
+            assert d["result"] == {"approved": False}
+            assert time.monotonic() - t0 < 1
+
+    asyncio.run(scenario())
+
+
+def test_sse_events_on_create_and_decision(tmp_path, monkeypatch):
+    """The viewer trigger: creating a request broadcasts approval:pending on the
+    event bus; deciding it broadcasts approval:decided. No poll anywhere."""
+    monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approval_requests.db")
+
+    async def scenario():
+        queue = event_bus.subscribe()
+        try:
+            async with _async_client() as c:
+                r = await c.post("/api/approvals", json={
+                    "kind": "commit_sign", "session": "auto-9",
+                    "request": {"repo": "repo",
+                                "payload_b64": base64.b64encode(COMMIT_PAYLOAD).decode("ascii")},
+                })
+                rid = r.json()["id"]
+                await c.post(f"/api/approvals/{rid}/decision", json={"approved": False})
+            events = []
+            while not queue.empty():
+                topic, data, _seq = queue.get_nowait()
+                if topic.startswith("approval:"):
+                    events.append((topic, data))
+            assert ("approval:pending",
+                    {"id": rid, "kind": "commit_sign", "session": "auto-9"}) in events
+            assert ("approval:decided",
+                    {"id": rid, "kind": "commit_sign", "session": "auto-9"}) in events
+        finally:
+            event_bus.unsubscribe(queue)
+
+    asyncio.run(scenario())

@@ -1312,13 +1312,33 @@
 
       init() {
         this.refreshViewportWidth();
-        // Watch for a request from this session awaiting an operator approval
-        // (e.g. a commit signature) and open the approval overlay when one
-        // appears (durable field on the session status; the shared overlay's
-        // openApprovalOverlay dispatches on the request's kind).
+        // Open the approval overlay when a request from this session awaits the
+        // operator (e.g. a commit signature). Push-driven: the ``approval:pending``
+        // SSE event opens it, ``approval:decided`` clears the dedup. The one-shot
+        // durable-field read below covers a viewer that mounts after the event
+        // fired (openApprovalRequest ignores already-decided rows, so a stale
+        // cached replay is harmless). The shared overlay's openApprovalOverlay
+        // dispatches on the request's kind.
         this._lastApprovalPendingId = null;
         this._checkPendingApproval();
-        this._approvalPendingInterval = setInterval(() => this._checkPendingApproval(), 4000);
+        var approvalSelf = this;
+        this._approvalPendingHandler = function (d) {
+          if (!d || d.session !== approvalSelf.sessionKey || !d.id) return;
+          if (d.id !== approvalSelf._lastApprovalPendingId && window.openApprovalOverlay) {
+            approvalSelf._lastApprovalPendingId = d.id;
+            window.openApprovalOverlay(d.id);
+          }
+        };
+        this._approvalDecidedHandler = function (d) {
+          if (d && d.session === approvalSelf.sessionKey &&
+              d.id === approvalSelf._lastApprovalPendingId) {
+            approvalSelf._lastApprovalPendingId = null;
+          }
+        };
+        if (typeof window.registerHandler === 'function') {
+          window.registerHandler('approval:pending', this._approvalPendingHandler);
+          window.registerHandler('approval:decided', this._approvalDecidedHandler);
+        }
         if (!this._viewportResizeHandler) {
           var self = this;
           this._viewportResizeHandler = function() {
@@ -1479,6 +1499,9 @@
         }
       },
 
+      // One-shot durable-field read (viewer mount / reload) — live triggers
+      // arrive over SSE, this only recovers a pending request the viewer
+      // wasn't connected to see.
       async _checkPendingApproval() {
         const key = this.sessionKey;
         if (!key || !window.openApprovalOverlay) return;
@@ -1489,8 +1512,6 @@
           if (p && p.id && p.id !== this._lastApprovalPendingId) {
             this._lastApprovalPendingId = p.id;
             window.openApprovalOverlay(p.id);
-          } else if (!p) {
-            this._lastApprovalPendingId = null;
           }
         } catch (e) { /* best-effort */ }
       },
@@ -1531,9 +1552,15 @@
           clearInterval(this._tickInterval);
           this._tickInterval = null;
         }
-        if (this._approvalPendingInterval) {
-          clearInterval(this._approvalPendingInterval);
-          this._approvalPendingInterval = null;
+        if (typeof window.unregisterHandler === 'function') {
+          if (this._approvalPendingHandler) {
+            window.unregisterHandler('approval:pending', this._approvalPendingHandler);
+            this._approvalPendingHandler = null;
+          }
+          if (this._approvalDecidedHandler) {
+            window.unregisterHandler('approval:decided', this._approvalDecidedHandler);
+            this._approvalDecidedHandler = null;
+          }
         }
         if (this._copyFeedbackTimer) {
           clearTimeout(this._copyFeedbackTimer);

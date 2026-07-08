@@ -1837,6 +1837,7 @@
         this.detailLoading = true;
         try {
           const r = await (await fetch('/api/approvals/' + encodeURIComponent(id))).json();
+          if (r.result !== null) return;   // already decided (e.g. stale SSE cache replay)
           const kind = this._approvalKinds[r.kind];
           if (!kind) throw new Error('unknown approval kind: ' + r.kind);
           await kind.open(this, r);
