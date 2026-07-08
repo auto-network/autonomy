@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Usage: jira-comment ISSUE_KEY -f body.md     (or pipe markdown on stdin)
+# Posts a comment — staged for operator approval; blocks until decided.
+# Comments are for narrative: discussion, findings, corrections. Step-by-step
+# QA/repro instructions belong in the Confirm Plan field (jira-confirm-plan).
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/_jira_lib.sh"
+
+KEY="${1:-}"
+[ -n "$KEY" ] || jira_fail "usage: jira-comment ISSUE_KEY -f body.md (or stdin)"
+shift
+
+body_file="$(mktemp)"; req_file="$(mktemp)"
+trap 'rm -f "$body_file" "$req_file"' EXIT
+jira_read_body "$@" > "$body_file"
+[ -s "$body_file" ] || jira_fail "jira-comment: empty body"
+
+python3 - "$SESSION" "$KEY" "$body_file" > "$req_file" <<'PY'
+import json, sys
+session, key, path = sys.argv[1:4]
+print(json.dumps({"kind": "jira_write", "session": session, "request": {
+    "op": "comment", "key": key, "body_markdown": open(path).read()}}))
+PY
+jira_approval_wait "$req_file"

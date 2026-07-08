@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Usage: jira-createmeta [PROJECT [ISSUETYPE]]
+# Create-metadata (components, versions, priorities, severity) for ticket
+# creation. Defaults: $JIRA_PROJECT or ENTERPRISE, $JIRA_ISSUETYPE or Bug.
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/_jira_lib.sh"
+
+PROJECT="${1:-${JIRA_PROJECT:-ENTERPRISE}}"
+ISSUETYPE="${2:-${JIRA_ISSUETYPE:-Bug}}"
+
+resp="$(curl -sk "$DASH/api/jira/createmeta?project=$PROJECT&issuetype=$ISSUETYPE&version_prefix=Enterprise")"
+echo "$resp" | python3 -c 'import sys,json
+d=json.load(sys.stdin)
+if "error" in d: sys.exit(f"jira: {d[\"error\"]}")
+print(json.dumps(d, indent=2))'
