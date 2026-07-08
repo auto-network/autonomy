@@ -103,6 +103,14 @@ except ImportError:
 # from any state regardless of rank. Clearing to NULL (when the tailer
 # parses the first assistant-role entry) is gated on the current state
 # NOT being ``setup_failed`` — failures stick so the operator sees them.
+#
+# NULL is STICKY: ``advance`` refuses to move a NULL row into a launching
+# state. Entering the FSM requires the explicit ``arm`` writer, called only
+# from the two launch entrypoints (register_pending on create,
+# api_session_resume after revive). Before this rule, NULL ranked 0 and any
+# late writer re-entered "launching" — the setup-exit watcher's marker read
+# raced the tailer's clear on every resume and could park a running session
+# on ``setup_running`` forever (validated 11×, graph://afb67d11-7c4).
 STARTUP_STATE_RANK = {
     "requesting": 1,
     "preparing_workspace": 2,
@@ -153,7 +161,12 @@ def _advance_startup_state_sql(tmux_name: str, proposed: str | None) -> bool:
         return True
     if current == "setup_failed":
         return False
-    current_rank = STARTUP_STATE_RANK.get(current or "", 0)
+    if current is None:
+        # Sticky NULL: the session is past launching (or never armed).
+        # Late writers (marker watcher, screen-poll, inject tasks) must not
+        # re-enter the FSM; only the explicit arm writer does.
+        return False
+    current_rank = STARTUP_STATE_RANK.get(current, 0)
     proposed_rank = STARTUP_STATE_RANK.get(proposed, 0)
     if proposed_rank <= current_rank:
         return False
@@ -163,6 +176,25 @@ def _advance_startup_state_sql(tmux_name: str, proposed: str | None) -> bool:
     )
     conn.commit()
     return True
+
+
+def _arm_startup_state_sql(tmux_name: str, state: str) -> bool:
+    """Unconditional FSM entry writer. Returns True if a row was updated.
+
+    Used only when a launch is actually starting: session create
+    (register_pending → "requesting") and session resume (→
+    "harness_starting"). Overwrites anything, including ``setup_failed`` —
+    an explicit relaunch is the retry path, so the sticky failure must not
+    block it.
+    """
+    from tools.dashboard.dao.dashboard_db import get_conn
+    conn = get_conn()
+    cur = conn.execute(
+        "UPDATE tmux_sessions SET startup_state = ? WHERE tmux_name = ?",
+        (state, tmux_name),
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def _harness_usage_org() -> str:
@@ -985,6 +1017,15 @@ class SessionMonitor:
         # filed a self-repair ticket for (file once, not every 2s poll).
         self._screen_stuck_since: dict[str, float] = {}
         self._self_repair_filed: set[str] = set()
+        # Sessions explicitly armed for composer detection. The pane-poller
+        # watches this set IN ADDITION to the startup_state value window, so
+        # composer_ready keeps being detected even after the tailer's
+        # backfill clear drops startup_state to NULL mid-launch (the resume
+        # race, graph://afb67d11-7c4). Armed by arm_startup_state (create /
+        # resume entrypoints); cleared by the poller at composer_ready or
+        # when the session leaves the live set. This is the permanent
+        # poller contract for the FSM worker's wait-for-composer step.
+        self._screen_poll_armed: set[str] = set()
         self._started = False
         self._last_pause_nag_sent: float = 0.0  # timestamp of last dispatch-pause nag
         self._last_orphan_prune: float = time.time()  # defer first prune one full interval
@@ -1176,6 +1217,24 @@ class SessionMonitor:
             await self._broadcast_registry()
         return changed
 
+    async def arm_startup_state(self, tmux_name: str, state: str) -> bool:
+        """Explicit FSM entry: put a session INTO a launching state.
+
+        ``advance_startup_state`` refuses to move a NULL (past-launching) row
+        — this is the only writer that can. Call it exactly when a launch
+        begins: create (``register_pending``) and resume
+        (``api_session_resume`` after ``revive_session``). Overwrites
+        ``setup_failed`` (an explicit relaunch is the retry path).
+        """
+        changed = _arm_startup_state_sql(tmux_name, state)
+        # Arm the pane-poller alongside the FSM entry regardless of the row
+        # write outcome — composer detection must run for this launch even if
+        # the row was already in the proposed state.
+        self._screen_poll_armed.add(tmux_name)
+        if changed:
+            await self._broadcast_registry()
+        return changed
+
     async def register_pending(
         self,
         tmux_name: str,
@@ -1210,7 +1269,7 @@ class SessionMonitor:
                 "(likely already exists; proceeding to advance_startup_state)",
                 tmux_name,
             )
-        await self.advance_startup_state(tmux_name, "requesting")
+        await self.arm_startup_state(tmux_name, "requesting")
         # Mark as needing resolution so the normal register() call later is
         # idempotent — the tail-state will get rebuilt cleanly with the
         # jsonl_path / resolution_dir once those are known.
@@ -2379,17 +2438,26 @@ class SessionMonitor:
             try:
                 await asyncio.sleep(self.SCREEN_POLL_INTERVAL_S)
                 rows = get_live_sessions()
+                # Drop armed entries whose session left the live set (died
+                # mid-launch, killed, failed) so the set can't leak.
+                live_names = {r["tmux_name"] for r in rows}
+                self._screen_poll_armed &= live_names
                 for row in rows:
                     tmux_name = row["tmux_name"]
                     # Watch sessions whose startup_state is in the harness-
                     # prep range — past container ready, before composer is
-                    # confirmed. Once startup_state advances to
-                    # ``composer_ready`` or clears to NULL, this loop steps
-                    # out of that session. ``confirming_trust`` is included so
-                    # the loop keeps watching while the trust auto-confirm
-                    # runs and waits for the composer to appear.
+                    # confirmed — OR that are explicitly armed for composer
+                    # detection. The armed set keeps detection alive when the
+                    # tailer's backfill clear drops startup_state to NULL
+                    # mid-launch; startup_state alone stops being a reliable
+                    # watch predicate at that point. Once composer_ready is
+                    # reached the poller disarms and steps out.
+                    # ``confirming_trust`` is included so the loop keeps
+                    # watching while the trust auto-confirm runs and waits
+                    # for the composer to appear.
                     startup_state = row.get("startup_state")
-                    if startup_state not in ("harness_starting", "confirming_trust"):
+                    armed = tmux_name in self._screen_poll_armed
+                    if startup_state not in ("harness_starting", "confirming_trust") and not armed:
                         continue
                     harness = resolve_harness_for_session_row(row)
                     try:
@@ -2458,9 +2526,18 @@ class SessionMonitor:
                     # screen-read hasn't confirmed composer_ready within
                     # HARNESS_READY_GRACE_S of first seeing the session in
                     # this state, promote anyway so the card clears.
+                    # Grace applies in the harness-prep window and to armed
+                    # sessions whose startup_state already cleared (NULL) —
+                    # the composer is expected imminently in both. It must
+                    # NOT apply to armed sessions still in the early states
+                    # (requesting…setup_running): their pane can be blank for
+                    # minutes legitimately and a force-promote would lie.
                     if (
                         next_state is None
-                        and startup_state == "harness_starting"
+                        and (
+                            startup_state == "harness_starting"
+                            or (armed and startup_state is None)
+                        )
                     ):
                         first = self._harness_ready_grace.setdefault(
                             tmux_name, time.monotonic()
@@ -2486,7 +2563,18 @@ class SessionMonitor:
                     if next_state == "composer_ready" or new_state.get("composer_ready"):
                         self._screen_stuck_since.pop(tmux_name, None)
                         self._self_repair_filed.discard(tmux_name)
-                    else:
+                        # Composer reached — this launch no longer needs the
+                        # armed watch; harness_state.composer_ready is now
+                        # the durable signal downstream gates read.
+                        self._screen_poll_armed.discard(tmux_name)
+                    elif startup_state in ("harness_starting", "confirming_trust") or (
+                        armed and startup_state is None
+                    ):
+                        # Stuck-tracking only where the composer is expected
+                        # imminently — an armed session still in the early
+                        # launch states (requesting…setup_running) can sit on
+                        # a blank/booting pane for minutes legitimately and
+                        # must not file detector-miss tickets.
                         stuck_since = self._screen_stuck_since.setdefault(
                             tmux_name, time.monotonic()
                         )

@@ -70,9 +70,89 @@ def _broadcast_count(monitor) -> int:
 
 
 @pytest.mark.asyncio
-async def test_advance_from_null_to_requesting_writes(db, monitor):
+async def test_advance_from_null_refused_sticky(db, monitor):
+    """NULL is sticky: advance cannot re-enter the FSM. Only arm can.
+
+    Before this rule NULL ranked 0 and any late writer (the setup-exit
+    watcher's marker read, most often) re-entered 'launching' after the
+    tailer cleared — the resume flip-flop/stuck bug (graph://afb67d11-7c4).
+    """
+    dashboard_db.insert_session(
+        tmux_name="auto-test", session_type="container", project="x",
+    )
+    monitor._event_bus.broadcast.reset_mock()
+    changed = await monitor.advance_startup_state("auto-test", "setup_running")
+    assert changed is False
+    assert _read_state("auto-test") is None
+    assert _broadcast_count(monitor) == 0
+
+
+@pytest.mark.asyncio
+async def test_marker_rearm_after_tailer_clear_refused(db, monitor):
+    """The exact production sequence, end to end: resume arms the FSM, the
+    launch progresses to awaiting_first_response, the tailer's backfill
+    clears to NULL, then the setup-exit watcher reads the marker file and
+    proposes setup_running. The proposal must be refused — before the
+    sticky-NULL rule it WROTE (rank 6 > NULL's rank 0) and parked the
+    running session on the 'Container setup' chip forever."""
+    dashboard_db.insert_session(
+        tmux_name="auto-test", session_type="container", project="x",
+    )
+    await monitor.arm_startup_state("auto-test", "harness_starting")
+    await monitor.advance_startup_state("auto-test", "composer_ready")
+    await monitor.advance_startup_state("auto-test", "awaiting_first_response")
+    await monitor.advance_startup_state("auto-test", None)  # tailer clear
+    monitor._event_bus.broadcast.reset_mock()
+    changed = await monitor.advance_startup_state("auto-test", "setup_running")
+    assert changed is False
+    assert _read_state("auto-test") is None
+    assert _broadcast_count(monitor) == 0
+
+
+@pytest.mark.asyncio
+async def test_arm_re_enters_after_clear(db, monitor):
+    """arm is the explicit FSM entry — it works where advance refuses."""
     await monitor.register_pending("auto-test", project="x")
-    assert _read_state("auto-test") == "requesting"
+    await monitor.advance_startup_state("auto-test", "awaiting_first_response")
+    await monitor.advance_startup_state("auto-test", None)
+    changed = await monitor.arm_startup_state("auto-test", "harness_starting")
+    assert changed is True
+    assert _read_state("auto-test") == "harness_starting"
+
+
+@pytest.mark.asyncio
+async def test_arm_overwrites_setup_failed(db, monitor):
+    """An explicit relaunch is the retry path — sticky failure must not
+    block it."""
+    await monitor.register_pending("auto-test", project="x")
+    await monitor.advance_startup_state("auto-test", "setup_failed")
+    changed = await monitor.arm_startup_state("auto-test", "harness_starting")
+    assert changed is True
+    assert _read_state("auto-test") == "harness_starting"
+
+
+@pytest.mark.asyncio
+async def test_arm_arms_screen_poll_watch(db, monitor):
+    """arm must put the session in the pane-poller's armed set so composer
+    detection keeps running even after the tailer clears startup_state."""
+    dashboard_db.insert_session(
+        tmux_name="auto-test", session_type="container", project="x",
+    )
+    await monitor.arm_startup_state("auto-test", "harness_starting")
+    assert "auto-test" in monitor._screen_poll_armed
+
+
+@pytest.mark.asyncio
+async def test_setup_failed_still_writes_from_null(db, monitor):
+    """Deliberate exception to sticky NULL: a LATE setup failure (the
+    backgrounded startup script failing after the harness is already
+    running) must stay operator-visible."""
+    dashboard_db.insert_session(
+        tmux_name="auto-test", session_type="container", project="x",
+    )
+    changed = await monitor.advance_startup_state("auto-test", "setup_failed")
+    assert changed is True
+    assert _read_state("auto-test") == "setup_failed"
 
 
 @pytest.mark.asyncio

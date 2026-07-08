@@ -1090,16 +1090,22 @@ def find_live_session(session_uuid: str | None = None, file_path: str | None = N
 def revive_session(tmux_name: str, *, file_offset: int = 0) -> None:
     """Re-activate a dead session: set is_live=1, reset file_offset, clear
     the 'dead' activity_state flag, and reset startup_state to NULL so the
-    relaunched session's FSM starts fresh (api_session_resume advances it
+    relaunched session's FSM starts fresh (api_session_resume arms it
     to harness_starting right after this call, mirroring api_session_create).
-    Leaves non-dead activity states alone."""
+    Leaves non-dead activity states alone.
+
+    harness_state resets too: it describes the PREVIOUS process's screen. A
+    stale composer_ready=true from the old boot would satisfy the
+    composer-ready injection gate before the relaunched harness accepts
+    input; the pane-poller re-derives fresh state within a poll interval."""
     conn = get_conn()
     conn.execute(
         "UPDATE tmux_sessions SET"
         "  is_live=1,"
         "  file_offset=?,"
         "  activity_state=CASE WHEN activity_state='dead' THEN 'idle' ELSE activity_state END,"
-        "  startup_state=NULL"
+        "  startup_state=NULL,"
+        "  harness_state='{}'"
         " WHERE tmux_name=?",
         (file_offset, tmux_name),
     )

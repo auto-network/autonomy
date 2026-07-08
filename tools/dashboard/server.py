@@ -5453,6 +5453,32 @@ def _read_harness_state(tmux_name: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _composer_ready_reached(tmux_name: str) -> bool:
+    """True once the session's composer has been confirmed ready.
+
+    Reads BOTH signals: the transient ``startup_state == composer_ready``
+    chip value AND the durable ``harness_state.composer_ready`` JSON flag the
+    pane-poller persists. Injection gates must use this instead of polling
+    ``startup_state`` alone: the tailer's backfill clear can drop
+    ``startup_state`` to NULL before the poller promotes it (the resume
+    race, graph://afb67d11-7c4), and NULL is sticky — a gate watching only
+    ``startup_state`` would starve forever while the composer is ready.
+    """
+    row = dashboard_db.get_session(tmux_name)
+    if not row:
+        return False
+    if row.get("startup_state") == "composer_ready":
+        return True
+    raw = row.get("harness_state")
+    if not raw:
+        return False
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return bool(isinstance(parsed, dict) and parsed.get("composer_ready"))
+
+
 def _wait_for_prompt(
     *,
     tmux_name: str,
@@ -6626,16 +6652,16 @@ async def api_session_create(request):
         _inject_harness = (proj.harness if proj else "claude")
 
         async def _inject_first_message(msg=first_message, harness=_inject_harness):
-            # Composer_ready-gated injection. Poll startup_state until the
-            # screen-poll loop has advanced it to "composer_ready"; then
-            # apply the per-harness settle delay; then tmux_send; then
+            # Composer_ready-gated injection. Poll until the pane-poller has
+            # confirmed the composer (startup_state chip OR the durable
+            # harness_state flag — the chip can clear to sticky NULL first);
+            # then apply the per-harness settle delay; then tmux_send; then
             # advance startup_state to "awaiting_first_response" so the
             # card shows the right chip until the tailer clears on first
             # assistant turn.
             deadline = time.time() + 60  # 60s ceiling — matches the watcher net
             while time.time() < deadline:
-                row = dashboard_db.get_session(tmux_name)
-                if row and row.get("startup_state") == "composer_ready":
+                if _composer_ready_reached(tmux_name):
                     break
                 await asyncio.sleep(0.5)
             else:
@@ -6687,8 +6713,7 @@ async def api_session_create(request):
         async def _clear_when_ready():
             deadline = time.time() + 60
             while time.time() < deadline:
-                row = dashboard_db.get_session(tmux_name)
-                if row and row.get("startup_state") == "composer_ready":
+                if _composer_ready_reached(tmux_name):
                     await session_monitor.update_phase(
                         tmux_name, clear_startup_state=True,
                     )
@@ -6797,6 +6822,22 @@ def _spawn_setup_exit_watcher(tmux_name: str, run_dir: Path) -> None:
                                 "watch_setup_exit: %s startup_state=%s (marker)",
                                 tmux_name, marker,
                             )
+                    elif marker == "setup_failed":
+                        # Terminal failure marker from the entrypoint. The
+                        # .setup-exit read below is the authority for the
+                        # exit code; this covers the window where the marker
+                        # landed first.
+                        if await session_monitor.advance_startup_state(tmux_name, "setup_failed"):
+                            logger.info(
+                                "watch_setup_exit: %s startup_state=setup_failed (marker)",
+                                tmux_name,
+                            )
+                    elif marker == "setup_complete":
+                        # Terminal success marker. setup_complete is
+                        # intentionally not a startup_state value (the
+                        # harness chip has already moved on); nothing to
+                        # render — stop polling once .setup-exit confirms.
+                        pass
             except Exception:
                 logger.debug(
                     "watch_setup_exit: .setup_phase marker read failed for %s",
@@ -7171,8 +7212,10 @@ async def api_session_resume(request):
     # screen-poll never picks it up, and the chip freezes. Resetting to
     # harness_starting puts it back in the screen-poll's watch window so
     # composer_ready detection and the orientation injection can run.
+    # arm (not advance): NULL is sticky against advance, and this is one of
+    # the two legitimate FSM entrypoints.
     try:
-        await session_monitor.advance_startup_state(tmux_name, "harness_starting")
+        await session_monitor.arm_startup_state(tmux_name, "harness_starting")
     except Exception:
         logger.warning(
             "api_session_resume: failed to arm initial state for %s",
@@ -7229,10 +7272,12 @@ async def api_session_resume(request):
             # Wait for the resumed harness to reach composer_ready before
             # typing — `claude --resume` loads history first, so a fixed sleep
             # is unreliable. Falls through after 120s (matches the watcher net).
+            # Gate reads the durable harness_state flag too: on resume the
+            # tailer's backfill clear routinely beats the poller's promote,
+            # and startup_state alone would starve (graph://afb67d11-7c4).
             deadline = time.time() + 120
             while time.time() < deadline:
-                row = dashboard_db.get_session(tmux_name)
-                if row and row.get("startup_state") == "composer_ready":
+                if _composer_ready_reached(tmux_name):
                     break
                 await asyncio.sleep(1)
             else:
