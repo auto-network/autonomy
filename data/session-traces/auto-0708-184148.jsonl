@@ -1,0 +1,2 @@
+{"t": "2026-07-08T18:41:48.107090+00:00", "mono_ms": 0, "phase": "enter", "dt_ms": 0, "project": "autonomy", "session_type": "container", "primer": false}
+{"t": "2026-07-08T18:41:48.120326+00:00", "mono_ms": 13, "phase": "queued", "dt_ms": 13, "project": "autonomy", "harness": "codex"}

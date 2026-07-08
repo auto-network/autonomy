@@ -136,6 +136,79 @@ def _capability_command_surface(
     )
 
 
+# Claude Code only loads a skill whose SKILL.md opens with a frontmatter block
+# carrying at least these keys, and whose directory name is a simple slug.
+_SKILL_REQUIRED_FRONTMATTER = ("name", "description")
+_SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def _skill_frontmatter(text: str) -> dict[str, str] | None:
+    """Parse the leading ``---`` frontmatter block of a SKILL.md into a flat
+    key/value map. Returns None when the block is absent or unterminated.
+    Flat ``key: value`` lines only — enough to validate the harness contract
+    without a YAML dependency."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    fm: dict[str, str] = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return fm
+        key, sep, value = line.partition(":")
+        if sep:
+            fm[key.strip()] = value.strip()
+    return None
+
+
+def _capability_skill_surface(capabilities, run_dir: Path, harness: str) -> dict[str, str]:
+    """Install each enabled capability's SKILL.md where the harness actually
+    discovers skills.
+
+    Claude Code scans ``<project>/.claude/skills/<name>/SKILL.md``, so each
+    valid skill is copied under ``<run_dir>/cap-skills/<name>/`` and
+    bind-mounted into the primary repo at ``/workspace/repo/.claude/skills/``.
+    (The mountpoint appears as an empty directory on the host worktree, which
+    git ignores.) The skill must open with frontmatter carrying ``name`` +
+    ``description`` and the name must be a plain slug — a SKILL.md missing
+    either is skipped with a warning, because projecting it would look
+    installed while the harness silently never loads it.
+
+    Codex projection is a deliberate gap for now: its skills directory is a
+    bind of the host user's home, and nesting mounts there would create
+    directories in the operator's real home.
+    """
+    if harness != "claude":
+        return {}
+    mounts: dict[str, str] = {}
+    for cap in capabilities:
+        if not cap.skill_path:
+            continue
+        src = REPO_ROOT / cap.skill_path
+        if not src.is_file():
+            continue
+        text = src.read_text()
+        fm = _skill_frontmatter(text) or {}
+        name = fm.get("name", "")
+        missing = [k for k in _SKILL_REQUIRED_FRONTMATTER if not fm.get(k)]
+        if missing:
+            logger.warning(
+                "capability %s: SKILL.md at %s lacks frontmatter key(s) %s; "
+                "not installed as a skill",
+                cap.implementation, cap.skill_path, ", ".join(missing))
+            continue
+        if not _SKILL_NAME_RE.match(name):
+            logger.warning(
+                "capability %s: skill name %r is not a plain slug "
+                "([a-z0-9-]); not installed as a skill",
+                cap.implementation, name)
+            continue
+        dst_dir = run_dir / "cap-skills" / name
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        (dst_dir / "SKILL.md").write_text(text)
+        mounts[str(dst_dir)] = f"/workspace/repo/.claude/skills/{name}:ro"
+    return mounts
+
+
 _HOST_ENV_PREFIX = "host:"
 _FILE_ENV_PREFIX = "file:"
 
@@ -915,6 +988,18 @@ def launch_session(
     # disk artefact, mount, or env var is created.
     shim_mounts, shim_env = _capability_command_surface(capabilities, run_dir)
     for host_path, container_spec in shim_mounts.items():
+        container_path = container_spec.split(":")[0]
+        if any(
+            spec.split(":")[0] == container_path
+            for spec in default_mounts.values()
+        ):
+            continue
+        default_mounts[host_path] = container_spec
+
+    # Capability skills: SKILL.md files installed at the harness's skill
+    # discovery path (per-session copies under run_dir, like the shim dir).
+    for host_path, container_spec in _capability_skill_surface(
+            capabilities, run_dir, harness).items():
         container_path = container_spec.split(":")[0]
         if any(
             spec.split(":")[0] == container_path
