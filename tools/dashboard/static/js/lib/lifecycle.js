@@ -32,7 +32,16 @@
   // planning mode requires a prior model response.
   function lifecycleState(s) {
     if (!s) return "pending";
-    // Dead branches FIRST, using a truthy test rather than ``=== false``:
+    // FAILED branches before dead: the lifecycle worker's fail write sets
+    // is_live=0 AND activity_state='failed' — without this branch a failed
+    // launch rendered as a plain "Ended" card and the Retry chip was
+    // unreachable. The backend's derived lifecycle_state is the same
+    // decision, precomputed; use it when present.
+    if (s.lifecycle_state === "FAILED" || s.activity_state === "failed"
+        || s.startup_state === "setup_failed") {
+      return "setup_failed";
+    }
+    // Dead branches next, using a truthy test rather than ``=== false``:
     // the dead/registry path delivers is_live as the integer 0 (SQLite) or
     // missing, and ``0 === false`` / ``undefined === false`` are both false
     // in JS — which let a dead-mid-launch row skip this branch and fall

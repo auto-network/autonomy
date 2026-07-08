@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tools.dashboard.session_lifecycle_worker import derive_lifecycle_state
 from tools.dashboard.dao.dashboard_db import get_live_sessions as _db_live_sessions
 from tools.dashboard.dao.dashboard_db import find_live_session as _db_find_live
 from tools.dashboard.dao.dashboard_db import get_all_sessions as _db_all_sessions
@@ -598,6 +599,11 @@ def get_recent_sessions(
             row["entry_count"] = db_row.get("entry_count", 0) or row["total_turns"]
             row["context_tokens"] = db_row.get("context_tokens", 0)
             row["activity_state"] = db_row.get("activity_state", "dead")
+            # Failed launches must render as FAILED (Retry chip), not as a
+            # plain Ended card — carry the FSM columns + derived coarse
+            # state through to the Recent surface.
+            row["startup_state"] = db_row.get("startup_state")
+            row["lifecycle_state"] = derive_lifecycle_state(db_row)
             row["bead_id"] = row["bead_id"] or db_row.get("bead_id", "")
             row["tmux_session"] = db_row.get("tmux_name", "")
             # auto-ngis4: surface harness + model (stored on tmux_sessions)
