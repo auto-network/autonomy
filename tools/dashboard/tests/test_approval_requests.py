@@ -55,26 +55,25 @@ def test_commit_sign_flow(client):
 
 
 def test_no_secret_kind_full_flow(client):
-    """A Jira-style kind needs nothing beyond the generic primitive: the stored
-    request is self-describing, approval is a bare {approved: true} with optional
-    operator edits, no signature/passphrase anywhere."""
+    """A no-secret kind needs nothing beyond the generic primitive: the stored
+    request is self-describing and approval is the bare verdict — no signature,
+    no passphrase, no enricher."""
     r = client.post("/api/approvals", json={
-        "kind": "jira_write", "session": "auto-2",
-        "request": {"op": "create", "summary": "Fix the flux capacitor",
+        "kind": "demo_ack", "session": "auto-2",
+        "request": {"summary": "Fix the flux capacitor",
                     "description": "It fluxes when it should capacit."},
     })
     rid = r.json()["id"]
-    assert ar.pending_for_session("auto-2") == {"id": rid, "kind": "jira_write"}
+    assert ar.pending_for_session("auto-2") == {"id": rid, "kind": "demo_ack"}
     d = client.get(f"/api/approvals/{rid}").json()
     assert d["request"]["summary"] == "Fix the flux capacitor"
     assert d["result"] is None
     # no enricher registered for this kind -> no extra fields, no error
     assert "files" not in d and "patch" not in d
-    ok = client.post(f"/api/approvals/{rid}/decision",
-                     json={"approved": True, "edits": {"summary": "Fix flux capacitor drift"}})
+    ok = client.post(f"/api/approvals/{rid}/decision", json={"approved": True})
     assert ok.json() == {"ok": True}
     d = client.get(f"/api/approvals/{rid}").json()
-    assert d["result"] == {"approved": True, "edits": {"summary": "Fix flux capacitor drift"}}
+    assert d["result"] == {"approved": True}
     assert ar.pending_for_session("auto-2") is None
 
 

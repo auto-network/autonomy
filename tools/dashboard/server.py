@@ -113,6 +113,7 @@ from tools.dashboard.worktree_monitor import worktree_monitor
 from tools.dashboard import session_trace
 from tools.dashboard.dao import auth_db, dashboard_db
 from tools.dashboard import approvals_routes
+from tools.dashboard import jira_routes
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
     from tools.dashboard.dao import mock as dao_dispatch
@@ -15221,6 +15222,10 @@ routes = [
     # On-demand approval rendezvous (requester <-> operator browser),
     # e.g. commit signing
     *approvals_routes.ROUTES,
+
+    # Jira broker (issue_tracker capability): host-side reads; writes ride the
+    # approval rendezvous as kind=jira_write
+    *jira_routes.ROUTES,
 
     # Static (catch-all — plugin static mounts above take precedence)
     Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),
