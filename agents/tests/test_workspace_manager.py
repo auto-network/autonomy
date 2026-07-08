@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -1059,7 +1060,6 @@ def test_cleanup_removes_worktree_after_cherry_pick(tmp_path, monkeypatch):
          "refs/heads/main", new_main_sha],
         check=True,
     )
-
     # Sanity: SHAs differ, but ``git cherry`` reports zero "+ " lines.
     assert session_sha != new_main_sha
     cherry_out = subprocess.run(
@@ -1230,6 +1230,170 @@ def test_scan_all_worktrees_reports_state_per_session(tmp_path, monkeypatch):
     assert clean_row.ff_eligible is False
     assert clean_row.clone_stale is False
     assert clean_row.session_live is False
+
+
+def test_scan_all_worktrees_suppresses_cross_worktree_duplicates(tmp_path, monkeypatch):
+    """A commit checked out in a second worktree (review checkout) is listed
+    once, on the session that owns the branch; the mirror row reports it in
+    ``duplicate_commits`` and drops to zero pending."""
+    session_author = "sess-author"
+    session_review = "sess-review"
+    worktrees_dir, _clone, wt_author = _make_writable_session_worktree(
+        tmp_path, session_author, monkeypatch,
+    )
+    url = str(next(tmp_path.glob("upstream.git")))
+    proj = ProjectConfig(
+        id="w", name="w", description="", image="img", graph_project="gp",
+        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+    )
+    wm.prepare_session_mounts(
+        proj, session_review,
+        repos_dir=tmp_path / "repos", worktrees_dir=worktrees_dir,
+    )
+    wt_review = worktrees_dir / session_review / "upstream"
+
+    subprocess.run(["git", "-C", str(wt_author), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(wt_author), "config", "user.name", "t"], check=True)
+    (wt_author / "feature.txt").write_text("feature\n")
+    subprocess.run(["git", "-C", str(wt_author), "add", "feature.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(wt_author), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "shared feature commit",
+        ],
+        check=True,
+    )
+    # Review checkout: same commit, different branch name, second worktree.
+    subprocess.run(
+        [
+            "git", "-C", str(wt_review), "checkout", "-q", "-b",
+            "review/1", f"session/{session_author}",
+        ],
+        check=True,
+    )
+
+    rows = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+    by_session = {row.session_name: row for row in rows}
+
+    author_row = by_session[session_author]
+    assert author_row.commits_ahead == 1
+    assert author_row.commits[0].subject == "shared feature commit"
+    assert author_row.duplicate_commits == []
+
+    review_row = by_session[session_review]
+    assert review_row.commits_ahead == 0
+    assert review_row.commits == []
+    assert review_row.ff_eligible is False
+    assert len(review_row.duplicate_commits) == 1
+    dup = review_row.duplicate_commits[0]
+    assert dup.subject == "shared feature commit"
+    assert dup.of_session == session_author
+    assert dup.of_repo == "upstream"
+
+
+def test_scan_all_worktrees_suppresses_rebased_copy_duplicates(tmp_path, monkeypatch):
+    """A commit copied to another session branch under a different SHA
+    (cherry-pick/rebase) is still recognized as the same pending change
+    via its patch-id and listed on exactly one row. Both rows own their
+    session branch here, so the canonical-rank tiebreak applies: the most
+    recent session (``sess-copy`` > ``sess-author``) keeps the listing —
+    the newer branch is the more likely home of the work's current form."""
+    session_author = "sess-author"
+    session_copy = "sess-copy"
+    worktrees_dir, _clone, wt_author = _make_writable_session_worktree(
+        tmp_path, session_author, monkeypatch,
+    )
+    url = str(next(tmp_path.glob("upstream.git")))
+    proj = ProjectConfig(
+        id="w", name="w", description="", image="img", graph_project="gp",
+        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+    )
+    wm.prepare_session_mounts(
+        proj, session_copy,
+        repos_dir=tmp_path / "repos", worktrees_dir=worktrees_dir,
+    )
+    wt_copy = worktrees_dir / session_copy / "upstream"
+
+    for wt in (wt_author, wt_copy):
+        subprocess.run(["git", "-C", str(wt), "config", "user.email", "t@t"], check=True)
+        subprocess.run(["git", "-C", str(wt), "config", "user.name", "t"], check=True)
+
+    (wt_author / "feature.txt").write_text("feature\n")
+    subprocess.run(["git", "-C", str(wt_author), "add", "feature.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(wt_author), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "shared feature commit",
+        ],
+        check=True,
+    )
+    author_sha = subprocess.run(
+        ["git", "-C", str(wt_author), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    # Copy onto the other session branch: different SHA, same patch-id.
+    # Pin a distinct committer date so the copy can't SHA-collide with the
+    # original (same tree, same parent, same message, same-second commit).
+    subprocess.run(
+        ["git", "-C", str(wt_copy), "-c", "commit.gpgsign=false",
+         "cherry-pick", author_sha],
+        check=True,
+        env={**os.environ, "GIT_COMMITTER_DATE": "2036-01-01T00:00:00 +0000"},
+    )
+    copy_sha = subprocess.run(
+        ["git", "-C", str(wt_copy), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert copy_sha != author_sha
+
+    rows = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+    by_session = {row.session_name: row for row in rows}
+
+    copy_row = by_session[session_copy]
+    assert copy_row.commits_ahead == 1
+    assert copy_row.duplicate_commits == []
+
+    author_row = by_session[session_author]
+    assert author_row.commits_ahead == 0
+    assert author_row.commits == []
+    assert len(author_row.duplicate_commits) == 1
+    assert author_row.duplicate_commits[0].sha == author_sha
+    assert author_row.duplicate_commits[0].of_session == session_copy
+
+
+def test_scan_all_worktrees_suppresses_net_empty_branches(tmp_path, monkeypatch):
+    """A branch whose commits cancel out (commit + revert) has nothing to
+    land: the row reports ``net_empty`` and zero pending commits."""
+    session = "sess-net-empty"
+    worktrees_dir, _clone, worktree = _make_writable_session_worktree(
+        tmp_path, session, monkeypatch,
+    )
+    subprocess.run(["git", "-C", str(worktree), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "config", "user.name", "t"], check=True)
+    (worktree / "spec.txt").write_text("draft spec\n")
+    subprocess.run(["git", "-C", str(worktree), "add", "spec.txt"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(worktree), "-c", "commit.gpgsign=false",
+            "commit", "-q", "-m", "add spec",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git", "-C", str(worktree), "-c", "commit.gpgsign=false",
+            "revert", "--no-edit", "HEAD",
+        ],
+        check=True,
+    )
+
+    rows = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+    row = next(item for item in rows if item.session_name == session)
+
+    assert row.net_empty is True
+    assert row.commits == []
+    assert row.commits_ahead == 0
+    assert row.ff_eligible is False
 
 
 def test_scan_all_worktrees_keeps_dirty_worktree_ff_eligible_when_commit_is_linear(tmp_path, monkeypatch):
@@ -1497,6 +1661,15 @@ def test_get_session_worktree_commit_detail_accepts_commit_ahead_of_divergent_ma
     assert detail.subject == "first commit"
 
 def test_scan_all_worktrees_hides_commits_already_in_target_branch(tmp_path, monkeypatch):
+    """A commit merged into the target repo disappears once the clone syncs.
+
+    The pending filter runs entirely in the worktree against the managed
+    clone's integration ref. While the clone lags the target repo (the
+    ``clone_stale`` window — the dashboard merge flow closes it by syncing
+    the clone as part of the merge), the commit is conservatively still
+    listed; after the sync it is gone from both the commit list and the
+    ahead count.
+    """
     session = "sess-already-merged"
     worktrees_dir, clone, worktree = _make_writable_session_worktree(
         tmp_path, session, monkeypatch, repo_name="autonomy",
@@ -1538,13 +1711,27 @@ def test_scan_all_worktrees_hides_commits_already_in_target_branch(tmp_path, mon
         check=True,
     )
 
+    # Clone not yet synced from the target repo: conservatively still pending.
+    rows = wm.scan_all_worktrees(
+        worktrees_dir=worktrees_dir,
+        live_session_names={session},
+    )
+    row = next(item for item in rows if item.session_name == session and item.repo_name == "autonomy")
+    assert row.commits_ahead == 1
+    assert [commit.sha for commit in row.commits] == [merged_sha]
+
+    # Publish the merge to the repo's origin and refresh the managed clone
+    # — the same fetch every session launch performs — closing the window.
+    subprocess.run(["git", "-C", str(target_repo), "push", "-q", "origin", "main"], check=True)
+    wm.ensure_managed_clone(str(upstream), repos_dir=tmp_path / "repos")
+
     rows = wm.scan_all_worktrees(
         worktrees_dir=worktrees_dir,
         live_session_names={session},
     )
     row = next(item for item in rows if item.session_name == session and item.repo_name == "autonomy")
 
-    assert row.commits_ahead == 1
+    assert row.commits_ahead == 0
     assert row.commits == []
     assert row.ff_eligible is False
 
@@ -1782,33 +1969,39 @@ def _make_cherry_pick_fixture(tmp_path):
     return repo, merged_sha, cherry_sha, pending_sha
 
 
-def test_target_branch_merged_shas_matches_per_sha_classification(tmp_path):
-    """Batched ``git cherry`` classification == the old per-SHA loop.
+def test_cherry_unmerged_shas_classifies_all_dispositions(tmp_path):
+    """``_cherry_unmerged_shas`` covers all three merge dispositions:
+    SHA-identical ancestor (fast-forwarded) and patch-id equivalent under
+    a different SHA (cherry-picked) are both absent from the ``+`` set;
+    the genuinely pending commit is present."""
+    repo, merged_sha, cherry_sha, pending_sha = _make_cherry_pick_fixture(tmp_path)
 
-    Covers all three dispositions in one fixture: SHA-identical ancestor
-    (fast-forwarded), patch-id equivalent under a different SHA
-    (cherry-picked), and genuinely still pending.
+    unmerged = wm._cherry_unmerged_shas(repo, "master")
+
+    assert unmerged == {pending_sha}
+
+
+def test_dashboard_pending_commit_shas_filters_in_the_worktree(tmp_path):
+    """The merged filter must work with ``REPO_ROOT`` pointing anywhere.
+
+    Regression: this filter used to run ``git cherry`` in the host
+    checkout (``REPO_ROOT``), which does not contain session-branch
+    objects — the command failed on unknown SHAs and the filter silently
+    kept already-merged commits listed forever. Note: NO monkeypatch of
+    ``REPO_ROOT`` here; the real one has no relation to the fixture repo,
+    exactly like production.
     """
     repo, merged_sha, cherry_sha, pending_sha = _make_cherry_pick_fixture(tmp_path)
-    candidates = [merged_sha, cherry_sha, pending_sha]
-
-    old_merged = {
-        sha for sha in candidates
-        if wm._target_branch_contains_commit(repo, "master", sha)
-    }
-    new_merged = wm._target_branch_merged_shas(repo, "master", pending_sha, candidates)
-
-    assert old_merged == {merged_sha, cherry_sha}
-    assert new_merged == old_merged
-
-
-def test_dashboard_pending_commit_shas_uses_batched_classification(tmp_path, monkeypatch):
-    """End-to-end: the per-row helper filters merged/cherry-picked SHAs
-    via the batched path and leaves only the truly pending commit."""
-    repo, merged_sha, cherry_sha, pending_sha = _make_cherry_pick_fixture(tmp_path)
-    monkeypatch.setattr(wm, "REPO_ROOT", repo)
 
     pending = wm._dashboard_pending_commit_shas(repo, "autonomy", base_ref="master")
+    assert pending == [pending_sha]
+
+
+def test_dashboard_pending_commit_shas_filters_non_autonomy_repos(tmp_path):
+    """The patch-id merged filter applies to every repo, not just autonomy."""
+    repo, merged_sha, cherry_sha, pending_sha = _make_cherry_pick_fixture(tmp_path)
+
+    pending = wm._dashboard_pending_commit_shas(repo, "enterprise_ng", base_ref="master")
     assert pending == [pending_sha]
 
 

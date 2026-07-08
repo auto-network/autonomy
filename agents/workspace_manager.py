@@ -40,7 +40,7 @@ import shutil
 import subprocess
 import sys
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -693,6 +693,17 @@ class WorktreeCommit:
 
 
 @dataclass(frozen=True)
+class WorktreeDuplicateRef:
+    """A commit suppressed on this row because another row already lists it."""
+
+    sha: str
+    short_sha: str
+    subject: str
+    of_session: str
+    of_repo: str
+
+
+@dataclass(frozen=True)
 class WorktreeState:
     """Current state of a session worktree for dashboard inspection."""
 
@@ -711,6 +722,8 @@ class WorktreeState:
     cherry_pick_commit: str | None = None
     commits: list[WorktreeCommit] = field(default_factory=list)
     dirty_files: list[GitFileChange] = field(default_factory=list)
+    net_empty: bool = False
+    duplicate_commits: list[WorktreeDuplicateRef] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1143,6 +1156,26 @@ def _worktree_commits_ahead(worktree: Path, *, base_ref: str | None = None) -> i
     return sum(1 for line in out.splitlines() if line.startswith("+ "))
 
 
+def _worktree_net_empty(worktree: Path, *, base_ref: str | None = None) -> bool:
+    """Return True when the branch's integrated diff against base is empty.
+
+    ``git diff --quiet <base>...HEAD`` compares HEAD's tree to the merge
+    base: exit 0 means the branch's commits cancel out to no content change
+    (e.g. a commit followed by its revert), so there is nothing to land
+    even though ``git cherry`` still lists both commits as pending. Any
+    git failure is treated as "not empty" — the conservative direction.
+    """
+    base_ref = base_ref or _worktree_merge_base_ref(worktree)
+    if base_ref is None:
+        return False
+    rc, _, _ = _git_output(
+        ["diff", "--quiet", f"{base_ref}...HEAD"],
+        worktree,
+        timeout=30,
+    )
+    return rc == 0
+
+
 def _worktree_ff_only_safe(worktree: Path, *, base_ref: str | None = None) -> bool:
     """Return True when the merge base ref is an ancestor of HEAD."""
     base_ref = base_ref or _worktree_merge_base_ref(worktree)
@@ -1297,73 +1330,31 @@ def _worktree_commit_shas(worktree: Path, *, base_ref: str | None = None) -> lis
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
-def _target_branch_contains_commit(repo: Path, branch: str, sha: str) -> bool:
-    """Return True when ``sha`` (or its patch) is already on ``branch``.
+def _cherry_unmerged_shas(worktree: Path, base_ref: str) -> set[str] | None:
+    """Return SHAs on ``HEAD`` whose patches are NOT already on ``base_ref``.
 
-    Checks SHA-reachability first (cheapest) then falls back to patch-id
-    equivalence via ``git cherry`` so a commit that was cherry-picked onto
-    ``branch`` with a different SHA is still detected as merged. Without
-    this, an orphan worktree branch keeps showing its original commit as
-    "pending" forever after the cherry-pick lands as a new SHA on master.
+    One ``git cherry <base_ref> HEAD`` run **in the worktree**: each commit
+    unique to HEAD is prefixed ``+`` (patch not on base) or ``-`` (a
+    patch-id-equivalent commit is already on base, e.g. a cherry-pick or
+    rebase landed it under a different SHA). Only the ``+`` set is returned.
+    A commit that's a SHA-identical ancestor of base doesn't appear at all —
+    correctly treated as merged, since only ``+`` means "still pending".
+
+    Runs in the worktree because that is the one repo where both sides
+    resolve: the session branch's objects and the shared integration ref
+    live in the managed clone the worktree is linked to. Returns None on
+    git failure so callers keep the conservative "everything still pending"
+    default rather than silently hiding commits.
     """
-    rc, _, _ = _git_output(
-        ["merge-base", "--is-ancestor", sha, f"refs/heads/{branch}"],
-        repo,
-        timeout=15,
-    )
-    if rc == 0:
-        return True
-    rc, out, _ = _git_output(
-        ["cherry", f"refs/heads/{branch}", sha, f"{sha}^"],
-        repo,
-        timeout=15,
-    )
+    rc, out, _ = _git_output(["cherry", base_ref, "HEAD"], worktree, timeout=30)
     if rc != 0:
-        return False
-    line = (out.splitlines() or [""])[0].strip()
-    return line.startswith("-")
-
-
-def _target_branch_merged_shas(
-    repo: Path,
-    branch: str,
-    head_sha: str,
-    candidates: list[str],
-) -> set[str]:
-    """Classify which of ``candidates`` are merged into ``branch``, in one call.
-
-    Replaces a per-SHA ``_target_branch_contains_commit`` loop (a
-    ``merge-base --is-ancestor`` plus a ``git cherry`` patch-id check per
-    commit) with a single ``git cherry <branch> <head_sha>``. ``git cherry``
-    lists every commit reachable from ``head_sha`` but not ``branch``,
-    prefixed ``+`` (patch not yet on branch) or ``-`` (patch-id equivalent
-    already on branch, e.g. a cherry-pick with a different SHA). A commit
-    that's a direct SHA-identical ancestor of ``branch`` doesn't appear in
-    the output at all (nothing unique to report) — also correctly
-    classified here as merged, since only ``+`` lines mean "still pending."
-
-    ``candidates`` must all be reachable from ``head_sha`` (e.g. the
-    ordered output of :func:`_worktree_commit_shas`, whose tip is
-    ``head_sha``). On any git failure, returns an empty set — the same
-    conservative "treat as still pending" default the old per-SHA loop
-    fell back to when a SHA/branch couldn't be resolved.
-    """
-    if not candidates:
-        return set()
-    rc, out, _ = _git_output(
-        ["cherry", f"refs/heads/{branch}", head_sha],
-        repo,
-        timeout=30,
-    )
-    if rc != 0:
-        return set()
-    still_pending: set[str] = set()
+        return None
+    unmerged: set[str] = set()
     for line in out.splitlines():
         marker, _, sha = line.strip().partition(" ")
         if marker == "+":
-            still_pending.add(sha.strip())
-    candidate_set = set(candidates)
-    return candidate_set - still_pending
+            unmerged.add(sha.strip())
+    return unmerged
 
 
 def _dashboard_pending_commit_shas(
@@ -1371,22 +1362,33 @@ def _dashboard_pending_commit_shas(
     repo_name: str,
     *,
     base_ref: str | None = None,
-    target_branch_and_head: tuple[str | None, str | None] | None = None,
 ) -> list[str]:
-    """Return worktree ahead SHAs that are not already merged into the target repo."""
+    """Return worktree ahead SHAs that are not already on the integration base.
+
+    ``rev-list`` gives the SHA-level ahead set; ``git cherry`` (patch-id)
+    then drops commits whose work already landed on the base under a
+    different SHA. Both run in the worktree against ``base_ref`` — the
+    session worktrees are linked worktrees of the managed clone, so the
+    integration ref they see is the clone's, refreshed from origin/host on
+    every session launch.
+
+    Earlier versions ran the patch-id check via ``git cherry`` in the host
+    checkout (``REPO_ROOT``) instead, which does not contain session-branch
+    objects: the command failed on unknown SHAs and the filter silently
+    no-opped, leaving already-merged commits listed forever. It was also
+    autonomy-only; running in the worktree makes the same logic valid for
+    every repo. Note ``git cherry`` never reports merge commits, so they
+    are filtered here too — matching :func:`_worktree_commits_ahead`, which
+    has always counted only cherry ``+`` lines.
+    """
+    base_ref = base_ref or _worktree_merge_base_ref(worktree)
     pending = _worktree_commit_shas(worktree, base_ref=base_ref)
-    if repo_name != "autonomy" or not pending:
+    if not pending or base_ref is None:
         return pending
-
-    target_branch, _target_head = (
-        target_branch_and_head if target_branch_and_head is not None
-        else _autonomy_target_branch_and_head()
-    )
-    if target_branch is None:
+    unmerged = _cherry_unmerged_shas(worktree, base_ref)
+    if unmerged is None:
         return pending
-
-    merged = _target_branch_merged_shas(REPO_ROOT, target_branch, pending[-1], pending)
-    return [sha for sha in pending if sha not in merged]
+    return [sha for sha in pending if sha in unmerged]
 
 
 def _worktree_clone_stale(
@@ -1664,14 +1666,12 @@ def _worktree_commits(
     repo_name: str,
     *,
     base_ref: str | None = None,
-    target_branch_and_head: tuple[str | None, str | None] | None = None,
 ) -> list[WorktreeCommit]:
     """Return dashboard-pending commit details for one worktree."""
     shas = _dashboard_pending_commit_shas(
         worktree,
         repo_name,
         base_ref=base_ref,
-        target_branch_and_head=target_branch_and_head,
     )
     if not shas:
         return []
@@ -1693,9 +1693,9 @@ def _workflow_resolved_commits(
     are computed separately from the physical branch and must not use this
     filtered subset as their source of truth.
 
-    The input list has already passed through ``_dashboard_pending_commit_shas``.
-    For autonomy this means git/patch-id merged commits are removed upstream, so
-    the resolver's ``git_merged_shas`` branch is exercised by DAO-level callers
+    The input list has already passed through ``_dashboard_pending_commit_shas``,
+    which removes git/patch-id merged commits for every repo, so the
+    resolver's ``git_merged_shas`` branch is exercised by DAO-level callers
     and future integrations that pass a merged set explicitly.
     """
     if not commits:
@@ -1825,8 +1825,15 @@ def scan_all_worktrees(
             is_dirty = True if dirty_files_or_none is None else bool(tracked_dirty)
             raw_commits = _worktree_commits(
                 repo_dir, repo_dir.name, base_ref=base_ref,
-                target_branch_and_head=target_branch_and_head,
             )
+            net_empty = bool(raw_commits) and _worktree_net_empty(
+                repo_dir, base_ref=base_ref,
+            )
+            if net_empty:
+                # Commits that cancel out (e.g. an add followed by its
+                # revert) leave nothing to land; listing them as pending
+                # only asks the operator to merge a no-op.
+                raw_commits = []
             commits = _workflow_resolved_commits(repo_dir.name, raw_commits)
             commits_ahead = len(commits)
             raw_commits_ahead = _worktree_commits_ahead(repo_dir, base_ref=base_ref)
@@ -1875,8 +1882,129 @@ def scan_all_worktrees(
                 cherry_pick_commit=cherry_pick_commit,
                 commits=commits,
                 dirty_files=dirty_files,
+                net_empty=net_empty,
             ))
 
+    return _suppress_cross_worktree_duplicates(out)
+
+
+def _duplicate_canonical_rank(row: WorktreeState) -> tuple[bool, bool, str]:
+    """Rank choosing which row keeps a commit listed by several rows.
+
+    Higher ranks win: the session that owns the branch (its own
+    ``session/<name>`` branch — the author, vs a review checkout), then a
+    live session over a dead one, then the most recent session (names are
+    date-encoded, so lexicographic order is chronological) — review
+    checkouts of an in-flight branch tend to be older than the session
+    still driving it.
+    """
+    owns_branch = row.branch == f"{SESSION_BRANCH_PREFIX}{row.session_name}"
+    return (owns_branch, row.session_live, row.session_name)
+
+
+def _pending_patch_ids(worktree: Path, shas: list[str]) -> dict[str, str]:
+    """Map each pending SHA to its stable patch-id.
+
+    One ``git log --no-walk --patch`` piped through ``git patch-id
+    --stable`` per row. SHAs whose patch-id can't be computed (empty
+    patches, git failure) are simply absent — callers fall back to the
+    SHA itself as the identity key.
+    """
+    if not shas:
+        return {}
+    rc, patches, _ = _git_output(
+        ["log", "--no-walk", "--patch", "--format=commit %H", *shas],
+        worktree,
+        timeout=60,
+    )
+    if rc != 0:
+        return {}
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(worktree), "patch-id", "--stable"],
+            input=patches,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if proc.returncode != 0:
+        return {}
+    out: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        pid, _, sha = line.strip().partition(" ")
+        if pid and sha:
+            out[sha.strip()] = pid
+    return out
+
+
+def _suppress_cross_worktree_duplicates(rows: list[WorktreeState]) -> list[WorktreeState]:
+    """List every pending change on exactly one row.
+
+    The same change shows up on several rows whenever a branch is checked
+    out in more than one worktree (review checkouts — identical SHAs) or
+    was rebased/copied across session branches (same patch, different
+    SHAs). Identity is therefore the patch-id, falling back to the SHA
+    when one can't be computed. Keep each ``(repo, patch)`` on one
+    canonical row (:func:`_duplicate_canonical_rank`) and move it to
+    ``duplicate_commits`` on the rest, so the Worktrees view counts
+    pending work once and rows that only mirror another row's commits
+    read as resolved.
+
+    Costs one extra ``git log --patch`` + ``git patch-id`` pair per row
+    that still has pending commits after the merged filter — and nothing
+    when at most one row does.
+    """
+    with_commits = [row for row in rows if row.commits]
+    if len(with_commits) < 2:
+        return rows
+
+    row_keys: dict[int, dict[str, tuple[str, str]]] = {}
+    for row in with_commits:
+        pids = _pending_patch_ids(row.worktree_path, [c.sha for c in row.commits])
+        row_keys[id(row)] = {
+            commit.sha: (row.repo_name, pids.get(commit.sha, commit.sha))
+            for commit in row.commits
+        }
+
+    canonical: dict[tuple[str, str], WorktreeState] = {}
+    for row in with_commits:
+        for key in row_keys[id(row)].values():
+            best = canonical.get(key)
+            if best is None or _duplicate_canonical_rank(row) > _duplicate_canonical_rank(best):
+                canonical[key] = row
+
+    out: list[WorktreeState] = []
+    for row in rows:
+        keys = row_keys.get(id(row), {})
+        dupes = [
+            commit for commit in row.commits
+            if canonical[keys[commit.sha]] is not row
+        ]
+        if not dupes:
+            out.append(row)
+            continue
+        kept = [commit for commit in row.commits if commit not in dupes]
+        commits_ahead = len(kept)
+        out.append(replace(
+            row,
+            commits=kept,
+            commits_ahead=commits_ahead,
+            ff_eligible=row.ff_eligible and commits_ahead > 0,
+            cherry_pick_eligible=row.cherry_pick_eligible and commits_ahead > 0,
+            cherry_pick_commit=row.cherry_pick_commit if commits_ahead > 0 else None,
+            duplicate_commits=[
+                WorktreeDuplicateRef(
+                    sha=commit.sha,
+                    short_sha=commit.short_sha,
+                    subject=commit.subject,
+                    of_session=canonical[keys[commit.sha]].session_name,
+                    of_repo=canonical[keys[commit.sha]].repo_name,
+                )
+                for commit in dupes
+            ],
+        ))
     return out
 
 

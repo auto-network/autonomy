@@ -180,6 +180,8 @@ WORKTREE_ROW_DEFAULTS: dict[str, Any] = {
     "target_branch": "main",
     "commits": [],
     "dirty_files": [],
+    "net_empty": False,
+    "duplicate_commits": [],
     # auto-ngis4 — see SESSION_DEFAULTS for context.
     "session_harness": None,
     "session_model": None,
