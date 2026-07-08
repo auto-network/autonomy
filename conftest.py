@@ -50,6 +50,21 @@ def _isolate_dashboard_browser_module(request):
     try:
         yield
     finally:
+        # Close the module's browser session. Without this every browser
+        # module leaked a live Chromium for the rest of the run (and across
+        # runs — the daemon outlives pytest): dozens of instances pile up,
+        # first runs pay a cold boot per module, and long sessions degrade
+        # until agent-browser commands start timing out.
+        import subprocess
+        try:
+            subprocess.run(
+                ["agent-browser", "close"],
+                capture_output=True,
+                timeout=15,
+                env={**os.environ, "AGENT_BROWSER_SESSION": session_name},
+            )
+        except Exception:
+            pass
         if previous is None:
             os.environ.pop("AGENT_BROWSER_SESSION", None)
         else:
