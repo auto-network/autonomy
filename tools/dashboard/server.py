@@ -112,7 +112,7 @@ from tools.dashboard.session_lifecycle_worker import (
 from tools.dashboard.worktree_monitor import worktree_monitor
 from tools.dashboard import session_trace
 from tools.dashboard.dao import auth_db, dashboard_db
-from tools.dashboard import sign_requests_routes
+from tools.dashboard import approvals_routes
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
     from tools.dashboard.dao import mock as dao_dispatch
@@ -4710,17 +4710,18 @@ async def api_session_get(request):
     # Read-side reconcile so a drifted/empty stored ID does not leak out
     # the session-detail surface (auto-4nr14 §A).
     resolved_source_id = dashboard_db.reconcile_session_graph_source_id(session)
-    # Is a commit from this session blocked awaiting the operator's signature?
-    # id (or None) — the viewer opens the sign dialog when set. Guarded so the
-    # session surface never breaks on a rendezvous-store hiccup.
+    # Is this session blocked awaiting an operator approval (e.g. a commit
+    # signature)? {id, kind} or None — the viewer opens the approval overlay
+    # when set. Guarded so the session surface never breaks on a
+    # rendezvous-store hiccup.
     try:
-        from tools.dashboard.dao import sign_requests as _sign_requests
-        commit_sign_pending = _sign_requests.pending_id_for_session(tmux_name)
+        from tools.dashboard.dao import approval_requests as _approvals
+        pending_approval = _approvals.pending_for_session(tmux_name)
     except Exception:
-        commit_sign_pending = None
+        pending_approval = None
     return JSONResponse({
         "session_id": session["tmux_name"],
-        "commit_sign_pending": commit_sign_pending,
+        "pending_approval": pending_approval,
         "session_uuid": session.get("session_uuid"),
         "graph_source_id": resolved_source_id or None,
         # The tmux_sessions transcript column is ``jsonl_path`` (the graph
@@ -15217,8 +15218,9 @@ routes = [
     *_build_plugin_routes(),
 
 
-    # Commit-signing rendezvous (agent shim <-> operator browser)
-    *sign_requests_routes.ROUTES,
+    # On-demand approval rendezvous (requester <-> operator browser),
+    # e.g. commit signing
+    *approvals_routes.ROUTES,
 
     # Static (catch-all — plugin static mounts above take precedence)
     Mount("/static", app=StaticFiles(directory=str(STATIC_DIR)), name="static"),

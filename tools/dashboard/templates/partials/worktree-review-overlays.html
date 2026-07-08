@@ -43,7 +43,7 @@
               </button>
               <button type="button"
                       class="h-12 rounded-2xl border border-white/10 px-5 text-sm font-semibold text-slate-300 disabled:opacity-50"
-                      :disabled="signing" @click="declineSign()" data-testid="sign-cancel-button">Decline</button>
+                      :disabled="signing" @click="declineApproval()" data-testid="sign-cancel-button">Decline</button>
             </div>
           </template>
           <template x-if="signPrompt">

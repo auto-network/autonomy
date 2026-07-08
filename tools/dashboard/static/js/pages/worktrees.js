@@ -1804,29 +1804,44 @@
         return window.openpgp;
       },
 
-      async openSignRequest(id) {
-        // Render a pending sign-request in THIS overlay, in sign mode.
-        this.signPassphrase = ''; this.signing = false; this.signError = null;
-        this.signPrompt = false; this.signRemember = false;
-        this.signHasRemembered = !!(await this._rememberedPassphrase());
+      // ── On-demand approvals ─────────────────────────────────────
+      // Per-kind handlers for /api/approvals requests — the ONLY place kinds
+      // differ on the client. Each entry renders the fetched request into
+      // overlay state; the chrome and Decline are kind-agnostic (declining is
+      // identical for every kind, so it lives in the shell).
+      _approvalKinds: {
+        commit_sign: {
+          async open(self, r) {
+            // Render the pending commit in THIS overlay, in sign mode.
+            self.signPassphrase = ''; self.signing = false; self.signError = null;
+            self.signPrompt = false; self.signRemember = false;
+            self.signHasRemembered = !!(await self._rememberedPassphrase());
+            const parsed = _parseCommitPayload(new TextDecoder().decode(_b64ToBytes(r.request.payload_b64)));
+            self.selectedCommit = {
+              row: { session_name: r.session, repo_name: r.request.repo, session_live: true },
+              commit: {
+                sha: null, subject: parsed.subject, body: parsed.body, author: parsed.author,
+                files: r.files || [], patch: r.patch || '',
+                stats: _commitStats({ files: r.files || [] }),
+              },
+              patchFiles: _patchIndex(r.patch || ''),
+              commitIndex: 0, position: 1, total: 1, pr: null,
+              signMode: true, approvalId: r.id, payloadB64: r.request.payload_b64,
+            };
+            self.showDiff = true;
+          },
+        },
+      },
+
+      async openApprovalRequest(id) {
         this.detailLoading = true;
         try {
-          const r = await (await fetch('/api/sign-requests/' + encodeURIComponent(id))).json();
-          const parsed = _parseCommitPayload(new TextDecoder().decode(_b64ToBytes(r.payload_b64)));
-          this.selectedCommit = {
-            row: { session_name: r.session, repo_name: r.repo, session_live: true },
-            commit: {
-              sha: null, subject: parsed.subject, body: parsed.body, author: parsed.author,
-              files: r.files || [], patch: r.patch || '',
-              stats: _commitStats({ files: r.files || [] }),
-            },
-            patchFiles: _patchIndex(r.patch || ''),
-            commitIndex: 0, position: 1, total: 1, pr: null,
-            signMode: true, signRequestId: id, payloadB64: r.payload_b64,
-          };
-          this.showDiff = true;
+          const r = await (await fetch('/api/approvals/' + encodeURIComponent(id))).json();
+          const kind = this._approvalKinds[r.kind];
+          if (!kind) throw new Error('unknown approval kind: ' + r.kind);
+          await kind.open(this, r);
         } catch (e) {
-          _toast('Could not load the sign request: ' + (e.message || e), 'error');
+          _toast('Could not load the approval request: ' + (e.message || e), 'error');
         } finally {
           this.detailLoading = false;
         }
@@ -1867,9 +1882,9 @@
           const bytes = _b64ToBytes(sc.payloadB64);   // sign the EXACT bytes
           const message = await openpgp.createMessage({ binary: bytes });
           const sig = await openpgp.sign({ message, signingKeys: priv, detached: true, format: 'armored' });
-          const resp = await fetch('/api/sign-requests/' + encodeURIComponent(sc.signRequestId) + '/signature', {
+          const resp = await fetch('/api/approvals/' + encodeURIComponent(sc.approvalId) + '/decision', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ armored_signature: sig }),
+            body: JSON.stringify({ approved: true, signature: sig }),
           });
           if (!resp.ok) throw new Error('the dashboard rejected the signature');
           this.signPrompt = false; this.selectedCommit = null;
@@ -1930,13 +1945,15 @@
         try { await this._idbOp('readwrite', (s) => s.delete('k')); } catch (e) { /* ignore */ }
       },
 
-      async declineSign() {
+      // Decline is identical for every approval kind, so it lives here in the
+      // shell rather than in the per-kind handlers.
+      async declineApproval() {
         const sc = this.selectedCommit;
-        if (!sc || !sc.signMode) return;
+        if (!sc || !sc.approvalId) return;
         try {
-          await fetch('/api/sign-requests/' + encodeURIComponent(sc.signRequestId) + '/signature', {
+          await fetch('/api/approvals/' + encodeURIComponent(sc.approvalId) + '/decision', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ armored_signature: '' }),
+            body: JSON.stringify({ approved: false }),
           });
         } catch (e) { /* best-effort */ }
         this.selectedCommit = null;
@@ -2517,11 +2534,11 @@
     return await window._worktreeReviewOverlay.openCommitOverlay(opts);
   };
 
-  window.openSignRequestOverlay = async function (id) {
-    if (!window._worktreeReviewOverlay || typeof window._worktreeReviewOverlay.openSignRequest !== 'function') {
+  window.openApprovalOverlay = async function (id) {
+    if (!window._worktreeReviewOverlay || typeof window._worktreeReviewOverlay.openApprovalRequest !== 'function') {
       return false;
     }
-    await window._worktreeReviewOverlay.openSignRequest(id);
+    await window._worktreeReviewOverlay.openApprovalRequest(id);
     return true;
   };
 })();
