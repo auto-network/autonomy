@@ -23,6 +23,8 @@ jira-read ENTERPRISE-8385          # cleaned ticket: summary, status, descriptio
                                    # comments, attachments — ADF already markdown
 jira-createmeta                    # ENTERPRISE/Bug creation metadata (defaults)
 jira-createmeta PROJ Story         # any project/issuetype
+jira-attachment 12345              # download an attachment by id (ids are in
+                                   # jira-read's attachments list); -o FILE to name it
 ```
 
 ### Writing (each pauses for operator approval)
@@ -31,6 +33,7 @@ jira-createmeta PROJ Story         # any project/issuetype
 jira-comment ENTERPRISE-8385 -f findings.md     # or: echo "..." | jira-comment KEY
 jira-confirm-plan ENTERPRISE-8385 -f plan.md    # sets the Confirm Plan field
 jira-create payload.json                        # create a ticket
+jira-attach ENTERPRISE-8385 repro.log           # upload an attachment (10MB cap)
 ```
 
 `jira-create` payload — the Jira fields object (bare or under `"fields"`);

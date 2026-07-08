@@ -1824,14 +1824,19 @@
                 action: 'Set ' + (req.field_name || req.field_id || 'field'),
               },
               create: { title: 'New Jira ticket', action: 'Create ticket' },
+              attach: { title: 'Jira attachment', action: 'Attach file' },
             };
             const op = ops[req.op] || { title: 'Jira write', action: 'Approve' };
+            const attachNote = req.op === 'attach'
+              ? req.filename + ' (' + ((req.size || 0) / 1024).toFixed(1) + ' KB, ' +
+                (req.mime_type || 'unknown type') + ')'
+              : '';
             self.approvalRequest = {
               id: r.id, kind: r.kind, session: r.session,
               title: op.title, actionLabel: op.action, op: req.op,
               target: req.key ||
                 ((req.fields || {}).project ? (req.fields.project.key || '') : ''),
-              bodyMarkdown: req.body_markdown || '',
+              bodyMarkdown: req.body_markdown || attachNote,
               fields: req.op === 'create' ? (req.fields || {}) : null,
             };
           },

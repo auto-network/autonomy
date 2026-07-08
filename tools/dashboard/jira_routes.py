@@ -12,14 +12,16 @@ result. Ops carried in the request JSON:
 - ``{"op": "set_field", "key", "field_name" | "field_id", "body_markdown"}``
   (e.g. Confirm Plan; the id is discovered via editmeta at execution time)
 - ``{"op": "create", "fields": {...}}``
+- ``{"op": "attach", "key", "filename", "content_b64", "mime_type"?}``
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from agents.capabilities.jira.backend import api
@@ -56,6 +58,19 @@ async def get_createmeta(request: Request) -> JSONResponse:
     return JSONResponse(meta)
 
 
+async def get_attachment(request: Request) -> Response:
+    """GET /api/jira/attachment/{id} -> the attachment bytes (download runs
+    host-side; the signed media redirect never reaches the agent)."""
+    attachment_id = request.path_params["id"]
+    try:
+        content, filename, mime_type = await asyncio.to_thread(
+            api.get_attachment, _cfg(), attachment_id)
+    except api.JiraError as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+    return Response(content, media_type=mime_type, headers={
+        "Content-Disposition": f'attachment; filename="{filename}"'})
+
+
 async def get_probe(request: Request) -> JSONResponse:
     """GET /api/jira/probe -> config + auth reachability for the capability."""
     try:
@@ -83,6 +98,11 @@ async def _execute_jira_write(row: dict) -> dict:
                                 req.get("body_markdown", ""))
         elif op == "create":
             out = api.create_issue(cfg, req.get("fields", {}))
+        elif op == "attach":
+            out = api.add_attachment(
+                cfg, req["key"], req.get("filename", "attachment"),
+                base64.b64decode(req.get("content_b64", "")),
+                req.get("mime_type") or "application/octet-stream")
         else:
             return {"ok": False, "error": f"unknown jira_write op: {op}"}
         return {"ok": True, **out}
@@ -96,5 +116,6 @@ approvals_routes.EXECUTORS["jira_write"] = _execute_jira_write
 ROUTES = [
     Route("/api/jira/issue/{key}", get_issue, methods=["GET"]),
     Route("/api/jira/createmeta", get_createmeta, methods=["GET"]),
+    Route("/api/jira/attachment/{id}", get_attachment, methods=["GET"]),
     Route("/api/jira/probe", get_probe, methods=["GET"]),
 ]

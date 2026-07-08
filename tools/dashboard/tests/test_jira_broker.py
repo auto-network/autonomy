@@ -183,6 +183,40 @@ def test_error_carries_jira_detail_never_credentials(jira_env, monkeypatch):
     assert "sekret-token" not in str(exc.value)
 
 
+def test_get_attachment_follows_signed_redirect(jira_env, monkeypatch):
+    """Jira's content endpoint 303s to a signed media URL on another host —
+    the broker follows it and returns the bytes + metadata."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rest/api/3/attachment/777":
+            return httpx.Response(200, json={"filename": "repro.log",
+                                             "mimeType": "text/plain"})
+        if request.url.path == "/rest/api/3/attachment/content/777":
+            return httpx.Response(303, headers={
+                "Location": "https://media.test/signed/777"})
+        if request.url.host == "media.test":
+            assert "authorization" not in [k.lower() for k in request.headers]
+            return httpx.Response(200, content=b"log line\n")
+        raise AssertionError(f"unexpected call: {request.url}")
+
+    _mock(monkeypatch, handler)
+    content, filename, mime = api.get_attachment(api.JiraConfig.from_env(), "777")
+    assert (content, filename, mime) == (b"log line\n", "repro.log", "text/plain")
+
+
+def test_add_attachment_multipart_with_xsrf_header(jira_env, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/rest/api/3/issue/ENT-1/attachments"
+        assert request.headers.get("X-Atlassian-Token") == "no-check"
+        assert b"repro.log" in request.content and b"log line" in request.content
+        return httpx.Response(200, json=[{"id": "777", "filename": "repro.log",
+                                          "size": 9}])
+
+    _mock(monkeypatch, handler)
+    out = api.add_attachment(api.JiraConfig.from_env(), "ENT-1", "repro.log",
+                             b"log line\n", "text/plain")
+    assert out == {"id": "777", "filename": "repro.log", "size": 9}
+
+
 # ── routes + the jira_write executor on the approval rendezvous ──
 
 
@@ -291,6 +325,54 @@ def test_jira_write_set_field_discovers_id_and_sends_adf(jira_env, monkeypatch):
             assert result["execution"] == {"ok": True, "field_id": "customfield_10153"}
             assert ("GET", "/rest/api/3/issue/ENTERPRISE-8385/editmeta") in seen
             assert ("PUT", "/rest/api/3/issue/ENTERPRISE-8385") in seen
+
+    asyncio.run(scenario())
+
+
+def test_attachment_download_route(jira_env, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/attachment/777"):
+            return httpx.Response(200, json={"filename": "repro.log",
+                                             "mimeType": "text/plain"})
+        return httpx.Response(200, content=b"log line\n")
+
+    _mock(monkeypatch, handler)
+    client = TestClient(_app())
+    resp = client.get("/api/jira/attachment/777")
+    assert resp.status_code == 200
+    assert resp.content == b"log line\n"
+    assert 'filename="repro.log"' in resp.headers["content-disposition"]
+
+
+def test_jira_write_attach_flow(jira_env, monkeypatch):
+    import base64 as b64
+    uploaded = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        uploaded["path"] = request.url.path
+        uploaded["content"] = request.content
+        return httpx.Response(200, json=[{"id": "9", "filename": "repro.log",
+                                          "size": 9}])
+
+    _mock(monkeypatch, handler)
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=_app())
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://t") as c:
+            r = await c.post("/api/approvals", json={
+                "kind": "jira_write", "session": "auto-1",
+                "request": {"op": "attach", "key": "ENT-1",
+                            "filename": "repro.log", "size": 9,
+                            "mime_type": "text/plain",
+                            "content_b64": b64.b64encode(b"log line\n").decode()}})
+            rid = r.json()["id"]
+            await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
+            result = (await c.get(f"/api/approvals/{rid}?wait=10")).json()["result"]
+            assert result["execution"] == {"ok": True, "id": "9",
+                                           "filename": "repro.log", "size": 9}
+            assert uploaded["path"] == "/rest/api/3/issue/ENT-1/attachments"
+            assert b"log line" in uploaded["content"]
 
     asyncio.run(scenario())
 
