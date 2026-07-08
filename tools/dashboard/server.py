@@ -6462,7 +6462,7 @@ async def api_session_create(request):
         )
         if not _SESSION_LIFECYCLE_WORKER.try_enqueue(job):
             reason = "session lifecycle queue is full"
-            SessionLifecycleStateWriter().fail(
+            _SESSION_LIFECYCLE_WORKER.state_writer.fail(
                 tmux_name,
                 phase="requested",
                 reason=reason,
@@ -15482,6 +15482,20 @@ async def _on_startup():
     # off-loop thread that owns workspace start/stop/retry. It sits idle until
     # api_session_create is rewired to enqueue — starting it now is additive and
     # lets the create cutover land as a separate, verifiable step.
+    # Every lifecycle transition broadcasts the registry so the session
+    # cards track the worker's states live — without this the chip only
+    # moved when some unrelated event happened to broadcast.
+    _lifecycle_loop = asyncio.get_running_loop()
+
+    def _lifecycle_transition_hook(_transition) -> None:
+        try:
+            asyncio.run_coroutine_threadsafe(
+                session_monitor._broadcast_registry(), _lifecycle_loop,
+            )
+        except Exception:
+            logger.debug("session_lifecycle: transition broadcast failed", exc_info=True)
+
+    _SESSION_LIFECYCLE_WORKER.state_writer.set_transition_hook(_lifecycle_transition_hook)
     _SESSION_LIFECYCLE_WORKER.start()
     logger.info("session_lifecycle: worker started from _on_startup (idle until create enqueues)")
     # Recover rows a restart froze mid-launch — must run before traffic so

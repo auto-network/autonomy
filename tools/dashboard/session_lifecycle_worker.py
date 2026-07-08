@@ -96,6 +96,17 @@ class SessionLifecycleStateWriter:
     ) -> None:
         self._on_transition = on_transition
 
+    def set_transition_hook(
+        self, hook: Callable[[LifecycleTransition], None] | None,
+    ) -> None:
+        """Install the transition observer after construction.
+
+        The worker and its writer are built at import time, but the hook
+        needs the running event loop (it schedules the registry SSE
+        broadcast) — _on_startup wires it once the loop exists.
+        """
+        self._on_transition = hook
+
     def set_state(
         self,
         tmux_name: str,
@@ -195,6 +206,16 @@ class SessionLifecycleWorker:
         self._name = name
         self._thread: threading.Thread | None = None
         self._stop_requested = threading.Event()
+
+    @property
+    def state_writer(self) -> SessionLifecycleStateWriter:
+        """The single lifecycle state writer this worker drives.
+
+        Request handlers that must write lifecycle state outside a job
+        (e.g. the enqueue-failed 503 path) go through this instance so the
+        transition hook fires for every write.
+        """
+        return self._state_writer
 
     @property
     def is_running(self) -> bool:
