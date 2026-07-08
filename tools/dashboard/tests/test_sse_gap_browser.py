@@ -204,7 +204,7 @@ def _start_server(fixture_path, events_path, port):
     return proc
 
 
-def _wait_for_server(port, timeout=10.0):
+def _wait_for_server(port, timeout=30.0):
     """Poll until server responds."""
     import http.client
     deadline = time.monotonic() + timeout

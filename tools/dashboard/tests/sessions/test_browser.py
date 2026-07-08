@@ -112,7 +112,10 @@ class SessionsTestHarness:
             env=env, cwd=repo_root,
         )
         import httpx
-        for _ in range(20):
+        # 30s window: uvicorn imports the full server module; under 8-way
+        # xdist contention plus per-module Chromium cold boots, 10s is
+        # routinely exceeded on a loaded machine.
+        for _ in range(60):
             try:
                 if httpx.get(f"http://localhost:{TEST_PORT}/sessions", timeout=1).status_code == 200:
                     return

@@ -92,7 +92,10 @@ def start_mock_server(
         stderr=subprocess.PIPE,
     )
 
-    deadline = time.time() + 8
+    # 30s window: uvicorn imports the full server module; under 8-way xdist
+    # contention plus per-module Chromium cold boots, 8s is routinely
+    # exceeded on a loaded machine.
+    deadline = time.time() + 30
     ready = False
     while time.time() < deadline:
         try:
