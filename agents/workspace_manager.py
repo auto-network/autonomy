@@ -525,7 +525,7 @@ def prepare_session_mounts(
                 worktree,
                 session_name=session_name,
                 repo_slug=_repo_slug,
-                org=getattr(workspace, "org", None),
+                org=getattr(workspace, "graph_project", None),
                 workspace_id=getattr(workspace, "workspace_id", None)
                 or getattr(workspace, "id", None),
             )
