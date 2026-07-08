@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,15 @@ logger = logging.getLogger(__name__)
 
 _DB_PATH = Path(os.environ.get("DASHBOARD_DB", str(Path(__file__).parents[3] / "data" / "dashboard.db")))
 _conn: sqlite3.Connection | None = None
+# Thread that created ``_conn`` (init_db). A sqlite3 connection must not be
+# driven by two threads concurrently — check_same_thread=False only disables
+# the safety check, it doesn't make the handle thread-safe, and concurrent
+# use surfaces as sporadic "InterfaceError: bad parameter or other API
+# misuse". Threads other than the owner get their own handle via
+# ``_thread_local`` in get_conn().
+_conn_owner: int | None = None
+_active_path: Path | None = None
+_thread_local = threading.local()
 
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS tmux_sessions (
@@ -161,10 +171,12 @@ def _backfill_new_columns(conn: sqlite3.Connection) -> None:
 
 def init_db(db_path: Path | None = None) -> None:
     """Initialise dashboard.db and create schema. Idempotent."""
-    global _conn
+    global _conn, _conn_owner, _active_path
     path = db_path or _DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     _conn = sqlite3.connect(str(path), check_same_thread=False)
+    _conn_owner = threading.get_ident()
+    _active_path = path
     _conn.row_factory = sqlite3.Row
     _conn.execute("PRAGMA journal_mode=WAL")
     _conn.execute("PRAGMA busy_timeout=5000")
@@ -333,7 +345,28 @@ def get_conn() -> sqlite3.Connection:
     if _conn is None:
         init_db()
         assert _conn is not None
-        return _conn
+    if threading.get_ident() != _conn_owner:
+        # Never hand the shared handle to a different thread — concurrent
+        # execute() on one sqlite3 connection raises sporadic
+        # InterfaceError. Give each thread its own handle to the active DB
+        # (WAL mode makes multi-connection access safe); keyed by path so a
+        # re-init against a different file invalidates stale handles.
+        tconn = getattr(_thread_local, "conn", None)
+        if tconn is not None and getattr(_thread_local, "path", None) == _active_path:
+            try:
+                tconn.execute("SELECT 1")
+                return tconn
+            except sqlite3.Error:
+                try:
+                    tconn.close()
+                except sqlite3.Error:
+                    pass
+        tconn = sqlite3.connect(str(_active_path), check_same_thread=False)
+        tconn.row_factory = sqlite3.Row
+        tconn.execute("PRAGMA busy_timeout=5000")
+        _thread_local.conn = tconn
+        _thread_local.path = _active_path
+        return tconn
     try:
         _conn.execute("SELECT 1")
     except sqlite3.Error:
