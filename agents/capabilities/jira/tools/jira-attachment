@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Usage: jira-attachment ATTACHMENT_ID [-o OUTPUT_FILE]
+# Downloads an attachment (ids are in jira-read's attachments list). The
+# download runs host-side; default output name comes from the attachment.
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/_jira_lib.sh"
+
+ID="${1:-}"
+[ -n "$ID" ] || jira_fail "usage: jira-attachment ATTACHMENT_ID [-o OUTPUT_FILE]"
+OUT=""
+[ "${2:-}" = "-o" ] && OUT="${3:-}"
+
+tmp="$(mktemp)"; hdr="$(mktemp)"
+trap 'rm -f "$tmp" "$hdr"' EXIT
+status="$(curl -sk -D "$hdr" -w '%{http_code}' -o "$tmp" "$DASH/api/jira/attachment/$ID")"
+if [ "$status" != "200" ]; then
+  msg="$(python3 -c 'import sys,json
+try: print(json.load(open(sys.argv[1])).get("error",""))
+except Exception: print("")' "$tmp" 2>/dev/null)"
+  jira_fail "jira-attachment: download failed (HTTP $status)${msg:+: $msg}"
+fi
+if [ -z "$OUT" ]; then
+  OUT="$(grep -io 'filename="[^"]*"' "$hdr" | head -1 | sed 's/.*="\(.*\)"/\1/')"
+  OUT="${OUT:-attachment-$ID}"
+fi
+mv "$tmp" "$OUT"
+trap 'rm -f "$hdr"' EXIT
+echo "$OUT"

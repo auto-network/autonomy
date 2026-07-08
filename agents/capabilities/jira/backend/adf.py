@@ -363,6 +363,7 @@ def process_ticket(raw_data: dict[str, Any]) -> dict[str, Any]:
     attachments = []
     for attachment in fields.get("attachment", []):
         attachments.append({
+            "id": attachment.get("id"),
             "filename": attachment.get("filename"),
             "created": attachment.get("created"),
             "size": attachment.get("size"),

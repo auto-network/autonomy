@@ -61,10 +61,11 @@ class JiraConfig:
 
 
 def _client(cfg: JiraConfig) -> httpx.Client:
+    # No default Content-Type: httpx sets application/json for json= bodies
+    # and the multipart boundary for files= bodies (attachment upload).
     return httpx.Client(
         base_url=cfg.base_url,
         auth=(cfg.email, cfg.token),
-        headers={"Content-Type": "application/json"},
         timeout=30.0,
         transport=_transport,
     )
@@ -180,6 +181,38 @@ def create_issue(cfg: JiraConfig, fields: dict[str, Any]) -> dict[str, Any]:
         body = resp.json()
     return {"key": body.get("key"), "id": body.get("id"),
             "url": f"{cfg.base_url}/browse/{body.get('key')}"}
+
+
+def get_attachment(cfg: JiraConfig, attachment_id: str) -> tuple[bytes, str, str]:
+    """Download attachment content -> (bytes, filename, mime_type).
+
+    Jira's content endpoint 303-redirects to a signed media URL on another
+    host; redirects are followed for this call only (the signed URL carries
+    its own auth, and httpx drops basic auth on cross-origin hops)."""
+    with _client(cfg) as c:
+        meta_resp = c.get(f"/rest/api/3/attachment/{attachment_id}")
+        _check(meta_resp, f"attachment {attachment_id} metadata")
+        meta = meta_resp.json()
+        resp = c.get(f"/rest/api/3/attachment/content/{attachment_id}",
+                     follow_redirects=True)
+        _check(resp, f"attachment {attachment_id} content")
+        return (resp.content,
+                meta.get("filename") or f"attachment-{attachment_id}",
+                meta.get("mimeType") or "application/octet-stream")
+
+
+def add_attachment(cfg: JiraConfig, key: str, filename: str, content: bytes,
+                   mime_type: str = "application/octet-stream") -> dict[str, Any]:
+    """Upload an attachment (multipart; Jira requires the XSRF opt-out header)."""
+    with _client(cfg) as c:
+        resp = c.post(f"/rest/api/3/issue/{key}/attachments",
+                      headers={"X-Atlassian-Token": "no-check"},
+                      files={"file": (filename, content, mime_type)})
+        _check(resp, f"attach {filename} to {key}")
+        body = resp.json()
+    first = body[0] if isinstance(body, list) and body else {}
+    return {"id": first.get("id"), "filename": first.get("filename"),
+            "size": first.get("size")}
 
 
 def probe(cfg: JiraConfig) -> dict[str, Any]:
