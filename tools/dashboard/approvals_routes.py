@@ -15,9 +15,6 @@ Nothing here polls. The operator's viewer is notified over the SSE event bus
 session detail remains the durable field for reconnect recovery), and the
 requester blocks on ``GET /api/approvals/{id}?wait=N`` — held open server-side
 until the decision lands or the window elapses.
-
-This fully replaces the signing-specific /api/sign-requests surface — no legacy
-endpoints remain; commit signing is ``kind=commit_sign`` on these routes.
 """
 
 from __future__ import annotations
