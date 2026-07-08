@@ -12,7 +12,7 @@ OUT=""
 
 tmp="$(mktemp)"; hdr="$(mktemp)"
 trap 'rm -f "$tmp" "$hdr"' EXIT
-status="$(curl -sk -D "$hdr" -w '%{http_code}' -o "$tmp" "$DASH/api/jira/attachment/$ID")"
+status="$(curl -sk -D "$hdr" -w '%{http_code}' -o "$tmp" "$DASH/api/jira/attachment/$ID?org=$ORG")"
 if [ "$status" != "200" ]; then
   msg="$(python3 -c 'import sys,json
 try: print(json.load(open(sys.argv[1])).get("error",""))

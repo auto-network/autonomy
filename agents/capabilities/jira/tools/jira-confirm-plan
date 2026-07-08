@@ -16,11 +16,11 @@ trap 'rm -f "$body_file" "$req_file"' EXIT
 jira_read_body "$@" > "$body_file"
 [ -s "$body_file" ] || jira_fail "jira-confirm-plan: empty body"
 
-python3 - "$SESSION" "$KEY" "$body_file" > "$req_file" <<'PY'
+python3 - "$SESSION" "$KEY" "$body_file" "$ORG" > "$req_file" <<'PY'
 import json, sys
-session, key, path = sys.argv[1:4]
+session, key, path, org = sys.argv[1:5]
 print(json.dumps({"kind": "jira_write", "session": session, "request": {
-    "op": "set_field", "key": key, "field_name": "Confirm Plan",
+    "op": "set_field", "key": key, "org": org, "field_name": "Confirm Plan",
     "body_markdown": open(path).read()}}))
 PY
 jira_approval_wait "$req_file"
