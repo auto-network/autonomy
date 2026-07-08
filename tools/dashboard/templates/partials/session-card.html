@@ -112,6 +112,7 @@
            itself is now a menu entry under this button, not a separate green button. -->
       <template x-if="s.org">
         <button class="sc-org sc-actions"
+                :class="s.org.favicon ? 'sc-org-favicon' : ''"
                 :style="s.org.favicon ? '' : `background:${s.org.color}`"
                 :title="s.org.resolved ? s.org.name : ('legacy: ' + (s.project || 'unknown'))"
                 :aria-label="(typeof showSessionActions === 'function') ? 'Session actions' : ('Org: ' + s.org.name)"
@@ -220,6 +221,7 @@
       </span>
       <template x-if="s.org">
         <button class="sc-org sc-actions"
+                :class="s.org.favicon ? 'sc-org-favicon' : ''"
                 :style="s.org.favicon ? '' : `background:${s.org.color}`"
                 :title="s.org.resolved ? s.org.name : ('legacy: ' + (s.project || 'unknown'))"
                 :aria-label="(typeof showSessionActions === 'function') ? 'Session actions' : ('Org: ' + s.org.name)"

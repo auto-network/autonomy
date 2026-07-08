@@ -113,6 +113,17 @@
   user-select: none;
 }
 .sc-org-img { width: 100%; height: 100%; object-fit: cover; }
+/* Real favicons carry their own artwork edge-to-edge (e.g. dynbench's
+   D/B logo reaches into the corners) — the 50% circle mask above chops
+   off exactly the parts of the mark that live near the corners. Only
+   the generated-initial fallback needs the circular badge treatment;
+   a favicon should render close to whole, so drop the mask down to a
+   light squircle and let object-fit:contain avoid cropping non-square
+   source art. */
+.sc-org-favicon {
+  border-radius: 4px;
+}
+.sc-org-favicon .sc-org-img { object-fit: contain; }
 /* Grid place-items handles centering independent of font baseline, so
    no per-glyph offset hack. */
 /* SVG variant hard-codes its own 16x16 box on the tag so it renders

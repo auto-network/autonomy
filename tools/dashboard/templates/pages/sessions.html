@@ -19,6 +19,7 @@
               @click="orgFilterOpen = !orgFilterOpen"
               data-testid="org-filter-toggle">
         <span class="sc-org" style="width:14px;height:14px"
+              :class="orgFilterPicked && orgFilterPicked.favicon ? 'sc-org-favicon' : ''"
               :style="orgFilterPicked && !orgFilterPicked.favicon ? `background:${orgFilterPicked.color}` : (orgFilterPicked ? '' : 'background:#2a3441')">
           <template x-if="orgFilterPicked && orgFilterPicked.favicon">
             <img class="sc-org-img" :src="orgFilterPicked.favicon" :alt="orgFilterPicked.name">
@@ -53,7 +54,9 @@
                @click="pickOrgFilter(o.slug)"
                :data-testid="'org-filter-option-' + o.slug">
             <span class="flex items-center gap-2">
-              <span class="sc-org" style="width:14px;height:14px" :style="o.favicon ? '' : `background:${o.color}`">
+              <span class="sc-org" style="width:14px;height:14px"
+                    :class="o.favicon ? 'sc-org-favicon' : ''"
+                    :style="o.favicon ? '' : `background:${o.color}`">
                 <template x-if="!o.favicon">
                   <span class="sc-org-initial" style="font-size:9px;line-height:14px" x-text="o.initial"></span>
                 </template>
@@ -92,6 +95,7 @@
                  :style="`color:${group.org.color}`"
                  data-testid="org-header">
               <span class="sc-org"
+                    :class="group.org.favicon ? 'sc-org-favicon' : ''"
                     :style="group.org.favicon ? '' : `background:${group.org.color}`"
                     :title="group.org.resolved ? group.org.name : 'legacy / unresolved'">
                 <template x-if="!group.org.favicon">
