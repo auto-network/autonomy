@@ -335,6 +335,13 @@
     Alpine.data('worktreesPage', (opts) => ({
       _mode: (opts && opts.mode) || 'page',
       rows: [],
+      // Org scoping: the page shows exactly one organization at a time
+      // (no "all" mode). ``orgs`` comes from /api/worktrees/orgs;
+      // ``selectedOrg`` persists across visits. Until an org is chosen
+      // the page shows the org picker and fetches no rows.
+      orgs: [],
+      selectedOrg: '',
+      orgsLoading: true,
       loading: true,
       refreshing: false,
       // Per-row force-refresh state for the review overlay's Refresh
@@ -479,12 +486,29 @@
           });
       },
 
-      get autonomyCommitCount() {
-        return this.commitItems.filter(item => this.supportsDashboardMerge(item.row)).length;
-      },
-
       get uncommittedChangesCount() {
         return this.rows.filter(row => row.is_dirty).length;
+      },
+
+      // ── PRs view ─────────────────────────────────────────────────
+      // One entry per row that has linked PRs; rows with pending
+      // commits but no fetched PR state surface separately so the
+      // operator can pull their PR status on demand.
+      get prStacks() {
+        return this.rows
+          .filter(row => this.rowPrs(row).length > 0)
+          .map(row => ({ row, prs: this.rowPrs(row) }))
+          .sort((a, b) => (b.prs.length - a.prs.length)
+            || (a.row.session_name || '').localeCompare(b.row.session_name || ''));
+      },
+
+      get prUnfetchedRows() {
+        return this.rows.filter(row =>
+          !row.source_control && this.commitList(row).length > 0);
+      },
+
+      get selectedOrgIdentity() {
+        return this.orgs.find(o => o.slug === this.selectedOrg) || null;
       },
 
       rowKey(row) {
@@ -514,6 +538,17 @@
       },
 
       rowOrg(row) {
+        // Server-resolved org identity (session → workspace → org
+        // cascade); the repo_name fallback covers rows from before the
+        // field existed.
+        const org = row && row.org;
+        if (org && org.slug) {
+          return {
+            name: org.name || org.slug,
+            initial: org.initial || '?',
+            color: org.color || '#64748b',
+          };
+        }
         const repo = (row && row.repo_name) || '';
         if (repo === 'autonomy') {
           return { name: 'Autonomy', initial: 'A', color: '#6366f1' };
@@ -523,6 +558,46 @@
         }
         const initial = repo ? repo.charAt(0).toUpperCase() : '?';
         return { name: repo || 'Unknown', initial, color: '#64748b' };
+      },
+
+      // ── org scoping ──────────────────────────────────────────────
+      async loadOrgs() {
+        this.orgsLoading = true;
+        try {
+          const resp = await fetch('/api/worktrees/orgs');
+          this.orgs = await _jsonOrError(resp) || [];
+          if (this.selectedOrg && !this.orgs.some(o => o.slug === this.selectedOrg)) {
+            this.selectedOrg = '';
+          }
+          // "Choose an org" only means something when there is a choice:
+          // with exactly one org, auto-select it instead of showing a
+          // one-button picker.
+          if (!this.selectedOrg && this.orgs.length === 1) {
+            this.selectedOrg = this.orgs[0].slug;
+            try { localStorage.setItem('worktrees.org', this.selectedOrg); } catch (e) { /* private mode */ }
+          }
+        } catch (err) {
+          this.error = err.message || String(err);
+        } finally {
+          this.orgsLoading = false;
+        }
+      },
+
+      setOrg(slug) {
+        if (!slug || slug === '__none__') return;
+        this.selectedOrg = slug;
+        try { localStorage.setItem('worktrees.org', slug); } catch (e) { /* private mode */ }
+        this.rows = [];
+        this.loading = true;
+        this.refresh(false);
+      },
+
+      _restoreOrg() {
+        try {
+          this.selectedOrg = localStorage.getItem('worktrees.org') || '';
+        } catch (e) {
+          this.selectedOrg = '';
+        }
       },
 
       // ── source_control / autonomy/github capability bridge ────────
@@ -1684,13 +1759,20 @@
 
       async refresh(manual, options) {
         const opts = options || {};
+        if (!this.selectedOrg) {
+          // No org chosen yet — nothing to fetch; the picker is showing.
+          this.loading = false;
+          return false;
+        }
+        const orgQuery = '?org=' + encodeURIComponent(this.selectedOrg);
         if (manual) this.refreshing = true;
         this.error = '';
         try {
           const resp = manual
-            ? await fetch('/api/worktrees/refresh', { method: 'POST' })
-            : await fetch('/api/worktrees');
+            ? await fetch('/api/worktrees/refresh' + orgQuery, { method: 'POST' })
+            : await fetch('/api/worktrees' + orgQuery);
           this.rows = _normalizeRows(await _jsonOrError(resp));
+          if (manual) this.loadOrgs(); // keep dropdown counts fresh; not awaited
           this.syncOverlayRows();
           this.lastUpdated = new Date().toLocaleTimeString();
           this.queueBranchLayouts();
@@ -2480,7 +2562,8 @@
           window._worktreeReviewOverlay = this;
           this.loading = false;
         } else {
-          this.refresh(false).then(() => this._handleDeeplink());
+          this._restoreOrg();
+          this.loadOrgs().then(() => this._initialLoad());
         }
         // Bind the agent-→dashboard rebase status channel. Failures
         // inside the bind log + return — the page still works without
@@ -2534,6 +2617,33 @@
       // dirty-files when there are no commits. Multi-repo sessions:
       // take the first matching row; the operator can hop to
       // siblings via the in-page nav.
+      async _initialLoad() {
+        // Deeplinks (?session=<tmux>) must work regardless of which org
+        // is selected: resolve the target session's org first, switch
+        // to it, then load. Without a deeplink, load the persisted org
+        // or fall through to the picker.
+        const params = new URLSearchParams(window.location.search);
+        const target = params.get('session');
+        if (target) {
+          try {
+            const resp = await fetch('/api/worktrees');
+            const all = _normalizeRows(await _jsonOrError(resp));
+            const match = all.find((r) => r.session_name === target);
+            const slug = match && match.org && match.org.slug;
+            if (slug && slug !== this.selectedOrg) {
+              this.selectedOrg = slug;
+              try { localStorage.setItem('worktrees.org', slug); } catch (e) { /* private mode */ }
+            }
+          } catch (err) { /* fall through to the normal load */ }
+        }
+        if (!this.selectedOrg) {
+          this.loading = false;
+          return;
+        }
+        await this.refresh(false);
+        await this._handleDeeplink();
+      },
+
       async _handleDeeplink() {
         const params = new URLSearchParams(window.location.search);
         const target = params.get('session');

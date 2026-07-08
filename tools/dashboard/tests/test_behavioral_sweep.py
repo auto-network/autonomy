@@ -5060,7 +5060,9 @@ class TestWorktreesPageBehavior:
         assert c.get("refresh_label") == "Refresh", (
             f"Refresh button rendered oddly: {c.get('refresh_label')!r}"
         )
-        assert c.get("summary_counts") == ["6", "2", "2"], (
+        # Org-scoped hero stats: worktrees / commits / uncommitted changes
+        # (the sweep fixture is single-org, so the page auto-selects it).
+        assert c.get("summary_counts") == ["4", "6", "2"], (
             f"Unexpected summary counts: {c.get('summary_counts')}"
         )
 

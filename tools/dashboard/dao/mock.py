@@ -182,6 +182,15 @@ WORKTREE_ROW_DEFAULTS: dict[str, Any] = {
     "dirty_files": [],
     "net_empty": False,
     "duplicate_commits": [],
+    "org": {
+        "slug": "autonomy",
+        "name": "Autonomy Network",
+        "byline": "",
+        "color": "#6C63FF",
+        "favicon": None,
+        "initial": "A",
+        "resolved": True,
+    },
     # auto-ngis4 — see SESSION_DEFAULTS for context.
     "session_harness": None,
     "session_model": None,

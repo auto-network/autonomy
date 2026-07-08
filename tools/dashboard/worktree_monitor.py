@@ -1149,7 +1149,12 @@ class WorktreeMonitor:
         """
         self._terminal_notifier = notifier
 
-    async def refresh(self, *, force_capabilities: bool = False) -> list[WorktreeState]:
+    async def refresh(
+        self,
+        *,
+        force_capabilities: bool = False,
+        session_filter: Callable[[str], bool] | None = None,
+    ) -> list[WorktreeState]:
         """Force a scan and replace the cache.
 
         ``force_capabilities=True`` bypasses the per-row TTL and any
@@ -1158,25 +1163,42 @@ class WorktreeMonitor:
         operator-facing top-level refresh now passes the default
         (local-git only) and uses :meth:`refresh_one` for scoped
         operator-explicit fetches.
+
+        ``session_filter`` scopes the git sweep to matching session
+        names (the org-scoped worktrees page refresh); non-matching
+        sessions keep their cached rows instead of being rescanned.
         """
         if self._lock is None:
             self._lock = asyncio.Lock()
         async with self._lock:
             sweep_start = time.monotonic()
             calls_before = git_call_count()
-            rows = await asyncio.to_thread(scan_all_worktrees)
+            if session_filter is None:
+                rows = await asyncio.to_thread(scan_all_worktrees)
+            else:
+                rows = await asyncio.to_thread(
+                    lambda: scan_all_worktrees(session_filter=session_filter)
+                )
             sweep_seconds = time.monotonic() - sweep_start
             git_calls = git_call_count() - calls_before
-            self._cache = rows
+            if session_filter is not None:
+                kept = [
+                    row for row in self._cache
+                    if not session_filter(row.session_name)
+                ]
+                self._cache = kept + rows
+            else:
+                self._cache = rows
             live_count = sum(1 for row in rows if row.session_live)
             logger.info(
-                "worktree_monitor: sweep took %.2fs rows=%d live=%d git_calls=%d",
+                "worktree_monitor: sweep took %.2fs rows=%d live=%d git_calls=%d%s",
                 sweep_seconds, len(rows), live_count, git_calls,
+                " (scoped)" if session_filter is not None else "",
             )
             await self._refresh_source_control(
                 rows, force_capabilities=force_capabilities,
             )
-            return list(rows)
+            return list(self._cache)
 
     async def refresh_one(
         self, session_name: str, repo_name: str,
@@ -1201,8 +1223,16 @@ class WorktreeMonitor:
         if self._lock is None:
             self._lock = asyncio.Lock()
         async with self._lock:
-            rows = await asyncio.to_thread(scan_all_worktrees)
-            self._cache = rows
+            # Scope the git sweep to the one session being refreshed —
+            # a single overlay Refresh click shouldn't pay for a full
+            # sweep of every other session's worktrees.
+            rows = await asyncio.to_thread(
+                lambda: scan_all_worktrees(
+                    session_filter=lambda name: name == session_name,
+                )
+            )
+            kept = [row for row in self._cache if row.session_name != session_name]
+            self._cache = kept + rows
             target = next(
                 (
                     r for r in rows
@@ -1214,7 +1244,7 @@ class WorktreeMonitor:
             )
             if target is not None:
                 await self._refresh_one_source_control(target, rows)
-            return list(rows)
+            return list(self._cache)
 
     async def _refresh_one_source_control(
         self, row: WorktreeState, all_rows: list[WorktreeState],
