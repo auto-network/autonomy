@@ -120,12 +120,20 @@ def _arm_startup_state_sql(tmux_name: str, state: str) -> bool:
     "harness_starting"). Overwrites anything, including ``setup_failed`` —
     an explicit relaunch is the retry path, so the sticky failure must not
     block it.
+
+    Stamps ``last_activity``: the liveness sweep's booting-grace anchors on
+    it, and a launch can sit queued at ``requesting`` before the worker's
+    first transition provides a fresh stamp — the arm stamp is what keeps
+    the sweep off a queued launch (a resumed row's prior last_activity can
+    be arbitrarily old).
     """
+    import time as _time
     from tools.dashboard.dao.dashboard_db import get_conn
     conn = get_conn()
     cur = conn.execute(
-        "UPDATE tmux_sessions SET startup_state = ? WHERE tmux_name = ?",
-        (state, tmux_name),
+        "UPDATE tmux_sessions SET startup_state = ?, last_activity = ?"
+        " WHERE tmux_name = ?",
+        (state, _time.time(), tmux_name),
     )
     conn.commit()
     return cur.rowcount > 0
@@ -287,7 +295,25 @@ def _log_worktree_cleanup(tmux_name: str, result: CleanupResult) -> None:
 
 
 def _cleanup_worktrees_for_dead_session(tmux_name: str) -> None:
-    """Thread-safe wrapper around cleanup_session_worktrees — never raises."""
+    """Thread-safe wrapper around cleanup_session_worktrees — never raises.
+
+    Re-checks the row at EXECUTION time: this runs on a thread scheduled at
+    death detection, and a resume/retry can revive the session in the gap
+    (proven: auto-0708-122535 revived 19s after its stop; the queued
+    cleanup then removed the worktree 1s into the relaunch's preparing
+    step). A live or launching row aborts the cleanup.
+    """
+    try:
+        row = get_session(tmux_name)
+    except Exception:
+        row = None
+    if row and (row.get("is_live") or row.get("startup_state")):
+        logger.info(
+            "session_monitor: worktree cleanup skipped for %s — session "
+            "revived (is_live=%s, startup_state=%s)",
+            tmux_name, row.get("is_live"), row.get("startup_state"),
+        )
+        return
     try:
         result = cleanup_session_worktrees(tmux_name, worktrees_dir=WORKTREES_DIR)
     except Exception:
@@ -3417,8 +3443,21 @@ class SessionMonitor:
                     # (proven: auto-0615-105045 reaped at
                     # startup_state=launching_container, 2026-06-15). Bounded by
                     # a grace window so a genuinely stuck launch is still reaped.
+                    #
+                    # The grace anchors on last_activity, NOT created_at: the
+                    # lifecycle writer stamps last_activity on every
+                    # transition (and arm stamps it at FSM entry), so an
+                    # in-flight launch always has a fresh anchor — including
+                    # RESUMES, whose created_at is the original session's and
+                    # can be hours old (proven: auto-0708-122535 revived
+                    # mid-resume, reaped 1s into preparing because its
+                    # created_at was 4.8h stale). A stuck launch stops
+                    # transitioning and becomes reapable after the grace.
+                    _boot_anchor = (
+                        row.get("last_activity") or row.get("created_at") or 0
+                    )
                     if (row.get("startup_state") in self._STARTUP_BOOTING_STATES
-                            and (now - (row.get("created_at") or 0))
+                            and (now - _boot_anchor)
                             < self._STARTUP_GRACE_SECONDS):
                         continue
                     alive = await asyncio.to_thread(self._check_tmux, tmux_name)

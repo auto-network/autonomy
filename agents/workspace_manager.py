@@ -277,14 +277,28 @@ def create_worktree(
     refresh of stale launch leftovers via ``refresh_existing=True``.
     """
     if worktree_dir.exists():
-        if refresh_existing:
-            _refresh_existing_worktree(
-                managed_clone,
-                worktree_dir,
-                branch,
-                git_timeout=git_timeout,
-            )
-        return worktree_dir
+        if not (worktree_dir / ".git").exists():
+            # The directory exists but is not a worktree — a partial removal
+            # (interrupted rmtree, raced cleanup) left a husk. Empty husks
+            # are recreated below; a husk with content needs a human — blind
+            # recreation could bury data and ``git worktree add`` refuses
+            # non-empty dirs anyway.
+            if any(worktree_dir.iterdir()):
+                raise WorkspaceError(
+                    f"worktree dir {worktree_dir} exists without .git and is "
+                    "not empty — broken by a partial cleanup; inspect and "
+                    "remove it manually"
+                )
+            worktree_dir.rmdir()
+        else:
+            if refresh_existing:
+                _refresh_existing_worktree(
+                    managed_clone,
+                    worktree_dir,
+                    branch,
+                    git_timeout=git_timeout,
+                )
+            return worktree_dir
     worktree_dir.parent.mkdir(parents=True, exist_ok=True)
     # If the session branch already exists in the managed clone — typically
     # because a prior cleanup deleted its worktree but couldn't reach the
