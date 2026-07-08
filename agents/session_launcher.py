@@ -112,18 +112,28 @@ def _capability_command_surface(
     ``expose_commands`` list, so the function is a no-op for callers that
     do not opt in.
     """
-    shims_to_emit: list[tuple[str, str]] = []
+    # Command names share one shim directory, so collisions are possible in
+    # principle. First capability wins (input is contract-sorted, so the
+    # outcome is deterministic); the loser is logged, never silently
+    # overwritten.
+    shims_to_emit: dict[str, str] = {}
     for cap in capabilities:
         tt = getattr(cap, "tool_target", None)
         if tt is None:
             continue
         for cmd in tt.expose_commands:
-            shims_to_emit.append((cmd, f"{tt.target}/{cmd}"))
+            if cmd in shims_to_emit:
+                logger.warning(
+                    "capability %s: command %r already exposed by another "
+                    "capability (-> %s); keeping the first shim",
+                    cap.implementation, cmd, shims_to_emit[cmd])
+                continue
+            shims_to_emit[cmd] = f"{tt.target}/{cmd}"
     if not shims_to_emit:
         return {}, {}
     shim_dir = run_dir / "cap-bin"
     shim_dir.mkdir(parents=True, exist_ok=True)
-    for cmd, exec_target in shims_to_emit:
+    for cmd, exec_target in shims_to_emit.items():
         shim_path = shim_dir / cmd
         shim_path.write_text(
             f'#!/bin/sh\nexec {exec_target} "$@"\n'
