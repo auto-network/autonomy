@@ -245,9 +245,18 @@ def rich_content_fixtures():
 
 
 def write_fixture(fixture_dict, path):
-    """Write fixture to a JSON file for DASHBOARD_MOCK."""
-    Path(path).write_text(json.dumps(fixture_dict, indent=2))
-    return str(path)
+    """Write fixture to a JSON file for DASHBOARD_MOCK.
+
+    Atomic (tmp file + rename): the mock server reads this file fresh on
+    every request from another process, so a plain truncate+write lets a
+    concurrent reader observe half-written JSON and 500 mid-test.
+    """
+    import os
+    target = Path(path)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(json.dumps(fixture_dict, indent=2))
+    os.replace(tmp, target)
+    return str(target)
 
 
 # ── State-aware session generators ───────────────────────────────────

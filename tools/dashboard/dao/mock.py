@@ -242,6 +242,16 @@ def _load() -> dict:
     """Read and parse the fixture file. Returns empty structure if missing."""
     if not FIXTURE_PATH.exists():
         return {"beads": [], "runs": []}
+    # Tests swap the fixture with plain write_text in some helpers, so a
+    # read landing mid-write can see truncated JSON. The write finishes in
+    # milliseconds — retry briefly instead of 500ing the request (which
+    # surfaces as an unrelated-looking one-off test flake).
+    import time as _time
+    for _ in range(5):
+        try:
+            return json.loads(FIXTURE_PATH.read_text())
+        except (json.JSONDecodeError, OSError):
+            _time.sleep(0.05)
     return json.loads(FIXTURE_PATH.read_text())
 
 
