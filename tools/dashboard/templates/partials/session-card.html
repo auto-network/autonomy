@@ -21,7 +21,13 @@
      window.Autonomy.lifecycle.* — pure functions over the row shape.
 #}
 <div class="session-card-wrap">
-  <div class="session-card" :class="borderCls(s.session_type)">
+  <!-- Left strip is color-coded by organization (graph://497cdc20-d43 org.color
+       Setting) so sessions from different orgs are visually distinguishable at
+       a glance; falls back to the legacy per-type coloring (host/container/
+       dispatch/...) only when the org hasn't resolved a color. -->
+  <div class="session-card"
+       :class="(s.org && s.org.color) ? '' : borderCls(s.session_type)"
+       :style="(s.org && s.org.color) ? `border-left-color:${s.org.color}` : ''">
 
     <!-- Compact-only row: dot + bell + type badge + role badge + merged org/actions + resume -->
     <div class="sc-compact-row">

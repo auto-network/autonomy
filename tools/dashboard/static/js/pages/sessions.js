@@ -192,6 +192,54 @@
       projects: [],
       orgGroups: [],
 
+      // --- Org filter (toolbar dropdown, between zoom + launch button) ---
+      // '' means "All orgs" (default). Filters both the Active and Recent
+      // sections by comparing against the resolved s.org.slug already
+      // present on every session row (see _updateFromStore / _fetchRecent).
+      selectedOrg: localStorage.getItem('sessionsOrgFilter') || '',
+      orgFilterList: [],
+      orgFilterOpen: false,
+
+      async _fetchOrgFilterList() {
+        try {
+          const data = await fetch('/api/orgs').then(r => r.ok ? r.json() : { orgs: [] });
+          this.orgFilterList = (data.orgs || []).map(function(e) {
+            var org = (e && e.org) || {};
+            var ident = (e && e.identity_resolved) || {};
+            var slug = org.slug || ident.slug || '';
+            return {
+              slug: slug,
+              name: ident.name || slug,
+              color: ident.color || '#4b5563',
+              favicon: ident.favicon || null,
+              initial: ident.initial || (slug ? slug[0].toUpperCase() : '?'),
+            };
+          }).filter(function(o) { return o.slug; });
+        } catch (e) {
+          console.warn('[sessionsPage] orgs fetch error', e);
+          this.orgFilterList = [];
+        }
+      },
+
+      get orgFilterPicked() {
+        var self = this;
+        if (!this.selectedOrg) return null;
+        return (this.orgFilterList || []).find(function(o) { return o.slug === self.selectedOrg; }) || null;
+      },
+
+      pickOrgFilter(slug) {
+        this.orgFilterOpen = false;
+        slug = slug || '';
+        if (slug === this.selectedOrg) return;
+        this.selectedOrg = slug;
+        localStorage.setItem('sessionsOrgFilter', slug);
+      },
+
+      _matchesOrg(s) {
+        if (!this.selectedOrg) return true;
+        return !!(s.org && s.org.slug === this.selectedOrg);
+      },
+
       // --- Card helper methods (referenced by session-card.html partial) ---
       borderCls: _borderCls,
       typeBadge: _typeBadge,
@@ -231,13 +279,13 @@
       },
       get launching() {
         var self = this;
-        var arr = this.interactive.filter(function(s) { return self._isLaunching(s); });
+        var arr = this.interactive.filter(function(s) { return self._isLaunching(s) && self._matchesOrg(s); });
         arr.sort(function(a, b) { return (b.created_at || 0) - (a.created_at || 0); });
         return arr;
       },
       get activeInteractive() {
         var self = this;
-        return this.interactive.filter(function(s) { return !self._isLaunching(s); });
+        return this.interactive.filter(function(s) { return !self._isLaunching(s) && self._matchesOrg(s); });
       },
 
       get sortedInteractive() {
@@ -312,9 +360,12 @@
       },
 
       get filtered() {
-        if (this.recentFilter === 'all') return this.recent;
         var self = this;
-        return this.recent.filter(function(s) { return self._matchesFilter(s, self.recentFilter); });
+        var base = this.recentFilter === 'all'
+          ? this.recent
+          : this.recent.filter(function(s) { return self._matchesFilter(s, self.recentFilter); });
+        if (!this.selectedOrg) return base;
+        return base.filter(function(s) { return self._matchesOrg(s); });
       },
 
       _matchesFilter(s, f) {
@@ -477,6 +528,8 @@
 
         // Fetch workspace registry for the launch dropdown
         this._fetchProjects();
+        // Fetch org list for the toolbar filter dropdown
+        this._fetchOrgFilterList();
 
         // Handle new terminal creation from the + button dropdown.
         // Session creation goes through POST /api/session/create, which is the
