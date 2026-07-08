@@ -986,6 +986,9 @@ class SessionMonitor:
         # when the session leaves the live set. This is the permanent
         # poller contract for the FSM worker's wait-for-composer step.
         self._screen_poll_armed: set[str] = set()
+        # Consecutive authoritative liveness misses per session — the reap
+        # gate (_LIVENESS_MISS_THRESHOLD). Probe failures don't count.
+        self._liveness_misses: dict[str, int] = {}
         self._started = False
         self._last_pause_nag_sent: float = 0.0  # timestamp of last dispatch-pause nag
         self._last_orphan_prune: float = time.time()  # defer first prune one full interval
@@ -3408,97 +3411,130 @@ class SessionMonitor:
     # launches while still eventually reaping a genuinely stuck launch.
     _STARTUP_GRACE_SECONDS = 300.0
 
+    # A session is only reaped after this many CONSECUTIVE authoritative
+    # "no such session" probe results (~10s apart). One authoritative miss
+    # can race a tmux server restart; probe FAILURES (None) never count —
+    # they say nothing about the session (2026-07-08 18:1x incident: a
+    # fork-EAGAIN spike failed every probe in one tick and a fail-dead
+    # probe reaped the entire live fleet).
+    _LIVENESS_MISS_THRESHOLD = 2
+
+    async def _sweep_tmux_liveness(self, sessions: list[dict], now: float) -> bool:
+        """One liveness pass over the live rows. Returns True if any died.
+
+        Extracted from the loop so the reap decision is testable: the
+        fail-safe rules (probe-failure ≠ dead; N consecutive confirmed
+        misses required) are the contract this method owns.
+        """
+        changed = False
+        for row in sessions:
+            tmux_name = row["tmux_name"]
+            # Dispatch + librarian + agentic sessions are owned by
+            # their respective dispatchers/watchers (see
+            # agents/dispatcher.py — poll_and_collect for dispatch,
+            # poll_and_collect_agentic for kind='agentic'). They
+            # never had a tmux session, so has-session always
+            # returns False and polling would mark them dead within
+            # 10s — and the cleanup_session_worktrees that follows
+            # would yank /workspace/repo out from under a still-running
+            # container. Their death signal is an explicit POST to
+            # /api/monitor/deregister or container-exit collection,
+            # not tmux polling.
+            if row.get("type") in ("dispatch", "librarian", "agentic"):
+                continue
+            # Do not reap a session the startup FSM says is still
+            # booting. A container session's host tmux is not spawned
+            # until AFTER launch_session() returns (~15s for an 8-repo
+            # workspace), yet the row is registered live at request
+            # time. Without this guard the 10s liveness sweep fires
+            # mid-launch, _check_tmux misses (no tmux yet), the session
+            # is marked dead, and cleanup_session_worktrees yanks the
+            # freshly-built worktrees out from under the launching
+            # container — leaving empty dirs Docker remounts as root
+            # (proven: auto-0615-105045 reaped at
+            # startup_state=launching_container, 2026-06-15). Bounded by
+            # a grace window so a genuinely stuck launch is still reaped.
+            #
+            # The grace anchors on last_activity, NOT created_at: the
+            # lifecycle writer stamps last_activity on every
+            # transition (and arm stamps it at FSM entry), so an
+            # in-flight launch always has a fresh anchor — including
+            # RESUMES, whose created_at is the original session's and
+            # can be hours old (proven: auto-0708-122535 revived
+            # mid-resume, reaped 1s into preparing because its
+            # created_at was 4.8h stale). A stuck launch stops
+            # transitioning and becomes reapable after the grace.
+            _boot_anchor = (
+                row.get("last_activity") or row.get("created_at") or 0
+            )
+            if (row.get("startup_state") in self._STARTUP_BOOTING_STATES
+                    and (now - _boot_anchor)
+                    < self._STARTUP_GRACE_SECONDS):
+                continue
+            alive = await asyncio.to_thread(self._check_tmux, tmux_name)
+            if alive is None:
+                # Probe failure — liveness UNKNOWN. Fail-safe: neither a
+                # miss nor a confirmation; try again next tick.
+                continue
+            if alive:
+                self._liveness_misses.pop(tmux_name, None)
+                continue
+            misses = self._liveness_misses.get(tmux_name, 0) + 1
+            self._liveness_misses[tmux_name] = misses
+            if misses < self._LIVENESS_MISS_THRESHOLD:
+                logger.info(
+                    "session_monitor: tmux missing for %s (miss %d/%d) — "
+                    "awaiting confirmation",
+                    tmux_name, misses, self._LIVENESS_MISS_THRESHOLD,
+                )
+                continue
+            self._liveness_misses.pop(tmux_name, None)
+            self._remove_watches(tmux_name)
+            # Clear pending_tool_ids before marking dead —
+            # dead sessions cannot have running tools
+            ts = self._tail_states.get(tmux_name)
+            if ts:
+                ts.pending_tool_ids.clear()
+            mark_dead(tmux_name)
+            # W3: final in-process graph catch-up (final state) —
+            # replaces the blocking `graph ingest-session`
+            # subprocess (up to 30s on the event loop thread)
+            # this used to be.
+            jsonl_path = row.get("jsonl_path")
+            if jsonl_path:
+                await self._final_graph_catchup(tmux_name, jsonl_path)
+            self._tail_states.pop(tmux_name, None)
+            # Clean up the session's workspace worktrees (no-op
+            # if the session had none). Uncommitted changes or
+            # local commits are preserved with a warning.
+            await asyncio.to_thread(
+                _cleanup_worktrees_for_dead_session, tmux_name,
+            )
+            # One final disk measurement so the ended card keeps
+            # a footprint; the session leaves the resource poll
+            # set for good. Runs AFTER worktree cleanup so the
+            # persisted number is what actually remains on disk.
+            # Fire-and-forget: never blocks the liveness sweep.
+            from tools.dashboard.resource_monitor import (
+                resource_monitor,
+            )
+            asyncio.create_task(
+                resource_monitor.on_session_dead(tmux_name, row),
+            )
+            changed = True
+            logger.info(
+                "session_monitor: tmux dead  %s (type=%s, confirmed %d probes)",
+                tmux_name, row["type"], self._LIVENESS_MISS_THRESHOLD,
+            )
+        return changed
+
     async def _liveness_loop(self) -> None:
         """Check tmux liveness for all sessions every 10s."""
         while True:
             try:
                 sessions = get_live_sessions()
-                changed = False
                 now = time.time()
-
-                for row in sessions:
-                    tmux_name = row["tmux_name"]
-                    # Dispatch + librarian + agentic sessions are owned by
-                    # their respective dispatchers/watchers (see
-                    # agents/dispatcher.py — poll_and_collect for dispatch,
-                    # poll_and_collect_agentic for kind='agentic'). They
-                    # never had a tmux session, so has-session always
-                    # returns False and polling would mark them dead within
-                    # 10s — and the cleanup_session_worktrees that follows
-                    # would yank /workspace/repo out from under a still-running
-                    # container. Their death signal is an explicit POST to
-                    # /api/monitor/deregister or container-exit collection,
-                    # not tmux polling.
-                    if row.get("type") in ("dispatch", "librarian", "agentic"):
-                        continue
-                    # Do not reap a session the startup FSM says is still
-                    # booting. A container session's host tmux is not spawned
-                    # until AFTER launch_session() returns (~15s for an 8-repo
-                    # workspace), yet the row is registered live at request
-                    # time. Without this guard the 10s liveness sweep fires
-                    # mid-launch, _check_tmux misses (no tmux yet), the session
-                    # is marked dead, and cleanup_session_worktrees yanks the
-                    # freshly-built worktrees out from under the launching
-                    # container — leaving empty dirs Docker remounts as root
-                    # (proven: auto-0615-105045 reaped at
-                    # startup_state=launching_container, 2026-06-15). Bounded by
-                    # a grace window so a genuinely stuck launch is still reaped.
-                    #
-                    # The grace anchors on last_activity, NOT created_at: the
-                    # lifecycle writer stamps last_activity on every
-                    # transition (and arm stamps it at FSM entry), so an
-                    # in-flight launch always has a fresh anchor — including
-                    # RESUMES, whose created_at is the original session's and
-                    # can be hours old (proven: auto-0708-122535 revived
-                    # mid-resume, reaped 1s into preparing because its
-                    # created_at was 4.8h stale). A stuck launch stops
-                    # transitioning and becomes reapable after the grace.
-                    _boot_anchor = (
-                        row.get("last_activity") or row.get("created_at") or 0
-                    )
-                    if (row.get("startup_state") in self._STARTUP_BOOTING_STATES
-                            and (now - _boot_anchor)
-                            < self._STARTUP_GRACE_SECONDS):
-                        continue
-                    alive = await asyncio.to_thread(self._check_tmux, tmux_name)
-                    if not alive:
-                        self._remove_watches(tmux_name)
-                        # Clear pending_tool_ids before marking dead —
-                        # dead sessions cannot have running tools
-                        ts = self._tail_states.get(tmux_name)
-                        if ts:
-                            ts.pending_tool_ids.clear()
-                        mark_dead(tmux_name)
-                        # W3: final in-process graph catch-up (final state) —
-                        # replaces the blocking `graph ingest-session`
-                        # subprocess (up to 30s on the event loop thread)
-                        # this used to be.
-                        jsonl_path = row.get("jsonl_path")
-                        if jsonl_path:
-                            await self._final_graph_catchup(tmux_name, jsonl_path)
-                        self._tail_states.pop(tmux_name, None)
-                        # Clean up the session's workspace worktrees (no-op
-                        # if the session had none). Uncommitted changes or
-                        # local commits are preserved with a warning.
-                        await asyncio.to_thread(
-                            _cleanup_worktrees_for_dead_session, tmux_name,
-                        )
-                        # One final disk measurement so the ended card keeps
-                        # a footprint; the session leaves the resource poll
-                        # set for good. Runs AFTER worktree cleanup so the
-                        # persisted number is what actually remains on disk.
-                        # Fire-and-forget: never blocks the liveness sweep.
-                        from tools.dashboard.resource_monitor import (
-                            resource_monitor,
-                        )
-                        asyncio.create_task(
-                            resource_monitor.on_session_dead(tmux_name, row),
-                        )
-                        changed = True
-                        logger.info(
-                            "session_monitor: tmux dead  %s (type=%s)",
-                            tmux_name, row["type"],
-                        )
+                changed = await self._sweep_tmux_liveness(sessions, now)
 
                 # Clean up old dead sessions from tail states
                 # (Dead sessions with _COOLDOWN expired get deleted from DB)
@@ -3782,15 +3818,29 @@ class SessionMonitor:
             self._last_pause_nag_sent = now
 
     @staticmethod
-    def _check_tmux(name: str) -> bool:
-        """Check if a tmux session is alive (runs in thread)."""
+    def _check_tmux(name: str) -> bool | None:
+        """Probe tmux liveness (runs in thread). Tri-state:
+
+        - True / False: the probe RAN and its answer is authoritative.
+        - None: the probe itself failed — tmux could not be spawned
+          (fork EAGAIN under process pressure, missing binary, any
+          OSError). That says nothing about the session; callers must
+          treat it as UNKNOWN and never as dead. A user-level fork-EAGAIN
+          spike makes every spawn raise BlockingIOError (an OSError) at
+          once — a bool probe returning False here reaps the entire
+          live fleet in a single sweep tick.
+        """
         try:
             return subprocess.run(
                 ["tmux", "has-session", "-t", name],
                 capture_output=True,
             ).returncode == 0
         except (FileNotFoundError, OSError):
-            return False
+            logger.warning(
+                "session_monitor: liveness probe failed for %s — UNKNOWN, not dead",
+                name, exc_info=True,
+            )
+            return None
 
     # ── Seed (replaces recover) ────────────────────────────────────
 
