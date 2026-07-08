@@ -307,24 +307,32 @@
         this._diskRefreshing[key] = false;
       },
       // Dual CPU/RAM sparkline over the collector's history ring buffer.
-      // Ported from design d2250266 v58: each series normalized to its own
-      // range, Catmull-Rom smoothing, pulsing endpoint. RAM under CPU.
+      // Ported from design d2250266 v58 (Catmull-Rom smoothing, pulsing
+      // endpoint), with scaling rules from operator review:
+      // - y-range is floored (CPU 100 percentage points, RAM 500MB) so
+      //   idle noise doesn't auto-scale into fake spikes;
+      // - RAM is centered in its floored span so the (usually near-flat)
+      //   blue line rides mid-height instead of hiding under the CPU line
+      //   at the baseline;
+      // - CPU samples under 1% are not drawn at all: an idle session shows
+      //   no amber trace rather than a flat line along the bottom. The
+      //   line breaks into segments around the gaps; isolated single
+      //   active samples render as dots.
       sparkSvg(s) {
         var r = this.resourceFor(s);
         var hist = (r && r.history) || [];
         if (hist.length < 2) return '';
         var W = 180, H = 42, pad = 6;
-        // minSpan floors the y-range so idle noise doesn't auto-scale into
-        // fake spikes: CPU is never drawn on a span shorter than 100
-        // percentage points, RAM never shorter than 500MB. An idle session
-        // reads as a flat line hugging the baseline, as it should.
-        function toPts(data, minSpan) {
+        function scaled(data, minSpan, center) {
+          data = data.filter(function (n) { return !isNaN(n); });
           if (data.length < 2) return null;
           var mn = Math.min.apply(null, data), mx = Math.max.apply(null, data);
-          var sp = Math.max(mx - mn, minSpan || 1), n = data.length;
+          var sp = Math.max(mx - mn, minSpan || 1);
+          var base = center ? mn - (sp - (mx - mn)) / 2 : mn;
+          var n = data.length;
           return data.map(function (v, i) {
             return [pad + (i / (n - 1)) * (W - pad * 2),
-                    H - pad - ((v - mn) / sp) * (H - pad * 2)];
+                    H - pad - ((v - base) / sp) * (H - pad * 2), v];
           });
         }
         function path(points) {
@@ -338,21 +346,31 @@
           }
           return d;
         }
-        function lineEl(points, color) {
-          if (!points) return '';
-          var last = points[points.length - 1];
+        function stroke(points, color) {
           return '<path d="' + path(points) + '" fill="none" stroke="' + color + '" stroke-width="1.6" ' +
-                 'stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>' +
-                 '<circle cx="' + last[0].toFixed(1) + '" cy="' + last[1].toFixed(1) + '" r="2.2" fill="' + color + '" vector-effect="non-scaling-stroke">' +
+                 'stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>';
+        }
+        function pulse(pt, color) {
+          return '<circle cx="' + pt[0].toFixed(1) + '" cy="' + pt[1].toFixed(1) + '" r="2.2" fill="' + color + '" vector-effect="non-scaling-stroke">' +
                  '<animate attributeName="opacity" values="1;0.5;1" dur="2.4s" repeatCount="indefinite"/></circle>';
         }
         // history rows are [ts, cpu_pct, mem_bytes]
-        var cpu = toPts(hist.map(function (h) { return Number(h[1]); }).filter(function (n) { return !isNaN(n); }), 100);
-        var ram = toPts(hist.map(function (h) { return Number(h[2]); }).filter(function (n) { return !isNaN(n); }), 500e6);
-        if (!cpu && !ram) return '';
-        return '<svg class="sc-spark-svg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' +
-          lineEl(ram, '#60a5fa') + lineEl(cpu, '#fbbf24') +
-          '</svg>';
+        var out = '';
+        var ram = scaled(hist.map(function (h) { return Number(h[2]); }), 500e6, true);
+        if (ram) out += stroke(ram, '#60a5fa') + pulse(ram[ram.length - 1], '#60a5fa');
+        var cpu = scaled(hist.map(function (h) { return Number(h[1]); }), 100, false);
+        if (cpu) {
+          var seg = [];
+          for (var i = 0; i <= cpu.length; i++) {
+            if (i < cpu.length && cpu[i][2] >= 1) { seg.push(cpu[i]); continue; }
+            if (seg.length >= 2) out += stroke(seg, '#fbbf24');
+            else if (seg.length === 1) out += '<circle cx="' + seg[0][0].toFixed(1) + '" cy="' + seg[0][1].toFixed(1) + '" r="1.6" fill="#fbbf24"/>';
+            seg = [];
+          }
+          if (cpu[cpu.length - 1][2] >= 1) out += pulse(cpu[cpu.length - 1], '#fbbf24');
+        }
+        if (!out) return '';
+        return '<svg class="sc-spark-svg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' + out + '</svg>';
       },
       // --- Workspace dropdown state (fetched from /api/projects) ---
       // orgGroups[i].org is a resolved identity object
