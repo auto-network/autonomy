@@ -122,17 +122,25 @@ class PickerTestHarness:
         ab_raw("open", f"http://localhost:{TEST_PORT}/design/{self.exp_id}",
                "--ignore-https-errors")
         # Cold per-worker Chromium under xdist load can take well over the
-        # old fixed 2s to boot Alpine — poll for readiness instead.
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            ready = ab_eval(
-                "return !!(window.Alpine && document.querySelector('[x-data]'));"
-            )
-            if ready is True:
-                break
-            time.sleep(0.5)
-        else:
-            raise RuntimeError("design page never became Alpine-ready")
+        # old fixed 2s to boot Alpine — poll for readiness instead. On
+        # timeout, retry once with a fresh page, then proceed either way:
+        # individual tests fail with specific assertions, which beats a
+        # module-wide setup ERROR.
+        for attempt in range(2):
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                ready = ab_eval(
+                    "return !!(window.Alpine && document.querySelector('[x-data]'));"
+                )
+                if ready is True:
+                    break
+                time.sleep(0.5)
+            else:
+                ab_raw("close")
+                ab_raw("open", f"http://localhost:{TEST_PORT}/design/{self.exp_id}",
+                       "--ignore-https-errors")
+                continue
+            break
         ab_raw("set", "viewport", "390", "844")
         time.sleep(0.5)
         ab_eval("document.getElementById('sidebar').classList.add('-translate-x-full'); return 'ok';")
@@ -280,11 +288,16 @@ def h(tmp_path_factory):
     harness = PickerTestHarness(tmp)
     harness.set_sessions(fixtures.standard_sessions())
     harness.start_server()
-    harness.open_experiment()
-    harness.open_picker()
-    yield harness
-    ab_raw("close")
-    harness.stop()
+    try:
+        # try/finally so a setup failure still stops the uvicorn server —
+        # a leaked server on this port poisons the next test file that
+        # lands on the same xdist worker.
+        harness.open_experiment()
+        harness.open_picker()
+        yield harness
+    finally:
+        ab_raw("close")
+        harness.stop()
 
 
 # ══════════════════════════════════════════════════════════════════════

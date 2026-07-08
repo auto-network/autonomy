@@ -219,10 +219,14 @@ def h(tmp_path_factory):
     harness = SessionsTestHarness(tmp)
     harness.set_fixture(sessions_page_fixture())
     harness.start_server()
-    harness.open_sessions_page()
-    yield harness
-    ab_raw("close")
-    harness.stop()
+    try:
+        # try/finally so a setup failure still stops the uvicorn server —
+        # a leaked server poisons the next file on this xdist worker.
+        harness.open_sessions_page()
+        yield harness
+    finally:
+        ab_raw("close")
+        harness.stop()
 
 
 # ── Tests ────────────────────────────────────────────────────────────
