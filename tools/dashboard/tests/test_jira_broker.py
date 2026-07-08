@@ -89,12 +89,46 @@ def _mock(monkeypatch, handler):
     monkeypatch.setattr(api, "_transport", httpx.MockTransport(handler))
 
 
+def _stub_install_setting(monkeypatch, payload):
+    """Isolate resolve() from the live graph: read_set returns exactly one
+    install member with the given payload (or raises when payload is None)."""
+    import types
+    from tools.graph import ops as graph_ops
+
+    def fake_read_set(set_id, **kw):
+        if payload is None:
+            raise RuntimeError("no graph in tests")
+        member = types.SimpleNamespace(payload=payload)
+        return types.SimpleNamespace(members=[member])
+
+    monkeypatch.setattr(graph_ops, "read_set", fake_read_set)
+
+
 def test_config_missing_is_a_clear_error(monkeypatch, tmp_path):
+    _stub_install_setting(monkeypatch, None)
     monkeypatch.delenv("JIRA_BASE_URL", raising=False)
     monkeypatch.setenv("JIRA_EMAIL", "x@y")
     monkeypatch.setenv("JIRA_TOKEN_FILE", str(tmp_path / "nope"))
-    with pytest.raises(api.JiraError, match="JIRA_BASE_URL"):
-        api.JiraConfig.from_env()
+    with pytest.raises(api.JiraError, match="base_url"):
+        api.JiraConfig.resolve()
+
+
+def test_config_resolves_from_org_install_setting(monkeypatch, tmp_path):
+    """Non-secret config comes from the issue_tracker org install Setting;
+    the token comes from the host file the Setting points at."""
+    token_file = tmp_path / "tok"
+    token_file.write_text("sekret\n")
+    _stub_install_setting(monkeypatch, {
+        "contract": "issue_tracker",
+        "broker_config": {"base_url": "https://jira.example/",
+                          "email": "op@example.com",
+                          "token_file": str(token_file)},
+    })
+    for var in ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_TOKEN_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = api.JiraConfig.resolve()
+    assert cfg == api.JiraConfig(base_url="https://jira.example",
+                                 email="op@example.com", token="sekret")
 
 
 def test_set_field_sends_adf_not_plain_string(jira_env, monkeypatch):
@@ -109,7 +143,7 @@ def test_set_field_sends_adf_not_plain_string(jira_env, monkeypatch):
         return httpx.Response(204)
 
     _mock(monkeypatch, handler)
-    out = api.set_field(api.JiraConfig.from_env(), "ENT-1", "customfield_10153",
+    out = api.set_field(api.JiraConfig.resolve(), "ENT-1", "customfield_10153",
                         "step 1\nstep 2")
     assert out == {"field_id": "customfield_10153"}
     assert (seen["method"], seen["path"]) == ("PUT", "/rest/api/3/issue/ENT-1")
@@ -125,7 +159,7 @@ def test_comment_sends_adf_and_shapes_response(jira_env, monkeypatch):
             "id": "64029", "author": {"displayName": "Op"}, "created": "now"})
 
     _mock(monkeypatch, handler)
-    out = api.add_comment(api.JiraConfig.from_env(), "ENT-1", "root cause: …")
+    out = api.add_comment(api.JiraConfig.resolve(), "ENT-1", "root cause: …")
     assert out == {"id": "64029", "author": "Op", "created": "now"}
 
 
@@ -139,7 +173,7 @@ def test_editmeta_discovers_field_id(jira_env, monkeypatch):
         }})
 
     _mock(monkeypatch, handler)
-    cfg = api.JiraConfig.from_env()
+    cfg = api.JiraConfig.resolve()
     assert api.editmeta_field_id(cfg, "ENT-1", "Confirm Plan") == "customfield_10153"
     with pytest.raises(api.JiraError, match="not editable"):
         api.editmeta_field_id(cfg, "ENT-1", "No Such Field")
@@ -163,7 +197,7 @@ def test_createmeta_shaping(jira_env, monkeypatch):
         }}]}]})
 
     _mock(monkeypatch, handler)
-    meta = api.createmeta(api.JiraConfig.from_env(), "ENTERPRISE", "Bug",
+    meta = api.createmeta(api.JiraConfig.resolve(), "ENTERPRISE", "Bug",
                           version_prefix="Enterprise")
     assert meta["severity"] == [{"id": "1", "value": "High"}]
     assert [v["id"] for v in meta["versions"]] == ["v2", "v1"]   # prefix-filtered, newest first
@@ -178,7 +212,7 @@ def test_error_carries_jira_detail_never_credentials(jira_env, monkeypatch):
 
     _mock(monkeypatch, handler)
     with pytest.raises(api.JiraError) as exc:
-        api.set_field(api.JiraConfig.from_env(), "ENT-1", "customfield_10153", "x")
+        api.set_field(api.JiraConfig.resolve(), "ENT-1", "customfield_10153", "x")
     assert "Atlassian Document" in str(exc.value)
     assert "sekret-token" not in str(exc.value)
 
@@ -199,7 +233,7 @@ def test_get_attachment_follows_signed_redirect(jira_env, monkeypatch):
         raise AssertionError(f"unexpected call: {request.url}")
 
     _mock(monkeypatch, handler)
-    content, filename, mime = api.get_attachment(api.JiraConfig.from_env(), "777")
+    content, filename, mime = api.get_attachment(api.JiraConfig.resolve(), "777")
     assert (content, filename, mime) == (b"log line\n", "repro.log", "text/plain")
 
 
@@ -212,7 +246,7 @@ def test_add_attachment_multipart_with_xsrf_header(jira_env, monkeypatch):
                                           "size": 9}])
 
     _mock(monkeypatch, handler)
-    out = api.add_attachment(api.JiraConfig.from_env(), "ENT-1", "repro.log",
+    out = api.add_attachment(api.JiraConfig.resolve(), "ENT-1", "repro.log",
                              b"log line\n", "text/plain")
     assert out == {"id": "777", "filename": "repro.log", "size": 9}
 

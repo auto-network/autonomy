@@ -29,7 +29,7 @@ from tools.dashboard import approvals_routes
 
 
 def _cfg() -> api.JiraConfig:
-    return api.JiraConfig.from_env()
+    return api.JiraConfig.resolve()
 
 
 async def get_issue(request: Request) -> JSONResponse:

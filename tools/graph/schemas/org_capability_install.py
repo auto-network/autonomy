@@ -8,6 +8,9 @@ defaults the runtime needs to materialize that implementation:
 * env var bindings (env name -> source identifier)
 * secret-file bindings (container path -> source identifier)
 * mount bindings (container path -> source identifier)
+* broker config (non-secret settings a host-side broker resolves at call
+  time — e.g. the Jira base URL, account email, and token-file PATH; the
+  secret itself stays in the host file, never in the graph)
 
 This schema does **not** materialize anything in a workspace. It only
 declares what the org *would* materialize when a workspace enables the
@@ -58,10 +61,13 @@ _ALLOWED_TOP_LEVEL = {
     "env_bindings",
     "secret_file_bindings",
     "mount_bindings",
+    "broker_config",
     "notes",
 }
 
-_BINDING_FIELDS = ("env_bindings", "secret_file_bindings", "mount_bindings")
+_BINDING_FIELDS = (
+    "env_bindings", "secret_file_bindings", "mount_bindings", "broker_config",
+)
 
 
 def _validate_str_str_map(payload: dict, key: str, cls_name: str) -> None:
@@ -128,6 +134,13 @@ class OrgCapabilityInstallV1(SettingSchema):
     mount_bindings: dict = field(
         required=False,
         description="Mount bindings: container path -> source identifier",
+    )
+    broker_config: dict = field(
+        required=False,
+        description=(
+            "Non-secret host-broker settings (str -> str), e.g. base_url, "
+            "email, token_file PATH — never a literal secret"
+        ),
     )
     notes: str = field(
         required=False,
