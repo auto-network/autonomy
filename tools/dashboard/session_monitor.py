@@ -1403,6 +1403,10 @@ class SessionMonitor:
         """Mark a session as dead and remove from tail states."""
         self._remove_watches(tmux_name)
         mark_dead(tmux_name)
+        # Final disk footprint for the ended card; drops the session from
+        # the resource poll set. Fire-and-forget, never raises.
+        from tools.dashboard.resource_monitor import resource_monitor
+        asyncio.create_task(resource_monitor.on_session_dead(tmux_name))
         self._tail_states.pop(tmux_name, None)
         # auto-ja51w: clear transient phase progress on deregister.
         self._phase_progress.pop(tmux_name, None)
@@ -3439,6 +3443,17 @@ class SessionMonitor:
                         # local commits are preserved with a warning.
                         await asyncio.to_thread(
                             _cleanup_worktrees_for_dead_session, tmux_name,
+                        )
+                        # One final disk measurement so the ended card keeps
+                        # a footprint; the session leaves the resource poll
+                        # set for good. Runs AFTER worktree cleanup so the
+                        # persisted number is what actually remains on disk.
+                        # Fire-and-forget: never blocks the liveness sweep.
+                        from tools.dashboard.resource_monitor import (
+                            resource_monitor,
+                        )
+                        asyncio.create_task(
+                            resource_monitor.on_session_dead(tmux_name, row),
                         )
                         changed = True
                         logger.info(

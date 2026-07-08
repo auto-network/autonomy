@@ -103,6 +103,7 @@ from tools.dashboard.session_harness import (
     resolve_harness_for_session_row,
 )
 from tools.dashboard.session_monitor import count_tool_uses, session_monitor, TaskStateTracker
+from tools.dashboard.resource_monitor import resource_monitor
 from tools.dashboard.session_lifecycle_worker import (
     LifecycleJob,
     SessionLifecycleStateWriter,
@@ -2926,6 +2927,18 @@ def _crosstalk_auth(request) -> tuple[str | None, JSONResponse | None]:
     if sender is None:
         return None, JSONResponse({"error": "invalid or revoked token"}, status_code=401)
     return sender, None
+
+
+async def api_resources(request):
+    """GET /api/resources — per-session CPU/RAM/disk samples + collector health.
+
+    ``?history=1`` includes each session's ring buffer of (ts, cpu_pct,
+    mem_bytes) samples for sparklines. The ``health`` block carries the
+    collector's own cost profile (tick/disk-measure timing stats) so the
+    overhead of monitoring is always inspectable.
+    """
+    include_history = request.query_params.get("history") in ("1", "true")
+    return JSONResponse(resource_monitor.snapshot(include_history=include_history))
 
 
 async def api_monitor_register(request):
@@ -15180,6 +15193,7 @@ routes = [
 
     # Monitor IPC — dispatcher registers dispatch/librarian sessions here so
     # inotify watches + SSE broadcasts are wired up in-process.
+    Route("/api/resources", api_resources),
     Route("/api/monitor/register", api_monitor_register, methods=["POST"]),
     Route("/api/monitor/deregister", api_monitor_deregister, methods=["POST"]),
 
@@ -15376,6 +15390,7 @@ async def _on_startup():
         todo_snapshot=_task_state_tracker.snapshot,
     )
     await worktree_monitor.start()
+    await resource_monitor.start()
     _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())
     _event_loop_watchdog_task = asyncio.create_task(_event_loop_watchdog())
     _recent_sessions_refresher_task = asyncio.create_task(_recent_sessions_refresher())
@@ -15479,6 +15494,10 @@ async def _on_shutdown():
         await worktree_monitor.stop()
     except Exception:
         logger.exception("error during worktree_monitor.stop()")
+    try:
+        await resource_monitor.stop()
+    except Exception:
+        logger.exception("error during resource_monitor.stop()")
     try:
         _SESSION_LIFECYCLE_WORKER.shutdown()
     except Exception:
