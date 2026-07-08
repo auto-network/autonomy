@@ -329,9 +329,10 @@ body.zoom-expanded .sc-meta2 {
 .sc-disk-item:hover .sc-resource-tip,
 .sc-disk-item:focus-within .sc-resource-tip { display: block; }
 .sc-disk-refresh {
-  width: 100%;
+  display: block;
+  margin-left: auto;
   margin-top: 6px;
-  padding: 2px 0;
+  padding: 2px 8px;
   border: 1px solid #304057;
   border-radius: 5px;
   background: transparent;
