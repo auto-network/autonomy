@@ -339,6 +339,7 @@
                   <div class="sv-exp-stat-val sv-exp-stat-with-icon"
                        :title="org.resolved ? ((workspaceName || '?') + ' · ' + org.name) : (workspaceName || '?')">
                     <span class="sc-org"
+                          :class="org.favicon ? 'sc-org-favicon' : ''"
                           :style="org.favicon ? '' : `background:${org.color}`"
                           :title="org.resolved ? org.name : ('legacy: ' + (project || 'unknown'))">
                       <template x-if="!org.favicon">

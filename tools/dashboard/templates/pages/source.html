@@ -140,6 +140,7 @@
               <div style="display:flex; align-items:center; gap:6px; margin-top:1px">
                 <template x-if="src.org">
                   <span class="sc-org"
+                        :class="src.org.favicon ? 'sc-org-favicon' : ''"
                         :style="src.org.favicon ? '' : `background:${src.org.color}`"
                         :title="src.org.resolved ? src.org.name : ('legacy: ' + (src.project || 'unknown'))">
                     <template x-if="!src.org.favicon">

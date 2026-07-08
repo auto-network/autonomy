@@ -564,6 +564,7 @@
                     x-text="typeLabel(rowChipKey(r))"></span>
               <template x-if="r.org">
                 <span class="sc-org"
+                      :class="r.org.favicon ? 'sc-org-favicon' : ''"
                       :style="r.org.favicon ? '' : `background:${r.org.color}`"
                       :title="r.org.resolved ? r.org.name : ('legacy: ' + (r.project || 'unknown'))">
                   <template x-if="!r.org.favicon">
