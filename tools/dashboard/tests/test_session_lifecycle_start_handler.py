@@ -207,7 +207,10 @@ def test_inject_echo_verified_pastes_before_enter(monkeypatch):
     assert [call[0] for call in calls] == ["capture", "paste", "capture", "enter"]
 
 
-def test_wait_for_prompt_requires_composer_ready(monkeypatch, tmp_path):
+def test_wait_for_prompt_waits_for_poller_signal(monkeypatch, tmp_path):
+    """_wait_for_prompt is a signal-waiter: the pane-poller is the single
+    pane reader/keystroke sender; the worker step waits on the durable
+    harness_state.composer_ready flag it persists."""
     from tools.dashboard import server
 
     _init_db(tmp_path)
@@ -217,34 +220,29 @@ def test_wait_for_prompt_requires_composer_ready(monkeypatch, tmp_path):
         project="blindhash-operations",
         harness="claude",
     )
-    captures = iter(["loading", "> "])
 
-    class Harness:
-        def read_screen_state(self, pane_text, current_state):
-            return (
-                {
-                    "composer_ready": pane_text == "> ",
-                    "confirming_trust_prompt": False,
-                    "blocking_modal": None,
-                },
-                [],
+    sleeps = []
+
+    def _sleep_then_signal(seconds):
+        sleeps.append(seconds)
+        # Simulate the pane-poller confirming the composer on the second
+        # worker poll.
+        if len(sleeps) == 2:
+            dashboard_db.update_tail_state(
+                "auto-life", harness_state='{"composer_ready": true}',
             )
 
-    monkeypatch.setattr(server, "get_session_harness", lambda _name: Harness())
-    monkeypatch.setattr(server, "_run_tmux_capture", lambda *_a, **_kw: next(captures))
-    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(server.time, "sleep", _sleep_then_signal)
 
     server._wait_for_prompt(
         tmux_name="auto-life",
-        harness_name="claude",
         deadline=server.time.monotonic() + 30,
     )
 
-    row = dashboard_db.get_session("auto-life")
-    assert '"composer_ready": true' in row["harness_state"]
+    assert len(sleeps) >= 2  # waited, did not return before the signal
 
 
-def test_wait_for_prompt_does_not_return_while_confirming_trust(monkeypatch, tmp_path):
+def test_wait_for_prompt_times_out_without_signal(monkeypatch, tmp_path):
     from tools.dashboard import server
 
     _init_db(tmp_path)
@@ -254,44 +252,9 @@ def test_wait_for_prompt_does_not_return_while_confirming_trust(monkeypatch, tmp
         project="blindhash-operations",
         harness="claude",
     )
-    captures = iter(["trust", "> "])
-    keys_sent = []
 
-    class Harness:
-        def read_screen_state(self, pane_text, current_state):
-            if pane_text == "trust":
-                return (
-                    {
-                        "composer_ready": True,
-                        "confirming_trust_prompt": True,
-                        "blocking_modal": None,
-                    },
-                    [{"kind": "key", "value": "C-m"}],
-                )
-            return (
-                {
-                    "composer_ready": True,
-                    "confirming_trust_prompt": False,
-                    "blocking_modal": None,
-                },
-                [],
-            )
-
-    monkeypatch.setattr(server, "get_session_harness", lambda _name: Harness())
-    monkeypatch.setattr(server, "_run_tmux_capture", lambda *_a, **_kw: next(captures))
-    monkeypatch.setattr(
-        server,
-        "_run_tmux_keystrokes",
-        lambda _tmux_name, keystrokes, **_kw: keys_sent.extend(keystrokes),
-    )
-    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
-
-    server._wait_for_prompt(
-        tmux_name="auto-life",
-        harness_name="claude",
-        deadline=server.time.monotonic() + 30,
-    )
-
-    assert keys_sent == [{"kind": "key", "value": "C-m"}]
-    row = dashboard_db.get_session("auto-life")
-    assert '"confirming_trust_prompt": false' in row["harness_state"]
+    with pytest.raises(TimeoutError):
+        server._wait_for_prompt(
+            tmux_name="auto-life",
+            deadline=server.time.monotonic(),  # already expired
+        )
