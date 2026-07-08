@@ -196,16 +196,24 @@ class TestCaptureButton:
         ab_raw("close")
         ab_raw("open", f"http://localhost:{TEST_PORT}/design/{exp_id}",
                "--ignore-https-errors")
-        time.sleep(3)
 
-        result = ab_eval("""
+        # Poll instead of a fixed sleep — a cold Chromium boot under
+        # parallel load routinely outlasts 3s.
+        checks_js = """
             return {
                 hasModule: typeof Screenshot !== 'undefined',
                 hasUrl: typeof Screenshot !== 'undefined' && typeof Screenshot._screenshotUrl === 'function',
                 hasStatus: typeof Screenshot !== 'undefined' && typeof Screenshot._updateScreenshotStatus === 'function',
                 hasResponse: typeof Screenshot !== 'undefined' && typeof Screenshot._handleScreenshotResponse === 'function',
             };
-        """)
+        """
+        deadline = time.time() + 20
+        result = None
+        while time.time() < deadline:
+            result = ab_eval(checks_js)
+            if result and result.get("hasModule"):
+                break
+            time.sleep(0.5)
 
         assert result is not None, "Could not evaluate JS on design page"
         assert result.get("hasModule"), "Screenshot module not loaded"
