@@ -357,6 +357,10 @@
       signPrompt: false,      // is the passphrase entry step showing
       signRemember: false,    // "remember for this session" checkbox
       signHasRemembered: false, // a valid remembered passphrase exists (skip prompt)
+      // generic approval overlay (non-commit kinds, e.g. jira_write):
+      // { id, kind, session, title, actionLabel, op, target, bodyMarkdown, fields }
+      approvalRequest: null,
+      approvalBusy: false,
       selectedDirtyRow: null,
       confirmDiscardRow: null,
       showDiff: false,
@@ -1810,6 +1814,28 @@
       // overlay state; the chrome and Decline are kind-agnostic (declining is
       // identical for every kind, so it lives in the shell).
       _approvalKinds: {
+        jira_write: {
+          open(self, r) {
+            const req = r.request || {};
+            const ops = {
+              comment: { title: 'Jira comment', action: 'Post comment' },
+              set_field: {
+                title: 'Jira field update',
+                action: 'Set ' + (req.field_name || req.field_id || 'field'),
+              },
+              create: { title: 'New Jira ticket', action: 'Create ticket' },
+            };
+            const op = ops[req.op] || { title: 'Jira write', action: 'Approve' };
+            self.approvalRequest = {
+              id: r.id, kind: r.kind, session: r.session,
+              title: op.title, actionLabel: op.action, op: req.op,
+              target: req.key ||
+                ((req.fields || {}).project ? (req.fields.project.key || '') : ''),
+              bodyMarkdown: req.body_markdown || '',
+              fields: req.op === 'create' ? (req.fields || {}) : null,
+            };
+          },
+        },
         commit_sign: {
           async open(self, r) {
             // Render the pending commit in THIS overlay, in sign mode.
@@ -1946,18 +1972,44 @@
         try { await this._idbOp('readwrite', (s) => s.delete('k')); } catch (e) { /* ignore */ }
       },
 
+      // Approve for kinds whose result is the bare verdict (no client-produced
+      // output like a signature). Execution happens server-side afterwards; the
+      // requester receives the outcome through the approval result.
+      async approveRequest() {
+        const req = this.approvalRequest;
+        if (!req || this.approvalBusy) return;
+        this.approvalBusy = true;
+        try {
+          const resp = await fetch('/api/approvals/' + encodeURIComponent(req.id) + '/decision', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ approved: true }),
+          });
+          if (!resp.ok || !(await resp.json()).ok) {
+            throw new Error('the dashboard rejected the decision');
+          }
+          this.approvalRequest = null;
+          _toast('Approved', 'success');
+        } catch (e) {
+          _toast('Could not approve: ' + (e.message || e), 'error');
+        } finally {
+          this.approvalBusy = false;
+        }
+      },
+
       // Decline is identical for every approval kind, so it lives here in the
       // shell rather than in the per-kind handlers.
       async declineApproval() {
-        const sc = this.selectedCommit;
-        if (!sc || !sc.approvalId) return;
+        const id = (this.approvalRequest && this.approvalRequest.id) ||
+          (this.selectedCommit && this.selectedCommit.approvalId);
+        if (!id) return;
         try {
-          await fetch('/api/approvals/' + encodeURIComponent(sc.approvalId) + '/decision', {
+          await fetch('/api/approvals/' + encodeURIComponent(id) + '/decision', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ approved: false }),
           });
         } catch (e) { /* best-effort */ }
-        this.selectedCommit = null;
+        this.approvalRequest = null;
+        if (this.selectedCommit && this.selectedCommit.approvalId) this.selectedCommit = null;
       },
 
       async openCommitAt(row, index, options) {
