@@ -258,3 +258,111 @@ def test_wait_for_prompt_times_out_without_signal(monkeypatch, tmp_path):
             tmux_name="auto-life",
             deadline=server.time.monotonic(),  # already expired
         )
+
+
+def test_resume_start_handler_host_kind_runs_to_running(monkeypatch, tmp_path):
+    """Host resume through the worker: host_cmd prebuilt by the API handler,
+    tmux spawned with -c REPO_ROOT, composer signal waited, resume message
+    injected, row lands running."""
+    from tools.dashboard import server
+
+    _init_db(tmp_path)
+    dashboard_db.insert_session(
+        tmux_name="host-life",
+        session_type="host",
+        project="host-proj",
+        harness="claude",
+    )
+    calls = {"tmux": [], "inject": []}
+
+    def fake_subprocess_run(cmd, **kwargs):
+        calls["tmux"].append((cmd, kwargs))
+        return SimpleNamespace(returncode=0, stderr=b"")
+
+    monkeypatch.setattr(server, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(server.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(server, "_wait_for_prompt", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        server, "_render_resume_message", lambda **_kwargs: "resumed orientation",
+    )
+    monkeypatch.setattr(
+        server, "_inject_echo_verified",
+        lambda **kwargs: calls["inject"].append(kwargs),
+    )
+
+    server._run_session_resume_start(
+        LifecycleJob("start", "host-life", {
+            "resume": True,
+            "kind": "host",
+            "host_cmd": "claude --resume abc",
+            "jsonl_path": str(tmp_path / "x.jsonl"),
+            "resume_uuid": "abc",
+            "harness": "claude",
+            "revived": True,
+        }),
+        SessionLifecycleStateWriter(),
+    )
+
+    row = dashboard_db.get_session("host-life")
+    assert row["startup_state"] is None
+    assert row["activity_state"] == "running"
+    assert row["is_live"] == 1
+    spawn_cmd = calls["tmux"][0][0]
+    assert spawn_cmd[:2] == ["tmux", "new-session"]
+    assert "-c" in spawn_cmd and str(tmp_path) in spawn_cmd
+    assert spawn_cmd[-1] == "claude --resume abc"
+    assert calls["inject"] and calls["inject"][0]["message"] == "resumed orientation"
+
+
+def test_resume_start_handler_failure_preserves_worktrees(monkeypatch, tmp_path):
+    """A failed RESUME must never delete the session's worktrees — they
+    carry the session's whole uncommitted/unmerged history."""
+    from tools.dashboard import server
+
+    _init_db(tmp_path)
+    dashboard_db.insert_session(
+        tmux_name="auto-life",
+        session_type="container",
+        project="blindhash-operations",
+        harness="claude",
+    )
+    proj = _project()
+    wt_cleanups = []
+
+    monkeypatch.setattr(server, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(server.workspace_settings, "get_workspace", lambda _pid: proj)
+    monkeypatch.setattr(server.workspace_settings, "artifact_mounts", lambda _proj: {})
+    monkeypatch.setattr(server, "render_workspace_primer", lambda _proj: "primer")
+    monkeypatch.setattr(
+        server, "prepare_session_mounts", lambda *_a, **_kw: {},
+    )
+    monkeypatch.setattr(server, "launch_session", lambda **_kw: "echo launched")
+    monkeypatch.setattr(
+        server, "cleanup_session_worktrees",
+        lambda *_a, **_kw: wt_cleanups.append(True),
+    )
+
+    def failing_tmux(cmd, **kwargs):
+        return SimpleNamespace(returncode=1, stderr=b"tmux exploded")
+
+    monkeypatch.setattr(server.subprocess, "run", failing_tmux)
+
+    server._run_session_resume_start(
+        LifecycleJob("start", "auto-life", {
+            "resume": True,
+            "kind": "project",
+            "project_id": "blindhash-operations",
+            "output_dir": str(tmp_path / "run"),
+            "jsonl_path": str(tmp_path / "x.jsonl"),
+            "resume_uuid": "abc",
+            "harness": "claude",
+            "revived": True,
+        }),
+        SessionLifecycleStateWriter(),
+    )
+
+    row = dashboard_db.get_session("auto-life")
+    assert row["activity_state"] == "failed"
+    assert row["is_live"] == 0
+    assert "tmux creation failed" in row["lifecycle_detail"]
+    assert wt_cleanups == []  # worktrees untouched
