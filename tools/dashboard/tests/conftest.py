@@ -112,15 +112,15 @@ def _set_default_event_bus_state_path():
 _set_default_event_bus_state_path()
 
 
-# ── Per-worker agent-browser session isolation ─────────────────────────
-# Every browser harness in this suite shells out to `agent-browser`, which
-# routes to one shared daemon session unless AGENT_BROWSER_SESSION is set.
-# Under xdist, files on different workers open/close/navigate that single
-# shared page out from under each other — the dominant source of
-# "different test fails every run" flakiness. Ports are already namespaced
-# per worker (_xdist.worker_test_port); this does the same for the browser.
-# Subprocess calls inherit os.environ, so setting it here covers every
-# helper (l2b_harness, per-file ab()/ab_raw() wrappers, BrowserHelper).
+# ── Per-worker agent-browser session fallback ──────────────────────────
+# The ROOT conftest.py gives each dashboard test module its own browser
+# session (pytest-<worker>-<module>-<hash>) via a module-scoped autouse
+# fixture and closes it at module teardown. This import-time default only
+# covers the gaps outside any module fixture — collection-time helpers,
+# pytest_sessionfinish, and non-dashboard tests — so stray agent-browser
+# calls never land on the operator's default daemon session. Subprocess
+# calls inherit os.environ, so both layers cover every helper
+# (l2b_harness, per-file ab()/ab_raw() wrappers, BrowserHelper).
 def _isolate_agent_browser_session():
     if _os.environ.get("AGENT_BROWSER_SESSION"):
         return
