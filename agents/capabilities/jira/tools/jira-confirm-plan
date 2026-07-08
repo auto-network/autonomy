@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Usage: jira-confirm-plan ISSUE_KEY -f plan.md     (or pipe markdown on stdin)
+# Sets the ticket's "Confirm Plan" field — staged for operator approval;
+# blocks until decided. Confirm Plan holds step-by-step QA instructions to
+# reproduce the bug and prove the fix: command-by-command (anchorectl, curl,
+# psql, …) with expected results. Narrative/discussion belongs in a comment.
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/_jira_lib.sh"
+
+KEY="${1:-}"
+[ -n "$KEY" ] || jira_fail "usage: jira-confirm-plan ISSUE_KEY -f plan.md (or stdin)"
+shift
+
+body_file="$(mktemp)"; req_file="$(mktemp)"
+trap 'rm -f "$body_file" "$req_file"' EXIT
+jira_read_body "$@" > "$body_file"
+[ -s "$body_file" ] || jira_fail "jira-confirm-plan: empty body"
+
+python3 - "$SESSION" "$KEY" "$body_file" > "$req_file" <<'PY'
+import json, sys
+session, key, path = sys.argv[1:4]
+print(json.dumps({"kind": "jira_write", "session": session, "request": {
+    "op": "set_field", "key": key, "field_name": "Confirm Plan",
+    "body_markdown": open(path).read()}}))
+PY
+jira_approval_wait "$req_file"

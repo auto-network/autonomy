@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -11,6 +12,21 @@ from starlette.testclient import TestClient
 from agents.capabilities.jira.backend import adf, api
 from tools.dashboard import approvals_routes, jira_routes
 from tools.dashboard.dao import approval_requests as ar
+
+CAPABILITY_DIR = Path(__file__).resolve().parents[3] / "agents" / "capabilities" / "jira"
+
+
+def test_capability_ships_no_credential_surface():
+    """The hard bar: nothing credential-shaped reaches the container. The
+    manifest requests no secret mounts or env, and the mounted tools never
+    reference the token or account email."""
+    manifest = json.loads((CAPABILITY_DIR / "manifest.json").read_text())
+    assert "required_secret_files" not in manifest
+    assert "required_env" not in manifest
+    for tool in (CAPABILITY_DIR / "tools").iterdir():
+        text = tool.read_text()
+        for needle in ("jira_token", "JIRA_TOKEN", "JIRA_EMAIL", "atlassian.net"):
+            assert needle not in text, f"{tool.name} references {needle}"
 
 
 # ── ADF conversion ──

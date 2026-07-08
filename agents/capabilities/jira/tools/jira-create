@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Usage: jira-create payload.json
+# Creates a ticket — staged for operator approval; blocks until decided.
+# payload.json = the Jira fields object, e.g.:
+#   {"fields": {"project": {"key": "ENTERPRISE"}, "issuetype": {"name": "Bug"},
+#               "summary": "...", "description": "markdown is fine here", ...}}
+# A plain-string description is converted to ADF host-side. Use
+# jira-createmeta for valid components/versions/priorities/severity.
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/_jira_lib.sh"
+
+PAYLOAD_FILE="${1:-}"
+[ -n "$PAYLOAD_FILE" ] && [ -f "$PAYLOAD_FILE" ] || jira_fail "usage: jira-create payload.json"
+
+req_file="$(mktemp)"
+trap 'rm -f "$req_file"' EXIT
+python3 - "$SESSION" "$PAYLOAD_FILE" > "$req_file" <<'PY' || exit 1
+import json, sys
+session, path = sys.argv[1:3]
+payload = json.load(open(path))
+fields = payload.get("fields", payload)   # accept bare fields or {"fields": ...}
+if not isinstance(fields, dict) or not fields:
+    sys.exit("jira-create: payload must contain a non-empty fields object")
+print(json.dumps({"kind": "jira_write", "session": session,
+                  "request": {"op": "create", "fields": fields}}))
+PY
+jira_approval_wait "$req_file"

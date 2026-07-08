@@ -1,9 +1,21 @@
-# Jira capability — primer projection (placeholder)
+## Jira capability (issue tracker)
 
-Stable stub so primer rendering can target this path. The real primer
-block is added by the Jira capability MVP bead (graph://86e04207-a25
-§ Phase 3).
+Broker-backed: these commands hold no Jira credential — reads run host-side;
+**writes pause for operator approval** (an overlay opens on the operator's
+dashboard; your command blocks until they approve or decline, then prints the
+outcome or the decline).
 
-When populated this file will be a short primer block listing the
-`jira-*` commands available, where the auth comes from, and any current
-Markdown-to-ADF limitations.
+- `jira-read KEY` — cleaned ticket JSON (description/comments as markdown)
+- `jira-createmeta [PROJECT [ISSUETYPE]]` — valid components/versions/priorities/severity for creation
+- `jira-comment KEY -f body.md` — post a comment *(operator approval)*
+- `jira-confirm-plan KEY -f plan.md` — set the Confirm Plan field *(operator approval)*
+- `jira-create payload.json` — create a ticket *(operator approval)*
+
+**Which field for what:** the **Confirm Plan** custom field holds step-by-step
+QA instructions to reproduce the bug and prove the fix — command-by-command
+(`anchorectl`, `curl`, `psql`, …) with expected results. **Comments** hold
+narrative: findings, discussion, corrections. Don't dump repro steps into a
+comment — put them in Confirm Plan via `jira-confirm-plan`.
+
+Markdown in bodies is converted to Jira's document format host-side. For full
+usage see `agents/capabilities/jira/SKILL.md`.
