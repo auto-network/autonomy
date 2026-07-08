@@ -2897,24 +2897,39 @@ async def api_terminals(request):
     return JSONResponse(result)
 
 async def api_terminal_kill(request):
-    """Kill a terminal session. If it's a Chat With session, ingest it into the graph."""
+    """Stop a terminal session via the lifecycle worker.
+
+    Dashboard-tracked sessions go through the worker's STOP handler
+    (stopping → cleaning → dead, bounded steps, chatwith ingest on
+    completion) and return 202 immediately. Unknown tmux sessions (not in
+    dashboard.db) fall back to a direct kill.
+    """
     name = request.path_params["id"]
-    if _tmux_session_exists(name):
-        subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
-        # Deregister from session monitor (marks dead in DB)
-        await session_monitor.deregister(name)
-        # Revoke CrossTalk tokens for this session
-        await asyncio.to_thread(auth_db.revoke_token, name)
-        # Ingest the completed session into the graph (fire-and-forget)
-        if name.startswith("chatwith-"):
-            asyncio.create_task(asyncio.to_thread(
-                subprocess.run,
-                ["graph", "sessions", "--all"],
-                capture_output=True, timeout=30,
-                cwd=str(Path(__file__).parents[2]),
-            ))
-        return JSONResponse({"status": "killed", "id": name})
-    return JSONResponse({"status": "not_found", "id": name})
+    if not _tmux_session_exists(name):
+        return JSONResponse({"status": "not_found", "id": name})
+
+    if dashboard_db.session_exists(name):
+        job = LifecycleJob("stop", name, {"event_loop": asyncio.get_running_loop()})
+        if _SESSION_LIFECYCLE_WORKER.try_enqueue(job):
+            return JSONResponse(
+                {"status": "stopping", "id": name}, status_code=202,
+            )
+        logger.warning(
+            "api_terminal_kill: lifecycle queue full; stopping %s inline", name,
+        )
+
+    # Non-dashboard tmux session, or queue-full fallback: direct kill.
+    subprocess.run(["tmux", "kill-session", "-t", name], capture_output=True)
+    await session_monitor.deregister(name)
+    await asyncio.to_thread(auth_db.revoke_token, name)
+    if name.startswith("chatwith-"):
+        asyncio.create_task(asyncio.to_thread(
+            subprocess.run,
+            ["graph", "sessions", "--all"],
+            capture_output=True, timeout=30,
+            cwd=str(Path(__file__).parents[2]),
+        ))
+    return JSONResponse({"status": "killed", "id": name})
 
 
 async def api_terminal_rename(request):
@@ -5613,6 +5628,66 @@ def _run_cleanup_step(
     return None
 
 
+def _teardown_stop_container_and_tmux(tmux_name: str) -> None:
+    """Idempotent process kill: docker container (if any) + tmux session."""
+    subprocess.run(
+        ["docker", "rm", "-f", tmux_name],
+        capture_output=True,
+        text=True,
+        timeout=_LIFECYCLE_STOP_TIMEOUT_S,
+    )
+    subprocess.run(
+        ["tmux", "kill-session", "-t", tmux_name],
+        capture_output=True,
+        text=True,
+        timeout=_LIFECYCLE_STOP_TIMEOUT_S,
+    )
+
+
+def _teardown_remove_watches(tmux_name: str) -> None:
+    session_monitor._remove_watches(tmux_name)
+    session_monitor._tail_states.pop(tmux_name, None)
+    session_monitor._phase_progress.pop(tmux_name, None)
+
+
+def _teardown_deregister(tmux_name: str, loop: asyncio.AbstractEventLoop | None) -> None:
+    if loop is not None and loop.is_running():
+        fut = asyncio.run_coroutine_threadsafe(
+            session_monitor.deregister(tmux_name),
+            loop,
+        )
+        fut.result(timeout=_LIFECYCLE_DEREGISTER_TIMEOUT_S)
+    else:
+        dashboard_db.mark_dead(tmux_name)
+    auth_db.revoke_token(tmux_name)
+
+
+def _teardown_cleanup_worktrees(tmux_name: str) -> None:
+    errors: list[BaseException] = []
+
+    def _target() -> None:
+        try:
+            cleanup_session_worktrees(
+                tmux_name,
+                force=True,
+                worktrees_dir=WORKTREES_DIR,
+            )
+        except BaseException as exc:  # noqa: BLE001 - propagate through parent thread
+            errors.append(exc)
+
+    thread = threading.Thread(
+        target=_target,
+        name=f"lifecycle-cleanup-{tmux_name}",
+        daemon=True,
+    )
+    thread.start()
+    thread.join(_LIFECYCLE_CLEANUP_WORKTREE_TIMEOUT_S)
+    if thread.is_alive():
+        raise TimeoutError("cleanup worktree timed out")
+    if errors:
+        raise errors[0]
+
+
 def _cleanup_after_lifecycle_failure(
     *,
     tmux_name: str,
@@ -5632,69 +5707,18 @@ def _cleanup_after_lifecycle_failure(
     """
     errors: list[str] = []
 
-    def _stop_container_and_tmux() -> None:
-        subprocess.run(
-            ["docker", "rm", "-f", tmux_name],
-            capture_output=True,
-            text=True,
-            timeout=_LIFECYCLE_STOP_TIMEOUT_S,
-        )
-        subprocess.run(
-            ["tmux", "kill-session", "-t", tmux_name],
-            capture_output=True,
-            text=True,
-            timeout=_LIFECYCLE_STOP_TIMEOUT_S,
-        )
-
-    def _remove_watches() -> None:
-        session_monitor._remove_watches(tmux_name)
-        session_monitor._tail_states.pop(tmux_name, None)
-        session_monitor._phase_progress.pop(tmux_name, None)
-
-    def _deregister() -> None:
-        if loop is not None and loop.is_running():
-            fut = asyncio.run_coroutine_threadsafe(
-                session_monitor.deregister(tmux_name),
-                loop,
-            )
-            fut.result(timeout=_LIFECYCLE_DEREGISTER_TIMEOUT_S)
-        else:
-            dashboard_db.mark_dead(tmux_name)
-        auth_db.revoke_token(tmux_name)
-
-    def _cleanup_worktrees() -> None:
-        errors: list[BaseException] = []
-
-        def _target() -> None:
-            try:
-                cleanup_session_worktrees(
-                    tmux_name,
-                    force=True,
-                    worktrees_dir=WORKTREES_DIR,
-                )
-            except BaseException as exc:  # noqa: BLE001 - propagate through parent thread
-                errors.append(exc)
-
-        thread = threading.Thread(
-            target=_target,
-            name=f"lifecycle-cleanup-{tmux_name}",
-            daemon=True,
-        )
-        thread.start()
-        thread.join(_LIFECYCLE_CLEANUP_WORKTREE_TIMEOUT_S)
-        if thread.is_alive():
-            raise TimeoutError("cleanup worktree timed out")
-        if errors:
-            raise errors[0]
-
     steps: list[tuple[str, float, Callable[[], None]]] = [
-        ("stop_container_tmux", _LIFECYCLE_STOP_TIMEOUT_S, _stop_container_and_tmux),
-        ("remove_watchers", _LIFECYCLE_REMOVE_WATCHERS_TIMEOUT_S, _remove_watches),
-        ("deregister", _LIFECYCLE_DEREGISTER_TIMEOUT_S, _deregister),
+        ("stop_container_tmux", _LIFECYCLE_STOP_TIMEOUT_S,
+         lambda: _teardown_stop_container_and_tmux(tmux_name)),
+        ("remove_watchers", _LIFECYCLE_REMOVE_WATCHERS_TIMEOUT_S,
+         lambda: _teardown_remove_watches(tmux_name)),
+        ("deregister", _LIFECYCLE_DEREGISTER_TIMEOUT_S,
+         lambda: _teardown_deregister(tmux_name, loop)),
     ]
     if cleanup_worktrees:
         steps.append(
-            ("cleanup_worktree", _LIFECYCLE_CLEANUP_WORKTREE_TIMEOUT_S, _cleanup_worktrees),
+            ("cleanup_worktree", _LIFECYCLE_CLEANUP_WORKTREE_TIMEOUT_S,
+             lambda: _teardown_cleanup_worktrees(tmux_name)),
         )
     for name, timeout, func in steps:
         err = _run_cleanup_step(name=name, timeout=timeout, func=func)
@@ -6365,8 +6389,80 @@ def _run_session_start(job: LifecycleJob, writer: SessionLifecycleStateWriter) -
         _run_project_session_start(job, writer)
 
 
+def _run_session_stop(job: LifecycleJob, writer: SessionLifecycleStateWriter) -> None:
+    """Worker-thread teardown: running → stopping → cleaning → dead.
+
+    Worktrees are NEVER cleaned on stop — dead sessions keep them so the
+    Worktrees merge flow can land their commits. Every step is bounded and
+    idempotent; step errors degrade to warnings and the session still
+    reaches ``dead`` (a half-stopped session must not stay ``running``).
+    """
+    tmux_name = job.tmux_name
+    loop = job.config.get("event_loop")
+    if loop is not None and not isinstance(loop, asyncio.AbstractEventLoop):
+        loop = None
+
+    writer.set_state(tmux_name, "stopping")
+    errors: list[str] = []
+    err = _run_cleanup_step(
+        name="stop_container_tmux",
+        timeout=_LIFECYCLE_STOP_TIMEOUT_S,
+        func=lambda: _teardown_stop_container_and_tmux(tmux_name),
+    )
+    if err:
+        errors.append(err)
+    writer.set_state(tmux_name, "cleaning")
+    for name, timeout, func in (
+        ("remove_watchers", _LIFECYCLE_REMOVE_WATCHERS_TIMEOUT_S,
+         lambda: _teardown_remove_watches(tmux_name)),
+        ("deregister", _LIFECYCLE_DEREGISTER_TIMEOUT_S,
+         lambda: _teardown_deregister(tmux_name, loop)),
+    ):
+        err = _run_cleanup_step(name=name, timeout=timeout, func=func)
+        if err:
+            errors.append(err)
+    writer.set_state(tmux_name, "dead")
+    if errors:
+        logger.warning(
+            "session_lifecycle: stop finished with step issues tmux=%s errors=%s",
+            tmux_name, "; ".join(errors),
+        )
+    # Completed Chat With sessions get ingested into the graph once dead.
+    if tmux_name.startswith("chatwith-"):
+        try:
+            subprocess.run(
+                ["graph", "sessions", "--all"],
+                capture_output=True, timeout=30,
+                cwd=str(Path(__file__).parents[2]),
+            )
+        except Exception:
+            logger.debug("session_lifecycle: chatwith ingest failed", exc_info=True)
+
+
+def _run_session_retry(job: LifecycleJob, writer: SessionLifecycleStateWriter) -> None:
+    """Retry a failed launch: bounded cleanup of the failed attempt's
+    leftovers (process + watches only — the row and worktrees stay), then
+    the normal start step list with the attempt counter bumped."""
+    tmux_name = job.tmux_name
+    for name, timeout, func in (
+        ("stop_container_tmux", _LIFECYCLE_STOP_TIMEOUT_S,
+         lambda: _teardown_stop_container_and_tmux(tmux_name)),
+        ("remove_watchers", _LIFECYCLE_REMOVE_WATCHERS_TIMEOUT_S,
+         lambda: _teardown_remove_watches(tmux_name)),
+    ):
+        err = _run_cleanup_step(name=name, timeout=timeout, func=func)
+        if err:
+            logger.warning(
+                "session_lifecycle: retry pre-clean issue tmux=%s error=%s",
+                tmux_name, err,
+            )
+    _run_session_start(job, writer)
+
+
 _SESSION_LIFECYCLE_WORKER = SessionLifecycleWorker()
 _SESSION_LIFECYCLE_WORKER.register_handler("start", _run_session_start)
+_SESSION_LIFECYCLE_WORKER.register_handler("stop", _run_session_stop)
+_SESSION_LIFECYCLE_WORKER.register_handler("retry", _run_session_retry)
 
 
 async def _recover_stuck_lifecycle_rows() -> None:
@@ -7086,6 +7182,178 @@ def _spawn_setup_exit_watcher(tmux_name: str, run_dir: Path) -> None:
     asyncio.create_task(_watch_setup_exit())
 
 
+def _build_host_resume_cmd(
+    *,
+    tmux_name: str,
+    harness: str,
+    model: str | None,
+    session_uuid: str,
+) -> str:
+    """Shell command that relaunches a host session's own harness CLI."""
+    env_prefix = f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
+    if harness == "codex":
+        # session_uuid is the rollout filename stem; codex resume needs
+        # the canonical UUID tail (same extraction the launcher uses).
+        m = re.search(
+            r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+            session_uuid,
+        )
+        codex_uuid = m.group(1) if m else session_uuid
+        model_flag = f"--model {shlex.quote(model)} " if model else ""
+        return (
+            env_prefix
+            + "codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox "
+            + model_flag
+            + f"resume {shlex.quote(codex_uuid)}"
+        )
+    resolved_model = model or _resolve_host_session_model()
+    return (
+        env_prefix
+        + "claude --dangerously-skip-permissions "
+        + f"--model {shlex.quote(resolved_model)} --resume {shlex.quote(session_uuid)}"
+    )
+
+
+async def api_session_retry(request):
+    """Relaunch a failed session through the lifecycle worker.
+
+    POST /api/session/{tmux_name}/retry
+    Returns 202 {"tmux_name", "status": "retrying"} once the retry job is
+    queued. Only rows in the failed terminal state are retryable. The
+    launch config is rebuilt from the durable row: rows with a
+    session_uuid + existing JSONL re-resume; workspace rows re-create;
+    host rows rebuild the host command.
+    """
+    tmux_name = request.path_params["tmux_name"]
+    row = dashboard_db.get_session(tmux_name)
+    if not row:
+        return JSONResponse({"error": f"unknown session '{tmux_name}'"}, status_code=404)
+    failed = (
+        row.get("activity_state") == "failed"
+        or row.get("startup_state") == "setup_failed"
+    )
+    if not failed:
+        return JSONResponse(
+            {"error": f"session '{tmux_name}' is not in a failed state"},
+            status_code=409,
+        )
+
+    try:
+        detail = json.loads(row.get("lifecycle_detail") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        detail = {}
+    attempt = int(detail.get("attempt", 1) or 1) + 1
+    harness = row.get("harness") or "claude"
+    model = row.get("model") or None
+    session_uuid = row.get("session_uuid") or ""
+    jsonl_path = row.get("jsonl_path") or ""
+    session_type = "host" if row.get("type") == "host" else "container"
+    project = row.get("project") or ""
+
+    proj = None
+    if session_type == "container" and project:
+        try:
+            proj = workspace_settings.get_workspace(project)
+        except (KeyError, workspace_settings.WorkspaceSettingsError):
+            proj = None
+
+    if session_uuid and jsonl_path and Path(jsonl_path).exists():
+        # The failed attempt was (or is retryable as) a RESUME.
+        if session_type == "host":
+            kind = "host"
+            output_dir = None
+            host_cmd = _build_host_resume_cmd(
+                tmux_name=tmux_name,
+                harness=harness,
+                model=model,
+                session_uuid=session_uuid,
+            )
+        else:
+            kind = "project" if proj is not None else "container"
+            host_cmd = None
+            _od = Path(jsonl_path)
+            while _od.parent != _od and _od.name != "sessions":
+                _od = _od.parent
+            output_dir = str(_od.parent)
+        config = {
+            "resume": True,
+            "kind": kind,
+            "attempt": attempt,
+            "project_id": proj.id if (kind == "project" and proj is not None) else None,
+            "workspace_name": proj.name if (kind == "project" and proj is not None) else None,
+            "org": proj.graph_project if (kind == "project" and proj is not None) else "autonomy",
+            "resume_uuid": session_uuid,
+            "output_dir": output_dir,
+            "jsonl_path": jsonl_path,
+            "harness": harness,
+            "model": model,
+            "revived": True,
+            "host_cmd": host_cmd,
+            "session_type": session_type,
+            "register_project": project or "autonomy",
+            "event_loop": asyncio.get_running_loop(),
+        }
+    elif proj is not None:
+        # Failed workspace CREATE — fresh start with the same project.
+        config = {
+            "project_id": proj.id,
+            "primer_url": None,
+            "attempt": attempt,
+            "event_loop": asyncio.get_running_loop(),
+        }
+    elif session_type == "host":
+        env_prefix = f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
+        config = {
+            "kind": "host",
+            "attempt": attempt,
+            "host_cmd": (
+                env_prefix
+                + "claude --dangerously-skip-permissions "
+                + f"--model {_resolve_host_session_model()}"
+            ),
+            "harness": "claude",
+            "register_project": project or str(_REPO_ROOT).replace("/", "-"),
+            "first_message": f"Session {tmux_name} restarted.",
+            "event_loop": asyncio.get_running_loop(),
+        }
+    else:
+        config = {
+            "kind": "container",
+            "attempt": attempt,
+            "harness": harness,
+            "register_project": project or "autonomy",
+            "first_message": None,
+            "event_loop": asyncio.get_running_loop(),
+        }
+
+    # Reset the row for the fresh attempt (is_live, harness_state,
+    # startup_state) and re-enter the FSM.
+    dashboard_db.revive_session(tmux_name, file_offset=0)
+    await session_monitor.register_pending(
+        tmux_name,
+        session_type=session_type,
+        project=project,
+        harness=harness,
+    )
+    if not _SESSION_LIFECYCLE_WORKER.try_enqueue(LifecycleJob("retry", tmux_name, config)):
+        reason = "session lifecycle queue is full"
+        _SESSION_LIFECYCLE_WORKER.state_writer.fail(
+            tmux_name, phase="requested", reason=reason, retryable=True, attempt=attempt,
+        )
+        return JSONResponse(
+            {"error": reason, "tmux_name": tmux_name, "retryable": True},
+            status_code=503,
+        )
+    logger.info(
+        "api_session_retry: queued tmux=%s attempt=%d resume=%s",
+        tmux_name, attempt, bool(config.get("resume")),
+    )
+    return JSONResponse(
+        {"tmux_name": tmux_name, "status": "retrying", "attempt": attempt},
+        status_code=202,
+    )
+
+
 async def api_session_resume(request):
     """Resume an existing Claude session.
 
@@ -7280,31 +7548,13 @@ async def api_session_resume(request):
         # Host session: relaunch the SAME harness CLI on the host. Hardcoding
         # ``claude`` here meant resuming a host Codex session ran the wrong
         # CLI against a codex rollout it can't read.
-        _env_prefix = (
-            f"BD_ACTOR=terminal:{tmux_name} AUTONOMY_SESSION={tmux_name} "
-        )
         kind = "host"
-        if resume_harness == "codex":
-            # session_uuid is the rollout filename stem; codex resume needs
-            # the canonical UUID tail (same extraction the launcher uses).
-            _m = re.search(
-                r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
-                session_uuid,
-            )
-            _codex_uuid = _m.group(1) if _m else session_uuid
-            _model_flag = f"--model {shlex.quote(model)} " if model else ""
-            host_cmd = (
-                _env_prefix
-                + "codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox "
-                + _model_flag
-                + f"resume {shlex.quote(_codex_uuid)}"
-            )
-        else:
-            host_cmd = (
-                _env_prefix
-                + f"claude --dangerously-skip-permissions "
-                + f"--model {shlex.quote(model)} --resume {shlex.quote(session_uuid)}"
-            )
+        host_cmd = _build_host_resume_cmd(
+            tmux_name=tmux_name,
+            harness=resume_harness,
+            model=model,
+            session_uuid=session_uuid,
+        )
         output_dir = None
 
     # ── Revive/seed the row, arm the FSM, enqueue the relaunch ──
@@ -15234,6 +15484,7 @@ routes = [
     Route("/api/terminal/unclaimed", api_terminal_unclaimed),
     Route("/api/session/create", api_session_create, methods=["POST"]),
     Route("/api/session/resume", api_session_resume, methods=["POST"]),
+    Route("/api/session/{tmux_name}/retry", api_session_retry, methods=["POST"]),
     Route("/api/session/send-handshake", api_session_send_handshake, methods=["POST"]),
     Route("/api/session/confirm-link", api_session_confirm_link, methods=["POST"]),
     Route("/api/session/{tmux_name}", api_session_get, methods=["GET"]),
