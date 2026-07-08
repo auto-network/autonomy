@@ -299,10 +299,35 @@ def test_client(mock_fixture, resume_env, monkeypatch):
     from tools.dashboard import server
     importlib.reload(server)
 
+    # Launches run on the lifecycle worker now: capture enqueued jobs and
+    # let tests drain them synchronously via client.run_lifecycle_jobs().
+    # The pane-dependent step helpers are stubbed — these tests assert
+    # routing/identity/registration, not tmux mechanics.
+    _queued_jobs: list = []
+    # Patch enqueue (not try_enqueue): try_enqueue delegates here, and
+    # tests that install their own capture/queue-full behavior override
+    # whichever method they need.
+    monkeypatch.setattr(
+        server._SESSION_LIFECYCLE_WORKER, "enqueue",
+        lambda job: _queued_jobs.append(job),
+    )
+    monkeypatch.setattr(server, "_wait_for_prompt", lambda **_kw: None)
+    monkeypatch.setattr(server, "_wait_for_setup_complete", lambda **_kw: None)
+    monkeypatch.setattr(server, "_inject_echo_verified", lambda **_kw: None)
+
+    def _run_lifecycle_jobs():
+        while _queued_jobs:
+            job = _queued_jobs.pop(0)
+            server._run_session_start(
+                job, server._SESSION_LIFECYCLE_WORKER.state_writer,
+            )
+
     from starlette.testclient import TestClient
     with TestClient(server.app) as client:
         client._monitor_calls = _monitor_calls
         client._dead_sessions = _dead_sessions
         client._live_sessions = _live_sessions
         client._revived = _revived
+        client._queued_jobs = _queued_jobs
+        client.run_lifecycle_jobs = _run_lifecycle_jobs
         yield client
