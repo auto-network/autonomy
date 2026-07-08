@@ -1320,7 +1320,13 @@
         // cached replay is harmless). The shared overlay's openApprovalOverlay
         // dispatches on the request's kind.
         this._lastApprovalPendingId = null;
+        // sessionKey is empty at init (configure() populates it later), so
+        // the durable-field read must also fire when the key lands.
         this._checkPendingApproval();
+        this.$watch('sessionKey', (key) => {
+          this._lastApprovalPendingId = null;
+          if (key) this._checkPendingApproval();
+        });
         var approvalSelf = this;
         this._approvalPendingHandler = function (d) {
           if (!d || d.session !== approvalSelf.sessionKey || !d.id) return;
