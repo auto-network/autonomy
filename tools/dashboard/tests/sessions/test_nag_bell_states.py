@@ -62,12 +62,16 @@ def h(tmp_path_factory):
     harness = SessionsTestHarness(tmp)
     harness.set_fixture(_fixture())
     harness.start_server()
-    harness.open_sessions_page()
-    # Allow SSE + Alpine reactivity to paint all four cards.
-    time.sleep(1)
-    yield harness
-    ab_raw("close")
-    harness.stop()
+    try:
+        # try/finally so a setup failure still stops the uvicorn server —
+        # a leaked server poisons the next file on this xdist worker.
+        harness.open_sessions_page()
+        # Allow SSE + Alpine reactivity to paint all four cards.
+        time.sleep(1)
+        yield harness
+    finally:
+        ab_raw("close")
+        harness.stop()
 
 
 def _bell_class_for(session_id):
