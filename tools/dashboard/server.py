@@ -15424,7 +15424,12 @@ async def _on_startup():
         todo_snapshot=_task_state_tracker.snapshot,
     )
     await worktree_monitor.start()
-    await resource_monitor.start()
+    # Resource collector: skip under mock/test servers — it polls the real
+    # dashboard.db live-session set and attempts docker/tmux resolution per
+    # session, which is pure noise (and timing jitter for browser tests)
+    # in those environments. Same gate as the harness-usage poller.
+    if _should_run_harness_usage_poller():
+        await resource_monitor.start(event_bus=event_bus)
     _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())
     _event_loop_watchdog_task = asyncio.create_task(_event_loop_watchdog())
     _recent_sessions_refresher_task = asyncio.create_task(_recent_sessions_refresher())

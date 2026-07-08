@@ -326,11 +326,13 @@ class ResourceMonitor:
         self._docker_sizes: dict[str, int] = {}
         self._docker_sizes_at = 0.0
         self._upper_dir_readable: bool | None = None
+        self._event_bus = None
 
     # ── lifecycle ────────────────────────────────────────────────
 
-    async def start(self) -> None:
+    async def start(self, event_bus=None) -> None:
         if self._task is None:
+            self._event_bus = event_bus
             self._task = asyncio.create_task(self._loop())
             logger.info(
                 "resource_monitor: started (cpu=%ss disk=%s)",
@@ -350,6 +352,15 @@ class ResourceMonitor:
             try:
                 rows = get_live_sessions()
                 await asyncio.to_thread(self._tick, rows, time.time())
+                # Push the latest samples (no history — the frontend keeps
+                # its own ring buffer by appending these) over the shared
+                # SSE bus. Dedup means an all-idle fleet broadcasts nothing;
+                # the bus's last-value cache replays state to newly opened
+                # pages on handler registration.
+                if self._event_bus is not None:
+                    await self._event_bus.broadcast(
+                        "resources",
+                        self.snapshot(include_history=False)["sessions"])
             except Exception:
                 logger.exception("resource_monitor: tick error")
             await asyncio.sleep(self.cpu_interval)

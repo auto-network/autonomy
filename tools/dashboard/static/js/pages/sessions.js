@@ -185,6 +185,165 @@
         return '/worktrees?session=' + encodeURIComponent(key);
       },
 
+      // --- Per-session resource metrics (design d2250266 meta2 row) ---
+      // Pushed over the shared SSE bus: the collector broadcasts its
+      // latest samples on the 'resources' topic after each ~6s tick
+      // (dedup'd server-side, last-value replayed on registration — same
+      // contract as the 'worktrees' topic). Keyed by tmux name. The
+      // sparkline ring buffer lives HERE, client-side: one
+      // /api/resources?history=1 hydrate on init backfills it, then each
+      // pushed sample is appended. Ended cards read the final persisted
+      // footprint off the row itself (disk_bytes / disk_detail, written
+      // by the collector's death-path measure).
+      resources: {},
+      _resourceTipOpen: null,   // tmux name whose disk tooltip is tapped open
+      _diskRefreshing: {},      // tmux name → true while force-refresh runs
+      _SPARK_SAMPLES: 100,      // client ring buffer cap (matches collector)
+
+      _applyResourceRows(rows) {
+        var next = {};
+        for (var key in rows) {
+          var r = rows[key];
+          var prev = this.resources[key];
+          var hist = (prev && prev.history) || r.history || [];
+          if (!r.history && r.sampled_at && r.cpu_pct != null) {
+            var lastTs = hist.length ? hist[hist.length - 1][0] : 0;
+            if (r.sampled_at > lastTs) {
+              hist = hist.concat([[r.sampled_at, r.cpu_pct, r.mem_bytes]]);
+              if (hist.length > this._SPARK_SAMPLES) {
+                hist = hist.slice(hist.length - this._SPARK_SAMPLES);
+              }
+            }
+          }
+          next[key] = Object.assign({}, r, { history: hist });
+        }
+        this.resources = next;
+      },
+      async _hydrateResources() {
+        try {
+          var res = await fetch('/api/resources?history=1');
+          if (res.ok) {
+            this._applyResourceRows((await res.json()).sessions || {});
+          }
+        } catch (e) { /* SSE pushes will populate from here */ }
+      },
+
+      resourceFor(s) {
+        var key = (s && (s.tmux_session || s.tmux_name || s.id)) || '';
+        return this.resources[key] || null;
+      },
+      fmtBytes(n) {
+        if (n == null || isNaN(n)) return '';
+        if (n >= 1e9) return (n / 1e9).toFixed(n >= 1e10 ? 0 : 1) + 'GB';
+        if (n >= 1e6) return (n / 1e6).toFixed(0) + 'MB';
+        if (n >= 1e3) return (n / 1e3).toFixed(0) + 'KB';
+        return n + 'B';
+      },
+      cpuStr(s) {
+        var r = this.resourceFor(s);
+        return (r && r.cpu_pct != null) ? r.cpu_pct.toFixed(r.cpu_pct >= 10 ? 0 : 1) + '%' : '—';
+      },
+      ramStr(s) {
+        var r = this.resourceFor(s);
+        return (r && r.mem_bytes != null) ? this.fmtBytes(r.mem_bytes) : '—';
+      },
+      diskStr(s) {
+        if (s.is_live) {
+          var r = this.resourceFor(s);
+          return (r && r.disk && r.disk.total != null) ? this.fmtBytes(r.disk.total) : '—';
+        }
+        return s.disk_bytes != null ? this.fmtBytes(s.disk_bytes) : '';
+      },
+      // Breakdown rows for the disk tooltip: [['Run dir','2.4MB'], ...].
+      // Live cards read the collector's latest merged detail; ended cards
+      // parse the persisted JSON. Component keys → operator labels.
+      diskDetail(s) {
+        var detail = null;
+        if (s.is_live) {
+          var r = this.resourceFor(s);
+          detail = r && r.disk;
+        } else if (s.disk_detail) {
+          try { detail = JSON.parse(s.disk_detail); } catch (e) { detail = null; }
+        }
+        if (!detail || !detail.components) return [];
+        var labels = { run_dir: 'Run dir', jsonl: 'Transcript',
+                       worktrees: 'Worktrees', container_fs: 'Container' };
+        var rows = [];
+        for (var k in detail.components) {
+          rows.push([labels[k] || k, this.fmtBytes(detail.components[k])]);
+        }
+        rows.push(['Total', this.fmtBytes(detail.total)]);
+        return rows;
+      },
+      resourceTipKey(s) {
+        return (s && (s.tmux_session || s.tmux_name || s.id)) || '';
+      },
+      toggleResourceTip(s) {
+        var key = this.resourceTipKey(s);
+        this._resourceTipOpen = this._resourceTipOpen === key ? null : key;
+      },
+      async refreshDisk(s) {
+        var key = this.resourceTipKey(s);
+        if (!key || this._diskRefreshing[key]) return;
+        this._diskRefreshing[key] = true;
+        try {
+          var res = await fetch('/api/resources/' + encodeURIComponent(key) + '/refresh',
+                                { method: 'POST' });
+          if (res.ok) {
+            var body = await res.json();
+            if (this.resources[key]) {
+              this.resources[key] = Object.assign({}, this.resources[key], { disk: body.disk });
+            } else {
+              this.resources[key] = { disk: body.disk };
+            }
+          }
+        } catch (e) { /* transient — next poll repaints */ }
+        this._diskRefreshing[key] = false;
+      },
+      // Dual CPU/RAM sparkline over the collector's history ring buffer.
+      // Ported from design d2250266 v58: each series normalized to its own
+      // range, Catmull-Rom smoothing, pulsing endpoint. RAM under CPU.
+      sparkSvg(s) {
+        var r = this.resourceFor(s);
+        var hist = (r && r.history) || [];
+        if (hist.length < 2) return '';
+        var W = 180, H = 42, pad = 6;
+        function toPts(data) {
+          if (data.length < 2) return null;
+          var mn = Math.min.apply(null, data), mx = Math.max.apply(null, data);
+          var sp = (mx - mn) || 1, n = data.length;
+          return data.map(function (v, i) {
+            return [pad + (i / (n - 1)) * (W - pad * 2),
+                    H - pad - ((v - mn) / sp) * (H - pad * 2)];
+          });
+        }
+        function path(points) {
+          var d = 'M' + points[0][0].toFixed(1) + ' ' + points[0][1].toFixed(1);
+          for (var i = 0; i < points.length - 1; i++) {
+            var p0 = points[i - 1] || points[i], p1 = points[i],
+                p2 = points[i + 1], p3 = points[i + 2] || p2;
+            d += ' C' + (p1[0] + (p2[0] - p0[0]) / 6).toFixed(1) + ' ' + (p1[1] + (p2[1] - p0[1]) / 6).toFixed(1) +
+                 ' ' + (p2[0] - (p3[0] - p1[0]) / 6).toFixed(1) + ' ' + (p2[1] - (p3[1] - p1[1]) / 6).toFixed(1) +
+                 ' ' + p2[0].toFixed(1) + ' ' + p2[1].toFixed(1);
+          }
+          return d;
+        }
+        function lineEl(points, color) {
+          if (!points) return '';
+          var last = points[points.length - 1];
+          return '<path d="' + path(points) + '" fill="none" stroke="' + color + '" stroke-width="1.6" ' +
+                 'stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>' +
+                 '<circle cx="' + last[0].toFixed(1) + '" cy="' + last[1].toFixed(1) + '" r="2.2" fill="' + color + '" vector-effect="non-scaling-stroke">' +
+                 '<animate attributeName="opacity" values="1;0.5;1" dur="2.4s" repeatCount="indefinite"/></circle>';
+        }
+        // history rows are [ts, cpu_pct, mem_bytes]
+        var cpu = toPts(hist.map(function (h) { return Number(h[1]); }).filter(function (n) { return !isNaN(n); }));
+        var ram = toPts(hist.map(function (h) { return Number(h[2]); }).filter(function (n) { return !isNaN(n); }));
+        if (!cpu && !ram) return '';
+        return '<svg class="sc-spark-svg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' +
+          lineEl(ram, '#60a5fa') + lineEl(cpu, '#fbbf24') +
+          '</svg>';
+      },
       // --- Workspace dropdown state (fetched from /api/projects) ---
       // orgGroups[i].org is a resolved identity object
       // {slug,name,color,favicon,initial,resolved} — the header renders a
@@ -520,6 +679,16 @@
         if (typeof window.registerHandler === 'function') {
           window.registerHandler('worktrees', this._workspaceHandler);
         }
+
+        // Per-session CPU/RAM/disk pushed by the resource collector after
+        // each ~6s tick. One REST hydrate backfills sparkline history;
+        // every subsequent point arrives on the 'resources' topic and is
+        // appended to the client-side ring buffer.
+        this._resourceHandler = function (rows) { self._applyResourceRows(rows); };
+        if (typeof window.registerHandler === 'function') {
+          window.registerHandler('resources', this._resourceHandler);
+        }
+        this._hydrateResources();
         // One-shot fallback for the cold-start window before the
         // backend has emitted its first 'worktrees' broadcast.
         if (!Object.keys(this._workspaceStatusByTmux).length) {
@@ -930,6 +1099,11 @@
               // cards still render the icon-rail badge.
               harness: r.harness || null,
               model: r.model || null,
+              // Final disk footprint persisted by the resource collector's
+              // death-path measure — drives the ended-card disk stat +
+              // breakdown tooltip with zero live polling.
+              disk_bytes: r.disk_bytes != null ? r.disk_bytes : null,
+              disk_detail: r.disk_detail || null,
               // auto-yfcoc — dead recent rows carry setup_phase /
               // harness_phase from the DAO; passthrough so the
               // lifecycle derivation correctly classifies them as
@@ -1028,6 +1202,10 @@
         if (this._workspaceHandler && typeof window.unregisterHandler === 'function') {
           window.unregisterHandler('worktrees', this._workspaceHandler);
           this._workspaceHandler = null;
+        }
+        if (this._resourceHandler && typeof window.unregisterHandler === 'function') {
+          window.unregisterHandler('resources', this._resourceHandler);
+          this._resourceHandler = null;
         }
         if (this._onCreateTerminal) window.removeEventListener('create-terminal', this._onCreateTerminal);
       },

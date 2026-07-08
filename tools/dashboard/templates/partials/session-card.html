@@ -312,6 +312,25 @@
           <span class="sc-footer-value" x-text="s.org.resolved ? s.org.name : '?'"></span>
         </div>
       </template>
+      <!-- Ended cards: final persisted disk footprint (written by the
+           resource collector's death-path measure — zero live polling).
+           Dotted trigger opens the component breakdown, same affordance
+           as the live meta2 row's Disk tile. Helpers are sessions-page
+           scope; other surfaces including this partial skip it. -->
+      <template x-if="!s.is_live && typeof diskStr === 'function' && diskStr(s)">
+        <div class="sc-footer-item sc-disk-item" data-testid="sc-disk-ended">
+          <span class="sc-footer-label">disk</span>
+          <button type="button" class="sc-footer-value sc-resource-trigger"
+                  @click.prevent.stop="toggleResourceTip(s)"
+                  x-text="diskStr(s)"></button>
+          <div class="sc-resource-tip"
+               :class="_resourceTipOpen === resourceTipKey(s) ? 'open' : ''">
+            <template x-for="row in diskDetail(s)" :key="row[0]">
+              <div><span x-text="row[0]"></span><b x-text="row[1]"></b></div>
+            </template>
+          </div>
+        </div>
+      </template>
       <!-- auto-10lsv: which Anthropic account is this session burning?
            Surfaces the operator-facing credential pointer chosen by the
            launcher. Container claude sessions only — host claude is
@@ -342,6 +361,42 @@
         </button>
       </template>
     </div>
+
+    <!-- Second stats row (design d2250266 v58): CPU/RAM/Disk tiles + dual
+         sparkline over the resource collector's 'resources' SSE topic.
+         Live cards only; revealed only at expanded zoom (CSS). CPU/RAM
+         labels carry their series colour so the sparkline needs no legend.
+         Disk keeps the dotted resource-trigger: hover/tap for the full
+         component breakdown, with the force-refresh affordance inside. -->
+    <template x-if="s.is_live && typeof resourceFor === 'function' && resourceFor(s)">
+      <div class="sc-meta2" data-testid="sc-meta2">
+        <div class="sc-footer-item">
+          <span class="sc-footer-label sc-meta2-cpu">cpu</span>
+          <span class="sc-footer-value" x-text="cpuStr(s)"></span>
+        </div>
+        <div class="sc-footer-item">
+          <span class="sc-footer-label sc-meta2-ram">ram</span>
+          <span class="sc-footer-value" x-text="ramStr(s)"></span>
+        </div>
+        <div class="sc-footer-item sc-disk-item" data-testid="sc-disk-live">
+          <span class="sc-footer-label">disk</span>
+          <button type="button" class="sc-footer-value sc-resource-trigger"
+                  @click.prevent.stop="toggleResourceTip(s)"
+                  x-text="diskStr(s)"></button>
+          <div class="sc-resource-tip"
+               :class="_resourceTipOpen === resourceTipKey(s) ? 'open' : ''">
+            <template x-for="row in diskDetail(s)" :key="row[0]">
+              <div><span x-text="row[0]"></span><b x-text="row[1]"></b></div>
+            </template>
+            <button type="button" class="sc-disk-refresh"
+                    @click.prevent.stop="refreshDisk(s)"
+                    x-text="_diskRefreshing[resourceTipKey(s)] ? 'Refreshing…' : '↻ Refresh'"
+                    data-testid="sc-disk-refresh"></button>
+          </div>
+        </div>
+        <div class="sc-spark" x-html="sparkSvg(s)" aria-hidden="true"></div>
+      </div>
+    </template>
 
   </div>
 </div>

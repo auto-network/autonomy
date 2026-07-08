@@ -613,6 +613,10 @@ def get_recent_sessions(
             row["model"] = db_row.get("model") or None
             # auto-08n3f: org UUID stored on the row, friendly alias joined
             # in via dashboard.claude.credentials.
+            # Disk footprint persisted by resource_monitor (final measure on
+            # death) — lets Recent cards show storage with zero polling.
+            row["disk_bytes"] = db_row.get("disk_bytes")
+            row["disk_detail"] = db_row.get("disk_detail")
             row["harness_token"] = db_row.get("harness_token") or None
             if row["harness_token"]:
                 row["harness_token_alias"] = (
