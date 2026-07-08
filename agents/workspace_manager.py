@@ -454,7 +454,8 @@ def configure_commit_signing(
             ("commit.gpgSign", "true"),
             ("gpg.program", shim_path),
             ("autonomy.sign.session", session_name),
-            ("autonomy.sign.repo", repo_slug),
+            # Worktree dir name — the dashboard locates the worktree by it.
+            ("autonomy.sign.repo", Path(worktree).name),
         ]
         # Org signing identity so GitHub shows "Verified" (committer email must
         # match a verified email on the key's account). Best-effort from policy.
