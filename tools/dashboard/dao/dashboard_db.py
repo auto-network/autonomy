@@ -290,6 +290,16 @@ def init_db(db_path: Path | None = None) -> None:
                 "ALTER TABLE tmux_sessions RENAME COLUMN claude_token_alias TO harness_token"
             )
         _conn.commit()
+    # Migrate: disk footprint columns (session resource metrics, Phase 1).
+    # Written by resource_monitor on each disk sample and once more on death,
+    # so ended sessions keep a footprint without any further polling.
+    try:
+        _conn.execute("SELECT disk_bytes FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN disk_bytes INTEGER")
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN disk_detail TEXT")
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN disk_sampled_at REAL")
+        _conn.commit()
     logger.info("dashboard_db: initialised at %s", path)
 
 
@@ -886,6 +896,19 @@ def mark_dead(tmux_name: str) -> None:
         "dashboard_db: mark_dead  tmux=%s  updated_rows=%d  caller=%s",
         tmux_name, cursor.rowcount, caller_loc,
     )
+
+
+def update_disk_usage(
+    tmux_name: str, disk_bytes: int, disk_detail: str, sampled_at: float,
+) -> None:
+    """Persist a session's disk footprint (resource_monitor writes these)."""
+    conn = get_conn()
+    conn.execute(
+        "UPDATE tmux_sessions SET disk_bytes=?, disk_detail=?, disk_sampled_at=?"
+        " WHERE tmux_name=?",
+        (disk_bytes, disk_detail, sampled_at, tmux_name),
+    )
+    conn.commit()
 
 
 def update_activity_state(tmux_name: str, state: str) -> None:
