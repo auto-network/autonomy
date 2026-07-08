@@ -67,21 +67,30 @@ id="$(curl -sk -X POST "$DASH/api/approvals" -H 'Content-Type: application/json'
         | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null)"
 [ -n "$id" ] || fail "commit signing: dashboard did not accept the request (is it running at $DASH?)"
 
-# block until the operator decides: result null = pending, approved with a
-# signature = signed, anything else = declined
+# block until the operator decides. No polling: ?wait= makes the server hold
+# the GET open until the decision is written (or the window elapses, in which
+# case we immediately hold a fresh one). result null = still pending, approved
+# with a signature = signed, approved without one = dashboard error, otherwise
+# declined.
 while :; do
-  state="$(curl -sk "$DASH/api/approvals/$id" \
+  state="$(curl -sk --max-time 70 "$DASH/api/approvals/$id?wait=55" \
             | python3 -c 'import sys,json
 r=json.load(sys.stdin).get("result")
-print("PENDING" if r is None else ("SIGNED" if r.get("approved") and r.get("signature") else "DECLINED"))' 2>/dev/null)"
+if r is None: print("PENDING")
+elif not r.get("approved"): print("DECLINED")
+elif r.get("signature"): print("SIGNED")
+else: print("ERROR")' 2>/dev/null)"
   case "$state" in
     SIGNED)   break ;;
     DECLINED) fail "User declined signing request, confirm with user their intent." ;;
-    *)        sleep 3 ;;
+    ERROR)    fail "commit signing: the request was approved but no signature came back (dashboard error)." ;;
+    PENDING)  ;;          # held call elapsed undecided — hold a fresh one
+    *)        sleep 2 ;;  # network/parse hiccup (e.g. dashboard restart) — brief backoff
   esac
 done
 
-sig="$(curl -sk "$DASH/api/approvals/$id" \
+# ?wait=0: decided request returns immediately on the bare (no-enrichment) path
+sig="$(curl -sk "$DASH/api/approvals/$id?wait=0" \
         | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["signature"])')"
 
 # hand git the armored signature (stdout) + the status line it looks for (stderr)

@@ -2,22 +2,27 @@
 
 One generic primitive over one table: a requester POSTs a pending request of
 some ``kind``, the operator's browser reviews it and POSTs a decision, the
-requester polls the request until the decision appears. Kind-specific behavior
-lives in small registries — server-side ``ENRICH`` below for GETs whose stored
-request isn't self-describing, and the overlay's per-kind client handlers —
-never in columns or per-kind routes. No auth: a bogus request just sits
-undecided because the operator won't recognise it.
+requester consumes the result. Kind-specific behavior lives in small
+registries — server-side ``ENRICH`` below for GETs whose stored request isn't
+self-describing, and the overlay's per-kind client handlers — never in columns
+or per-kind routes. No auth, by explicit operator decision: an agent can
+currently approve its own request; the operator-identity gate on the decision
+route is a planned follow-up. (For ``commit_sign`` specifically a forged
+approval is also harmless — a GPG signature authenticates itself.)
 
-The /api/sign-requests endpoints are kept as thin adapters over the same store
-(kind=commit_sign) for shims baked into already-running agent containers.
+Nothing here polls. The operator's viewer is notified over the SSE event bus
+(``approval:pending`` / ``approval:decided``; ``pending_approval`` on the
+session detail remains the durable field for reconnect recovery), and the
+requester blocks on ``GET /api/approvals/{id}?wait=N`` — held open server-side
+until the decision lands or the window elapses.
 
-Deferred (same seam as before): emit an SSE event on the session's stream when
-a request is created/decided; ``pending_approval`` on the session detail is the
-durable field the viewer polls meanwhile.
+This fully replaces the signing-specific /api/sign-requests surface — no legacy
+endpoints remain; commit signing is ``kind=commit_sign`` on these routes.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import time
 
@@ -26,6 +31,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from tools.dashboard.dao import approval_requests as ar
+from tools.dashboard.event_bus import event_bus
 
 # Importing the schema module registers the ``autonomy.commit.signing-key#1``
 # Setting schema at startup (its SettingSchema self-registers on import). Done
@@ -97,6 +103,16 @@ ENRICH = {
 }
 
 
+# One event per undecided request that something is waiting on. Created lazily
+# by waiters, fired + removed by the decision — so the dict is bounded by the
+# number of concurrently-awaited pending requests.
+_decision_waiters: dict[str, asyncio.Event] = {}
+
+# Cap on ?wait= so a stuck client can't hold a connection open indefinitely;
+# requesters (e.g. the signing shim) loop on the held GET instead.
+MAX_WAIT_S = 60.0
+
+
 async def create_approval(request: Request) -> JSONResponse:
     """POST /api/approvals  {kind, session, request} -> {id}."""
     try:
@@ -111,17 +127,40 @@ async def create_approval(request: Request) -> JSONResponse:
             {"error": "kind, session, and a non-empty request object are required"},
             status_code=400)
     rid = ar.create(kind=kind, session=session, request=req, created_at=time.time())
+    # Push-notify the operator's open viewer(s); pending_approval on the
+    # session detail stays the durable fallback for a viewer that (re)connects.
+    await event_bus.broadcast("approval:pending",
+                              {"id": rid, "kind": kind, "session": session})
     return JSONResponse({"id": rid})
 
 
 async def get_approval(request: Request) -> JSONResponse:
-    """GET /api/approvals/{id} -> the request + decision state, kind-enriched.
+    """GET /api/approvals/{id}[?wait=N] -> the request + decision state.
 
     ``result`` is null while pending, else the decision JSON
-    ({"approved": bool, ...kind fields, ...operator edits})."""
-    r = ar.get(request.path_params["id"])
+    ({"approved": bool, ...kind fields, ...operator edits}).
+
+    ``?wait=N`` blocks the requester side of the rendezvous: the response is
+    held until the decision is written or N seconds (capped) elapse — the
+    no-polling replacement for a client retry loop. Held calls skip the
+    kind enrichment: the waiter wants the result, not the review rendering."""
+    rid = request.path_params["id"]
+    r = ar.get(rid)
     if not r:
         return JSONResponse({"error": "not found"}, status_code=404)
+    wait = request.query_params.get("wait")
+    if wait is not None:
+        if r["result"] is None:
+            ev = _decision_waiters.setdefault(rid, asyncio.Event())
+            try:
+                await asyncio.wait_for(ev.wait(), min(float(wait or 0), MAX_WAIT_S))
+            except (asyncio.TimeoutError, ValueError):
+                pass
+            r = ar.get(rid) or r
+        return JSONResponse({
+            "id": r["id"], "kind": r["kind"], "session": r["session"],
+            "request": r["request"], "result": r["result"],
+        })
     extra = {}
     enrich = ENRICH.get(r["kind"])
     if enrich:
@@ -151,9 +190,18 @@ async def decide_approval(request: Request) -> JSONResponse:
     if not isinstance(body.get("approved"), bool):
         return JSONResponse({"error": "decision requires a boolean 'approved'"},
                             status_code=400)
-    if ar.get(rid) is None:
+    r = ar.get(rid)
+    if r is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     updated = ar.set_result(rid, body)
+    if updated:
+        # Wake every held ?wait= call, then tell viewers the request is closed
+        # (clears their dedup / any stale replayed open).
+        ev = _decision_waiters.pop(rid, None)
+        if ev:
+            ev.set()
+        await event_bus.broadcast("approval:decided",
+                                  {"id": rid, "kind": r["kind"], "session": r["session"]})
     return JSONResponse({"ok": updated})
 
 
