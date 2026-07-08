@@ -61,6 +61,11 @@ WORKDIR /workspace
 ENV BEADS_DIR=/data/.beads
 ENV CODEX_HOME=/home/agent/.codex
 
+# Capability command shims: the launcher bind-mounts per-session shims at this
+# path (session_launcher.CAPABILITY_BIN_DIR) — on PATH so enabled capability
+# commands (jira-read, mermaid-share, …) are directly invocable.
+ENV PATH="/etc/autonomy/cap-bin:${PATH}"
+
 # Verify tools are available
 RUN bd --help > /dev/null 2>&1 || echo "WARN: bd not functional (expected if cross-arch)" \
     && dolt version > /dev/null 2>&1 || echo "WARN: dolt not functional" \
