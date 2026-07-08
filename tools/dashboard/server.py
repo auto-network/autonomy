@@ -6872,7 +6872,22 @@ async def api_session_retry(request):
         except (KeyError, workspace_settings.WorkspaceSettingsError):
             proj = None
 
-    if session_uuid and jsonl_path and Path(jsonl_path).exists():
+    if session_uuid and jsonl_path and not Path(jsonl_path).exists():
+        # The row says this session has a transcript but the file is gone —
+        # a fresh-create fallback here would carry cleanup_worktrees=True
+        # on failure and could wipe a worktree holding real session work.
+        # Refuse instead of guessing.
+        return JSONResponse(
+            {
+                "error": (
+                    f"session '{tmux_name}' has a recorded transcript that no "
+                    f"longer exists on disk ({jsonl_path}); cannot rebuild a "
+                    "launch config safely"
+                ),
+            },
+            status_code=409,
+        )
+    if session_uuid and jsonl_path:
         # The failed attempt was (or is retryable as) a RESUME.
         if session_type == "host":
             kind = "host"
@@ -6942,7 +6957,11 @@ async def api_session_retry(request):
         }
 
     # Reset the row for the fresh attempt (is_live, harness_state,
-    # startup_state) and re-enter the FSM.
+    # startup_state) and re-enter the FSM. ORDER IS LOAD-BEARING: revive
+    # (is_live=1) must precede the arm — the pane-poller reconciles its
+    # armed set against live rows every cycle, and arming a still-dead row
+    # would let that reconcile silently drop the watch before the worker's
+    # first transition re-asserts liveness.
     dashboard_db.revive_session(tmux_name, file_offset=0)
     await session_monitor.register_pending(
         tmux_name,
