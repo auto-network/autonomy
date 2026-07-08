@@ -66,6 +66,7 @@ cp bin/claude context/bin/
 # Copy Dockerfiles and any sibling files they COPY (e.g. dind-entrypoint.sh).
 cp "$SCRIPT_DIR/Dockerfile" context/
 cp "$SCRIPT_DIR/dind-entrypoint.sh" context/
+cp "$SCRIPT_DIR/commit_sign_shim.sh" context/
 
 docker build $NO_CACHE -t autonomy-agent context/
 echo "==> Done. Image: autonomy-agent:latest"
