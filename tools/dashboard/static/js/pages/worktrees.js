@@ -354,6 +354,9 @@
       signPassphrase: '',
       signing: false,
       signError: null,
+      signPrompt: false,      // is the passphrase entry step showing
+      signRemember: false,    // "remember for this session" checkbox
+      signHasRemembered: false, // a valid remembered passphrase exists (skip prompt)
       selectedDirtyRow: null,
       confirmDiscardRow: null,
       showDiff: false,
@@ -1804,6 +1807,8 @@
       async openSignRequest(id) {
         // Render a pending sign-request in THIS overlay, in sign mode.
         this.signPassphrase = ''; this.signing = false; this.signError = null;
+        this.signPrompt = false; this.signRemember = false;
+        this.signHasRemembered = !!(await this._rememberedPassphrase());
         this.detailLoading = true;
         try {
           const r = await (await fetch('/api/sign-requests/' + encodeURIComponent(id))).json();
@@ -1827,9 +1832,27 @@
         }
       },
 
-      async signCommit() {
+      // The pinned Sign button. If a passphrase is already remembered for this
+      // session, sign in one tap; otherwise reveal the passphrase entry step.
+      async onSignTap() {
+        this.signError = null;
+        const remembered = await this._rememberedPassphrase();
+        if (remembered != null) {
+          const ok = await this._doSign(remembered);
+          if (!ok) { this.signHasRemembered = false; this.signPrompt = true; } // stored one was stale
+          return;
+        }
+        this.signPrompt = true;
+        this.$nextTick(() => { const el = this.$refs.signPassphraseInput; if (el) el.focus(); });
+      },
+
+      // Confirm from the passphrase entry step.
+      async confirmSign() { await this._doSign(this.signPassphrase); },
+
+      // Do the actual signing with a given passphrase. Returns true on success.
+      async _doSign(passphrase) {
         const sc = this.selectedCommit;
-        if (!sc || !sc.signMode) return;
+        if (!sc || !sc.signMode) return false;
         this.signing = true; this.signError = null;
         try {
           const openpgp = await this._ensureOpenpgp();
@@ -1838,7 +1861,9 @@
             throw new Error('no signing key is configured for this org');
           }
           const encPriv = await openpgp.readPrivateKey({ armoredKey: encArmored });
-          const priv = await openpgp.decryptKey({ privateKey: encPriv, passphrase: this.signPassphrase });
+          // decryptKey throws on a wrong passphrase — so success here proves it.
+          const priv = await openpgp.decryptKey({ privateKey: encPriv, passphrase });
+          if (this.signRemember) { try { await this._rememberStore(passphrase); } catch (e) { /* non-fatal */ } }
           const bytes = _b64ToBytes(sc.payloadB64);   // sign the EXACT bytes
           const message = await openpgp.createMessage({ binary: bytes });
           const sig = await openpgp.sign({ message, signingKeys: priv, detached: true, format: 'armored' });
@@ -1847,13 +1872,62 @@
             body: JSON.stringify({ armored_signature: sig }),
           });
           if (!resp.ok) throw new Error('the dashboard rejected the signature');
-          this.selectedCommit = null;
+          this.signPrompt = false; this.selectedCommit = null;
           _toast('Commit signed', 'success');
+          return true;
         } catch (e) {
           this.signError = (e && e.message) ? e.message : String(e);
+          return false;
         } finally {
           this.signing = false;
         }
+      },
+
+      // ── "Remember for this session": passphrase encrypted with a
+      // non-extractable AES-GCM key (kept in IndexedDB so its raw bytes never
+      // touch JS); ciphertext + expiry in sessionStorage (clears on tab close).
+      _REMEMBER_TTL_MS: 15 * 60 * 1000,
+      _idb() {
+        return new Promise((res, rej) => {
+          const req = indexedDB.open('sign-remember', 1);
+          req.onupgradeneeded = () => req.result.createObjectStore('k');
+          req.onsuccess = () => res(req.result);
+          req.onerror = () => rej(req.error);
+        });
+      },
+      async _idbOp(mode, fn) {
+        const db = await this._idb();
+        return new Promise((res, rej) => {
+          const store = db.transaction('k', mode).objectStore('k');
+          const r = fn(store);
+          r.onsuccess = () => res(r.result);
+          r.onerror = () => rej(r.error);
+        });
+      },
+      async _rememberStore(passphrase) {
+        const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(passphrase));
+        await this._idbOp('readwrite', (s) => s.put(key, 'k'));
+        sessionStorage.setItem('sign-remember', JSON.stringify({
+          iv: Array.from(iv), ct: Array.from(new Uint8Array(ct)), exp: Date.now() + this._REMEMBER_TTL_MS,
+        }));
+      },
+      async _rememberedPassphrase() {
+        try {
+          const raw = sessionStorage.getItem('sign-remember');
+          if (!raw) return null;
+          const blob = JSON.parse(raw);
+          if (!blob.exp || Date.now() > blob.exp) { await this._rememberClear(); return null; }
+          const key = await this._idbOp('readonly', (s) => s.get('k'));
+          if (!key) return null;
+          const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(blob.iv) }, key, new Uint8Array(blob.ct));
+          return new TextDecoder().decode(pt);
+        } catch (e) { return null; }
+      },
+      async _rememberClear() {
+        try { sessionStorage.removeItem('sign-remember'); } catch (e) { /* ignore */ }
+        try { await this._idbOp('readwrite', (s) => s.delete('k')); } catch (e) { /* ignore */ }
       },
 
       async declineSign() {

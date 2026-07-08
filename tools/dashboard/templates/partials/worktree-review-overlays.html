@@ -18,8 +18,65 @@
        @keydown.escape.window="selectedCommit = null"
        @scroll.passive="syncReviewHeaderState()"
        data-testid="worktree-commit-detail">
+    <template x-if="selectedCommit.signMode">
+      <div class="fixed inset-x-0 top-0 z-[60] border-b border-white/10 bg-gray-950/95 px-4 py-3 backdrop-blur sm:px-6"
+           data-testid="sign-title-bar">
+        <div class="mx-auto flex max-w-6xl items-center gap-2">
+          <span class="text-base leading-none">🔐</span>
+          <span class="shrink-0 text-sm font-semibold text-slate-100">Signature request</span>
+          <span class="min-w-0 flex-1 truncate text-xs text-slate-400"
+                x-text="(selectedCommit.row.repo_name ? '· ' + selectedCommit.row.repo_name + ' ' : '') + '· ' + (selectedCommit.commit.subject || '')"></span>
+        </div>
+      </div>
+    </template>
+    <template x-if="selectedCommit.signMode">
+      <div class="fixed inset-x-0 bottom-0 z-[60] border-t border-white/10 bg-gray-950/95 px-4 py-3 backdrop-blur sm:px-6"
+           data-testid="sign-footer">
+        <div class="mx-auto max-w-6xl">
+          <template x-if="!signPrompt">
+            <div class="flex items-center gap-3">
+              <button type="button"
+                      class="h-12 flex-1 rounded-2xl bg-indigo-600 text-base font-semibold text-white transition hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-50"
+                      :disabled="signing" @click="onSignTap()" data-testid="sign-commit-button">
+                <span x-show="!signing">Sign</span>
+                <span x-show="signing" x-cloak>Signing…</span>
+              </button>
+              <button type="button"
+                      class="h-12 rounded-2xl border border-white/10 px-5 text-sm font-semibold text-slate-300 disabled:opacity-50"
+                      :disabled="signing" @click="declineSign()" data-testid="sign-cancel-button">Decline</button>
+            </div>
+          </template>
+          <template x-if="signPrompt">
+            <div class="flex flex-col gap-3">
+              <input type="password" x-model="signPassphrase" x-ref="signPassphraseInput" placeholder="GPG passphrase"
+                     class="h-14 w-full rounded-2xl border border-white/10 bg-black/40 px-4 text-lg tracking-[0.3em] text-slate-100 placeholder:text-base placeholder:tracking-normal placeholder:text-slate-500"
+                     data-testid="sign-passphrase" @keydown.enter="confirmSign()">
+              <label class="flex items-center gap-2 text-xs text-slate-400">
+                <input type="checkbox" x-model="signRemember" class="h-4 w-4 rounded border-white/20 bg-black/40" data-testid="sign-remember">
+                Remember for this session (15 min) — stays in this browser, encrypted; never sent anywhere.
+              </label>
+              <div class="flex items-center gap-3">
+                <button type="button"
+                        class="h-12 flex-1 rounded-2xl bg-indigo-600 text-base font-semibold text-white transition hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-50"
+                        :disabled="signing || !signPassphrase" @click="confirmSign()" data-testid="sign-confirm-button">
+                  <span x-show="!signing">Sign</span>
+                  <span x-show="signing" x-cloak>Signing…</span>
+                </button>
+                <button type="button"
+                        class="h-12 rounded-2xl border border-white/10 px-5 text-sm font-semibold text-slate-300 disabled:opacity-50"
+                        :disabled="signing" @click="signPrompt = false; signPassphrase = ''" data-testid="sign-back-button">Back</button>
+              </div>
+              <template x-if="signError">
+                <p class="text-sm text-rose-300" data-testid="sign-error" x-text="signError"></p>
+              </template>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
     <section class="worktree-review-shell min-h-screen bg-gray-950">
-      <div class="mx-auto max-w-6xl px-4 pb-8 pt-4 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8"
+           :class="selectedCommit.signMode ? 'pt-16 pb-44' : 'pt-4 pb-8'">
         <div class="-mx-4 mb-4 px-4 pt-1 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
           <div class="mx-auto max-w-6xl">
             <div class="relative mb-2 pr-12">
@@ -286,29 +343,7 @@
         </div>
 
         <div class="relative mt-6">
-          <template x-if="selectedCommit.signMode">
-            <div class="mx-auto flex max-w-6xl flex-col gap-3" data-testid="sign-commit-panel">
-              <p class="text-xs text-slate-400">Enter your GPG passphrase to sign. It stays in this browser and signs the commit locally — it is never sent anywhere.</p>
-              <div class="flex flex-col gap-2 md:flex-row md:items-center">
-                <input type="password" x-model="signPassphrase" placeholder="GPG passphrase"
-                       class="h-11 flex-1 rounded-2xl border border-white/10 bg-black/30 px-4 text-sm text-slate-100 placeholder:text-slate-500"
-                       data-testid="sign-passphrase" @keydown.enter="signCommit()">
-                <button type="button"
-                        class="h-11 rounded-2xl bg-indigo-600 px-6 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-50"
-                        :disabled="signing"
-                        @click="signCommit()" data-testid="sign-commit-button">
-                  <span x-show="!signing">Sign</span>
-                  <span x-show="signing" x-cloak>Signing…</span>
-                </button>
-                <button type="button"
-                        class="h-11 rounded-2xl border border-white/10 px-4 text-sm font-semibold text-slate-300 disabled:opacity-50"
-                        :disabled="signing" @click="declineSign()" data-testid="sign-cancel-button">Cancel</button>
-              </div>
-              <template x-if="signError">
-                <p class="text-sm text-rose-300" data-testid="sign-error" x-text="signError"></p>
-              </template>
-            </div>
-          </template>
+          <!-- Sign mode uses the pinned title bar + footer at the top of this overlay. -->
           <template x-if="!selectedCommit.signMode && !isPrReview() && supportsDashboardMerge(selectedCommit.row)">
             <div class="mx-auto flex max-w-6xl flex-col gap-2 md:flex-row md:items-center">
               <template x-if="cloneStale(selectedCommit.row)">
