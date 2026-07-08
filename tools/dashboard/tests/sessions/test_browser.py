@@ -134,7 +134,19 @@ class SessionsTestHarness:
         ab_raw("close")
         ab_raw("open", f"http://localhost:{TEST_PORT}/sessions",
                "--ignore-https-errors")
-        time.sleep(3)
+        # A cold Chromium under parallel load routinely blows past the old
+        # fixed 3s sleep — poll until the page has actually painted either
+        # session cards or its explicit empty state.
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            painted = ab_eval("""
+                if (!window.Alpine) return false;
+                if (document.querySelectorAll('[data-testid="session-card"]').length > 0) return true;
+                return (document.body.innerText || '').indexOf('No ') !== -1;
+            """)
+            if painted is True:
+                break
+            time.sleep(0.5)
         ab_raw("set", "viewport", "430", "900")
         time.sleep(0.5)
 
@@ -302,7 +314,12 @@ class TestSessionOverlayNavigation:
         assert not back_state["overlayActive"], "Overlay should close on Back"
         assert not back_state["overlayBodyClass"], "Closing the overlay should clear the mobile overlay body class"
         assert back_state["markedCardStillMounted"], "Back should reveal the original sessions DOM instead of rebuilding it"
-        assert back_state["overlayHostChildren"] == 0, "Overlay host should be cleared after closing"
+        # 25c8ec7 fast-paths overlay Back: the viewer stays mounted in the
+        # (hidden) host so an immediate re-open is instant. Only a real
+        # route() away from /sessions destroys it.
+        assert back_state["overlayHostChildren"] >= 1, (
+            "Fast-path Back should leave the session viewer mounted in the hidden overlay host"
+        )
 
     def test_desktop_navigation_keeps_dashboard_chrome_visible(self, h):
         ab_raw("set", "viewport", "1280", "900")

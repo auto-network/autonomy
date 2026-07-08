@@ -69,6 +69,12 @@ def fresh_bus():
 @pytest.fixture
 def client(test_app, fresh_bus):
     with TestClient(test_app) as c:
+        # Server lifespan startup writes plugin-declared settings (e.g.
+        # design.refresh-preview), which emit setting.changed events of
+        # their own. Drop the boot-time events so each test's buffer
+        # inspection sees only the writes the test itself performs.
+        fresh_bus._buffer.clear()
+        fresh_bus._buffer_bytes = 0
         yield c
 
 

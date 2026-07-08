@@ -103,6 +103,11 @@ SESSION_DEFAULTS: dict[str, Any] = {
     "nag_message": None,
     "dispatch_nag_enabled": False,
     "linked": False,
+    # Fixture sessions behave like transcript-linked sessions unless a test
+    # overrides this — the viewer only backfills history for sessions the
+    # registry reports as resolved (or dead), so an unresolved-by-default
+    # mock row renders an empty viewer regardless of session_entries.
+    "resolved": True,
     # auto-ngis4: harness + model are session identity (icon-rail note
     # graph://553c7437-036). Default unknown so legacy fixtures behave
     # the same as production rows that haven't seen an assistant turn yet.

@@ -25,13 +25,20 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-TRACE_DIR = Path(__file__).resolve().parents[2] / "data" / "session-traces"
+# DASHBOARD_TRACE_DIR override exists so tests (and alternate deploys) can
+# redirect trace writes away from the live repo's data/ tree — without it,
+# every test that exercises the launch path litters real trace files.
+TRACE_DIR = Path(
+    os.environ.get("DASHBOARD_TRACE_DIR")
+    or Path(__file__).resolve().parents[2] / "data" / "session-traces"
+)
 
 # First-monotonic per session, so mono_ms is "since trace start" regardless
 # of which code path logged the first event. Bounded cleanup keeps it from

@@ -121,14 +121,25 @@ class PickerTestHarness:
         ab_raw("close")
         ab_raw("open", f"http://localhost:{TEST_PORT}/design/{self.exp_id}",
                "--ignore-https-errors")
-        time.sleep(2)
+        # Cold per-worker Chromium under xdist load can take well over the
+        # old fixed 2s to boot Alpine — poll for readiness instead.
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            ready = ab_eval(
+                "return !!(window.Alpine && document.querySelector('[x-data]'));"
+            )
+            if ready is True:
+                break
+            time.sleep(0.5)
+        else:
+            raise RuntimeError("design page never became Alpine-ready")
         ab_raw("set", "viewport", "390", "844")
         time.sleep(0.5)
         ab_eval("document.getElementById('sidebar').classList.add('-translate-x-full'); return 'ok';")
         time.sleep(0.5)
 
     def open_picker(self):
-        ab_eval("""
+        open_js = """
             var els = document.querySelectorAll('[x-data]');
             for (var i=0; i<els.length; i++) {
                 var d = els[i]._x_dataStack && els[i]._x_dataStack[0];
@@ -139,8 +150,17 @@ class PickerTestHarness:
                 }
             }
             return 'not found';
-        """)
-        time.sleep(1)
+        """
+        # Poll until the picker component exists AND its session list has
+        # loaded — _loadChatSessions is async and the fixture fetch can
+        # lose the race against a fixed sleep on a loaded machine.
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if ab_eval(open_js) == "opened" and (self.session_count() or 0) > 0:
+                return
+            time.sleep(0.5)
+        # Leave state as-is; individual tests assert and report specifics
+        # (TestEmptyState legitimately reaches here with 0 sessions).
 
     def refresh(self):
         # Re-seed Alpine store from the (potentially updated) fixture via API,
@@ -312,12 +332,17 @@ class TestUserCanConnect:
 
     def test_chat_panel_shows_messages(self, h):
         """After connecting, I should see the session's conversation history.
-        KNOWN BUG: _connectSession doesn't wire the chat panel to load entries."""
+
+        Historically a permanent failure (postmortem graph://fc8b4f21-1d7:
+        the panel never loaded entries). Root cause was the mock server
+        never resolving sessions via session:registry, so the panel-mode
+        viewer skipped its backlog fetch — fixed 2026-07-08 along with the
+        rest of the mock SSE fidelity work."""
         time.sleep(2)
         result = h.chat_entry_count()
         assert result["count"] > 0, (
-            f"BUG: No messages shown after connecting. Status: {result['status']}. "
-            "See postmortem graph://fc8b4f21-1d7"
+            f"No messages shown after connecting. Status: {result['status']}. "
+            "History: graph://fc8b4f21-1d7"
         )
 
 

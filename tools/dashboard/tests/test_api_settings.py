@@ -365,27 +365,31 @@ def test_diag_settings_counts_direct_and_http_traffic(
     assert diag.status_code == 200
     body = diag.json()
 
-    assert body["totals"]["calls"] == 3
-    assert body["totals"]["reads"] == 2
-    assert body["totals"]["writes"] == 1
-    assert body["totals"]["errors"] == 0
-    assert body["totals"]["operations"] == {
-        "add_setting": 1,
-        "get_setting": 1,
-        "read_set": 1,
+    # Server background pollers (claude credentials refresh, operator
+    # activity) issue their own settings calls concurrently, so global
+    # totals/last_call are not hermetic. Assert on this test's own
+    # set_id breakdown and on operation kinds no background task uses.
+    ops_counts = body["totals"]["operations"]
+    assert ops_counts.get("add_setting", 0) >= 1
+    assert ops_counts.get("get_setting", 0) >= 1
+    assert ops_counts.get("read_set", 0) >= 1
+
+    row = next(
+        item for item in body["last_60s"]["top_sets"]
+        if item["set_id"] == "autonomy.test.api"
+    )
+    assert row == {
+        "set_id": "autonomy.test.api",
+        "calls": 3,
+        "reads": 2,
+        "writes": 1,
+        "upserts": 0,
     }
-    assert body["last_60s"]["calls"] == 3
-    assert body["last_60s"]["top_sets"] == [
-        {
-            "set_id": "autonomy.test.api",
-            "calls": 3,
-            "reads": 2,
-            "writes": 1,
-            "upserts": 0,
-        },
-    ]
-    assert body["last_call"]["operation"] == "read_set"
-    assert body["last_call"]["set_id"] == "autonomy.test.api"
+    totals_row = next(
+        item for item in body["totals"]["top_sets"]
+        if item["set_id"] == "autonomy.test.api"
+    )
+    assert totals_row["calls"] == 3
     assert set(body["last_60s"]["latency_ms"]) == {"p50", "p95", "p99"}
     assert body["last_60s"]["latency_ms"]["p50"] is not None
     assert body["last_60s"]["latency_ms"]["p95"] is not None
@@ -404,10 +408,10 @@ def test_diag_settings_counts_errors(graph_db_env, example_schema, client):
     assert diag.status_code == 200
     body = diag.json()
 
-    assert body["totals"]["calls"] == 1
-    assert body["totals"]["writes"] == 1
-    assert body["totals"]["errors"] == 1
-    assert body["totals"]["operations"] == {"promote_setting": 1}
+    # Global totals race with background poller reads — assert on the
+    # promote_setting operation (which no background task performs).
+    assert body["totals"]["errors"] >= 1
+    assert body["totals"]["operations"].get("promote_setting") == 1
     assert body["last_error"]["operation"] == "promote_setting"
     assert body["last_error"]["ok"] is False
 

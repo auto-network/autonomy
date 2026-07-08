@@ -4726,6 +4726,34 @@ async def api_session_confirm_link(request):
 async def api_session_get(request):
     """GET /api/session/{tmux_name} — return session details."""
     tmux_name = request.path_params["tmux_name"]
+
+    # Mock mode: synthesize the detail payload from the fixture. The viewer
+    # fetches this endpoint before backfilling messages, so without a mock
+    # branch every DASHBOARD_MOCK session viewer 404s here and renders empty.
+    if os.environ.get("DASHBOARD_MOCK"):
+        mock_session = dao_sessions.get_session_by_id(tmux_name)
+        if not mock_session:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse({
+            "session_id": tmux_name,
+            "pending_approval": None,
+            "session_uuid": mock_session.get("session_uuid"),
+            "graph_source_id": mock_session.get("graph_source_id"),
+            "file_path": "",
+            "resumable": False,
+            "type": mock_session.get("type", ""),
+            "role": mock_session.get("role", ""),
+            "activity_state": mock_session.get("activity_state", "idle"),
+            "project": mock_session.get("project", ""),
+            "org": mock_session.get("org", ""),
+            "is_live": bool(mock_session.get("is_live", True)),
+            "dispatch_nag_enabled": bool(mock_session.get("dispatch_nag")),
+            "nag_enabled": bool(mock_session.get("nag_enabled")),
+            "nag_interval": mock_session.get("nag_interval"),
+            "nag_message": mock_session.get("nag_message"),
+            "nag_last_sent": mock_session.get("nag_last_sent"),
+        })
+
     session = dashboard_db.get_session(tmux_name)
     if not session:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -9705,6 +9733,21 @@ async def api_events(request):
     """
     client_id = request.query_params.get("client_id") or None
     queue = event_bus.subscribe(client_id=client_id)
+
+    # Mock-mode fidelity: in production the SessionMonitor keeps a
+    # session:registry snapshot cached on the bus, and subscribe() replays
+    # it, so a cold-opened viewer learns its session is resolved before (or
+    # shortly after) configure() runs. The monitor doesn't run against
+    # fixtures, so synthesize the roster fresh from the mock DAO per
+    # connection — reading the fixture file at connect time preserves the
+    # fixture-swap isolation that keeps _on_startup from caching it.
+    if os.environ.get("DASHBOARD_MOCK"):
+        try:
+            queue.put_nowait(
+                ("session:registry", dao_sessions.get_active_sessions(), 0)
+            )
+        except Exception:
+            logger.exception("mock session:registry seed failed; continuing")
 
     async def event_generator():
         # Activity-gated heartbeat: if no real event arrives within HEARTBEAT_S,
@@ -15447,7 +15490,14 @@ async def _on_startup():
     # are swallowed inside restore() — we proceed with a fresh epoch.
     # Some tests substitute a MockEventBus without snapshot/restore;
     # treat absence of the attribute as a no-op.
+    # Mock-mode servers skip restore entirely: under pytest all fixture
+    # servers on one xdist worker inherit the same DASHBOARD_EVENT_BUS_STATE,
+    # so restoring replays a *previous test file's* cached topics (e.g. its
+    # session:registry / session:messages) into this file's subscribers —
+    # observed as cross-file SSE pollution. Production never runs mock.
     restore_fn = getattr(event_bus, "restore", None)
+    if os.environ.get("DASHBOARD_MOCK"):
+        restore_fn = None
     if callable(restore_fn):
         try:
             restore_fn(EVENT_BUS_STATE_PATH)

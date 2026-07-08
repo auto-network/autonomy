@@ -42,8 +42,7 @@ def test_no_backend_falls_back_to_default_template():
         )
     assert out is not None
     assert "Session auto-test1" in out
-    assert "workspace Autonomy" in out
-    assert "Awaiting instructions" in out
+    assert "started in workspace Autonomy at" in out
 
 
 def test_per_workspace_override_wins():
@@ -145,9 +144,9 @@ def test_broken_template_falls_back_to_default():
             workspace_name="Y",
             org="autonomy",
         )
-    # The fallback uses DEFAULT_TEMPLATE which mentions "Awaiting instructions"
+    # The fallback uses DEFAULT_TEMPLATE
     assert out is not None
-    assert "Awaiting instructions" in out
+    assert "started in workspace Y at" in out
     assert "auto-broken" in out
 
 
@@ -165,12 +164,13 @@ def test_settings_backend_exception_falls_back():
         )
     assert out is not None
     assert "Session auto-no-backend" in out
-    assert "Awaiting instructions" in out
+    assert "started in workspace Z at" in out
 
 
 def test_default_template_format_matches_spec():
     """The default template must match the spec format
-    ``Session <tmux_name> started in workspace <workspace_name> at <ts>. Awaiting instructions.``"""
+    ``Session <tmux_name> started in workspace <workspace_name> at <ts>.``
+    (trailing "Awaiting instructions." was deliberately dropped in 4bb3dde)"""
     with patch(
         "tools.graph.settings_ops.read_set", return_value=_mock_members([])
     ):
@@ -183,6 +183,6 @@ def test_default_template_format_matches_spec():
     import re
     assert re.match(
         r"^Session auto-fmt started in workspace Auto at "
-        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00\. Awaiting instructions\.$",
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00\.$",
         out,
     ), f"format mismatch: {out!r}"

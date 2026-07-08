@@ -423,10 +423,18 @@ class TestHostSessionWatcherAddsWatches:
                 srv._watch_for_host_session_jsonl(projects_dir, tmux_name, timeout=5.0)
             )
 
-            # Simulate Claude creating the JSONL after a short delay
+            # Simulate Claude creating the JSONL after a short delay. The
+            # watcher links by CONTENT match — the file must contain the
+            # session's tmux_name (from the injected orientation message) —
+            # so the fixture line has to carry it.
             await asyncio.sleep(0.3)
             new_jsonl = projects_dir / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"
-            new_jsonl.write_text('{"type":"system"}\n')
+            new_jsonl.write_text(
+                json.dumps({
+                    "type": "user",
+                    "message": {"content": f"Session {tmux_name} started."},
+                }) + "\n"
+            )
 
             # Wait for the watcher to find it
             await asyncio.wait_for(task, timeout=5.0)
