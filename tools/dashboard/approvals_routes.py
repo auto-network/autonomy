@@ -1,0 +1,165 @@
+"""On-demand operator-approval HTTP routes (the generalized signing rendezvous).
+
+One generic primitive over one table: a requester POSTs a pending request of
+some ``kind``, the operator's browser reviews it and POSTs a decision, the
+requester polls the request until the decision appears. Kind-specific behavior
+lives in small registries — server-side ``ENRICH`` below for GETs whose stored
+request isn't self-describing, and the overlay's per-kind client handlers —
+never in columns or per-kind routes. No auth: a bogus request just sits
+undecided because the operator won't recognise it.
+
+The /api/sign-requests endpoints are kept as thin adapters over the same store
+(kind=commit_sign) for shims baked into already-running agent containers.
+
+Deferred (same seam as before): emit an SSE event on the session's stream when
+a request is created/decided; ``pending_approval`` on the session detail is the
+durable field the viewer polls meanwhile.
+"""
+
+from __future__ import annotations
+
+import base64
+import time
+
+from starlette.requests import Request
+from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.routing import Route
+
+from tools.dashboard.dao import approval_requests as ar
+
+# Importing the schema module registers the ``autonomy.commit.signing-key#1``
+# Setting schema at startup (its SettingSchema self-registers on import). Done
+# here rather than in tools/graph/schemas/__init__.py to avoid touching that file
+# while unrelated work sits uncommitted in it.
+from tools.graph.schemas import commit_signing_key as _sign_key_schema  # noqa: F401
+
+# The per-org signing key lives in this Setting as a passphrase-encrypted armored
+# private key. The browser fetches it, decrypts locally, and signs; the server
+# only ever holds (and serves) the ENCRYPTED blob. Kind-specific helper for
+# ``commit_sign``.
+SIGN_KEY_SET_ID = _sign_key_schema.SIGN_KEY_SET_ID
+
+
+async def get_sign_key(request: Request) -> PlainTextResponse:
+    """GET /api/sign-key -> the org's passphrase-encrypted armored private key,
+    or 404 if none is configured. Read-only; serves an already-encrypted value."""
+    org = request.query_params.get("org") or None
+    try:
+        from tools.graph import ops as graph_ops
+        members = graph_ops.read_set(SIGN_KEY_SET_ID, org=org)
+        for m in (getattr(members, "members", []) or []):
+            payload = m.payload if isinstance(m.payload, dict) else {}
+            armored = payload.get("armored_private_key") or payload.get("armored")
+            if isinstance(armored, str) and "PRIVATE KEY" in armored:
+                return PlainTextResponse(armored)
+    except Exception:
+        pass
+    return PlainTextResponse("no signing key configured", status_code=404)
+
+
+def _tree_and_parent(payload: bytes) -> tuple[str | None, str | None]:
+    """Pull the tree SHA and first parent SHA out of the commit payload headers
+    (headers end at the first blank line)."""
+    tree = parent = None
+    for line in payload.decode("utf-8", "replace").splitlines():
+        if line == "":
+            break
+        if line.startswith("tree "):
+            tree = line[5:].strip()
+        elif line.startswith("parent ") and parent is None:
+            parent = line[7:].strip()
+    return tree, parent
+
+
+def _enrich_commit_sign(row: dict) -> dict:
+    """``files``/``patch``: the live diff-tree of the pending commit (parent ->
+    tree) so the commit overlay can render it. Needed because the stored request
+    isn't self-describing — the diff lives in the worktree. Empty if the
+    worktree/tree is gone (e.g. the agent moved on)."""
+    req = row["request"]
+    payload = base64.b64decode(req.get("payload_b64", ""))
+    tree, parent = _tree_and_parent(payload)
+    files, patch = [], ""
+    if tree:
+        try:
+            from agents.workspace_manager import sign_request_diff
+            d = sign_request_diff(row["session"], req.get("repo", ""), parent, tree)
+            files, patch = d["files"], d["patch"]
+        except Exception:
+            pass  # worktree/tree unavailable -> render without diff
+    return {"files": files, "patch": patch}
+
+
+# Per-kind GET enrichment — the only kind-specific hook on the server side of
+# the primitive. A kind whose stored request is self-describing needs no entry.
+ENRICH = {
+    "commit_sign": _enrich_commit_sign,
+}
+
+
+async def create_approval(request: Request) -> JSONResponse:
+    """POST /api/approvals  {kind, session, request} -> {id}."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    kind = body.get("kind")
+    session = body.get("session")
+    req = body.get("request")
+    if not kind or not session or not isinstance(req, dict) or not req:
+        return JSONResponse(
+            {"error": "kind, session, and a non-empty request object are required"},
+            status_code=400)
+    rid = ar.create(kind=kind, session=session, request=req, created_at=time.time())
+    return JSONResponse({"id": rid})
+
+
+async def get_approval(request: Request) -> JSONResponse:
+    """GET /api/approvals/{id} -> the request + decision state, kind-enriched.
+
+    ``result`` is null while pending, else the decision JSON
+    ({"approved": bool, ...kind fields, ...operator edits})."""
+    r = ar.get(request.path_params["id"])
+    if not r:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    extra = {}
+    enrich = ENRICH.get(r["kind"])
+    if enrich:
+        try:
+            extra = enrich(r) or {}
+        except Exception:
+            extra = {}
+    return JSONResponse({
+        "id": r["id"],
+        "kind": r["kind"],
+        "session": r["session"],
+        "request": r["request"],
+        "result": r["result"],
+        **extra,
+    })
+
+
+async def decide_approval(request: Request) -> JSONResponse:
+    """POST /api/approvals/{id}/decision  {approved: bool, ...} — the body IS the
+    stored result, so kind-specific outputs (e.g. the armored ``signature``) and
+    operator edits ride along without schema changes. First writer wins."""
+    rid = request.path_params["id"]
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body.get("approved"), bool):
+        return JSONResponse({"error": "decision requires a boolean 'approved'"},
+                            status_code=400)
+    if ar.get(rid) is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    updated = ar.set_result(rid, body)
+    return JSONResponse({"ok": updated})
+
+
+ROUTES = [
+    Route("/api/approvals", create_approval, methods=["POST"]),
+    Route("/api/approvals/{id}", get_approval, methods=["GET"]),
+    Route("/api/approvals/{id}/decision", decide_approval, methods=["POST"]),
+    Route("/api/sign-key", get_sign_key, methods=["GET"]),
+]

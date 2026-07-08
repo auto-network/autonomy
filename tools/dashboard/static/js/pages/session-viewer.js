@@ -1312,12 +1312,13 @@
 
       init() {
         this.refreshViewportWidth();
-        // Watch for a commit from this session awaiting the operator's signature
-        // and open the sign dialog when one appears (durable field on the
-        // session status; the shared overlay's openSignRequestOverlay does the rest).
-        this._lastSignPendingId = null;
-        this._checkCommitSignPending();
-        this._signPendingInterval = setInterval(() => this._checkCommitSignPending(), 4000);
+        // Watch for a request from this session awaiting an operator approval
+        // (e.g. a commit signature) and open the approval overlay when one
+        // appears (durable field on the session status; the shared overlay's
+        // openApprovalOverlay dispatches on the request's kind).
+        this._lastApprovalPendingId = null;
+        this._checkPendingApproval();
+        this._approvalPendingInterval = setInterval(() => this._checkPendingApproval(), 4000);
         if (!this._viewportResizeHandler) {
           var self = this;
           this._viewportResizeHandler = function() {
@@ -1478,18 +1479,18 @@
         }
       },
 
-      async _checkCommitSignPending() {
+      async _checkPendingApproval() {
         const key = this.sessionKey;
-        if (!key || !window.openSignRequestOverlay) return;
+        if (!key || !window.openApprovalOverlay) return;
         try {
           const r = await fetch('/api/session/' + encodeURIComponent(key));
           if (!r.ok) return;
-          const id = (await r.json()).commit_sign_pending || null;
-          if (id && id !== this._lastSignPendingId) {
-            this._lastSignPendingId = id;
-            window.openSignRequestOverlay(id);
-          } else if (!id) {
-            this._lastSignPendingId = null;
+          const p = (await r.json()).pending_approval || null;
+          if (p && p.id && p.id !== this._lastApprovalPendingId) {
+            this._lastApprovalPendingId = p.id;
+            window.openApprovalOverlay(p.id);
+          } else if (!p) {
+            this._lastApprovalPendingId = null;
           }
         } catch (e) { /* best-effort */ }
       },
@@ -1530,9 +1531,9 @@
           clearInterval(this._tickInterval);
           this._tickInterval = null;
         }
-        if (this._signPendingInterval) {
-          clearInterval(this._signPendingInterval);
-          this._signPendingInterval = null;
+        if (this._approvalPendingInterval) {
+          clearInterval(this._approvalPendingInterval);
+          this._approvalPendingInterval = null;
         }
         if (this._copyFeedbackTimer) {
           clearTimeout(this._copyFeedbackTimer);

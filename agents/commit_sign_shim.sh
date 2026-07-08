@@ -50,20 +50,30 @@ if [ "$(git config --get autonomy.sign.requireSignoff 2>/dev/null || true)" = "t
     || fail "commit signing: policy requires a Signed-off-by trailer and this commit has none. Re-commit with --signoff (the commit-msg hook adds it automatically unless you used --no-verify)."
 fi
 
-# create the sign-request: session/repo as url-encoded query params, the exact
-# commit bytes as the POST body.
-_enc() { python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
-url="$DASH/api/sign-requests?session=$(_enc "$SESSION")&repo=$(_enc "$REPO")"
-id="$(curl -sk -X POST "$url" --data-binary @"$payload" \
+# create the approval request (kind=commit_sign): the exact commit bytes ride
+# base64-encoded inside the kind-specific request JSON.
+req="$(mktemp)" || fail "commit signing: could not create temp file"
+trap 'rm -f "$payload" "$req"' EXIT
+python3 - "$SESSION" "$REPO" "$payload" > "$req" <<'PY' || fail "commit signing: could not build the request"
+import base64, json, sys
+session, repo, path = sys.argv[1:4]
+print(json.dumps({"kind": "commit_sign", "session": session, "request": {
+    "repo": repo,
+    "payload_b64": base64.b64encode(open(path, "rb").read()).decode("ascii"),
+}}))
+PY
+id="$(curl -sk -X POST "$DASH/api/approvals" -H 'Content-Type: application/json' \
+        --data-binary @"$req" \
         | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null)"
 [ -n "$id" ] || fail "commit signing: dashboard did not accept the request (is it running at $DASH?)"
 
-# block until the operator signs (armored) or cancels (empty string)
+# block until the operator decides: result null = pending, approved with a
+# signature = signed, anything else = declined
 while :; do
-  state="$(curl -sk "$DASH/api/sign-requests/$id" \
+  state="$(curl -sk "$DASH/api/approvals/$id" \
             | python3 -c 'import sys,json
-v=json.load(sys.stdin).get("signature")
-print("PENDING" if v is None else ("DECLINED" if v=="" else "SIGNED"))' 2>/dev/null)"
+r=json.load(sys.stdin).get("result")
+print("PENDING" if r is None else ("SIGNED" if r.get("approved") and r.get("signature") else "DECLINED"))' 2>/dev/null)"
   case "$state" in
     SIGNED)   break ;;
     DECLINED) fail "User declined signing request, confirm with user their intent." ;;
@@ -71,8 +81,8 @@ print("PENDING" if v is None else ("DECLINED" if v=="" else "SIGNED"))' 2>/dev/n
   esac
 done
 
-sig="$(curl -sk "$DASH/api/sign-requests/$id" \
-        | python3 -c 'import sys,json; print(json.load(sys.stdin)["signature"])')"
+sig="$(curl -sk "$DASH/api/approvals/$id" \
+        | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["signature"])')"
 
 # hand git the armored signature (stdout) + the status line it looks for (stderr)
 echo "[GNUPG:] SIG_CREATED D" >&2
