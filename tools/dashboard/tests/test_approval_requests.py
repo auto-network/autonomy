@@ -160,9 +160,8 @@ def test_get_degrades_without_worktree(client):
 
 
 def test_byte_exact_round_trip_hostile_payload(client):
-    """Byte-exactness survives the payloads that broke naive handling: a
-    trailing newline and non-ASCII bytes. This is the property GitHub's
-    Verified check depends on."""
+    """Byte-exactness over a payload with a trailing newline and non-ASCII
+    bytes — the property GitHub's Verified check depends on."""
     payload = ("tree abc\nauthor Dév <d@x> 1 +0000\n"
                "committer Dév <d@x> 1 +0000\n\nfix \U0001f510\n").encode("utf-8")
     assert payload.endswith(b"\n") and any(b >= 0x80 for b in payload)
