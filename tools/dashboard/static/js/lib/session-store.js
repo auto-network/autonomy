@@ -744,6 +744,10 @@ window.ensureSessionMessages = function() {
       store.startupState = s.startup_state || null;
       if (s.resumable !== undefined) store.resumable = !!s.resumable;
       if (s.harness_state !== undefined) store.harnessState = s.harness_state;
+      // The resume-bridge flag only needs to survive the gap between the
+      // resume POST's 202 and this row's first registry appearance — the
+      // row is live now, so the bridge is done.
+      store._resuming = false;
       // auto-ja51w: transient sub-phase progress (e.g.
       // {repo_index:2, total:3, current_repo:'enterprise_ng'}). Surfaced
       // by SessionMonitor.update_phase(progress=...) — present only while
@@ -751,11 +755,22 @@ window.ensureSessionMessages = function() {
       // gets explicit null on omit so the field clears cleanly.
       store.phaseProgress = s.phase_progress || null;
     }
-    // Mark removed sessions as dead
+    // Mark removed sessions as dead. A session absent from the registry is
+    // no longer live — including a resume/create whose launch FAILED (the
+    // lifecycle writer sets is_live=0 on failure, which drops the row from
+    // the live-only registry payload). Clearing the optimistic bridge
+    // flags here is what lets the card leave the Active list instead of
+    // lingering as a stale "Ended + Resume" ghost; the Recent list renders
+    // its true FAILED state (Setup failed + Retry) from the DAO.
     var allSessions = Alpine.store('sessions');
     for (var id in allSessions) {
       if (!activeIds[id] && allSessions[id].isLive) {
         allSessions[id].isLive = false;
+        // The row WAS live and is now gone — the launch/session is over
+        // (dead, or failed with is_live=0). Never-live placeholder tiles
+        // (pending-* / source-id keys) are deliberately untouched: they
+        // bridge the create/resume POST round-trip.
+        allSessions[id]._resuming = false;
       }
     }
     _emitSessionStoreChanged('registry');

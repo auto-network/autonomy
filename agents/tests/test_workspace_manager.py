@@ -2127,3 +2127,30 @@ def test_cleanup_preserve_verdict_demotes_repeat_warning_to_debug(tmp_path, monk
     ]
     assert len(second_preserve) == 1
     assert second_preserve[0].levelno == logging.DEBUG
+
+
+def test_create_worktree_recreates_empty_husk(tmp_path):
+    """A dir left behind by a partial/raced removal (exists, no .git, empty)
+    is recreated instead of being blindly reused — reuse would crash the
+    launch at the .git read."""
+    upstream = _make_upstream(tmp_path)
+    clone = wm.ensure_managed_clone(str(upstream), repos_dir=tmp_path / "repos")
+    worktree = tmp_path / "worktrees" / "sess-husk" / "upstream"
+    worktree.mkdir(parents=True)
+
+    wm.create_worktree(clone, worktree, "session/sess-husk")
+
+    assert (worktree / ".git").exists()
+
+
+def test_create_worktree_refuses_nonempty_husk(tmp_path):
+    """A gutted dir that still has content needs a human — recreating could
+    bury data and git worktree add refuses non-empty dirs anyway."""
+    upstream = _make_upstream(tmp_path)
+    clone = wm.ensure_managed_clone(str(upstream), repos_dir=tmp_path / "repos")
+    worktree = tmp_path / "worktrees" / "sess-husk2" / "upstream"
+    worktree.mkdir(parents=True)
+    (worktree / "leftover.txt").write_text("data\n")
+
+    with pytest.raises(wm.WorkspaceError, match="without .git"):
+        wm.create_worktree(clone, worktree, "session/sess-husk2")

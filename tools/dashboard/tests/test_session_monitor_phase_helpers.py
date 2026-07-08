@@ -207,3 +207,61 @@ async def test_registry_payload_startup_state_null_after_running(db, monitor):
     payload = monitor.get_registry()
     entry = next(e for e in payload if e["session_id"] == "auto-test")
     assert entry["startup_state"] is None
+
+
+# ── Liveness sweep vs in-flight launches (the resume-reap race) ─────
+
+
+@pytest.mark.asyncio
+async def test_arm_stamps_last_activity(db, monitor):
+    """The liveness sweep's booting-grace anchors on last_activity; arm must
+    stamp it or a resumed row (ancient created_at, stale last_activity)
+    gets reaped while queued at 'requesting'."""
+    import time as _time
+
+    dashboard_db.insert_session(
+        tmux_name="auto-test", session_type="container", project="x",
+    )
+    conn = dashboard_db.get_conn()
+    conn.execute(
+        "UPDATE tmux_sessions SET last_activity=? WHERE tmux_name=?",
+        (_time.time() - 99999, "auto-test"),
+    )
+    conn.commit()
+    await monitor.arm_startup_state("auto-test", "requesting")
+    row = dashboard_db.get_session("auto-test")
+    assert row["last_activity"] > _time.time() - 5
+
+
+def test_dead_session_worktree_cleanup_skips_revived_rows(db, monkeypatch):
+    """The cleanup thread is scheduled at death detection but can execute
+    after a resume revives the session — it must re-check at execution
+    time and abort instead of removing the relaunch's worktree."""
+    from tools.dashboard import session_monitor as sm
+
+    dashboard_db.insert_session(
+        tmux_name="auto-test", session_type="container", project="x",
+    )
+    # Row is live (revived) by the time the queued cleanup runs.
+    calls = []
+    monkeypatch.setattr(
+        sm, "cleanup_session_worktrees",
+        lambda *a, **kw: calls.append(a) or None,
+    )
+    sm._cleanup_worktrees_for_dead_session("auto-test")
+    assert calls == []  # aborted — session is live
+
+    # Genuinely dead row → cleanup proceeds.
+    dashboard_db.mark_dead("auto-test")
+
+    class _Result:
+        removed: list = []
+        preserved: list = []
+        errors: list = []
+
+    monkeypatch.setattr(
+        sm, "cleanup_session_worktrees",
+        lambda *a, **kw: calls.append(a) or _Result(),
+    )
+    sm._cleanup_worktrees_for_dead_session("auto-test")
+    assert len(calls) == 1
