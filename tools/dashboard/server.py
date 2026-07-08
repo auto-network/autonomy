@@ -130,7 +130,6 @@ from tools.dashboard.session_harness import (
     CLAUDE_HARNESS,
     dedup_claude_entries,
     enrich_claude_entries,
-    get_session_harness,
     parse_claude_log_line,
     postprocess_claude_entries,
     resolve_harness_for_path,
@@ -5388,29 +5387,6 @@ def _run_tmux_capture(tmux_name: str, *, timeout: float | None = None) -> str:
     return result.stdout or ""
 
 
-def _run_tmux_keystrokes(tmux_name: str, keystrokes: list[dict], *, timeout: float) -> None:
-    for keystroke in keystrokes:
-        kind = (keystroke or {}).get("kind")
-        value = (keystroke or {}).get("value")
-        if not value:
-            continue
-        if kind == "literal":
-            cmd = ["tmux", "send-keys", "-t", tmux_name, "-l", str(value)]
-        else:
-            cmd = ["tmux", "send-keys", "-t", tmux_name, str(value)]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"tmux send-keys failed: {(result.stderr or '').strip()}"
-            )
-        time.sleep(0.05)
-
-
 def _wait_for_setup_complete(
     *,
     tmux_name: str,
@@ -5482,43 +5458,22 @@ def _composer_ready_reached(tmux_name: str) -> bool:
 def _wait_for_prompt(
     *,
     tmux_name: str,
-    harness_name: str | None,
     deadline: float,
 ) -> None:
-    """Poll tmux until the harness parser sees a real composer prompt."""
-    harness = get_session_harness(harness_name)
-    current_state = _read_harness_state(tmux_name)
+    """Wait for the pane-poller's durable composer_ready signal.
+
+    The pane-poller (session_monitor._screen_poll_loop) is the single pane
+    reader and keystroke sender during a launch: armed via
+    arm_startup_state at the launch entrypoints, it runs the harness screen
+    adapter (trust auto-confirm, composer detection, grace fallback for
+    unreadable panes) and persists the result into harness_state. The
+    worker step just waits on that signal — it never touches the pane, so
+    there is exactly one detector per session. Two concurrent capture+
+    keystroke loops (the pre-signal design) could double-send the trust
+    confirmation.
+    """
     while time.monotonic() < deadline:
-        pane_text = _run_tmux_capture(
-            tmux_name,
-            timeout=min(_LIFECYCLE_TMUX_OP_TIMEOUT_S, _remaining_step_timeout(deadline, "waiting_ready")),
-        )
-        new_state, keystrokes = harness.read_screen_state(pane_text, current_state)
-        if new_state != current_state:
-            try:
-                dashboard_db.update_tail_state(
-                    tmux_name,
-                    harness_state=json.dumps(new_state),
-                )
-            except Exception:
-                logger.debug(
-                    "session_lifecycle: harness_state update failed tmux=%s",
-                    tmux_name,
-                    exc_info=True,
-                )
-        current_state = new_state
-        if keystrokes:
-            _run_tmux_keystrokes(
-                tmux_name,
-                keystrokes,
-                timeout=min(_LIFECYCLE_TMUX_OP_TIMEOUT_S, _remaining_step_timeout(deadline, "waiting_ready")),
-            )
-            time.sleep(0.5)
-            continue
-        if new_state.get("confirming_trust_prompt"):
-            time.sleep(0.5)
-            continue
-        if new_state.get("composer_ready"):
+        if _read_harness_state(tmux_name).get("composer_ready"):
             return
         time.sleep(0.5)
     raise TimeoutError(f"waiting_ready timed out after {_LIFECYCLE_WAITING_READY_TIMEOUT_S}s")
@@ -5945,7 +5900,6 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
         wait_deadline = time.monotonic() + _LIFECYCLE_WAITING_READY_TIMEOUT_S
         _wait_for_prompt(
             tmux_name=tmux_name,
-            harness_name=proj.harness or "claude",
             deadline=wait_deadline,
         )
 
