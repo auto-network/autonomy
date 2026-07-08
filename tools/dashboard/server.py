@@ -6007,6 +6007,60 @@ _SESSION_LIFECYCLE_WORKER = SessionLifecycleWorker()
 _SESSION_LIFECYCLE_WORKER.register_handler("start", _run_project_session_start)
 
 
+async def _recover_stuck_lifecycle_rows() -> None:
+    """Startup recovery (FSM contract, correctness addition 3).
+
+    The lifecycle queue is process memory: a dashboard restart mid-launch
+    loses the job and leaves the row frozen in a non-terminal
+    startup_state with is_live=1 — the "stuck forever" class the June-18
+    review predicted (40 restarts observed in a single 2-day log window).
+    Sweep at boot, before requests arrive:
+
+    - tmux session still exists → the process outlived the restart; the
+      interrupted launch work is gone, but the session itself is healthy.
+      Adopt as running: clear startup_state. (v1 — bead 4 re-enters the
+      worker at the interrupted phase instead, and routes the write
+      through the lifecycle writer once the legacy writers are deleted.)
+    - tmux session gone → the launch died with the restart. Mark it
+      failed(startup_recovery) so the operator gets a retryable failed
+      card instead of an eternally-launching one.
+
+    setup_failed rows are skipped: sticky, already operator-visible.
+    """
+    try:
+        rows = dashboard_db.get_live_sessions()
+    except Exception:
+        logger.exception("startup_recovery: could not list live sessions")
+        return
+    for row in rows:
+        state = row.get("startup_state")
+        if not state or state == "setup_failed":
+            continue
+        tmux_name = row.get("tmux_name")
+        if not tmux_name:
+            continue
+        try:
+            if _tmux_session_exists(tmux_name):
+                cleared = await session_monitor.advance_startup_state(tmux_name, None)
+                logger.info(
+                    "startup_recovery: adopted %s (was %s, tmux alive, cleared=%s)",
+                    tmux_name, state, cleared,
+                )
+            else:
+                SessionLifecycleStateWriter().fail(
+                    tmux_name,
+                    phase="startup_recovery",
+                    reason=f"dashboard restarted mid-launch (was {state}); process gone",
+                    retryable=True,
+                )
+                logger.warning(
+                    "startup_recovery: failed %s (was %s, tmux gone)",
+                    tmux_name, state,
+                )
+        except Exception:
+            logger.exception("startup_recovery: sweep failed for %s", tmux_name)
+
+
 async def _finish_project_session_create(
     *,
     tmux_name: str,
@@ -15430,6 +15484,9 @@ async def _on_startup():
     # lets the create cutover land as a separate, verifiable step.
     _SESSION_LIFECYCLE_WORKER.start()
     logger.info("session_lifecycle: worker started from _on_startup (idle until create enqueues)")
+    # Recover rows a restart froze mid-launch — must run before traffic so
+    # the first registry broadcast the clients see is already repaired.
+    await _recover_stuck_lifecycle_rows()
     if _should_run_harness_usage_poller():
         _harness_usage_poller_task = asyncio.create_task(_harness_usage_poller())
     if _claude_credentials_refresh.should_run_credentials_refresh_poller():
