@@ -33,7 +33,7 @@ class TestResumeWithSourceId:
             "/api/session/resume",
             json={"source_id": resume_env["container_source_id"]},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         data = resp.json()
         assert "tmux_name" in data
         assert data["type"] == "container"
@@ -44,7 +44,7 @@ class TestResumeWithSourceId:
             "/api/session/resume",
             json={"source_id": resume_env["host_source_id"]},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         data = resp.json()
         assert data["type"] == "host"
 
@@ -92,7 +92,7 @@ class TestResumeWithDirectParams:
                 "file_path": resume_env["jsonl_file"],
             },
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         data = resp.json()
         assert "tmux_name" in data
 
@@ -141,7 +141,7 @@ class TestSessionIdentityPreservation:
             "/api/session/resume",
             json={"source_id": resume_env["container_source_id"]},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         data = resp.json()
         assert data["tmux_name"] == "auto-0326-142603"
 
@@ -178,7 +178,7 @@ class TestSessionIdentityPreservation:
             "/api/session/resume",
             json={"source_id": resume_env["container_source_id"]},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         assert len(test_client._revived) == 1
         assert test_client._revived[0]["tmux_name"] == "auto-0326-142603"
         assert test_client._revived[0]["file_offset"] == 0
@@ -189,7 +189,7 @@ class TestSessionIdentityPreservation:
             "/api/session/resume",
             json={"source_id": resume_env["container_source_id"]},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         data = resp.json()
         # No dead session → should NOT be "auto-0326-..." but should be some generated name
         assert data["tmux_name"]  # just ensure it's non-empty
@@ -214,7 +214,7 @@ class TestSessionIdentityPreservation:
                 "file_path": resume_env["jsonl_file"],
             },
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         # Should find by file_path fallback
         data = resp.json()
         assert data["tmux_name"] == "auto-0328-100000"
@@ -238,6 +238,7 @@ class TestHistoryBackfill:
             "/api/session/resume",
             json={"source_id": resume_env["container_source_id"]},
         )
+        test_client.run_lifecycle_jobs()
         assert len(test_client._monitor_calls["register_revived"]) == 1
         assert len(test_client._monitor_calls["register"]) == 0
         call = test_client._monitor_calls["register_revived"][0]
@@ -250,7 +251,8 @@ class TestHistoryBackfill:
             "/api/session/resume",
             json={"source_id": resume_env["container_source_id"]},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
+        test_client.run_lifecycle_jobs()
         assert len(test_client._monitor_calls["register"]) == 1
         call = test_client._monitor_calls["register"][0]
         assert str(call["jsonl_path"]) == resume_env["jsonl_file"]
@@ -262,7 +264,8 @@ class TestHistoryBackfill:
             "/api/session/resume",
             json={"source_id": resume_env["host_source_id"]},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
+        test_client.run_lifecycle_jobs()
         assert len(test_client._monitor_calls["register"]) == 1
         call = test_client._monitor_calls["register"][0]
         assert str(call["jsonl_path"]) == resume_env["host_jsonl"]
@@ -286,7 +289,7 @@ class TestReResumeAfterDeath:
             "/api/session/resume",
             json={"source_id": resume_env["container_source_id"]},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         data = resp.json()
         assert data["tmux_name"] == "auto-0326-142603"
         assert data["label"] == "Already resumed once"
@@ -362,7 +365,7 @@ class TestActiveSessionGuard:
             "/api/session/resume",
             json={"source_id": resume_env["container_source_id"]},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
 
 
 class TestWorkspacePrimerRendering:
@@ -384,7 +387,8 @@ class TestWorkspacePrimerRendering:
             "/api/session/resume",
             json={"source_id": resume_env["container_source_id"]},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
+        test_client.run_lifecycle_jobs()
         run_dir = Path(resume_env["jsonl_file"]).parent.parent.parent
         primer_path = run_dir / ".claude_md"
         assert primer_path.exists(), f"primer not rendered at {primer_path}"
@@ -446,11 +450,19 @@ class TestWorkspaceHarnessPassthrough:
 
         resp = test_client.post("/api/session/create", json={"type": "host"})
 
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         tmux_name = resp.json()["tmux_name"]
+        # Row is seeded + armed on the request path, before any worker step
+        # runs — this is what keeps the card renderable from the first
+        # registry broadcast.
         row = server.dashboard_db.get_session(tmux_name)
         assert row["type"] == "host"
-        assert row["startup_state"] == "harness_starting"
+        assert row["startup_state"] == "requesting"
+        # Draining the worker runs launch -> register -> waiting -> running.
+        test_client.run_lifecycle_jobs()
+        row = server.dashboard_db.get_session(tmux_name)
+        assert row["startup_state"] is None
+        assert row["activity_state"] == "running"
 
     def test_workspace_create_returns_without_running_prepare_on_request_path(
         self, test_client, monkeypatch,
@@ -567,7 +579,8 @@ class TestWorkspaceHarnessPassthrough:
             "/api/session/resume",
             json={"source_id": resume_env["container_source_id"]},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
+        test_client.run_lifecycle_jobs()
         assert launch_kwargs["harness"] == "codex"
         assert prep_kwargs["refresh_existing_worktree"] is False
 
@@ -661,7 +674,8 @@ class TestWorkspaceCapabilityPassthrough:
             "/api/session/resume",
             json={"source_id": resume_env["container_source_id"]},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
+        test_client.run_lifecycle_jobs()
         assert "capabilities" in launch_kwargs, (
             "workspace resume must forward capabilities=... to launch_session"
         )
@@ -693,7 +707,8 @@ class TestWorkspaceCapabilityPassthrough:
         )
 
         resp = test_client.post("/api/session/create", json={})
-        assert resp.status_code == 200
+        assert resp.status_code == 202
+        test_client.run_lifecycle_jobs()
         # The default container-terminal path must not synthesize capabilities.
         assert launch_kwargs.get("capabilities", ()) == ()
 
