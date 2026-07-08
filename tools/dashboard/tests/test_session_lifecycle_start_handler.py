@@ -366,3 +366,34 @@ def test_resume_start_handler_failure_preserves_worktrees(monkeypatch, tmp_path)
     assert row["is_live"] == 0
     assert "tmux creation failed" in row["lifecycle_detail"]
     assert wt_cleanups == []  # worktrees untouched
+
+
+def test_stop_handler_reaches_dead_despite_step_errors(monkeypatch, tmp_path):
+    """STOP runs stopping -> cleaning -> dead with bounded, idempotent
+    steps; a failing step degrades to a warning and the session still
+    reaches dead — a half-stopped session must not stay running."""
+    from tools.dashboard import server
+
+    _init_db(tmp_path)
+    dashboard_db.insert_session(
+        tmux_name="auto-life",
+        session_type="container",
+        project="blindhash-operations",
+        harness="claude",
+    )
+
+    def exploding_kill(cmd, **kwargs):
+        raise RuntimeError("docker unreachable")
+
+    monkeypatch.setattr(server.subprocess, "run", exploding_kill)
+    monkeypatch.setattr(server.auth_db, "revoke_token", lambda _name: None)
+
+    server._run_session_stop(
+        LifecycleJob("stop", "auto-life", {}),
+        SessionLifecycleStateWriter(),
+    )
+
+    row = dashboard_db.get_session("auto-life")
+    assert row["activity_state"] == "dead"
+    assert row["is_live"] == 0
+    assert row["startup_state"] is None

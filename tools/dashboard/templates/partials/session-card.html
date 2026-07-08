@@ -329,15 +329,14 @@
       <!-- Inline action (auto-yfcoc). Resume on dead-resumable rows,
            Retry on setup_failed; margin-left:auto right-aligns inside
            the existing .sc-footer flex. Resume reuses the existing
-           page-level resumeSession() helper; Retry on the LIST is a
-           re-create rather than a resume — defer the click handler to
-           a follow-up if the host wants explicit retry wiring. For now
-           the chip is rendered, click is a no-op-with-stopPropagation
-           so it doesn't accidentally trigger the card's outer @click. -->
+           page-level resumeSession() helper; Retry POSTs the lifecycle
+           worker's retry endpoint — the worker cleans the failed
+           attempt's leftovers and re-runs the launch, and the card
+           follows along via the registry broadcasts. -->
       <template x-if="window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.inlineAction(s)">
         <button class="sc-action-inline"
                 :class="window.Autonomy.lifecycle.inlineAction(s).kind"
-                @click.prevent.stop="(window.Autonomy.lifecycle.inlineAction(s).kind === 'resume' && typeof resumeSession === 'function') ? resumeSession(s, $event) : null"
+                @click.prevent.stop="(window.Autonomy.lifecycle.inlineAction(s).kind === 'resume' && typeof resumeSession === 'function') ? resumeSession(s, $event) : (window.Autonomy.lifecycle.inlineAction(s).kind === 'retry' ? fetch('/api/session/' + encodeURIComponent(s.tmux_name || s.session_id || s.id) + '/retry', {method: 'POST'}) : null)"
                 data-testid="sc-action-inline"
                 x-text="window.Autonomy.lifecycle.inlineAction(s).label">
         </button>
