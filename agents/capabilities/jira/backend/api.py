@@ -40,23 +40,44 @@ class JiraConfig:
     token: str
 
     @classmethod
-    def from_env(cls) -> "JiraConfig":
-        """Resolve from the dashboard host's environment:
-        JIRA_BASE_URL, JIRA_EMAIL, JIRA_TOKEN_FILE (default ~/.jira_token)."""
-        base_url = os.environ.get("JIRA_BASE_URL", "").rstrip("/")
-        email = os.environ.get("JIRA_EMAIL", "")
-        token_file = Path(os.environ.get("JIRA_TOKEN_FILE",
-                                         str(Path.home() / ".jira_token")))
+    def resolve(cls) -> "JiraConfig":
+        """Resolve broker config. Non-secret values (base URL, account email,
+        token-file PATH) come from the org install Setting
+        ``autonomy.org.capability.install#1`` key=``issue_tracker`` — the
+        designed home for org capability config; no literal secret is ever in
+        the graph. Environment variables (JIRA_BASE_URL, JIRA_EMAIL,
+        JIRA_TOKEN_FILE) override per value — the test seam. The token itself
+        is read from the host file and exists only in process memory."""
+        installed: dict = {}
+        try:
+            from tools.graph import ops as graph_ops
+            members = graph_ops.read_set("autonomy.org.capability.install")
+            for m in (getattr(members, "members", []) or []):
+                payload = m.payload if isinstance(m.payload, dict) else {}
+                if payload.get("contract") == "issue_tracker":
+                    installed = payload.get("broker_config") or {}
+                    break
+        except Exception:
+            pass
+        base_url = (os.environ.get("JIRA_BASE_URL")
+                    or installed.get("base_url", "")).rstrip("/")
+        email = os.environ.get("JIRA_EMAIL") or installed.get("email", "")
+        token_file = Path(os.environ.get("JIRA_TOKEN_FILE")
+                          or installed.get("token_file", "")
+                          or str(Path.home() / ".jira_token")).expanduser()
         token = ""
         try:
             token = token_file.read_text().strip()
         except OSError:
             pass
         missing = [name for name, val in
-                   [("JIRA_BASE_URL", base_url), ("JIRA_EMAIL", email),
+                   [("base_url", base_url), ("email", email),
                     (f"token file {token_file}", token)] if not val]
         if missing:
-            raise JiraError(f"jira broker is not configured: missing {', '.join(missing)}")
+            raise JiraError(
+                "jira broker is not configured: missing "
+                f"{', '.join(missing)} (set broker_config on the "
+                "issue_tracker org install Setting)")
         return cls(base_url=base_url, email=email, token=token)
 
 
