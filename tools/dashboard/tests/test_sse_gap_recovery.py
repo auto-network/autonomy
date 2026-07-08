@@ -501,7 +501,9 @@ def buffer_overflow_recovered(harness):
     primer = _assistant_entry("Primer event", 55)
     harness.write_gap_events([primer])
     primed_seq = 0
-    for _ in range(10):
+    # Generous window: the mock event watcher's file poll + SSE delivery
+    # can take well over 5s on a loaded machine (8 workers, 8 Chromiums).
+    for _ in range(30):
         last_seq = ab_eval("return window._lastSeq;")
         if last_seq and last_seq > 0:
             primed_seq = last_seq
