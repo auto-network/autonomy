@@ -1,6 +1,6 @@
 """Grep-guard: startup_state has exactly two writers, by contract.
 
-The June-18 FSM contract (musings/session-lifecycle-fsm-contract-2026-06-18.md)
+The June-18 FSM contract (graph://92ed929a-3ec)
 requires that ONLY the lifecycle worker writes lifecycle state, with
 ``arm_startup_state`` as the single explicit FSM entry. The historical
 multi-writer design (setup-exit watcher, screen-poller, inject tasks,
