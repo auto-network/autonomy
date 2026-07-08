@@ -42,8 +42,22 @@ if [ -f /startup.sh ]; then
     {
         # Dependency install / image pulls begin now.
         _setup_phase setup_running
+        # errexit is inherited by this backgrounded subshell: without set +e
+        # a failing /startup.sh kills the compound BEFORE the exit code is
+        # recorded, so .setup-exit never appears and the host can only see
+        # "setup still running" — setup failure becomes unreportable.
+        set +e
         /startup.sh > /workspace/output/.setup.log 2>&1
-        echo $? > /workspace/output/.setup-exit
+        _setup_rc=$?
+        echo "$_setup_rc" > /workspace/output/.setup-exit
+        # Terminal marker: without it .setup_phase reads setup_running
+        # forever after a successful boot, and any late marker read looks
+        # like an in-progress setup.
+        if [ "$_setup_rc" = "0" ]; then
+            _setup_phase setup_complete
+        else
+            _setup_phase setup_failed
+        fi
     } &
 fi
 exec "$@"
