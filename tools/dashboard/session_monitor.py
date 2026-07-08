@@ -99,8 +99,7 @@ except ImportError:
 # default (existing rows / sessions past launching). Non-NULL values are
 # the in-progress launching states the session cards render as chips.
 #
-# WRITERS — exactly two, by contract (musings/
-# session-lifecycle-fsm-contract-2026-06-18.md):
+# WRITERS — exactly two, by contract (graph://92ed929a-3ec):
 #   1. The session lifecycle worker's SessionLifecycleStateWriter — every
 #      transition during a launch/stop/retry, including the terminal
 #      NULL(running) and sticky ``setup_failed``.

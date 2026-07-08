@@ -49,8 +49,7 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     -- drop via migration once none remain.
     setup_phase         TEXT NOT NULL DEFAULT 'pending',
     harness_phase       TEXT NOT NULL DEFAULT 'pending',
-    -- Unified single-column startup FSM (musings/
-    -- session-lifecycle-fsm-contract-2026-06-18.md). NULL = "not in
+    -- Unified single-column startup FSM (graph://92ed929a-3ec). NULL = "not in
     -- launching" — default for old rows and the terminal running state.
     -- Written ONLY by the lifecycle worker's writer and
     -- arm_startup_state (enforced by test_no_racing_writers.py).
