@@ -40,18 +40,20 @@ class JiraConfig:
     token: str
 
     @classmethod
-    def resolve(cls) -> "JiraConfig":
+    def resolve(cls, org: str | None = None) -> "JiraConfig":
         """Resolve broker config. Non-secret values (base URL, account email,
         token-file PATH) come from the org install Setting
-        ``autonomy.org.capability.install#1`` key=``issue_tracker`` — the
-        designed home for org capability config; no literal secret is ever in
-        the graph. Environment variables (JIRA_BASE_URL, JIRA_EMAIL,
-        JIRA_TOKEN_FILE) override per value — the test seam. The token itself
-        is read from the host file and exists only in process memory."""
+        ``autonomy.org.capability.install#1`` key=``issue_tracker`` in *org*'s
+        database — the designed home for org capability config; no literal
+        secret is ever in the graph. Environment variables (JIRA_BASE_URL,
+        JIRA_EMAIL, JIRA_TOKEN_FILE) override per value — the test seam. The
+        token itself is read from the host file and exists only in process
+        memory."""
         installed: dict = {}
         try:
             from tools.graph import ops as graph_ops
-            members = graph_ops.read_set("autonomy.org.capability.install")
+            members = graph_ops.read_set("autonomy.org.capability.install",
+                                         org=org, peers=[])
             for m in (getattr(members, "members", []) or []):
                 payload = m.payload if isinstance(m.payload, dict) else {}
                 if payload.get("contract") == "issue_tracker":
@@ -77,7 +79,7 @@ class JiraConfig:
             raise JiraError(
                 "jira broker is not configured: missing "
                 f"{', '.join(missing)} (set broker_config on the "
-                "issue_tracker org install Setting)")
+                f"issue_tracker org install Setting; org={org!r})")
         return cls(base_url=base_url, email=email, token=token)
 
 

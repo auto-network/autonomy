@@ -14,14 +14,14 @@ PAYLOAD_FILE="${1:-}"
 
 req_file="$(mktemp)"
 trap 'rm -f "$req_file"' EXIT
-python3 - "$SESSION" "$PAYLOAD_FILE" > "$req_file" <<'PY' || exit 1
+python3 - "$SESSION" "$PAYLOAD_FILE" "$ORG" > "$req_file" <<'PY' || exit 1
 import json, sys
-session, path = sys.argv[1:3]
+session, path, org = sys.argv[1:4]
 payload = json.load(open(path))
 fields = payload.get("fields", payload)   # accept bare fields or {"fields": ...}
 if not isinstance(fields, dict) or not fields:
     sys.exit("jira-create: payload must contain a non-empty fields object")
 print(json.dumps({"kind": "jira_write", "session": session,
-                  "request": {"op": "create", "fields": fields}}))
+                  "request": {"op": "create", "fields": fields, "org": org}}))
 PY
 jira_approval_wait "$req_file"

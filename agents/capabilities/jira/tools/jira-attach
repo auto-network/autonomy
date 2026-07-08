@@ -11,14 +11,14 @@ KEY="${1:-}"; FILE="${2:-}"
 
 req_file="$(mktemp)"
 trap 'rm -f "$req_file"' EXIT
-python3 - "$SESSION" "$KEY" "$FILE" > "$req_file" <<'PY' || exit 1
+python3 - "$SESSION" "$KEY" "$FILE" "$ORG" > "$req_file" <<'PY' || exit 1
 import base64, json, mimetypes, os, sys
-session, key, path = sys.argv[1:4]
+session, key, path, org = sys.argv[1:5]
 size = os.path.getsize(path)
 if size > 10 * 1024 * 1024:
     sys.exit(f"jira-attach: {path} is {size} bytes; the cap is 10MB")
 print(json.dumps({"kind": "jira_write", "session": session, "request": {
-    "op": "attach", "key": key,
+    "op": "attach", "key": key, "org": org,
     "filename": os.path.basename(path),
     "size": size,
     "mime_type": mimetypes.guess_type(path)[0] or "application/octet-stream",

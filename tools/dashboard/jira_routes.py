@@ -28,15 +28,22 @@ from agents.capabilities.jira.backend import api
 from tools.dashboard import approvals_routes
 
 
-def _cfg() -> api.JiraConfig:
-    return api.JiraConfig.resolve()
+def _cfg(org: str | None) -> api.JiraConfig:
+    return api.JiraConfig.resolve(org=org)
+
+
+def _org(request: Request) -> str | None:
+    """Org whose install Setting configures the broker — from ?org= (the
+    agent tools pass their container's GRAPH_ORG), same pattern as
+    /api/sign-key."""
+    return request.query_params.get("org") or None
 
 
 async def get_issue(request: Request) -> JSONResponse:
     """GET /api/jira/issue/{key} -> cleaned ticket, ADF already markdown."""
     key = request.path_params["key"]
     try:
-        ticket = await asyncio.to_thread(api.read_ticket, _cfg(), key)
+        ticket = await asyncio.to_thread(api.read_ticket, _cfg(_org(request)), key)
     except api.JiraError as e:
         return JSONResponse({"error": str(e)}, status_code=502)
     return JSONResponse(ticket)
@@ -52,7 +59,7 @@ async def get_createmeta(request: Request) -> JSONResponse:
                             status_code=400)
     try:
         meta = await asyncio.to_thread(
-            api.createmeta, _cfg(), project, issuetype, version_prefix)
+            api.createmeta, _cfg(_org(request)), project, issuetype, version_prefix)
     except api.JiraError as e:
         return JSONResponse({"error": str(e)}, status_code=502)
     return JSONResponse(meta)
@@ -64,7 +71,7 @@ async def get_attachment(request: Request) -> Response:
     attachment_id = request.path_params["id"]
     try:
         content, filename, mime_type = await asyncio.to_thread(
-            api.get_attachment, _cfg(), attachment_id)
+            api.get_attachment, _cfg(_org(request)), attachment_id)
     except api.JiraError as e:
         return JSONResponse({"error": str(e)}, status_code=502)
     return Response(content, media_type=mime_type, headers={
@@ -74,7 +81,7 @@ async def get_attachment(request: Request) -> Response:
 async def get_probe(request: Request) -> JSONResponse:
     """GET /api/jira/probe -> config + auth reachability for the capability."""
     try:
-        result = await asyncio.to_thread(api.probe, _cfg())
+        result = await asyncio.to_thread(api.probe, _cfg(_org(request)))
     except api.JiraError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
     return JSONResponse(result)
@@ -86,7 +93,7 @@ async def _execute_jira_write(row: dict) -> dict:
     stored as ``result.execution`` and wakes the agent's held GET)."""
     req = row["request"]
     op = req.get("op")
-    cfg = _cfg()
+    cfg = _cfg(req.get("org") or None)
 
     def run() -> dict:
         if op == "comment":

@@ -126,7 +126,7 @@ def test_config_resolves_from_org_install_setting(monkeypatch, tmp_path):
     })
     for var in ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_TOKEN_FILE"):
         monkeypatch.delenv(var, raising=False)
-    cfg = api.JiraConfig.resolve()
+    cfg = api.JiraConfig.resolve(org="autonomy")
     assert cfg == api.JiraConfig(base_url="https://jira.example",
                                  email="op@example.com", token="sekret")
 

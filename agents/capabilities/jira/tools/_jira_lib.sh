@@ -8,6 +8,8 @@
 
 DASH="${AUTONOMY_DASHBOARD:-${GRAPH_API:-https://localhost:8080}}"
 SESSION="${AUTONOMY_SESSION:-}"
+# Org whose install Setting configures the broker (graph DBs are per-org).
+ORG="${GRAPH_ORG:-}"
 
 jira_fail() { echo "$1" >&2; exit 1; }
 
