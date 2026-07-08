@@ -896,7 +896,14 @@ def launch_session(
         run_dir = Path(output_dir)
     else:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        run_dir = REPO_ROOT / "data" / "agent-runs" / f"{name}-{ts}"
+        # DASHBOARD_AGENT_RUNS_DIR mirrors server.py's AGENT_RUNS_DIR override
+        # so tests (per-worker tmp redirect in the dashboard conftest) don't
+        # litter the real repo's data/agent-runs with launch fixtures.
+        base = Path(os.environ.get(
+            "DASHBOARD_AGENT_RUNS_DIR",
+            str(REPO_ROOT / "data" / "agent-runs"),
+        ))
+        run_dir = base / f"{name}-{ts}"
 
     run_dir.mkdir(parents=True, exist_ok=True)
     sessions_dir = run_dir / "sessions"
