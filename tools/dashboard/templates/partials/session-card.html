@@ -296,6 +296,26 @@
         <span class="sc-footer-label">ctx</span>
         <span class="sc-footer-value" :class="ctxWarn(s) ? 'warn' : ''" x-text="ctxStr(s) || '—'"></span>
       </div>
+      <!-- Ended cards: final persisted disk footprint (written by the
+           resource collector's death-path measure — zero live polling).
+           Third column per design d2250266: TURNS · CTX · DISK. Dotted
+           trigger opens the component breakdown, same affordance as the
+           live meta2 row's Disk tile. Helpers are sessions-page scope;
+           other surfaces including this partial skip it. -->
+      <template x-if="!s.is_live && typeof diskStr === 'function' && diskStr(s)">
+        <div class="sc-footer-item sc-disk-item" data-testid="sc-disk-ended">
+          <span class="sc-footer-label">disk</span>
+          <button type="button" class="sc-footer-value sc-resource-trigger"
+                  @click.prevent.stop="toggleResourceTip(s)"
+                  x-text="diskStr(s)"></button>
+          <div class="sc-resource-tip"
+               :class="_resourceTipOpen === resourceTipKey(s) ? 'open' : ''">
+            <template x-for="row in diskDetail(s)" :key="row[0]">
+              <div><span x-text="row[0]"></span><b x-text="row[1]"></b></div>
+            </template>
+          </div>
+        </div>
+      </template>
       <div class="sc-footer-item">
         <span class="sc-footer-label" x-text="endedOrIdleLabel(s)"></span>
         <span class="sc-footer-value" :class="s.is_live ? recencyColor(s) : ''" x-text="endedOrIdleValue(s)"></span>
@@ -310,25 +330,6 @@
         <div class="sc-footer-item">
           <span class="sc-footer-label">org</span>
           <span class="sc-footer-value" x-text="s.org.resolved ? s.org.name : '?'"></span>
-        </div>
-      </template>
-      <!-- Ended cards: final persisted disk footprint (written by the
-           resource collector's death-path measure — zero live polling).
-           Dotted trigger opens the component breakdown, same affordance
-           as the live meta2 row's Disk tile. Helpers are sessions-page
-           scope; other surfaces including this partial skip it. -->
-      <template x-if="!s.is_live && typeof diskStr === 'function' && diskStr(s)">
-        <div class="sc-footer-item sc-disk-item" data-testid="sc-disk-ended">
-          <span class="sc-footer-label">disk</span>
-          <button type="button" class="sc-footer-value sc-resource-trigger"
-                  @click.prevent.stop="toggleResourceTip(s)"
-                  x-text="diskStr(s)"></button>
-          <div class="sc-resource-tip"
-               :class="_resourceTipOpen === resourceTipKey(s) ? 'open' : ''">
-            <template x-for="row in diskDetail(s)" :key="row[0]">
-              <div><span x-text="row[0]"></span><b x-text="row[1]"></b></div>
-            </template>
-          </div>
         </div>
       </template>
       <!-- auto-10lsv: which Anthropic account is this session burning?

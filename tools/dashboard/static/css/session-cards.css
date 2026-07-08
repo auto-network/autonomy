@@ -265,6 +265,10 @@
    rev-58 spacing between the two stats lines. */
 .sc-meta2 { display: none; }
 body.zoom-expanded .sc-meta2 {
+  /* Same flex rhythm as .sc-footer so the CPU/RAM/Disk tiles sit under
+     turns/ctx/idle (all content-width columns), and the sparkline fills
+     everything from there to the card edge — the design's "spans the
+     tmux + org columns", not a right-justified strip. */
   display: flex;
   gap: 12px;
   align-items: center;
@@ -277,8 +281,6 @@ body.zoom-expanded .sc-meta2 {
 .sc-spark {
   flex: 1;
   min-width: 48px;
-  max-width: 220px;
-  margin-left: auto;
   align-self: stretch;
   display: flex;
   align-items: center;

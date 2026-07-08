@@ -266,11 +266,17 @@
           try { detail = JSON.parse(s.disk_detail); } catch (e) { detail = null; }
         }
         if (!detail || !detail.components) return [];
-        var labels = { run_dir: 'Run dir', jsonl: 'Transcript',
-                       worktrees: 'Worktrees', container_fs: 'Container' };
+        // Design d2250266 order + vocabulary: Image / Worktree / Output.
+        // (Image = the container's writable layer; Output = the run dir
+        // under agent-runs; Transcript = host-session JSONL.)
+        var order = [['container_fs', 'Image'], ['worktrees', 'Worktree'],
+                     ['run_dir', 'Output'], ['jsonl', 'Transcript']];
         var rows = [];
-        for (var k in detail.components) {
-          rows.push([labels[k] || k, this.fmtBytes(detail.components[k])]);
+        for (var i = 0; i < order.length; i++) {
+          var k = order[i][0];
+          if (detail.components[k] != null) {
+            rows.push([order[i][1], this.fmtBytes(detail.components[k])]);
+          }
         }
         rows.push(['Total', this.fmtBytes(detail.total)]);
         return rows;
