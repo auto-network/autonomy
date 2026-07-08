@@ -177,8 +177,9 @@ async def get_approval(request: Request) -> JSONResponse:
 
 async def decide_approval(request: Request) -> JSONResponse:
     """POST /api/approvals/{id}/decision  {approved: bool, ...} — the body IS the
-    stored result, so kind-specific outputs (e.g. the armored ``signature``) and
-    operator edits ride along without schema changes. First writer wins."""
+    stored result: the operator's true/false plus kind-specific outputs (e.g. the
+    armored ``signature``). The request itself is never modified by a decision —
+    what was staged is exactly what an approval applies to. First writer wins."""
     rid = request.path_params["id"]
     try:
         body = await request.json()
