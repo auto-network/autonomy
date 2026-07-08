@@ -43,17 +43,17 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     role                TEXT DEFAULT '',
     harness_token       TEXT,
     -- auto-a1jco: two independent lifecycle dimensions.
-    -- ``setup_phase`` tracks ``/startup.sh`` progress (DinD workspaces);
-    -- ``harness_phase`` tracks the ``exec claude`` boot. They progress
-    -- in parallel — a single scalar can't represent both because the
-    -- entrypoint backgrounds the setup script and exec's the harness
-    -- concurrently. See graph://18c9a9e9-efb for the full state machine.
+    -- DEPRECATED (two-column model, graph://18c9a9e9-efb, superseded by
+    -- the worker-owned startup_state FSM): no code writes these anymore
+    -- — every row reads 'pending'. Kept one release for stray readers;
+    -- drop via migration once none remain.
     setup_phase         TEXT NOT NULL DEFAULT 'pending',
     harness_phase       TEXT NOT NULL DEFAULT 'pending',
-    -- Unified single-column startup FSM. NULL = "this feature does not
-    -- govern this session" — covers both default (existing rows never
-    -- populated) and terminal success (cleared on first assistant turn).
-    -- Replaces the prior two-column setup_phase + harness_phase split.
+    -- Unified single-column startup FSM (musings/
+    -- session-lifecycle-fsm-contract-2026-06-18.md). NULL = "not in
+    -- launching" — default for old rows and the terminal running state.
+    -- Written ONLY by the lifecycle worker's writer and
+    -- arm_startup_state (enforced by test_no_racing_writers.py).
     startup_state       TEXT
 );
 

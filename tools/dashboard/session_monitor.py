@@ -39,6 +39,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from tools.dashboard.session_lifecycle_worker import derive_lifecycle_state
 from tools.dashboard.session_harness import (
     CLAUDE_HARNESS,
     SessionHarness,
@@ -1467,6 +1468,9 @@ class SessionMonitor:
                 # Unified startup FSM. NULL = not in launching (existing
                 # sessions, post-launch sessions, dead sessions).
                 "startup_state": s.get("startup_state"),
+                # Coarse lifecycle, DERIVED per the FSM contract — one
+                # source of truth for the card's section/chip branching.
+                "lifecycle_state": derive_lifecycle_state(s),
             }
             # auto-ja51w: transient per-session phase progress (e.g. per-repo
             # tick from inside prepare_session_mounts). Set via

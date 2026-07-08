@@ -168,3 +168,33 @@ def test_worker_backpressure_is_nonblocking():
 
     assert (time.monotonic() - started) < 0.1
     assert worker.try_enqueue(LifecycleJob("start", "auto-three")) is False
+
+
+def test_derive_lifecycle_state_coarse_mapping():
+    from tools.dashboard.session_lifecycle_worker import derive_lifecycle_state
+
+    # FAILED wins over DEAD: fail writes set is_live=0 AND activity failed.
+    assert derive_lifecycle_state(
+        {"activity_state": "failed", "is_live": 0, "startup_state": "setup_failed"}
+    ) == "FAILED"
+    assert derive_lifecycle_state(
+        {"activity_state": "idle", "is_live": 1, "startup_state": "setup_failed"}
+    ) == "FAILED"
+    assert derive_lifecycle_state(
+        {"activity_state": "stopping", "is_live": 1, "startup_state": None}
+    ) == "TEARING_DOWN"
+    assert derive_lifecycle_state(
+        {"activity_state": "cleaning", "is_live": 1, "startup_state": None}
+    ) == "TEARING_DOWN"
+    assert derive_lifecycle_state(
+        {"activity_state": "dead", "is_live": 0, "startup_state": None}
+    ) == "DEAD"
+    assert derive_lifecycle_state(
+        {"activity_state": "idle", "is_live": 0, "startup_state": None}
+    ) == "DEAD"
+    assert derive_lifecycle_state(
+        {"activity_state": "running", "is_live": 1, "startup_state": "setup_running"}
+    ) == "STARTING"
+    assert derive_lifecycle_state(
+        {"activity_state": "idle", "is_live": 1, "startup_state": None}
+    ) == "RUNNING"

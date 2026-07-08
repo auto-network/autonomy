@@ -69,6 +69,26 @@ _ACTIVITY_STATE_FOR_LIFECYCLE: dict[str, str] = {
 }
 
 
+def derive_lifecycle_state(row: dict) -> str:
+    """Coarse lifecycle state, DERIVED from the persisted columns.
+
+    Per the FSM contract there is no fifth column — STARTING / RUNNING /
+    TEARING_DOWN / FAILED / DEAD are computed from (activity_state,
+    startup_state, is_live) at read time. Order matters: failed rows also
+    carry is_live=0, so FAILED must win over DEAD.
+    """
+    activity = row.get("activity_state")
+    if activity == "failed" or row.get("startup_state") == "setup_failed":
+        return "FAILED"
+    if activity in ("stopping", "cleaning"):
+        return "TEARING_DOWN"
+    if activity == "dead" or not row.get("is_live"):
+        return "DEAD"
+    if row.get("startup_state"):
+        return "STARTING"
+    return "RUNNING"
+
+
 @dataclass(frozen=True)
 class LifecycleJob:
     action: LifecycleAction
