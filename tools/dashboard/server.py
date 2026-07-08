@@ -326,6 +326,13 @@ EVENT_BUS_STATE_PATH = Path(
     os.environ.get("DASHBOARD_EVENT_BUS_STATE")
     or str(_REPO_ROOT / "data" / "event_bus.state")
 )
+# Resource collector ring buffers survive hot reloads the same way the
+# event bus does: snapshot on shutdown, restore on boot. Env-overridable
+# for tests, mirroring DASHBOARD_EVENT_BUS_STATE.
+RESOURCE_MONITOR_STATE_PATH = Path(
+    os.environ.get("DASHBOARD_RESOURCE_MONITOR_STATE")
+    or str(_REPO_ROOT / "data" / "resource_monitor.state")
+)
 # Labels always shown in pause UI even if not in dispatch.state
 _KNOWN_PAUSE_LABELS = ["dashboard"]
 
@@ -15515,6 +15522,9 @@ async def _on_startup():
     # session, which is pure noise (and timing jitter for browser tests)
     # in those environments. Same gate as the harness-usage poller.
     if _should_run_harness_usage_poller():
+        # Carry sparkline ring buffers across the hot reload — the prior
+        # process snapshots them in _on_shutdown, mirroring the event bus.
+        resource_monitor.load_state(RESOURCE_MONITOR_STATE_PATH)
         await resource_monitor.start(event_bus=event_bus)
     _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())
     _event_loop_watchdog_task = asyncio.create_task(_event_loop_watchdog())
@@ -15621,6 +15631,7 @@ async def _on_shutdown():
         logger.exception("error during worktree_monitor.stop()")
     try:
         await resource_monitor.stop()
+        resource_monitor.save_state(RESOURCE_MONITOR_STATE_PATH)
     except Exception:
         logger.exception("error during resource_monitor.stop()")
     try:

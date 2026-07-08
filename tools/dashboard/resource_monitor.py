@@ -365,6 +365,95 @@ class ResourceMonitor:
                 logger.exception("resource_monitor: tick error")
             await asyncio.sleep(self.cpu_interval)
 
+    # ── snapshot / restore (hot-reload continuity) ───────────────
+
+    _SNAPSHOT_VERSION = 1
+    # Sessions whose last sample is older than this are not restored —
+    # a snapshot from a long-dead process would splice stale points into
+    # the sparkline as if they were adjacent to fresh ones.
+    _SNAPSHOT_MAX_AGE_S = 900.0
+
+    def save_state(self, path) -> None:
+        """Persist ring buffers + sampling state to ``path`` atomically.
+
+        Called from the server's shutdown handler (same contract as
+        EventBus.snapshot) so a hot reload doesn't blow away ~10 minutes
+        of sparkline history. Measurement handles (cgroup dirs, pane
+        PIDs) are deliberately NOT persisted — they re-resolve with one
+        docker inspect / tmux call per session on the first tick.
+        Failures are logged, never raised.
+        """
+        try:
+            target = Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            sessions = {}
+            for name, s in self._states.items():
+                if s.kind == "unresolved" and not s.history:
+                    continue
+                sessions[name] = {
+                    "history": list(s.history),
+                    "last_cpu_ns": s.last_cpu_ns,
+                    "last_cpu_at": s.last_cpu_at,
+                    "cpu_pct": s.cpu_pct,
+                    "mem_bytes": s.mem_bytes,
+                    "sampled_at": s.sampled_at,
+                    "disk": s.disk,
+                    "disk_sampled_at": s.disk_sampled_at,
+                    "next_disk_at": dict(s.next_disk_at),
+                    "disk_entry_count": dict(s.disk_entry_count),
+                }
+            state = {"version": self._SNAPSHOT_VERSION, "sessions": sessions}
+            tmp = target.with_suffix(target.suffix + ".tmp")
+            tmp.write_text(json.dumps(state))
+            tmp.replace(target)
+        except Exception:
+            logger.exception("resource_monitor.save_state(%s) failed", path)
+
+    def load_state(self, path) -> bool:
+        """Load a prior process's snapshot. Returns True if state was loaded.
+
+        Restored sessions come back as ``unresolved`` — the next tick
+        re-resolves their measurement handle and keeps appending to the
+        carried-over history. ``last_cpu_ns`` survives so the first
+        post-restart CPU delta is computed across the reload gap instead
+        of being lost. Missing/corrupt/stale snapshots restore nothing.
+        """
+        try:
+            target = Path(path)
+            if not target.is_file():
+                return False
+            state = json.loads(target.read_text())
+            if (not isinstance(state, dict)
+                    or state.get("version") != self._SNAPSHOT_VERSION):
+                return False
+            now = time.time()
+            restored = 0
+            for name, row in (state.get("sessions") or {}).items():
+                if (now - (row.get("sampled_at") or 0)) > self._SNAPSHOT_MAX_AGE_S:
+                    continue
+                s = _SessionState()
+                s.history = deque(
+                    (tuple(p) for p in row.get("history") or []), maxlen=100)
+                s.last_cpu_ns = int(row.get("last_cpu_ns") or 0)
+                s.last_cpu_at = float(row.get("last_cpu_at") or 0)
+                s.cpu_pct = row.get("cpu_pct")
+                s.mem_bytes = row.get("mem_bytes")
+                s.sampled_at = float(row.get("sampled_at") or 0)
+                s.disk = row.get("disk")
+                s.disk_sampled_at = float(row.get("disk_sampled_at") or 0)
+                s.next_disk_at = dict(row.get("next_disk_at") or {})
+                s.disk_entry_count = dict(row.get("disk_entry_count") or {})
+                self._states[name] = s
+                restored += 1
+            if restored:
+                logger.info(
+                    "resource_monitor: restored %d session buffer(s) from %s",
+                    restored, target)
+            return restored > 0
+        except Exception:
+            logger.exception("resource_monitor.load_state(%s) failed", path)
+            return False
+
     # ── death hook ───────────────────────────────────────────────
 
     async def on_session_dead(self, tmux_name: str, row: dict | None = None) -> None:
