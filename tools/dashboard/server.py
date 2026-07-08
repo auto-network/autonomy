@@ -8890,6 +8890,17 @@ def _worktree_state_json(row: WorktreeState) -> dict:
         ),
         "commits": [_worktree_commit_json(commit) for commit in row.commits],
         "dirty_files": [_worktree_file_json(file) for file in row.dirty_files],
+        "net_empty": row.net_empty,
+        "duplicate_commits": [
+            {
+                "sha": dup.sha,
+                "short_sha": dup.short_sha,
+                "subject": dup.subject,
+                "of_session": dup.of_session,
+                "of_repo": dup.of_repo,
+            }
+            for dup in row.duplicate_commits
+        ],
     }
     snapshot = worktree_monitor.get_source_control(row.session_name, row.repo_name)
     if snapshot is not None:
