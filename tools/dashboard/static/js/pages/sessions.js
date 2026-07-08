@@ -314,10 +314,14 @@
         var hist = (r && r.history) || [];
         if (hist.length < 2) return '';
         var W = 180, H = 42, pad = 6;
-        function toPts(data) {
+        // minSpan floors the y-range so idle noise doesn't auto-scale into
+        // fake spikes: CPU is never drawn on a span shorter than 100
+        // percentage points, RAM never shorter than 500MB. An idle session
+        // reads as a flat line hugging the baseline, as it should.
+        function toPts(data, minSpan) {
           if (data.length < 2) return null;
           var mn = Math.min.apply(null, data), mx = Math.max.apply(null, data);
-          var sp = (mx - mn) || 1, n = data.length;
+          var sp = Math.max(mx - mn, minSpan || 1), n = data.length;
           return data.map(function (v, i) {
             return [pad + (i / (n - 1)) * (W - pad * 2),
                     H - pad - ((v - mn) / sp) * (H - pad * 2)];
@@ -343,8 +347,8 @@
                  '<animate attributeName="opacity" values="1;0.5;1" dur="2.4s" repeatCount="indefinite"/></circle>';
         }
         // history rows are [ts, cpu_pct, mem_bytes]
-        var cpu = toPts(hist.map(function (h) { return Number(h[1]); }).filter(function (n) { return !isNaN(n); }));
-        var ram = toPts(hist.map(function (h) { return Number(h[2]); }).filter(function (n) { return !isNaN(n); }));
+        var cpu = toPts(hist.map(function (h) { return Number(h[1]); }).filter(function (n) { return !isNaN(n); }), 100);
+        var ram = toPts(hist.map(function (h) { return Number(h[2]); }).filter(function (n) { return !isNaN(n); }), 500e6);
         if (!cpu && !ram) return '';
         return '<svg class="sc-spark-svg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' +
           lineEl(ram, '#60a5fa') + lineEl(cpu, '#fbbf24') +
