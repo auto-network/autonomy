@@ -1627,7 +1627,22 @@
       async openSessionOverlay(sessionName) {
         if (!sessionName) return false;
         await this.refresh(false);
-        const matches = this.rows.filter((row) => row.session_name === sessionName);
+        let matches = this.rows.filter((row) => row.session_name === sessionName);
+        if (!matches.length) {
+          // The overlay is session-scoped, but refresh() is gated on the
+          // page-level org filter — when it's unset (picker showing) or
+          // pointed at a different org than this session, rows come back
+          // empty and the session viewer's affordance would wrongly fall
+          // back to a /worktrees navigation. Look the session up
+          // unfiltered instead; the page-level rows/filter are untouched.
+          try {
+            const resp = await fetch('/api/worktrees');
+            const allRows = _normalizeRows(await _jsonOrError(resp));
+            matches = allRows.filter((row) => row.session_name === sessionName);
+          } catch (_err) {
+            return false;
+          }
+        }
         if (!matches.length) return false;
         const withPrs = matches.find((row) => this.rowPrs(row).length > 0);
         if (withPrs) {
