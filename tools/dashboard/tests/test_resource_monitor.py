@@ -330,6 +330,59 @@ def test_unresolved_backoff(monitor, tmp_path, monkeypatch):
     assert state.next_resolve_at > now
 
 
+# ── snapshot / restore across hot reload ────────────────────────
+
+
+def test_snapshot_restore_roundtrip(monitor, tmp_path):
+    row = _host_row(tmp_path)
+    name = row["tmux_name"]
+    _prime_host_state(monitor, name)
+    now = time.time()
+    monitor._tick([row], now)
+    monitor._tick([row], now + 6)
+    old = monitor._states[name]
+    assert len(old.history) >= 1
+
+    state_path = tmp_path / "rm.state"
+    monitor.save_state(state_path)
+
+    fresh = ResourceMonitor(cpu_interval=6,
+                            worktrees_dir=tmp_path / "worktrees")
+    assert fresh.load_state(state_path) is True
+    s = fresh._states[name]
+    assert s.kind == "unresolved"          # handle re-resolves on next tick
+    assert list(s.history) == [tuple(p) for p in old.history]
+    assert s.last_cpu_ns == old.last_cpu_ns  # CPU delta spans the reload
+    assert s.mem_bytes == old.mem_bytes
+    assert s.disk == old.disk
+    assert s.next_disk_at == old.next_disk_at
+    assert s.disk_entry_count == old.disk_entry_count
+
+
+def test_restore_drops_stale_sessions(monitor, tmp_path):
+    row = _host_row(tmp_path)
+    name = row["tmux_name"]
+    state = _prime_host_state(monitor, name)
+    monitor._tick([row], time.time())
+    state.sampled_at = time.time() - 3600  # long-dead process
+    state_path = tmp_path / "rm.state"
+    monitor.save_state(state_path)
+    fresh = ResourceMonitor(cpu_interval=6,
+                            worktrees_dir=tmp_path / "worktrees")
+    assert fresh.load_state(state_path) is False
+    assert fresh._states == {}
+
+
+def test_restore_missing_or_corrupt(monitor, tmp_path):
+    assert monitor.load_state(tmp_path / "nope.state") is False
+    bad = tmp_path / "bad.state"
+    bad.write_text("{not json")
+    assert monitor.load_state(bad) is False
+    wrong = tmp_path / "wrong.state"
+    wrong.write_text('{"version": 999, "sessions": {}}')
+    assert monitor.load_state(wrong) is False
+
+
 # ── API endpoint ────────────────────────────────────────────────
 
 
