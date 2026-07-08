@@ -1763,8 +1763,15 @@ def scan_all_worktrees(
     *,
     worktrees_dir: Path = WORKTREES_DIR,
     live_session_names: Iterable[str] | None = None,
+    session_filter: Callable[[str], bool] | None = None,
 ) -> list[WorktreeState]:
-    """Scan ``data/worktrees`` and return one state row per session/repo worktree."""
+    """Scan ``data/worktrees`` and return one state row per session/repo worktree.
+
+    ``session_filter`` limits the sweep to matching session names — the
+    worktree monitor uses it to rescan one org or one session without
+    paying for every other worktree's git calls. A skipped session does
+    no git work at all.
+    """
     if not worktrees_dir.exists():
         return []
 
@@ -1785,6 +1792,8 @@ def scan_all_worktrees(
 
     for session_dir in session_dirs:
         if not session_dir.is_dir():
+            continue
+        if session_filter is not None and not session_filter(session_dir.name):
             continue
         try:
             repo_dirs = sorted(session_dir.iterdir())

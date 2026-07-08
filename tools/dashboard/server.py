@@ -8852,12 +8852,17 @@ def _session_meta_for_tmux(tmux_name: str) -> dict:
     principle 553c7437-036) so worktree rows can render a harness badge
     inline without a second lookup.
     """
+    from tools.dashboard.org_identity import resolve_session_org
+
     row = dashboard_db.get_session(tmux_name) or {}
     return {
         "title": (row.get("label") or "").strip(),
         "project": (row.get("project") or "").strip(),
         "harness": row.get("harness") or None,
         "model": row.get("model") or None,
+        # Resolved org identity {slug,name,color,initial,...} — the
+        # worktrees page scopes its whole view to one org at a time.
+        "org": resolve_session_org(row),
     }
 
 
@@ -8871,6 +8876,7 @@ def _worktree_state_json(row: WorktreeState) -> dict:
         # so the worktree review chrome can render the icon-rail badge.
         "session_harness": meta["harness"],
         "session_model": meta["model"],
+        "org": meta["org"],
         "repo_name": row.repo_name,
         "worktree_path": str(row.worktree_path),
         "managed_clone": str(row.managed_clone) if row.managed_clone else None,
@@ -8920,29 +8926,108 @@ def _cleanup_result_json(result) -> dict:
         ],
     }
 
+def _org_filter_param(request) -> str:
+    return (request.query_params.get("org") or "").strip()
+
+
+def _filter_worktree_payload_by_org(payload: list[dict], org: str) -> list[dict]:
+    """Keep rows whose resolved org slug matches ``org`` (no-op when empty)."""
+    if not org:
+        return payload
+    return [p for p in payload if ((p.get("org") or {}).get("slug") or "") == org]
+
+
+def _worktree_org_session_filter(org: str):
+    """Session-name predicate for org-scoped worktree scans.
+
+    Resolves each session's org through the same identity cascade the
+    row payloads use; memoized per call because the scan asks once per
+    session directory and sessions repeat across repos.
+    """
+    from tools.dashboard.org_identity import session_org_slug
+
+    memo: dict[str, bool] = {}
+
+    def _match(session_name: str) -> bool:
+        hit = memo.get(session_name)
+        if hit is None:
+            row = dashboard_db.get_session(session_name) or {}
+            hit = session_org_slug(row) == org
+            memo[session_name] = hit
+        return hit
+
+    return _match
+
+
 async def api_worktrees(request):
+    org = _org_filter_param(request)
     if os.environ.get("DASHBOARD_MOCK"):
-        return JSONResponse(dao_sessions.get_worktrees())
-    return JSONResponse([
+        return JSONResponse(_filter_worktree_payload_by_org(dao_sessions.get_worktrees(), org))
+    payload = [
         _worktree_state_json(row)
         for row in worktree_monitor.get_all()
-    ])
+    ]
+    return JSONResponse(_filter_worktree_payload_by_org(payload, org))
+
+
+async def api_worktrees_orgs(request):
+    """Org summary for the worktrees page: one entry per org with counts.
+
+    Backs the org dropdown (the page always shows exactly one org at a
+    time), so it has to be cheap: aggregates the monitor's cached rows,
+    no git work.
+    """
+    if os.environ.get("DASHBOARD_MOCK"):
+        payload = dao_sessions.get_worktrees()
+    else:
+        payload = [_worktree_state_json(row) for row in worktree_monitor.get_all()]
+    orgs: dict[str, dict] = {}
+    for row in payload:
+        identity = row.get("org") or {}
+        slug = identity.get("slug") or "unknown"
+        entry = orgs.setdefault(slug, {
+            "slug": slug,
+            "name": identity.get("name") or slug,
+            "color": identity.get("color"),
+            "initial": identity.get("initial"),
+            "favicon": identity.get("favicon"),
+            "worktrees": 0,
+            "commits": 0,
+            "dirty": 0,
+        })
+        entry["worktrees"] += 1
+        entry["commits"] += len(row.get("commits") or [])
+        entry["dirty"] += 1 if row.get("is_dirty") else 0
+    ordered = sorted(orgs.values(), key=lambda e: (-e["worktrees"], e["slug"]))
+    return JSONResponse(ordered)
 
 
 async def api_worktrees_refresh(request):
+    org = _org_filter_param(request)
     if os.environ.get("DASHBOARD_MOCK"):
-        return JSONResponse(dao_sessions.get_worktrees())
+        return JSONResponse(_filter_worktree_payload_by_org(dao_sessions.get_worktrees(), org))
     # Top-level Refresh on the Worktrees page is local-git only — re-run
     # ``scan_all_worktrees`` and serve cached source_control snapshots.
     # Fanning out gh fetches for every live row was the rate-limit
     # anti-pattern we just removed from the background poll; it doesn't
     # belong on the operator path either. Per-row force-fetch is on
     # ``POST /api/worktrees/{session}/{repo}/refresh`` (see below).
-    rows = await worktree_monitor.refresh()
-    return JSONResponse([
+    #
+    # With ``?org=`` the git sweep itself is scoped: only that org's
+    # session worktrees are rescanned (the page shows one org at a time,
+    # so a Refresh click shouldn't pay for every other org's git calls);
+    # the other orgs' rows stay cached.
+    if org:
+        rows = await worktree_monitor.refresh(
+            session_filter=_worktree_org_session_filter(org),
+        )
+    else:
+        rows = await worktree_monitor.refresh()
+    payload = [
         _worktree_state_json(row)
         for row in rows
-    ])
+    ]
+    return JSONResponse(_filter_worktree_payload_by_org(payload, org))
 
 
 async def api_worktree_refresh(request):
@@ -15134,6 +15219,7 @@ routes = [
     Route("/api/dao/recent_sessions", api_dao_recent_sessions),
     Route("/api/dao/session_status", api_dao_session_status),
     Route("/api/worktrees", api_worktrees),
+    Route("/api/worktrees/orgs", api_worktrees_orgs),
     Route("/api/worktrees/refresh", api_worktrees_refresh, methods=["POST"]),
     Route("/api/worktrees/{session}/{repo}/commits/{sha}", api_worktree_commit, methods=["GET"]),
     Route("/api/worktrees/{session}/{repo}/changes", api_worktree_changes, methods=["GET"]),

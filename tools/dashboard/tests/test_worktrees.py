@@ -31,9 +31,12 @@ class _FakeMonitor:
     def get_all(self):
         return list(self.rows)
 
-    async def refresh(self, *, force_capabilities: bool = False):
+    async def refresh(self, *, force_capabilities: bool = False, session_filter=None):
         self.refresh_count += 1
         self.last_force = force_capabilities
+        self.last_session_filter = session_filter
+        if session_filter is not None:
+            return [row for row in self.rows if session_filter(row.session_name)]
         return list(self.rows)
 
 
@@ -173,6 +176,106 @@ class TestWorktreeAPI:
         # Top-level refresh is local-git only — must NOT pass force_capabilities=True.
         # The per-row endpoint below is the operator's force-GET path.
         assert fake.last_force is False
+        # No ``?org=`` → unscoped sweep.
+        assert fake.last_session_filter is None
+
+    @staticmethod
+    def _org_meta_by_session(monkeypatch, org_by_session):
+        """Route each session to a fixed org identity for filter tests."""
+        from tools.dashboard import server
+
+        def fake_meta(tmux_name):
+            slug = org_by_session.get(tmux_name, "unknown")
+            return {
+                "title": "",
+                "project": "",
+                "harness": None,
+                "model": None,
+                "org": {
+                    "slug": slug,
+                    "name": slug.title(),
+                    "byline": "",
+                    "color": "#123456",
+                    "favicon": None,
+                    "initial": slug[:1].upper(),
+                    "resolved": slug != "unknown",
+                },
+            }
+
+        monkeypatch.setattr(server, "_session_meta_for_tmux", fake_meta)
+
+    def test_get_worktrees_org_param_filters_rows(self, test_client, monkeypatch):
+        """``GET /api/worktrees?org=<slug>`` returns only that org's rows —
+        the worktrees page is scoped to one organization at a time."""
+        rows = [
+            _row(session="auto-a", repo="autonomy"),
+            _row(session="auto-b", repo="enterprise_ng"),
+        ]
+        _install_fake_monitor(monkeypatch, rows)
+        self._org_meta_by_session(monkeypatch, {"auto-a": "autonomy", "auto-b": "anchore"})
+
+        resp = test_client.get("/api/worktrees?org=anchore")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [r["session_name"] for r in data] == ["auto-b"]
+        assert data[0]["org"]["slug"] == "anchore"
+
+    def test_worktrees_orgs_endpoint_aggregates_counts(self, test_client, monkeypatch):
+        """``GET /api/worktrees/orgs`` backs the org dropdown: one entry
+        per org with worktree / commit / dirty counts, biggest first."""
+        rows = [
+            _row(session="auto-a", repo="autonomy", ahead=2,
+                 commits=[_commit(), _commit(sha="feedface00000000")]),
+            _row(session="auto-a2", repo="autonomy", ahead=0, commits=[], dirty=True),
+            _row(session="auto-b", repo="enterprise_ng"),
+        ]
+        _install_fake_monitor(monkeypatch, rows)
+        self._org_meta_by_session(monkeypatch, {
+            "auto-a": "autonomy", "auto-a2": "autonomy", "auto-b": "anchore",
+        })
+
+        resp = test_client.get("/api/worktrees/orgs")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [o["slug"] for o in data] == ["autonomy", "anchore"]
+        autonomy = data[0]
+        assert autonomy["worktrees"] == 2
+        assert autonomy["commits"] == 2
+        assert autonomy["dirty"] == 1
+        assert autonomy["color"] == "#123456"
+        anchore = data[1]
+        assert anchore["worktrees"] == 1
+        assert anchore["commits"] == 1
+        assert anchore["dirty"] == 0
+
+    def test_post_worktrees_refresh_org_param_scopes_sweep(self, test_client, monkeypatch):
+        """``POST /api/worktrees/refresh?org=<slug>`` passes a session
+        filter to the monitor (only that org's worktrees are rescanned)
+        and returns only that org's rows."""
+        from tools.dashboard import server
+
+        rows = [
+            _row(session="auto-a", repo="autonomy"),
+            _row(session="auto-b", repo="enterprise_ng"),
+        ]
+        _server, fake = _install_fake_monitor(monkeypatch, rows)
+        self._org_meta_by_session(monkeypatch, {"auto-a": "autonomy", "auto-b": "anchore"})
+        monkeypatch.setattr(
+            server, "_worktree_org_session_filter",
+            lambda org: (lambda name: {"auto-a": "autonomy", "auto-b": "anchore"}.get(name) == org),
+        )
+
+        resp = test_client.post("/api/worktrees/refresh?org=autonomy")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [r["session_name"] for r in data] == ["auto-a"]
+        assert fake.refresh_count == 1
+        assert fake.last_session_filter is not None
+        assert fake.last_session_filter("auto-a") is True
+        assert fake.last_session_filter("auto-b") is False
 
     def test_per_row_refresh_endpoint_force_fetches_one_row(
         self, test_client, monkeypatch,
@@ -804,7 +907,11 @@ class TestWorktreePage:
     def test_static_js_wires_polling_and_actions(self):
         js = (JS_DIR / "pages" / "worktrees.js").read_text()
         assert "fetch('/api/worktrees')" in js
-        assert "fetch('/api/worktrees/refresh', { method: 'POST' })" in js
+        # Fetches are org-scoped: the page shows one organization at a time.
+        assert "fetch('/api/worktrees/refresh' + orgQuery, { method: 'POST' })" in js
+        assert "fetch('/api/worktrees' + orgQuery)" in js
+        assert "fetch('/api/worktrees/orgs')" in js
+        assert "localStorage.getItem('worktrees.org')" in js
         assert "_highlightDiffText(path, text)" in js
         assert "hljs.highlight(source, { language, ignoreIllegals: true })" in js
         assert "get uncommittedChangesCount()" in js
@@ -2069,7 +2176,7 @@ class TestWorktreeMonitorCapabilityCache:
             return list(rows)
 
         monkeypatch.setattr(wm_module, "_fetch_source_control", fake_fetch)
-        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: list(rows))
+        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda **kw: list(rows))
         return wm_module.WorktreeMonitor()
 
     def test_refresh_caches_snapshots_for_live_rows_only(self, monkeypatch):
@@ -2116,7 +2223,7 @@ class TestWorktreeMonitorCapabilityCache:
         assert monitor.get_source_control("auto-live", "autonomy") is not None
 
         from tools.dashboard import worktree_monitor as wm_module
-        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: [])
+        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda **kw: [])
         asyncio.run(monitor.refresh())
 
         assert monitor.get_source_control("auto-live", "autonomy") is None
@@ -2172,7 +2279,7 @@ class TestWorktreeMonitorBackgroundFetchPolicy:
             return {**snapshot, "watch": {"mode": watch_mode}}
 
         monkeypatch.setattr(wm_module, "_fetch_source_control", fake_fetch)
-        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: list(rows))
+        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda **kw: list(rows))
         return wm_module.WorktreeMonitor(), call_count
 
     def test_silent_row_never_fetches_in_background(self, monkeypatch):
@@ -2327,7 +2434,7 @@ class TestWorktreeMonitorBackgroundFetchPolicy:
 
         monkeypatch.setattr(wm_module, "_fetch_source_control", fake_fetch)
         monkeypatch.setattr(wm_module, "_refresh_bindings_via_rest", fake_refresh_bindings)
-        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: list(rows))
+        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda **kw: list(rows))
 
         monitor = wm_module.WorktreeMonitor()
         key = ("auto-live", "autonomy")
@@ -2373,7 +2480,7 @@ class TestWorktreeMonitorRefreshOne:
             return {**snapshot, "watch": {"mode": watch_mode}}
 
         monkeypatch.setattr(wm_module, "_fetch_source_control", fake_fetch)
-        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: list(rows))
+        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda **kw: list(rows))
         return wm_module.WorktreeMonitor(), captured
 
     def test_refresh_one_fetches_only_target_row(self, monkeypatch):
@@ -2464,7 +2571,7 @@ class TestWorktreeMonitorRateLimitBackoff:
             return responses[min(i, len(responses) - 1)]
 
         monkeypatch.setattr(wm_module, "_fetch_source_control", fake_fetch)
-        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: list(rows))
+        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda **kw: list(rows))
         return wm_module.WorktreeMonitor(), idx
 
     def test_rate_limited_response_arms_backoff_and_skips_subsequent(
@@ -2551,7 +2658,7 @@ class TestWorktreeMonitorRateLimitBackoff:
             return rate_limited
 
         monkeypatch.setattr(wm_module, "_fetch_source_control", fake_fetch)
-        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: list(rows_first))
+        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda **kw: list(rows_first))
         monitor = wm_module.WorktreeMonitor()
 
         # Force seed — rate-limited reply arms the back-off.
@@ -2561,7 +2668,7 @@ class TestWorktreeMonitorRateLimitBackoff:
             _row(session="auto-old", live=True),
             _row(session="auto-new", live=True),
         ]
-        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda: list(rows_second))
+        monkeypatch.setattr(wm_module, "scan_all_worktrees", lambda **kw: list(rows_second))
         asyncio.run(monitor.refresh())
 
         # Still only one underlying fetch — second refresh was

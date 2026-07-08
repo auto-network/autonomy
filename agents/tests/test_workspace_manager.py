@@ -1302,6 +1302,33 @@ def test_scan_all_worktrees_suppresses_cross_worktree_duplicates(tmp_path, monke
     assert dup.of_repo == "upstream"
 
 
+def test_scan_all_worktrees_session_filter_skips_sessions(tmp_path, monkeypatch):
+    """``session_filter`` scopes the sweep: filtered-out sessions produce
+    no rows (and, upstream, keep their cached rows instead)."""
+    session_a = "sess-in-scope"
+    session_b = "sess-out-of-scope"
+    worktrees_dir, _clone, _wt = _make_writable_session_worktree(
+        tmp_path, session_a, monkeypatch,
+    )
+    url = str(next(tmp_path.glob("upstream.git")))
+    proj = ProjectConfig(
+        id="w", name="w", description="", image="img", graph_project="gp",
+        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+    )
+    wm.prepare_session_mounts(
+        proj, session_b,
+        repos_dir=tmp_path / "repos", worktrees_dir=worktrees_dir,
+    )
+
+    rows = wm.scan_all_worktrees(
+        worktrees_dir=worktrees_dir,
+        live_session_names=set(),
+        session_filter=lambda name: name == session_a,
+    )
+
+    assert [row.session_name for row in rows] == [session_a]
+
+
 def test_scan_all_worktrees_suppresses_rebased_copy_duplicates(tmp_path, monkeypatch):
     """A commit copied to another session branch under a different SHA
     (cherry-pick/rebase) is still recognized as the same pending change
