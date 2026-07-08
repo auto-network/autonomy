@@ -72,10 +72,10 @@
   //      session is visual noise; the green is signal-by-absence.
   //      Approved as an explicit deviation by host-0531-020038
   //      (turn 71) — not a design match.
-  //   2. ``harness_starting`` label is "Booting " + capitalized
-  //      ``s.harness`` (or "harness" fallback). The design hardcodes
-  //      "Booting Claude" which mis-labels Codex sessions; the
-  //      dynamic form is host-approved (turn 71).
+  //   2. ``harness_starting`` renders the static "Starting harness"
+  //      label for every harness. (The earlier dynamic
+  //      "Booting <Harness>" form was dropped in the unified-FSM
+  //      rework, auto-ja51w C10.)
   var _STATE_CHIP_LABEL = {
     pending: "",
     requesting: "Queued",

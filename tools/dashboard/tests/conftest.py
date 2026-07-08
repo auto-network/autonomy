@@ -112,6 +112,56 @@ def _set_default_event_bus_state_path():
 _set_default_event_bus_state_path()
 
 
+# ── Per-worker agent-browser session isolation ─────────────────────────
+# Every browser harness in this suite shells out to `agent-browser`, which
+# routes to one shared daemon session unless AGENT_BROWSER_SESSION is set.
+# Under xdist, files on different workers open/close/navigate that single
+# shared page out from under each other — the dominant source of
+# "different test fails every run" flakiness. Ports are already namespaced
+# per worker (_xdist.worker_test_port); this does the same for the browser.
+# Subprocess calls inherit os.environ, so setting it here covers every
+# helper (l2b_harness, per-file ab()/ab_raw() wrappers, BrowserHelper).
+def _isolate_agent_browser_session():
+    if _os.environ.get("AGENT_BROWSER_SESSION"):
+        return
+    worker = _os.environ.get("PYTEST_XDIST_WORKER", "master")
+    _os.environ["AGENT_BROWSER_SESSION"] = f"pytest-{_os.getpid()}-{worker}"
+
+
+_isolate_agent_browser_session()
+
+
+# ── Repo-data write redirects ──────────────────────────────────────────
+# session_trace.py appends launch-phase JSONL under data/session-traces and
+# the launch path creates run dirs under data/agent-runs by default; tests
+# exercising create/lifecycle would litter the real repo. Point both at
+# per-worker tmp dirs (uvicorn subprocesses inherit them). Individual
+# fixtures still override DASHBOARD_AGENT_RUNS_DIR where they need to
+# assert on run-dir contents.
+def _isolate_repo_data_writes():
+    worker = _os.environ.get("PYTEST_XDIST_WORKER", "master")
+    for env, name in (
+        ("DASHBOARD_TRACE_DIR", "session-traces"),
+        ("DASHBOARD_AGENT_RUNS_DIR", "agent-runs"),
+    ):
+        if _os.environ.get(env):
+            continue
+        tmp = _Path(_tempfile.gettempdir()) / f"pytest-{name}-{_os.getpid()}-{worker}"
+        tmp.mkdir(parents=True, exist_ok=True)
+        _os.environ[env] = str(tmp)
+
+
+_isolate_repo_data_writes()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Close this worker's namespaced browser session so Chromium
+    instances do not accumulate across pytest runs."""
+    name = _os.environ.get("AGENT_BROWSER_SESSION", "")
+    if name.startswith("pytest-"):
+        subprocess.run(["agent-browser", "close"], capture_output=True, timeout=10)
+
+
 # ── JSONL Fixture ──────────────────────────────────────────────────────
 
 MOCK_ENTRIES = [
@@ -383,6 +433,7 @@ class BrowserHelper:
 @pytest.fixture
 def browser():
     """Agent-browser instance. Tests must start their own server."""
-    b = BrowserHelper("http://localhost:8082")
+    from tools.dashboard.tests._xdist import worker_test_port
+    b = BrowserHelper(f"http://localhost:{worker_test_port(8082)}")
     yield b
     b.close()

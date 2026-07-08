@@ -404,6 +404,10 @@ def test_ws_voice_discard_clears_buffer_via_manager(voice_route_env):
         ws.send_text(json.dumps({"type": "start"}))
         mgr.append_final("auto-test-designer", "to be discarded")
         ws.send_text(json.dumps({"type": "discard"}))
+        # discard emits an authoritative buffer_state("") reset first (see
+        # test_ws_voice_discard_from_listening_emits_buffer_state_reset).
+        reset = ws.receive_json()
+        assert reset["type"] == "buffer_state"
         ws.send_text(json.dumps({"type": "commit"}))
         err = ws.receive_json()
         assert err["type"] == "commit_error"

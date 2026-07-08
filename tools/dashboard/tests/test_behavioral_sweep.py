@@ -2232,14 +2232,25 @@ SESSIONS_PAGE_CHECKS = """
     r.roles = roles;
     r.roles_visible = roles.length > 0;
 
-    // Host card has distinct styling (active section only)
+    // Host vs container distinction (active section only). Org-colored
+    // cards no longer carry the legacy session-card-host/-container border
+    // classes (session-card.html gates borderCls on !s.org.color), so the
+    // durable signal is the type badge: hosts render an .sc-type-host
+    // .sc-role badge, containers render no type badge at all.
     var activeSection = document.querySelector('[data-testid="active-sessions-section"]');
-    var hostCards = activeSection ? activeSection.querySelectorAll('.session-card-host') : [];
-    r.host_card_count = hostCards.length;
-
-    // Container cards (active section only)
-    var containerCards = activeSection ? activeSection.querySelectorAll('.session-card-container') : [];
-    r.container_card_count = containerCards.length;
+    var hostCount = 0, containerCount = 0;
+    var activeCards = activeSection ? activeSection.querySelectorAll('.session-card') : [];
+    activeCards.forEach(function(c) {
+        if (c.classList.contains('session-card-host') || c.querySelector('.sc-role.sc-type-host')) {
+            hostCount++;
+        } else if (c.querySelector('.sc-role.sc-type-dispatch, .sc-role.sc-type-librarian, .sc-role.sc-type-chatwith')) {
+            // other special types — neither host nor plain container
+        } else {
+            containerCount++;
+        }
+    });
+    r.host_card_count = hostCount;
+    r.container_card_count = containerCount;
 
     // Turn counts visible (T3 stats)
     var turnVals = [];
@@ -3204,8 +3215,10 @@ WORKTREES_PAGE_CHECKS = """(async () => {
     r.delta_pr_review_has_pr_heading = prDetail
         ? prDetail.textContent.indexOf('Files in this PR') !== -1
         : false;
+    // The file list front-ellipsizes long paths ("...terprise/jobs/…"),
+    // so match on a suffix that survives truncation.
     r.delta_pr_review_path_visible = prDetail
-        ? prDetail.textContent.indexOf('enterprise/jobs/directives.py') !== -1
+        ? prDetail.textContent.indexOf('jobs/directives.py') !== -1
         : false;
 
     var overlayRefresh = document.querySelector('[data-testid="review-overlay-refresh-button"]');
@@ -5898,16 +5911,16 @@ class TestSessionViewerPreReadyLoadingChip:
                     errorMsg: data.errorMsg,
                     isLive: store.isLive,
                     harness: store.harness,
-                    setupPhase: store.setupPhase,
-                    harnessPhase: store.harnessPhase,
+                    startupState: store.startupState,
                     harnessState: store.harnessState,
                     resumable: store.resumable,
                 };
 
+                // auto-ja51w C10 unified the old setupPhase/harnessPhase
+                // pair into the single startupState FSM field — seed that.
                 store.isLive = true;
                 store.harness = 'claude';
-                store.setupPhase = 'container_starting';
-                store.harnessPhase = 'harness_starting';
+                store.startupState = 'container_starting';
                 store.harnessState = {};
                 store.resumable = false;
 
@@ -5929,17 +5942,17 @@ class TestSessionViewerPreReadyLoadingChip:
 
                 // Flip to setup_failed and re-assert — chip should now
                 // carry the failed tone class + amber styling.
-                store.setupPhase = 'setup_failed';
-                store.harnessPhase = 'pending';
+                store.startupState = 'setup_failed';
                 await sleep(120);
                 chip = document.querySelector('[data-testid="sv-loading-phase-chip"]');
                 r.chip_text_failed = chip ? chip.textContent.trim() : null;
                 r.chip_classes_failed = chip ? chip.className : null;
 
-                // Flip to harness_starting with codex harness — chip
-                // text should be the dynamic "Booting Codex".
-                store.setupPhase = 'setup_complete';
-                store.harnessPhase = 'harness_starting';
+                // Flip to harness_starting with codex harness. The unified
+                // FSM (d9fb85b) dropped the dynamic "Booting <Harness>"
+                // label — every harness renders the static
+                // "Starting harness" chip now.
+                store.startupState = 'harness_starting';
                 store.harness = 'codex';
                 await sleep(120);
                 chip = document.querySelector('[data-testid="sv-loading-phase-chip"]');
@@ -5962,8 +5975,7 @@ class TestSessionViewerPreReadyLoadingChip:
                 // this same fixture URL must see a clean ready state.
                 store.isLive = saved.isLive;
                 store.harness = saved.harness;
-                store.setupPhase = saved.setupPhase;
-                store.harnessPhase = saved.harnessPhase;
+                store.startupState = saved.startupState;
                 store.harnessState = saved.harnessState;
                 store.resumable = saved.resumable;
                 data.state = saved.state;
@@ -6011,10 +6023,13 @@ class TestSessionViewerPreReadyLoadingChip:
             f"setup_failed chip missing .failed tone class: {cls!r}"
 
     def test_dynamic_harness_label_for_codex(self):
+        """The unified startup FSM (d9fb85b) replaced the dynamic
+        "Booting <Harness>" label with the static "Starting harness"
+        chip for every harness — assert the current contract."""
         c = self._checks
-        assert c.get("chip_text_codex") == "Booting Codex", \
-            (f"harness_starting label is not dynamic over s.harness — "
-             f"expected 'Booting Codex', got {c.get('chip_text_codex')!r}")
+        assert c.get("chip_text_codex") == "Starting harness", \
+            (f"harness_starting chip label drifted — "
+             f"expected 'Starting harness', got {c.get('chip_text_codex')!r}")
 
 class TestSessionViewerWorktreeOverlay:
     """Session-viewer worktree review opens as an overlay without route churn."""
@@ -10271,20 +10286,35 @@ class TestPluginSubstrate:
         ``route()`` (same-path) still sees fresh state.
         """
         _set_plugin_setting(sweep_server["fixture_path"], None)
-        _force_plugin_disabled(sweep_server["fixture_path"], "settings")
-        _force_plugin_disabled(sweep_server["fixture_path"], "primers")
-        _ab_eval_batch(
-            "return (window.Autonomy && window.Autonomy.refreshPlugins) "
-            "  ? window.Autonomy.refreshPlugins().then(function () { "
-            "      if (typeof _renderSidebarPlugins === 'function') "
-            "        _renderSidebarPlugins(); "
-            "    }) "
-            "  : null;"
+        # Pin EVERY shipped plugin off, discovered from the live catalog
+        # rather than a hardcoded pair — the "no plugin enabled" baseline
+        # kept breaking each time a new default-enabled plugin landed
+        # (settings, then primers, then design_studio/presentations/...).
+        from tools.dashboard.plugin_api import loader as _plugin_loader
+        shipped = [
+            d.manifest.id for d in _plugin_loader.discover()
+            if d.manifest.id != "example"
+        ]
+        for _pid in shipped:
+            _force_plugin_disabled(sweep_server["fixture_path"], _pid)
+        # AWAIT the refresh — firing it un-awaited lets the promise resolve
+        # (with this fixture's all-disabled list) AFTER the test's own
+        # navigation re-rendered the sidebar, wiping the state the test
+        # just built.
+        _run_async_eval(
+            "(async () => {"
+            "  if (window.Autonomy && window.Autonomy.refreshPlugins) {"
+            "    await window.Autonomy.refreshPlugins();"
+            "    if (typeof _renderSidebarPlugins === 'function')"
+            "      _renderSidebarPlugins();"
+            "  }"
+            "  return JSON.stringify({done: true});"
+            "})()"
         )
         yield
         _set_plugin_setting(sweep_server["fixture_path"], None)
-        _clear_forced_plugin(sweep_server["fixture_path"], "settings")
-        _clear_forced_plugin(sweep_server["fixture_path"], "primers")
+        for _pid in shipped:
+            _clear_forced_plugin(sweep_server["fixture_path"], _pid)
 
     def test_dormant_substrate_preserves_legacy_sidebar(self, browser, sweep_server):
         # Default state: no dashboard.plugin Setting → bootstrap rule
