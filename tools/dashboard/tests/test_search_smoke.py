@@ -189,7 +189,19 @@ class SearchSmokeHarness:
             f"http://localhost:{TEST_PORT}/search?q=dashboard",
             "--ignore-https-errors",
         )
-        time.sleep(2.5)
+        # Poll for the results to paint — a cold Chromium under a loaded
+        # parallel run routinely outlasts the old fixed 2.5s, and a module
+        # fixture that yields too early fails the whole class.
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            painted = ab_eval(
+                "return !!(window.Alpine"
+                " && document.querySelector('[data-testid=\"sp-chip-rail\"]')"
+                " && document.querySelector('[data-testid=\"sp-results\"]'));"
+            )
+            if painted is True:
+                break
+            time.sleep(0.5)
         ab_raw("set", "viewport", "390", "844")
         time.sleep(0.5)
 
@@ -200,10 +212,14 @@ def smoke(tmp_path_factory):
     h = SearchSmokeHarness(tmp)
     h.write_fixture(_search_fixture())
     h.start()
-    h.open_search()
-    yield h
-    ab_raw("close")
-    h.stop()
+    try:
+        # try/finally so a setup failure still stops the server (a leaked
+        # server poisons the next file on this worker's port).
+        h.open_search()
+        yield h
+    finally:
+        ab_raw("close")
+        h.stop()
 
 
 # ── Tests ─────────────────────────────────────────────────────────────
