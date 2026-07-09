@@ -2385,11 +2385,13 @@ SESSIONS_PAGE_CHECKS = """
             .map(function(e) { return e.textContent.trim(); });
         var values = Array.from(row.querySelectorAll('.sc-footer-value'))
             .map(function(e) { return e.textContent.trim(); });
+        var whenEl = row.querySelector('[data-testid="sc-when"]');
         recentFooters.push({
             type: row.dataset.sessionType || '',
             sid: row.dataset.sessionId || '',
             labels: labels,
             values: values,
+            when: whenEl ? whenEl.textContent.trim() : '',
         });
     });
     r.recent_footers = recentFooters;
@@ -3568,37 +3570,39 @@ class TestSessionsPageBehavior:
         # footer item in session-card.html).
         return [l for l in labels if l not in ("project", "org")]
 
+    # b1281669 (design d2250266): ended cards moved their time range to the
+    # .sc-when line ("started → ended · duration") and DROPPED the 'ended'
+    # footer column; live cards keep the Idle column.
+
     def test_recent_interactive_footer_labels(self):
-        """Dead interactive: footer = ['turns', 'ctx', 'ended', 'tmux']."""
+        """Dead interactive: footer = ['turns', 'ctx', 'tmux'] (ended moved to when-line)."""
         f = self._footer_for("interactive")
-        assert self._core_labels(f["labels"]) == ["turns", "ctx", "ended", "tmux"], \
+        assert self._core_labels(f["labels"]) == ["turns", "ctx", "tmux"], \
             f"interactive footer labels mismatch: {f['labels']}"
 
     def test_recent_dispatch_footer_labels(self):
-        """Dead dispatch: footer = ['turns', 'ctx', 'ended'] (tmux hidden)."""
+        """Dead dispatch: footer = ['turns', 'ctx'] (tmux hidden, ended on when-line)."""
         f = self._footer_for("dispatch")
-        assert self._core_labels(f["labels"]) == ["turns", "ctx", "ended"], \
+        assert self._core_labels(f["labels"]) == ["turns", "ctx"], \
             f"dispatch footer labels mismatch (tmux must be absent): {f['labels']}"
 
     def test_recent_librarian_footer_labels(self):
-        """Dead librarian: footer = ['turns', 'ctx', 'ended'] (tmux hidden)."""
+        """Dead librarian: footer = ['turns', 'ctx'] (tmux hidden, ended on when-line)."""
         f = self._footer_for("librarian")
-        assert self._core_labels(f["labels"]) == ["turns", "ctx", "ended"], \
+        assert self._core_labels(f["labels"]) == ["turns", "ctx"], \
             f"librarian footer labels mismatch (tmux must be absent): {f['labels']}"
 
     def test_recent_ended_value_is_absolute_datetime(self):
-        """The 'ended' value matches YYYY-MM-DD HH:MM (24h, operator-local, no tz suffix)."""
-        import re
-        pattern = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
-        for f in self._checks.get("recent_footers", []):
-            labels = f["labels"]
-            values = f["values"]
-            assert "ended" in labels, f"row missing 'ended' label: {f}"
-            ended_idx = labels.index("ended")
-            ended_val = values[ended_idx]
-            assert pattern.match(ended_val), \
-                f"ended value {ended_val!r} on {f['type']!r} row " \
-                f"does not match YYYY-MM-DD HH:MM"
+        """Ended cards carry their time range on the when-line:
+        "<start> → <end>[ · duration]" (b1281669 replaced the ended
+        footer column)."""
+        footers = self._checks.get("recent_footers", [])
+        assert footers, "no recent-row footers captured"
+        for f in footers:
+            assert "ended" not in f["labels"], \
+                f"'ended' footer column should be gone (moved to when-line): {f}"
+            assert "→" in f.get("when", ""), \
+                f"when-line missing/empty on {f['type']!r} row: {f.get('when')!r}"
 
     def test_recent_dispatch_librarian_have_no_tmux_column(self):
         """For dispatch + librarian, the synthetic tmux value must not leak into the footer."""
