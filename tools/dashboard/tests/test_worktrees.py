@@ -2814,13 +2814,14 @@ class TestWorktreeMonitorNagMode:
         from tools.dashboard import worktree_monitor as wm_module
 
         monitor = wm_module.WorktreeMonitor()
-        # Use a small but non-trivial duration so the immediate lookup
-        # still sees the live mode even after the Settings write.
+        # Duration must comfortably outlast the set_nag_mode Settings write
+        # plus scheduler jitter under a loaded parallel run — with 1.0s the
+        # immediate lookup raced expiry and flaked (observed >1.1s elapsed).
         monitor.set_nag_mode(
-            "auto-x", "autonomy", "nag_all", duration_seconds=1.0,
+            "auto-x", "autonomy", "nag_all", duration_seconds=3.0,
         )
         assert monitor.get_nag_mode("auto-x", "autonomy") == "nag_all"
-        time.sleep(1.2)
+        time.sleep(3.4)
         # Past expiry — entry remains in-memory but the live mode is
         # silent so the polling decision tree won't poll any more.
         assert monitor.get_nag_mode("auto-x", "autonomy") == "silent"
