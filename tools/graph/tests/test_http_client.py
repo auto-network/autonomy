@@ -93,6 +93,61 @@ def test_get_source_returns_none_on_404():
         assert client.get_source("missing") is None
 
 
+def test_locate_source_org_reads_enriched_404_body():
+    """A cross-org miss (404 body carrying ``exists_in_org``) surfaces as
+    a locate hit so the CLI can name the source's home org."""
+    client = _make_client()
+    import urllib.error
+
+    body = {
+        "error": "not found in org 'autonomy'",
+        "exists_in_org": "anchore",
+        "source_id": "2b3a4030-9934-4a18-8931-a381e7d4f56d",
+        "source_type": "session",
+    }
+
+    def fake_urlopen(req, timeout=None, context=None):
+        raise urllib.error.HTTPError(
+            req.full_url, 404, "not found", {},
+            io.BytesIO(json.dumps(body).encode()),
+        )
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        hit = client.locate_source_org("2b3a4030")
+    assert hit == {
+        "org": "anchore",
+        "id": "2b3a4030-9934-4a18-8931-a381e7d4f56d",
+        "type": "session",
+    }
+
+
+def test_locate_source_org_plain_404_returns_none():
+    """A miss with no org hint (ID exists nowhere) stays None."""
+    client = _make_client()
+    import urllib.error
+
+    def fake_urlopen(req, timeout=None, context=None):
+        raise urllib.error.HTTPError(
+            req.full_url, 404, "not found", {},
+            io.BytesIO(json.dumps({"error": "not found"}).encode()),
+        )
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        assert client.locate_source_org("missing") is None
+
+
+def test_locate_source_org_in_scope_hit_reports_source_org():
+    """When the source resolves normally, the hit echoes its org field."""
+    client = _make_client()
+
+    def fake_urlopen(req, timeout=None, context=None):
+        return _FakeResponse({"id": "abc-full", "type": "note", "org": "autonomy"})
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        hit = client.locate_source_org("abc")
+    assert hit == {"org": "autonomy", "id": "abc-full", "type": "note"}
+
+
 def test_http_error_other_than_404_raises():
     """5xx etc. raise GraphHttpError with status."""
     client = _make_client()

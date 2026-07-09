@@ -543,7 +543,15 @@ def _resolve_tmux_name_to_source_id(tmux_name: str) -> str | None:
     Tries the local dashboard.db first (host mode); falls back to the dashboard
     API (container mode). Returns None when no match or no graph_source_id has
     been linked yet.
+
+    Side channel: when the API payload names the session's org, it is
+    stashed in :data:`_LAST_TMUX_RESOLVED_ORG` so the not-found path can
+    say "this session exists, but in org X" — the tmux→source lookup is
+    org-agnostic while the subsequent source read is org-scoped, and that
+    gap is exactly where cross-org tails used to dead-end.
     """
+    global _LAST_TMUX_RESOLVED_ORG
+    _LAST_TMUX_RESOLVED_ORG = None
     db_path = Path(__file__).parents[2] / "data" / "dashboard.db"
     if db_path.exists() and db_path.stat().st_size > 0:
         import sqlite3
@@ -574,9 +582,18 @@ def _resolve_tmux_name_to_source_id(tmux_name: str) -> str | None:
     try:
         resp = urllib.request.urlopen(url, timeout=5, context=ctx)
         data = json.loads(resp.read())
+        org_val = data.get("org")
+        if isinstance(org_val, dict):  # org-identity payload → slug
+            org_val = org_val.get("slug")
+        _LAST_TMUX_RESOLVED_ORG = org_val or None
         return data.get("graph_source_id") or None
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError):
         return None
+
+
+# Org of the most recently API-resolved tmux session (see
+# ``_resolve_tmux_name_to_source_id``). Read by ``_print_source_not_found``.
+_LAST_TMUX_RESOLVED_ORG: str | None = None
 
 
 def _lookup_tmux_for_source(source: dict) -> str | None:
@@ -803,6 +820,54 @@ def _maybe_resolve_session_arg(value: str) -> str | None:
     return None
 
 
+def _print_source_not_found(source_arg: str, *, client=None, display_arg: str | None = None) -> None:
+    """Print a source-miss error, with a cross-org hint when one exists.
+
+    A session/source that lives in another org's DB used to surface as a
+    bare "Source not found", sending agents down a dead end every time
+    they tailed a peer-org session by tmux name. On a miss, probe all org
+    DBs (existence only — no content) and, when the ID does exist
+    elsewhere, name the org and print the exact retry command.
+
+    ``display_arg`` is what the user actually typed (e.g. the tmux name
+    before session resolution) so the message and retry echo their input.
+    """
+    shown = display_arg or source_arg
+    caller = os.environ.get("GRAPH_ORG") or ""
+    hit = None
+    if client is not None and hasattr(client, "locate_source_org"):
+        try:
+            hit = client.locate_source_org(source_arg.split("@", 1)[0])
+        except Exception:
+            hit = None
+    if hit is None and _LAST_TMUX_RESOLVED_ORG and display_arg and display_arg != source_arg:
+        # The arg was a tmux name the dashboard resolved (org-agnostic) but
+        # the org-scoped source read missed — the session API told us its
+        # home org even if the graph locate probe can't (older dashboard).
+        hit = {"org": _LAST_TMUX_RESOLVED_ORG, "id": source_arg, "type": "session"}
+    if hit and hit.get("org") and hit["org"] != caller:
+        import shlex
+        scope = f"org '{caller}'" if caller else "the caller's scope"
+        kind = "Session" if hit.get("type") == "session" else "Source"
+        print(f"Source not found in {scope}: {shown}")
+        print(
+            f"  {kind} {hit['id'][:12]} exists in org '{hit['org']}' — "
+            f"outside this session's org scope."
+        )
+        argv0_path = Path(sys.argv[0]) if sys.argv and sys.argv[0] else None
+        is_graph_cli = argv0_path is not None and (
+            argv0_path.name.startswith("graph")
+            or (argv0_path.name == "__main__.py" and argv0_path.parent.name == "graph")
+        )
+        if is_graph_cli:
+            retry = shlex.join(["graph", *sys.argv[1:]])
+            print(f"  To read it anyway: GRAPH_ORG={hit['org']} {retry}")
+        else:
+            print(f"  To read it anyway, re-run with GRAPH_ORG={hit['org']}")
+        return
+    print(f"Source not found: {shown}")
+
+
 _STOPWORDS = {"the", "a", "an", "is", "in", "on", "at", "to", "for", "of", "and", "or", "with", "from", "by", "not", "no"}
 
 
@@ -964,6 +1029,7 @@ def cmd_read(args):
 
     # Parse @N version suffix
     source_arg = args.source
+    original_arg = args.source
     resolved = _maybe_resolve_session_arg(source_arg.split("@", 1)[0])
     if resolved:
         suffix = source_arg[len(source_arg.split("@", 1)[0]):]
@@ -983,14 +1049,14 @@ def cmd_read(args):
 
     client = get_client()
     if isinstance(client, HttpClient):
-        _cmd_read_via_api(args, source_arg, version_req, client)
+        _cmd_read_via_api(args, source_arg, version_req, client, original_arg)
         return
 
     result, db, close_db = _resolve_source_cross_org(
         args, source_arg, first=args.first,
     )
     if result is None:
-        print(f"No source found matching '{args.source}'")
+        _print_source_not_found(source_arg, client=client, display_arg=original_arg)
         return
     if isinstance(result, list):
         print(f"Multiple sources match '{args.source}':")
@@ -1039,7 +1105,7 @@ def _save_read_entries(
     print(f"  ✓ Saved to {save_path} ({_lines} lines, {len(raw)} chars)")
 
 
-def _cmd_read_via_api(args, source_arg: str, version_req, client: "HttpClient") -> None:
+def _cmd_read_via_api(args, source_arg: str, version_req, client: "HttpClient", original_arg: str | None = None) -> None:
     """Container path: fetch the source + content via /api/graph/{id}.
 
     Version-pinned reads (``<id>@N`` and ``<id>@`` for list) round-trip
@@ -1050,7 +1116,7 @@ def _cmd_read_via_api(args, source_arg: str, version_req, client: "HttpClient") 
     try:
         payload = client._get(f"/api/graph/{source_arg}", org=org)
     except LookupError:
-        print(f"No source found matching '{source_arg}'")
+        _print_source_not_found(source_arg, client=client, display_arg=original_arg)
         return
     if not isinstance(payload, dict):
         print(f"No source found matching '{source_arg}'")
@@ -1495,6 +1561,7 @@ def cmd_context(args):
     org = os.environ.get("GRAPH_ORG")
     client = get_client()
 
+    original_arg = args.source
     resolved = _maybe_resolve_session_arg(args.source)
     if resolved:
         args.source = resolved
@@ -1518,7 +1585,7 @@ def cmd_context(args):
     # from launch, so a genuine miss here means the session doesn't exist
     # (or its org is unresolvable), not that ingest hasn't run yet.
     if not source:
-        print(f"Source not found: {args.source}")
+        _print_source_not_found(args.source, client=client, display_arg=original_arg)
         return
     source.setdefault("org", org or "")
     if not isinstance(client, HttpClient):

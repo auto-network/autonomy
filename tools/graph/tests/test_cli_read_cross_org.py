@@ -239,7 +239,11 @@ def test_cmd_read_cross_org_canonical_resolves_and_reads_body(orgs_root, capsys,
 
 
 def test_cmd_read_cross_org_raw_rejected(orgs_root, capsys, monkeypatch):
-    """Raw content stays invisible across orgs — `not found` on a peer's raw UUID."""
+    """Raw content stays invisible across orgs — `not found` on a peer's raw UUID.
+
+    The not-found now carries a cross-org hint (which org holds the ID)
+    but must still leak zero content.
+    """
     ids = _seed_anchore_and_autonomy(orgs_root)
     monkeypatch.setenv("GRAPH_ORG", "anchore")
 
@@ -247,7 +251,8 @@ def test_cmd_read_cross_org_raw_rejected(orgs_root, capsys, monkeypatch):
     graph_cli.cmd_read(args)
 
     out = capsys.readouterr().out
-    assert "No source found" in out
+    assert "Source not found" in out
+    assert "exists in org 'autonomy'" in out
     assert "autonomy internal raw" not in out
 
 
@@ -311,6 +316,52 @@ def test_cmd_context_cross_org_raw_not_found(orgs_root, capsys, monkeypatch):
 
     out = capsys.readouterr().out
     assert "Source not found" in out
+
+
+# ── cross-org not-found hint (auto: org-aware misses) ─────────
+
+
+def test_locate_source_org_finds_peer_raw(orgs_root):
+    """The probe sees raw peer content — existence only, scope ignored."""
+    ids = _seed_anchore_and_autonomy(orgs_root)
+    hit = ops.locate_source_org(ids["autonomy_raw"])
+    assert hit == {
+        "org": "autonomy", "id": ids["autonomy_raw"], "type": "note",
+    }
+
+
+def test_locate_source_org_unknown_id_returns_none(orgs_root):
+    _seed_anchore_and_autonomy(orgs_root)
+    assert ops.locate_source_org(str(uuid.uuid4())) is None
+
+
+def test_cmd_context_not_found_hint_names_home_org(orgs_root, capsys, monkeypatch):
+    """A peer-raw miss names the org that holds the ID and the retry env,
+    without leaking any of the content itself."""
+    ids = _seed_anchore_and_autonomy(orgs_root)
+    monkeypatch.setenv("GRAPH_ORG", "anchore")
+
+    args = _make_args(source=ids["autonomy_raw"], turn="1", window=3)
+    graph_cli.cmd_context(args)
+
+    out = capsys.readouterr().out
+    assert "Source not found in org 'anchore'" in out
+    assert "exists in org 'autonomy'" in out
+    assert "GRAPH_ORG=autonomy" in out
+    assert "internal raw" not in out
+
+
+def test_cmd_context_unknown_id_stays_bare(orgs_root, capsys, monkeypatch):
+    """An ID that exists in no org keeps the plain not-found message."""
+    _seed_anchore_and_autonomy(orgs_root)
+    monkeypatch.setenv("GRAPH_ORG", "anchore")
+
+    args = _make_args(source=str(uuid.uuid4()), turn="1", window=3)
+    graph_cli.cmd_context(args)
+
+    out = capsys.readouterr().out
+    assert "Source not found:" in out
+    assert "exists in org" not in out
 
 
 def test_cmd_context_last_refreshes_only_addressed_session(orgs_root, tmp_path, capsys, monkeypatch):

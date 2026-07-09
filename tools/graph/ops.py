@@ -485,6 +485,39 @@ def get_source(
     return None
 
 
+def locate_source_org(
+    source_id: str,
+    *,
+    org: str | None = None,
+) -> dict | None:
+    """Diagnostic probe: which org DB holds *source_id*, scope ignored.
+
+    Scans every org DB (exact ID or prefix), skipping the peer-visibility
+    filter entirely. Returns ``{"org": slug, "id": full_id, "type": ...}``
+    for the first hit, or ``None``. No content is returned — this exists
+    so a scoped caller's not-found error can say "the source exists, but
+    in org X" instead of a bare miss (cross-org ``graph tail <tmux>``
+    was the recurring trip-up).
+
+    ``org`` is accepted for client-interface parity and ignored — the
+    whole point is to look outside the caller's scope.
+    """
+    from .cross_org import list_org_slugs
+    for slug in sorted(list_org_slugs()):
+        slug_db = open_peer_db(slug)
+        if slug_db is None:
+            continue
+        src = slug_db.get_source(source_id)
+        if src is None:
+            continue
+        return {
+            "org": slug,
+            "id": src.get("id") or source_id,
+            "type": src.get("type") or "",
+        }
+    return None
+
+
 def resolve_source_strict(
     source_id: str,
     *,
