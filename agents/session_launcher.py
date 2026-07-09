@@ -1048,6 +1048,13 @@ def launch_session(
     # ── Assemble docker command ────────────────────────────────
     cmd: list[str] = [
         "docker", "run",
+        # --init: tini as PID 1 so orphaned grandchildren get reaped. The
+        # harness process is a poor PID 1 — browser/tool subprocess trees
+        # that outlive their parent (e.g. agent-browser's Chromium after a
+        # session close) otherwise accumulate as zombies until the pid
+        # ceiling kills thread creation ('RuntimeError: can't start new
+        # thread' after ~20k defunct entries — 2026-07-08/09 incidents).
+        "--init",
         "--name", name,
         *network_args,
         "-e", f"BD_ACTOR={session_type}:{name}",
