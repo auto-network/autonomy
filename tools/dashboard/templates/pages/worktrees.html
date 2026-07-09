@@ -104,40 +104,70 @@
   <section class="py-4 md:py-6">
     <div class="mx-auto w-full max-w-[96rem]">
       <div x-show="!hasOverlayOpen()">
-      <div class="mb-5 flex flex-wrap items-start gap-3 border-b border-white/10 pb-5">
-        <div class="min-w-0 flex-1 pr-1 md:pr-6">
-          <h2 class="text-3xl font-semibold tracking-tight text-white md:text-5xl">Worktrees</h2>
-        </div>
-        <div class="ml-auto shrink-0 rounded-2xl border border-white/10 bg-slate-950/70 p-1.5 shadow-2xl shadow-black/20">
-          <div class="flex items-center gap-2">
-            <label class="sr-only" for="worktrees-org-select">Organization</label>
-            <select id="worktrees-org-select"
-                    class="h-9 max-w-[12rem] rounded-xl border border-gray-700 bg-gray-800 px-3 text-xs font-semibold text-gray-200"
-                    data-testid="worktrees-org-select"
-                    x-model="selectedOrg"
-                    @change="setOrg(selectedOrg)">
-              <option value="" disabled hidden>Choose org…</option>
-              <template x-for="o in orgs" :key="o.slug">
-                <option :value="o.slug"
-                        :selected="o.slug === selectedOrg"
-                        x-text="o.name + ' (' + o.worktrees + ')'"></option>
-              </template>
-            </select>
-            <div class="text-right text-[10px] leading-4 text-slate-500">
-              <div class="uppercase tracking-[0.16em]">Updated</div>
-              <div class="font-mono text-slate-300" x-text="lastUpdated || 'pending'">pending</div>
+      {# Design d993646a: the page claims the global toolbar. Org dropdown
+         sits next to the nav menu (left), Refresh right-justified; the
+         shared search box and page-title hide via the app-topbar-active
+         header class (added in init, removed by the router's resetTopbar
+         on every nav). Teleporting keeps this component's reactive scope. #}
+      <template x-if="_mode === 'page'">
+        <template x-teleport="#app-topbar-slot">
+          <div class="flex min-w-0 flex-1 items-center gap-2" data-testid="worktrees-toolbar-controls">
+            <div class="relative shrink-0" @click.outside="orgMenuOpen = false">
+              <button type="button"
+                      class="flex h-9 items-center gap-2 rounded-lg border border-gray-700 bg-gray-800 px-3 text-xs font-semibold text-gray-200 transition hover:border-gray-500"
+                      data-testid="worktrees-org-select"
+                      @click="orgMenuOpen = !orgMenuOpen">
+                <span class="grid h-4 w-4 place-items-center rounded-full text-[9px] font-bold leading-none text-white"
+                      :style="'background:' + ((selectedOrgIdentity && selectedOrgIdentity.color) || '#64748b')">
+                  <span x-text="(selectedOrgIdentity && selectedOrgIdentity.initial) || '?'"></span>
+                </span>
+                {# Name only — the counts live in the menu rows and the hero stats. #}
+                <span class="max-w-[9rem] truncate"
+                      x-text="(selectedOrgIdentity && selectedOrgIdentity.name) || 'Choose org'"></span>
+                <svg class="h-3 w-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="m19 9-7 7-7-7"/>
+                </svg>
+              </button>
+              <div x-show="orgMenuOpen"
+                   x-cloak
+                   x-transition.opacity.duration.75ms
+                   class="absolute left-0 z-50 mt-1 w-64 rounded-xl border border-gray-700 bg-gray-900 p-1 shadow-2xl shadow-black/50"
+                   data-testid="worktrees-org-menu">
+                <template x-for="o in orgs" :key="'org-menu-' + o.slug">
+                  <button type="button"
+                          class="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition hover:bg-gray-800"
+                          :class="o.slug === selectedOrg ? 'bg-gray-800' : ''"
+                          @click="orgMenuOpen = false; setOrg(o.slug)">
+                    <span class="mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full text-[9px] font-bold leading-none text-white"
+                          :style="'background:' + (o.color || '#64748b')">
+                      <span x-text="o.initial || '?'"></span>
+                    </span>
+                    <span class="min-w-0 flex-1">
+                      <span class="block truncate text-xs font-semibold text-gray-200" x-text="o.name"></span>
+                      <span class="mt-0.5 block text-[10px] font-medium text-gray-500"
+                            x-text="o.worktrees + (o.worktrees === 1 ? ' worktree · ' : ' worktrees · ') + o.commits + (o.commits === 1 ? ' commit' : ' commits')"></span>
+                    </span>
+                  </button>
+                </template>
+              </div>
             </div>
-            <a href="/worktrees"
-               role="button"
-               data-hard-reload
-               @click.prevent="refresh(true)"
-               :aria-disabled="refreshing ? 'true' : 'false'"
-               class="inline-flex h-9 items-center rounded-xl border border-gray-700 bg-gray-800 px-3 text-xs font-semibold text-gray-200 transition hover:bg-gray-700"
-               :class="refreshing ? 'cursor-wait opacity-50 pointer-events-none' : ''"
-               data-testid="worktrees-refresh-button">
+            <button type="button"
+                    class="ml-auto inline-flex h-9 shrink-0 items-center rounded-lg border border-gray-700 bg-gray-800 px-3 text-xs font-semibold text-gray-200 transition hover:bg-gray-700"
+                    :class="refreshing ? 'cursor-wait opacity-50 pointer-events-none' : ''"
+                    :aria-disabled="refreshing ? 'true' : 'false'"
+                    @click="refresh(true)"
+                    data-testid="worktrees-refresh-button">
               <span x-text="refreshing ? 'Refreshing...' : 'Refresh'">Refresh</span>
-            </a>
+            </button>
           </div>
+        </template>
+      </template>
+
+      <div class="mb-5 flex flex-wrap items-end justify-between gap-3 border-b border-white/10 pb-5">
+        <h2 class="text-3xl font-semibold tracking-tight text-white md:text-5xl">Worktrees</h2>
+        <div class="text-right text-[10px] leading-4 text-slate-500">
+          <div class="uppercase tracking-[0.16em]">Updated</div>
+          <div class="font-mono text-slate-300" x-text="lastUpdated || 'pending'">pending</div>
         </div>
       </div>
 
@@ -235,124 +265,74 @@
             <article class="group relative z-10 rounded-3xl border bg-[#0b1017] p-4 shadow-2xl shadow-black/20 transition hover:-translate-y-0.5 md:p-5"
                      :class="[(supportsDashboardMerge(item.row) ? 'border-indigo-500/20 hover:border-indigo-400/50' : 'border-white/10 hover:border-white/20'), isPoofingRow(item.row) ? 'poofing-card pointer-events-none' : ''].join(' ')"
                      data-testid="worktree-commit-card">
-              <div class="mb-2 flex items-start justify-between gap-3">
-                <div class="flex min-w-0 flex-wrap items-center gap-2">
-                  <span class="inline-flex items-center gap-1.5 rounded-full bg-slate-800 px-2 py-0.5 text-[10px] font-semibold text-slate-200">
-                    <span class="grid h-4 w-4 place-items-center rounded-full text-[9px] font-bold leading-none text-white"
-                          :style="'background:' + rowOrg(item.row).color">
-                      <span x-text="rowOrg(item.row).initial"></span>
+              {# Design 255aeae1 v5 — two-line header. Line 1: org badge
+                 first, session chip carrying the liveness dot, actions
+                 right. Line 2: fused repo|branch pill + single PR badge
+                 (stack depth folded in as "+N") + stack count. No status
+                 or harness badges; liveness lives on the session chip. #}
+              <div class="mb-3 flex flex-col gap-2 md:flex-row md:items-start md:justify-between md:gap-3">
+                <div class="flex min-w-0 flex-col gap-2">
+                  <div class="flex min-w-0 flex-wrap items-center gap-1.5">
+                    <span class="inline-flex min-w-0 shrink-[3] items-center gap-1.5 overflow-hidden whitespace-nowrap rounded-md bg-slate-800 px-2 py-1 text-[10px] font-semibold text-slate-200">
+                      <span class="grid h-4 w-4 place-items-center rounded-full text-[9px] font-bold leading-none text-white"
+                            :style="'background:' + rowOrg(item.row).color">
+                        <span x-text="rowOrg(item.row).initial"></span>
+                      </span>
+                      <span class="min-w-0 truncate" x-text="rowOrg(item.row).name"></span>
                     </span>
-                    <span x-text="rowOrg(item.row).name"></span>
+                    <span class="inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-indigo-500/20 bg-indigo-500/10 px-2 py-1 font-mono text-[11px] font-semibold text-indigo-200"
+                          :title="item.row.session_live ? 'session live' : 'session ended'"
+                          data-testid="worktree-session-chip">
+                      <span class="h-1.5 w-1.5 shrink-0 rounded-full"
+                            :class="item.row.session_live ? 'bg-emerald-400' : 'bg-slate-500'"></span>
+                      <span class="min-w-0 truncate" x-text="item.row.session_name"></span>
+                    </span>
+                  </div>
+                  <div class="flex flex-wrap items-center gap-1.5">
+                  <span class="inline-flex min-w-0 max-w-full overflow-hidden whitespace-nowrap rounded-md border border-white/10 font-mono text-[10px] font-semibold">
+                    <span class="shrink-0 bg-slate-800 px-2 py-1 text-slate-400"
+                          x-text="repoName(item.row)"></span>
+                    <span class="min-w-0 truncate border-l border-white/10 bg-slate-900 px-2 py-1 text-slate-200"
+                          x-text="sourceBranch(item.row)"></span>
                   </span>
-                  <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
-                        x-text="item.row.session_name"></span>
-                  <!-- Harness badge — auto-ngis4 / icon-rail. -->
-                  <span x-data="{ harness: item.row.session_harness }">
-                    {% include 'partials/session-harness-badge.html' %}
-                  </span>
-                  <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
-                        :class="statusClass(item.row)"
-                        x-text="statusLabel(item.row)"></span>
-                  <template x-for="pr in rowPrs(item.row)" :key="'pr-badge-' + (pr.review_id || pr.number)">
-                    <a :href="pr.url"
+                  <template x-if="rowPr(item.row)">
+                    <a :href="rowPr(item.row).url"
                        target="_blank"
                        rel="noreferrer"
-                       class="rounded-full border px-2 py-0.5 text-[10px] font-semibold transition"
-                       :class="prBadgeClass(pr)"
+                       class="whitespace-nowrap rounded-md border px-2 py-1 text-[10px] font-semibold transition"
+                       :class="prBadgeClass(rowPr(item.row))"
+                       :title="rowPrBadgeExtra(item.row) ? 'plus ' + (rowPrs(item.row).length - 1) + ' more PR(s) stacked on this branch — open Review to step through the stack' : ''"
                        @click.stop
                        data-testid="pr-badge">
                       <span class="inline-flex items-center gap-1.5">
                         <span class="h-1.5 w-1.5 rounded-full"
-                              :class="prDotClass(pr)"></span>
-                        <span x-text="'PR #' + (pr.number != null ? pr.number : pr.review_id)"></span>
+                              :class="prDotClass(rowPr(item.row))"></span>
+                        <span x-text="'PR #' + (rowPr(item.row).number != null ? rowPr(item.row).number : rowPr(item.row).review_id)"></span>
+                        <span class="opacity-60"
+                              x-show="rowPrBadgeExtra(item.row)"
+                              x-text="rowPrBadgeExtra(item.row)"></span>
                       </span>
                     </a>
                   </template>
-                  <span class="rounded-full bg-slate-800 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400"
+                  <span class="whitespace-nowrap rounded-md bg-slate-800 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400"
                         x-text="stackedCardCountLabel(item.row, item.total)"></span>
+                  </div>
                 </div>
-                <button type="button"
-                        class="h-10 shrink-0 rounded-2xl bg-indigo-600 px-4 text-sm font-semibold text-white transition hover:bg-indigo-500"
-                        @click="openReviewDefault(item.row)"
-                        data-testid="review-commit-button">Review</button>
+                <div class="flex shrink-0 items-center justify-end gap-2">
+                  <button type="button"
+                          class="h-9 shrink-0 rounded-lg bg-indigo-600 px-4 text-sm font-semibold text-white transition hover:bg-indigo-500"
+                          @click="openReviewDefault(item.row)"
+                          data-testid="review-commit-button">Review</button>
+                </div>
               </div>
 
               <div class="min-w-0">
-                <template x-if="hasStackedPrs(item.row)">
-                  <div>
-                    <div class="mt-1 flex flex-col items-start gap-1.5"
-                         data-branch-row>
-                      <span class="inline-flex min-w-0 items-center gap-2"
-                            data-branch-part="src">
-                        <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">src</span>
-                        <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
-                          <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
-                                x-text="repoName(item.row)"></span>
-                          <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
-                                x-text="sourceBranch(item.row)"></span>
-                        </span>
-                      </span>
-                      <span class="text-xs text-slate-600"
-                            data-branch-part="arrow"
-                            aria-hidden="true">→</span>
-                      <span class="inline-flex min-w-0 items-center gap-2"
-                            data-branch-part="dst">
-                        <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">dst</span>
-                        <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
-                          <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
-                                x-text="repoName(item.row)"></span>
-                          <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
-                                x-text="targetBranch(item.row)"></span>
-                        </span>
-                      </span>
-                    </div>
-                    <div class="mt-3 rounded-3xl border border-white/10 bg-white/[0.035] px-4 py-4 shadow-[0_16px_40px_rgba(0,0,0,0.22)]"
-                         data-testid="stacked-pr-summary">
-                      <div class="flex flex-wrap items-baseline justify-between gap-2">
-                        <div class="text-[10px] font-semibold uppercase tracking-[0.22em] text-slate-500">Stacked review</div>
-                        <div class="font-mono text-[11px] text-slate-400"
-                             x-text="stackedCardSummary(item.row)"></div>
-                      </div>
-                      <p class="mt-3 max-w-2xl text-sm leading-6 text-slate-300">
-                        PR titles and per-commit line deltas stay visible on the card. Open Review for commit messages, file lists, and integrated diff details.
-                      </p>
-                    </div>
-                  </div>
-                </template>
-                <template x-if="!hasStackedPrs(item.row)">
-                  <button type="button" class="block w-full min-w-0 text-left" @click="selectCommit(item)">
-                    <div class="mt-1 flex flex-col items-start gap-1.5"
-                         data-branch-row>
-                      <span class="inline-flex min-w-0 items-center gap-2"
-                            data-branch-part="src">
-                        <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">src</span>
-                        <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
-                          <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
-                                x-text="repoName(item.row)"></span>
-                          <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
-                                x-text="sourceBranch(item.row)"></span>
-                        </span>
-                      </span>
-                      <span class="text-xs text-slate-600"
-                            data-branch-part="arrow"
-                            aria-hidden="true">→</span>
-                      <span class="inline-flex min-w-0 items-center gap-2"
-                            data-branch-part="dst">
-                        <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">dst</span>
-                        <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
-                          <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
-                                x-text="repoName(item.row)"></span>
-                          <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
-                                x-text="targetBranch(item.row)"></span>
-                        </span>
-                      </span>
-                    </div>
-                    <h3 class="mt-3 min-w-0 overflow-hidden break-words text-xl font-semibold leading-7 text-white md:text-2xl"
-                        x-text="item.commit.subject"></h3>
-                    <p class="mt-3 line-clamp-3 min-w-0 overflow-hidden whitespace-pre-wrap break-words text-sm leading-6 text-slate-400"
-                       x-text="item.commit.body || 'No commit body.'"></p>
-                  </button>
-                </template>
+                <button type="button" class="block w-full min-w-0 text-left" @click="selectCommit(item)">
+                  <h3 class="min-w-0 overflow-hidden break-words text-xl font-semibold leading-7 text-white md:text-2xl"
+                      x-text="item.commit.subject"></h3>
+                  <p class="mt-3 line-clamp-3 min-w-0 overflow-hidden whitespace-pre-wrap break-words text-sm leading-6 text-slate-400"
+                     x-text="item.commit.body || 'No commit body.'"></p>
+                </button>
               </div>
 
               <template x-if="rowPrs(item.row).length">
@@ -465,7 +445,7 @@
                     <div>
                       <div class="text-[10px] font-semibold uppercase tracking-[0.22em] text-indigo-200/80">PR state</div>
                       <p class="mt-2 max-w-2xl text-sm leading-6 text-slate-300">
-                        PR status has not been fetched for this worktree yet. Refresh to load linked PRs, checks, and watch controls.
+                        GitHub has not been checked for this branch yet. Check to discover linked PRs (or confirm there are none) and load checks + watch controls.
                       </p>
                     </div>
                     <button type="button"
@@ -473,43 +453,45 @@
                             :disabled="isCardRefreshing(item.row)"
                             @click="refreshRowSourceControl(item.row)"
                             data-testid="pr-empty-state-refresh-button"
-                            x-text="isCardRefreshing(item.row) ? 'Refreshing...' : 'Refresh PR state'">Refresh PR state</button>
+                            x-text="isCardRefreshing(item.row) ? 'Checking...' : 'Check for PRs'">Check for PRs</button>
                   </div>
                 </div>
               </template>
 
-              <template x-if="!hasStackedPrs(item.row)">
-                <div class="mt-4 min-w-0">
-                  <div class="mb-2 flex items-center justify-between gap-3">
-                    <div class="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Changed in this commit</div>
-                    <div class="flex shrink-0 items-center gap-2 font-mono text-[10px] text-slate-500">
-                      <span x-text="item.commit.stats.files + ' files'"></span>
-                      <span class="text-emerald-300" x-text="'+' + item.commit.stats.additions"></span>
-                      <span class="text-rose-300" x-text="'-' + item.commit.stats.deletions"></span>
+              {# Files list renders for every card — the stacked-summary
+                 placeholder body is gone (design 255aeae1 v5); stacked
+                 rows read like normal cards with the "+N later commits"
+                 footer carrying the stack depth. #}
+              <div class="mt-4 min-w-0">
+                <div class="mb-2 flex items-center justify-between gap-3">
+                  <div class="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Changed in this commit</div>
+                  <div class="flex shrink-0 items-center gap-2 font-mono text-[10px] text-slate-500">
+                    <span x-text="item.commit.stats.files + ' files'"></span>
+                    <span class="text-emerald-300" x-text="'+' + item.commit.stats.additions"></span>
+                    <span class="text-rose-300" x-text="'-' + item.commit.stats.deletions"></span>
+                  </div>
+                </div>
+                <div class="divide-y divide-white/10 border-y border-white/10">
+                  <template x-for="file in item.commit.files.slice(0, 3)" :key="commitKey(item) + file.status + file.path">
+                    <div class="grid grid-cols-[0.85rem_minmax(0,1fr)_auto] items-center gap-1.5 py-1.5">
+                      <span class="text-center font-mono text-[10px] font-bold text-indigo-200" x-text="file.status"></span>
+                      <span class="min-w-0 overflow-hidden whitespace-nowrap font-mono text-[11px] leading-4 text-slate-300"
+                            :title="file.path"
+                            x-text="fitPath(file.path, $el)"></span>
+                      <span class="inline-flex shrink-0 items-center gap-1 font-mono text-[10px]">
+                        <span class="text-emerald-300" x-text="'+' + file.additions"></span>
+                        <span class="text-rose-300" x-text="'-' + file.deletions"></span>
+                      </span>
                     </div>
-                  </div>
-                  <div class="divide-y divide-white/10 border-y border-white/10">
-                    <template x-for="file in item.commit.files.slice(0, 3)" :key="commitKey(item) + file.status + file.path">
-                      <div class="grid grid-cols-[0.85rem_minmax(0,1fr)_auto] items-center gap-1.5 py-1.5">
-                        <span class="text-center font-mono text-[10px] font-bold text-indigo-200" x-text="file.status"></span>
-                        <span class="min-w-0 overflow-hidden whitespace-nowrap font-mono text-[11px] leading-4 text-slate-300"
-                              :title="file.path"
-                              x-text="fitPath(file.path, $el)"></span>
-                        <span class="inline-flex shrink-0 items-center gap-1 font-mono text-[10px]">
-                          <span class="text-emerald-300" x-text="'+' + file.additions"></span>
-                          <span class="text-rose-300" x-text="'-' + file.deletions"></span>
-                        </span>
-                      </div>
-                    </template>
-                  </div>
-                  <template x-if="item.total > 1">
-                    <div class="mt-2 text-[11px] text-slate-500" x-text="'+' + (item.total - 1) + ' later commits in this stack'"></div>
-                  </template>
-                  <template x-if="item.commit.files.length > 3">
-                    <div class="mt-2 text-[11px] text-slate-500" x-text="'+' + (item.commit.files.length - 3) + ' more paths in full view'"></div>
                   </template>
                 </div>
-              </template>
+                <template x-if="item.total > 1">
+                  <div class="mt-2 text-[11px] text-slate-500" x-text="'+' + (item.total - 1) + ' later commits in this stack'"></div>
+                </template>
+                <template x-if="item.commit.files.length > 3">
+                  <div class="mt-2 text-[11px] text-slate-500" x-text="'+' + (item.commit.files.length - 3) + ' more paths in full view'"></div>
+                </template>
+              </div>
             </article>
           </div>
         </template>
@@ -533,56 +515,61 @@
           <article class="group relative rounded-3xl border bg-slate-950/75 p-4 shadow-2xl shadow-black/20 transition hover:-translate-y-0.5 md:p-5"
                    :class="row.session_live ? 'border-white/10 hover:border-white/20' : 'border-amber-300/15 hover:border-amber-200/30'"
                    data-testid="worktree-dirty-card">
-            <div class="mb-3 flex items-start justify-between gap-3">
-              <div class="flex min-w-0 flex-wrap items-center gap-2">
-                <span class="inline-flex items-center gap-1.5 rounded-full bg-slate-800 px-2 py-0.5 text-[10px] font-semibold text-slate-200">
-                  <span class="grid h-4 w-4 place-items-center rounded-full text-[9px] font-bold leading-none text-white"
-                        :style="'background:' + rowOrg(row).color">
-                    <span x-text="rowOrg(row).initial"></span>
+            {# Design 255aeae1 v5 — two-line header, mirroring the commit
+               card: org badge first, session chip with liveness dot,
+               actions right; fused repo|branch pill on the meta line. #}
+            <div class="mb-3 flex flex-col gap-2 md:flex-row md:items-start md:justify-between md:gap-3">
+              <div class="flex min-w-0 flex-col gap-2">
+                <div class="flex min-w-0 flex-wrap items-center gap-1.5">
+                  <span class="inline-flex min-w-0 shrink-[3] items-center gap-1.5 overflow-hidden whitespace-nowrap rounded-md bg-slate-800 px-2 py-1 text-[10px] font-semibold text-slate-200">
+                    <span class="grid h-4 w-4 place-items-center rounded-full text-[9px] font-bold leading-none text-white"
+                          :style="'background:' + rowOrg(row).color">
+                      <span x-text="rowOrg(row).initial"></span>
+                    </span>
+                    <span class="min-w-0 truncate" x-text="rowOrg(row).name"></span>
                   </span>
-                  <span x-text="rowOrg(row).name"></span>
-                </span>
-                <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
-                      x-text="row.session_name"></span>
-                <!-- Harness badge — auto-ngis4 / icon-rail. -->
-                <span x-data="{ harness: row.session_harness }">
-                  {% include 'partials/session-harness-badge.html' %}
-                </span>
-                <span class="inline-flex overflow-hidden rounded-full border border-white/10 text-[10px] font-semibold">
-                  <span class="bg-slate-800 px-2 py-0.5 uppercase tracking-wider text-slate-500">repo</span>
-                  <span class="bg-slate-900 px-2 py-0.5 font-mono text-slate-200"
-                        x-text="repoName(row)"></span>
-                </span>
-                <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
-                      :class="statusClass(row)"
-                      x-text="statusLabel(row)"></span>
-                <span class="hidden rounded-full bg-slate-800 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400 sm:inline-flex"
-                      x-text="changesCompanionCommitLabel(row)"></span>
+                  <span class="inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-indigo-500/20 bg-indigo-500/10 px-2 py-1 font-mono text-[11px] font-semibold text-indigo-200"
+                        :title="row.session_live ? 'session live' : 'session ended'"
+                        data-testid="worktree-session-chip">
+                    <span class="h-1.5 w-1.5 shrink-0 rounded-full"
+                          :class="row.session_live ? 'bg-emerald-400' : 'bg-slate-500'"></span>
+                    <span class="min-w-0 truncate" x-text="row.session_name"></span>
+                  </span>
+                </div>
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <span class="inline-flex min-w-0 max-w-full overflow-hidden whitespace-nowrap rounded-md border border-white/10 font-mono text-[10px] font-semibold">
+                    <span class="shrink-0 bg-slate-800 px-2 py-1 text-slate-400"
+                          x-text="repoName(row)"></span>
+                    <span class="min-w-0 truncate border-l border-white/10 bg-slate-900 px-2 py-1 text-slate-200"
+                          x-text="sourceBranch(row)"></span>
+                  </span>
+                </div>
               </div>
-              <div class="flex shrink-0 items-center gap-2">
-                <button x-show="cloneStale(row)"
-                        type="button"
-                        class="h-10 rounded-2xl border border-amber-400/40 px-4 text-sm font-semibold text-amber-200 transition hover:bg-amber-400/10 disabled:cursor-wait disabled:opacity-50"
-                        :disabled="isSyncingBase(row)"
-                        :title="'Pull host master into the managed clone (' + targetBranch(row) + ')'"
-                        @click="syncBase(row)"
-                        data-testid="row-sync-base-button">
-                  <span x-show="!isSyncingBase(row)" x-text="'Sync ' + targetBranch(row)"></span>
-                  <span x-show="isSyncingBase(row)">Syncing...</span>
-                </button>
-                <button type="button"
-                        class="h-10 rounded-2xl bg-indigo-600 px-4 text-sm font-semibold text-white transition hover:bg-indigo-500"
-                        @click="selectDirtyRow(row)"
-                        data-testid="review-dirty-button">View Diffs</button>
-                <button x-show="canDiscardDirtyRow(row)"
-                        type="button"
-                        class="h-10 rounded-2xl border border-rose-500/40 px-4 text-sm font-semibold text-rose-300 transition hover:bg-rose-500/10 disabled:cursor-wait disabled:opacity-50"
-                        :disabled="isCleaningRow(row)"
-                        @click="openDiscardConfirm(row)"
-                        data-testid="discard-dirty-button">
-                  <span x-show="!isCleaningRow(row)">Discard</span>
-                  <span x-show="isCleaningRow(row)">Discarding...</span>
-                </button>
+              <div class="flex shrink-0 items-center justify-end gap-2">
+                  <button x-show="cloneStale(row)"
+                  <button x-show="cloneStale(row)"
+                          type="button"
+                          class="h-9 rounded-lg border border-amber-400/40 px-3 text-sm font-semibold text-amber-200 transition hover:bg-amber-400/10 disabled:cursor-wait disabled:opacity-50"
+                          :disabled="isSyncingBase(row)"
+                          :title="'Pull host master into the managed clone (' + targetBranch(row) + ')'"
+                          @click="syncBase(row)"
+                          data-testid="row-sync-base-button">
+                    <span x-show="!isSyncingBase(row)" x-text="'Sync ' + targetBranch(row)"></span>
+                    <span x-show="isSyncingBase(row)">Syncing...</span>
+                  </button>
+                  <button type="button"
+                          class="h-9 rounded-lg bg-indigo-600 px-3.5 text-sm font-semibold text-white transition hover:bg-indigo-500"
+                          @click="selectDirtyRow(row)"
+                          data-testid="review-dirty-button">View Diffs</button>
+                  <button x-show="canDiscardDirtyRow(row)"
+                          type="button"
+                          class="h-9 rounded-lg border border-rose-500/40 px-3.5 text-sm font-semibold text-rose-300 transition hover:bg-rose-500/10 disabled:cursor-wait disabled:opacity-50"
+                          :disabled="isCleaningRow(row)"
+                          @click="openDiscardConfirm(row)"
+                          data-testid="discard-dirty-button">
+                    <span x-show="!isCleaningRow(row)">Discard</span>
+                    <span x-show="isCleaningRow(row)">Discarding...</span>
+                  </button>
               </div>
             </div>
 
@@ -636,21 +623,31 @@
         <template x-for="item in prStacks" :key="'prs/' + rowKey(item.row)">
           <article class="group relative rounded-3xl border border-emerald-500/15 bg-[#0b1017] p-4 shadow-2xl shadow-black/20 transition hover:-translate-y-0.5 hover:border-emerald-400/30 md:p-5"
                    data-testid="worktree-pr-card">
-            <div class="mb-3 flex min-w-0 flex-wrap items-center gap-2">
-              <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
-                    x-text="item.row.session_name"></span>
-              <!-- Harness badge — auto-ngis4 / icon-rail. -->
-              <span x-data="{ harness: item.row.session_harness }">
-                {% include 'partials/session-harness-badge.html' %}
-              </span>
-              <span class="inline-flex overflow-hidden rounded-full border border-white/10 text-[10px] font-semibold">
-                <span class="bg-slate-800 px-2 py-0.5 uppercase tracking-wider text-slate-500">repo</span>
-                <span class="bg-slate-900 px-2 py-0.5 font-mono text-slate-200"
-                      x-text="repoName(item.row)"></span>
-              </span>
-              <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
-                    :class="statusClass(item.row)"
-                    x-text="statusLabel(item.row)"></span>
+            <div class="mb-3 flex flex-col gap-2">
+              <div class="flex min-w-0 items-center gap-1.5">
+                <span class="inline-flex min-w-0 shrink-[3] items-center gap-1.5 overflow-hidden whitespace-nowrap rounded-md bg-slate-800 px-2 py-1 text-[10px] font-semibold text-slate-200">
+                  <span class="grid h-4 w-4 place-items-center rounded-full text-[9px] font-bold leading-none text-white"
+                        :style="'background:' + rowOrg(item.row).color">
+                    <span x-text="rowOrg(item.row).initial"></span>
+                  </span>
+                  <span class="min-w-0 truncate" x-text="rowOrg(item.row).name"></span>
+                </span>
+                <span class="inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-indigo-500/20 bg-indigo-500/10 px-2 py-1 font-mono text-[11px] font-semibold text-indigo-200"
+                      :title="item.row.session_live ? 'session live' : 'session ended'"
+                      data-testid="worktree-session-chip">
+                  <span class="h-1.5 w-1.5 shrink-0 rounded-full"
+                        :class="item.row.session_live ? 'bg-emerald-400' : 'bg-slate-500'"></span>
+                  <span class="min-w-0 truncate" x-text="item.row.session_name"></span>
+                </span>
+              </div>
+              <div class="flex flex-wrap items-center gap-1.5">
+                <span class="inline-flex min-w-0 max-w-full overflow-hidden whitespace-nowrap rounded-md border border-white/10 font-mono text-[10px] font-semibold">
+                  <span class="shrink-0 bg-slate-800 px-2 py-1 text-slate-400"
+                        x-text="repoName(item.row)"></span>
+                  <span class="min-w-0 truncate border-l border-white/10 bg-slate-900 px-2 py-1 text-slate-200"
+                        x-text="sourceBranch(item.row)"></span>
+                </span>
+              </div>
             </div>
             <div class="space-y-2">
               <template x-for="pr in item.prs" :key="'pr-row-' + (pr.review_id || pr.number)">
@@ -706,7 +703,7 @@
                         :disabled="isCardRefreshing(row)"
                         @click="refreshRowSourceControl(row)">
                   <span class="font-mono" x-text="row.session_name + '/' + repoName(row)"></span>
-                  <span x-text="isCardRefreshing(row) ? 'Refreshing...' : 'Fetch PR state'"></span>
+                  <span x-text="isCardRefreshing(row) ? 'Checking...' : 'Check for PRs'"></span>
                 </button>
               </template>
             </div>

@@ -972,15 +972,21 @@ class TestWorktreePage:
         assert 'x-text="fitPath(file.path, $el)"' in template
         assert 'x-text="repoName(item.row)"' in template
         assert 'x-text="row.session_title"' in template
-        assert "changesCompanionCommitLabel(row)" in template
-        assert "1 commit also present" in js
+        # Design 255aeae1 v5: the card meta line dropped the companion-commit
+        # chip and the LIVE/ORPHANED text badges — liveness is the dot on the
+        # session chip. The status helpers survive for the review overlay.
+        assert "changesCompanionCommitLabel(row)" not in template
+        assert 'data-testid="worktree-session-chip"' in template
+        assert "row.session_live ? 'bg-emerald-400' : 'bg-slate-500'" in template
         assert 'x-text="uncommittedChangesCount"' in template
         assert 'data-testid="worktree-merge-disabled-reason"' in template
         assert 'x-show="canDiscardDirtyRow(row)"' in template
         assert 'x-text="refreshing ? \'Refreshing...\' : \'Refresh\'"' in template
-        assert 'href="/worktrees"' in template
-        assert 'data-hard-reload' in template
-        assert '@click.prevent="refresh(true)"' in template
+        # Design d993646a: Refresh is a plain button teleported into the
+        # global toolbar (#app-topbar-slot) — the hard-reload anchor is gone.
+        assert '@click="refresh(true)"' in template
+        assert 'x-teleport="#app-topbar-slot"' in template
+        assert 'data-testid="worktrees-org-select"' in template
         assert template.lstrip().startswith('<div data-testid="worktrees-fragment-root">')
         assert '<style>' in template
         assert '<div x-data="worktreesPage()"' in template
@@ -1027,9 +1033,14 @@ class TestWorktreePage:
         template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
         js = (JS_DIR / "pages" / "worktrees.js").read_text()
 
-        # Badge fragment renders one badge per PR (zero, one, or many).
+        # Design 255aeae1 v5: the commit card wears ONE badge — the bottom
+        # of the stack — with extra depth folded in as a dimmed "+N". The
+        # PRs view still renders one badge per PR.
         assert 'data-testid="pr-badge"' in template
-        assert 'x-for="pr in rowPrs(item.row)"' in template
+        assert 'x-if="rowPr(item.row)"' in template
+        assert ':class="prBadgeClass(rowPr(item.row))"' in template
+        assert 'x-text="rowPrBadgeExtra(item.row)"' in template
+        assert 'x-for="pr in item.prs"' in template
         assert ':class="prBadgeClass(pr)"' in template
         assert ':class="prDotClass(pr)"' in template
 
@@ -1201,11 +1212,14 @@ class TestWorktreePage:
 
         assert 'data-testid="pr-empty-state-cta"' in template
         assert '!item.row.source_control' in template
-        assert 'PR status has not been fetched for this worktree yet.' in template
+        # The empty state is a discovery affordance: with no bindings the
+        # per-row refresh falls back to `gh pr list` auto-detect, so the
+        # copy says "check/discover", not "refresh" (nothing exists yet).
+        assert 'GitHub has not been checked for this branch yet.' in template
         assert 'data-testid="pr-empty-state-refresh-button"' in template
         assert '@click="refreshRowSourceControl(item.row)"' in template
         assert ':disabled="isCardRefreshing(item.row)"' in template
-        assert "Refresh PR state" in template
+        assert "Check for PRs" in template
 
         assert "cardRefreshing: {}" in js
         assert "isCardRefreshing(row) {" in js
@@ -1309,22 +1323,26 @@ class TestWorktreePage:
         assert "const start = Math.max(" in js
         assert "label: 'Unlinked commits'" in js
 
-    def test_stacked_rows_hide_first_commit_detail_chrome_until_review(self):
-        """Multi-PR cards should stop pretending the first commit is the
-        primary detail surface; commit bodies and file lists move behind
-        Review, while the card shows stack summary + per-commit deltas."""
+    def test_stacked_rows_render_unified_card_body(self):
+        """Design 255aeae1 v5: stacked cards read like normal cards — the
+        stacked-summary placeholder body and the src→dst arrow rows are
+        gone. Stack depth shows as the count chip, the "+N later commits"
+        footer, and the dimmed "+N" inside the PR badge; the per-PR
+        navigator below the body still steps through the stack."""
         template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
         js = (JS_DIR / "pages" / "worktrees.js").read_text()
 
-        assert 'data-testid="stacked-pr-summary"' in template
-        assert 'x-if="hasStackedPrs(item.row)"' in template
-        assert 'x-if="!hasStackedPrs(item.row)"' in template
-        assert 'Open Review for commit messages, file lists, and integrated diff details.' in template
-        assert 'x-text="stackedCardSummary(item.row)"' in template
+        assert 'data-testid="stacked-pr-summary"' not in template
+        # Cards show no merge target and no src→dst choreography; the
+        # review overlay keeps its src→dst header (that's the screen
+        # with the merge button, where the destination is load-bearing).
+        assert 'x-text="targetBranch(item.row)"' not in template
+        assert 'x-text="targetBranch(selectedCommit.row)"' in template
         assert 'x-text="stackedCardCountLabel(item.row, item.total)"' in template
+        assert "' later commits in this stack'" in template
+        assert 'x-text="sourceBranch(item.row)"' in template
+        assert "rowPrBadgeExtra(row) {" in js
         assert "return prCount + ' PRs · ' + total + ' commits';" in js
-        assert "return prCount + ' ' + prLabel + ' stacked across ' + commitCount + ' ' + commitLabel;" in js
-        assert "return files + ' ' + fileLabel + ' +' + additions + ' -' + deletions;" in js
 
     def test_stacked_merge_commits_collapse_into_subdued_summary_rows(self):
         """Stacked cards should stop rendering merge commits as full-weight

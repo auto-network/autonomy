@@ -342,6 +342,7 @@
       orgs: [],
       selectedOrg: '',
       orgsLoading: true,
+      orgMenuOpen: false,
       loading: true,
       refreshing: false,
       // Per-row force-refresh state for the review overlay's Refresh
@@ -699,6 +700,15 @@
 
       hasStackedPrs(row) {
         return this.rowPrs(row).length > 1;
+      },
+
+      // Card badge shows one PR — the bottom of the stack, the one
+      // Review opens first — with any extra stack depth folded in as a
+      // dimmed "+N" (design 255aeae1 v5). The full stack stays
+      // navigable in the review overlay and the PRs view.
+      rowPrBadgeExtra(row) {
+        const extra = this.rowPrs(row).length - 1;
+        return extra > 0 ? '+' + extra : '';
       },
 
       stackedCardCountLabel(row, total) {
@@ -2578,6 +2588,12 @@
           this.loading = false;
         } else {
           this._restoreOrg();
+          // Claim the global toolbar: hides the shared search box +
+          // page-title and shows #app-topbar-slot, where this page's
+          // org dropdown + Refresh are teleported. The SPA router's
+          // resetTopbar() removes the class again on every navigation.
+          const header = document.querySelector('header');
+          if (header) header.classList.add('app-topbar-active');
           this.loadOrgs().then(() => this._initialLoad());
         }
         // Bind the agent-→dashboard rebase status channel. Failures
