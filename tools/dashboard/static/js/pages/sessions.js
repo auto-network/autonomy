@@ -205,15 +205,35 @@
         for (var key in rows) {
           var r = rows[key];
           var prev = this.resources[key];
-          var hist = (prev && prev.history) || r.history || [];
-          if (!r.history && r.sampled_at && r.cpu_pct != null) {
-            var lastTs = hist.length ? hist[hist.length - 1][0] : 0;
-            if (r.sampled_at > lastTs) {
-              hist = hist.concat([[r.sampled_at, r.cpu_pct, r.mem_bytes]]);
-              if (hist.length > this._SPARK_SAMPLES) {
-                hist = hist.slice(hist.length - this._SPARK_SAMPLES);
+          var hist;
+          if (r.history && r.history.length) {
+            // REST hydrate: the server ring buffer is the base. It must WIN
+            // over any prev entry — the SSE handler's cached replay fires
+            // synchronously on registration, so by the time this fetch
+            // returns, prev already exists with 1-2 points; preferring prev
+            // here silently discarded the full history on every page load
+            // (sparklines looked "reset" on fresh desktop loads while
+            // long-open mobile pages kept their own buffer). Points that
+            // arrived over SSE during the fetch are grafted on the end.
+            hist = r.history.slice();
+            if (prev && prev.history && prev.history.length) {
+              var baseTs = hist[hist.length - 1][0];
+              for (var i = 0; i < prev.history.length; i++) {
+                if (prev.history[i][0] > baseTs) hist.push(prev.history[i]);
               }
             }
+          } else {
+            // SSE push: append the latest sample to the client-side ring.
+            hist = (prev && prev.history) || [];
+            if (r.sampled_at && r.cpu_pct != null) {
+              var lastTs = hist.length ? hist[hist.length - 1][0] : 0;
+              if (r.sampled_at > lastTs) {
+                hist = hist.concat([[r.sampled_at, r.cpu_pct, r.mem_bytes]]);
+              }
+            }
+          }
+          if (hist.length > this._SPARK_SAMPLES) {
+            hist = hist.slice(hist.length - this._SPARK_SAMPLES);
           }
           next[key] = Object.assign({}, r, { history: hist });
         }
