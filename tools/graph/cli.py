@@ -1836,7 +1836,16 @@ def _render_session_status_rows(rows: list[dict], since: str | None = None,
     topic_indent = " " * (28 + 1 + 8 + 1 + 14 + 1 + 7 + 1 + 12 + 1)
     for row in rows:
         tmux = str(row.get("tmux_name") or "")[:27]
-        if row.get("is_live") == 0:
+        coarse = row.get("state")
+        if coarse in ("ENDED", "FAILED"):
+            state = "dead" if coarse == "ENDED" else "failed"
+        elif coarse == "LAUNCHING":
+            state = "launch"
+        elif coarse == "STOPPING":
+            state = "stop"
+        elif coarse == "ACTIVE":
+            state = str(row.get("attention") or row.get("activity_state") or "idle")
+        elif row.get("is_live") == 0:  # pre-migration rows
             state = "dead"
         else:
             state = str(row.get("activity_state") or "idle")
@@ -1908,8 +1917,18 @@ def _load_local_session_status_rows(since: str | None = None) -> list[dict]:
             (cutoff,),
         ).fetchall()
     else:
+        # Out-of-process reader: the DB may predate the FSM consolidation
+        # (no ``state`` column) or postdate the legacy-column drop (no
+        # ``is_live``). Probe the schema and key on whichever exists.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tmux_sessions)")}
+        if "state" in cols:
+            live_where = "state NOT IN ('ENDED','FAILED') OR state IS NULL"
+        else:
+            live_where = "is_live=1"
         rows = conn.execute(
-            "SELECT * FROM tmux_sessions WHERE is_live=1 ORDER BY last_activity DESC"
+            "SELECT * FROM tmux_sessions"
+            f" WHERE {live_where}"
+            " ORDER BY last_activity DESC"
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]

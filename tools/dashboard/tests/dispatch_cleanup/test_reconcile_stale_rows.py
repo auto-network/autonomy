@@ -1,14 +1,14 @@
 """auto-8bnq0 Defect 2 — reconcile deregisters stale dispatch rows.
 
 When a dispatch container exits but the dispatcher's deregister POST fails
-or the dispatcher is mid-restart, tmux_sessions retains is_live=1 with no
+or the dispatcher is mid-restart, tmux_sessions retains a live-state row with no
 matching RUNNING dispatch_runs entry. auto-opbyh's liveness-loop type
 filter (correctly) leaves dispatch rows alone — their death is
 dispatcher-owned. Nothing else sweeps them. Over time, dashboard.db
 accumulates stale 'live' dispatch rows (observed 2026-04-20 on s2ep5).
 
 New contract: on dispatcher startup, iterate tmux_sessions rows with
-type IN ('dispatch','librarian') AND is_live=1; for each row where no
+type IN ('dispatch','librarian') in a non-terminal state; for each row where no
 dispatch_runs entry with status='RUNNING' matches the tmux_name, POST
 /api/monitor/deregister. Idempotent.
 
@@ -34,26 +34,26 @@ class TestReconcileStaleDispatchRows:
     """Defect 2 — reconcile deregisters orphaned tmux_sessions rows."""
 
     def test_reconcile_deregisters_stale_dispatch_row(self, cleanup_env):
-        """is_live=1 dispatch row with no matching RUNNING run → POST deregister."""
+        """Live-state dispatch row with no matching RUNNING run → POST deregister."""
         dispatcher = cleanup_env["dispatcher"]
         dashboard_db = cleanup_env["dashboard_db"]
 
         stale_tmux = "auto-stale-disp-20260420-100000"
-        # Plant a stale is_live=1 dispatch row
+        # Plant a stale live-state dispatch row
         sess_dir = cleanup_env["tmp_path"] / "sessions"
         sess_dir.mkdir(parents=True)
         jsonl = sess_dir / f"{stale_tmux}.jsonl"
         jsonl.write_text("")
         insert_tmux_session(
             dashboard_db, tmux_name=stale_tmux, type_="dispatch",
-            jsonl_path=str(jsonl), is_live=1, bead_id="auto-stale",
+            jsonl_path=str(jsonl), state="ACTIVE", bead_id="auto-stale",
         )
         # Crucially: NO corresponding RUNNING dispatch_runs entry
 
         assert hasattr(dispatcher, "reconcile_stale_monitor_rows"), (
             "agents.dispatcher.reconcile_stale_monitor_rows missing — "
             "Defect 2 not yet implemented. Expected callable that POSTs "
-            "/api/monitor/deregister for every is_live=1 dispatch or "
+            "/api/monitor/deregister for every live-state dispatch or "
             "librarian row with no matching RUNNING dispatch_runs entry."
         )
 
@@ -97,7 +97,7 @@ class TestReconcileStaleDispatchRows:
         jsonl.write_text("")
         insert_tmux_session(
             dashboard_db, tmux_name=live_tmux, type_="dispatch",
-            jsonl_path=str(jsonl), is_live=1, bead_id=live_bead,
+            jsonl_path=str(jsonl), state="ACTIVE", bead_id=live_bead,
         )
         # MATCHING RUNNING dispatch_runs entry
         insert_dispatch_run(
@@ -133,6 +133,6 @@ class TestReconcileStaleDispatchRows:
 
         # Assert the row is still live in the DB
         row = fetch_tmux_row(dashboard_db, live_tmux)
-        assert row is not None and row["is_live"] == 1, (
+        assert row is not None and row["state"] == "ACTIVE", (
             f"Live dispatch row was flipped to dead: {row!r}"
         )

@@ -36,7 +36,12 @@ def _init_test_db(db_path: Path) -> None:
     conn.execute("""CREATE TABLE IF NOT EXISTS tmux_sessions (
         tmux_name TEXT PRIMARY KEY, session_uuid TEXT, graph_source_id TEXT,
         type TEXT NOT NULL, project TEXT NOT NULL, jsonl_path TEXT,
-        bead_id TEXT, created_at REAL NOT NULL, is_live INTEGER DEFAULT 1,
+        bead_id TEXT, created_at REAL NOT NULL,
+        state TEXT CHECK (state IN
+            ('LAUNCHING','ACTIVE','STOPPING','ENDED','FAILED')),
+        attention TEXT CHECK (attention IN
+            ('tool_running','thinking','idle')),
+        ended_at REAL,
         file_offset INTEGER DEFAULT 0, last_activity REAL,
         last_message TEXT DEFAULT '', entry_count INTEGER DEFAULT 0,
         context_tokens INTEGER DEFAULT 0, label TEXT DEFAULT '',
@@ -45,7 +50,7 @@ def _init_test_db(db_path: Path) -> None:
         nag_message TEXT DEFAULT '', nag_last_sent REAL DEFAULT 0,
         dispatch_nag INTEGER DEFAULT 0,
         resolution_dir TEXT, session_uuids TEXT DEFAULT '[]',
-        curr_jsonl_file TEXT, activity_state TEXT DEFAULT 'idle'
+        curr_jsonl_file TEXT
     )""")
     conn.commit()
     conn.close()
@@ -217,24 +222,24 @@ class TestMonitorBroadcastsSSEForDispatch:
             )
 
 
-# ── Test 3 — deregister marks is_live=0 but preserves jsonl_path ──────
+# ── Test 3 — deregister marks the row ENDED but preserves jsonl_path ──
 
 
 class TestMonitorDeregisterKeepsRow:
-    """#3 — Deregister marks row is_live=0 but keeps row with jsonl_path.
+    """#3 — Deregister marks the row ENDED but keeps it with jsonl_path.
 
     FAILS TODAY: Dispatch registration isn't wired; also, the
     deregister-triggered-by-decision.json hook on dispatcher side does
     not exist. The assertion that a row exists with type='dispatch' and
-    is_live=0 AFTER decision.json cannot currently be produced by any
+    state=ENDED AFTER decision.json cannot currently be produced by any
     dispatcher code path. This test exercises the monitor API directly:
     register_session(type='dispatch') + deregister_session(tmux) must
-    leave a row with is_live=0 and jsonl_path preserved.
+    leave a row with state=ENDED and jsonl_path preserved.
     """
 
     @pytest.mark.asyncio
     async def test_monitor_deregisters_on_decision_json(self, monitor_env):
-        """Deregister preserves the row with jsonl_path and sets is_live=0."""
+        """Deregister preserves the row with jsonl_path and marks it ENDED."""
         tmp_path, db_path, sm_mod = monitor_env
         sess_dir = tmp_path / "agent-runs" / "auto-disp-003" / "sessions"
         sess_dir.mkdir(parents=True)
@@ -266,8 +271,8 @@ class TestMonitorDeregisterKeepsRow:
             "deregister_session must NOT delete the row — history lookups "
             "depend on it remaining in tmux_sessions."
         )
-        assert row["is_live"] == 0, (
-            f"Expected is_live=0 after deregister, got {row['is_live']}"
+        assert row["state"] == "ENDED", (
+            f"Expected state=ENDED after deregister, got {row['state']}"
         )
         assert row["jsonl_path"] == str(jsonl), (
             f"jsonl_path must be preserved after deregister; got {row['jsonl_path']!r}"
@@ -282,10 +287,10 @@ class TestHistoricalDispatchBackfill:
     """#7 — Migration script back-fills rows for historical agent-runs.
 
     FAILS TODAY: Before Phase 1 ships, there is no migration that walks
-    data/agent-runs/*/sessions/ and inserts a type='dispatch', is_live=0
+    data/agent-runs/*/sessions/ and inserts a type='dispatch', ENDED
     row per historical run. This test verifies the migration is present
     and idempotent: before run = no row; after run = row exists with
-    jsonl_path and is_live=0.
+    jsonl_path and state=ENDED.
 
     The migration is expected to live at:
         tools/dashboard/migrations/backfill_dispatch_sessions.py
@@ -334,7 +339,7 @@ class TestHistoricalDispatchBackfill:
             f"Backfill did not insert a row for historical run {run_name!r}"
         )
         assert row["type"] == "dispatch", f"type={row['type']!r}, expected 'dispatch'"
-        assert row["is_live"] == 0, f"is_live={row['is_live']}, expected 0"
+        assert row["state"] == "ENDED", f"state={row['state']}, expected ENDED"
         assert row["jsonl_path"] == str(historical_jsonl), (
             f"jsonl_path not populated: {row['jsonl_path']!r}"
         )

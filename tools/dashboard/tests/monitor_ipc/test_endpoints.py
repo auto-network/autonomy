@@ -153,7 +153,7 @@ class TestRegisterEndpoint:
 
 @pytest.mark.asyncio
 class TestDeregisterEndpoint:
-    """#3 — POST /api/monitor/deregister marks is_live=0, preserves row + jsonl_path."""
+    """#3 — POST /api/monitor/deregister marks the row ENDED, preserves row + jsonl_path."""
 
     async def test_deregister_endpoint_marks_dead_preserves_row(
         self, ipc_env    ):
@@ -196,10 +196,10 @@ class TestDeregisterEndpoint:
             row = fetch_row(db_path, "auto-test-003")
             assert row is not None, (
                 "Deregister deleted the row — it must preserve the row "
-                "with is_live=0 for history lookups."
+                "in a terminal state for history lookups."
             )
-            assert row["is_live"] == 0, (
-                f"Expected is_live=0 after deregister, got {row['is_live']}"
+            assert row["state"] == "ENDED", (
+                f"Expected state=ENDED after deregister, got {row['state']}"
             )
             assert row["jsonl_path"] == str(jsonl), (
                 f"jsonl_path lost during deregister: {row['jsonl_path']!r}"

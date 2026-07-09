@@ -105,6 +105,7 @@ from tools.dashboard.session_harness import (
 from tools.dashboard.session_monitor import count_tool_uses, session_monitor, TaskStateTracker
 from tools.dashboard.resource_monitor import resource_monitor
 from tools.dashboard.session_lifecycle_worker import (
+    derive_lifecycle_state,
     LifecycleJob,
     SessionLifecycleStateWriter,
     SessionLifecycleWorker,
@@ -708,7 +709,7 @@ async def api_dispatch_resume_bead(request):
     conn = _get_conn()
     row = conn.execute(
         "SELECT * FROM tmux_sessions"
-        " WHERE bead_id=? AND type='dispatch' AND is_live=0"
+        " WHERE bead_id=? AND type='dispatch' AND state IN ('ENDED','FAILED')"
         " ORDER BY created_at DESC LIMIT 1",
         (bead_id,),
     ).fetchone()
@@ -3179,7 +3180,8 @@ async def api_crosstalk_broadcast(request):
     # Get live sessions, filter by idle time
     conn = dashboard_db.get_conn()
     rows = conn.execute(
-        "SELECT tmux_name, last_activity, created_at FROM tmux_sessions WHERE is_live=1 AND tmux_name != ?",
+        "SELECT tmux_name, last_activity, created_at FROM tmux_sessions"
+        " WHERE state NOT IN ('ENDED','FAILED') AND tmux_name != ?",
         (sender,),
     ).fetchall()
 
@@ -3255,7 +3257,8 @@ async def api_crosstalk_peers(request):
 
     conn = dashboard_db.get_conn()
     rows = conn.execute(
-        "SELECT tmux_name, type, label, created_at FROM tmux_sessions WHERE is_live=1 AND tmux_name != ?",
+        "SELECT tmux_name, type, label, created_at FROM tmux_sessions"
+        " WHERE state NOT IN ('ENDED','FAILED') AND tmux_name != ?",
         (sender,),
     ).fetchall()
     return JSONResponse({"peers": [dict(r) for r in rows]})
@@ -4281,7 +4284,7 @@ async def api_session_tail(request):
     if session_file is None:
         # Session file not resolved — check if it's a newly created session
         # registered in the monitor but with no JSONL yet
-        if db_row and db_row.get("is_live"):
+        if db_row and derive_lifecycle_state(db_row) not in ("ENDED", "FAILED"):
             return JSONResponse({
                 "entries": [], "offset": 0, "is_live": True,
                 "type": db_row.get("type", ""),
@@ -4297,7 +4300,7 @@ async def api_session_tail(request):
             status_code=404,
         )
     if not session_file.exists():
-        if db_row and db_row.get("is_live"):
+        if db_row and derive_lifecycle_state(db_row) not in ("ENDED", "FAILED"):
             return JSONResponse({
                 "entries": [], "offset": 0, "is_live": True,
                 "type": db_row.get("type", ""),
@@ -4318,8 +4321,11 @@ async def api_session_tail(request):
     home_projects = Path.home() / ".claude" / "projects"
     session_type = "host" if session_file.is_relative_to(home_projects) else "container"
 
-    # Liveness from DB — dashboard.db is the sole owner after initial seed
-    is_live = bool(db_row.get("is_live")) if db_row else False
+    # Liveness from DB — the one state column decides
+    is_live = (
+        derive_lifecycle_state(db_row) not in ("ENDED", "FAILED")
+        if db_row else False
+    )
     tmux_name = db_row.get("tmux_name", "") if db_row else ""
     # Resolved: session has a linked JSONL path or non-empty session_uuids
     resolved = bool(db_row.get("jsonl_path")) or (
@@ -4793,7 +4799,7 @@ async def api_session_get(request):
         "activity_state": session.get("activity_state", "idle"),
         "project": session.get("project"),
         "org": resolve_session_org(session),
-        "is_live": bool(session.get("is_live")),
+        "is_live": derive_lifecycle_state(session) not in ("ENDED", "FAILED"),
         "dispatch_nag_enabled": bool(session.get("dispatch_nag")),
         "nag_enabled": bool(session.get("nag_enabled")),
         "nag_interval": session.get("nag_interval"),
@@ -7246,7 +7252,7 @@ async def api_session_resume(request):
         session_uuid=session_uuid, file_path=file_path,
     )
 
-    if dead_session and not dead_session.get("is_live"):
+    if dead_session and derive_lifecycle_state(dead_session) in ("ENDED", "FAILED"):
         # Reuse the original session identity
         tmux_name = dead_session["tmux_name"]
         label = dead_session.get("label", "")

@@ -1,7 +1,7 @@
 """Back-fill tmux_sessions rows for historical dispatch runs.
 
 Scans ``data/agent-runs/*/sessions/`` for existing agent runs and INSERTs a
-``type='dispatch'``, ``is_live=0`` row per historical run that does not yet
+``type='dispatch'``, ``state='ENDED'`` row per historical run that does not yet
 have one. Idempotent — reruns are safe.
 
 Usage::
@@ -43,7 +43,7 @@ def _bead_id_from_run_name(run_name: str) -> str | None:
 
 
 def backfill(agent_runs_dir: Path, *, db_path: Path | None = None) -> int:
-    """Insert one ``type='dispatch'``, ``is_live=0`` row per historical run.
+    """Insert one ``type='dispatch'``, ``state='ENDED'`` row per historical run.
 
     Returns the number of rows inserted. Idempotent: running twice is safe.
     """
@@ -81,12 +81,12 @@ def backfill(agent_runs_dir: Path, *, db_path: Path | None = None) -> int:
                 "INSERT INTO tmux_sessions"
                 " (tmux_name, type, project, bead_id, jsonl_path, session_uuid,"
                 "  resolution_dir, session_uuids, curr_jsonl_file,"
-                "  created_at, is_live, last_activity)"
-                " VALUES (?, 'dispatch', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+                "  created_at, state, ended_at, last_activity)"
+                " VALUES (?, 'dispatch', ?, ?, ?, ?, ?, ?, ?, ?, 'ENDED', ?, ?)",
                 (
                     run_name, project, bead_id, str(jsonl), session_uuid,
                     str(jsonl.parent), json.dumps([session_uuid]),
-                    str(jsonl), mtime, mtime,
+                    str(jsonl), mtime, mtime, mtime,
                 ),
             )
             inserted += 1

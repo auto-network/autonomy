@@ -13,8 +13,8 @@ rows WITHOUT a real tmux still get marked dead (regression guard — the
 filter must be narrow, not "skip everything").
 
 FAIL-REASON on master: session_monitor.py:_liveness_loop iterates all
-is_live=1 rows, calls _check_tmux unconditionally, marks dead on False.
-Dispatch/agentic rows is_live flip to 0 within the tick.
+live rows, calls _check_tmux unconditionally, marks dead on False.
+Dispatch/agentic rows must NOT be reaped by the tmux probe.
 """
 from __future__ import annotations
 
@@ -61,28 +61,28 @@ class TestLivenessTypeFilter:
             type_="dispatch",
             jsonl_path=str(sess_dir / f"{fake_dispatch}.jsonl"),
             bead_id="auto-fake",
-            is_live=1,
+            state="ACTIVE",
         )
         insert_row(
             db_path,
             tmux_name=fake_container,
             type_="container",
             jsonl_path=str(sess_dir / f"{fake_container}.jsonl"),
-            is_live=1,
+            state="ACTIVE",
         )
         insert_row(
             db_path,
             tmux_name=fake_librarian,
             type_="librarian",
             jsonl_path=str(sess_dir / f"{fake_librarian}.jsonl"),
-            is_live=1,
+            state="ACTIVE",
         )
         insert_row(
             db_path,
             tmux_name=fake_agentic,
             type_="agentic",
             jsonl_path=str(sess_dir / f"{fake_agentic}.jsonl"),
-            is_live=1,
+            state="ACTIVE",
         )
 
         # Build a monitor — do NOT patch _check_tmux.
@@ -115,18 +115,18 @@ class TestLivenessTypeFilter:
         l_row = fetch_row(db_path, fake_librarian)
         a_row = fetch_row(db_path, fake_agentic)
 
-        assert d_row is not None and d_row["is_live"] == 1, (
+        assert d_row is not None and d_row["state"] == "ACTIVE", (
             f"Dispatch row {fake_dispatch!r} got marked dead by liveness loop. "
             "Liveness must skip type='dispatch' — their death signal is "
             "explicit deregister_session() from dispatcher, not tmux polling. "
             f"row={d_row!r}"
         )
-        assert l_row is not None and l_row["is_live"] == 1, (
+        assert l_row is not None and l_row["state"] == "ACTIVE", (
             f"Librarian row {fake_librarian!r} got marked dead by liveness loop. "
             "Liveness must skip type='librarian'. "
             f"row={l_row!r}"
         )
-        assert a_row is not None and a_row["is_live"] == 1, (
+        assert a_row is not None and a_row["state"] == "ACTIVE", (
             f"Agentic row {fake_agentic!r} got marked dead by liveness loop. "
             "Liveness must skip type='agentic' — their lifecycle is owned by "
             "the agentic container watcher (poll_and_collect_agentic), not "
@@ -135,7 +135,7 @@ class TestLivenessTypeFilter:
             f"row={a_row!r}"
         )
         # Regression guard — container rows without tmux ARE dead
-        assert c_row is not None and c_row["is_live"] == 0, (
+        assert c_row is not None and c_row["state"] == "ENDED", (
             f"Container row {fake_container!r} should have been marked dead "
             "(no real tmux session by that name). Filter is TOO broad — it "
             f"must only skip dispatch + librarian + agentic. row={c_row!r}"

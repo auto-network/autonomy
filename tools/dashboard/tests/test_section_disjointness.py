@@ -158,18 +158,10 @@ async def test_sections_are_disjoint_and_total(db, tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_disjointness_survives_legacy_column_drift(db, tmp_path, monkeypatch):
-    """Poison the legacy is_live column on a live row: the sections must
-    still be decided by state, not by the projection. (Until Phase D flips
-    the Recent live-exclusion off is_live entirely, the write-through keeps
-    them equal in production — this pins the direction of authority.)"""
+async def test_terminal_states_never_reach_the_active_feed(db, tmp_path, monkeypatch):
+    """With the legacy columns dropped, state alone decides the sections —
+    a terminal row cannot reach the Active feed through any field."""
     names = _seed_all_states(tmp_path)
-    conn = dashboard_db.get_conn()
-    conn.execute(
-        "UPDATE tmux_sessions SET is_live=1 WHERE tmux_name=?",
-        (names["ENDED"],),
-    )
-    conn.commit()
-
     active = {s["session_id"] for s in _active_feed()}
-    assert names["ENDED"] not in active  # Active keys on state, not is_live
+    assert names["ENDED"] not in active
+    assert names["FAILED"] not in active

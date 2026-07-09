@@ -105,12 +105,13 @@ def isolated_dao(tmp_path, monkeypatch):
     conn = ddb.get_conn()
     conn.execute("""INSERT INTO tmux_sessions
         (tmux_name, type, project, jsonl_path, session_uuid, bead_id,
-         created_at, is_live, last_activity, last_message, entry_count,
-         context_tokens, label, role, activity_state)
-        VALUES (?, 'container', 'autonomy', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 'dead')""",
+         created_at, state, ended_at, last_activity, last_message, entry_count,
+         context_tokens, label, role)
+        VALUES (?, 'container', 'autonomy', ?, ?, ?, ?, 'ENDED', ?, ?, ?, ?, ?, ?, ?)""",
         ("auto-0418-200000", "/home/jeremy/sessions/with-label.jsonl",
          "uuid-with-label", "auto-test",
          time.time() - 3600,  # created an hour ago
+         time.time() - 600,   # ended 10 min ago
          time.time() - 600,   # last activity 10 min ago
          "Working on the thing", 240, 90000,
          "Session viewer redesign", "designer"),
@@ -118,9 +119,9 @@ def isolated_dao(tmp_path, monkeypatch):
     # Insert a live session — should be filtered out of recent
     conn.execute("""INSERT INTO tmux_sessions
         (tmux_name, type, project, jsonl_path, session_uuid, bead_id,
-         created_at, is_live, last_activity, last_message, entry_count,
-         context_tokens, label, role, activity_state)
-        VALUES (?, 'container', 'autonomy', ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'idle')""",
+         created_at, state, attention, last_activity, last_message, entry_count,
+         context_tokens, label, role)
+        VALUES (?, 'container', 'autonomy', ?, ?, ?, ?, 'ACTIVE', 'idle', ?, ?, ?, ?, ?, ?)""",
         ("auto-live-session", "/home/jeremy/sessions/old-active.jsonl",
          "uuid-old-active", None,
          time.time() - 1800, time.time() - 60,
@@ -181,7 +182,7 @@ class TestDashboardOverlay:
 
 class TestLiveExclusion:
     def test_live_session_excluded(self, isolated_dao):
-        """Sessions with is_live=1 in dashboard.db are filtered out of Recent."""
+        """Sessions in a non-terminal state in dashboard.db are filtered out of Recent."""
         results = isolated_dao.get_recent_sessions(limit=10)
         ids = [r["id"] for r in results]
         # src-old-active matches uuid-old-active (a live session) — must be excluded
@@ -779,8 +780,8 @@ class TestSessionStatusGraphSourceRepair:
         conn.execute(
             """INSERT INTO tmux_sessions
                (tmux_name, graph_source_id, type, project, jsonl_path, session_uuid,
-                created_at, is_live, last_activity, activity_state)
-               VALUES (?, ?, 'container', 'autonomy', ?, ?, ?, 1, ?, 'idle')""",
+                created_at, state, attention, last_activity)
+               VALUES (?, ?, 'container', 'autonomy', ?, ?, ?, 'ACTIVE', 'idle', ?)""",
             (
                 "auto-live-stale-graph",
                 "src-stale-missing",

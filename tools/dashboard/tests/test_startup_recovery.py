@@ -39,27 +39,37 @@ def db(tmp_path, monkeypatch):
 
 
 def _seed(tmux_name: str, startup_state: str | None) -> None:
+    from tools.dashboard.session_lifecycle_worker import STATE_AUTHORITY
+
+    if startup_state is None:
+        dashboard_db.insert_session(
+            tmux_name=tmux_name, session_type="container", project="x",
+            state="ACTIVE",
+        )
+        return
     dashboard_db.insert_session(
         tmux_name=tmux_name, session_type="container", project="x",
+        state="LAUNCHING",
     )
-    if startup_state is not None:
-        conn = dashboard_db.get_conn()
-        conn.execute(
-            "UPDATE tmux_sessions SET startup_state=? WHERE tmux_name=?",
-            (startup_state, tmux_name),
+    if startup_state == "setup_failed":
+        STATE_AUTHORITY.transition(
+            tmux_name, "FAILED", cause="test", reason="x", failed_phase="s",
         )
-        conn.commit()
+    else:
+        STATE_AUTHORITY.transition(
+            tmux_name, "LAUNCHING", phase=startup_state, cause="test",
+        )
 
 
 def _row(tmux_name: str) -> dict:
     conn = dashboard_db.get_conn()
     cur = conn.execute(
-        "SELECT startup_state, activity_state, is_live, lifecycle_detail"
+        "SELECT startup_state, state, lifecycle_detail, ended_at"
         " FROM tmux_sessions WHERE tmux_name=?",
         (tmux_name,),
     )
     row = cur.fetchone()
-    keys = ("startup_state", "activity_state", "is_live", "lifecycle_detail")
+    keys = ("startup_state", "state", "lifecycle_detail", "ended_at")
     return dict(zip(keys, row))
 
 
@@ -78,7 +88,7 @@ async def test_adopts_row_when_tmux_alive(db, monkeypatch):
     await _run_sweep(monkeypatch, alive={"auto-stuck"})
     row = _row("auto-stuck")
     assert row["startup_state"] is None
-    assert row["is_live"] == 1
+    assert row["state"] == "ACTIVE"
 
 
 @pytest.mark.asyncio
@@ -87,8 +97,7 @@ async def test_fails_row_when_tmux_gone(db, monkeypatch):
     await _run_sweep(monkeypatch, alive=set())
     row = _row("auto-zombie")
     assert row["startup_state"] == "setup_failed"
-    assert row["activity_state"] == "failed"
-    assert row["is_live"] == 0
+    assert row["state"] == "FAILED"
     detail = json.loads(row["lifecycle_detail"])
     assert detail["failed_phase"] == "startup_recovery"
     assert detail["retryable"] is True
@@ -101,8 +110,7 @@ async def test_leaves_running_rows_alone(db, monkeypatch):
     await _run_sweep(monkeypatch, alive=set())
     row = _row("auto-healthy")
     assert row["startup_state"] is None
-    assert row["is_live"] == 1
-    assert row["activity_state"] != "failed"
+    assert row["state"] == "ACTIVE"
 
 
 @pytest.mark.asyncio
@@ -111,7 +119,7 @@ async def test_leaves_sticky_failed_rows_alone(db, monkeypatch):
     await _run_sweep(monkeypatch, alive=set())
     row = _row("auto-failed")
     assert row["startup_state"] == "setup_failed"
-    assert row["is_live"] == 1  # untouched — visibility preserved as-is
+    assert row["state"] == "FAILED"  # untouched — visibility preserved
 
 
 @pytest.mark.asyncio

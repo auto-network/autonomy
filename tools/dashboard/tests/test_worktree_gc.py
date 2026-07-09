@@ -148,9 +148,9 @@ def test_death_path_never_cleans_worktrees(db, monkeypatch, tmp_path):
 
 
 def test_reader_flip_get_live_sessions_keys_on_state(db):
-    """The live set is state-based: a FAILED row (is_live projection 0)
-    and an ENDED row are excluded; LAUNCHING/ACTIVE/STOPPING included —
-    regardless of what the legacy column says."""
+    """The live set is state-based: terminal rows are excluded,
+    LAUNCHING/ACTIVE/STOPPING included — there is no other liveness field
+    left to disagree."""
     from tools.dashboard.session_lifecycle_worker import STATE_AUTHORITY
 
     _ = STATE_AUTHORITY
@@ -164,12 +164,6 @@ def test_reader_flip_get_live_sessions_keys_on_state(db):
         tmux_name="auto-e", session_type="container", project="x", state="ACTIVE",
     )
     dashboard_db.mark_dead("auto-e")
-    # Poison the legacy column on a live row: state must win.
-    conn = dashboard_db.get_conn()
-    conn.execute(
-        "UPDATE tmux_sessions SET is_live=0 WHERE tmux_name='auto-a'",
-    )
-    conn.commit()
 
     names = {r["tmux_name"] for r in dashboard_db.get_live_sessions()}
     assert names == {"auto-a", "auto-l"}

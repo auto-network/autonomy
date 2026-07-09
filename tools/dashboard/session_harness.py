@@ -134,7 +134,7 @@ class SessionHarness(Protocol):
         return ``composer_ready=True`` from this method as soon as
         ``current_state`` is non-empty (the first JSONL turn has been
         written) — otherwise sessions running that harness never reach
-        ``harness_phase=composer_ready`` and the derived ``ready`` flag
+        the composer-ready signal and the derived ``ready`` flag
         never fires.
         """
 
@@ -409,7 +409,7 @@ class CodexSessionHarness:
     ) -> tuple[dict[str, Any], list[dict]]:
         # auto-eerfx: Codex screen-reading is deferred to a follow-up
         # bead. The stub returns composer_ready=True unconditionally so
-        # Codex sessions can reach harness_phase=composer_ready (and
+        # Codex sessions can reach composer_ready (and
         # thus the derived 'ready' state) without waiting on a
         # screen-state signal this adapter doesn't yet produce.
         return (

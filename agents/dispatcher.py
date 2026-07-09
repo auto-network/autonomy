@@ -2521,7 +2521,7 @@ def poll_and_collect_agentic() -> None:
                 file=sys.stderr,
             )
         # Mark the session dead in the dashboard's tmux_sessions registry.
-        # Without this the session stays is_live=1 forever — the liveness
+        # Without this the session stays in a live state forever — the liveness
         # loop now skips ``type='agentic'`` rows (commit d08879c) so it
         # never marks them dead on its own. This is the explicit death
         # signal the skip comment promises ("container-exit collection
@@ -3011,11 +3011,11 @@ def reconcile_orphaned_runs() -> None:
 
 
 def reconcile_stale_monitor_rows() -> None:
-    """Sweep stale is_live=1 dispatch/librarian rows in tmux_sessions.
+    """Sweep stale live-state dispatch/librarian rows in tmux_sessions.
 
     When a dispatch container exits but the dispatcher's deregister POST
-    failed (or the dispatcher was mid-restart), tmux_sessions retains
-    is_live=1 with no matching RUNNING dispatch_runs entry. The session
+    failed (or the dispatcher was mid-restart), tmux_sessions retains a
+    non-terminal row with no matching RUNNING dispatch_runs entry. The session
     monitor's liveness loop (correctly) does not sweep dispatch/librarian
     rows — their lifecycle is dispatcher-owned. This pass closes the gap.
 
@@ -3030,8 +3030,14 @@ def reconcile_stale_monitor_rows() -> None:
         conn.row_factory = _sq.Row
         try:
             candidates = conn.execute(
+                # Keyed on the one state column (FSM consolidation). The
+                # legacy columns are dropped, so the NULL arm (a row this
+                # out-of-process reader meets before any backfill stamped
+                # it) conservatively counts as live — a spurious deregister
+                # POST is idempotent and just marks it ENDED.
                 "SELECT tmux_name FROM tmux_sessions "
-                "WHERE type IN ('dispatch','librarian') AND is_live=1"
+                "WHERE type IN ('dispatch','librarian')"
+                " AND (state NOT IN ('ENDED','FAILED') OR state IS NULL)"
             ).fetchall()
         finally:
             conn.close()
@@ -3394,7 +3400,7 @@ def main():
     # dispatcher restart between agent-completion and collection would lose
     # the agent's verdict and mark it 'orphaned'.
     reconcile_orphaned_runs()
-    # Pre-pass: deregister stale is_live=1 dispatch/librarian rows whose
+    # Pre-pass: deregister stale live-state dispatch/librarian rows whose
     # dispatch_runs entry is no longer RUNNING.
     reconcile_stale_monitor_rows()
     # Reconcile all state locations — clean up orphaned rows, beads, and worktrees
