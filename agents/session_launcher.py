@@ -174,11 +174,20 @@ def _capability_skill_surface(capabilities, run_dir: Path, harness: str) -> dict
     """Install each enabled capability's SKILL.md where the harness actually
     discovers skills.
 
-    Claude Code scans ``<project>/.claude/skills/<name>/SKILL.md``, so each
-    valid skill is copied under ``<run_dir>/cap-skills/<name>/`` and
-    bind-mounted into the primary repo at ``/workspace/repo/.claude/skills/``.
-    (The mountpoint appears as an empty directory on the host worktree, which
-    git ignores.) The skill must open with frontmatter carrying ``name`` +
+    Claude Code scans BOTH ``<cwd>/.claude/skills/`` (project) and
+    ``~/.claude/skills/`` (personal) at startup; a personal skill is available
+    regardless of the working directory. We copy each valid skill under
+    ``<run_dir>/cap-skills/<name>/`` and bind-mount it into the personal dir
+    ``/home/agent/.claude/skills/<name>`` because that is writable and
+    cwd-independent on every workspace — including ones whose working dir is a
+    read-only mount (Operator: cwd=/workspace/repo:ro) or simply isn't
+    /workspace/repo (enterprise-ng: cwd=/workspace/enterprise_ng). The old
+    /workspace/repo hardcode both failed on those (read-only mkdir aborts the
+    whole container launch) and, even where it mounted, sat outside the
+    harness's cwd so the skill was never discovered. /home/agent/.claude is
+    container-local (only its ``projects`` and ``CLAUDE.md`` are host-bound),
+    so nesting here never touches the operator's real home. The skill must open
+    with frontmatter carrying ``name`` +
     ``description`` and the name must be a plain slug — a SKILL.md missing
     either is skipped with a warning, because projecting it would look
     installed while the harness silently never loads it.
@@ -215,7 +224,7 @@ def _capability_skill_surface(capabilities, run_dir: Path, harness: str) -> dict
         dst_dir = run_dir / "cap-skills" / name
         dst_dir.mkdir(parents=True, exist_ok=True)
         (dst_dir / "SKILL.md").write_text(text)
-        mounts[str(dst_dir)] = f"/workspace/repo/.claude/skills/{name}:ro"
+        mounts[str(dst_dir)] = f"/home/agent/.claude/skills/{name}:ro"
     return mounts
 
 
