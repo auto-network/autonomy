@@ -664,8 +664,16 @@ class TestUnresolvedState:
                 "unified viewer Unresolved state not implemented yet"
             )
             # When unresolved state IS implemented, entries should be empty
-            # and a specific "Link Terminal" message should appear
-            text = h.visible_text()
+            # and a specific "Link Terminal" message should appear. Poll —
+            # the store row can resolve while the page still shows the
+            # loading slot for a beat under parallel load.
+            text = ""
+            _deadline = time.time() + 12
+            while time.time() < _deadline:
+                text = h.visible_text()
+                if "link" in text.lower():
+                    break
+                time.sleep(0.5)
             assert "link" in text.lower(), (
                 "unified viewer Unresolved state not implemented yet — "
                 "no link prompt shown for unresolved session"
