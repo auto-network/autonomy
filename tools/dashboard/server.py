@@ -5672,14 +5672,21 @@ def _teardown_remove_watches(tmux_name: str) -> None:
     session_monitor._phase_progress.pop(tmux_name, None)
 
 
-def _teardown_deregister(tmux_name: str, loop: asyncio.AbstractEventLoop | None) -> None:
+def _teardown_deregister(
+    tmux_name: str,
+    loop: asyncio.AbstractEventLoop | None,
+    *,
+    record_death: bool = True,
+) -> None:
+    """Untail + revoke. ``record_death=False`` on the FAILED-cleanup path:
+    the row is already terminal FAILED and must stay there."""
     if loop is not None and loop.is_running():
         fut = asyncio.run_coroutine_threadsafe(
-            session_monitor.deregister(tmux_name),
+            session_monitor.deregister(tmux_name, record_death=record_death),
             loop,
         )
         fut.result(timeout=_LIFECYCLE_DEREGISTER_TIMEOUT_S)
-    else:
+    elif record_death:
         dashboard_db.mark_dead(tmux_name)
     auth_db.revoke_token(tmux_name)
 
@@ -5735,7 +5742,7 @@ def _cleanup_after_lifecycle_failure(
         ("remove_watchers", _LIFECYCLE_REMOVE_WATCHERS_TIMEOUT_S,
          lambda: _teardown_remove_watches(tmux_name)),
         ("deregister", _LIFECYCLE_DEREGISTER_TIMEOUT_S,
-         lambda: _teardown_deregister(tmux_name, loop)),
+         lambda: _teardown_deregister(tmux_name, loop, record_death=False)),
     ]
     if cleanup_worktrees:
         steps.append(

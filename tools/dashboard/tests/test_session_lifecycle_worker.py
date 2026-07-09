@@ -30,11 +30,15 @@ def _init_db(tmp_path):
     return db_path
 
 
-def _insert_session(tmux_name="auto-life"):
+def _insert_session(tmux_name="auto-life", state="LAUNCHING"):
+    # Worker-step tests seed rows the way production does: launch
+    # entrypoints birth rows LAUNCHING (register_pending) before any
+    # worker step runs.
     dashboard_db.insert_session(
         tmux_name=tmux_name,
         session_type="container",
         project="autonomy",
+        state=state,
     )
 
 
@@ -79,15 +83,17 @@ def test_state_writer_maps_lifecycle_to_existing_columns(tmp_path):
     assert detail["retryable"] is False
     assert detail["attempt"] == 3
     assert isinstance(detail["last_progress_at"], float)
-    assert seen[-1].state == "failed"
-    assert seen[-1].phase == "injecting"
+    assert seen[-1].state == "FAILED"
     assert seen[-1].reason == "composer timeout"
+    assert _row()["state"] == "FAILED"
+    assert _row()["ended_at"] is not None
 
+    # FAILED is its own terminal: it never becomes ENDED (kept operator-
+    # visible until retried) — the authority refuses the move.
     writer.set_state("auto-life", "dead")
-    assert _row()["startup_state"] is None
-    assert _row()["activity_state"] == "dead"
+    assert _row()["state"] == "FAILED"
+    assert _row()["activity_state"] == "failed"
     assert _row()["is_live"] == 0
-    assert _row()["lifecycle_detail"] is None
 
 
 def test_worker_runs_jobs_serially_on_background_thread(tmp_path):
@@ -129,7 +135,7 @@ def test_worker_marks_job_failed_when_handler_raises(tmp_path):
     done = threading.Event()
 
     def on_transition(transition):
-        if transition.state == "failed":
+        if transition.state == "FAILED":
             done.set()
 
     def bad_handler(_job, _writer):
@@ -173,7 +179,10 @@ def test_worker_backpressure_is_nonblocking():
 def test_derive_lifecycle_state_coarse_mapping():
     from tools.dashboard.session_lifecycle_worker import derive_lifecycle_state
 
-    # FAILED wins over DEAD: fail writes set is_live=0 AND activity failed.
+    # The stored state column is the truth when present.
+    assert derive_lifecycle_state({"state": "LAUNCHING", "is_live": 0}) == "LAUNCHING"
+    # Legacy fallback (pre-backfill rows / mock fixtures):
+    # FAILED wins over ENDED: fail writes set is_live=0 AND activity failed.
     assert derive_lifecycle_state(
         {"activity_state": "failed", "is_live": 0, "startup_state": "setup_failed"}
     ) == "FAILED"
@@ -182,19 +191,19 @@ def test_derive_lifecycle_state_coarse_mapping():
     ) == "FAILED"
     assert derive_lifecycle_state(
         {"activity_state": "stopping", "is_live": 1, "startup_state": None}
-    ) == "TEARING_DOWN"
+    ) == "STOPPING"
     assert derive_lifecycle_state(
         {"activity_state": "cleaning", "is_live": 1, "startup_state": None}
-    ) == "TEARING_DOWN"
+    ) == "STOPPING"
     assert derive_lifecycle_state(
         {"activity_state": "dead", "is_live": 0, "startup_state": None}
-    ) == "DEAD"
+    ) == "ENDED"
     assert derive_lifecycle_state(
         {"activity_state": "idle", "is_live": 0, "startup_state": None}
-    ) == "DEAD"
+    ) == "ENDED"
     assert derive_lifecycle_state(
         {"activity_state": "running", "is_live": 1, "startup_state": "setup_running"}
-    ) == "STARTING"
+    ) == "LAUNCHING"
     assert derive_lifecycle_state(
         {"activity_state": "idle", "is_live": 1, "startup_state": None}
-    ) == "RUNNING"
+    ) == "ACTIVE"

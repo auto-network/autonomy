@@ -63,7 +63,23 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     -- launching" — default for old rows and the terminal running state.
     -- Written ONLY by the lifecycle worker's writer and
     -- arm_startup_state (enforced by test_no_racing_writers.py).
-    startup_state       TEXT
+    startup_state       TEXT,
+    -- THE single lifecycle truth (FSM consolidation): closed set
+    -- LAUNCHING | ACTIVE | STOPPING | ENDED | FAILED, CHECK-enforced so an
+    -- out-of-domain value is unrepresentable, not merely unreviewed.
+    -- Written only by the transition authority. is_live/activity_state
+    -- above are write-through projections of it during the migration
+    -- window. NULL = pre-backfill row only.
+    state               TEXT CHECK (state IN
+                            ('LAUNCHING','ACTIVE','STOPPING','ENDED','FAILED')),
+    -- Presence telemetry: tracker-owned, non-authoritative, meaningful
+    -- only while state=ACTIVE, NULL otherwise. Domain is the tracker
+    -- vocabulary (_apply_activity_entries), CHECK-enforced. NOT lifecycle.
+    attention           TEXT CHECK (attention IN
+                            ('tool_running','thinking','idle')),
+    -- Stamped when state enters ENDED/FAILED; the worktree GC tombstone
+    -- anchor. Cleared on re-entry into LAUNCHING/ACTIVE.
+    ended_at            REAL
 );
 
 CREATE TABLE IF NOT EXISTS turn_corrections (
@@ -280,6 +296,58 @@ def init_db(db_path: Path | None = None) -> None:
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN lifecycle_detail TEXT")
         _conn.commit()
+    # Migrate: the single lifecycle truth (FSM consolidation,
+    # graph://92ed929a-3ec). ``state`` is a closed set —
+    # LAUNCHING | ACTIVE | STOPPING | ENDED | FAILED — written ONLY by the
+    # transition authority (SessionLifecycleStateWriter.transition;
+    # enforced by test_no_racing_writers.py). is_live / activity_state
+    # become write-through projections stamped in the same UPDATE during
+    # the migration window and are dropped afterwards.
+    # ``attention`` is presence telemetry (working|idle), tracker-owned,
+    # non-authoritative, meaningful only while state=ACTIVE.
+    # ``ended_at`` stamps terminal entry; it is the worktree GC's
+    # tombstone anchor.
+    try:
+        _conn.execute("SELECT state FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute(
+            "ALTER TABLE tmux_sessions ADD COLUMN state TEXT CHECK (state IN"
+            " ('LAUNCHING','ACTIVE','STOPPING','ENDED','FAILED'))"
+        )
+        _conn.execute(
+            "ALTER TABLE tmux_sessions ADD COLUMN attention TEXT CHECK"
+            " (attention IN ('tool_running','thinking','idle'))"
+        )
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN ended_at REAL")
+        # One-shot backfill — the same decision table as
+        # derive_lifecycle_state's legacy fallback, in SQL. FAILED must win
+        # over ENDED (failed rows also carry is_live=0).
+        _conn.execute(
+            "UPDATE tmux_sessions SET state = CASE"
+            "  WHEN activity_state='failed' OR startup_state='setup_failed'"
+            "    THEN 'FAILED'"
+            "  WHEN activity_state IN ('stopping','cleaning') THEN 'STOPPING'"
+            "  WHEN activity_state='dead' OR is_live=0 OR is_live IS NULL"
+            "    THEN 'ENDED'"
+            "  WHEN startup_state IS NOT NULL THEN 'LAUNCHING'"
+            "  ELSE 'ACTIVE'"
+            " END"
+        )
+        _conn.execute(
+            "UPDATE tmux_sessions SET"
+            "  attention = CASE WHEN state='ACTIVE' THEN"
+            "    (CASE WHEN activity_state IN ('tool_running','thinking','idle')"
+            "      THEN activity_state ELSE 'idle' END)"
+            "  END,"
+            "  ended_at = CASE WHEN state IN ('ENDED','FAILED')"
+            "    THEN COALESCE(last_activity, created_at) END"
+        )
+        _conn.commit()
+    _conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tmux_sessions_state"
+        " ON tmux_sessions(state)"
+    )
+    _conn.commit()
     # Migrate: harness_token column (auto-ghhdg — rename from claude_token_alias;
     # auto-08n3f — values switched from operator alias strings to Anthropic
     # org UUIDs joined to ``dashboard.claude.credentials.alias`` for display).
@@ -392,10 +460,18 @@ def insert_session(
     session_uuid: str | None = None,
     resolution_dir: str | None = None,
     harness_token: str | None = None,
+    state: str = "ACTIVE",
 ) -> None:
-    """INSERT a new session row. Raises sqlite3.IntegrityError on duplicate name."""
+    """INSERT a new session row. Raises sqlite3.IntegrityError on duplicate name.
+
+    ``state`` is the birth lifecycle state: ACTIVE for registration of an
+    already-running process (seed, dispatch IPC, post-spawn register);
+    LAUNCHING for launch entrypoints (register_pending), whose arm then
+    moves through the authority as LAUNCHING→LAUNCHING.
+    """
     import json as _json
 
+    assert state in ("LAUNCHING", "ACTIVE")
     conn = get_conn()
     # Build session_uuids and curr_jsonl_file from initial values
     session_uuids = _json.dumps([session_uuid]) if session_uuid else "[]"
@@ -405,12 +481,12 @@ def insert_session(
         " (tmux_name, type, project, harness, harness_state,"
         "  bead_id, jsonl_path, session_uuid,"
         "  resolution_dir, session_uuids, curr_jsonl_file, created_at, is_live,"
-        "  harness_token)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+        "  harness_token, state, attention)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
         (tmux_name, session_type, project, harness, harness_state,
          bead_id, jsonl_path, session_uuid,
          resolution_dir, session_uuids, curr_jsonl_file, time.time(),
-         harness_token),
+         harness_token, state, "idle" if state == "ACTIVE" else None),
     )
     conn.commit()
 
@@ -919,15 +995,17 @@ def mark_dead(tmux_name: str) -> None:
     import inspect
     caller = inspect.stack()[1]
     caller_loc = f"{Path(caller.filename).name}:{caller.lineno}"
-    conn = get_conn()
-    cursor = conn.execute(
-        "UPDATE tmux_sessions SET is_live=0, activity_state='dead' WHERE tmux_name=?",
-        (tmux_name,),
+    # Death is a lifecycle transition like any other: route through the
+    # authority (legality matrix, atomic write incl. write-through
+    # projections, broadcast hook). Import deferred — the worker module
+    # imports this one lazily inside methods, so this cannot cycle.
+    from tools.dashboard.session_lifecycle_worker import STATE_AUTHORITY
+    changed = STATE_AUTHORITY.transition(
+        tmux_name, "ENDED", cause=f"death-detected@{caller_loc}",
     )
-    conn.commit()
     logger.info(
-        "dashboard_db: mark_dead  tmux=%s  updated_rows=%d  caller=%s",
-        tmux_name, cursor.rowcount, caller_loc,
+        "dashboard_db: mark_dead  tmux=%s  changed=%s  caller=%s",
+        tmux_name, changed, caller_loc,
     )
 
 
@@ -945,11 +1023,21 @@ def update_disk_usage(
 
 
 def update_activity_state(tmux_name: str, state: str) -> None:
-    """Update the activity_state for a session."""
+    """Record presence telemetry (working|idle) for an ACTIVE session.
+
+    This is the ATTENTION writer — not lifecycle state. The guard is load-
+    bearing: the tracker fires on tailed JSONL entries, which can trail a
+    lifecycle transition (a batch landing after a stop/failure), and an
+    unguarded write here used to punch 'idle'/'working' into dead rows.
+    activity_state is stamped alongside as a legacy write-through
+    projection until the column drop.
+    """
+    assert state in ("tool_running", "thinking", "idle"), state
     conn = get_conn()
     conn.execute(
-        "UPDATE tmux_sessions SET activity_state=? WHERE tmux_name=?",
-        (state, tmux_name),
+        "UPDATE tmux_sessions SET attention=?, activity_state=?"
+        " WHERE tmux_name=? AND state='ACTIVE'",
+        (state, state, tmux_name),
     )
     conn.commit()
 
@@ -1154,12 +1242,12 @@ def revive_session(tmux_name: str, *, file_offset: int = 0) -> None:
     composer-ready injection gate before the relaunched harness accepts
     input; the pane-poller re-derives fresh state within a poll interval."""
     conn = get_conn()
+    # Row-prep only: the lifecycle STATE change (→ LAUNCHING, is_live,
+    # ended_at clear) happens at the arm_startup_state call that
+    # immediately follows, as one atomic authority write.
     conn.execute(
         "UPDATE tmux_sessions SET"
-        "  is_live=1,"
         "  file_offset=?,"
-        "  activity_state=CASE WHEN activity_state='dead' THEN 'idle' ELSE activity_state END,"
-        "  startup_state=NULL,"
         "  harness_state='{}'"
         " WHERE tmux_name=?",
         (file_offset, tmux_name),

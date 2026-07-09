@@ -36,57 +36,77 @@ LifecycleState = Literal[
 
 _STOP = object()
 
-_STARTUP_STATE_FOR_LIFECYCLE: dict[str, str | None] = {
-    "requested": "requesting",
-    "preparing": "preparing_workspace",
-    "launching": "launching_container",
-    "setup": "setup_running",
-    "waiting_ready": "harness_starting",
-    "confirming_trust": "confirming_trust",
-    "composer_ready": "composer_ready",
-    "injecting": "awaiting_first_response",
-    "running": None,
-    "failed": "setup_failed",
-    "stopping": None,
-    "cleaning": None,
-    "dead": None,
+# ── The single lifecycle truth ───────────────────────────────────────
+#
+# One closed set. Every session is in exactly one of these at all times;
+# is_live / activity_state are write-through projections during the
+# migration window and derived afterwards. Only the transition authority
+# below writes this column (enforced by test_no_racing_writers.py).
+SessionState = Literal["LAUNCHING", "ACTIVE", "STOPPING", "ENDED", "FAILED"]
+
+# Legal moves. A transition outside this table is refused and logged at
+# WARNING — an illegal request is a bug announcing itself, and refusing
+# keeps it from corrupting state. ``None`` covers rows that predate the
+# state column (un-backfilled snapshots); they may enter anywhere once.
+_LEGAL_TRANSITIONS: dict[str | None, frozenset[str]] = {
+    None: frozenset({"LAUNCHING", "ACTIVE", "STOPPING", "ENDED", "FAILED"}),
+    "LAUNCHING": frozenset({"LAUNCHING", "ACTIVE", "STOPPING", "ENDED", "FAILED"}),
+    "ACTIVE": frozenset({"ACTIVE", "STOPPING", "ENDED", "FAILED"}),
+    "STOPPING": frozenset({"STOPPING", "ENDED", "FAILED"}),
+    # ENDED→LAUNCHING is resume/retry entry; ENDED→ACTIVE is boot-recovery
+    # adopting a row whose process outlived a dashboard restart. ENDED
+    # never becomes FAILED: the one path that wanted it (failure-cleanup's
+    # deregister recording death mid-cleanup) suppresses death-recording
+    # instead — the worker knows the session is failing.
+    "ENDED": frozenset({"ENDED", "LAUNCHING", "ACTIVE"}),
+    # FAILED→STOPPING is the failure-cleanup pass (fail is recorded first,
+    # bounded cleanup renders the cleaning chip, then fail is restored);
+    # FAILED→LAUNCHING is retry. FAILED never becomes ENDED — it is its
+    # own terminal, kept operator-visible until retried.
+    "FAILED": frozenset({"FAILED", "LAUNCHING", "STOPPING"}),
 }
 
-_ACTIVITY_STATE_FOR_LIFECYCLE: dict[str, str] = {
-    "requested": "running",
-    "preparing": "running",
-    "launching": "running",
-    "setup": "running",
-    "waiting_ready": "running",
-    "confirming_trust": "running",
-    "composer_ready": "running",
-    "injecting": "running",
-    "running": "running",
-    "failed": "failed",
-    "stopping": "stopping",
-    "cleaning": "cleaning",
-    "dead": "dead",
+# Internal worker step → (coarse state, chip phase). The chip values are
+# the granular launch phases the UI renders; they are sub-state, only
+# meaningful while LAUNCHING/STOPPING.
+_SESSION_STATE_FOR_LIFECYCLE: dict[str, tuple[str, str | None]] = {
+    "requested": ("LAUNCHING", "requesting"),
+    "preparing": ("LAUNCHING", "preparing_workspace"),
+    "launching": ("LAUNCHING", "launching_container"),
+    "setup": ("LAUNCHING", "setup_running"),
+    "waiting_ready": ("LAUNCHING", "harness_starting"),
+    "confirming_trust": ("LAUNCHING", "confirming_trust"),
+    "composer_ready": ("LAUNCHING", "composer_ready"),
+    "injecting": ("LAUNCHING", "awaiting_first_response"),
+    "running": ("ACTIVE", None),
+    "failed": ("FAILED", None),
+    "stopping": ("STOPPING", "stopping"),
+    "cleaning": ("STOPPING", "cleaning"),
+    "dead": ("ENDED", None),
 }
-
 
 def derive_lifecycle_state(row: dict) -> str:
-    """Coarse lifecycle state, DERIVED from the persisted columns.
+    """Coarse lifecycle state for a session row.
 
-    Per the FSM contract there is no fifth column — STARTING / RUNNING /
-    TEARING_DOWN / FAILED / DEAD are computed from (activity_state,
-    startup_state, is_live) at read time. Order matters: failed rows also
-    carry is_live=0, so FAILED must win over DEAD.
+    The stored ``state`` column is the truth. The legacy-column computation
+    below covers rows that don't carry it (pre-backfill snapshots, mock
+    fixtures) and is also the migration backfill's definition. Order
+    matters in the fallback: failed rows also carry is_live=0, so FAILED
+    must win over ENDED.
     """
+    stored = row.get("state")
+    if stored:
+        return stored
     activity = row.get("activity_state")
     if activity == "failed" or row.get("startup_state") == "setup_failed":
         return "FAILED"
     if activity in ("stopping", "cleaning"):
-        return "TEARING_DOWN"
+        return "STOPPING"
     if activity == "dead" or not row.get("is_live"):
-        return "DEAD"
+        return "ENDED"
     if row.get("startup_state"):
-        return "STARTING"
-    return "RUNNING"
+        return "LAUNCHING"
+    return "ACTIVE"
 
 
 @dataclass(frozen=True)
@@ -130,6 +150,161 @@ class SessionLifecycleStateWriter:
         """
         self._on_transition = hook
 
+    def transition(
+        self,
+        tmux_name: str,
+        to_state: str,
+        *,
+        phase: str | None = None,
+        cause: str = "",
+        reason: str | None = None,
+        failed_phase: str | None = None,
+        retryable: bool = True,
+        attempt: int = 1,
+    ) -> bool:
+        """THE transition authority — the only writer of session state.
+
+        Validates the move against ``_LEGAL_TRANSITIONS``, then writes the
+        full column set atomically: ``state``, the legacy write-through
+        projections (``startup_state``/``activity_state``/``is_live`` —
+        stamped in the SAME UPDATE, so they cannot disagree with ``state``),
+        ``last_activity``, ``ended_at``, ``attention`` (reset to idle on
+        ACTIVE entry, cleared on terminal entry), and ``lifecycle_detail``.
+
+        Returns True when the row changed. An illegal move is REFUSED,
+        logged at WARNING, and returns False — a caller requesting an
+        impossible transition is a bug announcing itself, and refusal keeps
+        it from corrupting state.
+        """
+        from tools.dashboard.dao import dashboard_db
+
+        assert to_state in ("LAUNCHING", "ACTIVE", "STOPPING", "ENDED", "FAILED")
+        conn = dashboard_db.get_conn()
+        row = conn.execute(
+            "SELECT state FROM tmux_sessions WHERE tmux_name=?", (tmux_name,),
+        ).fetchone()
+        if row is None:
+            logger.warning(
+                "session_lifecycle: transition skipped for missing row tmux=%s to=%s cause=%s",
+                tmux_name, to_state, cause,
+            )
+            # The transition event still fires (pre-consolidation contract:
+            # observers hear about the attempt even when the row is gone —
+            # e.g. a failure recorded for an already-purged session).
+            if self._on_transition is not None:
+                self._on_transition(LifecycleTransition(
+                    tmux_name=tmux_name,
+                    state=to_state,  # type: ignore[arg-type]
+                    phase=phase,
+                    reason=reason,
+                ))
+            return False
+        current = row[0] or None
+        if to_state not in _LEGAL_TRANSITIONS.get(current, frozenset()):
+            logger.warning(
+                "session_lifecycle: ILLEGAL transition refused tmux=%s %s→%s cause=%s reason=%s",
+                tmux_name, current, to_state, cause, reason or "",
+            )
+            return False
+
+        now = time.time()
+        is_live = 0 if to_state in ("ENDED", "FAILED") else 1
+        # Legacy chip projection: LAUNCHING carries the granular phase;
+        # FAILED keeps the sticky setup_failed chip; ACTIVE/STOPPING/ENDED
+        # clear it (matches the pre-consolidation rendering exactly).
+        if to_state == "LAUNCHING":
+            startup_state = phase
+        elif to_state == "FAILED":
+            startup_state = "setup_failed"
+        else:
+            startup_state = None
+        if to_state == "LAUNCHING":
+            activity_state = "running"
+        elif to_state == "ACTIVE":
+            # Legacy value on entry ('running', matching the pre-migration
+            # writer); the attention tracker converges to idle/working from
+            # tailed entries within seconds.
+            activity_state = "running"
+        elif to_state == "STOPPING":
+            activity_state = phase or "stopping"
+        elif to_state == "FAILED":
+            activity_state = "failed"
+        else:
+            activity_state = "dead"
+
+        lifecycle_detail = None
+        if to_state == "FAILED":
+            lifecycle_detail = json.dumps(
+                {
+                    "failed_phase": failed_phase or "",
+                    "reason": reason or "",
+                    "retryable": bool(retryable),
+                    "attempt": int(attempt),
+                    "last_progress_at": now,
+                },
+                sort_keys=True,
+            )
+
+        if to_state in ("ENDED", "FAILED"):
+            ended_at_sql = "COALESCE(ended_at, ?)"
+            ended_at_val: float | None = now
+            attention_sql = "NULL"
+        elif to_state == "ACTIVE":
+            ended_at_sql = "NULL"
+            ended_at_val = None
+            # attention's domain is the tracker vocabulary
+            # (tool_running|thinking|idle, CHECK-enforced); entry matches
+            # birth and the tracker converges from tailed entries. The
+            # legacy activity_state projection keeps 'running' for
+            # byte-compatibility until the column drop.
+            attention_sql = "'idle'"
+        else:
+            ended_at_sql = "NULL"
+            ended_at_val = None
+            attention_sql = "attention"
+
+        params: list = [to_state, startup_state, activity_state, is_live, now, lifecycle_detail]
+        if ended_at_val is not None:
+            params.append(ended_at_val)
+        params.append(tmux_name)
+        cur = conn.execute(
+            "UPDATE tmux_sessions"
+            f" SET state=?, startup_state=?, activity_state=?, is_live=?,"
+            f" last_activity=?, lifecycle_detail=?,"
+            f" ended_at={ended_at_sql}, attention={attention_sql}"
+            " WHERE tmux_name=?",
+            params,
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            # Row vanished between the legality SELECT and the UPDATE.
+            # Same contract as the missing-row branch above: observers
+            # still hear about the attempt.
+            logger.warning(
+                "session_lifecycle: state write skipped for missing row tmux=%s state=%s",
+                tmux_name, to_state,
+            )
+            if self._on_transition is not None:
+                self._on_transition(LifecycleTransition(
+                    tmux_name=tmux_name,
+                    state=to_state,  # type: ignore[arg-type]
+                    phase=phase,
+                    reason=reason,
+                ))
+            return False
+        logger.info(
+            "session_lifecycle: state tmux=%s state=%s phase=%s cause=%s reason=%s",
+            tmux_name, to_state, phase or "", cause, reason or "",
+        )
+        if self._on_transition is not None:
+            self._on_transition(LifecycleTransition(
+                tmux_name=tmux_name,
+                state=to_state,  # type: ignore[arg-type]
+                phase=phase,
+                reason=reason,
+            ))
+        return True
+
     def set_state(
         self,
         tmux_name: str,
@@ -140,55 +315,18 @@ class SessionLifecycleStateWriter:
         retryable: bool = True,
         attempt: int = 1,
     ) -> None:
-        from tools.dashboard.dao import dashboard_db
-
-        startup_state = _STARTUP_STATE_FOR_LIFECYCLE[state]
-        activity_state = _ACTIVITY_STATE_FOR_LIFECYCLE[state]
-        is_live = 0 if state in ("dead", "failed") else 1
-        now = time.time()
-        lifecycle_detail = None
-        if state == "failed":
-            lifecycle_detail = json.dumps(
-                {
-                    "failed_phase": phase or "",
-                    "reason": reason or "",
-                    "retryable": bool(retryable),
-                    "attempt": int(attempt),
-                    "last_progress_at": now,
-                },
-                sort_keys=True,
-            )
-
-        conn = dashboard_db.get_conn()
-        cur = conn.execute(
-            "UPDATE tmux_sessions"
-            " SET startup_state=?, activity_state=?, is_live=?,"
-            " last_activity=?, lifecycle_detail=?"
-            " WHERE tmux_name=?",
-            (startup_state, activity_state, is_live, now, lifecycle_detail, tmux_name),
-        )
-        conn.commit()
-        if cur.rowcount == 0:
-            logger.warning(
-                "session_lifecycle: state write skipped for missing row tmux=%s state=%s",
-                tmux_name,
-                state,
-            )
-        transition = LifecycleTransition(
-            tmux_name=tmux_name,
-            state=state,
-            phase=phase,
-            reason=reason,
-        )
-        logger.info(
-            "session_lifecycle: state tmux=%s state=%s phase=%s reason=%s",
+        """Worker-step wrapper: internal step name → transition()."""
+        to_state, chip = _SESSION_STATE_FOR_LIFECYCLE[state]
+        self.transition(
             tmux_name,
-            state,
-            phase or "",
-            reason or "",
+            to_state,
+            phase=chip if to_state in ("LAUNCHING", "STOPPING") else None,
+            cause=f"worker:{state}",
+            reason=reason,
+            failed_phase=phase if to_state == "FAILED" else None,
+            retryable=retryable,
+            attempt=attempt,
         )
-        if self._on_transition is not None:
-            self._on_transition(transition)
 
     def fail(
         self,
@@ -209,6 +347,13 @@ class SessionLifecycleStateWriter:
         )
 
 
+# The one shared authority instance. Everything that records lifecycle
+# state — the worker's steps, arm_startup_state, mark_dead, boot recovery —
+# goes through this object so the transition hook (wired in _on_startup)
+# broadcasts every change.
+STATE_AUTHORITY = SessionLifecycleStateWriter()
+
+
 LifecycleHandler = Callable[[LifecycleJob, SessionLifecycleStateWriter], None]
 
 
@@ -224,7 +369,7 @@ class SessionLifecycleWorker:
         name: str = "session-lifecycle",
     ) -> None:
         self._queue: queue.Queue[LifecycleJob | object] = queue.Queue(maxsize=max_queue_size)
-        self._state_writer = state_writer or SessionLifecycleStateWriter()
+        self._state_writer = state_writer or STATE_AUTHORITY
         self._handlers: dict[LifecycleAction, LifecycleHandler] = dict(handlers or {})
         self._name = name
         self._thread: threading.Thread | None = None

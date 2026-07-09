@@ -99,44 +99,16 @@ except ImportError:
 # default (existing rows / sessions past launching). Non-NULL values are
 # the in-progress launching states the session cards render as chips.
 #
-# WRITERS — exactly two, by contract (graph://92ed929a-3ec):
-#   1. The session lifecycle worker's SessionLifecycleStateWriter — every
-#      transition during a launch/stop/retry, including the terminal
-#      NULL(running) and sticky ``setup_failed``.
-#   2. ``arm_startup_state`` below — the explicit FSM entry, called only
-#      from the launch entrypoints (register_pending on create/resume).
-#
-# Nothing else writes this column. The historical multi-writer design
-# (setup-exit watcher, screen-poller, inject tasks, tailer clear) raced —
-# the launching flip-flop/stuck class validated 11× in
-# graph://afb67d11-7c4 — and was removed with the FSM completion.
-
-
-def _arm_startup_state_sql(tmux_name: str, state: str) -> bool:
-    """Unconditional FSM entry writer. Returns True if a row was updated.
-
-    Used only when a launch is actually starting: session create
-    (register_pending → "requesting") and session resume (→
-    "harness_starting"). Overwrites anything, including ``setup_failed`` —
-    an explicit relaunch is the retry path, so the sticky failure must not
-    block it.
-
-    Stamps ``last_activity``: the liveness sweep's booting-grace anchors on
-    it, and a launch can sit queued at ``requesting`` before the worker's
-    first transition provides a fresh stamp — the arm stamp is what keeps
-    the sweep off a queued launch (a resumed row's prior last_activity can
-    be arbitrarily old).
-    """
-    import time as _time
-    from tools.dashboard.dao.dashboard_db import get_conn
-    conn = get_conn()
-    cur = conn.execute(
-        "UPDATE tmux_sessions SET startup_state = ?, last_activity = ?"
-        " WHERE tmux_name = ?",
-        (state, _time.time(), tmux_name),
-    )
-    conn.commit()
-    return cur.rowcount > 0
+# WRITER — exactly one, by contract (graph://92ed929a-3ec): the
+# transition authority (SessionLifecycleStateWriter.transition on the
+# shared STATE_AUTHORITY instance). The worker's steps, arm_startup_state
+# below (launch entry), mark_dead (death detection), and boot recovery are
+# all causes routed through it; it validates the move against the legality
+# matrix and stamps state + the legacy write-through projections in one
+# atomic UPDATE. The historical multi-writer design (setup-exit watcher,
+# screen-poller, inject tasks, tailer clear) raced — the launching
+# flip-flop/stuck class validated 11× in graph://afb67d11-7c4 — and was
+# removed with the FSM completion.
 
 
 def _harness_usage_org() -> str:
@@ -1162,14 +1134,19 @@ class SessionMonitor:
         await self._broadcast_registry()
 
     async def arm_startup_state(self, tmux_name: str, state: str) -> bool:
-        """Explicit FSM entry: put a session INTO a launching state.
+        """Explicit FSM entry: put a session INTO the LAUNCHING state.
 
-        The FSM entry writer: only this (and the lifecycle worker's own
-        writer) touch startup_state. Call it exactly when a launch begins:
-        create/resume/retry seed the row here before enqueueing. Overwrites
-        ``setup_failed`` (an explicit relaunch is the retry path).
+        Call it exactly when a launch begins: create/resume/retry seed the
+        row here before enqueueing. Routes through the transition authority
+        (→ LAUNCHING with the given chip phase; legality matrix allows
+        entry from ENDED and FAILED — an explicit relaunch is the retry
+        path — and refuses it from ACTIVE/STOPPING).
         """
-        changed = _arm_startup_state_sql(tmux_name, state)
+        from tools.dashboard.session_lifecycle_worker import STATE_AUTHORITY
+
+        changed = STATE_AUTHORITY.transition(
+            tmux_name, "LAUNCHING", phase=state, cause="launch-entry",
+        )
         # Arm the pane-poller alongside the FSM entry regardless of the row
         # write outcome — composer detection must run for this launch even if
         # the row was already in the proposed state.
@@ -1201,6 +1178,7 @@ class SessionMonitor:
                 session_type=session_type,
                 project=project,
                 harness=harness,
+                state="LAUNCHING",
             )
         except Exception:
             # Duplicate-name or other INSERT failure — surfaces as a no-op so
@@ -1393,9 +1371,11 @@ class SessionMonitor:
     ) -> None:
         """Re-register a revived session for tailing.
 
-        The DB row already exists and has been set to is_live=1 by revive_session().
-        This just sets up the in-memory tail state and inotify watches so the
-        session monitor starts tailing the JSONL file again.
+        The DB row already exists; revive_session() reset its tail offset and
+        harness_state, and the arm that follows moves it to LAUNCHING through
+        the transition authority. This just sets up the in-memory tail state
+        and inotify watches so the session monitor starts tailing the JSONL
+        file again.
         """
         path_str: str | None = None
         res_dir: Path | None = None
@@ -1428,10 +1408,18 @@ class SessionMonitor:
         )
         await self._broadcast_registry()
 
-    async def deregister(self, tmux_name: str) -> None:
-        """Mark a session as dead and remove from tail states."""
+    async def deregister(self, tmux_name: str, *, record_death: bool = True) -> None:
+        """Remove a session from tailing; optionally record its death.
+
+        ``record_death=False`` is for the worker's FAILED-session cleanup:
+        the row is already terminal FAILED (with its retryable detail) and
+        must stay there — recording ENDED mid-cleanup would need a
+        postmortem ENDED→FAILED restore, which the legality matrix
+        deliberately does not contain.
+        """
         self._remove_watches(tmux_name)
-        mark_dead(tmux_name)
+        if record_death:
+            mark_dead(tmux_name)
         # Final disk footprint for the ended card; drops the session from
         # the resource poll set. Fire-and-forget, never raises.
         from tools.dashboard.resource_monitor import resource_monitor

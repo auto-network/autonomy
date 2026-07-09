@@ -208,6 +208,22 @@ def test_client(mock_fixture, resume_env, monkeypatch):
     """TestClient with mocked tmux, launch_session, and graph.db."""
     monkeypatch.setenv("DASHBOARD_MOCK", mock_fixture)
 
+    # Fresh dashboard.db per test — cross-test row reuse makes the
+    # transition legality matrix (correctly) refuse re-arming rows a
+    # previous test left ACTIVE, and tests must not write the repo DB.
+    from tools.dashboard.dao import dashboard_db as _ddb
+    _db_path = resume_env["tmp_path"] / "dashboard.db"
+    monkeypatch.setenv("DASHBOARD_DB", str(_db_path))
+    prior = getattr(_ddb, "_conn", None)
+    if prior is not None:
+        try:
+            prior.close()
+        except Exception:
+            pass
+    _ddb._conn = None
+    _ddb._DB_PATH = _db_path
+    _ddb.init_db(_db_path)
+
     # Reload mock DAO
     from tools.dashboard.dao import mock as mock_mod
     importlib.reload(mock_mod)
