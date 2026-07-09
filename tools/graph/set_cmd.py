@@ -277,6 +277,7 @@ def cmd_set_members(args) -> None:
         rows.append({
             "id": m.id[:11],
             "key": m.key,
+            "org": m.org or "-",
             "stored_rev": str(m.stored_revision),
             "target_rev": target_disp,
             "state": m.state,
@@ -284,9 +285,15 @@ def cmd_set_members(args) -> None:
     if not rows:
         print(f"(no Settings in {args.set_id})")
     else:
+        # ORG is the DB each row is surfaced from — the caller org or one of
+        # its peers. It matters because resolvers differ on peer visibility
+        # (e.g. capability enable/install read the workspace's own org ONLY,
+        # so a row surfaced here from a peer will NOT resolve for a workspace
+        # in a different org). Pin with --only-org to see one DB in isolation.
         _print_table(rows, [
             ("id", "ID", 12),
             ("key", "KEY", 28),
+            ("org", "ORG", 16),
             ("stored_rev", "STORED", 6),
             ("target_rev", "TARGET", 6),
             ("state", "STATE", 10),
