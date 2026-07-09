@@ -397,3 +397,65 @@ def test_stop_handler_reaches_dead_despite_step_errors(monkeypatch, tmp_path):
     assert row["activity_state"] == "dead"
     assert row["is_live"] == 0
     assert row["startup_state"] is None
+
+
+def test_verify_container_started_fails_fast_with_pane_tail(monkeypatch):
+    """docker run producing NO container must fail the launch within the
+    verification window — not sit in phantom setup for the full 600s
+    budget (auto-0709-092918: an OCI mount error printed in the pane in
+    2s; the launch waited 600s, three times)."""
+    from tools.dashboard import server
+
+    monkeypatch.setattr(server, "_container_exists", lambda _n: False)
+    monkeypatch.setattr(
+        server, "_run_tmux_capture",
+        lambda _n, **_kw: "docker: OCI runtime create failed: ro mkdir\n",
+    )
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
+
+    with pytest.raises(RuntimeError) as exc:
+        server._verify_container_started(
+            tmux_name="auto-life",
+            deadline=server.time.monotonic() + 0.2,  # a couple of probes
+        )
+    assert "no container" in str(exc.value)
+    assert "OCI runtime create failed" in str(exc.value)
+
+
+def test_verify_container_probe_failure_is_not_a_verdict(monkeypatch):
+    """A failing docker probe (fork pressure) must not claim 'no
+    container' — same fail-safe contract as the tmux liveness probe."""
+    from tools.dashboard import server
+
+    monkeypatch.setattr(server, "_container_exists", lambda _n: None)
+    monkeypatch.setattr(server, "_run_tmux_capture", lambda _n, **_kw: "")
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
+
+    with pytest.raises(RuntimeError) as exc:
+        server._verify_container_started(
+            tmux_name="auto-life",
+            deadline=server.time.monotonic(),
+        )
+    assert "could not be verified" in str(exc.value)
+
+
+def test_wait_for_setup_fails_when_container_dies_mid_setup(monkeypatch, tmp_path):
+    """A container that dies during setup can never write .setup-exit —
+    two consecutive authoritative 'gone' probes fail the step immediately
+    instead of waiting out the 600s budget."""
+    from tools.dashboard import server
+
+    monkeypatch.setattr(server, "_container_exists", lambda _n: False)
+    monkeypatch.setattr(
+        server, "_run_tmux_capture", lambda _n, **_kw: "container exited\n",
+    )
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
+
+    with pytest.raises(RuntimeError) as exc:
+        server._wait_for_setup_complete(
+            tmux_name="auto-life",
+            run_dir=tmp_path,
+            startup_script=tmp_path / "startup.sh",
+            deadline=server.time.monotonic() + 60,
+        )
+    assert "died during setup" in str(exc.value)

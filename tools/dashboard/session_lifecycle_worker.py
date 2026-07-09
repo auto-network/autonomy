@@ -66,6 +66,33 @@ _LEGAL_TRANSITIONS: dict[str | None, frozenset[str]] = {
     "FAILED": frozenset({"FAILED", "LAUNCHING", "STOPPING"}),
 }
 
+# Per-phase time budgets, seconds — THE single source for both consumers:
+# the worker enforces them inside its blocking steps, and the liveness
+# reaper's orphaned-launch belt reads the same table (budget + margin since
+# the last transition). One table, two consumers: a reaper grace that
+# undercuts a worker deadline is unrepresentable. Keyed by the chip phase
+# (the value the row's startup_state carries while LAUNCHING/STOPPING).
+STEP_TIMEOUTS_S: dict[str, float] = {
+    # Queue wait before the worker picks the job up. Generous: launches
+    # serialize on one worker thread and may sit behind a slow setup.
+    "requesting": 900.0,
+    "preparing_workspace": 120.0,
+    "launching_container": 60.0,
+    "setup_running": 600.0,
+    "harness_starting": 60.0,
+    "confirming_trust": 60.0,
+    "composer_ready": 30.0,
+    "awaiting_first_response": 30.0,
+    "stopping": 30.0,
+    "cleaning": 70.0,
+}
+
+# The reaper's slack on top of a phase budget before it may treat a
+# LAUNCHING/STOPPING session as orphaned (worker lost the job without the
+# process dying). The worker itself fails a stuck step at the budget; the
+# belt exists only for the exotic worker-death case.
+REAPER_BELT_MARGIN_S = 60.0
+
 # Internal worker step → (coarse state, chip phase). The chip values are
 # the granular launch phases the UI renders; they are sub-state, only
 # meaningful while LAUNCHING/STOPPING.

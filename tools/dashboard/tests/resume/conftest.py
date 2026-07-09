@@ -330,6 +330,7 @@ def test_client(mock_fixture, resume_env, monkeypatch):
     monkeypatch.setattr(server, "_wait_for_prompt", lambda **_kw: None)
     monkeypatch.setattr(server, "_wait_for_setup_complete", lambda **_kw: None)
     monkeypatch.setattr(server, "_inject_echo_verified", lambda **_kw: None)
+    monkeypatch.setattr(server, "_verify_container_started", lambda **_kw: None)
 
     def _run_lifecycle_jobs():
         while _queued_jobs:

@@ -39,7 +39,11 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
-from tools.dashboard.session_lifecycle_worker import derive_lifecycle_state
+from tools.dashboard.session_lifecycle_worker import (
+    REAPER_BELT_MARGIN_S,
+    STEP_TIMEOUTS_S,
+    derive_lifecycle_state,
+)
 from tools.dashboard.session_harness import (
     CLAUDE_HARNESS,
     SessionHarness,
@@ -3393,18 +3397,6 @@ class SessionMonitor:
     # 2026-07-09) — added as a STOPGAP ahead of the single-state FSM
     # consolidation. composer_ready / awaiting_first_response stay excluded: by
     # then tmux exists and a real miss is a real death.
-    _STARTUP_BOOTING_STATES = frozenset({
-        "requesting", "preparing_workspace", "launching_container",
-        "setup_running", "confirming_trust", "harness_starting",
-    })
-    # Upper bound on how long a session may sit in a booting state before the
-    # reaper is allowed to act anyway. MUST exceed the FSM's own setup timeout
-    # (_LIFECYCLE_SETUP_TIMEOUT_S = 600s, server.py) or the reaper kills a
-    # session that is still legitimately setting up before the FSM can fail it —
-    # which 300s did. The FSM fails a genuinely stuck setup at 600s, so 660s
-    # lets the FSM own that call and the reaper stays the backstop.
-    _STARTUP_GRACE_SECONDS = 660.0
-
     # A session is only reaped after this many CONSECUTIVE authoritative
     # "no such session" probe results (~10s apart). One authoritative miss
     # can race a tmux server restart; probe FAILURES (None) never count —
@@ -3436,34 +3428,51 @@ class SessionMonitor:
             # not tmux polling.
             if row.get("type") in ("dispatch", "librarian", "agentic"):
                 continue
-            # Do not reap a session the startup FSM says is still
-            # booting. A container session's host tmux is not spawned
-            # until AFTER launch_session() returns (~15s for an 8-repo
-            # workspace), yet the row is registered live at request
-            # time. Without this guard the 10s liveness sweep fires
-            # mid-launch, _check_tmux misses (no tmux yet), the session
-            # is marked dead, and cleanup_session_worktrees yanks the
-            # freshly-built worktrees out from under the launching
-            # container — leaving empty dirs Docker remounts as root
-            # (proven: auto-0615-105045 reaped at
-            # startup_state=launching_container, 2026-06-15). Bounded by
-            # a grace window so a genuinely stuck launch is still reaped.
+            # The reaper owns exactly ONE decision: is an ACTIVE
+            # session's tmux gone. Everything else belongs to the FSM:
             #
-            # The grace anchors on last_activity, NOT created_at: the
-            # lifecycle writer stamps last_activity on every
-            # transition (and arm stamps it at FSM entry), so an
-            # in-flight launch always has a fresh anchor — including
-            # RESUMES, whose created_at is the original session's and
-            # can be hours old (proven: auto-0708-122535 revived
-            # mid-resume, reaped 1s into preparing because its
-            # created_at was 4.8h stale). A stuck launch stops
-            # transitioning and becomes reapable after the grace.
-            _boot_anchor = (
-                row.get("last_activity") or row.get("created_at") or 0
-            )
-            if (row.get("startup_state") in self._STARTUP_BOOTING_STATES
-                    and (now - _boot_anchor)
-                    < self._STARTUP_GRACE_SECONDS):
+            # - LAUNCHING: tmux legitimately does not exist for most of a
+            #   launch, and the worker already fails a stuck step at its
+            #   own budget (STEP_TIMEOUTS_S, enforced inside each blocking
+            #   call). The reaper keeps a single belt for the exotic
+            #   orphan case — the worker lost the job without the process
+            #   dying — using THE SAME budget table plus a margin, from
+            #   the last transition (the writer stamps last_activity on
+            #   every one). One table, two consumers: a reaper grace that
+            #   undercuts a worker deadline is unrepresentable. An
+            #   orphaned launch becomes FAILED (retryable), not ENDED —
+            #   nothing was ever running.
+            # - STOPPING: the worker is mid-teardown; never double-fire.
+            state = derive_lifecycle_state(row)
+            if state == "STOPPING":
+                continue
+            if state == "LAUNCHING":
+                phase = row.get("startup_state") or "requesting"
+                budget = STEP_TIMEOUTS_S.get(phase, max(STEP_TIMEOUTS_S.values()))
+                anchor = row.get("last_activity") or row.get("created_at") or 0
+                if (now - anchor) <= budget + REAPER_BELT_MARGIN_S:
+                    continue
+                from tools.dashboard.session_lifecycle_worker import STATE_AUTHORITY
+                if STATE_AUTHORITY.transition(
+                    tmux_name,
+                    "FAILED",
+                    cause="reaper:launch-orphaned",
+                    reason=(
+                        f"launch orphaned: no transition for {int(now - anchor)}s "
+                        f"in phase {phase} (budget {int(budget)}s + belt)"
+                    ),
+                    failed_phase=phase,
+                ):
+                    self._remove_watches(tmux_name)
+                    self._tail_states.pop(tmux_name, None)
+                    self._screen_poll_armed.discard(tmux_name)
+                    changed = True
+                    logger.warning(
+                        "session_monitor: orphaned launch failed  %s (phase=%s)",
+                        tmux_name, phase,
+                    )
+                continue
+            if state != "ACTIVE":
                 continue
             alive = await asyncio.to_thread(self._check_tmux, tmux_name)
             if alive is None:
