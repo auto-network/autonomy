@@ -2797,6 +2797,37 @@ class TestWorktreeMonitorDiscovery:
         assert snap_a["reason"] == FAILURE_NO_HOST_TOKEN
         assert monitor._source_control_cache[("auto-b", "autonomy")] is good
 
+    def test_discovery_failure_surfaces_degraded_without_clobbering(self, monkeypatch):
+        """A failed pr list (e.g. host gh too old for a JSON field) marks
+        cache-less rows state=degraded with the failure code — never
+        blank, never clobbering an existing good snapshot."""
+        from agents.capabilities.github.service import FAILURE_EXEC_FAILED
+        wm_module, monitor = self._monitor()
+        rows = [
+            _row(session="auto-a", repo="enterprise_ng", live=False),
+            _row(session="auto-b", repo="enterprise_ng", live=True),
+        ]
+        monkeypatch.setattr(
+            wm_module, "derive_repo_host_and_slug",
+            lambda _p: ("github.com", "anchore/enterprise_ng"),
+        )
+
+        async def fake_list(host, slug, *, timeout=30, limit=100):
+            return None, FAILURE_EXEC_FAILED
+
+        monkeypatch.setattr(wm_module, "source_control_repo_reviews_v1", fake_list)
+        good = {"state": "ready", "reviews": [{"number": 1}], "review": {"number": 1},
+                "implementation": "autonomy/github", "reason": None,
+                "watch": {"mode": "silent"}}
+        monitor._source_control_cache[("auto-b", "enterprise_ng")] = good
+
+        asyncio.run(monitor.discover_prs(rows))
+
+        snap_a = monitor._source_control_cache[("auto-a", "enterprise_ng")]
+        assert snap_a["state"] == "degraded"
+        assert snap_a["reason"] == FAILURE_EXEC_FAILED
+        assert monitor._source_control_cache[("auto-b", "enterprise_ng")] is good
+
     def test_discovery_skips_unparseable_remote(self, monkeypatch):
         wm_module, monitor = self._monitor()
         rows = [_row(session="auto-a", repo="scratch", live=True)]
