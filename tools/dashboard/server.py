@@ -12531,6 +12531,29 @@ async def api_graph_search(request):
     return JSONResponse(results)
 
 
+def _graph_not_found_body(source_id: str, org: str | None) -> dict:
+    """404 body for a graph-source miss, enriched with a cross-org hint.
+
+    When the ID exists in some org DB the caller's scope can't see,
+    ``exists_in_org`` names it (plus the resolved full ``source_id`` and
+    ``source_type``) so the CLI can say "this session exists, but in org
+    X" instead of a bare not-found. Existence-only — no content leaks.
+    """
+    body: dict = {"error": "not found"}
+    try:
+        hit = graph_ops.locate_source_org(source_id)
+    except Exception:
+        hit = None
+    if hit and hit.get("org") and hit["org"] != (org or ""):
+        body["error"] = (
+            f"not found in org '{org}'" if org else "not found in caller scope"
+        )
+        body["exists_in_org"] = hit["org"]
+        body["source_id"] = hit["id"]
+        body["source_type"] = hit["type"]
+    return body
+
+
 async def api_graph_source_get(request):
     """Resolve a source by id across own + peer DBs (cross-org read).
 
@@ -12548,7 +12571,8 @@ async def api_graph_source_get(request):
         graph_ops.get_source, source_id, org=org, peers=peers,
     )
     if not src:
-        return JSONResponse({"error": "not found"}, status_code=404)
+        body = await asyncio.to_thread(_graph_not_found_body, source_id, org)
+        return JSONResponse(body, status_code=404)
     return JSONResponse(src)
 
 
@@ -14552,7 +14576,8 @@ async def api_graph_resolve(request):
             "integrated": bool(comment.get("integrated", 0)),
             "redirect": f"/graph/{comment['source_id'][:12]}?highlight={comment['id'][:12]}",
         })
-    return JSONResponse({"error": "not found"}, status_code=404)
+    body = await asyncio.to_thread(_graph_not_found_body, id, org)
+    return JSONResponse(body, status_code=404)
 
 
 async def api_resolve_embed(request):

@@ -42,6 +42,20 @@ class GraphHttpError(Exception):
         self.body = body or {}
 
 
+class NotFoundError(LookupError):
+    """404 from the dashboard graph API, carrying the response body.
+
+    Subclasses :class:`LookupError` so every existing ``except LookupError``
+    handler keeps working; ``body`` preserves server-side hints (e.g.
+    ``exists_in_org`` on a cross-org source miss) for callers that can
+    render a better error than a bare not-found.
+    """
+
+    def __init__(self, message: str, body: dict | None = None):
+        super().__init__(message)
+        self.body = body or {}
+
+
 def _resolve_client_org_arg(org):
     """Mirror :func:`settings_ops._resolve_org_arg` for HTTP-client use.
 
@@ -85,7 +99,7 @@ def _translate_http_error(status: int, body: dict) -> Exception:
         return ops.CrossOrgWriteError(target, origin)
     if status == 404:
         msg = body.get("error") or "not found"
-        return LookupError(msg)
+        return NotFoundError(msg, body)
     if status == 400:
         msg = body.get("error") or "bad request"
         return ValueError(msg)
@@ -228,6 +242,35 @@ class HttpClient:
             return self._get(f"/api/graph/source/{source_id}", org=org)
         except LookupError:
             return None
+
+    def locate_source_org(self, source_id, *, org=None):
+        """Existence probe for not-found errors, mirror of
+        :func:`ops.locate_source_org`.
+
+        Returns ``{"org": slug, "id": full_id, "type": ...}`` when the ID
+        resolves — either inside the caller's scope, or (via the server's
+        enriched 404 body) in an org the caller can't see. ``None`` when
+        the ID exists nowhere.
+        """
+        try:
+            src = self._get(f"/api/graph/source/{source_id}", org=org)
+        except NotFoundError as e:
+            if e.body.get("exists_in_org"):
+                return {
+                    "org": e.body["exists_in_org"],
+                    "id": e.body.get("source_id") or source_id,
+                    "type": e.body.get("source_type") or "",
+                }
+            return None
+        except LookupError:
+            return None
+        if not isinstance(src, dict):
+            return None
+        return {
+            "org": src.get("org") or "",
+            "id": src.get("id") or source_id,
+            "type": src.get("type") or "",
+        }
 
     def read_source_full(
         self,
