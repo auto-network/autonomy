@@ -18,6 +18,31 @@ OPERATION_POLICY_SET_ID = "autonomy.capability.operation_policy"
 OPERATION_POLICY_REVISION = 1
 
 
+# Registered under BOTH set_ids in this module (the synopsis flush keys the
+# module-level SYNOPSIS by each schema's set_id#rev).
+SYNOPSIS = {
+    "summary": (
+        "Commit workflow policy per org/workspace/repo — destination, "
+        "branch mode, visibility, push/review/signature requirements "
+        "(autonomy.commit.policy) — plus per-operation capability narrowing: "
+        "execution classes, approval, credential boundary, audit and "
+        "redaction rules (autonomy.capability.operation_policy)."
+    ),
+    "nouns": [
+        "commit policy", "commit workflow", "commit destination",
+        "branch mode", "push requirement", "review integration",
+        "signature requirement", "signing", "operation policy",
+        "capability operation", "approval required", "credential boundary",
+        "audit level", "redaction",
+    ],
+    "related_set_ids": [
+        "autonomy.capability.contract#1",
+        "autonomy.capability.impl#1",
+        "autonomy.commit.signing-key#1",
+    ],
+}
+
+
 COMMIT_DESTINATIONS = (
     "local_only",
     "local_integration_branch",

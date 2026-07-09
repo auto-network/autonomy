@@ -1,4 +1,8 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["tools/dashboard/tests"]
+# All three suites run by default. tools/graph/tests and agents/tests were
+# outside the default sweep for months and silently accumulated drift
+# (typegen artifacts, schema synopses, launcher call-capture assumptions,
+# primer template changes) that ambushed whichever session ran them next.
+testpaths = ["tools/dashboard/tests", "tools/graph/tests", "agents/tests"]
 addopts = "-n 8 --dist loadfile"

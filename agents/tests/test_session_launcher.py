@@ -43,6 +43,13 @@ def fake_crosstalk(monkeypatch):
 
 @pytest.fixture
 def captured_run(monkeypatch):
+    """Capture the docker invocations launch_session makes.
+
+    Only ``docker`` commands are recorded: every assertion in this file
+    indexes the docker run/exec command directly, and the launch path also
+    shells out to helpers (e.g. ``git rev-parse`` for Codex trust rooting,
+    2277f887) that would otherwise shift the indices each time one is added.
+    """
     calls: list[list[str]] = []
 
     class FakeCompleted:
@@ -52,7 +59,8 @@ def captured_run(monkeypatch):
             self.stderr = ""
 
     def fake_run(cmd, **kwargs):
-        calls.append(cmd)
+        if cmd and cmd[0] == "docker":
+            calls.append(cmd)
         return FakeCompleted()
 
     monkeypatch.setattr(session_launcher.subprocess, "run", fake_run)
