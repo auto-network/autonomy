@@ -15,6 +15,10 @@ outcome or the decline).
 - `jira-confirm-plan KEY -f plan.md` — set the Confirm Plan field *(operator approval)*
 - `jira-create payload.json` — create a ticket *(operator approval)*
 - `jira-attach KEY FILE` — upload an attachment *(operator approval)*
+- `jira-transition KEY 'Name' [--field 'Name=value' …]` — move through a
+  workflow transition; `--list` shows what's valid now + required fields.
+  Preflight fails with the missing-fields list before staging approval
+  *(operator approval)*
 
 **Which field for what:** the **Confirm Plan** custom field holds step-by-step
 QA instructions to reproduce the bug and prove the fix — command-by-command
