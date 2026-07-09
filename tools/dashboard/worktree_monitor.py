@@ -1313,7 +1313,20 @@ class WorktreeMonitor:
                         time.monotonic() + RATE_LIMIT_BACKOFF_SECONDS
                     )
                     return
-                continue  # logged by the service; leave caches untouched
+                # Make the failure VISIBLE on rows that have nothing
+                # cached — a blank card reads as "never checked", which
+                # is how the host-gh-2.4.0 field rejection hid for a
+                # whole verification pass. Good caches are never
+                # clobbered.
+                for row in group:
+                    key = (row.session_name, row.repo_name)
+                    if key not in self._source_control_cache:
+                        self._source_control_cache[key] = _degraded_snapshot(
+                            state="degraded",
+                            reason=failure,
+                            watch_mode=self.get_nag_mode(*key),
+                        )
+                continue  # detail logged by the service
 
             try:
                 prs = json.loads(stdout or "[]")
