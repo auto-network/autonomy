@@ -1003,6 +1003,8 @@
             // see lifecycle.js for the bypass.
             // Unified startup FSM. NULL = not in launching.
             startup_state: s.startupState || null,
+            state: s.state || null,
+            attention: s.attention || null,
             harness_state: s.harnessState || {},
             resolved: s.resolved === true,
             // auto-ja51w: transient sub-phase progress from

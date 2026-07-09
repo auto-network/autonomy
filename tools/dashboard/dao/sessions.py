@@ -600,10 +600,11 @@ def get_recent_sessions(
             row["context_tokens"] = db_row.get("context_tokens", 0)
             row["activity_state"] = db_row.get("activity_state", "dead")
             # Failed launches must render as FAILED (Retry chip), not as a
-            # plain Ended card — carry the FSM columns + derived coarse
-            # state through to the Recent surface.
+            # plain Ended card — carry the one state + chip phase through
+            # to the Recent surface.
             row["startup_state"] = db_row.get("startup_state")
-            row["lifecycle_state"] = derive_lifecycle_state(db_row)
+            row["state"] = derive_lifecycle_state(db_row)
+            row["lifecycle_state"] = row["state"]
             row["bead_id"] = row["bead_id"] or db_row.get("bead_id", "")
             row["tmux_session"] = db_row.get("tmux_name", "")
             # auto-ngis4: surface harness + model (stored on tmux_sessions)

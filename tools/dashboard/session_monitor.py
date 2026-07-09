@@ -56,6 +56,7 @@ from tools.graph import ops as graph_ops
 from tools.dashboard.dao.dashboard_db import (
     get_conn,
     get_dispatch_nag_sessions,
+    get_all_sessions,
     get_live_sessions,
     get_session,
     get_tailable_sessions,
@@ -75,7 +76,6 @@ from agents.workspace_manager import (
     CleanupResult,
     WORKTREES_DIR,
     cleanup_session_worktrees,
-    prune_orphan_worktrees,
 )
 
 logger = logging.getLogger(__name__)
@@ -270,51 +270,76 @@ def _log_worktree_cleanup(tmux_name: str, result: CleanupResult) -> None:
         )
 
 
-def _cleanup_worktrees_for_dead_session(tmux_name: str) -> None:
-    """Thread-safe wrapper around cleanup_session_worktrees — never raises.
+# A terminal session's worktrees are garbage-collected only after this
+# tombstone horizon (seconds since ended_at). Ending a session must never
+# synchronously destroy anything: one wrong transition — a raced reaper, a
+# false death — must not be able to delete a session's work. The horizon
+# gives resumes, retries, and operators an hours-scale window; the
+# preserve policy (uncommitted changes / local commits) still applies on
+# top, and the operator's explicit Worktrees "Clean up" button remains
+# immediate.
+WORKTREE_GC_HORIZON_S = float(
+    os.environ.get("DASHBOARD_WORKTREE_GC_HORIZON_S", 6 * 3600)
+)
 
-    Re-checks the row at EXECUTION time: this runs on a thread scheduled at
-    death detection, and a resume/retry can revive the session in the gap
-    (proven: auto-0708-122535 revived 19s after its stop; the queued
-    cleanup then removed the worktree 1s into the relaunch's preparing
-    step). A live or launching row aborts the cleanup.
+
+def _gc_worktrees_for_terminal_session(tmux_name: str) -> None:
+    """One GC step — never raises. The guard re-reads the row at EXECUTION
+    time: a resume/retry can re-enter the FSM between scheduling and
+    execution (proven: auto-0708-122535 revived 19s after its stop and a
+    queued cleanup removed the worktree 1s into the relaunch), so removal
+    requires the row to be terminal AND past the tombstone horizon NOW.
+    A dir with no row at all is an orphan and proceeds straight to the
+    preserve-policy cleanup.
     """
     try:
         row = get_session(tmux_name)
     except Exception:
         row = None
-    if row and (row.get("is_live") or row.get("startup_state")):
-        logger.info(
-            "session_monitor: worktree cleanup skipped for %s — session "
-            "revived (is_live=%s, startup_state=%s)",
-            tmux_name, row.get("is_live"), row.get("startup_state"),
-        )
-        return
+    if row is not None:
+        state = derive_lifecycle_state(row)
+        if state not in ("ENDED", "FAILED"):
+            logger.info(
+                "session_monitor: worktree GC skipped for %s — state=%s",
+                tmux_name, state,
+            )
+            return
+        ended_at = row.get("ended_at") or 0
+        if (time.time() - ended_at) < WORKTREE_GC_HORIZON_S:
+            return
     try:
         result = cleanup_session_worktrees(tmux_name, worktrees_dir=WORKTREES_DIR)
     except Exception:
-        logger.exception("session_monitor: worktree cleanup raised for %s", tmux_name)
+        logger.exception("session_monitor: worktree GC raised for %s", tmux_name)
         return
     _log_worktree_cleanup(tmux_name, result)
 
 
-def _prune_orphan_worktrees_safely(live_session_names: list[str]) -> None:
-    """Thread-safe wrapper around prune_orphan_worktrees — never raises."""
+def _worktree_gc_pass() -> None:
+    """Tombstoned worktree GC — the ONLY path that removes worktree dirs
+    outside an explicit operator action or a fresh-create failure cleanup.
+    Scans data/worktrees/ and runs the per-dir step for every dir whose
+    session is not kept. Kept: every non-terminal session, and terminal
+    sessions still inside the tombstone horizon. Absorbs the old
+    orphan-prune (a dir with no row is just a keep-set miss here).
+    """
     try:
-        results = prune_orphan_worktrees(live_session_names, worktrees_dir=WORKTREES_DIR)
+        if not WORKTREES_DIR.exists():
+            return
+        now = time.time()
+        keep: set[str] = set()
+        for row in get_all_sessions():
+            state = derive_lifecycle_state(row)
+            if state not in ("ENDED", "FAILED"):
+                keep.add(row["tmux_name"])
+            elif (now - (row.get("ended_at") or 0)) < WORKTREE_GC_HORIZON_S:
+                keep.add(row["tmux_name"])
+        for entry in sorted(WORKTREES_DIR.iterdir()):
+            if not entry.is_dir() or entry.name in keep:
+                continue
+            _gc_worktrees_for_terminal_session(entry.name)
     except Exception:
-        logger.exception("session_monitor: orphan worktree prune raised")
-        return
-    total = sum(len(r.removed) for r in results.values())
-    preserved = sum(len(r.preserved) for r in results.values())
-    if total or preserved:
-        logger.info(
-            "session_monitor: orphan worktree prune — "
-            "%d removed, %d preserved, %d sessions scanned",
-            total, preserved, len(results),
-        )
-    for name, result in results.items():
-        _log_worktree_cleanup(name, result)
+        logger.exception("session_monitor: worktree GC pass raised")
 
 
 def _send_nag_crosstalk(tmux_name: str, message: str) -> None:
@@ -1454,11 +1479,14 @@ class SessionMonitor:
         sessions = get_live_sessions()
         out = []
         for s in sessions:
+            _state = derive_lifecycle_state(s)
             entry = {
                 "session_id": s["tmux_name"],
                 "project": s["project"],
                 "type": s["type"],
-                "is_live": bool(s["is_live"]),
+                # Compat key, computed from the one state — no longer read
+                # from the projection column (drop-ready for Phase D).
+                "is_live": _state not in ("ENDED", "FAILED"),
                 "started_at": s["created_at"],
                 "graph_source_id": s.get("graph_source_id"),
                 "label": s.get("label", ""),
@@ -1492,9 +1520,12 @@ class SessionMonitor:
                 # Unified startup FSM. NULL = not in launching (existing
                 # sessions, post-launch sessions, dead sessions).
                 "startup_state": s.get("startup_state"),
-                # Coarse lifecycle, DERIVED per the FSM contract — one
-                # source of truth for the card's section/chip branching.
-                "lifecycle_state": derive_lifecycle_state(s),
+                # The one lifecycle truth + its telemetry sidecar. The
+                # legacy ``lifecycle_state`` key carries the same value for
+                # consumers that already read it.
+                "state": _state,
+                "attention": s.get("attention"),
+                "lifecycle_state": _state,
             }
             # auto-ja51w: transient per-session phase progress (e.g. per-repo
             # tick from inside prepare_session_mounts). Set via
@@ -3507,17 +3538,13 @@ class SessionMonitor:
             if jsonl_path:
                 await self._final_graph_catchup(tmux_name, jsonl_path)
             self._tail_states.pop(tmux_name, None)
-            # Clean up the session's workspace worktrees (no-op
-            # if the session had none). Uncommitted changes or
-            # local commits are preserved with a warning.
-            await asyncio.to_thread(
-                _cleanup_worktrees_for_dead_session, tmux_name,
-            )
+            # Deliberately NO worktree cleanup here: ending a session is a
+            # state transition, never destruction. The tombstoned worktree
+            # GC removes eligible dirs hours later (WORKTREE_GC_HORIZON_S)
+            # with an execution-time state re-check.
             # One final disk measurement so the ended card keeps
             # a footprint; the session leaves the resource poll
-            # set for good. Runs AFTER worktree cleanup so the
-            # persisted number is what actually remains on disk.
-            # Fire-and-forget: never blocks the liveness sweep.
+            # set for good. Fire-and-forget: never blocks the sweep.
             from tools.dashboard.resource_monitor import (
                 resource_monitor,
             )
@@ -3583,15 +3610,12 @@ class SessionMonitor:
                 # Dispatch pause nag — alert dispatch_nag subscribers when queue is stuck
                 await self._check_dispatch_pause_nag(now)
 
-                # Periodic worktree orphan prune — every 10 minutes scan
-                # data/worktrees/ and clean up anything that doesn't match
-                # a live session. Picks up worktrees orphaned by crashes
-                # or missed death signals.
+                # Periodic tombstoned worktree GC — every 10 minutes scan
+                # data/worktrees/ and remove dirs whose session has been
+                # terminal past the horizon (or has no row at all), with
+                # the preserve policy and an execution-time state re-check.
                 if (now - self._last_orphan_prune) >= self._ORPHAN_PRUNE_INTERVAL:
-                    live_names = [r["tmux_name"] for r in get_live_sessions()]
-                    await asyncio.to_thread(
-                        _prune_orphan_worktrees_safely, live_names,
-                    )
+                    await asyncio.to_thread(_worktree_gc_pass)
                     self._last_orphan_prune = now
 
             except Exception:
