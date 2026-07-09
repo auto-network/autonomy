@@ -598,6 +598,7 @@ def test_session_launcher_preserves_explicit_graph_org(tmp_path, monkeypatch):
     import agents.session_launcher as launcher
 
     monkeypatch.setattr(launcher, "REPO_ROOT", tmp_path)
+    monkeypatch.delenv("DASHBOARD_AGENT_RUNS_DIR", raising=False)
     monkeypatch.setattr(launcher, "_resolve_credentials",
                         lambda: {"type": "token", "token": "x"})
     monkeypatch.setattr(launcher, "_setup_auth_docker_args",
