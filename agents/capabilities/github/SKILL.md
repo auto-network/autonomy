@@ -32,18 +32,24 @@ gh pr list --limit 10
 gh pr view <NUMBER> --json number,title,body,state,mergeStateStatus,statusCheckRollup
 ```
 
-## After creating a PR — declare the binding
+## After creating a PR — the binding is declared for you
 
 The Worktrees dashboard previously auto-detected your PR by scanning
 ``gh pr list --head <branch>`` every 30s. That ran into rate limits,
-ghost-commits on squash-merge, and stacked-PR ambiguity. The new
-flow is **operator/agent declaration**: tell the dashboard which review
-covers which commit range, and it fetches state by id instead.
+ghost-commits on squash-merge, and stacked-PR ambiguity. The flow is
+**declaration**: tell the dashboard which review covers which commit
+range, and it fetches state by id instead.
 
-After you create the PR, run:
+`gh` in agent containers is a transparent shim
+(`agents/capabilities/github/bin/gh`): every command passes through to
+the real gh byte-for-byte, and after a successful `gh pr create` the
+shim runs the binding helper automatically. Watch its trailing output —
+`✓ review binding declared` means you're done; `⚠ PR created but NOT
+linked` means you must run the helper yourself (typically the stacked
+case):
 
 ```bash
-agents/capabilities/github/bin/declare-review-binding.sh
+declare-review-binding.sh          # on PATH in agent containers
 ```
 
 The helper resolves the current branch's PR via `gh pr view`, derives

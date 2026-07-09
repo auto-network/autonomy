@@ -10,6 +10,12 @@ Common one-liners:
 - `gh pr checks` — merge-gate status
 - `gh pr list --limit 10` — recent PRs
 
+**PR linking is automatic:** `gh pr create` auto-declares the dashboard
+review binding for your worktree (a shim runs the helper after create).
+If it prints "⚠ PR created but NOT linked", run
+`declare-review-binding.sh` before continuing — the dashboard can't
+track your PR until the binding exists.
+
 The Dashboard composes typed `source_control@1` operations
 (`review.read`, `review.refresh`, `gates.watch_set`) from
 `agents/capabilities/github/service.py` against your live container —

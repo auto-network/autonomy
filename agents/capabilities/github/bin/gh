@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# gh shim — transparent passthrough with ONE post-hook (auto-hof9c,
+# design graph://f7c4c109-91a §Phase 1c).
+#
+# Every invocation reaches the real gh byte-for-byte: no output capture,
+# no pipes (tty and interactive fidelity intact), no per-command
+# knowledge to maintain. The single behavioral delta: after a SUCCESSFUL
+# `gh pr create`, declare-review-binding.sh runs so the dashboard tracks
+# the new PR immediately — the thing sessions provably forget. The
+# helper resolves the PR itself via `gh pr view`, so this shim never
+# parses gh output.
+#
+# Interception is the strict form `gh pr create ...` ($1/$2 exactly):
+# true positional parsing is impossible without gh's flag table (`gh -R
+# repo pr create` would misread the flag value as a positional), and a
+# missed interception is safe — refresh-time discovery (auto-jwbgb) is
+# the net; a false interception never happens.
+
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+SELF_DIR="$(dirname "$SELF")"
+CAP_BIN="${AUTONOMY_CAPABILITY_BIN:-/etc/autonomy/cap-bin}"
+
+_real_gh() {
+    local candidate resolved
+    while IFS= read -r candidate; do
+        resolved="$(cd "$(dirname "$candidate")" 2>/dev/null && pwd)/$(basename "$candidate")"
+        case "$resolved" in
+            "$SELF" | "$SELF_DIR"/* | "$CAP_BIN"/*) continue ;;
+        esac
+        printf '%s\n' "$candidate"
+        return 0
+    done < <(type -aP gh)
+    printf '%s\n' /usr/bin/gh
+}
+
+REAL_GH="$(_real_gh)"
+
+if [ "${1:-}" != "pr" ] || [ "${2:-}" != "create" ]; then
+    exec "$REAL_GH" "$@"
+fi
+
+"$REAL_GH" "$@"
+rc=$?
+if [ $rc -eq 0 ]; then
+    if "$SELF_DIR/declare-review-binding.sh"; then
+        echo "✓ review binding declared — the dashboard now tracks this PR by id."
+    else
+        echo "⚠ PR created but NOT linked to the dashboard."
+        echo "  Run: declare-review-binding.sh   (it is on PATH)"
+        echo "  Add --previous-review-id <N> if this PR stacks on another."
+    fi
+fi
+exit $rc
