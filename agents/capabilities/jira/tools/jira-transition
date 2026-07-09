@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Usage: jira-transition ISSUE_KEY 'Transition Name' [--field 'Name=value' …]
+#        jira-transition ISSUE_KEY --list
+# Moves a ticket through a workflow transition — staged for operator
+# approval like every other write. A preflight read runs first: if the
+# transition's required fields aren't satisfied (already on the ticket, or
+# supplied via --field), the command fails with the missing list BEFORE any
+# approval overlay opens — no half-transitioned tickets, no doomed overlay.
+# The name matches the workflow transition or its destination status,
+# case-insensitively. --field values are plain strings; comma-separate
+# multi-value fields; users by exact display name or email.
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/_jira_lib.sh"
+
+KEY="${1:-}"
+[ -n "$KEY" ] || jira_fail "usage: jira-transition ISSUE_KEY 'Transition Name' [--field 'Name=value' …]  (or: jira-transition ISSUE_KEY --list)"
+
+if [ "${2:-}" = "--list" ]; then
+  curl -sk "$DASH/api/jira/transitions/$KEY?org=$ORG" \
+    | python3 -c 'import sys, json
+d = json.load(sys.stdin)
+if "error" in d: sys.exit("jira: " + str(d["error"]))
+rows = d.get("transitions") or []
+if not rows:
+    print("No transitions available from the current status.")
+    sys.exit(0)
+for t in rows:
+    print(t["name"] + "  ->  " + str(t["to_status"]))
+    for f in t.get("required_fields") or []:
+        state = "set" if f.get("has_value") else "MISSING"
+        allowed = f.get("allowed") or []
+        hint = ("  (one of: " + ", ".join(str(a) for a in allowed[:8]) + ")") if allowed else ""
+        print("    requires " + str(f["name"]) + ": " + state + hint)'
+  exit $?
+fi
+
+NAME="${2:-}"
+[ -n "$NAME" ] && [ "${NAME#-}" = "$NAME" ] \
+  || jira_fail "usage: jira-transition ISSUE_KEY 'Transition Name' [--field 'Name=value' …]"
+shift 2
+
+FIELDS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --field) [ -n "${2:-}" ] || jira_fail "jira-transition: --field needs 'Name=value'"
+             FIELDS+=("$2"); shift 2 ;;
+    *)       jira_fail "jira-transition: unexpected argument: $1 (use --field 'Name=value')" ;;
+  esac
+done
+
+req_file="$(mktemp)"
+trap 'rm -f "$req_file"' EXIT
+
+# Preflight: match the transition, check its required fields against the
+# ticket + --field values, and only then emit the approval request.
+curl -sk "$DASH/api/jira/transitions/$KEY?org=$ORG" \
+  | python3 -c 'import sys, json
+session, key, org, name = sys.argv[1:5]
+d = json.load(sys.stdin)
+if "error" in d: sys.exit("jira: " + str(d["error"]))
+rows = d.get("transitions") or []
+fields = {}
+for kv in sys.argv[5:]:
+    k, sep, v = kv.partition("=")
+    if not k or not sep: sys.exit("jira-transition: bad --field (expected Name=value): " + kv)
+    fields[k] = v
+want = name.strip().casefold()
+match = next((t for t in rows if (t["name"] or "").casefold() == want), None) \
+    or next((t for t in rows if (t.get("to_status") or "").casefold() == want), None)
+if match is None:
+    valid = "; ".join(t["name"] + " -> " + str(t.get("to_status")) for t in rows) or "none"
+    sys.exit("jira-transition: no transition named " + repr(name) + " from the current status.\nValid: " + valid)
+provided = {k.strip().casefold() for k in fields}
+missing = [f for f in match.get("required_fields") or []
+           if not f.get("has_value")
+           and (f.get("name") or "").casefold() not in provided
+           and f.get("id") not in fields]
+if missing:
+    lines = []
+    for f in missing:
+        allowed = f.get("allowed") or []
+        hint = " (one of: " + ", ".join(str(a) for a in allowed[:8]) + ")" if allowed else ""
+        lines.append("  " + str(f["name"]) + hint)
+    sys.exit("jira-transition: " + match["name"] + " requires field(s) not yet set on " + key + ":\n"
+             + "\n".join(lines)
+             + "\nPass each as --field " + chr(39) + "Name=value" + chr(39)
+             + " or set them on the ticket first. Nothing was staged for approval.")
+req = {"kind": "jira_write", "session": session, "request":
+       {"op": "transition", "key": key, "org": org, "transition": match["name"]}}
+if fields: req["request"]["fields"] = fields
+print(json.dumps(req))' "$SESSION" "$KEY" "$ORG" "$NAME" ${FIELDS[@]+"${FIELDS[@]}"} > "$req_file" || exit 1
+
+jira_approval_wait "$req_file"

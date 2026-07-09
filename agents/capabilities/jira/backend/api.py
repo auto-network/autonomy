@@ -220,6 +220,161 @@ def editmeta_field_id(cfg: JiraConfig, key: str, field_name: str) -> str:
                     f"(not present in editmeta)")
 
 
+def _transition_meta(cfg: JiraConfig, key: str) -> list[dict[str, Any]]:
+    """Raw transition metadata for *key*: id, name, destination status, and
+    each transition-screen field with its required flag and schema.
+    ``expand=transitions.fields`` surfaces screen-level validators; workflow
+    validators with no screen field only fire on POST (their message comes
+    back through :func:`_check`)."""
+    with _client(cfg) as c:
+        resp = c.get(f"/rest/api/3/issue/{key}/transitions",
+                     params={"expand": "transitions.fields"})
+        _check(resp, f"transitions for {key}")
+        body = resp.json()
+    out: list[dict[str, Any]] = []
+    for t in body.get("transitions") or []:
+        fields = []
+        for field_id, meta in (t.get("fields") or {}).items():
+            if not isinstance(meta, dict):
+                continue
+            schema = meta.get("schema") or {}
+            fields.append({
+                "id": field_id,
+                "name": meta.get("name"),
+                "required": bool(meta.get("required")),
+                "type": schema.get("type"),
+                "items": schema.get("items"),
+                "allowed": [v.get("name") or v.get("value")
+                            for v in meta.get("allowedValues") or []
+                            if isinstance(v, dict)],
+            })
+        out.append({"id": t.get("id"), "name": t.get("name"),
+                    "to_status": (t.get("to") or {}).get("name"),
+                    "fields": fields})
+    return out
+
+
+def _has_value(value: Any) -> bool:
+    return value not in (None, "", [], {})
+
+
+def list_transitions(cfg: JiraConfig, key: str) -> list[dict[str, Any]]:
+    """Workflow transitions available on *key* from its current status,
+    with each transition's required screen fields annotated ``has_value``
+    (whether the issue already satisfies them) so a caller can compute
+    what's missing *before* staging a write."""
+    meta = _transition_meta(cfg, key)
+    required_ids = sorted({f["id"] for t in meta for f in t["fields"]
+                           if f["required"]})
+    current: dict[str, Any] = {}
+    if required_ids:
+        with _client(cfg) as c:
+            resp = c.get(f"/rest/api/3/issue/{key}",
+                         params={"fields": ",".join(required_ids)})
+            _check(resp, f"read {key} fields")
+            current = resp.json().get("fields") or {}
+    return [{
+        "id": t["id"], "name": t["name"], "to_status": t["to_status"],
+        "required_fields": [
+            {"id": f["id"], "name": f["name"], "type": f["type"],
+             "has_value": _has_value(current.get(f["id"])),
+             "allowed": f["allowed"]}
+            for f in t["fields"] if f["required"]],
+    } for t in meta]
+
+
+def _match_transition(transitions: list[dict], transition_name: str,
+                      key: str) -> dict:
+    """Match case-insensitively against the transition name first, then the
+    destination status name (operators think in status names; the two can
+    differ per workflow). On no match the error lists what's valid from the
+    ticket's current status so the caller can retry instead of guessing."""
+    want = transition_name.strip().casefold()
+    for probe in ("name", "to_status"):
+        match = next((t for t in transitions
+                      if (t.get(probe) or "").casefold() == want), None)
+        if match is not None:
+            return match
+    valid = "; ".join(f"{t['name']} -> {t['to_status']}"
+                      for t in transitions) or "none"
+    raise JiraError(
+        f"no transition named {transition_name!r} on {key} from its "
+        f"current status. Valid transitions: {valid}")
+
+
+def _resolve_user(cfg: JiraConfig, query: str) -> str:
+    """Resolve a display name / email to an accountId; unique match only."""
+    with _client(cfg) as c:
+        resp = c.get("/rest/api/3/user/search", params={"query": query})
+        _check(resp, f"user search {query!r}")
+        users = [u for u in resp.json() if u.get("accountId")]
+    if len(users) == 1:
+        return users[0]["accountId"]
+    names = ", ".join(u.get("displayName", "?") for u in users[:10])
+    raise JiraError(
+        f"user {query!r} resolves to {len(users)} accounts"
+        + (f" ({names})" if names else "")
+        + " — use an exact display name or email")
+
+
+def _coerce_field_value(cfg: JiraConfig, field: dict, value: str) -> Any:
+    """Shape a CLI-provided string for the field's schema type. Arrays take
+    comma-separated values. Users resolve display name/email -> accountId."""
+    ftype, items = field.get("type"), field.get("items")
+    if ftype == "array":
+        parts = [p.strip() for p in value.split(",") if p.strip()]
+        if items == "option":
+            return [{"value": p} for p in parts]
+        if items == "user":
+            return [{"accountId": _resolve_user(cfg, p)} for p in parts]
+        if items in ("version", "component"):
+            return [{"name": p} for p in parts]
+        return parts
+    if ftype == "option":
+        return {"value": value}
+    if ftype == "user":
+        return {"accountId": _resolve_user(cfg, value)}
+    if ftype in ("version", "component", "priority", "resolution"):
+        return {"name": value}
+    if ftype == "number":
+        try:
+            return float(value) if "." in value else int(value)
+        except ValueError:
+            raise JiraError(f"field {field.get('name')!r} expects a number, "
+                            f"got {value!r}")
+    return value
+
+
+def transition_issue(cfg: JiraConfig, key: str, transition_name: str,
+                     fields: dict[str, str] | None = None) -> dict[str, Any]:
+    """Move *key* through the workflow transition named *transition_name*,
+    optionally setting transition-screen fields (by display name or id) in
+    the same POST — required-field validators mean some transitions only
+    succeed with fields supplied alongside them."""
+    meta = _transition_meta(cfg, key)
+    match = _match_transition(meta, transition_name, key)
+    payload: dict[str, Any] = {"transition": {"id": match["id"]}}
+    if fields:
+        by_name = {(f.get("name") or "").casefold(): f for f in match["fields"]}
+        by_id = {f["id"]: f for f in match["fields"]}
+        coerced: dict[str, Any] = {}
+        for name, value in fields.items():
+            field = by_id.get(name) or by_name.get(name.strip().casefold())
+            if field is None:
+                available = ", ".join(
+                    f.get("name") or f["id"] for f in match["fields"]) or "none"
+                raise JiraError(
+                    f"field {name!r} is not on the {match['name']!r} "
+                    f"transition screen for {key}. Available: {available}")
+            coerced[field["id"]] = _coerce_field_value(cfg, field, str(value))
+        payload["fields"] = coerced
+    with _client(cfg) as c:
+        resp = c.post(f"/rest/api/3/issue/{key}/transitions", json=payload)
+        _check(resp, f"transition {key} -> {match['name']}")
+    return {"transition": match["name"], "to_status": match["to_status"],
+            "fields_set": sorted((payload.get("fields") or {}).keys())}
+
+
 def add_comment(cfg: JiraConfig, key: str, body_markdown: str) -> dict[str, Any]:
     with _client(cfg) as c:
         resp = c.post(f"/rest/api/3/issue/{key}/comment",

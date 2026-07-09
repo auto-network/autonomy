@@ -58,7 +58,30 @@ jira-comment ENTERPRISE-8385 -f findings.md     # or: echo "..." | jira-comment 
 jira-confirm-plan ENTERPRISE-8385 -f plan.md    # sets the Confirm Plan field
 jira-create payload.json                        # create a ticket
 jira-attach ENTERPRISE-8385 repro.log           # upload an attachment (10MB cap)
+jira-transition ENTERPRISE-8385 'Code Review'   # move through a workflow transition
 ```
+
+### Transitions
+
+`jira-transition KEY --list` (read, no approval) shows the transitions valid
+from the ticket's current status, each with its required fields and whether
+the ticket already satisfies them. The write matches your name against the
+transition name *or* the destination status, case-insensitively.
+
+Transitions can carry required-field validators. `jira-transition`
+preflights them: if a required field is empty on the ticket and not
+supplied, it fails with the missing list **before** anything is staged for
+approval — supply values inline with repeatable `--field 'Name=value'`
+(comma-separate multi-value fields; users by exact display name or email):
+
+```bash
+jira-transition ENTERPRISE-8385 'Pending RC' \
+  --field 'Fix versions=Enterprise 6.1.0' --field 'Developer=Jane Doe'
+```
+
+Some validators (e.g. "Confirm Plan must be populated") have no transition
+screen field — those surface as a clear Jira error through the approval
+result; fix the ticket (e.g. `jira-confirm-plan`) and retry.
 
 `jira-create` payload — the Jira fields object (bare or under `"fields"`);
 a plain-string `description` may be markdown (converted host-side):

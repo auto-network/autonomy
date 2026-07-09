@@ -298,6 +298,130 @@ def test_search_issues_paginates_by_token(jira_env, monkeypatch):
     assert out == {"items": [], "next_page_token": None}   # last page
 
 
+# ── workflow transitions ──
+
+
+_TRANSITIONS_JSON = {"transitions": [
+    {"id": "31", "name": "Start Review", "to": {"name": "Code Review"},
+     "fields": {
+         "fixVersions": {"name": "Fix versions", "required": True,
+                         "schema": {"type": "array", "items": "version"},
+                         "allowedValues": [{"name": "Enterprise 6.1.0"}]},
+         "customfield_9": {"name": "Developer", "required": True,
+                           "schema": {"type": "user"}},
+         "summary": {"name": "Summary", "required": False,
+                     "schema": {"type": "string"}},
+     }},
+    {"id": "41", "name": "Ready for RC", "to": {"name": "Pending RC"},
+     "fields": {}},
+]}
+
+
+def test_list_transitions_annotates_required_fields(jira_env, monkeypatch):
+    """expand=transitions.fields + a follow-up issue read: each required
+    screen field carries has_value so the CLI preflight can compute what's
+    missing before staging an approval."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/transitions"):
+            assert request.url.params["expand"] == "transitions.fields"
+            return httpx.Response(200, json=_TRANSITIONS_JSON)
+        assert request.url.path == "/rest/api/3/issue/ENT-1"
+        assert set(request.url.params["fields"].split(",")) == {
+            "fixVersions", "customfield_9"}
+        return httpx.Response(200, json={"fields": {
+            "fixVersions": [{"name": "Enterprise 6.1.0"}],
+            "customfield_9": None}})
+
+    _mock(monkeypatch, handler)
+    out = api.list_transitions(api.JiraConfig.resolve(), "ENT-1")
+    review = out[0]
+    assert (review["name"], review["to_status"]) == ("Start Review", "Code Review")
+    by_name = {f["name"]: f for f in review["required_fields"]}
+    assert set(by_name) == {"Fix versions", "Developer"}   # non-required dropped
+    assert by_name["Fix versions"]["has_value"] is True
+    assert by_name["Fix versions"]["allowed"] == ["Enterprise 6.1.0"]
+    assert by_name["Developer"]["has_value"] is False
+    assert out[1]["required_fields"] == []
+
+
+def test_transition_matches_destination_status_and_posts(jira_env, monkeypatch):
+    """'Pending RC' (the status) matches the 'Ready for RC' transition —
+    operators think in status names, workflows name transitions freely."""
+    posted = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=_TRANSITIONS_JSON)
+        posted["body"] = json.loads(request.content)
+        return httpx.Response(204)
+
+    _mock(monkeypatch, handler)
+    out = api.transition_issue(api.JiraConfig.resolve(), "ENT-1", "pending rc")
+    assert posted["body"] == {"transition": {"id": "41"}}
+    assert out == {"transition": "Ready for RC", "to_status": "Pending RC",
+                   "fields_set": []}
+
+
+def test_transition_no_match_lists_valid_transitions(jira_env, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_TRANSITIONS_JSON)
+
+    _mock(monkeypatch, handler)
+    with pytest.raises(api.JiraError) as exc:
+        api.transition_issue(api.JiraConfig.resolve(), "ENT-1", "Done")
+    assert "Start Review -> Code Review" in str(exc.value)
+    assert "Ready for RC -> Pending RC" in str(exc.value)
+
+
+def test_transition_coerces_fields_by_schema(jira_env, monkeypatch):
+    """CLI strings become schema shapes: version arrays by name, users
+    resolved display-name -> accountId via user search."""
+    posted = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rest/api/3/user/search":
+            assert request.url.params["query"] == "Jane Doe"
+            return httpx.Response(200, json=[
+                {"accountId": "acc-1", "displayName": "Jane Doe"}])
+        if request.method == "GET":
+            return httpx.Response(200, json=_TRANSITIONS_JSON)
+        posted["body"] = json.loads(request.content)
+        return httpx.Response(204)
+
+    _mock(monkeypatch, handler)
+    out = api.transition_issue(
+        api.JiraConfig.resolve(), "ENT-1", "Start Review",
+        fields={"Fix versions": "Enterprise 6.1.0", "Developer": "Jane Doe"})
+    assert posted["body"]["fields"] == {
+        "fixVersions": [{"name": "Enterprise 6.1.0"}],
+        "customfield_9": {"accountId": "acc-1"}}
+    assert out["fields_set"] == ["customfield_9", "fixVersions"]
+
+
+def test_transition_ambiguous_user_is_an_error(jira_env, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rest/api/3/user/search":
+            return httpx.Response(200, json=[
+                {"accountId": "a", "displayName": "Jane Doe"},
+                {"accountId": "b", "displayName": "Jane Doerr"}])
+        return httpx.Response(200, json=_TRANSITIONS_JSON)
+
+    _mock(monkeypatch, handler)
+    with pytest.raises(api.JiraError, match="resolves to 2 accounts"):
+        api.transition_issue(api.JiraConfig.resolve(), "ENT-1", "Start Review",
+                             fields={"Developer": "Jane"})
+
+
+def test_transition_unknown_field_names_screen_fields(jira_env, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_TRANSITIONS_JSON)
+
+    _mock(monkeypatch, handler)
+    with pytest.raises(api.JiraError, match="not on the 'Start Review'"):
+        api.transition_issue(api.JiraConfig.resolve(), "ENT-1", "Start Review",
+                             fields={"Sprint": "42"})
+
+
 # ── named queries (pure resolution over workspace_overrides) ──
 
 
@@ -457,6 +581,55 @@ def test_named_query_unresolvable_session_is_404(jira_env, monkeypatch):
     client = TestClient(_app())
     r = client.get("/api/jira/query?session=ghost")
     assert r.status_code == 404 and "does not map" in r.json()["error"]
+
+
+def test_transitions_read_route(jira_env, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/transitions"):
+            return httpx.Response(200, json=_TRANSITIONS_JSON)
+        return httpx.Response(200, json={"fields": {
+            "fixVersions": [], "customfield_9": None}})
+
+    _mock(monkeypatch, handler)
+    client = TestClient(_app())
+    out = client.get("/api/jira/transitions/ENT-1").json()
+    assert [t["name"] for t in out["transitions"]] == [
+        "Start Review", "Ready for RC"]
+    assert out["transitions"][0]["required_fields"][0]["has_value"] is False
+
+
+def test_jira_write_transition_flow(jira_env, monkeypatch):
+    """op=transition through the approval rendezvous: executor re-resolves
+    the transition by name and posts it with coerced fields."""
+    posted = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=_TRANSITIONS_JSON)
+        posted["path"] = request.url.path
+        posted["body"] = json.loads(request.content)
+        return httpx.Response(204)
+
+    _mock(monkeypatch, handler)
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=_app())
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://t") as c:
+            r = await c.post("/api/approvals", json={
+                "kind": "jira_write", "session": "auto-1",
+                "request": {"op": "transition", "key": "ENTERPRISE-8348",
+                            "transition": "Pending RC"}})
+            rid = r.json()["id"]
+            await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
+            result = (await c.get(f"/api/approvals/{rid}?wait=10")).json()["result"]
+            assert result["execution"] == {
+                "ok": True, "transition": "Ready for RC",
+                "to_status": "Pending RC", "fields_set": []}
+            assert posted["path"] == "/rest/api/3/issue/ENTERPRISE-8348/transitions"
+            assert posted["body"] == {"transition": {"id": "41"}}
+
+    asyncio.run(scenario())
 
 
 def test_jira_write_full_flow_comment(jira_env, monkeypatch):

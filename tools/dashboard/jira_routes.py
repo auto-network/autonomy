@@ -13,6 +13,8 @@ result. Ops carried in the request JSON:
   (e.g. Confirm Plan; the id is discovered via editmeta at execution time)
 - ``{"op": "create", "fields": {...}}``
 - ``{"op": "attach", "key", "filename", "content_b64", "mime_type"?}``
+- ``{"op": "transition", "key", "transition", "fields"?}`` (fields keyed by
+  display name or id, values as CLI strings — coerced per schema host-side)
 """
 
 from __future__ import annotations
@@ -85,6 +87,21 @@ async def get_probe(request: Request) -> JSONResponse:
     except api.JiraError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
     return JSONResponse(result)
+
+
+async def get_transitions(request: Request) -> JSONResponse:
+    """GET /api/jira/transitions/{key} -> the workflow transitions valid
+    from the issue's current status, each with its required screen fields
+    annotated ``has_value``. The jira-transition tool preflights against
+    this so a doomed transition fails with a clear missing-fields list
+    BEFORE the operator sees an approval overlay."""
+    key = request.path_params["key"]
+    try:
+        out = await asyncio.to_thread(
+            api.list_transitions, _cfg(_org(request)), key)
+    except api.JiraError as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+    return JSONResponse({"transitions": out})
 
 
 async def post_search(request: Request) -> JSONResponse:
@@ -211,6 +228,10 @@ async def _execute_jira_write(row: dict) -> dict:
                                 req.get("body_markdown", ""))
         elif op == "create":
             out = api.create_issue(cfg, req.get("fields", {}))
+        elif op == "transition":
+            out = api.transition_issue(cfg, req["key"],
+                                       req.get("transition", ""),
+                                       req.get("fields") or None)
         elif op == "attach":
             out = api.add_attachment(
                 cfg, req["key"], req.get("filename", "attachment"),
@@ -230,6 +251,7 @@ ROUTES = [
     Route("/api/jira/issue/{key}", get_issue, methods=["GET"]),
     Route("/api/jira/createmeta", get_createmeta, methods=["GET"]),
     Route("/api/jira/attachment/{id}", get_attachment, methods=["GET"]),
+    Route("/api/jira/transitions/{key}", get_transitions, methods=["GET"]),
     Route("/api/jira/search", post_search, methods=["POST"]),
     Route("/api/jira/query", list_named_queries, methods=["GET"]),
     Route("/api/jira/query/{name}", run_named_query, methods=["GET"]),
