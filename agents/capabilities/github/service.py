@@ -686,18 +686,27 @@ def derive_repo_slug(managed_clone: Path | None) -> str | None:
 def _github_broker_config() -> dict:
     """``broker_config`` map from the autonomy/github org install Setting.
 
-    Read fresh per call (matches JiraConfig.resolve); tests monkeypatch
-    this function rather than threading env overrides per host.
+    Read fresh per call; tests monkeypatch this function rather than
+    threading env overrides per host. ``read_set`` requires the
+    keyword-only ``org`` argument — the jira loader's bare call
+    TypeErrors and silently falls back to its env overrides, which is
+    exactly the failure mode this version logs instead of swallowing.
     """
     try:
-        from tools.graph import ops as graph_ops
-        members = graph_ops.read_set("autonomy.org.capability.install")
+        from tools.graph import settings_ops
+        members = settings_ops.read_set(
+            "autonomy.org.capability.install", org="autonomy",
+        )
         for m in (getattr(members, "members", []) or []):
             payload = m.payload if isinstance(m.payload, dict) else {}
             if payload.get("implementation") == "autonomy/github":
                 return payload.get("broker_config") or {}
     except Exception:
-        pass
+        logger.warning(
+            "github capability: could not read org install broker_config; "
+            "host-mode execution disabled this pass",
+            exc_info=True,
+        )
     return {}
 
 

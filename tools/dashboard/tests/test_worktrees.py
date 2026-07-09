@@ -1535,6 +1535,46 @@ class TestGithubHostExecution:
         )
         assert wg.github_host_token("github.com") is None
 
+    def test_broker_config_loader_calls_read_set_correctly(self, monkeypatch):
+        """Regression: read_set requires keyword-only ``org``; a bare call
+        TypeErrors, and a silently-swallowed TypeError reads as "no config"
+        — host mode dead with no symptom. Pin the loader against the REAL
+        signature by stubbing at the settings_ops layer (the stub enforces
+        org as keyword-only exactly like production)."""
+        from agents.capabilities.github import service as wg
+        from tools.graph import settings_ops
+
+        class _Member:
+            def __init__(self, payload):
+                self.payload = payload
+
+        class _Members:
+            def __init__(self, members):
+                self.members = members
+
+        seen = {}
+
+        def fake_read_set(set_id, *, org, **kw):
+            seen["set_id"] = set_id
+            seen["org"] = org
+            return _Members([
+                _Member({"implementation": "autonomy/jira", "broker_config": {"x": "y"}}),
+                _Member({"implementation": "autonomy/github",
+                         "broker_config": {"token_file.github.com": "/tmp/t"}}),
+            ])
+
+        monkeypatch.setattr(settings_ops, "read_set", fake_read_set)
+        cfg = wg._github_broker_config()
+        assert cfg == {"token_file.github.com": "/tmp/t"}
+        assert seen == {"set_id": "autonomy.org.capability.install", "org": "autonomy"}
+
+        # A loader exception degrades to {} (container fallback), never raises.
+        def boom(set_id, *, org, **kw):
+            raise RuntimeError("db unavailable")
+
+        monkeypatch.setattr(settings_ops, "read_set", boom)
+        assert wg._github_broker_config() == {}
+
     def test_dead_row_refreshes_via_host_mode(self, monkeypatch):
         """The headline capability: a DEAD session's bound row fetches PR
         state by id with zero docker involvement — impossible before."""
