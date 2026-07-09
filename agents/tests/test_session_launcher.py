@@ -391,8 +391,10 @@ def test_capability_skill_installed_at_claude_discovery_path(
     tmp_path, fake_creds, fake_crosstalk, captured_run,
 ):
     """The SKILL.md of an enabled capability is copied per-session and mounted
-    where Claude Code actually discovers skills — the project's
-    .claude/skills/<name>/ — under its frontmatter name."""
+    where Claude Code actually discovers skills — the harness's personal
+    skills dir ~/.claude/skills/<name>/ — under its frontmatter name. The
+    personal dir is writable and cwd-independent on every workspace (unlike a
+    hardcoded /workspace/repo, which is read-only or not the cwd on some)."""
     _run(
         output_dir=str(tmp_path / "run"),
         capabilities=(_github_capability(),),
@@ -400,7 +402,7 @@ def test_capability_skill_installed_at_claude_discovery_path(
     docker_cmd = next(c for c in captured_run if c and c[0] == "docker")
     mounts = _mounts(docker_cmd)
     assert any(
-        m.endswith("cap-skills/github:/workspace/repo/.claude/skills/github:ro")
+        m.endswith("cap-skills/github:/home/agent/.claude/skills/github:ro")
         for m in mounts
     )
     installed = tmp_path / "run" / "cap-skills" / "github" / "SKILL.md"
@@ -433,7 +435,7 @@ def test_capability_skill_requires_frontmatter_and_slug_name(tmp_path, monkeypat
 
     good = cap_with("---\nname: good-name\ndescription: does things\n---\nbody\n")
     mounts = session_launcher._capability_skill_surface([good], run_dir, "claude")
-    assert list(mounts.values()) == ["/workspace/repo/.claude/skills/good-name:ro"]
+    assert list(mounts.values()) == ["/home/agent/.claude/skills/good-name:ro"]
     # codex projection is a deliberate gap (host-home bind) — nothing installed
     assert session_launcher._capability_skill_surface([good], run_dir, "codex") == {}
 
