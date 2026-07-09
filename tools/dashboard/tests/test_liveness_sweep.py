@@ -168,3 +168,108 @@ def test_check_tmux_probe_failure_is_unknown(monkeypatch):
 
     monkeypatch.setattr(sm.subprocess, "run", eagain_spawn)
     assert sm.SessionMonitor._check_tmux("auto-x") is None
+
+
+# ── Phase B: the reaper reads the one state ──────────────────────────
+
+
+def _seed_state(name: str, state: str, phase: str | None = None) -> None:
+    from tools.dashboard.session_lifecycle_worker import STATE_AUTHORITY
+
+    dashboard_db.insert_session(
+        tmux_name=name, session_type="container", project="x",
+        state="LAUNCHING" if state != "ACTIVE" else "ACTIVE",
+    )
+    if state == "LAUNCHING" and phase:
+        STATE_AUTHORITY.transition(name, "LAUNCHING", phase=phase, cause="test")
+    elif state == "STOPPING":
+        STATE_AUTHORITY.transition(name, "STOPPING", phase="stopping", cause="test")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", [
+    "requesting", "preparing_workspace", "launching_container",
+    "setup_running", "harness_starting", "confirming_trust",
+    "composer_ready", "awaiting_first_response",
+])
+async def test_reaper_never_reaps_launching_within_budget(db, monitor, monkeypatch, phase):
+    """THE class test: for every launch phase, a missing tmux does not
+    reap a LAUNCHING session inside its own budget — allowlist-omission
+    bugs (setup_running, confirming_trust, …) are impossible by
+    construction because there is no allowlist, only the budget table."""
+    from tools.dashboard import session_monitor as sm
+
+    _seed_state("auto-a", "LAUNCHING", phase=phase)
+    rows = dashboard_db.get_live_sessions()
+    monkeypatch.setattr(monitor, "_check_tmux", lambda _n: False)
+    cleanups = []
+    monkeypatch.setattr(
+        sm, "_cleanup_worktrees_for_dead_session",
+        lambda name: cleanups.append(name),
+    )
+    import time
+    changed = await monitor._sweep_tmux_liveness(rows, time.time())
+    assert changed is False
+    row = dashboard_db.get_session("auto-a")
+    assert row["state"] == "LAUNCHING"
+    assert cleanups == []
+
+
+@pytest.mark.asyncio
+async def test_reaper_never_touches_stopping(db, monitor, monkeypatch):
+    _seed_state("auto-a", "STOPPING")
+    rows = dashboard_db.get_live_sessions()
+    monkeypatch.setattr(monitor, "_check_tmux", lambda _n: False)
+    import time
+    changed = await monitor._sweep_tmux_liveness(rows, time.time())
+    assert changed is False
+    assert dashboard_db.get_session("auto-a")["state"] == "STOPPING"
+
+
+@pytest.mark.asyncio
+async def test_orphaned_launch_fails_after_phase_budget_plus_belt(db, monitor, monkeypatch):
+    """A LAUNCHING row whose last transition is older than its phase's own
+    budget + the belt margin is an orphan (the worker lost the job) — it
+    becomes FAILED (retryable), never ENDED: nothing was ever running."""
+    from tools.dashboard.session_lifecycle_worker import (
+        REAPER_BELT_MARGIN_S,
+        STEP_TIMEOUTS_S,
+    )
+
+    _seed_state("auto-a", "LAUNCHING", phase="setup_running")
+    rows = dashboard_db.get_live_sessions()
+    monkeypatch.setattr(monitor, "_check_tmux", lambda _n: False)
+    import time
+    late = time.time() + STEP_TIMEOUTS_S["setup_running"] + REAPER_BELT_MARGIN_S + 5
+    changed = await monitor._sweep_tmux_liveness(rows, late)
+    assert changed is True
+    row = dashboard_db.get_session("auto-a")
+    assert row["state"] == "FAILED"
+    assert "orphaned" in row["lifecycle_detail"]
+
+
+@pytest.mark.asyncio
+async def test_orphan_belt_respects_the_slowest_budget(db, monitor, monkeypatch):
+    """setup_running is safe for its full 600s budget — the 300s-grace <
+    600s-setup ordering bug is unrepresentable because the belt reads the
+    worker's own table."""
+    from tools.dashboard.session_lifecycle_worker import STEP_TIMEOUTS_S
+
+    _seed_state("auto-a", "LAUNCHING", phase="setup_running")
+    rows = dashboard_db.get_live_sessions()
+    monkeypatch.setattr(monitor, "_check_tmux", lambda _n: False)
+    import time
+    mid_setup = time.time() + STEP_TIMEOUTS_S["setup_running"] - 30
+    changed = await monitor._sweep_tmux_liveness(rows, mid_setup)
+    assert changed is False
+    assert dashboard_db.get_session("auto-a")["state"] == "LAUNCHING"
+
+
+def test_step_budgets_are_single_sourced():
+    from tools.dashboard import server
+    from tools.dashboard.session_lifecycle_worker import STEP_TIMEOUTS_S
+
+    assert server._LIFECYCLE_SETUP_TIMEOUT_S == STEP_TIMEOUTS_S["setup_running"]
+    assert server._LIFECYCLE_PREPARING_TIMEOUT_S == STEP_TIMEOUTS_S["preparing_workspace"]
+    assert server._LIFECYCLE_LAUNCHING_TIMEOUT_S == STEP_TIMEOUTS_S["launching_container"]
+    assert server._LIFECYCLE_WAITING_READY_TIMEOUT_S == STEP_TIMEOUTS_S["harness_starting"]

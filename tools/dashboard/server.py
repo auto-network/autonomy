@@ -5385,14 +5385,21 @@ async def _resolve_primer(primer: str) -> str | None:
 
 
 _HOST_MODEL_FALLBACK = "claude-opus-4-8[1m]"
-_LIFECYCLE_PREPARING_TIMEOUT_S = 120
-_LIFECYCLE_LAUNCHING_TIMEOUT_S = 60
-_LIFECYCLE_SETUP_TIMEOUT_S = 600
-_LIFECYCLE_WAITING_READY_TIMEOUT_S = 60
-_LIFECYCLE_INJECTING_TIMEOUT_S = 30
+# Step budgets come from the FSM module's STEP_TIMEOUTS_S — the single
+# source both the worker (enforcing inside each blocking step) and the
+# liveness reaper's orphan belt (budget + margin) read. Defining a number
+# here that the reaper can't see is how the 300s-grace < 600s-setup
+# ordering bug happened.
+from tools.dashboard.session_lifecycle_worker import STEP_TIMEOUTS_S as _STEP_TIMEOUTS_S
+
+_LIFECYCLE_PREPARING_TIMEOUT_S = _STEP_TIMEOUTS_S["preparing_workspace"]
+_LIFECYCLE_LAUNCHING_TIMEOUT_S = _STEP_TIMEOUTS_S["launching_container"]
+_LIFECYCLE_SETUP_TIMEOUT_S = _STEP_TIMEOUTS_S["setup_running"]
+_LIFECYCLE_WAITING_READY_TIMEOUT_S = _STEP_TIMEOUTS_S["harness_starting"]
+_LIFECYCLE_INJECTING_TIMEOUT_S = _STEP_TIMEOUTS_S["awaiting_first_response"]
 _LIFECYCLE_REGISTER_TIMEOUT_S = 5
 _LIFECYCLE_TMUX_OP_TIMEOUT_S = 5
-_LIFECYCLE_STOP_TIMEOUT_S = 30
+_LIFECYCLE_STOP_TIMEOUT_S = _STEP_TIMEOUTS_S["stopping"]
 _LIFECYCLE_REMOVE_WATCHERS_TIMEOUT_S = 5
 _LIFECYCLE_DEREGISTER_TIMEOUT_S = 5
 _LIFECYCLE_CLEANUP_WORKTREE_TIMEOUT_S = 60
@@ -5434,6 +5441,60 @@ def _run_tmux_capture(tmux_name: str, *, timeout: float | None = None) -> str:
     return result.stdout or ""
 
 
+def _container_exists(tmux_name: str) -> bool | None:
+    """Does a docker container named after this session exist? Tri-state:
+    True/False are authoritative; None means the probe itself failed
+    (same fail-safe contract as the tmux liveness probe)."""
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Status}}", tmux_name],
+            capture_output=True,
+            text=True,
+            timeout=_LIFECYCLE_TMUX_OP_TIMEOUT_S,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return None
+    return result.returncode == 0
+
+
+def _pane_tail(tmux_name: str, lines: int = 15) -> str:
+    """Best-effort last pane lines — the docker error is usually here."""
+    try:
+        text = _run_tmux_capture(tmux_name)
+    except Exception:
+        return ""
+    stripped = [ln for ln in text.splitlines() if ln.strip()]
+    return "\n".join(stripped[-lines:])
+
+
+def _verify_container_started(*, tmux_name: str, deadline: float) -> None:
+    """Fail fast when ``docker run`` produced no container.
+
+    The tmux spawn succeeding only proves tmux ran the command — a docker
+    invocation that aborts during container init (bad mount, OCI error)
+    leaves NO container, and without this check the launch would sit in
+    phantom ``setup_running`` for the full setup budget before failing
+    (auto-0709-092918: three 600s cycles against a mount error that was
+    printed in the pane within two seconds). Polls until the container
+    object exists; probe failures (None) don't count against it.
+    """
+    saw_missing = False
+    while time.monotonic() < deadline:
+        exists = _container_exists(tmux_name)
+        if exists:
+            return
+        if exists is False:
+            saw_missing = True
+        time.sleep(1.0)
+    detail = "docker run produced no container"
+    if not saw_missing:
+        detail = "container presence could not be verified (docker probe failing)"
+    tail = _pane_tail(tmux_name)
+    if tail:
+        detail += f"; pane tail: {tail[-800:]}"
+    raise RuntimeError(detail)
+
+
 def _wait_for_setup_complete(
     *,
     tmux_name: str,
@@ -5441,10 +5502,18 @@ def _wait_for_setup_complete(
     startup_script: Path | None,
     deadline: float,
 ) -> None:
-    """Wait for the optional project startup script's exit marker."""
+    """Wait for the optional project startup script's exit marker.
+
+    Also watches the container itself: a container that dies mid-setup can
+    never write ``.setup-exit``, and waiting the full setup budget for a
+    corpse is the phantom-setup failure mode. Two consecutive authoritative
+    "container gone" probes fail the step immediately with the pane tail.
+    """
     if startup_script is None:
         return
     setup_exit = run_dir / ".setup-exit"
+    container_missing_streak = 0
+    tick = 0
     while time.monotonic() < deadline:
         if setup_exit.exists():
             exit_code = setup_exit.read_text().strip()
@@ -5460,6 +5529,19 @@ def _wait_for_setup_complete(
             if log_tail:
                 detail += f": {log_tail[-1000:]}"
             raise RuntimeError(detail)
+        tick += 1
+        if tick % 5 == 0:
+            exists = _container_exists(tmux_name)
+            if exists is False:
+                container_missing_streak += 1
+                if container_missing_streak >= 2:
+                    detail = "container died during setup"
+                    tail = _pane_tail(tmux_name)
+                    if tail:
+                        detail += f"; pane tail: {tail[-800:]}"
+                    raise RuntimeError(detail)
+            elif exists:
+                container_missing_streak = 0
         time.sleep(1.0)
     raise TimeoutError(f"setup timed out after {_LIFECYCLE_SETUP_TIMEOUT_S}s")
 
@@ -5958,6 +6040,13 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
                 timeout=_remaining_step_timeout(launch_deadline, "launching"),
             )
 
+        # Fail fast if docker produced no container (bad mount / OCI init
+        # error): the tmux spawn alone proves nothing.
+        _verify_container_started(
+            tmux_name=tmux_name,
+            deadline=time.monotonic() + 20,
+        )
+
         phase = "setup"
         writer.set_state(tmux_name, "setup")
         _register_project_session_from_worker(
@@ -6229,6 +6318,13 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 capture_output=True,
                 timeout=_remaining_step_timeout(launch_deadline, "launching"),
             )
+        if kind != "host":
+            # Fail fast if docker produced no container (bad mount / OCI init
+            # error): the tmux spawn alone proves nothing.
+            _verify_container_started(
+                tmux_name=tmux_name,
+                deadline=time.monotonic() + 20,
+            )
 
         phase = "setup"
         writer.set_state(tmux_name, "setup")
@@ -6357,6 +6453,13 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 ["tmux", "set-option", "-t", tmux_name, opt, val],
                 capture_output=True,
                 timeout=_remaining_step_timeout(launch_deadline, "launching"),
+            )
+        if kind != "host":
+            # Fail fast if docker produced no container (bad mount / OCI init
+            # error): the tmux spawn alone proves nothing.
+            _verify_container_started(
+                tmux_name=tmux_name,
+                deadline=time.monotonic() + 20,
             )
 
         if loop is not None and loop.is_running():
