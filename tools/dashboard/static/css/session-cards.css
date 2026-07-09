@@ -353,6 +353,12 @@ body.zoom-normal .sc-footer.sc-footer-ended {
   grid-template-columns: 0.58fr 0.52fr 0.72fr minmax(122px, 1.36fr) minmax(72px, 0.92fr);
   column-gap: 8px;
   row-gap: 4px;
+  /* The fractions were authored for a ~390px mobile card; uncapped they
+     stretch the five stats across a full widescreen card while live
+     cards stay left-packed. Cap keeps the grid tight and left-justified
+     on desktop — and since every card caps at the same width, columns
+     still align across cards. */
+  max-width: 640px;
 }
 .sc-footer-ended .sc-footer-item { min-width: 0; }
 .sc-footer-ended .sc-footer-value {
