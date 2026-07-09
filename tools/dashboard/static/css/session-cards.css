@@ -343,6 +343,25 @@ body.zoom-expanded .sc-meta2 {
 }
 .sc-disk-refresh:hover { color: #eef4fb; border-color: #4a5d7d; }
 
+/* Ended-card footer — design d2250266's fixed 5-column grid (turns, ctx,
+   disk, tmux, org) so columns align across cards and long values truncate
+   with an ellipsis instead of wrapping mid-name (tmux) or mid-word (org).
+   !important mirrors the zoom-normal .sc-footer flex override below. */
+.sc-footer.sc-footer-ended,
+body.zoom-normal .sc-footer.sc-footer-ended {
+  display: grid !important;
+  grid-template-columns: 0.58fr 0.52fr 0.72fr minmax(122px, 1.36fr) minmax(72px, 0.92fr);
+  column-gap: 8px;
+  row-gap: 4px;
+}
+.sc-footer-ended .sc-footer-item { min-width: 0; }
+.sc-footer-ended .sc-footer-value {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sc-footer-ended .sc-resource-trigger { align-self: flex-start; max-width: 100%; }
+
 /* Resume pill — design d2250266: dead-resumable rows get a compact green
    top-right action in the badge row instead of a footer entry. */
 .sc-resume-pill {
