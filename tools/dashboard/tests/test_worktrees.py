@@ -2797,6 +2797,28 @@ class TestWorktreeMonitorDiscovery:
         assert snap_a["reason"] == FAILURE_NO_HOST_TOKEN
         assert monitor._source_control_cache[("auto-b", "autonomy")] is good
 
+    def test_discovery_query_stays_under_graphql_node_cap(self, monkeypatch):
+        """Regression: the full PR_LIST_FIELDS (commits + statusCheckRollup
+        nested connections) x --limit 100 exceeded GitHub's 500k GraphQL
+        node cap on enterprise_ng. Discovery must use the scalar-only
+        field set; heavy fields come later via bound REST-by-id."""
+        from agents.capabilities.github import service as wg
+        captured = {}
+
+        async def fake_run(cmd, *, timeout=30, env=None):
+            captured["cmd"] = cmd
+            return "[]", "", 0, False
+
+        monkeypatch.setattr(wg, "run_cli", fake_run)
+        monkeypatch.setattr(wg, "github_host_token", lambda _h: "tok")
+        stdout, failure = asyncio.run(
+            wg.source_control_repo_reviews_v1("github.com", "anchore/enterprise_ng"))
+        assert failure is None and stdout == "[]"
+        json_arg = captured["cmd"][captured["cmd"].index("--json") + 1]
+        assert "commits" not in json_arg
+        assert "statusCheckRollup" not in json_arg
+        assert "headRefName" in json_arg and "headRefOid" in json_arg
+
     def test_discovery_failure_surfaces_degraded_without_clobbering(self, monkeypatch):
         """A failed pr list (e.g. host gh too old for a JSON field) marks
         cache-less rows state=degraded with the failure code — never
