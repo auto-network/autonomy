@@ -221,7 +221,17 @@ class TestDispatchPageNoNaN:
         ab_raw("close")
         ab_raw("open", f"http://localhost:{TEST_PORT}/dispatch",
                "--ignore-https-errors")
-        time.sleep(4)  # wait for SSE data to arrive
+        # Poll for the SSE-driven dispatch cards instead of a fixed sleep —
+        # cold Chromium boots under parallel load routinely outlast it.
+        _deadline = time.time() + 25
+        while time.time() < _deadline:
+            _painted = ab_eval(
+                "return !!(window.Alpine && (document.body.innerText || '').length > 200);"
+            )
+            if _painted is True:
+                break
+            time.sleep(0.5)
+        time.sleep(1)  # small settle for the Last column to compute
 
         # Check the full page text for NaN
         text = ab_eval("return document.body.innerText;")

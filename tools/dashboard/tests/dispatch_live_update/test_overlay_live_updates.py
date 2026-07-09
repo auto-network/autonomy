@@ -186,7 +186,16 @@ class TestOverlayLiveUpdatesUnmocked:
         _ab_raw("close")
         _ab_raw("open", f"http://localhost:{port}/session/autonomy/{tmux_name}",
                 "--ignore-https-errors", timeout=15)
-        time.sleep(3)
+        # Poll for the viewer's Alpine store row instead of a fixed sleep.
+        _deadline = time.time() + 25
+        while time.time() < _deadline:
+            _ready = _ab_eval(
+                "return !!(window.Alpine && Alpine.store('sessions')"
+                f" && Alpine.store('sessions')['{tmux_name}']);"
+            )
+            if _ready is True:
+                break
+            time.sleep(0.5)
 
         opened = _ab_eval(f"""
             var viewer = null;

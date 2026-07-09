@@ -117,7 +117,17 @@ class LayoutTestHarness:
         time.sleep(0.3)
         ab_raw("open", f"http://localhost:{TEST_PORT}/session/{project}/{session_id}",
                "--ignore-https-errors")
-        time.sleep(3)
+        # Poll for the viewer's Alpine store row instead of a fixed sleep —
+        # cold Chromium boots under parallel load routinely outlast it.
+        _deadline = time.time() + 25
+        while time.time() < _deadline:
+            _ready = ab_eval(
+                "return !!(window.Alpine && Alpine.store('sessions')"
+                f" && Alpine.store('sessions')['{session_id}']);"
+            )
+            if _ready is True:
+                break
+            time.sleep(0.5)
 
 
 @pytest.fixture(scope="module")
