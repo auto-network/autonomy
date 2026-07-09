@@ -1,6 +1,6 @@
-"""Activity state tracking tests — pending_tool_ids, last_entry_type, activity_state.
+"""Attention telemetry tests — pending_tool_ids, last_entry_type, attention.
 
-Tests the server-side activity_state derivation pipeline:
+Tests the server-side attention derivation pipeline:
   parsed entries → _TailState tracking → DB persistence → SSE broadcast.
 
 No browser, no HTTP server. Uses real inotify, real files (tmp_path),
@@ -28,12 +28,17 @@ from tools.dashboard.session_monitor import _TailState, _apply_activity_entries
 
 
 def _init_test_db(db_path: Path) -> None:
-    """Create a minimal dashboard.db for testing (includes activity_state column)."""
+    """Create a minimal dashboard.db for testing (state/attention columns)."""
     conn = sqlite3.connect(str(db_path))
     conn.execute("""CREATE TABLE IF NOT EXISTS tmux_sessions (
         tmux_name TEXT PRIMARY KEY, session_uuid TEXT, graph_source_id TEXT,
         type TEXT NOT NULL, project TEXT NOT NULL, jsonl_path TEXT,
-        bead_id TEXT, created_at REAL NOT NULL, is_live INTEGER DEFAULT 1,
+        bead_id TEXT, created_at REAL NOT NULL,
+        state TEXT CHECK (state IN
+            ('LAUNCHING','ACTIVE','STOPPING','ENDED','FAILED')),
+        attention TEXT CHECK (attention IN
+            ('tool_running','thinking','idle')),
+        ended_at REAL,
         file_offset INTEGER DEFAULT 0, last_activity REAL,
         last_message TEXT DEFAULT '', entry_count INTEGER DEFAULT 0,
         context_tokens INTEGER DEFAULT 0, label TEXT DEFAULT '',
@@ -42,8 +47,7 @@ def _init_test_db(db_path: Path) -> None:
         nag_message TEXT DEFAULT '', nag_last_sent REAL DEFAULT 0,
         dispatch_nag INTEGER DEFAULT 0,
         resolution_dir TEXT, session_uuids TEXT DEFAULT '[]',
-        curr_jsonl_file TEXT,
-        activity_state TEXT DEFAULT 'idle'
+        curr_jsonl_file TEXT
     )""")
     conn.commit()
     conn.close()
@@ -63,9 +67,9 @@ def _insert_session(
         res_dir = str(Path(jsonl_path).parent)
     conn.execute(
         "INSERT INTO tmux_sessions"
-        " (tmux_name, type, project, jsonl_path, created_at, is_live,"
+        " (tmux_name, type, project, jsonl_path, created_at, state,"
         "  resolution_dir, session_uuids, curr_jsonl_file, file_offset)"
-        " VALUES (?, ?, 'test', ?, ?, 1, ?, ?, ?, ?)",
+        " VALUES (?, ?, 'test', ?, ?, 'ACTIVE', ?, ?, ?, ?)",
         (tmux_name, session_type, jsonl_path, time.time(),
          res_dir, session_uuids, jsonl_path, file_offset),
     )
@@ -74,15 +78,27 @@ def _insert_session(
 
 
 def _read_activity_state(db_path: Path, tmux_name: str) -> str | None:
-    """Read activity_state directly from DB."""
+    """Read the attention telemetry column directly from DB."""
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     row = conn.execute(
-        "SELECT activity_state FROM tmux_sessions WHERE tmux_name=?",
+        "SELECT attention FROM tmux_sessions WHERE tmux_name=?",
         (tmux_name,),
     ).fetchone()
     conn.close()
-    return row["activity_state"] if row else None
+    return row["attention"] if row else None
+
+
+def _read_state(db_path: Path, tmux_name: str) -> str | None:
+    """Read the lifecycle state column directly from DB."""
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT state FROM tmux_sessions WHERE tmux_name=?",
+        (tmux_name,),
+    ).fetchone()
+    conn.close()
+    return row["state"] if row else None
 
 
 def _write_jsonl_entry(path: Path, entry: dict) -> None:
@@ -591,8 +607,8 @@ class TestActivityStateDerivation:
                 ts.pending_tool_ids.clear()
             mark_dead("auto-act-9")
 
-            state = _read_activity_state(db_path, "auto-act-9")
-            assert state == "dead"
+            assert _read_state(db_path, "auto-act-9") == "ENDED"
+            assert _read_activity_state(db_path, "auto-act-9") is None
         finally:
             await _stop_monitor(mon, patcher)
 
@@ -649,7 +665,7 @@ class TestActivityStateDerivation:
 
     @pytest.mark.asyncio
     async def test_empty_batch_no_state_change(self, setup_env):
-        """Empty batch should not change activity_state."""
+        """Empty batch should not change the attention telemetry."""
         tmp_path, db_path = setup_env
         jsonl = tmp_path / "test-session.jsonl"
         jsonl.write_text("")
@@ -658,7 +674,7 @@ class TestActivityStateDerivation:
         # Set initial state
         conn = sqlite3.connect(str(db_path))
         conn.execute(
-            "UPDATE tmux_sessions SET activity_state='idle' WHERE tmux_name='auto-act-11'"
+            "UPDATE tmux_sessions SET attention='idle' WHERE tmux_name='auto-act-11'"
         )
         conn.commit()
         conn.close()
@@ -865,8 +881,8 @@ class TestActivityStateBroadcast:
 
             # Run one liveness check
             bus.events.clear()
-            sessions = [{"tmux_name": "auto-bcast-4", "type": "container", "is_live": 1,
-                         "nag_enabled": 0}]
+            sessions = [{"tmux_name": "auto-bcast-4", "type": "container",
+                         "state": "ACTIVE", "nag_enabled": 0}]
             from tools.dashboard.dao.dashboard_db import get_live_sessions
             with patch("tools.dashboard.session_monitor.get_live_sessions", return_value=sessions):
                 # Direct call to simulate the relevant part of the liveness loop
@@ -879,9 +895,8 @@ class TestActivityStateBroadcast:
             dead_patcher.stop()
             patcher.start()  # Restore for cleanup
 
-            state = _read_activity_state(db_path, "auto-bcast-4")
-            assert state == "dead"
-            assert state != "tool_running"
+            assert _read_state(db_path, "auto-bcast-4") == "ENDED"
+            assert _read_activity_state(db_path, "auto-bcast-4") is None
         finally:
             await _stop_monitor(mon, patcher)
 
@@ -890,7 +905,7 @@ class TestActivityStateBroadcast:
 
 
 class TestDispatcherReadsActivityState:
-    """Validates the dispatcher's consumption of activity_state for timeout thresholds."""
+    """Validates the attention telemetry surfaced to threshold consumers."""
 
     def test_dispatcher_threshold_from_activity_state(self, setup_env):
         """Dispatcher uses 1800s threshold for tool_running, 300s otherwise."""
@@ -902,8 +917,8 @@ class TestDispatcherReadsActivityState:
         conn = sqlite3.connect(str(db_path))
         conn.execute(
             "INSERT INTO tmux_sessions"
-            " (tmux_name, type, project, created_at, is_live, activity_state)"
-            " VALUES ('auto-disp-1', 'container', 'test', ?, 1, 'tool_running')",
+            " (tmux_name, type, project, created_at, state, attention)"
+            " VALUES ('auto-disp-1', 'container', 'test', ?, 'ACTIVE', 'tool_running')",
             (time.time(),),
         )
         conn.commit()
@@ -913,7 +928,7 @@ class TestDispatcherReadsActivityState:
         assert row is not None
 
         # tool_running → 1800
-        if row.get("activity_state") == "tool_running":
+        if row.get("attention") == "tool_running":
             threshold = 1800
         else:
             threshold = 300
@@ -922,7 +937,7 @@ class TestDispatcherReadsActivityState:
         # Now update to idle
         conn = sqlite3.connect(str(db_path))
         conn.execute(
-            "UPDATE tmux_sessions SET activity_state='idle' WHERE tmux_name='auto-disp-1'"
+            "UPDATE tmux_sessions SET attention='idle' WHERE tmux_name='auto-disp-1'"
         )
         conn.commit()
         conn.close()
@@ -935,17 +950,17 @@ class TestDispatcherReadsActivityState:
         importlib.reload(db_mod)
 
         row = get_session("auto-disp-1")
-        threshold = 1800 if row.get("activity_state") == "tool_running" else 300
+        threshold = 1800 if row.get("attention") == "tool_running" else 300
         assert threshold == 300
 
     def test_thinking_uses_default_threshold(self, setup_env):
-        """activity_state=thinking → 300s threshold."""
+        """attention=thinking → 300s threshold."""
         _, db_path = setup_env
         conn = sqlite3.connect(str(db_path))
         conn.execute(
             "INSERT INTO tmux_sessions"
-            " (tmux_name, type, project, created_at, is_live, activity_state)"
-            " VALUES ('auto-disp-2', 'container', 'test', ?, 1, 'thinking')",
+            " (tmux_name, type, project, created_at, state, attention)"
+            " VALUES ('auto-disp-2', 'container', 'test', ?, 'ACTIVE', 'thinking')",
             (time.time(),),
         )
         conn.commit()
@@ -953,25 +968,25 @@ class TestDispatcherReadsActivityState:
 
         from tools.dashboard.dao.dashboard_db import get_session
         row = get_session("auto-disp-2")
-        threshold = 1800 if row.get("activity_state") == "tool_running" else 300
+        threshold = 1800 if row.get("attention") == "tool_running" else 300
         assert threshold == 300
 
     def test_dead_uses_default_threshold(self, setup_env):
-        """activity_state=dead → 300s threshold."""
+        """A terminal row (attention NULL) → 300s threshold."""
         _, db_path = setup_env
         conn = sqlite3.connect(str(db_path))
         conn.execute(
             "INSERT INTO tmux_sessions"
-            " (tmux_name, type, project, created_at, is_live, activity_state)"
-            " VALUES ('auto-disp-3', 'container', 'test', ?, 0, 'dead')",
-            (time.time(),),
+            " (tmux_name, type, project, created_at, state, ended_at)"
+            " VALUES ('auto-disp-3', 'container', 'test', ?, 'ENDED', ?)",
+            (time.time(), time.time()),
         )
         conn.commit()
         conn.close()
 
         from tools.dashboard.dao.dashboard_db import get_session
         row = get_session("auto-disp-3")
-        threshold = 1800 if row.get("activity_state") == "tool_running" else 300
+        threshold = 1800 if row.get("attention") == "tool_running" else 300
         assert threshold == 300
 
 
@@ -979,10 +994,10 @@ class TestDispatcherReadsActivityState:
 
 
 class TestActivityStateMigration:
-    """Validates the ALTER TABLE migration adds activity_state."""
+    """Validates the FSM consolidation migration on a legacy DB."""
 
     def test_migration_adds_column(self, tmp_path):
-        """init_db on a DB without activity_state adds the column."""
+        """init_db on a legacy DB stamps state and drops the legacy columns."""
         db_path = tmp_path / "legacy.db"
         # Create DB without activity_state column
         conn = sqlite3.connect(str(db_path))
@@ -1015,14 +1030,19 @@ class TestActivityStateMigration:
         importlib.reload(db_mod)
         db_mod.init_db(db_path)
 
-        # Verify column exists and default is 'idle'
+        # The live legacy row (is_live default 1, no startup_state) is
+        # backfilled ACTIVE with idle attention; the legacy columns are gone.
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT activity_state FROM tmux_sessions WHERE tmux_name='old-session'"
+            "SELECT state, attention FROM tmux_sessions"
+            " WHERE tmux_name='old-session'"
         ).fetchone()
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tmux_sessions)")}
         conn.close()
         assert row is not None
-        assert row["activity_state"] == "idle"
+        assert row["state"] == "ACTIVE"
+        assert row["attention"] == "idle"
+        assert "is_live" not in cols and "activity_state" not in cols
 
         os.environ.pop("DASHBOARD_DB", None)

@@ -38,10 +38,10 @@ _STOP = object()
 
 # ── The single lifecycle truth ───────────────────────────────────────
 #
-# One closed set. Every session is in exactly one of these at all times;
-# is_live / activity_state are write-through projections during the
-# migration window and derived afterwards. Only the transition authority
-# below writes this column (enforced by test_no_racing_writers.py).
+# One closed set. Every session is in exactly one of these at all times.
+# Only the transition authority below writes this column (enforced by
+# test_no_racing_writers.py). The legacy is_live/activity_state columns
+# are DROPPED — liveness is state-derived everywhere.
 SessionState = Literal["LAUNCHING", "ACTIVE", "STOPPING", "ENDED", "FAILED"]
 
 # Legal moves. A transition outside this table is refused and logged at
@@ -192,11 +192,11 @@ class SessionLifecycleStateWriter:
         """THE transition authority — the only writer of session state.
 
         Validates the move against ``_LEGAL_TRANSITIONS``, then writes the
-        full column set atomically: ``state``, the legacy write-through
-        projections (``startup_state``/``activity_state``/``is_live`` —
-        stamped in the SAME UPDATE, so they cannot disagree with ``state``),
-        ``last_activity``, ``ended_at``, ``attention`` (reset to idle on
-        ACTIVE entry, cleared on terminal entry), and ``lifecycle_detail``.
+        full column set atomically: ``state``, the chip ``startup_state``
+        (granular phase, meaningful while LAUNCHING; sticky setup_failed
+        for FAILED), ``last_activity``, ``ended_at``, ``attention`` (reset
+        to idle on ACTIVE entry, cleared on terminal entry), and
+        ``lifecycle_detail``.
 
         Returns True when the row changed. An illegal move is REFUSED,
         logged at WARNING, and returns False — a caller requesting an
@@ -235,29 +235,14 @@ class SessionLifecycleStateWriter:
             return False
 
         now = time.time()
-        is_live = 0 if to_state in ("ENDED", "FAILED") else 1
-        # Legacy chip projection: LAUNCHING carries the granular phase;
-        # FAILED keeps the sticky setup_failed chip; ACTIVE/STOPPING/ENDED
-        # clear it (matches the pre-consolidation rendering exactly).
+        # Chip phase: LAUNCHING carries the granular launch phase; FAILED
+        # keeps the sticky setup_failed chip; ACTIVE/STOPPING/ENDED clear it.
         if to_state == "LAUNCHING":
             startup_state = phase
         elif to_state == "FAILED":
             startup_state = "setup_failed"
         else:
             startup_state = None
-        if to_state == "LAUNCHING":
-            activity_state = "running"
-        elif to_state == "ACTIVE":
-            # Legacy value on entry ('running', matching the pre-migration
-            # writer); the attention tracker converges to idle/working from
-            # tailed entries within seconds.
-            activity_state = "running"
-        elif to_state == "STOPPING":
-            activity_state = phase or "stopping"
-        elif to_state == "FAILED":
-            activity_state = "failed"
-        else:
-            activity_state = "dead"
 
         lifecycle_detail = None
         if to_state == "FAILED":
@@ -290,13 +275,13 @@ class SessionLifecycleStateWriter:
             ended_at_val = None
             attention_sql = "attention"
 
-        params: list = [to_state, startup_state, activity_state, is_live, now, lifecycle_detail]
+        params: list = [to_state, startup_state, now, lifecycle_detail]
         if ended_at_val is not None:
             params.append(ended_at_val)
         params.append(tmux_name)
         cur = conn.execute(
             "UPDATE tmux_sessions"
-            f" SET state=?, startup_state=?, activity_state=?, is_live=?,"
+            f" SET state=?, startup_state=?,"
             f" last_activity=?, lifecycle_detail=?,"
             f" ended_at={ended_at_sql}, attention={attention_sql}"
             " WHERE tmux_name=?",

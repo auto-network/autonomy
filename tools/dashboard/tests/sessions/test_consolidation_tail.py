@@ -27,7 +27,12 @@ def _init_db(db_path: Path) -> None:
     conn.execute("""CREATE TABLE IF NOT EXISTS tmux_sessions (
         tmux_name TEXT PRIMARY KEY, session_uuid TEXT, graph_source_id TEXT,
         type TEXT NOT NULL, project TEXT NOT NULL, jsonl_path TEXT,
-        bead_id TEXT, created_at REAL NOT NULL, is_live INTEGER DEFAULT 1,
+        bead_id TEXT, created_at REAL NOT NULL,
+        state TEXT CHECK (state IN
+            ('LAUNCHING','ACTIVE','STOPPING','ENDED','FAILED')),
+        attention TEXT CHECK (attention IN
+            ('tool_running','thinking','idle')),
+        ended_at REAL,
         file_offset INTEGER DEFAULT 0, last_activity REAL,
         last_message TEXT DEFAULT '', entry_count INTEGER DEFAULT 0,
         context_tokens INTEGER DEFAULT 0, label TEXT DEFAULT '',
@@ -36,23 +41,25 @@ def _init_db(db_path: Path) -> None:
         nag_message TEXT DEFAULT '', nag_last_sent REAL DEFAULT 0,
         dispatch_nag INTEGER DEFAULT 0,
         resolution_dir TEXT, session_uuids TEXT DEFAULT '[]',
-        curr_jsonl_file TEXT, activity_state TEXT DEFAULT 'idle'
+        curr_jsonl_file TEXT
     )""")
     conn.commit()
     conn.close()
 
 
 def _insert_dispatch(db_path: Path, *, tmux_name: str, session_uuid: str,
-                     jsonl_path: str, is_live: int = 1, bead_id: str = "auto-t") -> None:
+                     jsonl_path: str, state: str = "ACTIVE", bead_id: str = "auto-t") -> None:
     conn = sqlite3.connect(str(db_path))
     conn.execute(
         "INSERT INTO tmux_sessions"
         " (tmux_name, type, project, bead_id, jsonl_path, session_uuid,"
-        "  resolution_dir, session_uuids, curr_jsonl_file, created_at, is_live)"
-        " VALUES (?, 'dispatch', 'autonomy', ?, ?, ?, ?, ?, ?, ?, ?)",
+        "  resolution_dir, session_uuids, curr_jsonl_file, created_at,"
+        "  state, ended_at)"
+        " VALUES (?, 'dispatch', 'autonomy', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (tmux_name, bead_id, jsonl_path, session_uuid,
          str(Path(jsonl_path).parent), json.dumps([session_uuid]),
-         jsonl_path, time.time(), is_live),
+         jsonl_path, time.time(), state,
+         time.time() if state in ("ENDED", "FAILED") else None),
     )
     conn.commit()
     conn.close()
@@ -128,7 +135,7 @@ class TestUnifiedTailResolvesDispatchUUID:
             tmux_name="auto-disp-0420-010101",
             session_uuid=dispatch_uuid,
             jsonl_path=str(jsonl),
-            is_live=1,
+            state="ACTIVE",
         )
 
         resp = client.get(f"/api/session/autonomy/{dispatch_uuid}/tail")
@@ -172,7 +179,7 @@ class TestEndedDispatchResolvesByUUID:
             tmux_name="auto-ended-0420-020202",
             session_uuid=ended_uuid,
             jsonl_path=str(jsonl),
-            is_live=0,
+            state="ENDED",
         )
 
         resp = client.get(f"/api/session/autonomy/{ended_uuid}/tail")

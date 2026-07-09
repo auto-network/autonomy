@@ -594,8 +594,9 @@ class ResourceMonitor:
         dict, or None for unknown/dead sessions.
         """
         from tools.dashboard.dao.dashboard_db import get_session
+        from tools.dashboard.session_lifecycle_worker import derive_lifecycle_state
         row = get_session(tmux_name)
-        if row is None or not row.get("is_live"):
+        if row is None or derive_lifecycle_state(row) in ("ENDED", "FAILED"):
             return None
         state = self._states.setdefault(tmux_name, _SessionState())
         return await asyncio.to_thread(

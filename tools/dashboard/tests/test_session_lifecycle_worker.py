@@ -57,14 +57,12 @@ def test_state_writer_maps_lifecycle_to_existing_columns(tmp_path):
 
     writer.set_state("auto-life", "requested")
     assert _row()["startup_state"] == "requesting"
-    assert _row()["activity_state"] == "running"
-    assert _row()["is_live"] == 1
+    assert _row()["state"] == "LAUNCHING"
     assert _row()["lifecycle_detail"] is None
 
     writer.set_state("auto-life", "running")
     assert _row()["startup_state"] is None
-    assert _row()["activity_state"] == "running"
-    assert _row()["is_live"] == 1
+    assert _row()["state"] == "ACTIVE"
     assert _row()["lifecycle_detail"] is None
 
     writer.fail(
@@ -75,8 +73,7 @@ def test_state_writer_maps_lifecycle_to_existing_columns(tmp_path):
         attempt=3,
     )
     assert _row()["startup_state"] == "setup_failed"
-    assert _row()["activity_state"] == "failed"
-    assert _row()["is_live"] == 0
+    assert _row()["state"] == "FAILED"
     detail = json.loads(_row()["lifecycle_detail"])
     assert detail["failed_phase"] == "injecting"
     assert detail["reason"] == "composer timeout"
@@ -92,8 +89,6 @@ def test_state_writer_maps_lifecycle_to_existing_columns(tmp_path):
     # visible until retried) — the authority refuses the move.
     writer.set_state("auto-life", "dead")
     assert _row()["state"] == "FAILED"
-    assert _row()["activity_state"] == "failed"
-    assert _row()["is_live"] == 0
 
 
 def test_worker_runs_jobs_serially_on_background_thread(tmp_path):
@@ -124,8 +119,8 @@ def test_worker_runs_jobs_serially_on_background_thread(tmp_path):
 
     assert [name for name, _thread_name in calls] == ["auto-one", "auto-two"]
     assert all(thread_name == "test-lifecycle" for _name, thread_name in calls)
-    assert _row("auto-one")["activity_state"] == "running"
-    assert _row("auto-two")["activity_state"] == "running"
+    assert _row("auto-one")["state"] == "ACTIVE"
+    assert _row("auto-two")["state"] == "ACTIVE"
 
 
 def test_worker_marks_job_failed_when_handler_raises(tmp_path):
@@ -153,8 +148,7 @@ def test_worker_marks_job_failed_when_handler_raises(tmp_path):
         worker.shutdown()
 
     assert _row()["startup_state"] == "setup_failed"
-    assert _row()["activity_state"] == "failed"
-    assert _row()["is_live"] == 0
+    assert _row()["state"] == "FAILED"
     detail = json.loads(_row()["lifecycle_detail"])
     assert detail["failed_phase"] == "start"
     assert "RuntimeError: boom" in detail["reason"]

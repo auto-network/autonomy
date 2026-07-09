@@ -186,8 +186,8 @@ class TestCheckDispatchPauseNag:
         """Insert a live session with dispatch_nag=1."""
         db.get_conn().execute(
             """INSERT OR REPLACE INTO tmux_sessions
-            (tmux_name, type, project, created_at, is_live, dispatch_nag)
-            VALUES (?, ?, ?, ?, 1, 1)""",
+            (tmux_name, type, project, created_at, state, dispatch_nag)
+            VALUES (?, ?, ?, ?, 'ACTIVE', 1)""",
             (tmux_name, "host", "test", time.time()),
         )
         db.get_conn().commit()

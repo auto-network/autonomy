@@ -89,8 +89,7 @@ def test_project_start_handler_prepares_launches_registers_without_event_loop(mo
     row = dashboard_db.get_session("auto-life")
     assert row is not None
     assert row["startup_state"] is None
-    assert row["activity_state"] == "running"
-    assert row["is_live"] == 1
+    assert row["state"] == "ACTIVE"
     assert row["project"] == "blindhash-operations"
     assert row["resolution_dir"].endswith("/sessions")
     assert row["last_message"] == "Starting..."
@@ -134,8 +133,7 @@ def test_project_start_handler_failure_writes_lifecycle_detail(monkeypatch, tmp_
     row = dashboard_db.get_session("auto-life")
     assert row is not None
     assert row["startup_state"] == "setup_failed"
-    assert row["activity_state"] == "failed"
-    assert row["is_live"] == 0
+    assert row["state"] == "FAILED"
     assert "launch_session failed" in row["lifecycle_detail"]
     assert cleanup_calls and cleanup_calls[0]["tmux_name"] == "auto-life"
 
@@ -170,8 +168,7 @@ def test_project_start_handler_cleanup_error_preserves_failed_state(monkeypatch,
     row = dashboard_db.get_session("auto-life")
     assert row is not None
     assert row["startup_state"] == "setup_failed"
-    assert row["activity_state"] == "failed"
-    assert row["is_live"] == 0
+    assert row["state"] == "FAILED"
     assert "launch_session failed" in row["lifecycle_detail"]
     assert "cleanup errors" in row["lifecycle_detail"]
 
@@ -305,8 +302,7 @@ def test_resume_start_handler_host_kind_runs_to_running(monkeypatch, tmp_path):
 
     row = dashboard_db.get_session("host-life")
     assert row["startup_state"] is None
-    assert row["activity_state"] == "running"
-    assert row["is_live"] == 1
+    assert row["state"] == "ACTIVE"
     spawn_cmd = calls["tmux"][0][0]
     assert spawn_cmd[:2] == ["tmux", "new-session"]
     assert "-c" in spawn_cmd and str(tmp_path) in spawn_cmd
@@ -362,8 +358,7 @@ def test_resume_start_handler_failure_preserves_worktrees(monkeypatch, tmp_path)
     )
 
     row = dashboard_db.get_session("auto-life")
-    assert row["activity_state"] == "failed"
-    assert row["is_live"] == 0
+    assert row["state"] == "FAILED"
     assert "tmux creation failed" in row["lifecycle_detail"]
     assert wt_cleanups == []  # worktrees untouched
 
@@ -394,8 +389,7 @@ def test_stop_handler_reaches_dead_despite_step_errors(monkeypatch, tmp_path):
     )
 
     row = dashboard_db.get_session("auto-life")
-    assert row["activity_state"] == "dead"
-    assert row["is_live"] == 0
+    assert row["state"] == "ENDED"
     assert row["startup_state"] is None
 
 

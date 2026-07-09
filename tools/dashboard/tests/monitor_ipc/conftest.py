@@ -37,7 +37,11 @@ def _init_dashboard_db(db_path: Path) -> None:
             jsonl_path TEXT,
             bead_id TEXT,
             created_at REAL NOT NULL,
-            is_live INTEGER DEFAULT 1,
+            state TEXT CHECK (state IN
+                ('LAUNCHING','ACTIVE','STOPPING','ENDED','FAILED')),
+            attention TEXT CHECK (attention IN
+                ('tool_running','thinking','idle')),
+            ended_at REAL,
             file_offset INTEGER DEFAULT 0,
             last_activity REAL,
             last_message TEXT DEFAULT '',
@@ -53,8 +57,7 @@ def _init_dashboard_db(db_path: Path) -> None:
             dispatch_nag INTEGER DEFAULT 0,
             resolution_dir TEXT,
             session_uuids TEXT DEFAULT '[]',
-            curr_jsonl_file TEXT,
-            activity_state TEXT DEFAULT 'idle'
+            curr_jsonl_file TEXT
         )
         """
     )
@@ -78,7 +81,7 @@ def insert_row(
     tmux_name: str,
     type_: str,
     jsonl_path: str | None = None,
-    is_live: int = 1,
+    state: str = "ACTIVE",
     bead_id: str | None = None,
     session_uuid: str | None = None,
 ) -> None:
@@ -87,12 +90,14 @@ def insert_row(
     conn.execute(
         "INSERT INTO tmux_sessions"
         " (tmux_name, type, project, bead_id, jsonl_path, session_uuid,"
-        "  resolution_dir, session_uuids, curr_jsonl_file, created_at, is_live)"
-        " VALUES (?, ?, 'autonomy', ?, ?, ?, ?, ?, ?, ?, ?)",
+        "  resolution_dir, session_uuids, curr_jsonl_file, created_at,"
+        "  state, ended_at)"
+        " VALUES (?, ?, 'autonomy', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             tmux_name, type_, bead_id, jsonl_path, session_uuid,
             res_dir, json.dumps([session_uuid]) if session_uuid else "[]",
-            jsonl_path, time.time(), is_live,
+            jsonl_path, time.time(), state,
+            time.time() if state in ("ENDED", "FAILED") else None,
         ),
     )
     conn.commit()

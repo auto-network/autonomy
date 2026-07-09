@@ -566,7 +566,12 @@ def get_recent_sessions(
                 db_by_uuid[row["session_uuid"]] = row
             if row.get("jsonl_path"):
                 db_by_path[row["jsonl_path"]] = row
-            if row.get("is_live"):
+            # Live-exclusion keys on the ONE state (not the legacy is_live
+            # projection): Active and Recent must partition sessions by
+            # exactly the same predicate or a session renders in both — the
+            # 2026-07-09 double-display. test_section_disjointness.py is
+            # the tripwire.
+            if derive_lifecycle_state(row) not in ("ENDED", "FAILED"):
                 if row.get("session_uuid"):
                     live_uuids.add(row["session_uuid"])
                 if row.get("jsonl_path"):

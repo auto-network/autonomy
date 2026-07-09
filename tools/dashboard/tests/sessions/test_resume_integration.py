@@ -34,7 +34,12 @@ def _init_db(db_path: Path) -> None:
     conn.execute("""CREATE TABLE IF NOT EXISTS tmux_sessions (
         tmux_name TEXT PRIMARY KEY, session_uuid TEXT, graph_source_id TEXT,
         type TEXT NOT NULL, project TEXT NOT NULL, jsonl_path TEXT,
-        bead_id TEXT, created_at REAL NOT NULL, is_live INTEGER DEFAULT 1,
+        bead_id TEXT, created_at REAL NOT NULL,
+        state TEXT CHECK (state IN
+            ('LAUNCHING','ACTIVE','STOPPING','ENDED','FAILED')),
+        attention TEXT CHECK (attention IN
+            ('tool_running','thinking','idle')),
+        ended_at REAL,
         file_offset INTEGER DEFAULT 0, last_activity REAL,
         last_message TEXT DEFAULT '', entry_count INTEGER DEFAULT 0,
         context_tokens INTEGER DEFAULT 0, label TEXT DEFAULT '',
@@ -43,25 +48,28 @@ def _init_db(db_path: Path) -> None:
         nag_message TEXT DEFAULT '', nag_last_sent REAL DEFAULT 0,
         dispatch_nag INTEGER DEFAULT 0,
         resolution_dir TEXT, session_uuids TEXT DEFAULT '[]',
-        curr_jsonl_file TEXT, activity_state TEXT DEFAULT 'idle'
+        curr_jsonl_file TEXT
     )""")
     conn.commit()
     conn.close()
 
 
 def _insert(db_path: Path, *, tmux_name: str, type_: str, session_uuid: str,
-            jsonl_path: str | None = None, is_live: int = 1,
+            jsonl_path: str | None = None, state: str = "ACTIVE",
             bead_id: str | None = None) -> None:
     conn = sqlite3.connect(str(db_path))
+    now = time.time()
     conn.execute(
         "INSERT INTO tmux_sessions"
         " (tmux_name, type, project, bead_id, jsonl_path, session_uuid,"
-        "  resolution_dir, session_uuids, curr_jsonl_file, created_at, is_live)"
-        " VALUES (?, ?, 'autonomy', ?, ?, ?, ?, ?, ?, ?, ?)",
+        "  resolution_dir, session_uuids, curr_jsonl_file, created_at,"
+        "  state, ended_at)"
+        " VALUES (?, ?, 'autonomy', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (tmux_name, type_, bead_id, jsonl_path, session_uuid,
          str(Path(jsonl_path).parent) if jsonl_path else None,
          json.dumps([session_uuid]) if session_uuid else "[]",
-         jsonl_path, time.time(), is_live),
+         jsonl_path, now, state,
+         now if state in ("ENDED", "FAILED") else None),
     )
     conn.commit()
     conn.close()
@@ -71,7 +79,7 @@ def _live_rows(db_path: Path) -> list[dict]:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
-        "SELECT * FROM tmux_sessions WHERE is_live=1"
+        "SELECT * FROM tmux_sessions WHERE state NOT IN ('ENDED','FAILED')"
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -126,7 +134,7 @@ class TestResumeDeadDispatchSpawnsInteractive:
          interactive (container) session from a dead dispatch row. Phase 5
          (or an adjacent resume feature) must provide this.
       2. Even if a new row is created, get_active_sessions() currently
-         returns ALL is_live=1 rows without type-filtering. Phase 5 adds
+         returns ALL live rows without type-filtering. Phase 5 adds
          the type filter which makes the test both meaningful AND the
          assertion about session_uuid differing from the dispatch's
          reachable.
@@ -155,7 +163,7 @@ class TestResumeDeadDispatchSpawnsInteractive:
             type_="dispatch",
             session_uuid=disp_uuid,
             jsonl_path=str(disp_jsonl),
-            is_live=0,
+            state="ENDED",
             bead_id="auto-resume",
         )
 
@@ -187,8 +195,8 @@ class TestResumeDeadDispatchSpawnsInteractive:
             "(type='container') whose session_uuid differs from the original."
         )
 
-        # Dead dispatch row must NOT have been revived into is_live=1 —
-        # it stays dead. Resume creates a NEW row.
+        # Dead dispatch row must NOT have been revived into a live state —
+        # it stays ENDED. Resume creates a NEW row.
         live_types = {r["type"] for r in _live_rows(db_path)}
         assert "container" in live_types, (
             f"Resume produced no live container row in DB; live types={live_types!r}"
@@ -229,7 +237,7 @@ class TestRunningDispatchAbsentFromActive:
             type_="dispatch",
             session_uuid=disp_uuid,
             jsonl_path=str(disp_jsonl),
-            is_live=1,
+            state="ACTIVE",
             bead_id="auto-running",
         )
 

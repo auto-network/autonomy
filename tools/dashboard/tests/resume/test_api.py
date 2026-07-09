@@ -462,7 +462,7 @@ class TestWorkspaceHarnessPassthrough:
         test_client.run_lifecycle_jobs()
         row = server.dashboard_db.get_session(tmux_name)
         assert row["startup_state"] is None
-        assert row["activity_state"] == "running"
+        assert row["state"] == "ACTIVE"
 
     def test_workspace_create_returns_without_running_prepare_on_request_path(
         self, test_client, monkeypatch,
@@ -527,8 +527,7 @@ class TestWorkspaceHarnessPassthrough:
         assert payload["retryable"] is True
         row = server.dashboard_db.get_session(payload["tmux_name"])
         assert row["startup_state"] == "setup_failed"
-        assert row["activity_state"] == "failed"
-        assert row["is_live"] == 0
+        assert row["state"] == "FAILED"
         assert "session lifecycle queue is full" in row["lifecycle_detail"]
 
     def test_workspace_resume_passes_codex_harness_without_refreshing_existing_worktree(

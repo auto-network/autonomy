@@ -42,7 +42,6 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     jsonl_path          TEXT,
     bead_id             TEXT,
     created_at          REAL NOT NULL,
-    is_live             INTEGER DEFAULT 1,
     file_offset         INTEGER DEFAULT 0,
     last_activity       REAL,
     last_message        TEXT DEFAULT '',
@@ -52,13 +51,6 @@ CREATE TABLE IF NOT EXISTS tmux_sessions (
     topics              TEXT DEFAULT '[]',
     role                TEXT DEFAULT '',
     harness_token       TEXT,
-    -- auto-a1jco: two independent lifecycle dimensions.
-    -- DEPRECATED (two-column model, graph://18c9a9e9-efb, superseded by
-    -- the worker-owned startup_state FSM): no code writes these anymore
-    -- — every row reads 'pending'. Kept one release for stray readers;
-    -- drop via migration once none remain.
-    setup_phase         TEXT NOT NULL DEFAULT 'pending',
-    harness_phase       TEXT NOT NULL DEFAULT 'pending',
     -- Unified single-column startup FSM (graph://92ed929a-3ec). NULL = "not in
     -- launching" — default for old rows and the terminal running state.
     -- Written ONLY by the lifecycle worker's writer and
@@ -252,11 +244,7 @@ def init_db(db_path: Path | None = None) -> None:
         _conn.commit()
         _backfill_new_columns(_conn)
     # Migrate: add activity_state column if missing
-    try:
-        _conn.execute("SELECT activity_state FROM tmux_sessions LIMIT 0")
-    except sqlite3.OperationalError:
-        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN activity_state TEXT DEFAULT 'idle'")
-        _conn.commit()
+
     # Migrate: add todos column if missing (Phase 2 — drawer Todos tab)
     try:
         _conn.execute("SELECT todos FROM tmux_sessions LIMIT 0")
@@ -268,13 +256,6 @@ def init_db(db_path: Path | None = None) -> None:
         _conn.execute("SELECT model FROM tmux_sessions LIMIT 0")
     except sqlite3.OperationalError:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN model TEXT DEFAULT NULL")
-        _conn.commit()
-    # Migrate: add setup_phase + harness_phase columns (auto-a1jco — startup phase model)
-    try:
-        _conn.execute("SELECT setup_phase FROM tmux_sessions LIMIT 0")
-    except sqlite3.OperationalError:
-        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN setup_phase TEXT NOT NULL DEFAULT 'pending'")
-        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN harness_phase TEXT NOT NULL DEFAULT 'pending'")
         _conn.commit()
     # Migrate: add startup_state column (unified single-column startup FSM).
     # Replaces setup_phase + harness_phase. NULL is the meaningful default:
@@ -321,23 +302,32 @@ def init_db(db_path: Path | None = None) -> None:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN ended_at REAL")
         # One-shot backfill — the same decision table as
         # derive_lifecycle_state's legacy fallback, in SQL. FAILED must win
-        # over ENDED (failed rows also carry is_live=0).
+        # over ENDED (failed rows also carry is_live=0). The legacy columns
+        # are read via introspection: a table old enough to predate one of
+        # them backfills with that column's absent-value semantics
+        # (activity/startup absent → NULL, is_live absent → 0 = dead).
+        _cols = {
+            r[1] for r in _conn.execute("PRAGMA table_info(tmux_sessions)")
+        }
+        _act = "activity_state" if "activity_state" in _cols else "NULL"
+        _live = "is_live" if "is_live" in _cols else "0"
+        _sst = "startup_state" if "startup_state" in _cols else "NULL"
         _conn.execute(
             "UPDATE tmux_sessions SET state = CASE"
-            "  WHEN activity_state='failed' OR startup_state='setup_failed'"
+            f"  WHEN {_act}='failed' OR {_sst}='setup_failed'"
             "    THEN 'FAILED'"
-            "  WHEN activity_state IN ('stopping','cleaning') THEN 'STOPPING'"
-            "  WHEN activity_state='dead' OR is_live=0 OR is_live IS NULL"
+            f"  WHEN {_act} IN ('stopping','cleaning') THEN 'STOPPING'"
+            f"  WHEN {_act}='dead' OR {_live}=0 OR {_live} IS NULL"
             "    THEN 'ENDED'"
-            "  WHEN startup_state IS NOT NULL THEN 'LAUNCHING'"
+            f"  WHEN {_sst} IS NOT NULL THEN 'LAUNCHING'"
             "  ELSE 'ACTIVE'"
             " END"
         )
         _conn.execute(
             "UPDATE tmux_sessions SET"
             "  attention = CASE WHEN state='ACTIVE' THEN"
-            "    (CASE WHEN activity_state IN ('tool_running','thinking','idle')"
-            "      THEN activity_state ELSE 'idle' END)"
+            f"    (CASE WHEN {_act} IN ('tool_running','thinking','idle')"
+            f"      THEN {_act} ELSE 'idle' END)"
             "  END,"
             "  ended_at = CASE WHEN state IN ('ENDED','FAILED')"
             "    THEN COALESCE(last_activity, created_at) END"
@@ -348,6 +338,19 @@ def init_db(db_path: Path | None = None) -> None:
         " ON tmux_sessions(state)"
     )
     _conn.commit()
+    # Drop the superseded lifecycle columns (FSM consolidation, Phase D).
+    # Runs AFTER the state backfill above consumed them. Requires SQLite
+    # ≥3.35 (ALTER DROP COLUMN); per-column and idempotent.
+    for _legacy_col in ("is_live", "activity_state", "setup_phase", "harness_phase"):
+        try:
+            _conn.execute("SELECT %s FROM tmux_sessions LIMIT 0" % _legacy_col)
+        except sqlite3.OperationalError:
+            continue
+        try:
+            _conn.execute("ALTER TABLE tmux_sessions DROP COLUMN %s" % _legacy_col)
+            _conn.commit()
+        except sqlite3.OperationalError:
+            logger.warning("dashboard_db: could not drop legacy column %s", _legacy_col)
     # Migrate: harness_token column (auto-ghhdg — rename from claude_token_alias;
     # auto-08n3f — values switched from operator alias strings to Anthropic
     # org UUIDs joined to ``dashboard.claude.credentials.alias`` for display).
@@ -480,9 +483,9 @@ def insert_session(
         "INSERT INTO tmux_sessions"
         " (tmux_name, type, project, harness, harness_state,"
         "  bead_id, jsonl_path, session_uuid,"
-        "  resolution_dir, session_uuids, curr_jsonl_file, created_at, is_live,"
+        "  resolution_dir, session_uuids, curr_jsonl_file, created_at,"
         "  harness_token, state, attention)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (tmux_name, session_type, project, harness, harness_state,
          bead_id, jsonl_path, session_uuid,
          resolution_dir, session_uuids, curr_jsonl_file, time.time(),
@@ -680,7 +683,7 @@ def reconcile_graph_source_ids(*, live_only: bool = True) -> int:
     if live_only:
         rows = conn.execute(
             "SELECT tmux_name, graph_source_id, jsonl_path, label FROM tmux_sessions"
-            " WHERE is_live=1 AND jsonl_path IS NOT NULL AND jsonl_path != ''"
+            " WHERE state NOT IN ('ENDED','FAILED') AND jsonl_path IS NOT NULL AND jsonl_path != ''"
         ).fetchall()
     else:
         rows = conn.execute(
@@ -831,15 +834,8 @@ def update_tail_state(
     context_tokens: int | None = None,
     model: str | None = None,
     harness_state: str | None = None,
-    setup_phase: str | None = None,
-    harness_phase: str | None = None,
 ) -> None:
-    """TAIL step: update read position and latest content.
-
-    ``setup_phase`` and ``harness_phase`` (auto-a1jco) track the two
-    independent lifecycle dimensions of a starting session — see
-    graph://18c9a9e9-efb.
-    """
+    """TAIL step: update read position and latest content."""
     conn = get_conn()
     parts = []
     vals: list[Any] = []
@@ -864,12 +860,6 @@ def update_tail_state(
     if harness_state is not None:
         parts.append("harness_state=?")
         vals.append(harness_state)
-    if setup_phase is not None:
-        parts.append("setup_phase=?")
-        vals.append(setup_phase)
-    if harness_phase is not None:
-        parts.append("harness_phase=?")
-        vals.append(harness_phase)
     if not parts:
         return
     vals.append(tmux_name)
@@ -978,7 +968,7 @@ def get_dispatch_nag_sessions() -> list[str]:
     """Return tmux_names of live sessions with dispatch_nag enabled."""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT tmux_name FROM tmux_sessions WHERE dispatch_nag=1 AND is_live=1"
+        "SELECT tmux_name FROM tmux_sessions WHERE dispatch_nag=1 AND state NOT IN ('ENDED','FAILED')"
     ).fetchall()
     return [r["tmux_name"] for r in rows]
 
@@ -1029,15 +1019,13 @@ def update_activity_state(tmux_name: str, state: str) -> None:
     bearing: the tracker fires on tailed JSONL entries, which can trail a
     lifecycle transition (a batch landing after a stop/failure), and an
     unguarded write here used to punch 'idle'/'working' into dead rows.
-    activity_state is stamped alongside as a legacy write-through
-    projection until the column drop.
     """
     assert state in ("tool_running", "thinking", "idle"), state
     conn = get_conn()
     conn.execute(
-        "UPDATE tmux_sessions SET attention=?, activity_state=?"
+        "UPDATE tmux_sessions SET attention=?"
         " WHERE tmux_name=? AND state='ACTIVE'",
-        (state, state, tmux_name),
+        (state, tmux_name),
     )
     conn.commit()
 
@@ -1065,7 +1053,7 @@ def get_live_sessions() -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
         f"SELECT * FROM tmux_sessions WHERE state NOT IN {_TERMINAL_STATES_SQL}"
-        " OR (state IS NULL AND is_live=1)"
+        " OR state IS NULL"
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -1084,7 +1072,7 @@ def get_session_status_rows(*, live_only: bool, since_cutoff: float | None = Non
         if live_only:
             rows = conn.execute(
                 "SELECT * FROM tmux_sessions"
-                " WHERE is_live=1 ORDER BY COALESCE(last_activity, created_at) DESC"
+                " WHERE state NOT IN ('ENDED','FAILED') ORDER BY COALESCE(last_activity, created_at) DESC"
             ).fetchall()
         else:
             rows = conn.execute(
@@ -1094,7 +1082,7 @@ def get_session_status_rows(*, live_only: bool, since_cutoff: float | None = Non
         if live_only:
             rows = conn.execute(
                 "SELECT * FROM tmux_sessions"
-                " WHERE is_live=1 AND COALESCE(last_activity, created_at) > ?"
+                " WHERE state NOT IN ('ENDED','FAILED') AND COALESCE(last_activity, created_at) > ?"
                 " ORDER BY COALESCE(last_activity, created_at) DESC",
                 (since_cutoff,),
             ).fetchall()
@@ -1144,15 +1132,16 @@ def get_tmux_name_for_source(graph_source_id: str, session_uuid: str | None = No
 
 
 def is_session_live(tmux_name: str) -> bool:
-    """Return True iff a row exists for ``tmux_name`` and is_live=1.
+    """Return True iff a row exists for ``tmux_name`` in a non-terminal state.
 
     Used by the targeted dashboard-approval nag (auto-rh2r5) to decide
     whether the authoring session is still alive to receive the message.
-    Missing rows and dead rows both return False.
+    Missing rows and terminal rows both return False.
     """
     conn = get_conn()
     row = conn.execute(
-        "SELECT is_live FROM tmux_sessions WHERE tmux_name=?", (tmux_name,)
+        "SELECT state NOT IN ('ENDED','FAILED') AS is_live"
+        " FROM tmux_sessions WHERE tmux_name=?", (tmux_name,)
     ).fetchone()
     return bool(row and row["is_live"])
 
@@ -1161,7 +1150,7 @@ def get_tailable_sessions() -> list[dict]:
     """Return live sessions that have a jsonl_path set (ready for tailing)."""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT * FROM tmux_sessions WHERE is_live=1 AND jsonl_path IS NOT NULL"
+        "SELECT * FROM tmux_sessions WHERE state NOT IN ('ENDED','FAILED') AND jsonl_path IS NOT NULL"
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -1170,7 +1159,7 @@ def get_sessions_needing_resolution() -> list[dict]:
     """Return live sessions with no jsonl_path yet (need directory resolution or watcher link)."""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT * FROM tmux_sessions WHERE is_live=1 AND jsonl_path IS NULL"
+        "SELECT * FROM tmux_sessions WHERE state NOT IN ('ENDED','FAILED') AND jsonl_path IS NULL"
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -1187,7 +1176,7 @@ def count_live() -> int:
     conn = get_conn()
     row = conn.execute(
         f"SELECT COUNT(*) FROM tmux_sessions WHERE state NOT IN {_TERMINAL_STATES_SQL}"
-        " OR (state IS NULL AND is_live=1)"
+        " OR state IS NULL"
     ).fetchone()
     return row[0] if row else 0
 
@@ -1296,9 +1285,9 @@ def upsert_session(
         " (tmux_name, type, project, harness, harness_state,"
         "  bead_id, jsonl_path, session_uuid,"
         "  resolution_dir, session_uuids, curr_jsonl_file,"
-        "  created_at, is_live, file_offset, last_message, label,"
+        "  created_at, file_offset, last_message, label,"
         "  harness_token, state, attention, ended_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(tmux_name) DO UPDATE SET"
         "  harness = excluded.harness,"
         "  harness_state = excluded.harness_state,"
@@ -1311,30 +1300,25 @@ def upsert_session(
         "  file_offset = excluded.file_offset,"
         "  last_message = CASE WHEN excluded.last_message != ''"
         "    THEN excluded.last_message ELSE last_message END,"
-        "  is_live = excluded.is_live,"
         "  harness_token = COALESCE(excluded.harness_token, harness_token),"
         # When a previously-dead row is revived via seed/IPC
-        # re-registration, the one state follows liveness (and the legacy
-        # activity_state projection stays consistent with it). Non-dead
+        # re-registration, the one state follows liveness. Non-dead
         # states are preserved. This is a sanctioned birth/seed writer;
         # everything after registration goes through the authority.
-        "  activity_state = CASE"
-        "    WHEN excluded.is_live=1 AND activity_state='dead' THEN 'idle'"
-        "    ELSE activity_state END,"
         "  state = CASE"
-        "    WHEN excluded.is_live=1 AND (state IS NULL OR state IN ('ENDED','FAILED'))"
+        "    WHEN excluded.state='ACTIVE' AND (state IS NULL OR state IN ('ENDED','FAILED'))"
         "      THEN 'ACTIVE'"
-        "    WHEN excluded.is_live=0 AND (state IS NULL OR state NOT IN ('ENDED','FAILED'))"
+        "    WHEN excluded.state='ENDED' AND (state IS NULL OR state NOT IN ('ENDED','FAILED'))"
         "      THEN 'ENDED'"
         "    ELSE state END,"
         "  ended_at = CASE"
-        "    WHEN excluded.is_live=1 THEN NULL"
+        "    WHEN excluded.state='ACTIVE' THEN NULL"
         "    ELSE COALESCE(ended_at, excluded.ended_at) END",
         (
             tmux_name, session_type, project, harness, harness_state,
             bead_id, jsonl_path, session_uuid,
             resolution_dir, session_uuids, curr_jsonl_file,
-            created_at or time.time(), 1 if is_live else 0, file_offset, last_message,
+            created_at or time.time(), file_offset, last_message,
             label,
             harness_token,
             "ACTIVE" if is_live else "ENDED",

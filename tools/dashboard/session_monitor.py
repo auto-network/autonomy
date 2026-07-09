@@ -1342,9 +1342,9 @@ class SessionMonitor:
             "context_tokens": int(row.get("context_tokens") or 0),
             "last_message": row.get("last_message") or "",
             "last_activity": row.get("last_activity"),
-            "activity_state": row.get("activity_state") or "idle",
+            "activity_state": row.get("attention") or "idle",
             "file_offset": int(row.get("file_offset") or 0),
-            "is_live": bool(row.get("is_live")),
+            "is_live": derive_lifecycle_state(row) not in ("ENDED", "FAILED"),
             "jsonl_path": row.get("jsonl_path"),
             "type": row.get("type"),
             "harness": row.get("harness") or "claude",
@@ -1501,7 +1501,10 @@ class SessionMonitor:
                 "nag_interval": s.get("nag_interval") or 15,
                 "nag_message": s.get("nag_message") or "",
                 "dispatch_nag_enabled": bool(s.get("dispatch_nag")),
-                "activity_state": s.get("activity_state", "idle"),
+                # Compat key for consumers not yet on ``attention``:
+                # registry rows are non-terminal, so the tracker value (or
+                # idle) is the honest answer.
+                "activity_state": s.get("attention") or "idle",
                 "harness": s.get("harness", "claude"),
                 # auto-ngis4: surface the most-recent assistant-turn model so
                 # session listings can cite it without a separate lookup.
@@ -1511,12 +1514,6 @@ class SessionMonitor:
                 "resolved": bool(s.get("jsonl_path")) or (
                     bool(s.get("session_uuids")) and s["session_uuids"] != "[]"
                 ),
-                # auto-a1jco: two-dimension lifecycle phase. Frontends
-                # compute the derived "ready" flag locally:
-                #   ready = setup_phase=='setup_complete'
-                #           and harness_phase=='composer_ready'
-                "setup_phase": s.get("setup_phase") or "pending",
-                "harness_phase": s.get("harness_phase") or "pending",
                 # Unified startup FSM. NULL = not in launching (existing
                 # sessions, post-launch sessions, dead sessions).
                 "startup_state": s.get("startup_state"),
@@ -2329,7 +2326,10 @@ class SessionMonitor:
                 {
                     "session_id": tmux_name,
                     "entries": new_entries,
-                    "is_live": bool(updated["is_live"]) if updated else True,
+                    "is_live": (
+                        derive_lifecycle_state(updated) not in ("ENDED", "FAILED")
+                        if updated else True
+                    ),
                     "seq": ts.broadcast_seq,
                     "context_tokens": updated["context_tokens"] if updated else 0,
                     "size_bytes": Path(row["jsonl_path"]).stat().st_size if row.get("jsonl_path") else 0,
@@ -2912,7 +2912,7 @@ class SessionMonitor:
         conn = get_conn()
         row = conn.execute(
             "SELECT tmux_name FROM tmux_sessions"
-            " WHERE is_live=1 AND session_uuids LIKE ?",
+            " WHERE state NOT IN ('ENDED','FAILED') AND session_uuids LIKE ?",
             (f"%{uuid}%",),
         ).fetchone()
         return row["tmux_name"] if row else None
@@ -3571,7 +3571,7 @@ class SessionMonitor:
                 conn = get_conn()
                 expired = conn.execute(
                     "SELECT tmux_name FROM tmux_sessions"
-                    " WHERE is_live=0 AND last_activity IS NOT NULL"
+                    " WHERE state IN ('ENDED','FAILED') AND last_activity IS NOT NULL"
                     "   AND (? - COALESCE(last_activity, created_at)) > ?",
                     (now, self._COOLDOWN_SECONDS),
                 ).fetchall()
@@ -3587,7 +3587,7 @@ class SessionMonitor:
                 for row in sessions:
                     if not row.get("nag_enabled"):
                         continue
-                    if not row.get("is_live"):
+                    if derive_lifecycle_state(row) in ("ENDED", "FAILED"):
                         continue
                     tmux_name = row["tmux_name"]
                     # Skip sessions whose tmux is dead (just marked above)
