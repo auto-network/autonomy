@@ -555,6 +555,7 @@
        @keydown.escape.window="approvalRequest = null"
        data-testid="approval-request-overlay">
     <div class="fixed inset-x-0 top-0 z-[60] border-b border-white/10 bg-gray-950/95 px-4 py-3 backdrop-blur sm:px-6"
+         style="padding-top: calc(0.75rem + env(safe-area-inset-top, 0px))"
          data-testid="approval-title-bar">
       <div class="mx-auto flex max-w-3xl items-center gap-2">
         <span class="text-base leading-none">🔔</span>
@@ -564,6 +565,7 @@
       </div>
     </div>
     <div class="fixed inset-x-0 bottom-0 z-[60] border-t border-white/10 bg-gray-950/95 px-4 py-3 backdrop-blur sm:px-6"
+         style="padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px))"
          data-testid="approval-footer">
       <div class="mx-auto flex max-w-3xl items-center gap-3">
         <button type="button"
@@ -578,7 +580,8 @@
       </div>
     </div>
     <section class="min-h-screen bg-gray-950">
-      <div class="mx-auto max-w-3xl px-4 pt-20 pb-32 sm:px-6">
+      <div class="mx-auto max-w-3xl px-4 pt-20 pb-32 sm:px-6"
+           style="padding-top: calc(5rem + env(safe-area-inset-top, 0px)); padding-bottom: calc(8rem + env(safe-area-inset-bottom, 0px))">
         <div class="flex flex-wrap items-center gap-2">
           <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
                 x-text="approvalRequest.session"></span>
