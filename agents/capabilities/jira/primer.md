@@ -5,6 +5,11 @@ Broker-backed: these commands hold no Jira credential — reads run host-side;
 dashboard; your command blocks until they approve or decline, then prints the
 outcome or the decline).
 
+**Ticket keys** look like `PROJECT-1234`; in this workspace the project is
+`ENTERPRISE`, so keys are `ENTERPRISE-<number>` (e.g. `ENTERPRISE-8346`). When
+the operator names one — "read ENTERPRISE-8346 and come up to speed" — that is
+a Jira ticket: read it with `jira-read ENTERPRISE-8346`.
+
 - `jira-read KEY` — cleaned ticket JSON (description/comments as markdown)
 - `jira-createmeta [PROJECT [ISSUETYPE]]` — valid components/versions/priorities/severity for creation
 - `jira-attachment ID [-o FILE]` — download an attachment (ids in `jira-read`)
