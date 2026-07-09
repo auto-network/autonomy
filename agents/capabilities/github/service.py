@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -553,17 +554,21 @@ async def run_cli(
     cmd: list[str],
     *,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    env: dict[str, str] | None = None,
 ) -> tuple[str, str, int, bool]:
     """Run ``cmd`` async, returning ``(stdout, stderr, returncode, timed_out)``.
 
     On timeout, kills the process and returns ``("", "<timeout marker>", -1, True)``.
     Never raises for normal subprocess errors — exit codes are reported as-is.
+    ``env``, when given, is the FULL child environment (host-mode gh runs
+    pass the token this way so it never appears in argv or logs).
     """
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
     except FileNotFoundError as exc:
         return "", f"executable not found: {exc}", 127, False
@@ -626,12 +631,14 @@ async def resolve_live_container(session_name: str, *, timeout: int = 5) -> str 
     return None
 
 
-def derive_repo_slug(managed_clone: Path | None) -> str | None:
-    """Read ``remote.origin.url`` from the managed clone and return ``owner/repo``.
+def derive_repo_host_and_slug(managed_clone: Path | None) -> tuple[str, str] | None:
+    """Read ``remote.origin.url`` from the managed clone → ``(host, owner/repo)``.
 
     Runs synchronously (this is a quick local git-config read, not an
     online operation). Returns None if the managed clone path is missing,
     git-config fails, or the URL doesn't parse to a recognized form.
+    The host distinguishes token domains (``github.com`` vs a private
+    ssh-config alias like ``github-autonomy``).
     """
     if managed_clone is None:
         return None
@@ -650,10 +657,65 @@ def derive_repo_slug(managed_clone: Path | None) -> str | None:
     if not url:
         return None
     try:
-        _host, slug = parse_repo_url(url)
+        host, slug = parse_repo_url(url)
     except Exception:
         return None
-    return slug
+    return host, slug
+
+
+def derive_repo_slug(managed_clone: Path | None) -> str | None:
+    """Back-compat wrapper for :func:`derive_repo_host_and_slug` (slug only)."""
+    resolved = derive_repo_host_and_slug(managed_clone)
+    return resolved[1] if resolved else None
+
+
+# ── Host-side execution (token files) ─────────────────────────────────
+#
+# The dashboard can run ``gh`` directly — no docker exec into an agent
+# container — when the operator has configured a host token file for the
+# repo's git host. Config lives on the ``autonomy/github`` org
+# capability-install Setting's ``broker_config`` map (the jira pattern,
+# 938055c): keys ``token_file.<git-host>`` point at host files holding
+# the token; the Setting itself NEVER carries a literal secret. Design:
+# graph note f7c4c109-91a (§Phase 1a).
+
+
+def _github_broker_config() -> dict:
+    """``broker_config`` map from the autonomy/github org install Setting.
+
+    Read fresh per call (matches JiraConfig.resolve); tests monkeypatch
+    this function rather than threading env overrides per host.
+    """
+    try:
+        from tools.graph import ops as graph_ops
+        members = graph_ops.read_set("autonomy.org.capability.install")
+        for m in (getattr(members, "members", []) or []):
+            payload = m.payload if isinstance(m.payload, dict) else {}
+            if payload.get("implementation") == "autonomy/github":
+                return payload.get("broker_config") or {}
+    except Exception:
+        pass
+    return {}
+
+
+def github_host_token(host: str | None) -> str | None:
+    """Return the host-side token for ``host``, or None when unconfigured.
+
+    The token exists only in process memory — read from the file the
+    ``token_file.<host>`` broker_config entry points at. Any read failure
+    (missing entry, missing/unreadable file, empty file) returns None so
+    callers fall back to container execution.
+    """
+    if not host:
+        return None
+    path = (_github_broker_config() or {}).get(f"token_file.{host}")
+    if not path:
+        return None
+    try:
+        token = Path(path).expanduser().read_text().strip()
+    except OSError:
+        return None
+    return token or None
 
 
 # ── Failure classification ────────────────────────────────────────────
@@ -824,17 +886,36 @@ async def _execute_op(
     mode: str | None = None,
     require_branch: bool = True,
 ) -> WorktreeGithubExecResult:
-    """Resolve the row + container, build gh argv, exec, classify."""
-    row = find_live_worktree_row(session_name, repo_name, rows)
-    if row is None:
-        return _failure_result(
-            operation, session_name, repo_name,
-            failure=FAILURE_NO_LIVE_ROW,
-            error_message=(
-                f"no live worktree row for ({session_name!r}, {repo_name!r}); "
-                "the session must be live and the row present in the worktree cache"
-            ),
-        )
+    """Resolve the row + execution mode, build gh argv, exec, classify.
+
+    Execution prefers HOST mode — running ``gh`` in the dashboard process
+    with a token read from the host file configured for the repo's git
+    host (:func:`github_host_token`) — which works even when the row's
+    session is dead. Without a configured token, falls back to the legacy
+    ``docker exec <live-container> gh ...`` path, which requires a live
+    session. Design: graph note f7c4c109-91a (§Phase 1a).
+    """
+    row = next(
+        (r for r in rows
+         if r.session_name == session_name and r.repo_name == repo_name),
+        None,
+    )
+    host_and_slug = derive_repo_host_and_slug(row.managed_clone) if row else None
+    token = github_host_token(host_and_slug[0]) if host_and_slug else None
+
+    if token is None:
+        # Legacy container path: the row must be LIVE.
+        row = find_live_worktree_row(session_name, repo_name, rows)
+        if row is None:
+            return _failure_result(
+                operation, session_name, repo_name,
+                failure=FAILURE_NO_LIVE_ROW,
+                error_message=(
+                    f"no live worktree row for ({session_name!r}, {repo_name!r}); "
+                    "the session must be live and the row present in the worktree "
+                    "cache (or configure a host token file for the repo's git host)"
+                ),
+            )
 
     if require_branch and not row.branch:
         return _failure_result(
@@ -843,7 +924,7 @@ async def _execute_op(
             error_message=f"worktree row for {repo_name!r} has no branch checked out",
         )
 
-    repo_slug = derive_repo_slug(row.managed_clone)
+    repo_slug = host_and_slug[1] if host_and_slug else derive_repo_slug(row.managed_clone)
     if repo_slug is None:
         return _failure_result(
             operation, session_name, repo_name,
@@ -855,18 +936,20 @@ async def _execute_op(
             ),
         )
 
-    container_name = await resolve_live_container(row.session_name)
-    if container_name is None:
-        return _failure_result(
-            operation, session_name, repo_name,
-            failure=FAILURE_NO_LIVE_CONTAINER,
-            branch=row.branch,
-            repo_slug=repo_slug,
-            error_message=(
-                f"no live container found for session {session_name!r}; "
-                "expected a running docker container with that name"
-            ),
-        )
+    container_name: str | None = None
+    if token is None:
+        container_name = await resolve_live_container(row.session_name)
+        if container_name is None:
+            return _failure_result(
+                operation, session_name, repo_name,
+                failure=FAILURE_NO_LIVE_CONTAINER,
+                branch=row.branch,
+                repo_slug=repo_slug,
+                error_message=(
+                    f"no live container found for session {session_name!r}; "
+                    "expected a running docker container with that name"
+                ),
+            )
 
     try:
         gh_args = gh_args_for(row=row, repo_slug=repo_slug, mode=mode)
@@ -880,8 +963,16 @@ async def _execute_op(
             error_message=str(exc),
         )
 
-    cmd = ["docker", "exec", container_name, "gh", *gh_args]
-    stdout, stderr, exit_code, timed_out = await run_cli(cmd, timeout=timeout)
+    if token is not None:
+        # Host mode: token only in the child env — never argv, never logs.
+        cmd = ["gh", *gh_args]
+        host_env = {**os.environ, "GH_TOKEN": token, "GH_PROMPT_DISABLED": "1"}
+        stdout, stderr, exit_code, timed_out = await run_cli(
+            cmd, timeout=timeout, env=host_env,
+        )
+    else:
+        cmd = ["docker", "exec", container_name, "gh", *gh_args]
+        stdout, stderr, exit_code, timed_out = await run_cli(cmd, timeout=timeout)
     failure = classify_failure(stdout, stderr, exit_code, timed_out)
 
     error_message: str | None = None

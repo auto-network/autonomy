@@ -130,6 +130,58 @@ async def probe_v1(
     )
 
 
+async def probe_host_v1(
+    host: str,
+    *,
+    timeout: int = DEFAULT_PROBE_TIMEOUT_SECONDS,
+) -> ProbeResult:
+    """Probe host-mode execution for ``host`` (e.g. ``github.com``).
+
+    READY means the dashboard can run ``gh`` directly with the token file
+    configured for that git host (graph note f7c4c109-91a §Phase 1a) — no
+    agent container involved. UNAVAILABLE = no token configured; DEGRADED
+    mirrors the container probe's classification.
+    """
+    import os
+
+    token = service.github_host_token(host)
+    if token is None:
+        return ProbeResult(
+            state=STATE_UNAVAILABLE,
+            reason=REASON_ENV_MISSING,
+            missing_env=("token_file." + host,),
+        )
+    stdout, stderr, exit_code, timed_out = await service.run_cli(
+        list(PROBE_COMMAND),
+        timeout=timeout,
+        env={**os.environ, "GH_TOKEN": token, "GH_PROMPT_DISABLED": "1"},
+    )
+    failure = service.classify_failure(stdout, stderr, exit_code, timed_out)
+    if failure is None:
+        return ProbeResult(state=STATE_READY)
+    if failure == service.FAILURE_GH_MISSING:
+        return ProbeResult(
+            state=STATE_DEGRADED,
+            reason=REASON_TOOL_MISSING,
+            missing_tools=("gh",),
+        )
+    if failure == service.FAILURE_AUTH_MISSING:
+        return ProbeResult(
+            state=STATE_DEGRADED,
+            reason=REASON_ENV_MISSING,
+            missing_env=("token_file." + host,),
+        )
+    return ProbeResult(
+        state=STATE_DEGRADED,
+        reason=REASON_PROBE_FAILED,
+        details={
+            "exit_code": exit_code,
+            "stderr": (stderr or "").strip()[:500],
+            "timed_out": timed_out,
+        },
+    )
+
+
 __all__ = [
     "PROBE_COMMAND",
     "DEFAULT_PROBE_TIMEOUT_SECONDS",
@@ -142,4 +194,5 @@ __all__ = [
     "REASON_PROBE_FAILED",
     "ProbeResult",
     "probe_v1",
+    "probe_host_v1",
 ]

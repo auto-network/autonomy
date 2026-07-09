@@ -1238,10 +1238,23 @@ class WorktreeMonitor:
                     r for r in rows
                     if r.session_name == session_name
                     and r.repo_name == repo_name
-                    and r.session_live
                 ),
                 None,
             )
+            if target is not None and not target.session_live:
+                # Dead sessions have no container to exec into, but a BOUND
+                # row whose git host has a configured token file refreshes
+                # in host mode (auto-rn1dp, design f7c4c109-91a §Phase 1a).
+                # Unbound dead rows still skip — the legacy fallback probes
+                # the container first and would just fail noisily.
+                from agents.capabilities.github.service import (
+                    derive_repo_host_and_slug,
+                    github_host_token,
+                )
+                host_and_slug = derive_repo_host_and_slug(target.managed_clone)
+                host_ok = bool(host_and_slug) and bool(github_host_token(host_and_slug[0]))
+                if not (host_ok and _read_bindings(target)):
+                    target = None
             if target is not None:
                 await self._refresh_one_source_control(target, rows)
             return list(self._cache)
