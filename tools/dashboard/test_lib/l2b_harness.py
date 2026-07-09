@@ -66,6 +66,17 @@ def start_mock_server(
     events_path = tmp_path / "events.jsonl"
     events_path.write_text("")
 
+    # Kill any stale listener squatting this port BEFORE spawning. Without
+    # this, our uvicorn silently fails to bind while the readiness probe
+    # below answers from the squatter — which then serves the OLD code and
+    # old fixture for the whole module (observed by auto-0708-153344 as a
+    # phantom 'pre-existing' failure).
+    subprocess.run(
+        ["pkill", "-f", f"uvicorn.*{port}"],
+        capture_output=True, timeout=3,
+    )
+    time.sleep(0.5)
+
     env = {
         **os.environ,
         "DASHBOARD_MOCK": str(fixture_path),
@@ -95,7 +106,7 @@ def start_mock_server(
     # 30s window: uvicorn imports the full server module; under 8-way xdist
     # contention plus per-module Chromium cold boots, 8s is routinely
     # exceeded on a loaded machine.
-    deadline = time.time() + 30
+    deadline = time.time() + 45
     ready = False
     while time.time() < deadline:
         try:

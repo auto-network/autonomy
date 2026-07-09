@@ -6473,27 +6473,23 @@ class TestSessionTurnCorrectionOverlay:
     def test_pending_overlay_mobile_390x844(self):
         """Mobile viewport (390x844): controls remain visible and the
         page does not horizontally overflow even with a long message."""
-        # Force the viewport to mobile width via JS, then re-check.
-        _ab_eval_batch(
-            "document.documentElement.style.maxWidth = '390px';"
-            "document.body.style.maxWidth = '390px';"
-            "document.body.style.width = '390px';"
-            "var main = document.querySelector('main'); if (main) main.style.maxWidth = '390px';"
-            "var content = document.getElementById('content'); if (content) content.style.maxWidth = '390px';"
-            "return true;"
-        )
+        # Set the REAL viewport — CSS max-width fakery leaves media-query
+        # (md:) breakpoints keyed to the daemon's actual window size, so
+        # the old approach passed or failed based on external daemon
+        # state (auto-0708-153344's finding: clientWidth read 166 when the
+        # daemon happened to be desktop-sized).
+        subprocess.run(["agent-browser", "set", "viewport", "390", "844"],
+                       capture_output=True, timeout=10)
         time.sleep(0.5)
-        full_js = "var r = {}; " + TURN_CORRECTION_MOBILE_CHECKS + " return r;"
-        m = _ab_eval_batch(full_js) or {}
-        # Reset width so subsequent tests in the module aren't affected.
-        _ab_eval_batch(
-            "document.documentElement.style.maxWidth = '';"
-            "document.body.style.maxWidth = '';"
-            "document.body.style.width = '';"
-            "var main = document.querySelector('main'); if (main) main.style.maxWidth = '';"
-            "var content = document.getElementById('content'); if (content) content.style.maxWidth = '';"
-            "return true;"
-        )
+        try:
+            full_js = "var r = {}; " + TURN_CORRECTION_MOBILE_CHECKS + " return r;"
+            m = _ab_eval_batch(full_js) or {}
+        finally:
+            # Restore a deterministic desktop viewport for the rest of the
+            # module — never depend on whatever the daemon started with.
+            subprocess.run(["agent-browser", "set", "viewport", "1280", "900"],
+                           capture_output=True, timeout=10)
+            time.sleep(0.3)
         assert m.get("has_mobile_target"), "Mobile pending tile not found"
         assert m.get("mobile_actions_visible"), (
             "Accept/dismiss controls must remain visible on mobile (390x844)"
