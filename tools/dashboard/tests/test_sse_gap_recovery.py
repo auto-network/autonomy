@@ -643,10 +643,10 @@ class TestMixedEntryTypes:
         # Restart server for clean state (TestServerRestart may have restarted it)
         harness.restart_server()
         harness.open_session_page()
-        time.sleep(3)
 
-        # Verify initial load
-        for _ in range(10):
+        # Verify initial load — generous window; a fresh server + cold page
+        # under parallel load can need well past 5s for the backfill.
+        for _ in range(30):
             result = ab_eval(f"""
                 var s = Alpine.store('sessions')['{TEST_SESSION_ID}'];
                 return s ? s.entries.length : 0;
@@ -670,10 +670,21 @@ class TestMixedEntryTypes:
         # Reconnect
         ab_eval("window._connect(); return 'reconnecting';")
 
-        # Write trigger event to cause gap detection + replay
+        # Write trigger event to cause gap detection + replay, then poll for
+        # the replayed entries instead of a fixed 4s (watcher poll + replay
+        # roundtrip under load can exceed it).
         trigger = _assistant_entry("Mixed types trigger", 25)
         harness.write_gap_events([trigger])
-        time.sleep(4)
+        expected = len(_make_gap_events()) + 1  # gap batch + trigger
+        for _ in range(30):
+            result = ab_eval(f"""
+                var s = Alpine.store('sessions')['{TEST_SESSION_ID}'];
+                var saved = window._savedEntryCount || 0;
+                return s ? (s.entries.length - saved) : -1;
+            """)
+            if result is not None and result >= expected:
+                break
+            time.sleep(0.5)
 
     def test_user_messages_visible(self, harness):
         """User messages written during gap appear in the store."""
