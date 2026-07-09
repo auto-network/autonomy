@@ -1282,19 +1282,38 @@ class WorktreeMonitor:
         """
         now = time.monotonic()
         if now < self._capability_backoff_until:
+            logger.info(
+                "worktree_monitor: discovery skipped — rate-limit backoff hot "
+                "(%.0fs remaining)",
+                self._capability_backoff_until - now,
+            )
             return
 
         groups: dict[str, list[WorktreeState]] = {}
         for row in rows:
             groups.setdefault(row.repo_name, []).append(row)
+        logger.info(
+            "worktree_monitor: discovery over %d rows in %d repo groups: %s",
+            len(rows), len(groups),
+            {name: len(g) for name, g in groups.items()},
+        )
 
         for repo_name, group in groups.items():
             host_and_slug = derive_repo_host_and_slug(group[0].managed_clone)
             if host_and_slug is None:
+                logger.info(
+                    "worktree_monitor: discovery skipping %s — no parseable "
+                    "GitHub remote on %s",
+                    repo_name, group[0].managed_clone,
+                )
                 continue
             host, slug = host_and_slug
             stdout, failure = await source_control_repo_reviews_v1(
                 host, slug, timeout=int(_GITHUB_REVIEW_TIMEOUT),
+            )
+            logger.info(
+                "worktree_monitor: discovery %s (%s) → failure=%s stdout_bytes=%d",
+                slug, repo_name, failure, len(stdout or ""),
             )
 
             if failure == FAILURE_NO_HOST_TOKEN:
@@ -1328,6 +1347,16 @@ class WorktreeMonitor:
                         )
                 continue  # detail logged by the service
 
+            def _mark_degraded(reason: str) -> None:
+                for row in group:
+                    key = (row.session_name, row.repo_name)
+                    if key not in self._source_control_cache:
+                        self._source_control_cache[key] = _degraded_snapshot(
+                            state="degraded",
+                            reason=reason,
+                            watch_mode=self.get_nag_mode(*key),
+                        )
+
             try:
                 prs = json.loads(stdout or "[]")
             except ValueError:
@@ -1335,10 +1364,13 @@ class WorktreeMonitor:
                     "worktree_monitor: discovery got unparseable pr list for %s",
                     slug,
                 )
+                _mark_degraded("unparseable_pr_list")
                 continue
             if not isinstance(prs, list):
+                _mark_degraded("unparseable_pr_list")
                 continue
 
+            wrote = 0
             for row in group:
                 key = (row.session_name, row.repo_name)
                 mine = [
@@ -1374,6 +1406,11 @@ class WorktreeMonitor:
                     )
                 self._source_control_cache[key] = snapshot
                 self._source_control_fetched_at[key] = now
+                wrote += 1
+            logger.info(
+                "worktree_monitor: discovery %s → %d open PRs, wrote %d/%d snapshots",
+                slug, len(prs), wrote, len(group),
+            )
 
     async def _refresh_one_source_control(
         self, row: WorktreeState, all_rows: list[WorktreeState],
