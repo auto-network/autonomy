@@ -46,6 +46,51 @@ _env = jinja2.Environment(
 )
 
 
+def _workspace_queries_block(cap, workspace_id: str) -> str:
+    """Render the workspace's named queries as an invocation block, or ``""``.
+
+    Named queries are workspace data (``workspace_overrides.named_queries``
+    on the enable Setting); this is the projection half of the mechanism —
+    the workspace teaches the capability *and the agent's context* in one
+    place. Rendered only when the implementation actually exposes a
+    ``*-query`` command, so a capability version that predates named
+    queries never advertises an invocation that would fail.
+    """
+    # Pure named-query helpers; shipped with the jira impl today but
+    # provider-neutral (placeholder derivation over workspace data).
+    from agents.capabilities.jira.backend import queries as named_queries
+
+    rows = named_queries.list_queries(cap.workspace_overrides)
+    if not rows:
+        return ""
+    command = next(
+        (c for c in (cap.tool_target.expose_commands if cap.tool_target else ())
+         if c.endswith("-query")),
+        None,
+    )
+    if command is None:
+        return ""
+    invocations = [
+        (
+            f"{command} {row['name']}"
+            + "".join(f" {p}=<value>" for p in row["params"]),
+            row["summary"],
+        )
+        for row in rows
+    ]
+    width = max(len(inv) for inv, _ in invocations)
+    lines = [
+        f"{inv:<{width}}   # {summary}" if summary else inv
+        for inv, summary in invocations
+    ]
+    return (
+        f"**Workspace queries ({workspace_id})** — standardized views "
+        f"taught to this workspace as data (`{command} --list` shows the "
+        "live set):\n\n"
+        "```bash\n" + "\n".join(lines) + "\n```"
+    )
+
+
 def _capability_primer_blocks(config: WorkspaceV1) -> list[dict]:
     """Build the per-capability primer projection rows for the template.
 
@@ -60,7 +105,8 @@ def _capability_primer_blocks(config: WorkspaceV1) -> list[dict]:
       .primer_path`` if the file exists, otherwise an empty string. The
       primer file is the implementation's short, action-oriented surface
       (``jira-read KEY``, ``gh`` is authenticated, etc.); the renderer
-      simply embeds it under the per-capability heading.
+      simply embeds it under the per-capability heading, followed by the
+      workspace's named-query block when the enable Setting defines one.
 
     Returns rows in stable contract order — :class:`MaterializedCapability`
     is already sorted by contract, so iterating the input is sufficient.
@@ -72,6 +118,12 @@ def _capability_primer_blocks(config: WorkspaceV1) -> list[dict]:
             primer_file = REPO_ROOT / cap.primer_path
             if primer_file.is_file():
                 primer_text = primer_file.read_text().rstrip()
+        queries_block = _workspace_queries_block(cap, config.id)
+        if queries_block:
+            primer_text = (
+                f"{primer_text}\n\n{queries_block}" if primer_text
+                else queries_block
+            )
         rows.append({
             "implementation": cap.implementation,
             "contract": cap.contract,
