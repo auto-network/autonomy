@@ -1932,20 +1932,65 @@
               },
               create: { title: 'New Jira ticket', action: 'Create ticket' },
               attach: { title: 'Jira attachment', action: 'Attach file' },
+              transition: {
+                title: 'Jira transition',
+                action: 'Transition to ' + (req.transition || '?'),
+              },
             };
             const op = ops[req.op] || { title: 'Jira write', action: 'Approve' };
             const attachNote = req.op === 'attach'
               ? req.filename + ' (' + ((req.size || 0) / 1024).toFixed(1) + ' KB, ' +
                 (req.mime_type || 'unknown type') + ')'
               : '';
+            const transitionFieldLines = Object.entries(req.fields || {})
+              .map(([k, v]) => '  ' + k + ': ' + v).join('\n');
+            const transitionNote = req.op === 'transition'
+              ? 'Transition ' + (req.key || '?') + ' → ' + (req.transition || '?') +
+                (transitionFieldLines
+                  ? '\n\nFields set with the transition:\n' + transitionFieldLines : '')
+              : '';
             self.approvalRequest = {
               id: r.id, kind: r.kind, session: r.session,
               title: op.title, actionLabel: op.action, op: req.op,
               target: req.key ||
                 ((req.fields || {}).project ? (req.fields.project.key || '') : ''),
-              bodyMarkdown: req.body_markdown || attachNote,
+              bodyMarkdown: req.body_markdown || attachNote || transitionNote,
               fields: req.op === 'create' ? (req.fields || {}) : null,
             };
+            if (req.op === 'transition' && req.key) {
+              // Enrich with TRUSTED context so the operator sees what they
+              // are approving: summary + current status from the broker's
+              // read routes (host-side Jira reads — the requesting agent
+              // cannot spoof them), and the transition's real destination
+              // status (the workflow name and the status can differ).
+              const org = encodeURIComponent(req.org || '');
+              Promise.all([
+                fetch('/api/jira/issue/' + encodeURIComponent(req.key) + '?org=' + org)
+                  .then((resp) => resp.json()).catch(() => null),
+                fetch('/api/jira/transitions/' + encodeURIComponent(req.key) + '?org=' + org)
+                  .then((resp) => resp.json()).catch(() => null),
+              ]).then(([ticket, tr]) => {
+                const ar = self.approvalRequest;
+                if (!ar || ar.id !== r.id) return;   // overlay changed meanwhile
+                const want = (req.transition || '').toLowerCase();
+                const match = ((tr && tr.transitions) || []).find((t) =>
+                  (t.name || '').toLowerCase() === want ||
+                  (t.to_status || '').toLowerCase() === want);
+                const lines = [];
+                if (ticket && !ticket.error && ticket.summary) {
+                  lines.push(req.key + ' — ' + ticket.summary);
+                }
+                const from = (ticket && !ticket.error && ticket.status) || '?';
+                const to = (match && match.to_status) || req.transition || '?';
+                const via = match && match.name && match.name !== to
+                  ? ' (via ‘' + match.name + '’)' : '';
+                lines.push('Status: ' + from + ' → ' + to + via);
+                if (transitionFieldLines) {
+                  lines.push('', 'Fields set with the transition:', transitionFieldLines);
+                }
+                ar.bodyMarkdown = lines.join('\n');
+              });
+            }
           },
         },
         commit_sign: {
