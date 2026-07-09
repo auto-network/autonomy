@@ -85,15 +85,18 @@ class TestLivenessTypeFilter:
             is_live=1,
         )
 
-        # Build a monitor — do NOT patch _check_tmux. Run one liveness tick.
+        # Build a monitor — do NOT patch _check_tmux.
         mon = smmod.SessionMonitor()
 
-        # Drive just the liveness cycle without starting the full monitor.
-        # _liveness_loop is an infinite loop; we want one iteration, so we
-        # call its body. The implementation under test may factor this into
-        # a helper `_liveness_tick()` — try that first, fall back to manual.
-        if hasattr(mon, "_liveness_tick"):
-            await mon._liveness_tick()
+        # Drive just the liveness sweep without starting the full monitor.
+        # The fail-safe contract (2096a3f3) requires _LIVENESS_MISS_THRESHOLD
+        # CONSECUTIVE authoritative "no such session" probes before a reap,
+        # so run the extracted sweep helper that many times.
+        if hasattr(mon, "_sweep_tmux_liveness"):
+            rounds = getattr(mon, "_LIVENESS_MISS_THRESHOLD", 2)
+            for _ in range(rounds):
+                sessions = smmod.get_live_sessions()
+                await mon._sweep_tmux_liveness(sessions, time.time())
         else:
             # Fallback: invoke the loop and cancel after one sleep.
             task = asyncio.create_task(mon._liveness_loop())
