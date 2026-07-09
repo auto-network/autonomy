@@ -201,8 +201,18 @@ class ViewerTestHarness:
         time.sleep(0.5)
 
     def visible_text(self):
-        """Get all visible text on the page."""
-        return ab_eval("return document.body.innerText") or ""
+        """Get all visible text on the page.
+
+        Retries briefly on an empty result: under peak parallel load the
+        agent-browser eval itself can time out and yield '' even though
+        the page is fine — assertions then fail on empty text.
+        """
+        deadline = time.time() + 10
+        while True:
+            text = ab_eval("return document.body.innerText") or ""
+            if text or time.time() > deadline:
+                return text
+            time.sleep(0.5)
 
     def chat_entry_count(self):
         """How many entries did the chat panel actually load?"""
