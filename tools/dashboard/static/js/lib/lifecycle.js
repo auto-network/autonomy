@@ -18,36 +18,39 @@
 // scope dependency through every page Alpine factory.
 
 (function () {
-  // ── Derivation: single column → UI state ──
+  // ── Derivation: server state → UI state ──
   //
-  // The backend tracks one ``startup_state`` value per session in the DB.
-  // NULL means "not in launching" (default for existing sessions, terminal
-  // state after the model emits its first turn). Any non-NULL value is
-  // a launching FSM state and maps directly to a UI state key.
-  //
-  // Dead sessions branch off ``is_live`` first — startup_state is
-  // irrelevant for dead rows.
-  // Planning mode is the one mid-session overlay (read from harness_state
-  // JSON); it only applies AFTER startup_state has cleared to NULL because
-  // planning mode requires a prior model response.
+  // The backend sends the one lifecycle truth on every row: ``state`` ∈
+  // LAUNCHING | ACTIVE | STOPPING | ENDED | FAILED (also mirrored as
+  // ``lifecycle_state``). The client maps it to a UI state key and adds
+  // ONLY presentation refinements: the granular chip phase while
+  // LAUNCHING/STOPPING (``startup_state`` — legit sub-state, not a second
+  // truth), resumability for ENDED, and the planning-mode overlay for
+  // ACTIVE. The legacy-field fallback below covers rows that predate the
+  // state field (old fixtures, cached payloads) and nothing else — the
+  // client no longer re-derives lifecycle from is_live/activity_state
+  // pairs when the server said what the state is.
   function lifecycleState(s) {
     if (!s) return "pending";
-    // FAILED branches before dead: the lifecycle worker's fail write sets
-    // is_live=0 AND activity_state='failed' — without this branch a failed
-    // launch rendered as a plain "Ended" card and the Retry chip was
-    // unreachable. The backend's derived lifecycle_state is the same
-    // decision, precomputed; use it when present.
-    if (s.lifecycle_state === "FAILED" || s.activity_state === "failed"
-        || s.startup_state === "setup_failed") {
+    var st = s.state || s.lifecycle_state;
+    if (st === "FAILED") return "setup_failed";
+    if (st === "ENDED") {
+      return s.resumable ? "dead_resumable" : "dead_not_resumable";
+    }
+    if (st === "LAUNCHING" || st === "STOPPING") {
+      return s.startup_state || (st === "STOPPING" ? "stopping" : "requesting");
+    }
+    if (st === "ACTIVE") {
+      var hsA = s.harness_state || {};
+      if (hsA.in_planning_mode) return "ready_with_planning";
+      return "ready";
+    }
+    // ── Legacy fallback (no state field on the row) ──
+    if (s.activity_state === "failed" || s.startup_state === "setup_failed") {
       return "setup_failed";
     }
-    // Dead branches next, using a truthy test rather than ``=== false``:
-    // the dead/registry path delivers is_live as the integer 0 (SQLite) or
-    // missing, and ``0 === false`` / ``undefined === false`` are both false
-    // in JS — which let a dead-mid-launch row skip this branch and fall
-    // through to the launching chip below, so a dead session rendered as if
-    // it were still booting. ``!s.is_live`` routes 0/false/null/undefined to
-    // dead correctly.
+    // Truthy test rather than ``=== false``: the dead path delivers
+    // is_live as the integer 0 (SQLite) or missing.
     if (!s.is_live) {
       if (s.resumable) return "dead_resumable";
       return "dead_not_resumable";
@@ -88,6 +91,8 @@
     confirming_trust: "Confirming trust",
     composer_ready: "Sending orientation",
     awaiting_first_response: "Awaiting first reply",
+    stopping: "Stopping",
+    cleaning: "Stopping",
     setup_failed: "Setup failed",
     ready: "",
     ready_with_planning: "Planning",

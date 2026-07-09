@@ -82,8 +82,8 @@ async def test_fork_eagain_spike_reaps_nothing(db, monitor, monkeypatch):
     monkeypatch.setattr(sm.subprocess, "run", eagain_spawn)
     cleanups = []
     monkeypatch.setattr(
-        sm, "_cleanup_worktrees_for_dead_session",
-        lambda name: cleanups.append(name),
+        sm, "cleanup_session_worktrees",
+        lambda name, **kw: cleanups.append(name) or None,
     )
 
     import time
@@ -103,8 +103,8 @@ async def test_confirmed_death_requires_consecutive_misses(db, monitor, monkeypa
     monkeypatch.setattr(monitor, "_check_tmux", lambda _n: False)
     cleanups = []
     monkeypatch.setattr(
-        sm, "_cleanup_worktrees_for_dead_session",
-        lambda name: cleanups.append(name),
+        sm, "cleanup_session_worktrees",
+        lambda name, **kw: cleanups.append(name) or None,
     )
 
     import time
@@ -115,7 +115,9 @@ async def test_confirmed_death_requires_consecutive_misses(db, monitor, monkeypa
     changed = await monitor._sweep_tmux_liveness(rows, time.time())
     assert changed is True  # second consecutive miss — confirmed dead
     assert _live_names() == set()
-    assert cleanups == ["auto-a"]
+    # Death is a transition, never destruction — the tombstoned GC owns
+    # worktree removal, hours later, with a state re-check.
+    assert cleanups == []
 
 
 @pytest.mark.asyncio
@@ -144,8 +146,8 @@ async def test_probe_failure_does_not_advance_or_reset_a_miss_streak(db, monitor
     rows = _seed_live("auto-a")
     cleanups = []
     monkeypatch.setattr(
-        sm, "_cleanup_worktrees_for_dead_session",
-        lambda name: cleanups.append(name),
+        sm, "cleanup_session_worktrees",
+        lambda name, **kw: cleanups.append(name) or None,
     )
     import time
 
@@ -157,7 +159,8 @@ async def test_probe_failure_does_not_advance_or_reset_a_miss_streak(db, monitor
     monkeypatch.setattr(monitor, "_check_tmux", lambda _n: False)
     changed = await monitor._sweep_tmux_liveness(rows, time.time())  # miss 2
     assert changed is True
-    assert cleanups == ["auto-a"]
+    assert _live_names() == set()
+    assert cleanups == []  # transition only — the GC owns destruction
 
 
 def test_check_tmux_probe_failure_is_unknown(monkeypatch):
@@ -204,8 +207,8 @@ async def test_reaper_never_reaps_launching_within_budget(db, monitor, monkeypat
     monkeypatch.setattr(monitor, "_check_tmux", lambda _n: False)
     cleanups = []
     monkeypatch.setattr(
-        sm, "_cleanup_worktrees_for_dead_session",
-        lambda name: cleanups.append(name),
+        sm, "cleanup_session_worktrees",
+        lambda name, **kw: cleanups.append(name) or None,
     )
     import time
     changed = await monitor._sweep_tmux_liveness(rows, time.time())

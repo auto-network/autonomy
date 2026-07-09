@@ -1052,10 +1052,21 @@ def delete_session(tmux_name: str) -> None:
 # ── Queries ─────────────────────────────────────────────────────
 
 
+_TERMINAL_STATES_SQL = "('ENDED','FAILED')"
+
+
 def get_live_sessions() -> list[dict]:
-    """Return all sessions with is_live=1."""
+    """Return all non-terminal sessions (LAUNCHING/ACTIVE/STOPPING).
+
+    The NULL-state arm is the compat belt for rows written by raw INSERTs
+    that bypass the sanctioned birth helpers (test fixtures, external
+    writers); the migration backfill means production rows carry state.
+    """
     conn = get_conn()
-    rows = conn.execute("SELECT * FROM tmux_sessions WHERE is_live=1").fetchall()
+    rows = conn.execute(
+        f"SELECT * FROM tmux_sessions WHERE state NOT IN {_TERMINAL_STATES_SQL}"
+        " OR (state IS NULL AND is_live=1)"
+    ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -1172,14 +1183,17 @@ def session_exists(tmux_name: str) -> bool:
 
 
 def count_live() -> int:
-    """Count live sessions."""
+    """Count non-terminal sessions."""
     conn = get_conn()
-    row = conn.execute("SELECT COUNT(*) FROM tmux_sessions WHERE is_live=1").fetchone()
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM tmux_sessions WHERE state NOT IN {_TERMINAL_STATES_SQL}"
+        " OR (state IS NULL AND is_live=1)"
+    ).fetchone()
     return row[0] if row else 0
 
 
 def find_dead_session(session_uuid: str | None = None, file_path: str | None = None) -> dict | None:
-    """Find a dead (is_live=0) session by session_uuid or jsonl_path.
+    """Find a terminal (ENDED/FAILED) session by session_uuid or jsonl_path.
 
     Checks session_uuid first, then falls back to jsonl_path.
     Returns the full row as a dict, or None.
@@ -1187,7 +1201,7 @@ def find_dead_session(session_uuid: str | None = None, file_path: str | None = N
     conn = get_conn()
     if session_uuid:
         row = conn.execute(
-            "SELECT * FROM tmux_sessions WHERE session_uuid=? AND is_live=0"
+            "SELECT * FROM tmux_sessions WHERE session_uuid=? AND state IN ('ENDED','FAILED')"
             " ORDER BY created_at DESC LIMIT 1",
             (session_uuid,),
         ).fetchone()
@@ -1195,7 +1209,7 @@ def find_dead_session(session_uuid: str | None = None, file_path: str | None = N
             return dict(row)
     if file_path:
         row = conn.execute(
-            "SELECT * FROM tmux_sessions WHERE jsonl_path=? AND is_live=0"
+            "SELECT * FROM tmux_sessions WHERE jsonl_path=? AND state IN ('ENDED','FAILED')"
             " ORDER BY created_at DESC LIMIT 1",
             (file_path,),
         ).fetchone()
@@ -1205,7 +1219,7 @@ def find_dead_session(session_uuid: str | None = None, file_path: str | None = N
 
 
 def find_live_session(session_uuid: str | None = None, file_path: str | None = None) -> dict | None:
-    """Find a live (is_live=1) session by session_uuid or jsonl_path.
+    """Find a non-terminal session by session_uuid or jsonl_path.
 
     Checks session_uuid first, then falls back to jsonl_path.
     Returns the full row as a dict, or None.
@@ -1213,7 +1227,7 @@ def find_live_session(session_uuid: str | None = None, file_path: str | None = N
     conn = get_conn()
     if session_uuid:
         row = conn.execute(
-            "SELECT * FROM tmux_sessions WHERE session_uuid=? AND is_live=1"
+            "SELECT * FROM tmux_sessions WHERE session_uuid=? AND state NOT IN ('ENDED','FAILED')"
             " ORDER BY created_at DESC LIMIT 1",
             (session_uuid,),
         ).fetchone()
@@ -1221,7 +1235,7 @@ def find_live_session(session_uuid: str | None = None, file_path: str | None = N
             return dict(row)
     if file_path:
         row = conn.execute(
-            "SELECT * FROM tmux_sessions WHERE jsonl_path=? AND is_live=1"
+            "SELECT * FROM tmux_sessions WHERE jsonl_path=? AND state NOT IN ('ENDED','FAILED')"
             " ORDER BY created_at DESC LIMIT 1",
             (file_path,),
         ).fetchone()
@@ -1231,11 +1245,7 @@ def find_live_session(session_uuid: str | None = None, file_path: str | None = N
 
 
 def revive_session(tmux_name: str, *, file_offset: int = 0) -> None:
-    """Re-activate a dead session: set is_live=1, reset file_offset, clear
-    the 'dead' activity_state flag, and reset startup_state to NULL so the
-    relaunched session's FSM starts fresh (api_session_resume arms it
-    to harness_starting right after this call, mirroring api_session_create).
-    Leaves non-dead activity states alone.
+    """Row-prep for a relaunch: reset the tail offset for full backfill.
 
     harness_state resets too: it describes the PREVIOUS process's screen. A
     stale composer_ready=true from the old boot would satisfy the
@@ -1287,8 +1297,8 @@ def upsert_session(
         "  bead_id, jsonl_path, session_uuid,"
         "  resolution_dir, session_uuids, curr_jsonl_file,"
         "  created_at, is_live, file_offset, last_message, label,"
-        "  harness_token)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "  harness_token, state, attention, ended_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(tmux_name) DO UPDATE SET"
         "  harness = excluded.harness,"
         "  harness_state = excluded.harness_state,"
@@ -1303,12 +1313,23 @@ def upsert_session(
         "    THEN excluded.last_message ELSE last_message END,"
         "  is_live = excluded.is_live,"
         "  harness_token = COALESCE(excluded.harness_token, harness_token),"
-        # When a previously-dead row is revived via seed, clear the stale
-        # 'dead' activity_state so it doesn't contradict is_live=1. Non-dead
-        # states (idle / thinking / tool_running) are preserved.
+        # When a previously-dead row is revived via seed/IPC
+        # re-registration, the one state follows liveness (and the legacy
+        # activity_state projection stays consistent with it). Non-dead
+        # states are preserved. This is a sanctioned birth/seed writer;
+        # everything after registration goes through the authority.
         "  activity_state = CASE"
         "    WHEN excluded.is_live=1 AND activity_state='dead' THEN 'idle'"
-        "    ELSE activity_state END",
+        "    ELSE activity_state END,"
+        "  state = CASE"
+        "    WHEN excluded.is_live=1 AND (state IS NULL OR state IN ('ENDED','FAILED'))"
+        "      THEN 'ACTIVE'"
+        "    WHEN excluded.is_live=0 AND (state IS NULL OR state NOT IN ('ENDED','FAILED'))"
+        "      THEN 'ENDED'"
+        "    ELSE state END,"
+        "  ended_at = CASE"
+        "    WHEN excluded.is_live=1 THEN NULL"
+        "    ELSE COALESCE(ended_at, excluded.ended_at) END",
         (
             tmux_name, session_type, project, harness, harness_state,
             bead_id, jsonl_path, session_uuid,
@@ -1316,6 +1337,9 @@ def upsert_session(
             created_at or time.time(), 1 if is_live else 0, file_offset, last_message,
             label,
             harness_token,
+            "ACTIVE" if is_live else "ENDED",
+            "idle" if is_live else None,
+            None if is_live else time.time(),
         ),
     )
     conn.commit()

@@ -255,36 +255,3 @@ async def test_arm_stamps_last_activity(db, monitor):
     row = dashboard_db.get_session("auto-test")
     assert row["last_activity"] > _time.time() - 5
 
-
-def test_dead_session_worktree_cleanup_skips_revived_rows(db, monkeypatch):
-    """The cleanup thread is scheduled at death detection but can execute
-    after a resume revives the session — it must re-check at execution
-    time and abort instead of removing the relaunch's worktree."""
-    from tools.dashboard import session_monitor as sm
-
-    dashboard_db.insert_session(
-        tmux_name="auto-test", session_type="container", project="x",
-    )
-    # Row is live (revived) by the time the queued cleanup runs.
-    calls = []
-    monkeypatch.setattr(
-        sm, "cleanup_session_worktrees",
-        lambda *a, **kw: calls.append(a) or None,
-    )
-    sm._cleanup_worktrees_for_dead_session("auto-test")
-    assert calls == []  # aborted — session is live
-
-    # Genuinely dead row → cleanup proceeds.
-    dashboard_db.mark_dead("auto-test")
-
-    class _Result:
-        removed: list = []
-        preserved: list = []
-        errors: list = []
-
-    monkeypatch.setattr(
-        sm, "cleanup_session_worktrees",
-        lambda *a, **kw: calls.append(a) or _Result(),
-    )
-    sm._cleanup_worktrees_for_dead_session("auto-test")
-    assert len(calls) == 1

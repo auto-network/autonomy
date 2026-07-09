@@ -53,6 +53,9 @@ document.addEventListener('alpine:init', function() {
         if (s.model !== undefined) store.model = s.model;
         if (s.harness_token !== undefined) store.harnessToken = s.harness_token;
         if (s.harness_token_alias !== undefined) store.harnessTokenAlias = s.harness_token_alias;
+        if (s.startup_state !== undefined) store.startupState = s.startup_state;
+        if (s.state || s.lifecycle_state) store.state = s.state || s.lifecycle_state;
+        if (s.attention !== undefined) store.attention = s.attention;
       }
       _emitSessionStoreChanged('seed');
     })
@@ -742,6 +745,9 @@ window.ensureSessionMessages = function() {
       // null). Store explicitly nulls on absence so cleared sessions
       // render correctly.
       store.startupState = s.startup_state || null;
+      // The one lifecycle truth + telemetry sidecar (FSM consolidation).
+      store.state = s.state || s.lifecycle_state || null;
+      store.attention = s.attention || null;
       if (s.resumable !== undefined) store.resumable = !!s.resumable;
       if (s.harness_state !== undefined) store.harnessState = s.harness_state;
       // The resume-bridge flag only needs to survive the gap between the
