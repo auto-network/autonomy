@@ -3398,18 +3398,24 @@ class SessionMonitor:
     _COOLDOWN_SECONDS = 30.0
     _ORPHAN_PRUNE_INTERVAL = 600.0  # seconds between orphan worktree prunes
     # startup_state values that mean "still booting" — a container session in
-    # any of these has not yet spawned its host tmux, so the tmux-liveness
-    # check below must not treat the miss as death. composer_ready /
-    # awaiting_first_response are intentionally excluded: by then tmux exists
-    # and a real miss is a real death.
+    # any of these may not yet have a live host tmux (a resume's old tmux is
+    # gone; a fresh launch hasn't spawned it), so the tmux-liveness check below
+    # must not treat the miss as death. setup_running + confirming_trust were
+    # MISSING here and got sessions reaped ~12s into setup (auto-0709-092918,
+    # 2026-07-09) — added as a STOPGAP ahead of the single-state FSM
+    # consolidation. composer_ready / awaiting_first_response stay excluded: by
+    # then tmux exists and a real miss is a real death.
     _STARTUP_BOOTING_STATES = frozenset({
         "requesting", "preparing_workspace", "launching_container",
-        "harness_starting",
+        "setup_running", "confirming_trust", "harness_starting",
     })
     # Upper bound on how long a session may sit in a booting state before the
-    # reaper is allowed to act anyway — protects normal (even cold-cache)
-    # launches while still eventually reaping a genuinely stuck launch.
-    _STARTUP_GRACE_SECONDS = 300.0
+    # reaper is allowed to act anyway. MUST exceed the FSM's own setup timeout
+    # (_LIFECYCLE_SETUP_TIMEOUT_S = 600s, server.py) or the reaper kills a
+    # session that is still legitimately setting up before the FSM can fail it —
+    # which 300s did. The FSM fails a genuinely stuck setup at 600s, so 660s
+    # lets the FSM own that call and the reaper stays the backstop.
+    _STARTUP_GRACE_SECONDS = 660.0
 
     # A session is only reaped after this many CONSECUTIVE authoritative
     # "no such session" probe results (~10s apart). One authoritative miss
