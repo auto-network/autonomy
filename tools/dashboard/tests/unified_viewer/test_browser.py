@@ -625,10 +625,17 @@ class TestUnresolvedState:
         add explicit empty state for unresolved sessions.
         """
         h.open_session_page("autonomy", "host-test-unresolved")
-        time.sleep(2)
+        # Poll for the store row — a fixed 2s loses to page-load jitter on
+        # a loaded parallel run and lands in the "no store yet" branch.
+        state = None
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            state = h.session_store_state("host-test-unresolved")
+            if state:
+                break
+            time.sleep(0.5)
         # In the unresolved state, there should be NO entries and
         # an explicit message about linking being needed
-        state = h.session_store_state("host-test-unresolved")
         if state:
             assert state.get("resolved") is False, (
                 "unified viewer Unresolved state not implemented yet"
