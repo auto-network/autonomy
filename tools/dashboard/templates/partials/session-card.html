@@ -314,8 +314,11 @@
            x-text="s.latest"></div>
     </template>
 
-    <!-- Footer (normal + expanded only, hidden in compact via CSS) -->
-    <div class="sc-footer">
+    <!-- Footer (normal + expanded only, hidden in compact via CSS).
+         Ended cards switch to the design's fixed 5-column grid
+         (sc-footer-ended) so columns align across cards and long
+         tmux/org values truncate instead of wrapping mid-name. -->
+    <div class="sc-footer" :class="s.is_live ? '' : 'sc-footer-ended'">
       <div class="sc-footer-item">
         <span class="sc-footer-label">turns</span>
         <span class="sc-footer-value" x-text="turnsStr(s) || '—'"></span>
@@ -330,18 +333,25 @@
            trigger opens the component breakdown, same affordance as the
            live meta2 row's Disk tile. Helpers are sessions-page scope;
            other surfaces including this partial skip it. -->
-      <template x-if="!s.is_live && typeof diskStr === 'function' && diskStr(s)">
+      <template x-if="!s.is_live && typeof diskStr === 'function'">
         <div class="sc-footer-item sc-disk-item" data-testid="sc-disk-ended">
           <span class="sc-footer-label">disk</span>
-          <button type="button" class="sc-footer-value sc-resource-trigger"
-                  @click.prevent.stop="toggleResourceTip(s)"
-                  x-text="diskStr(s)"></button>
-          <div class="sc-resource-tip"
-               :class="_resourceTipOpen === resourceTipKey(s) ? 'open' : ''">
-            <template x-for="row in diskDetail(s)" :key="row[0]">
-              <div><span x-text="row[0]"></span><b x-text="row[1]"></b></div>
-            </template>
-          </div>
+          <template x-if="diskDetail(s).length > 0">
+            <div style="display: contents">
+              <button type="button" class="sc-footer-value sc-resource-trigger"
+                      @click.prevent.stop="toggleResourceTip(s)"
+                      x-text="diskStr(s)"></button>
+              <div class="sc-resource-tip"
+                   :class="_resourceTipOpen === resourceTipKey(s) ? 'open' : ''">
+                <template x-for="row in diskDetail(s)" :key="row[0]">
+                  <div><span x-text="row[0]"></span><b x-text="row[1]"></b></div>
+                </template>
+              </div>
+            </div>
+          </template>
+          <template x-if="!diskDetail(s).length">
+            <span class="sc-footer-value">—</span>
+          </template>
         </div>
       </template>
       <!-- Live cards keep the Idle column; ended cards drop it — their end
@@ -353,7 +363,7 @@
           <span class="sc-footer-value" :class="s.is_live ? recencyColor(s) : ''" x-text="endedOrIdleValue(s)"></span>
         </div>
       </template>
-      <template x-if="showTmuxColumn(s)">
+      <template x-if="showTmuxColumn(s) || !s.is_live">
         <div class="sc-footer-item">
           <span class="sc-footer-label">tmux</span>
           <span class="sc-footer-value" x-text="s.tmux_session || '—'"></span>
