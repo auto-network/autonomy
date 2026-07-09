@@ -554,7 +554,11 @@ def test_session_launcher_writes_graph_org_in_meta(tmp_path, monkeypatch):
     import agents.session_launcher as launcher
 
     # Force the launcher to write into tmp_path so we can read the meta.
+    # DASHBOARD_AGENT_RUNS_DIR outranks REPO_ROOT in the launcher's run-dir
+    # fallback, and the dashboard tests' conftest sets it per worker in a
+    # combined default run — clear it so the REPO_ROOT patch decides.
     monkeypatch.setattr(launcher, "REPO_ROOT", tmp_path)
+    monkeypatch.delenv("DASHBOARD_AGENT_RUNS_DIR", raising=False)
 
     # Stub credentials and docker run — we only care about the meta file.
     monkeypatch.setattr(launcher, "_resolve_credentials",

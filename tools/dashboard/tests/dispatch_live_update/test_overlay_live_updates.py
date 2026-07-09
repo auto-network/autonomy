@@ -93,6 +93,11 @@ def live_dashboard(tmp_path, monkeypatch):
     env["DISPATCH_DB"] = str(dispatch_db)
     env["DASHBOARD_AGENT_RUNS_DIR"] = str(agent_runs)
     env.pop("DASHBOARD_MOCK", None)
+    # This server runs UNMOCKED, so startup restores the EventBus snapshot
+    # — with the per-worker default path it replays another test file's
+    # cached session:messages into this file's subscribers (the overlay
+    # then sees a foreign session_id and drops every event). Isolate it.
+    env["DASHBOARD_EVENT_BUS_STATE"] = str(tmp_path / "event_bus.state")
     repo_root = str(Path(__file__).resolve().parents[4])
     env["PYTHONPATH"] = repo_root
 
