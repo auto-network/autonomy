@@ -5100,7 +5100,9 @@ class TestWorktreesPageBehavior:
             f"Single bound beta row badges regressed: {c.get('beta_pr_badges')}"
         )
         assert not c.get("beta_has_empty_state"), "Bound beta row still showed the empty-state CTA"
-        assert c.get("delta_pr_badges") == ["PR #5008", "PR #5009"], (
+        # Design 255aeae1 v5: one badge per card — bottom of the stack
+        # with the extra depth folded in as a dimmed "+1".
+        assert c.get("delta_pr_badges") == ["PR #5008 +1"], (
             f"Stacked delta row badges regressed: {c.get('delta_pr_badges')}"
         )
         assert c.get("delta_navigator_pr_rows") == 2, (
@@ -5135,7 +5137,7 @@ class TestWorktreesPageBehavior:
         assert c.get("delta_pr_review_after_refresh_badge") == "PR #5008", (
             f"Refresh lost PR review context: {c.get('delta_pr_review_after_refresh_badge')!r}"
         )
-        assert c.get("delta_pr_badges_after_refresh") == ["PR #5008", "PR #5009"], (
+        assert c.get("delta_pr_badges_after_refresh") == ["PR #5008 +1"], (
             f"Refresh mutated stacked bindings on the card: {c.get('delta_pr_badges_after_refresh')}"
         )
 

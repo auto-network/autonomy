@@ -138,6 +138,11 @@ def cmd_start(args: argparse.Namespace) -> int:
         print(f"  Run: dashboard-mock stop --port {port}", file=sys.stderr)
         return 1
 
+    # Fresh worktrees have no built static/tailwind.css (gitignored) and the
+    # whole dashboard renders unstyled without it. This helper existed but
+    # was never wired into startup.
+    _ensure_tailwind_css()
+
     # Set up run directory and files
     RUN_DIR.mkdir(parents=True, exist_ok=True)
 
