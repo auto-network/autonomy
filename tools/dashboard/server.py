@@ -9079,9 +9079,11 @@ async def api_worktree_refresh(request):
     * **Row not found in the scan** → 404. The worktree directory
       doesn't exist on disk anymore.
     * **Row found but session is dead** → 200 with the row JSON.
-      ``refresh_one`` skips the capability fetch (no live container
-      to ``docker exec`` into), but the local-git rescan still ran
-      and the cached source_control snapshot (if any) is preserved.
+      ``refresh_one`` fetches PR state in host mode when the row has
+      review bindings and a host token file is configured for its git
+      host (auto-rn1dp); otherwise it skips the capability fetch (no
+      live container to ``docker exec`` into). The local-git rescan
+      runs either way and any cached snapshot is preserved.
       Caller can detect dead via ``session_live=False`` in the
       returned row. Capability re-resolution for dead sessions is
       a separate architectural piece — see graph://d9764756-c49.

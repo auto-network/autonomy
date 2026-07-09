@@ -1418,21 +1418,23 @@ class _DockerExecRecorder:
 
     def __init__(self, *, container_running=True, gh_results=None):
         self.calls: list[list[str]] = []
+        self.envs: list[dict | None] = []
         self._container_running = container_running
         self._gh_results = list(gh_results or [])
 
-    async def run_cli(self, cmd, *, timeout=30):
+    async def run_cli(self, cmd, *, timeout=30, env=None):
         self.calls.append(list(cmd))
+        self.envs.append(env)
         # docker inspect probe → liveness
         if cmd[:3] == ["docker", "inspect", "-f"]:
             running = "true" if self._container_running else "false"
             rc = 0 if self._container_running else 1
             return running, "", rc, False
-        # docker exec ... gh ...  → scripted gh result
-        if cmd[:2] == ["docker", "exec"]:
+        # docker exec ... gh ...  OR host-mode plain gh → scripted result
+        if cmd[:2] == ["docker", "exec"] or cmd[:1] == ["gh"]:
             if not self._gh_results:
                 raise AssertionError(
-                    f"unexpected docker exec call with no scripted result: {cmd!r}"
+                    f"unexpected gh call with no scripted result: {cmd!r}"
                 )
             return self._gh_results.pop(0)
         raise AssertionError(f"unexpected run_cli command: {cmd!r}")
@@ -1467,6 +1469,149 @@ def _install_github_stubs(
     monkeypatch.setattr(wg, "run_cli", recorder.run_cli)
     monkeypatch.setattr(wg, "derive_repo_slug", lambda _path: repo_slug)
     return wg, recorder, rows_list
+
+
+class TestGithubHostExecution:
+    """Host-mode gh execution (auto-rn1dp, design f7c4c109-91a §Phase 1a):
+    with a token file configured for the repo's git host, the capability
+    runs ``gh`` in the dashboard process — no docker exec, and DEAD rows
+    become refreshable."""
+
+    def test_github_host_token_resolution(self, monkeypatch, tmp_path):
+        from agents.capabilities.github import service as wg
+
+        token_path = tmp_path / "gh.token"
+        token_path.write_text("sekrit-token\n")
+        monkeypatch.setattr(
+            wg, "_github_broker_config",
+            lambda: {"token_file.github.com": str(token_path)},
+        )
+        assert wg.github_host_token("github.com") == "sekrit-token"
+        # Unconfigured host → None.
+        assert wg.github_host_token("github-autonomy") is None
+        # No host at all → None.
+        assert wg.github_host_token(None) is None
+        # Unreadable path → None (fall back to container mode).
+        monkeypatch.setattr(
+            wg, "_github_broker_config",
+            lambda: {"token_file.github.com": str(tmp_path / "missing")},
+        )
+        assert wg.github_host_token("github.com") is None
+        # Empty file → None.
+        token_path.write_text("   \n")
+        monkeypatch.setattr(
+            wg, "_github_broker_config",
+            lambda: {"token_file.github.com": str(token_path)},
+        )
+        assert wg.github_host_token("github.com") is None
+
+    def test_dead_row_refreshes_via_host_mode(self, monkeypatch):
+        """The headline capability: a DEAD session's bound row fetches PR
+        state by id with zero docker involvement — impossible before."""
+        from agents.capabilities.github import service as wg
+
+        dead = _row(session="auto-dead", repo="enterprise_ng", live=False)
+        recorder = _DockerExecRecorder(
+            gh_results=[("{\"number\": 577}", "", 0, False)],
+        )
+        monkeypatch.setattr(wg, "run_cli", recorder.run_cli)
+        monkeypatch.setattr(
+            wg, "derive_repo_host_and_slug",
+            lambda _p: ("github.com", "anchore/enterprise_ng"),
+        )
+        monkeypatch.setattr(
+            wg, "github_host_token",
+            lambda host: "sekrit" if host == "github.com" else None,
+        )
+
+        import asyncio
+        result = asyncio.run(wg.source_control_review_read_by_id_v1(
+            "auto-dead", "enterprise_ng", review_id="577", rows=[dead],
+        ))
+
+        assert result.ok, (result.failure, result.error_message)
+        assert result.container_name is None
+        # Host mode: plain gh argv, token ONLY in env — never argv/command.
+        assert recorder.calls == [
+            ["gh", "api", "-i", "/repos/anchore/enterprise_ng/pulls/577"],
+        ]
+        env = recorder.envs[0]
+        assert env is not None and env["GH_TOKEN"] == "sekrit"
+        assert env.get("GH_PROMPT_DISABLED") == "1"
+        assert all("sekrit" not in part for part in result.command)
+
+    def test_no_token_falls_back_to_container_mode(self, monkeypatch):
+        from agents.capabilities.github import service as wg
+
+        live = _row(session="auto-live", repo="enterprise_ng", live=True)
+        recorder = _DockerExecRecorder(
+            container_running=True,
+            gh_results=[("{}", "", 0, False)],
+        )
+        monkeypatch.setattr(wg, "run_cli", recorder.run_cli)
+        monkeypatch.setattr(
+            wg, "derive_repo_host_and_slug",
+            lambda _p: ("github.com", "anchore/enterprise_ng"),
+        )
+        monkeypatch.setattr(wg, "github_host_token", lambda _h: None)
+
+        import asyncio
+        result = asyncio.run(wg.source_control_review_read_by_id_v1(
+            "auto-live", "enterprise_ng", review_id="9", rows=[live],
+        ))
+
+        assert result.ok
+        assert result.container_name == "auto-live"
+        assert recorder.calls[0][:3] == ["docker", "inspect", "-f"]
+        assert recorder.calls[1][:2] == ["docker", "exec"]
+
+    def test_dead_row_without_token_still_fails_no_live_row(self, monkeypatch):
+        from agents.capabilities.github import service as wg
+
+        dead = _row(session="auto-dead", repo="enterprise_ng", live=False)
+        monkeypatch.setattr(
+            wg, "derive_repo_host_and_slug",
+            lambda _p: ("github.com", "anchore/enterprise_ng"),
+        )
+        monkeypatch.setattr(wg, "github_host_token", lambda _h: None)
+
+        import asyncio
+        result = asyncio.run(wg.source_control_review_read_by_id_v1(
+            "auto-dead", "enterprise_ng", review_id="9", rows=[dead],
+        ))
+        assert result.failure == wg.FAILURE_NO_LIVE_ROW
+
+    def test_probe_host_v1_states(self, monkeypatch, tmp_path):
+        from agents.capabilities.github import probe as gp
+        from agents.capabilities.github import service as wg
+        import asyncio
+
+        # No token configured → UNAVAILABLE naming the missing entry.
+        monkeypatch.setattr(wg, "github_host_token", lambda _h: None)
+        res = asyncio.run(gp.probe_host_v1("github.com"))
+        assert res.state == gp.STATE_UNAVAILABLE
+        assert "token_file.github.com" in res.missing_env
+
+        # Token + clean auth status → READY.
+        monkeypatch.setattr(wg, "github_host_token", lambda _h: "tok")
+
+        async def ok_run(cmd, *, timeout=30, env=None):
+            assert cmd == ["gh", "auth", "status"]
+            assert env["GH_TOKEN"] == "tok"
+            return "Logged in", "", 0, False
+
+        monkeypatch.setattr(wg, "run_cli", ok_run)
+        res = asyncio.run(gp.probe_host_v1("github.com"))
+        assert res.state == gp.STATE_READY
+
+        # Token rejected → DEGRADED pointing at the token file entry.
+        async def bad_run(cmd, *, timeout=30, env=None):
+            return "", "HTTP 401 Unauthorized", 1, False
+
+        monkeypatch.setattr(wg, "run_cli", bad_run)
+        res = asyncio.run(gp.probe_host_v1("github.com"))
+        assert res.state == gp.STATE_DEGRADED
+        assert "token_file.github.com" in res.missing_env
 
 
 class TestWorktreeGithubResolution:
@@ -2513,6 +2658,57 @@ class TestWorktreeMonitorRefreshOne:
         # Exactly one fetch — the target row. ``auto-other`` was
         # untouched (the whole point of the per-row endpoint).
         assert captured["calls"] == [("auto-target", "autonomy")]
+
+    def test_refresh_one_dead_bound_row_fetches_in_host_mode(self, monkeypatch):
+        """auto-rn1dp: a DEAD session's row refreshes when it has review
+        bindings and its git host has a configured token file; an unbound
+        dead row (or one without a token) still skips the fetch."""
+        from tools.dashboard import worktree_monitor as wm_module
+
+        rows = [_row(session="auto-dead", live=False)]
+        monitor, captured = self._make_monitor(monkeypatch, rows=rows)
+
+        async def fake_bound_refresh(row, all_rows, bindings, *, watch_mode="silent"):
+            captured["calls"].append((row.session_name, row.repo_name))
+            return ({"state": "ready", "implementation": "autonomy/github",
+                     "reason": None, "reviews": [], "review": None,
+                     "watch": {"mode": watch_mode}}, False)
+
+        monkeypatch.setattr(
+            "tools.dashboard.worktree_monitor._refresh_bindings_via_rest",
+            fake_bound_refresh,
+        )
+        monkeypatch.setattr(
+            "agents.capabilities.github.service.derive_repo_host_and_slug",
+            lambda _p: ("github.com", "anchore/autonomy"),
+        )
+        monkeypatch.setattr(
+            "agents.capabilities.github.service.github_host_token",
+            lambda _h: "tok",
+        )
+        monkeypatch.setattr(wm_module, "_read_bindings", lambda _row: [object()])
+
+        asyncio.run(monitor.refresh_one("auto-dead", "autonomy"))
+        assert captured["calls"] == [("auto-dead", "autonomy")]
+
+        # Without a token, the dead row is skipped as before.
+        captured["calls"].clear()
+        monkeypatch.setattr(
+            "agents.capabilities.github.service.github_host_token",
+            lambda _h: None,
+        )
+        asyncio.run(monitor.refresh_one("auto-dead", "autonomy"))
+        assert captured["calls"] == []
+
+        # Token but no bindings → also skipped (legacy fallback would
+        # probe the dead container and fail noisily).
+        monkeypatch.setattr(
+            "agents.capabilities.github.service.github_host_token",
+            lambda _h: "tok",
+        )
+        monkeypatch.setattr(wm_module, "_read_bindings", lambda _row: [])
+        asyncio.run(monitor.refresh_one("auto-dead", "autonomy"))
+        assert captured["calls"] == []
 
     def test_refresh_one_bypasses_ttl(self, monkeypatch):
         from tools.dashboard import worktree_monitor as wm_module
