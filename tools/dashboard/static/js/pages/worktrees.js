@@ -503,9 +503,12 @@
             || (a.row.session_name || '').localeCompare(b.row.session_name || ''));
       },
 
-      get prUnfetchedRows() {
-        return this.rows.filter(row =>
-          !row.source_control && this.commitList(row).length > 0);
+      // Snapshot state helper: discovery (auto-jwbgb) writes
+      // state="unavailable" reason="no_host_token" for repos the host
+      // has no GitHub token for; the cards render a quiet note off it.
+      sourceControlUnavailable(row) {
+        const sc = row && row.source_control;
+        return !!(sc && sc.state === 'unavailable');
       },
 
       get selectedOrgIdentity() {

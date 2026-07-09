@@ -39,6 +39,10 @@ class _FakeMonitor:
             return [row for row in self.rows if session_filter(row.session_name)]
         return list(self.rows)
 
+    async def discover_prs(self, rows):
+        self.discover_calls = getattr(self, "discover_calls", [])
+        self.discover_calls.append([r.session_name for r in rows])
+
 
 def _row(
     session="auto-test",
@@ -102,6 +106,7 @@ def _install_fake_monitor(monkeypatch, rows):
     fake = _FakeMonitor(rows)
     monkeypatch.setattr(server.worktree_monitor, "get_all", fake.get_all)
     monkeypatch.setattr(server.worktree_monitor, "refresh", fake.refresh)
+    monkeypatch.setattr(server.worktree_monitor, "discover_prs", fake.discover_prs)
     return server, fake
 
 
@@ -249,6 +254,31 @@ class TestWorktreeAPI:
         assert anchore["worktrees"] == 1
         assert anchore["commits"] == 1
         assert anchore["dirty"] == 0
+
+    def test_post_worktrees_refresh_runs_scoped_discovery(self, test_client, monkeypatch):
+        """The refresh endpoint runs repo-level PR discovery over exactly
+        the org-scoped rows (auto-jwbgb) — after the git sweep, before the
+        payload is built."""
+        from tools.dashboard import server
+
+        rows = [
+            _row(session="auto-a", repo="autonomy"),
+            _row(session="auto-b", repo="enterprise_ng"),
+        ]
+        _server, fake = _install_fake_monitor(monkeypatch, rows)
+        self._org_meta_by_session(monkeypatch, {"auto-a": "autonomy", "auto-b": "anchore"})
+        monkeypatch.setattr(
+            server, "_worktree_org_session_filter",
+            lambda org: (lambda name: {"auto-a": "autonomy", "auto-b": "anchore"}.get(name) == org),
+        )
+
+        resp = test_client.post("/api/worktrees/refresh?org=anchore")
+        assert resp.status_code == 200
+        assert fake.discover_calls == [["auto-b"]]
+
+        resp = test_client.post("/api/worktrees/refresh")
+        assert resp.status_code == 200
+        assert fake.discover_calls[-1] == ["auto-a", "auto-b"]
 
     def test_post_worktrees_refresh_org_param_scopes_sweep(self, test_client, monkeypatch):
         """``POST /api/worktrees/refresh?org=<slug>`` passes a session
@@ -1204,23 +1234,23 @@ class TestWorktreePage:
         assert "suppressErrorToast" in js
         assert "this.refresh(false, { suppressErrorToast: true })" in js
 
-    def test_pr_empty_state_cta_wired(self):
-        """Rows with no visible ``source_control`` block should explain
-        the absence and offer a row-scoped refresh affordance."""
+    def test_pr_state_note_replaces_empty_state_cta(self):
+        """Discovery runs inside the page Refresh (auto-jwbgb), so cards
+        state facts instead of asking for clicks: an authoritative
+        snapshot with zero PRs renders a quiet note; no snapshot renders
+        nothing; the per-card Check-for-PRs CTA is gone everywhere."""
         template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
         js = (JS_DIR / "pages" / "worktrees.js").read_text()
 
-        assert 'data-testid="pr-empty-state-cta"' in template
-        assert '!item.row.source_control' in template
-        # The empty state is a discovery affordance: with no bindings the
-        # per-row refresh falls back to `gh pr list` auto-detect, so the
-        # copy says "check/discover", not "refresh" (nothing exists yet).
-        assert 'GitHub has not been checked for this branch yet.' in template
-        assert 'data-testid="pr-empty-state-refresh-button"' in template
-        assert '@click="refreshRowSourceControl(item.row)"' in template
-        assert ':disabled="isCardRefreshing(item.row)"' in template
-        assert "Check for PRs" in template
+        assert 'data-testid="pr-empty-state-cta"' not in template
+        assert "Check for PRs" not in template
+        assert 'data-testid="pr-state-note"' in template
+        assert 'item.row.source_control && !rowPrs(item.row).length' in template
+        assert "No linked PRs for this branch." in template
+        assert "GitHub is not configured for this repo." in template
+        assert "sourceControlUnavailable(row) {" in js
 
+        # The row-scoped force-refresh path survives (overlay Refresh).
         assert "cardRefreshing: {}" in js
         assert "isCardRefreshing(row) {" in js
         assert "async _refreshRowFromServer(row) {" in js
@@ -2617,6 +2647,127 @@ class TestWorktreeMonitorBackgroundFetchPolicy:
         assert seen["rest"] == 1
         assert seen["fetch"] == 0
         assert monitor.get_source_control(*key) == refreshed
+
+
+class TestWorktreeMonitorDiscovery:
+    """Repo-level PR discovery (auto-jwbgb): one host-mode pr list per
+    repo; local headRefName→branch matching across live AND dead rows;
+    binding auto-seed for unbound matches; authoritative empty snapshots
+    for unmatched rows; token-less repos never clobber good caches."""
+
+    def _monitor(self):
+        from tools.dashboard import worktree_monitor as wm_module
+        return wm_module, wm_module.WorktreeMonitor()
+
+    def _prs_json(self):
+        import json as _json
+        return _json.dumps([
+            {"number": 5008, "headRefName": "session/auto-a", "title": "one",
+             "url": "https://x/5008", "state": "OPEN", "isDraft": False,
+             "commits": [], "statusCheckRollup": [], "baseRefName": "main"},
+            {"number": 5009, "headRefName": "session/auto-a", "title": "two",
+             "url": "https://x/5009", "state": "OPEN", "isDraft": False,
+             "commits": [], "statusCheckRollup": [], "baseRefName": "main"},
+        ])
+
+    def test_discovery_matches_and_seeds_across_liveness(self, monkeypatch):
+        wm_module, monitor = self._monitor()
+        rows = [
+            _row(session="auto-a", repo="enterprise_ng", live=False),   # dead, 2 PRs
+            _row(session="auto-b", repo="enterprise_ng", live=True),    # live, 0 PRs
+        ]
+        monkeypatch.setattr(
+            wm_module, "derive_repo_host_and_slug",
+            lambda _p: ("github.com", "anchore/enterprise_ng"),
+        )
+        listed = {"calls": 0}
+
+        async def fake_list(host, slug, *, timeout=30, limit=100):
+            listed["calls"] += 1
+            assert (host, slug) == ("github.com", "anchore/enterprise_ng")
+            return self._prs_json(), None
+
+        monkeypatch.setattr(wm_module, "source_control_repo_reviews_v1", fake_list)
+        monkeypatch.setattr(wm_module, "_read_bindings", lambda _row: [])
+        seeded = []
+        monkeypatch.setattr(
+            wm_module, "_seed_bindings_from_legacy_reviews",
+            lambda row, stack: seeded.append((row.session_name, len(stack))),
+        )
+
+        asyncio.run(monitor.discover_prs(rows))
+
+        assert listed["calls"] == 1  # ONE call for the whole repo, not per row
+        snap_a = monitor._source_control_cache[("auto-a", "enterprise_ng")]
+        snap_b = monitor._source_control_cache[("auto-b", "enterprise_ng")]
+        assert len(snap_a["reviews"]) == 2       # dead row hydrated
+        assert snap_b["reviews"] == []           # authoritative no-PRs
+        assert snap_b["state"] == "ready"
+        assert seeded == [("auto-a", 2)]
+
+    def test_discovery_respects_existing_bindings(self, monkeypatch):
+        wm_module, monitor = self._monitor()
+        rows = [_row(session="auto-a", repo="enterprise_ng", live=True)]
+        monkeypatch.setattr(
+            wm_module, "derive_repo_host_and_slug",
+            lambda _p: ("github.com", "anchore/enterprise_ng"),
+        )
+
+        async def fake_list(host, slug, *, timeout=30, limit=100):
+            return self._prs_json(), None
+
+        monkeypatch.setattr(wm_module, "source_control_repo_reviews_v1", fake_list)
+        monkeypatch.setattr(wm_module, "_read_bindings", lambda _row: [object()])
+        monkeypatch.setattr(
+            wm_module, "_seed_bindings_from_legacy_reviews",
+            lambda row, stack: (_ for _ in ()).throw(AssertionError("must not seed")),
+        )
+
+        asyncio.run(monitor.discover_prs(rows))
+        snap = monitor._source_control_cache[("auto-a", "enterprise_ng")]
+        assert len(snap["reviews"]) == 2
+
+    def test_discovery_no_token_marks_unavailable_without_clobbering(self, monkeypatch):
+        from tools.dashboard import worktree_monitor as wm_module
+        from agents.capabilities.github.service import FAILURE_NO_HOST_TOKEN
+        monitor = wm_module.WorktreeMonitor()
+        rows = [
+            _row(session="auto-a", repo="autonomy", live=False),
+            _row(session="auto-b", repo="autonomy", live=False),
+        ]
+        monkeypatch.setattr(
+            wm_module, "derive_repo_host_and_slug",
+            lambda _p: ("github-autonomy", "auto-network/autonomy"),
+        )
+
+        async def fake_list(host, slug, *, timeout=30, limit=100):
+            return None, FAILURE_NO_HOST_TOKEN
+
+        monkeypatch.setattr(wm_module, "source_control_repo_reviews_v1", fake_list)
+        # auto-b already has a good snapshot — it must survive.
+        good = {"state": "ready", "reviews": [{"number": 1}], "review": {"number": 1},
+                "implementation": "autonomy/github", "reason": None,
+                "watch": {"mode": "silent"}}
+        monitor._source_control_cache[("auto-b", "autonomy")] = good
+
+        asyncio.run(monitor.discover_prs(rows))
+
+        snap_a = monitor._source_control_cache[("auto-a", "autonomy")]
+        assert snap_a["state"] == "unavailable"
+        assert snap_a["reason"] == FAILURE_NO_HOST_TOKEN
+        assert monitor._source_control_cache[("auto-b", "autonomy")] is good
+
+    def test_discovery_skips_unparseable_remote(self, monkeypatch):
+        wm_module, monitor = self._monitor()
+        rows = [_row(session="auto-a", repo="scratch", live=True)]
+        monkeypatch.setattr(wm_module, "derive_repo_host_and_slug", lambda _p: None)
+
+        async def boom(host, slug, *, timeout=30, limit=100):
+            raise AssertionError("must not list for unparseable remotes")
+
+        monkeypatch.setattr(wm_module, "source_control_repo_reviews_v1", boom)
+        asyncio.run(monitor.discover_prs(rows))
+        assert ("auto-a", "scratch") not in monitor._source_control_cache
 
 
 class TestWorktreeMonitorRefreshOne:
