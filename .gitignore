@@ -76,6 +76,8 @@ data/dispatch.state
 data/dispatch.state.tmp
 data/event_bus.state
 data/event_bus.state.tmp
+data/resource_monitor.state
+data/resource_monitor.state.tmp
 
 # Diag dumps (event_bus snapshots written by /api/diag/eventbus/snapshot)
 data/diag/
