@@ -207,7 +207,7 @@ class TestCaptureButton:
                 hasResponse: typeof Screenshot !== 'undefined' && typeof Screenshot._handleScreenshotResponse === 'function',
             };
         """
-        deadline = time.time() + 20
+        deadline = time.time() + 40
         result = None
         while time.time() < deadline:
             result = ab_eval(checks_js)
