@@ -2819,6 +2819,34 @@ class TestWorktreeMonitorDiscovery:
         assert "statusCheckRollup" not in json_arg
         assert "headRefName" in json_arg and "headRefOid" in json_arg
 
+    def test_dead_row_snapshots_survive_background_ticks(self, monkeypatch):
+        """Regression (round-5 live verification): discovery hydrated 36
+        rows, then the 30s background tick rebuilt the snapshot cache
+        from LIVE rows only and silently evicted every dead row's
+        snapshot. Dead rows keep their snapshots as long as the worktree
+        exists; vanished worktrees are still GC'd."""
+        from tools.dashboard import worktree_monitor as wm_module
+
+        monitor = wm_module.WorktreeMonitor()
+        dead = _row(session="auto-dead", repo="enterprise_ng", live=False)
+        gone_key = ("auto-gone", "enterprise_ng")
+        snap = {"state": "ready", "reviews": [{"number": 578}],
+                "review": {"number": 578}, "implementation": "autonomy/github",
+                "reason": None, "watch": {"mode": "silent"}}
+        monitor._source_control_cache[("auto-dead", "enterprise_ng")] = snap
+        monitor._source_control_cache[gone_key] = dict(snap)
+
+        # Tick with NO live rows: dead row retained, vanished key GC'd.
+        asyncio.run(monitor._refresh_source_control([dead]))
+        assert monitor._source_control_cache[("auto-dead", "enterprise_ng")] is snap
+        assert gone_key not in monitor._source_control_cache
+
+        # Tick with a live sibling: dead row still retained.
+        live = _row(session="auto-live", repo="enterprise_ng", live=True)
+        monkeypatch.setattr(wm_module, "_read_bindings_batch", lambda rows: {})
+        asyncio.run(monitor._refresh_source_control([dead, live]))
+        assert monitor._source_control_cache[("auto-dead", "enterprise_ng")] is snap
+
     def test_discovery_failure_surfaces_degraded_without_clobbering(self, monkeypatch):
         """A failed pr list (e.g. host gh too old for a JSON field) marks
         cache-less rows state=degraded with the failure code — never

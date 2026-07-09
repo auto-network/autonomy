@@ -1661,9 +1661,25 @@ class WorktreeMonitor:
         explicitly rather than a missing block.
         """
         live_rows = [r for r in rows if r.session_live]
+        # Dead rows' snapshots are first-class since discovery/host-mode
+        # (auto-rn1dp/jwbgb): carry them forward as long as the worktree
+        # still exists — the background tick must never evict what an
+        # operator refresh hydrated. Keys whose worktree vanished are
+        # dropped (the GC property this rebuild always had).
+        dead_carried = {}
+        for row in rows:
+            if row.session_live:
+                continue
+            key = (row.session_name, row.repo_name)
+            cached = self._source_control_cache.get(key)
+            if cached is not None:
+                dead_carried[key] = cached
         if not live_rows:
-            self._source_control_cache = {}
-            self._source_control_fetched_at = {}
+            self._source_control_cache = dead_carried
+            self._source_control_fetched_at = {
+                k: v for k, v in self._source_control_fetched_at.items()
+                if k in dead_carried
+            }
             return
 
         now = time.monotonic()
@@ -1763,9 +1779,10 @@ class WorktreeMonitor:
                 return_exceptions=True,
             )
 
-        new_cache: dict[tuple[str, str], dict] = dict(carried)
+        new_cache: dict[tuple[str, str], dict] = {**dead_carried, **carried}
         new_fetched_at: dict[tuple[str, str], float] = {
-            k: v for k, v in self._source_control_fetched_at.items() if k in carried
+            k: v for k, v in self._source_control_fetched_at.items()
+            if k in carried or k in dead_carried
         }
         rate_limit_seen = False
         terminal_fire_targets: list[tuple[tuple[str, str], dict]] = []
