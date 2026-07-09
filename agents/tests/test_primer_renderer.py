@@ -15,6 +15,7 @@ import pytest
 from agents.primer_renderer import render_workspace_primer
 from agents.workspace_settings import (
     CAPABILITIES_MOUNT_DIR,
+    CapabilityToolTarget,
     MaterializedCapability,
     RepoMount,
     WorkspaceV1,
@@ -465,6 +466,62 @@ def test_capability_with_missing_primer_file_still_renders_heading(tmp_path, mon
     out = render_workspace_primer(_cfg(capabilities=(cap,)))
     assert "### autonomy/github — source_control@1" in out
     assert f"{CAPABILITIES_MOUNT_DIR}/autonomy-github" in out
+
+
+# ── Workspace named queries in the capability block ─────────
+
+
+_NAMED_QUERY_OVERRIDES = {
+    "query_defaults": {"project": "ENTERPRISE"},
+    "named_queries": [
+        {"name": "mine", "summary": "Open tickets assigned to me",
+         "query": "project = {project} AND assignee = currentUser()"},
+        {"name": "release", "summary": "Tickets targeted at a release",
+         "query": 'project = {project} AND fixVersion = "Enterprise {version}"'},
+    ],
+}
+
+
+def _jira_cap_with_queries(*, expose=("jira-read", "jira-search", "jira-query")):
+    cap = _jira_cap()
+    return MaterializedCapability(
+        **{**cap.__dict__,
+           "tool_target": CapabilityToolTarget(
+               source="agents/capabilities/jira/tools",
+               target="/opt/jira-tools",
+               expose_commands=expose),
+           "workspace_overrides": _NAMED_QUERY_OVERRIDES})
+
+
+def test_workspace_named_queries_render_in_capability_block():
+    """The projection half of named queries: the workspace teaches the
+    capability and the agent's context in one place — the enable Setting's
+    workspace_overrides render as invocation lines in the primer."""
+    out = render_workspace_primer(_cfg(
+        id="enterprise-ng", capabilities=(_jira_cap_with_queries(),),
+    ))
+    assert "Workspace queries (enterprise-ng)" in out
+    assert "jira-query mine" in out
+    # Caller params derived from placeholders minus query_defaults.
+    assert "jira-query release version=<value>" in out
+    assert "# Open tickets assigned to me" in out
+    assert "`jira-query --list`" in out
+
+
+def test_named_queries_not_rendered_without_query_command():
+    """An impl that predates named queries (no *-query command exposed)
+    must not advertise an invocation that would fail."""
+    out = render_workspace_primer(_cfg(
+        id="enterprise-ng",
+        capabilities=(_jira_cap_with_queries(expose=("jira-read",)),),
+    ))
+    assert "Workspace queries" not in out
+    assert "jira-query mine" not in out
+
+
+def test_no_named_queries_no_section():
+    out = render_workspace_primer(_cfg(capabilities=(_jira_cap(),)))
+    assert "Workspace queries" not in out
 
 
 # ── Turn-correction guidance (auto-edec1.5) ─────────────────

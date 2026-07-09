@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Usage: jira-query NAME [param=value …] [--max N] [--page TOKEN]
+#        jira-query --list
+#   Run one of this workspace's named queries (taught as data on the
+#   workspace's capability-enable Setting; `--list` shows what exists
+#   here). Read-only; resolution and the search run host-side — the
+#   dashboard maps this session to its workspace itself.
+#   e.g. jira-query mine
+#        jira-query release version=6.1.0
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/_jira_lib.sh"
+
+[ -n "$SESSION" ] || jira_fail "jira-query: AUTONOMY_SESSION is not set"
+
+if [ "${1:-}" = "--list" ]; then
+  curl -sk "$DASH/api/jira/query?org=$ORG&session=$SESSION" \
+    | python3 -c 'import sys, json
+d = json.load(sys.stdin)
+if "error" in d: sys.exit("jira: " + str(d["error"]))
+workspace = d.get("workspace", "?")
+rows = d.get("queries") or []
+if not rows:
+    print("No named queries defined for workspace " + workspace + ".")
+    sys.exit(0)
+invocations = []
+for q in rows:
+    inv = "jira-query " + q["name"] + "".join(" " + p + "=<value>" for p in q.get("params") or [])
+    invocations.append((inv, q.get("summary") or ""))
+width = max(len(i) for i, _ in invocations)
+print("Named queries for workspace " + workspace + ":")
+for inv, summary in invocations:
+    print("  " + inv.ljust(width) + ("   # " + summary if summary else ""))'
+  exit $?
+fi
+
+NAME="${1:-}"
+[ -n "$NAME" ] && [ "${NAME#-}" = "$NAME" ] \
+  || jira_fail 'usage: jira-query NAME [param=value …] [--max N] [--page TOKEN]  (or: jira-query --list)'
+shift
+
+MAX=50 ; PAGE="" ; PARAMS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --max)  MAX="${2:-}"; shift 2 ;;
+    --page) PAGE="${2:-}"; shift 2 ;;
+    *=*)    PARAMS+=("$1"); shift ;;
+    *)      jira_fail "jira-query: expected param=value, got: $1" ;;
+  esac
+done
+
+url="$(python3 -c 'import sys, urllib.parse
+dash, org, session, name, maxr, page = sys.argv[1:7]
+pairs = [("org", org), ("session", session), ("max_results", maxr)]
+if page: pairs.append(("page_token", page))
+for kv in sys.argv[7:]:
+    k, sep, v = kv.partition("=")
+    if not k or not sep: sys.exit(f"jira-query: bad param (expected key=value): {kv}")
+    pairs.append((k, v))
+print(f"{dash}/api/jira/query/{urllib.parse.quote(name)}?{urllib.parse.urlencode(pairs)}")' \
+  "$DASH" "$ORG" "$SESSION" "$NAME" "$MAX" "$PAGE" ${PARAMS[@]+"${PARAMS[@]}"})" || exit 1
+
+curl -sk "$url" | python3 -c 'import sys, json
+d = json.load(sys.stdin)
+if "error" in d: sys.exit("jira: " + str(d["error"]))
+print(json.dumps(d, indent=2))'

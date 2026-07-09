@@ -115,6 +115,55 @@ def read_ticket(cfg: JiraConfig, key: str) -> dict[str, Any]:
         return adf.process_ticket(resp.json())
 
 
+# Terse row fields for search results. The two customfield ids mirror
+# process_ticket's sprint/story-points mapping for this instance.
+_SEARCH_FIELDS = [
+    "summary", "status", "assignee", "priority", "fixVersions", "updated",
+    "customfield_10020",   # sprint
+    "customfield_10016",   # story points
+]
+
+
+def search_issues(cfg: JiraConfig, jql: str, max_results: int = 50,
+                  page_token: str | None = None) -> dict[str, Any]:
+    """Run a JQL search and return terse cleaned rows.
+
+    Uses ``POST /rest/api/3/search/jql`` — the current search endpoint
+    (the legacy ``/rest/api/3/search`` startAt-pagination API was removed
+    by Atlassian in 2025). Pagination is by opaque ``nextPageToken``:
+    ``next_page_token`` in the result is ``None`` on the last page,
+    otherwise pass it back in as *page_token* for the next page.
+    """
+    payload: dict[str, Any] = {
+        "jql": jql,
+        "maxResults": max(1, min(int(max_results), 100)),
+        "fields": _SEARCH_FIELDS,
+    }
+    if page_token:
+        payload["nextPageToken"] = page_token
+    with _client(cfg) as c:
+        resp = c.post("/rest/api/3/search/jql", json=payload)
+        _check(resp, "search")
+        body = resp.json()
+    items: list[dict[str, Any]] = []
+    for issue in body.get("issues") or []:
+        f = issue.get("fields") or {}
+        sprint_data = f.get("customfield_10020")
+        items.append({
+            "key": issue.get("key"),
+            "summary": f.get("summary"),
+            "status": (f.get("status") or {}).get("name"),
+            "priority": (f.get("priority") or {}).get("name"),
+            "assignee": (f.get("assignee") or {}).get("displayName", "Unassigned"),
+            "fix_versions": [v.get("name") for v in (f.get("fixVersions") or [])],
+            "sprint": [s.get("name") for s in sprint_data
+                       if isinstance(s, dict)] if isinstance(sprint_data, list) else [],
+            "story_points": f.get("customfield_10016"),
+            "updated": f.get("updated"),
+        })
+    return {"items": items, "next_page_token": body.get("nextPageToken")}
+
+
 def createmeta(cfg: JiraConfig, project: str, issuetype: str,
                version_prefix: str | None = None) -> dict[str, Any]:
     """Create-metadata for a project/issuetype: components, versions,

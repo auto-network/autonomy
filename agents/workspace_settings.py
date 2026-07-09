@@ -288,6 +288,10 @@ class MaterializedCapability:
     skill_path: str | None = None
     env_bindings: dict[str, str] = field(default_factory=dict)
     secret_file_bindings: dict[str, str] = field(default_factory=dict)
+    # ``workspace_overrides`` from the enable Setting — workspace-local
+    # data the projections layer on top of the org install (e.g. the
+    # issue_tracker named queries the primer renders).
+    workspace_overrides: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -584,6 +588,11 @@ def _materialize_capability(
             str(k): str(v)
             for k, v in (install_payload.get("secret_file_bindings") or {}).items()
         },
+        workspace_overrides=(
+            enable_payload.get("workspace_overrides")
+            if isinstance(enable_payload.get("workspace_overrides"), dict)
+            else {}
+        ),
     )
 
 

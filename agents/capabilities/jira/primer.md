@@ -6,6 +6,9 @@ dashboard; your command blocks until they approve or decline, then prints the
 outcome or the decline).
 
 - `jira-read KEY` — cleaned ticket JSON (description/comments as markdown)
+- `jira-query --list` / `jira-query NAME [k=v …]` — this workspace's named
+  queries (standardized triage/sprint views, taught per-workspace as data)
+- `jira-search 'JQL'` — raw JQL search; terse rows, `--page TOKEN` to paginate
 - `jira-createmeta [PROJECT [ISSUETYPE]]` — valid components/versions/priorities/severity for creation
 - `jira-attachment ID [-o FILE]` — download an attachment (ids in `jira-read`)
 - `jira-comment KEY -f body.md` — post a comment *(operator approval)*

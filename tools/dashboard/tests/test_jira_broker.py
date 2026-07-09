@@ -9,7 +9,7 @@ import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
-from agents.capabilities.jira.backend import adf, api
+from agents.capabilities.jira.backend import adf, api, queries
 from tools.dashboard import approvals_routes, jira_routes
 from tools.dashboard.dao import approval_requests as ar
 
@@ -251,6 +251,110 @@ def test_add_attachment_multipart_with_xsrf_header(jira_env, monkeypatch):
     assert out == {"id": "777", "filename": "repro.log", "size": 9}
 
 
+# ── JQL search ──
+
+
+def test_search_issues_posts_jql_and_shapes_rows(jira_env, monkeypatch):
+    """Search uses the current POST /rest/api/3/search/jql endpoint (the
+    legacy startAt-pagination /search API is gone) and returns terse
+    cleaned rows shaped like the list-item pattern."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "issues": [{"key": "ENT-1", "fields": {
+                "summary": "s", "status": {"name": "Pending RC"},
+                "priority": {"name": "P2"}, "assignee": None,
+                "fixVersions": [{"name": "Enterprise 6.1.0"}],
+                "customfield_10020": [{"name": "Sprint 42"}],
+                "customfield_10016": 3, "updated": "2026-07-01"}}],
+            "nextPageToken": "tok123"})
+
+    _mock(monkeypatch, handler)
+    out = api.search_issues(api.JiraConfig.resolve(), "project = ENT",
+                            max_results=25)
+    assert (seen["method"], seen["path"]) == ("POST", "/rest/api/3/search/jql")
+    assert seen["body"]["jql"] == "project = ENT"
+    assert seen["body"]["maxResults"] == 25
+    assert "summary" in seen["body"]["fields"]   # terse fields requested
+    assert out["items"] == [{
+        "key": "ENT-1", "summary": "s", "status": "Pending RC",
+        "priority": "P2", "assignee": "Unassigned",
+        "fix_versions": ["Enterprise 6.1.0"], "sprint": ["Sprint 42"],
+        "story_points": 3, "updated": "2026-07-01"}]
+    assert out["next_page_token"] == "tok123"
+
+
+def test_search_issues_paginates_by_token(jira_env, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["nextPageToken"] == "tok123"
+        return httpx.Response(200, json={"issues": []})
+
+    _mock(monkeypatch, handler)
+    out = api.search_issues(api.JiraConfig.resolve(), "x", page_token="tok123")
+    assert out == {"items": [], "next_page_token": None}   # last page
+
+
+# ── named queries (pure resolution over workspace_overrides) ──
+
+
+QUERY_OVERRIDES = {
+    "query_defaults": {"project": "ENTERPRISE"},
+    "named_queries": [
+        {"name": "mine", "summary": "Open tickets assigned to me",
+         "query": "project = {project} AND assignee = currentUser() "
+                  "AND statusCategory != Done"},
+        {"name": "release", "summary": "Tickets targeted at a release",
+         "query": 'project = {project} AND fixVersion = "Enterprise {version}"'},
+    ],
+}
+
+
+def test_list_queries_derives_caller_params_from_placeholders():
+    """No separate params field to drift: caller params = placeholders in
+    the query text minus query_defaults keys."""
+    rows = queries.list_queries(QUERY_OVERRIDES)
+    assert [(r["name"], r["params"]) for r in rows] == [
+        ("mine", []), ("release", ["version"])]
+
+
+def test_resolve_query_substitutes_defaults_and_params():
+    jql = queries.resolve_query(QUERY_OVERRIDES, "release", {"version": "6.1.0"})
+    assert jql == 'project = ENTERPRISE AND fixVersion = "Enterprise 6.1.0"'
+
+
+def test_resolve_query_params_win_over_defaults():
+    jql = queries.resolve_query(QUERY_OVERRIDES, "mine", {"project": "OTHER"})
+    assert jql.startswith("project = OTHER AND ")
+
+
+def test_resolve_query_errors_are_actionable():
+    with pytest.raises(queries.QueryError, match="unknown named query"):
+        queries.resolve_query(QUERY_OVERRIDES, "nope", {})
+    with pytest.raises(queries.QueryError, match="requires: version"):
+        queries.resolve_query(QUERY_OVERRIDES, "release", {})
+    with pytest.raises(queries.QueryError, match="takes no param"):
+        queries.resolve_query(QUERY_OVERRIDES, "mine", {"version": "1"})
+
+
+def test_resolve_query_rejects_clause_smuggling():
+    """A param value can't terminate the string literal it lands in —
+    quotes and operators are outside the value allowlist."""
+    with pytest.raises(queries.QueryError, match="invalid value"):
+        queries.resolve_query(QUERY_OVERRIDES, "release",
+                              {"version": '6.1.0" OR project = SECRET'})
+
+
+def test_queries_with_no_overrides():
+    assert queries.list_queries(None) == []
+    assert queries.list_queries({}) == []
+    with pytest.raises(queries.QueryError, match="none defined"):
+        queries.resolve_query({}, "mine", {})
+
+
 # ── routes + the jira_write executor on the approval rendezvous ──
 
 
@@ -271,6 +375,88 @@ def test_read_route(jira_env, monkeypatch):
     client = TestClient(_app())
     t = client.get("/api/jira/issue/ENT-1").json()
     assert t["key"] == "ENT-1" and t["description"] == "d"
+
+
+def test_search_route_runs_jql_read_only(jira_env, monkeypatch):
+    """POST /api/jira/search is a read route like /api/jira/issue — no
+    approval rendezvous, the search runs host-side immediately."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["jql"] == 'status = "Pending RC"'
+        return httpx.Response(200, json={"issues": [
+            {"key": "ENT-1", "fields": {"summary": "s"}}]})
+
+    _mock(monkeypatch, handler)
+    client = TestClient(_app())
+    out = client.post("/api/jira/search",
+                      json={"jql": 'status = "Pending RC"'}).json()
+    assert out["items"][0]["key"] == "ENT-1"
+    assert out["next_page_token"] is None
+
+
+def test_search_route_requires_jql(jira_env):
+    client = TestClient(_app())
+    assert client.post("/api/jira/search", json={}).status_code == 400
+    assert client.post("/api/jira/search",
+                       content=b"not json").status_code == 400
+
+
+def _stub_workspace(monkeypatch, overrides=QUERY_OVERRIDES):
+    """Pin session→workspace resolution: any session maps to enterprise-ng
+    with the given issue_tracker workspace_overrides."""
+    monkeypatch.setattr(jira_routes, "_workspace_overrides",
+                        lambda session: ("enterprise-ng", overrides))
+
+
+def test_named_query_list_route(jira_env, monkeypatch):
+    _stub_workspace(monkeypatch)
+    client = TestClient(_app())
+    out = client.get("/api/jira/query?session=auto-1").json()
+    assert out["workspace"] == "enterprise-ng"
+    assert [(q["name"], q["params"]) for q in out["queries"]] == [
+        ("mine", []), ("release", ["version"])]
+
+
+def test_named_query_run_route_resolves_and_searches(jira_env, monkeypatch):
+    _stub_workspace(monkeypatch)
+    ran = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        ran["jql"] = json.loads(request.content)["jql"]
+        return httpx.Response(200, json={"issues": [
+            {"key": "ENT-2", "fields": {"summary": "s"}}]})
+
+    _mock(monkeypatch, handler)
+    client = TestClient(_app())
+    out = client.get(
+        "/api/jira/query/release?session=auto-1&version=6.1.0").json()
+    assert ran["jql"] == 'project = ENTERPRISE AND fixVersion = "Enterprise 6.1.0"'
+    assert out["workspace"] == "enterprise-ng"
+    assert out["query"] == "release"
+    assert out["jql"] == ran["jql"]   # substituted JQL echoed for transparency
+    assert out["items"][0]["key"] == "ENT-2"
+
+
+def test_named_query_route_errors(jira_env, monkeypatch):
+    _stub_workspace(monkeypatch)
+    client = TestClient(_app())
+    # Unknown query name / bad params → 400 with the QueryError message.
+    r = client.get("/api/jira/query/nope?session=auto-1")
+    assert r.status_code == 400 and "unknown named query" in r.json()["error"]
+    r = client.get("/api/jira/query/release?session=auto-1")
+    assert r.status_code == 400 and "requires: version" in r.json()["error"]
+    # Session is mandatory — resolution is host-side, never caller-asserted.
+    assert client.get("/api/jira/query").status_code == 400
+    assert client.get("/api/jira/query/mine").status_code == 400
+
+
+def test_named_query_unresolvable_session_is_404(jira_env, monkeypatch):
+    def boom(session):
+        raise LookupError(f"session {session!r} does not map to a workspace")
+
+    monkeypatch.setattr(jira_routes, "_workspace_overrides", boom)
+    client = TestClient(_app())
+    r = client.get("/api/jira/query?session=ghost")
+    assert r.status_code == 404 and "does not map" in r.json()["error"]
 
 
 def test_jira_write_full_flow_comment(jira_env, monkeypatch):

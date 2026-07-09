@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Usage: jira-search "JQL" [--max N] [--page TOKEN]
+#   Raw JQL search — terse rows (key, summary, status, assignee,
+#   fix_versions, sprint, story_points, updated). Read-only; the search
+#   runs host-side in the dashboard. Prefer `jira-query` for the
+#   workspace's standardized views; this is the escape hatch.
+#   e.g. jira-search 'project = ENTERPRISE AND status = "Pending RC"'
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/_jira_lib.sh"
+
+JQL="" ; MAX=50 ; PAGE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --max)  MAX="${2:-}"; shift 2 ;;
+    --page) PAGE="${2:-}"; shift 2 ;;
+    *) [ -z "$JQL" ] && JQL="$1" || jira_fail "jira-search: unexpected argument: $1"; shift ;;
+  esac
+done
+[ -n "$JQL" ] || jira_fail 'usage: jira-search "JQL" [--max N] [--page TOKEN]'
+
+body="$(JQL="$JQL" MAX="$MAX" PAGE="$PAGE" python3 -c 'import json, os
+b = {"jql": os.environ["JQL"], "max_results": int(os.environ["MAX"] or 50)}
+if os.environ.get("PAGE"): b["page_token"] = os.environ["PAGE"]
+print(json.dumps(b))')" || exit 1
+
+curl -sk -X POST "$DASH/api/jira/search?org=$ORG" \
+     -H 'Content-Type: application/json' --data-binary "$body" \
+  | python3 -c 'import sys, json
+d = json.load(sys.stdin)
+if "error" in d: sys.exit("jira: " + str(d["error"]))
+print(json.dumps(d, indent=2))'
