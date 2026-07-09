@@ -434,9 +434,12 @@ def test_sync_snippet_assignment_and_curl_on_separate_lines():
         repos=(RepoMount(url="u", mount="/workspace/foo", writable=True),),
         network_host=True,
     ))
-    # Valid shell — DASHBOARD value followed by a real newline before curl.
-    assert "DASHBOARD=https://localhost:8080\ncurl " in out
+    # Valid shell — DASHBOARD value followed by a real newline before the
+    # next command (the template now interposes a REPO_NAME=$(curl ...)
+    # lookup between the assignment and the sync-base curl).
+    assert "DASHBOARD=https://localhost:8080\nREPO_NAME=$(curl " in out
     # Sanity: the broken concatenation must not appear.
+    assert "https://localhost:8080REPO_NAME" not in out
     assert "https://localhost:8080curl" not in out
 
 
@@ -447,7 +450,8 @@ def test_sync_snippet_renders_for_bridge_network():
         repos=(RepoMount(url="u", mount="/workspace/foo", writable=True),),
         network_host=False,
     ))
-    assert "DASHBOARD=https://host.docker.internal:8080\ncurl " in out
+    assert "DASHBOARD=https://host.docker.internal:8080\nREPO_NAME=$(curl " in out
+    assert "host.docker.internal:8080REPO_NAME" not in out
     assert "host.docker.internal:8080curl" not in out
 
 

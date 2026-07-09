@@ -304,11 +304,14 @@ class TestLaunchSessionMetaAndEnv:
 
     @pytest.fixture
     def captured_run(self, monkeypatch):
+        # Docker commands only — the launch path also shells out to helpers
+        # (git rev-parse for Codex trust rooting) that would shift indices.
         calls: list[list[str]] = []
         completed = _completed_process(stdout="fake-container-id\n")
 
         def fake_run(cmd, **kwargs):
-            calls.append(cmd)
+            if cmd and cmd[0] == "docker":
+                calls.append(cmd)
             return completed
 
         monkeypatch.setattr(session_launcher.subprocess, "run", fake_run)
