@@ -127,11 +127,24 @@ class ViewerTestHarness:
                 self.proc.kill()
 
     def open_session_page(self, project, session_id):
-        """Navigate to the session detail page."""
+        """Navigate to the session detail page.
+
+        Polls until the viewer's Alpine store row for *session_id* exists
+        (cold Chromium boots under parallel load routinely outlast a fixed
+        3s, and every caller's first read is that store row).
+        """
         ab_raw("close")
         ab_raw("open", f"http://localhost:{TEST_PORT}/session/{project}/{session_id}",
                "--ignore-https-errors")
-        time.sleep(3)
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            ready = ab_eval(
+                "return !!(window.Alpine && Alpine.store('sessions')"
+                f" && Alpine.store('sessions')['{session_id}']);"
+            )
+            if ready is True:
+                break
+            time.sleep(0.5)
 
     def open_experiment(self):
         """Navigate to the experiment page."""
