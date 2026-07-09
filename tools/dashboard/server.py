@@ -9041,11 +9041,10 @@ async def api_worktrees_refresh(request):
     org = _org_filter_param(request)
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse(_filter_worktree_payload_by_org(dao_sessions.get_worktrees(), org))
-    # Top-level Refresh on the Worktrees page is local-git only — re-run
-    # ``scan_all_worktrees`` and serve cached source_control snapshots.
-    # Fanning out gh fetches for every live row was the rate-limit
-    # anti-pattern we just removed from the background poll; it doesn't
-    # belong on the operator path either. Per-row force-fetch is on
+    # Top-level Refresh = scoped git sweep + repo-LEVEL PR discovery.
+    # Discovery is one ``gh pr list`` per repo (host mode), NOT the
+    # per-row fan-out that caused the historical rate-limit trouble —
+    # that anti-pattern stays dead. Per-row force-fetch remains on
     # ``POST /api/worktrees/{session}/{repo}/refresh`` (see below).
     #
     # With ``?org=`` the git sweep itself is scoped: only that org's
@@ -9053,11 +9052,17 @@ async def api_worktrees_refresh(request):
     # so a Refresh click shouldn't pay for every other org's git calls);
     # the other orgs' rows stay cached.
     if org:
-        rows = await worktree_monitor.refresh(
-            session_filter=_worktree_org_session_filter(org),
-        )
+        session_filter = _worktree_org_session_filter(org)
+        rows = await worktree_monitor.refresh(session_filter=session_filter)
+        scoped_rows = [r for r in rows if session_filter(r.session_name)]
     else:
         rows = await worktree_monitor.refresh()
+        scoped_rows = rows
+    # Repo-level PR discovery (auto-jwbgb): one host-mode ``gh pr list``
+    # per GitHub-backed repo in scope, hydrating every row — dead
+    # sessions included — before the payload is built. Operator-initiated
+    # only; the background tick never discovers.
+    await worktree_monitor.discover_prs(scoped_rows)
     payload = [
         _worktree_state_json(row)
         for row in rows

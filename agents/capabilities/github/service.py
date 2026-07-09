@@ -71,6 +71,9 @@ FAILURE_EXEC_FAILED = "exec_failed"
 # response to ``If-None-Match: <etag>``. The cached row is still fresh;
 # the resolver should keep it and only touch ``updated_at``.
 FAILURE_NOT_MODIFIED = "not_modified"
+# Host-mode discovery asked for a git host with no configured token file
+# (``broker_config`` ``token_file.<host>`` entry absent/unreadable).
+FAILURE_NO_HOST_TOKEN = "no_host_token"
 
 # Fields requested from ``gh pr list --head <branch>`` for review
 # read/refresh. ``commits`` is the per-PR commit list; ``baseRefName``
@@ -1138,6 +1141,56 @@ async def source_control_gates_watch_set_v1(
         timeout=timeout,
         mode=mode,
     )
+
+
+# ── Repo-wide discovery (host mode only) ──────────────────────────────
+
+
+OP_REPO_REVIEWS = "source_control_repo_reviews_v1"
+
+
+async def source_control_repo_reviews_v1(
+    host: str,
+    repo_slug: str,
+    *,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    limit: int = 100,
+) -> tuple[str | None, str | None]:
+    """List ALL open PRs for ``repo_slug`` in one host-mode gh call.
+
+    Powers refresh-time discovery (auto-jwbgb, design f7c4c109-91a
+    §Phase 1b): one ``gh pr list --repo <slug>`` per repo per
+    operator-initiated refresh; the caller matches ``headRefName``
+    against worktree branches locally — including dead sessions'
+    worktrees, which the docker-exec path could never serve.
+
+    Host mode only by design: without a token file for ``host`` this
+    returns ``(None, FAILURE_NO_HOST_TOKEN)`` and the caller skips the
+    repo. Returns ``(stdout, None)`` on success, ``(None, failure)``
+    otherwise.
+    """
+    token = github_host_token(host)
+    if token is None:
+        return None, FAILURE_NO_HOST_TOKEN
+    cmd = [
+        "gh", "pr", "list",
+        "--repo", repo_slug,
+        "--state", "open",
+        "--limit", str(limit),
+        "--json", PR_LIST_FIELDS,
+    ]
+    stdout, stderr, exit_code, timed_out = await run_cli(
+        cmd, timeout=timeout,
+        env={**os.environ, "GH_TOKEN": token, "GH_PROMPT_DISABLED": "1"},
+    )
+    failure = classify_failure(stdout, stderr, exit_code, timed_out)
+    if failure is not None:
+        logger.warning(
+            "github discovery: pr list failed for %s (%s): %s",
+            repo_slug, failure, (stderr or stdout or "").strip()[:200],
+        )
+        return None, failure
+    return stdout, None
 
 
 # ── REST-by-id operations (operator-declared review binding) ─────────

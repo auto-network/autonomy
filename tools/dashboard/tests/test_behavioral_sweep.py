@@ -3175,6 +3175,7 @@ WORKTREES_PAGE_CHECKS = """(async () => {
     var betaCard = cardBySession('auto-sweep-beta');
     var deltaCard = cardBySession('auto-sweep-delta');
     r.alpha_has_empty_state = !!(alphaCard && alphaCard.querySelector('[data-testid="pr-empty-state-cta"]'));
+    r.alpha_cta_count = document.querySelectorAll('[data-testid="pr-empty-state-cta"]').length;
     r.alpha_pr_badge_count = alphaCard ? alphaCard.querySelectorAll('[data-testid="pr-badge"]').length : -1;
     r.beta_pr_badges = badgeTexts(betaCard, 'pr-badge');
     r.beta_has_empty_state = !!(betaCard && betaCard.querySelector('[data-testid="pr-empty-state-cta"]'));
@@ -5096,7 +5097,10 @@ class TestWorktreesPageBehavior:
     def test_binding_driven_rows_render_without_losing_unbound_state(self):
         """Unbound rows keep the CTA while bound rows compose PR badges from Settings fixtures."""
         c = self._checks
-        assert c.get("alpha_has_empty_state"), "Unbound alpha row lost its PR empty-state CTA"
+        # auto-jwbgb: the per-card CTA is deleted — discovery lives in
+        # the page Refresh. No card anywhere may render it.
+        assert not c.get("alpha_has_empty_state"), "Per-card PR CTA should be gone"
+        assert c.get("alpha_cta_count") == 0, "Per-card PR CTA should be gone everywhere"
         assert c.get("alpha_pr_badge_count") == 0, (
             f"Unbound alpha row unexpectedly rendered PR badges: {c.get('alpha_pr_badge_count')}"
         )

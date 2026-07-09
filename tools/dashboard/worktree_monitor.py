@@ -14,6 +14,7 @@ even when its capability lookup fails.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections import deque
@@ -21,15 +22,18 @@ from collections.abc import Awaitable, Callable
 
 from agents.capabilities.github import probe as github_probe
 from agents.capabilities.github.service import (
+    FAILURE_NO_HOST_TOKEN,
     FAILURE_NOT_MODIFIED,
     FAILURE_RATE_LIMITED,
     WorktreeGithubExecResult,
+    derive_repo_host_and_slug,
     derive_repo_slug,
     normalize_review_stack,
     normalize_review_payload,
     parse_check_runs_response,
     parse_pull_response,
     source_control_check_runs_read_for_sha_v1,
+    source_control_repo_reviews_v1,
     source_control_review_read_by_id_v1,
     source_control_review_read_v1,
 )
@@ -1258,6 +1262,105 @@ class WorktreeMonitor:
             if target is not None:
                 await self._refresh_one_source_control(target, rows)
             return list(self._cache)
+
+    async def discover_prs(self, rows: list[WorktreeState]) -> None:
+        """Repo-level PR discovery for the operator-initiated Refresh.
+
+        One host-mode ``gh pr list --repo <slug>`` per GitHub-backed repo
+        among ``rows`` (auto-jwbgb, design f7c4c109-91a §Phase 1b), then
+        LOCAL matching of ``headRefName`` against every row's branch —
+        dead sessions included. Matched rows without bindings get them
+        auto-seeded (same mechanism as the legacy per-row path); matched
+        and unmatched rows alike get an authoritative snapshot, so "no
+        PRs for this branch" becomes a stated fact instead of an unknown.
+        Repos without a parseable GitHub remote or without a host token
+        are skipped — token-less repos surface state=unavailable on rows
+        that have no cached snapshot yet, never clobbering a good cache.
+
+        MUST only run on operator-initiated refreshes (rate-limit
+        discipline) — the background tick never calls this.
+        """
+        now = time.monotonic()
+        if now < self._capability_backoff_until:
+            return
+
+        groups: dict[str, list[WorktreeState]] = {}
+        for row in rows:
+            groups.setdefault(row.repo_name, []).append(row)
+
+        for repo_name, group in groups.items():
+            host_and_slug = derive_repo_host_and_slug(group[0].managed_clone)
+            if host_and_slug is None:
+                continue
+            host, slug = host_and_slug
+            stdout, failure = await source_control_repo_reviews_v1(
+                host, slug, timeout=int(_GITHUB_REVIEW_TIMEOUT),
+            )
+
+            if failure == FAILURE_NO_HOST_TOKEN:
+                for row in group:
+                    key = (row.session_name, row.repo_name)
+                    if key not in self._source_control_cache:
+                        self._source_control_cache[key] = _degraded_snapshot(
+                            state="unavailable",
+                            reason=FAILURE_NO_HOST_TOKEN,
+                            watch_mode=self.get_nag_mode(*key),
+                        )
+                continue
+            if failure is not None:
+                if failure == FAILURE_RATE_LIMITED:
+                    self._capability_backoff_until = (
+                        time.monotonic() + RATE_LIMIT_BACKOFF_SECONDS
+                    )
+                    return
+                continue  # logged by the service; leave caches untouched
+
+            try:
+                prs = json.loads(stdout or "[]")
+            except ValueError:
+                logger.warning(
+                    "worktree_monitor: discovery got unparseable pr list for %s",
+                    slug,
+                )
+                continue
+            if not isinstance(prs, list):
+                continue
+
+            for row in group:
+                key = (row.session_name, row.repo_name)
+                mine = [
+                    p for p in prs
+                    if isinstance(p, dict) and p.get("headRefName") == row.branch
+                ]
+                if mine:
+                    local_shas = tuple(
+                        c.sha for c in (row.commits or [])
+                        if getattr(c, "sha", None)
+                    )
+                    stack = normalize_review_stack(
+                        json.dumps(mine), local_commit_shas=local_shas,
+                    )
+                    if stack and not _read_bindings(row):
+                        try:
+                            await asyncio.to_thread(
+                                _seed_bindings_from_legacy_reviews, row, stack,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "worktree_monitor: discovery bind-seed failed "
+                                "for %s/%s",
+                                row.session_name, row.repo_name, exc_info=True,
+                            )
+                    snapshot = _ready_snapshot(
+                        [r.to_dict() for r in stack],
+                        watch_mode=self.get_nag_mode(*key),
+                    )
+                else:
+                    snapshot = _ready_snapshot(
+                        [], watch_mode=self.get_nag_mode(*key),
+                    )
+                self._source_control_cache[key] = snapshot
+                self._source_control_fetched_at[key] = now
 
     async def _refresh_one_source_control(
         self, row: WorktreeState, all_rows: list[WorktreeState],
