@@ -1157,6 +1157,19 @@ async def source_control_gates_watch_set_v1(
 
 OP_REPO_REVIEWS = "source_control_repo_reviews_v1"
 
+# Discovery-lite field set: scalars only. The full PR_LIST_FIELDS pulls
+# ``commits`` and ``statusCheckRollup`` — nested GraphQL connections that
+# at ``--limit 100`` blow past GitHub's 500,000-node query cap on busy
+# repos ("requesting up to 1,000,000 possible nodes"). Discovery's job is
+# existence + identity (match headRefName, seed a binding, paint the
+# badge); commit partitioning and checks arrive through the bound
+# REST-by-id path, which is per-PR and ETag-cheap.
+DISCOVERY_PR_LIST_FIELDS = (
+    "id,number,state,title,body,url,"
+    "headRefName,headRefOid,baseRefName,"
+    "isDraft,mergeable,mergeStateStatus,reviewDecision,updatedAt"
+)
+
 
 async def source_control_repo_reviews_v1(
     host: str,
@@ -1186,7 +1199,7 @@ async def source_control_repo_reviews_v1(
         "--repo", repo_slug,
         "--state", "open",
         "--limit", str(limit),
-        "--json", PR_LIST_FIELDS,
+        "--json", DISCOVERY_PR_LIST_FIELDS,
     ]
     stdout, stderr, exit_code, timed_out = await run_cli(
         cmd, timeout=timeout,
