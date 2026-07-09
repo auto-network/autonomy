@@ -140,6 +140,7 @@
   display: inline-flex; align-items: center;
   padding: 1px 7px; border-radius: 4px;
   font-size: 11px; font-weight: 600;
+  text-transform: capitalize;  /* design d2250266: role labels title case */
   color: #cbd5e1; background: #2a3444;
   white-space: nowrap; flex-shrink: 0;
   /* Long-pressing the corner mic dot kept selecting the HOST/role badge text
@@ -341,6 +342,40 @@ body.zoom-expanded .sc-meta2 {
   cursor: pointer;
 }
 .sc-disk-refresh:hover { color: #eef4fb; border-color: #4a5d7d; }
+
+/* Resume pill — design d2250266: dead-resumable rows get a compact green
+   top-right action in the badge row instead of a footer entry. */
+.sc-resume-pill {
+  margin-left: auto;
+  border: 1px solid rgba(104, 226, 154, 0.55);
+  color: #68e29a;
+  background: rgba(17, 55, 40, 0.74);
+  border-radius: 999px;
+  height: 24px;
+  padding: 0 9px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  align-self: center;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+.sc-resume-pill:hover { border-color: #68e29a; }
+body.zoom-compact .sc-resume-pill { height: 22px; font-size: 10px; padding: 0 8px; }
+
+/* When-line — ended cards carry "started → ended · duration" above the
+   title (replaces the ENDED footer column). Hidden at compact zoom. */
+.sc-when {
+  margin: 2px 0 0;
+  color: #93a4ba;
+  font-size: 10px;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+body.zoom-compact .sc-when { display: none; }
 
 /* --- Compact-only merged row --- */
 .sc-compact-row { display: none; align-items: center; gap: 3px; }

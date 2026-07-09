@@ -32,6 +32,7 @@
     <!-- Compact-only row: dot + bell + type badge + role badge + merged org/actions + resume -->
     <div class="sc-compact-row">
       <button type="button"
+              x-show="!!s.is_live"
               class="sc-dot voice-dot-button"
               :class="window.Autonomy.voice.ui.cardDotClasses(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live, isWorking: !!(s.is_live && s.activity_state && s.activity_state !== 'idle') })"
               :title="window.Autonomy.voice.ui.dotTitle(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
@@ -74,7 +75,7 @@
               'sc-nag-dispatch':  !s.nag_enabled &&  s.dispatch_nag_enabled,
               'sc-nag-both':       s.nag_enabled &&  s.dispatch_nag_enabled
             }"
-            x-show="s.nag_enabled != null || s.dispatch_nag_enabled != null">🔔</span>
+            x-show="s.is_live && (s.nag_enabled != null || s.dispatch_nag_enabled != null)">🔔</span>
       <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
       <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
       <!-- Harness badge — auto-ngis4 / icon-rail principle 553c7437-036.
@@ -88,7 +89,7 @@
            session — covers every active startup state plus the ready/
            planning/confirming-trust overlays. Hidden for ``ready`` and
            dead states (the chrome below the chip handles those). -->
-      <template x-if="window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.phaseChip(s)">
+      <template x-if="window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.phaseChip(s) && window.Autonomy.lifecycle.phaseTone(s) !== 'dead'">
         <span class="sc-phase-chip"
               :class="window.Autonomy.lifecycle.phaseTone(s)"
               data-testid="sc-phase-chip">
@@ -110,6 +111,15 @@
            Enabled when showSessionActions is available and the session is either live or
            on a recent-card surface (indicated by the presence of resumable). Resume
            itself is now a menu entry under this button, not a separate green button. -->
+      <!-- Resume pill (design d2250266): dead-resumable rows get the
+           compact top-right action, out of the metadata row. Hidden once
+           the resume succeeded (the Live chip takes over). -->
+      <template x-if="!s.is_live && s.resumable && typeof resumeSession === 'function' && !(resumed && resumed[s.id])">
+        <button class="sc-resume-pill"
+                @click.prevent.stop="resumeSession(s, $event)"
+                x-text="(typeof resuming !== 'undefined' && resuming[s.id]) ? 'Resuming…' : 'Resume'"
+                data-testid="sc-resume-pill"></button>
+      </template>
       <template x-if="s.org">
         <button class="sc-org sc-actions"
                 :class="s.org.favicon ? 'sc-org-favicon' : ''"
@@ -139,6 +149,7 @@
     <!-- Stats row: dot + bell + type badge + role badge + T3 + merged org/actions -->
     <div class="sc-stats">
       <button type="button"
+              x-show="!!s.is_live"
               class="sc-dot voice-dot-button"
               :class="window.Autonomy.voice.ui.cardDotClasses(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live, isWorking: !!(s.is_live && s.activity_state && s.activity_state !== 'idle') })"
               :title="window.Autonomy.voice.ui.dotTitle(window.Autonomy.voice.ui.voiceBindKey(s), { isLive: !!s.is_live })"
@@ -181,7 +192,7 @@
               'sc-nag-dispatch':  !s.nag_enabled &&  s.dispatch_nag_enabled,
               'sc-nag-both':       s.nag_enabled &&  s.dispatch_nag_enabled
             }"
-            x-show="s.nag_enabled != null || s.dispatch_nag_enabled != null">🔔</span>
+            x-show="s.is_live && (s.nag_enabled != null || s.dispatch_nag_enabled != null)">🔔</span>
       <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
       <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
       <!-- Harness badge mirrored on the stats row for the same reason
@@ -194,7 +205,7 @@
            Same chrome + derivation as the compact-row chip; both rows
            render it so the chip survives zoom modes via the existing
            row-hiding rules. -->
-      <template x-if="window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.phaseChip(s)">
+      <template x-if="window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.phaseChip(s) && window.Autonomy.lifecycle.phaseTone(s) !== 'dead'">
         <span class="sc-phase-chip"
               :class="window.Autonomy.lifecycle.phaseTone(s)"
               data-testid="sc-phase-chip">
@@ -219,6 +230,15 @@
         <span class="sc-t3-sep" x-show="ctxStr(s) && idleStr(s)">·</span>
         <span class="sc-t3-val" :class="recencyColor(s)" x-text="idleStr(s)"></span>
       </span>
+      <!-- Resume pill (design d2250266): dead-resumable rows get the
+           compact top-right action, out of the metadata row. Hidden once
+           the resume succeeded (the Live chip takes over). -->
+      <template x-if="!s.is_live && s.resumable && typeof resumeSession === 'function' && !(resumed && resumed[s.id])">
+        <button class="sc-resume-pill"
+                @click.prevent.stop="resumeSession(s, $event)"
+                x-text="(typeof resuming !== 'undefined' && resuming[s.id]) ? 'Resuming…' : 'Resume'"
+                data-testid="sc-resume-pill"></button>
+      </template>
       <template x-if="s.org">
         <button class="sc-org sc-actions"
                 :class="s.org.favicon ? 'sc-org-favicon' : ''"
@@ -244,6 +264,14 @@
       <span x-show="!s.is_live && resumeError && resumeError[s.id]" x-cloak
             class="px-3 py-1 bg-red-900 text-red-300 text-sm rounded ml-auto flex-shrink-0" x-text="resumeError[s.id]"></span>
     </div>
+
+    <!-- When-line (design d2250266): ended cards carry their time range
+         here — "started → ended · duration" — replacing the ENDED footer
+         column. Hidden at compact zoom via CSS; live cards never render
+         it (idle lives in the stats). -->
+    <template x-if="!s.is_live && typeof whenLine === 'function' && whenLine(s)">
+      <div class="sc-when" x-text="whenLine(s)" data-testid="sc-when"></div>
+    </template>
 
     <!-- Title. Librarian rows get an optional target-bead title suffix in
          muted color (e.g. "review_report · auto-dkhyx — Fix X"); all other
@@ -316,10 +344,15 @@
           </div>
         </div>
       </template>
-      <div class="sc-footer-item">
-        <span class="sc-footer-label" x-text="endedOrIdleLabel(s)"></span>
-        <span class="sc-footer-value" :class="s.is_live ? recencyColor(s) : ''" x-text="endedOrIdleValue(s)"></span>
-      </div>
+      <!-- Live cards keep the Idle column; ended cards drop it — their end
+           time moved to the .sc-when line (kept on surfaces without the
+           sessions-page helpers so the info is never lost). -->
+      <template x-if="s.is_live || typeof whenLine !== 'function'">
+        <div class="sc-footer-item">
+          <span class="sc-footer-label" x-text="endedOrIdleLabel(s)"></span>
+          <span class="sc-footer-value" :class="s.is_live ? recencyColor(s) : ''" x-text="endedOrIdleValue(s)"></span>
+        </div>
+      </template>
       <template x-if="showTmuxColumn(s)">
         <div class="sc-footer-item">
           <span class="sc-footer-label">tmux</span>
@@ -353,7 +386,7 @@
            worker's retry endpoint — the worker cleans the failed
            attempt's leftovers and re-runs the launch, and the card
            follows along via the registry broadcasts. -->
-      <template x-if="window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.inlineAction(s)">
+      <template x-if="window.Autonomy && window.Autonomy.lifecycle && window.Autonomy.lifecycle.inlineAction(s) && window.Autonomy.lifecycle.inlineAction(s).kind !== 'resume'">
         <button class="sc-action-inline"
                 :class="window.Autonomy.lifecycle.inlineAction(s).kind"
                 @click.prevent.stop="(window.Autonomy.lifecycle.inlineAction(s).kind === 'resume' && typeof resumeSession === 'function') ? resumeSession(s, $event) : (window.Autonomy.lifecycle.inlineAction(s).kind === 'retry' ? fetch('/api/session/' + encodeURIComponent(s.tmux_name || s.session_id || s.id) + '/retry', {method: 'POST'}) : null)"

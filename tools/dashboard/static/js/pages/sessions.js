@@ -284,6 +284,37 @@
       resourceTipKey(s) {
         return (s && (s.tmux_session || s.tmux_name || s.id)) || '';
       },
+      // "started → ended · duration" line for ended cards (design
+      // d2250266) — replaces the ENDED footer column. Accepts epoch
+      // seconds (session store rows) or ISO strings (recent DAO rows).
+      _whenEpoch(v) {
+        if (v == null || v === '') return 0;
+        if (typeof v === 'number') return v > 1e12 ? v / 1000 : v;
+        var t = Date.parse(v);
+        return isNaN(t) ? 0 : t / 1000;
+      },
+      _whenFmt(epoch) {
+        if (!epoch) return '';
+        var d = new Date(epoch * 1000);
+        function p(n) { return (n < 10 ? '0' : '') + n; }
+        return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+          + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+      },
+      _whenDur(secs) {
+        if (secs < 90) return Math.round(secs) + 's';
+        if (secs < 5400) return Math.round(secs / 60) + 'm';
+        if (secs < 129600) return (secs / 3600).toFixed(1).replace(/\.0$/, '') + 'h';
+        return (secs / 86400).toFixed(1).replace(/\.0$/, '') + 'd';
+      },
+      whenLine(s) {
+        if (s.is_live) return '';
+        var t0 = this._whenEpoch(s.created_at);
+        var t1 = this._whenEpoch(s.ended_at || s.last_activity_at || s.last_activity);
+        if (!t0 && !t1) return '';
+        var out = (this._whenFmt(t0) || '—') + ' → ' + (this._whenFmt(t1) || '—');
+        if (t0 && t1 && t1 > t0) out += ' · ' + this._whenDur(t1 - t0);
+        return out;
+      },
       toggleResourceTip(s) {
         var key = this.resourceTipKey(s);
         this._resourceTipOpen = this._resourceTipOpen === key ? null : key;
