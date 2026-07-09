@@ -102,15 +102,19 @@ async def test_register_after_pending_preserves_startup_state(db, monitor):
 
 
 @pytest.mark.asyncio
-async def test_arm_re_enters_after_running(db, monitor):
-    """arm re-enters the FSM on rows the worker already ran to completion
-    (startup_state NULL) — the resume/retry entry path."""
+async def test_arm_re_enters_after_ended(db, monitor):
+    """arm re-enters the FSM on terminal rows — the resume/retry entry
+    path (ENDED→LAUNCHING / FAILED→LAUNCHING in the legality matrix)."""
     await monitor.register_pending("auto-test", project="x")
     SessionLifecycleStateWriter().set_state("auto-test", "running")
+    SessionLifecycleStateWriter().set_state("auto-test", "dead")
     assert _read_state("auto-test") is None
     changed = await monitor.arm_startup_state("auto-test", "harness_starting")
     assert changed is True
     assert _read_state("auto-test") == "harness_starting"
+    row = dashboard_db.get_session("auto-test")
+    assert row["state"] == "LAUNCHING"
+    assert row["ended_at"] is None  # cleared on FSM re-entry
 
 
 @pytest.mark.asyncio
@@ -132,6 +136,7 @@ async def test_arm_arms_screen_poll_watch(db, monitor):
     dashboard_db.insert_session(
         tmux_name="auto-test", session_type="container", project="x",
     )
+    dashboard_db.mark_dead("auto-test")
     await monitor.arm_startup_state("auto-test", "harness_starting")
     assert "auto-test" in monitor._screen_poll_armed
 
@@ -141,9 +146,26 @@ async def test_arm_broadcasts_on_change(db, monitor):
     dashboard_db.insert_session(
         tmux_name="auto-test", session_type="container", project="x",
     )
+    dashboard_db.mark_dead("auto-test")
     monitor._event_bus.broadcast.reset_mock()
     await monitor.arm_startup_state("auto-test", "harness_starting")
     assert _broadcast_count(monitor) == 1
+
+
+@pytest.mark.asyncio
+async def test_arm_refused_on_active_row(db, monitor):
+    """The legality matrix forbids re-launching a session that is ACTIVE —
+    a resume/retry can only enter from a terminal state (the API's
+    live-session guard makes this unreachable in practice; the matrix
+    makes it impossible)."""
+    dashboard_db.insert_session(
+        tmux_name="auto-test", session_type="container", project="x",
+    )  # born ACTIVE
+    changed = await monitor.arm_startup_state("auto-test", "harness_starting")
+    assert changed is False
+    row = dashboard_db.get_session("auto-test")
+    assert row["state"] == "ACTIVE"
+    assert row["startup_state"] is None
 
 
 @pytest.mark.asyncio
@@ -222,6 +244,7 @@ async def test_arm_stamps_last_activity(db, monitor):
     dashboard_db.insert_session(
         tmux_name="auto-test", session_type="container", project="x",
     )
+    dashboard_db.mark_dead("auto-test")  # arm enters from a terminal state
     conn = dashboard_db.get_conn()
     conn.execute(
         "UPDATE tmux_sessions SET last_activity=? WHERE tmux_name=?",
