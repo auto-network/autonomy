@@ -2154,3 +2154,105 @@ def test_create_worktree_refuses_nonempty_husk(tmp_path):
 
     with pytest.raises(wm.WorkspaceError, match="without .git"):
         wm.create_worktree(clone, worktree, "session/sess-husk2")
+
+
+# ── Sweep memoization (auto-0peos Phase 1) ─────────────────────────────
+
+
+class TestScanFingerprintCache:
+    """Fingerprint-gated row memo: unchanged rows cost file reads, not
+    git subprocesses; any input change (worktree HEAD/index, clone
+    master, host target head) invalidates; orphaned worktrees fall back
+    to the full scan and carry the orphaned flag."""
+
+    def _fresh(self, tmp_path, monkeypatch, session="sess-memo"):
+        wm.invalidate_row_cache()
+        worktrees_dir, clone, worktree = _make_writable_session_worktree(
+            tmp_path, session, monkeypatch,
+        )
+        subprocess.run(["git", "-C", str(worktree), "config", "user.email", "t@t"], check=True)
+        subprocess.run(["git", "-C", str(worktree), "config", "user.name", "t"], check=True)
+        (worktree / "w.txt").write_text("work\n")
+        subprocess.run(["git", "-C", str(worktree), "add", "w.txt"], check=True)
+        subprocess.run(
+            ["git", "-C", str(worktree), "-c", "commit.gpgsign=false",
+             "commit", "-q", "-m", "memo work"],
+            check=True,
+        )
+        return worktrees_dir, clone, worktree
+
+    def test_warm_scan_reuses_rows_with_near_zero_git_calls(self, tmp_path, monkeypatch):
+        worktrees_dir, _clone, _wt = self._fresh(tmp_path, monkeypatch)
+
+        cold = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+        calls_before = wm.git_call_count()
+        hits_before, _ = wm.scan_cache_stats()
+        warm = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+        warm_calls = wm.git_call_count() - calls_before
+        hits_after, _ = wm.scan_cache_stats()
+
+        assert warm == cold
+        assert hits_after - hits_before == 1
+        # Dead row on a warm pass costs zero per-row git work. The only
+        # spawns are the per-sweep constants (host target-branch
+        # resolution: default-branch probe + rev-parse), independent of
+        # row count.
+        assert warm_calls <= 4, f"warm dead-row scan spawned {warm_calls} git calls"
+
+    def test_correctness_gate_cold_equals_warm(self, tmp_path, monkeypatch):
+        worktrees_dir, _clone, _wt = self._fresh(tmp_path, monkeypatch)
+        wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+        warm = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+        forced = wm.scan_all_worktrees(
+            worktrees_dir=worktrees_dir, live_session_names=set(), use_cache=False,
+        )
+        assert warm == forced
+
+    def test_new_commit_invalidates(self, tmp_path, monkeypatch):
+        worktrees_dir, _clone, worktree = self._fresh(tmp_path, monkeypatch)
+        first = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+        assert first[0].commits_ahead == 1
+
+        (worktree / "w2.txt").write_text("more\n")
+        subprocess.run(["git", "-C", str(worktree), "add", "w2.txt"], check=True)
+        subprocess.run(
+            ["git", "-C", str(worktree), "-c", "commit.gpgsign=false",
+             "commit", "-q", "-m", "second"],
+            check=True,
+        )
+        second = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+        assert second[0].commits_ahead == 2
+
+    def test_live_row_dirt_refreshes_on_cache_hit(self, tmp_path, monkeypatch):
+        session = "sess-memo-live"
+        worktrees_dir, _clone, worktree = self._fresh(tmp_path, monkeypatch, session=session)
+        wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names={session})
+        # Unstaged edit: touches neither HEAD nor index → fingerprint hit,
+        # but the live row must still show the dirt.
+        (worktree / "unstaged.txt").write_text("edit\n")
+        rows = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names={session})
+        assert any(f.path == "unstaged.txt" for f in rows[0].dirty_files)
+
+    def test_liveness_restamped_on_cache_hit(self, tmp_path, monkeypatch):
+        session = "sess-memo-flip"
+        worktrees_dir, _clone, _wt = self._fresh(tmp_path, monkeypatch, session=session)
+        dead = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+        assert dead[0].session_live is False
+        live = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names={session})
+        assert live[0].session_live is True
+
+    def test_orphaned_worktree_flagged_and_survives(self, tmp_path, monkeypatch):
+        import shutil
+        worktrees_dir, clone, worktree = self._fresh(tmp_path, monkeypatch, session="sess-orphan")
+        # Simulate the prune-in-container accident: delete the gitdir the
+        # worktree's .git pointer references.
+        gitdir = Path((worktree / ".git").read_text().split(":", 1)[1].strip())
+        shutil.rmtree(gitdir)
+
+        rows = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+        assert len(rows) == 1
+        assert rows[0].orphaned is True
+        assert rows[0].branch is None
+        # Second pass: still no crash, still flagged.
+        rows2 = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
+        assert rows2[0].orphaned is True

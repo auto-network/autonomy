@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import sys
 import traceback
 from dataclasses import dataclass, field, replace
@@ -738,6 +739,11 @@ class WorktreeState:
     dirty_files: list[GitFileChange] = field(default_factory=list)
     net_empty: bool = False
     duplicate_commits: list[WorktreeDuplicateRef] = field(default_factory=list)
+    # The worktree directory exists but its git bookkeeping (the gitdir
+    # its .git pointer references) is gone — typically a `git worktree
+    # prune` run inside a container. Cannot be fingerprinted or scanned
+    # meaningfully; prime reaping candidate.
+    orphaned: bool = False
 
 
 @dataclass(frozen=True)
@@ -1773,11 +1779,154 @@ def _session_is_live(session_name: str) -> bool:
     return session_name in _live_session_names()
 
 
+# ── Sweep memoization (auto-0peos Phase 1) ───────────────────────────
+#
+# A worktree row is a pure function of: the worktree's HEAD commit, its
+# index state, the working tree's dirt, and the managed clone's
+# integration ref (patch-equivalence against master). Everything except
+# unstaged tree edits leaves a trace in five small files, so a
+# pure-file-read fingerprint (measured 115µs/row on the real fleet vs a
+# p50 3.48s / 757-subprocess sweep) decides whether the expensive
+# per-row git recompute can be skipped. Live rows additionally refresh
+# their dirt every pass (unstaged edits touch neither HEAD nor index).
+# Known accepted gap: unstaged manual edits inside a DEAD session's
+# worktree go unnoticed until any ref/index change — nothing legitimate
+# writes to dead worktrees except dashboard actions, which move refs.
+
+
+def _read_ref_sha(gitdir: Path, ref_or_head: str = "HEAD") -> str | None:
+    """Resolve a ref to a sha with file reads only — no subprocess.
+
+    Handles linked worktrees (per-worktree gitdir + ``commondir``),
+    loose refs, and ``packed-refs``. Returns None when the structure is
+    missing/undecipherable (the orphaned-worktree case).
+    """
+    try:
+        head = (gitdir / ref_or_head).read_text().strip()
+    except OSError:
+        return None
+    if not head.startswith("ref: "):
+        return head or None
+    ref = head[5:].strip()
+    common = gitdir
+    try:
+        cd = gitdir / "commondir"
+        if cd.exists():
+            common = (gitdir / cd.read_text().strip()).resolve()
+        loose = common / ref
+        if loose.exists():
+            return loose.read_text().strip() or None
+        packed = common / "packed-refs"
+        if packed.exists():
+            for line in packed.read_text().splitlines():
+                if line.endswith(" " + ref):
+                    return line.split(" ", 1)[0]
+    except OSError:
+        return None
+    return None
+
+
+def _resolve_gitdir(worktree: Path) -> Path | None:
+    """Worktree → its gitdir; None when the pointer target is gone."""
+    gitpath = worktree / ".git"
+    try:
+        if gitpath.is_dir():
+            return gitpath
+        if gitpath.is_file():
+            target = Path(gitpath.read_text().split(":", 1)[1].strip())
+            return target if target.exists() else None
+    except (OSError, IndexError):
+        return None
+    return None
+
+
+def _worktree_fingerprint(
+    worktree: Path,
+    clone_master_sha: str | None,
+) -> tuple | None:
+    """Cheap invalidation key for a worktree row, or None if orphaned."""
+    gitdir = _resolve_gitdir(worktree)
+    if gitdir is None:
+        return None
+    head_sha = _read_ref_sha(gitdir)
+    if head_sha is None:
+        return None
+    try:
+        head_mtime = (gitdir / "HEAD").stat().st_mtime_ns
+    except OSError:
+        return None
+    idx = gitdir / "index"
+    try:
+        index_mtime = idx.stat().st_mtime_ns if idx.exists() else 0
+    except OSError:
+        index_mtime = 0
+    return (head_sha, head_mtime, index_mtime, clone_master_sha)
+
+
+def _clone_master_sha(clone: Path | None) -> str | None:
+    """The managed clone's integration ref sha, by file read."""
+    if clone is None:
+        return None
+    gitdir = _resolve_gitdir(clone)
+    if gitdir is None:
+        return None
+    for ref in ("refs/heads/master", "refs/heads/main"):
+        # _read_ref_sha resolves via loose-then-packed; feed it a
+        # symbolic-style content by reading directly.
+        common = gitdir
+        try:
+            loose = common / ref
+            if loose.exists():
+                return loose.read_text().strip() or None
+        except OSError:
+            continue
+    try:
+        packed = gitdir / "packed-refs"
+        if packed.exists():
+            for line in packed.read_text().splitlines():
+                if line.endswith((" refs/heads/master", " refs/heads/main")):
+                    return line.split(" ", 1)[0]
+    except OSError:
+        return None
+    return None
+
+
+# path → (fingerprint, row-with-stale-liveness). Guarded by a plain
+# lock: scans run on worker threads (asyncio.to_thread).
+_row_cache: dict[Path, tuple[tuple, "WorktreeState"]] = {}
+_row_cache_lock = threading.Lock()
+_scan_cache_hits = 0
+_scan_cache_misses = 0
+
+
+def scan_cache_stats() -> tuple[int, int]:
+    """(hits, misses) counters for sweep attribution logging."""
+    return _scan_cache_hits, _scan_cache_misses
+
+
+def _bump_scan_cache(*, hit: bool) -> None:
+    global _scan_cache_hits, _scan_cache_misses
+    if hit:
+        _scan_cache_hits += 1
+    else:
+        _scan_cache_misses += 1
+
+
+def invalidate_row_cache(worktree: Path | None = None) -> None:
+    """Drop cached rows (one worktree, or all when None)."""
+    with _row_cache_lock:
+        if worktree is None:
+            _row_cache.clear()
+        else:
+            _row_cache.pop(worktree, None)
+
+
 def scan_all_worktrees(
     *,
     worktrees_dir: Path = WORKTREES_DIR,
     live_session_names: Iterable[str] | None = None,
     session_filter: Callable[[str], bool] | None = None,
+    use_cache: bool = True,
 ) -> list[WorktreeState]:
     """Scan ``data/worktrees`` and return one state row per session/repo worktree.
 
@@ -1785,12 +1934,19 @@ def scan_all_worktrees(
     worktree monitor uses it to rescan one org or one session without
     paying for every other worktree's git calls. A skipped session does
     no git work at all.
+
+    ``use_cache`` (default True) enables the fingerprint-gated row memo
+    (auto-0peos Phase 1): rows whose fingerprint is unchanged reuse the
+    previous pass's computed row (liveness re-stamped; live rows'
+    working-tree dirt re-checked). ``use_cache=False`` forces the full
+    stateless recompute — the correctness gate compares the two.
     """
     if not worktrees_dir.exists():
         return []
 
     live = set(live_session_names) if live_session_names is not None else _live_session_names()
     out: list[WorktreeState] = []
+    clone_sha_memo: dict[Path | None, str | None] = {}
 
     # Resolved once per sweep rather than once per row (previously ~2-4
     # identical git spawns per row just to answer "what's the host
@@ -1827,6 +1983,41 @@ def scan_all_worktrees(
             if not (repo_dir / ".git").exists():
                 continue
             clone = _find_managed_clone_for_worktree(repo_dir)
+
+            # ── Fingerprint gate (auto-0peos Phase 1) ────────────────
+            row_is_live = session_dir.name in live
+            fp = None
+            if use_cache:
+                if clone not in clone_sha_memo:
+                    clone_sha_memo[clone] = _clone_master_sha(clone)
+                fp = _worktree_fingerprint(repo_dir, clone_sha_memo[clone])
+                if fp is not None:
+                    # clone_stale / rebase_required compare against the
+                    # HOST checkout's integration head, which can move
+                    # independently of the clone's master — it is part
+                    # of the row's inputs, so it is part of the key.
+                    fp = fp + (target_branch_and_head[1],)
+                if fp is not None:
+                    with _row_cache_lock:
+                        cached = _row_cache.get(repo_dir)
+                    if cached is not None and cached[0] == fp:
+                        row = replace(cached[1], session_live=row_is_live)
+                        if row_is_live:
+                            # Unstaged edits touch neither HEAD nor index —
+                            # live rows re-check dirt every pass.
+                            dirty_or_none = _worktree_dirty_files(repo_dir)
+                            dirty_now = dirty_or_none or []
+                            tracked_now = [f for f in dirty_now if f.status != "??"]
+                            row = replace(
+                                row,
+                                dirty_files=dirty_now,
+                                is_dirty=(True if dirty_or_none is None
+                                          else bool(tracked_now)),
+                            )
+                        _bump_scan_cache(hit=True)
+                        out.append(row)
+                        continue
+                _bump_scan_cache(hit=False)
             branch = _worktree_branch_name(repo_dir)
             base_ref = _worktree_dashboard_base_ref(
                 repo_dir, repo_dir.name,
@@ -1889,7 +2080,7 @@ def scan_all_worktrees(
             if commits_ahead == 0:
                 cherry_pick_eligible = False
                 cherry_pick_commit = None
-            out.append(WorktreeState(
+            row = WorktreeState(
                 session_name=session_dir.name,
                 repo_name=repo_dir.name,
                 worktree_path=repo_dir,
@@ -1900,13 +2091,31 @@ def scan_all_worktrees(
                 ff_eligible=ff_eligible,
                 clone_stale=clone_stale,
                 rebase_required=rebase_required,
-                session_live=session_dir.name in live,
+                session_live=row_is_live if use_cache else (session_dir.name in live),
                 cherry_pick_eligible=cherry_pick_eligible,
                 cherry_pick_commit=cherry_pick_commit,
                 commits=commits,
                 dirty_files=dirty_files,
                 net_empty=net_empty,
-            ))
+                # fp is None under use_cache when the gitdir is gone —
+                # the scan above ran against a broken structure.
+                orphaned=(use_cache and fp is None and branch is None),
+            )
+            if use_cache and fp is not None:
+                # Re-fingerprint AFTER the compute: the scan's own
+                # ``git status`` refreshes the index file, so a key
+                # captured before the scan self-invalidates every pass.
+                # The post-scan key reflects the state the scan leaves
+                # behind; status does not rewrite an already-fresh
+                # index, so the next pass matches. Costs one extra
+                # ~115µs fingerprint per MISS only.
+                store_fp = _worktree_fingerprint(repo_dir, clone_sha_memo[clone])
+                if store_fp is not None:
+                    with _row_cache_lock:
+                        _row_cache[repo_dir] = (
+                            store_fp + (target_branch_and_head[1],), row,
+                        )
+            out.append(row)
 
     return _suppress_cross_worktree_duplicates(out)
 
@@ -1925,18 +2134,29 @@ def _duplicate_canonical_rank(row: WorktreeState) -> tuple[bool, bool, str]:
     return (owns_branch, row.session_live, row.session_name)
 
 
+# sha → stable patch-id. A commit's patch-id is derived from its diff
+# content; both are immutable once the sha exists, so this memo never
+# invalidates. It converts the dedup pass's per-row subprocess pair
+# into a pure dict read on warm sweeps (auto-0peos Phase 1).
+_patch_id_memo: dict[str, str] = {}
+
+
 def _pending_patch_ids(worktree: Path, shas: list[str]) -> dict[str, str]:
     """Map each pending SHA to its stable patch-id.
 
     One ``git log --no-walk --patch`` piped through ``git patch-id
-    --stable`` per row. SHAs whose patch-id can't be computed (empty
-    patches, git failure) are simply absent — callers fall back to the
-    SHA itself as the identity key.
+    --stable`` per row — for the memo-missing SHAs only. SHAs whose
+    patch-id can't be computed (empty patches, git failure) are simply
+    absent — callers fall back to the SHA itself as the identity key.
     """
     if not shas:
         return {}
+    known = {sha: _patch_id_memo[sha] for sha in shas if sha in _patch_id_memo}
+    missing = [sha for sha in shas if sha not in known]
+    if not missing:
+        return known
     rc, patches, _ = _git_output(
-        ["log", "--no-walk", "--patch", "--format=commit %H", *shas],
+        ["log", "--no-walk", "--patch", "--format=commit %H", *missing],
         worktree,
         timeout=60,
     )
@@ -1953,13 +2173,13 @@ def _pending_patch_ids(worktree: Path, shas: list[str]) -> dict[str, str]:
     except (OSError, subprocess.SubprocessError):
         return {}
     if proc.returncode != 0:
-        return {}
-    out: dict[str, str] = {}
+        return known
     for line in proc.stdout.splitlines():
         pid, _, sha = line.strip().partition(" ")
         if pid and sha:
-            out[sha.strip()] = pid
-    return out
+            known[sha.strip()] = pid
+            _patch_id_memo[sha.strip()] = pid
+    return known
 
 
 def _suppress_cross_worktree_duplicates(rows: list[WorktreeState]) -> list[WorktreeState]:
@@ -2270,6 +2490,7 @@ def cleanup_session_worktrees(
                 result.errors.append((str(entry), f"rmtree: {e}"))
             continue
 
+        invalidate_row_cache(entry)
         ok, err = _worktree_remove(clone, entry)
         if not ok:
             # ``git worktree remove`` can fail if the clone's metadata is
