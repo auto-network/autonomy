@@ -1279,7 +1279,19 @@ class WorktreeMonitor:
 
         MUST only run on operator-initiated refreshes (rate-limit
         discipline) — the background tick never calls this.
+
+        Holds the monitor lock: the round-6 live race lost 18 of 29
+        freshly-written snapshots because discovery mutated the cache
+        concurrently with the startup sweep's read-then-replace in
+        ``_refresh_source_control``. Every cache writer serializes on
+        ``self._lock``.
         """
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            await self._discover_prs_locked(rows)
+
+    async def _discover_prs_locked(self, rows: list[WorktreeState]) -> None:
         now = time.monotonic()
         if now < self._capability_backoff_until:
             logger.info(
@@ -1421,7 +1433,14 @@ class WorktreeMonitor:
         with zero checks behind it. Bounded and cheap by construction —
         one ETag'd fetch per row that actually has bindings; rows without
         bindings are untouched. Never called on background ticks.
+        Serializes on the monitor lock like every other cache writer.
         """
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            await self._refresh_bound_rows_locked(rows)
+
+    async def _refresh_bound_rows_locked(self, rows: list[WorktreeState]) -> None:
         bindings_by_key = await asyncio.to_thread(_read_bindings_batch, rows)
         bound = [
             row for row in rows
