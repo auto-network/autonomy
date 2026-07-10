@@ -9179,6 +9179,10 @@ async def api_worktrees_refresh(request):
     # sessions included — before the payload is built. Operator-initiated
     # only; the background tick never discovers.
     await worktree_monitor.discover_prs(scoped_rows)
+    # Then chase full check state for the (bounded) set of rows with
+    # review bindings — discovery is identity-only, and a PR badge with
+    # zero checks behind it reads green-by-absence.
+    await worktree_monitor.refresh_bound_rows(scoped_rows)
     payload = [
         _worktree_state_json(row)
         for row in rows
