@@ -186,6 +186,7 @@ WORKTREE_ROW_DEFAULTS: dict[str, Any] = {
     "commits": [],
     "dirty_files": [],
     "net_empty": False,
+    "orphaned": False,
     "duplicate_commits": [],
     "org": {
         "slug": "autonomy",

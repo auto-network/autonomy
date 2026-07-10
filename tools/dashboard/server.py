@@ -9048,6 +9048,7 @@ def _worktree_state_json(row: WorktreeState) -> dict:
         "commits": [_worktree_commit_json(commit) for commit in row.commits],
         "dirty_files": [_worktree_file_json(file) for file in row.dirty_files],
         "net_empty": row.net_empty,
+        "orphaned": row.orphaned,
         "duplicate_commits": [
             {
                 "sha": dup.sha,

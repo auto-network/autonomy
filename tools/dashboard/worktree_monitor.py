@@ -43,6 +43,7 @@ from agents.workspace_manager import (
     _worktree_dashboard_base_ref,
     git_call_count,
     scan_all_worktrees,
+    scan_cache_stats,
 )
 from tools.graph import settings_ops
 from tools.graph.schemas.source_control_review_state import (
@@ -1177,6 +1178,7 @@ class WorktreeMonitor:
         async with self._lock:
             sweep_start = time.monotonic()
             calls_before = git_call_count()
+            hits_before, misses_before = scan_cache_stats()
             if session_filter is None:
                 rows = await asyncio.to_thread(scan_all_worktrees)
             else:
@@ -1184,6 +1186,7 @@ class WorktreeMonitor:
                     lambda: scan_all_worktrees(session_filter=session_filter)
                 )
             sweep_seconds = time.monotonic() - sweep_start
+            hits_after, misses_after = scan_cache_stats()
             git_calls = git_call_count() - calls_before
             if session_filter is not None:
                 kept = [
@@ -1195,8 +1198,10 @@ class WorktreeMonitor:
                 self._cache = rows
             live_count = sum(1 for row in rows if row.session_live)
             logger.info(
-                "worktree_monitor: sweep took %.2fs rows=%d live=%d git_calls=%d%s",
+                "worktree_monitor: sweep took %.2fs rows=%d live=%d git_calls=%d "
+                "cache_hits=%d cache_misses=%d%s",
                 sweep_seconds, len(rows), live_count, git_calls,
+                hits_after - hits_before, misses_after - misses_before,
                 " (scoped)" if session_filter is not None else "",
             )
             await self._refresh_source_control(
