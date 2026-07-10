@@ -43,6 +43,10 @@ class _FakeMonitor:
         self.discover_calls = getattr(self, "discover_calls", [])
         self.discover_calls.append([r.session_name for r in rows])
 
+    async def refresh_bound_rows(self, rows):
+        self.bound_calls = getattr(self, "bound_calls", [])
+        self.bound_calls.append([r.session_name for r in rows])
+
 
 def _row(
     session="auto-test",
@@ -107,6 +111,7 @@ def _install_fake_monitor(monkeypatch, rows):
     monkeypatch.setattr(server.worktree_monitor, "get_all", fake.get_all)
     monkeypatch.setattr(server.worktree_monitor, "refresh", fake.refresh)
     monkeypatch.setattr(server.worktree_monitor, "discover_prs", fake.discover_prs)
+    monkeypatch.setattr(server.worktree_monitor, "refresh_bound_rows", fake.refresh_bound_rows)
     return server, fake
 
 
@@ -275,6 +280,7 @@ class TestWorktreeAPI:
         resp = test_client.post("/api/worktrees/refresh?org=anchore")
         assert resp.status_code == 200
         assert fake.discover_calls == [["auto-b"]]
+        assert fake.bound_calls == [["auto-b"]]
 
         resp = test_client.post("/api/worktrees/refresh")
         assert resp.status_code == 200
@@ -2818,6 +2824,28 @@ class TestWorktreeMonitorDiscovery:
         assert "commits" not in json_arg
         assert "statusCheckRollup" not in json_arg
         assert "headRefName" in json_arg and "headRefOid" in json_arg
+
+    def test_refresh_bound_rows_chases_only_bound(self, monkeypatch):
+        """After discovery, the org refresh force-fetches full PR state
+        (REST-by-id + checks) for rows with bindings only — bounded work,
+        unbound rows untouched."""
+        from tools.dashboard import worktree_monitor as wm_module
+
+        monitor = wm_module.WorktreeMonitor()
+        bound = _row(session="auto-bound", repo="enterprise_ng", live=False)
+        unbound = _row(session="auto-unbound", repo="enterprise_ng", live=True)
+        monkeypatch.setattr(
+            wm_module, "_read_bindings_batch",
+            lambda rows: {("auto-bound", "enterprise_ng"): [object()]},
+        )
+        chased = []
+
+        async def fake_one(row, all_rows):
+            chased.append(row.session_name)
+
+        monkeypatch.setattr(monitor, "_refresh_one_source_control", fake_one)
+        asyncio.run(monitor.refresh_bound_rows([bound, unbound]))
+        assert chased == ["auto-bound"]
 
     def test_dead_row_snapshots_survive_background_ticks(self, monkeypatch):
         """Regression (round-5 live verification): discovery hydrated 36

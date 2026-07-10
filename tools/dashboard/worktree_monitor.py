@@ -1412,6 +1412,29 @@ class WorktreeMonitor:
                 slug, len(prs), wrote, len(group),
             )
 
+    async def refresh_bound_rows(self, rows: list[WorktreeState]) -> None:
+        """Chase full PR state (REST-by-id + check-runs) for bound rows.
+
+        Runs after discovery inside the operator's org Refresh: discovery
+        hydrates identity only (scalar fields — the GraphQL node-cap
+        lesson), so without this pass a discovered PR wears a green badge
+        with zero checks behind it. Bounded and cheap by construction —
+        one ETag'd fetch per row that actually has bindings; rows without
+        bindings are untouched. Never called on background ticks.
+        """
+        bindings_by_key = await asyncio.to_thread(_read_bindings_batch, rows)
+        bound = [
+            row for row in rows
+            if bindings_by_key.get((row.session_name, row.repo_name))
+        ]
+        if not bound:
+            return
+        logger.info(
+            "worktree_monitor: chasing checks for %d bound rows", len(bound),
+        )
+        for row in bound:
+            await self._refresh_one_source_control(row, rows)
+
     async def _refresh_one_source_control(
         self, row: WorktreeState, all_rows: list[WorktreeState],
     ) -> None:
