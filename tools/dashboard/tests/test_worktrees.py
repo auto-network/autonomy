@@ -2825,6 +2825,33 @@ class TestWorktreeMonitorDiscovery:
         assert "statusCheckRollup" not in json_arg
         assert "headRefName" in json_arg and "headRefOid" in json_arg
 
+    def test_discovery_serializes_on_the_monitor_lock(self, monkeypatch):
+        """Regression (round-6 live race): discovery wrote 29/29 snapshots
+        while the startup sweep's read-then-replace ran concurrently and
+        lost 18 of them. Discovery and the bound-chase must hold the same
+        lock as refresh()/_refresh_source_control."""
+        from tools.dashboard import worktree_monitor as wm_module
+
+        monitor = wm_module.WorktreeMonitor()
+
+        async def run():
+            monitor._lock = asyncio.Lock()
+            await monitor._lock.acquire()
+            task = asyncio.ensure_future(monitor.discover_prs([]))
+            await asyncio.sleep(0.05)
+            assert not task.done(), "discover_prs must wait for the monitor lock"
+            monitor._lock.release()
+            await asyncio.wait_for(task, timeout=5)
+
+            await monitor._lock.acquire()
+            task = asyncio.ensure_future(monitor.refresh_bound_rows([]))
+            await asyncio.sleep(0.05)
+            assert not task.done(), "refresh_bound_rows must wait for the monitor lock"
+            monitor._lock.release()
+            await asyncio.wait_for(task, timeout=5)
+
+        asyncio.run(run())
+
     def test_refresh_bound_rows_chases_only_bound(self, monkeypatch):
         """After discovery, the org refresh force-fetches full PR state
         (REST-by-id + checks) for rows with bindings only — bounded work,
