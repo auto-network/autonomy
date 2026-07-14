@@ -7298,6 +7298,14 @@ async def api_session_resume(request):
     # Keep the session's own model. Only a Claude session falls back to the
     # host default — never hand Codex a Claude model id (which is exactly
     # what _resolve_host_session_model() would have returned).
+    #
+    # Never forward a placeholder id: "<synthetic>" comes from error /
+    # local-command JSONL entries and was historically persisted by both the
+    # dashboard tailer and graph ingestion. Booting `--model <synthetic>`
+    # fails on a nonexistent model (auto-0709-092918, 2026-07-14), so a
+    # placeholder falls through to the default like no model at all.
+    if resume_model and resume_model.startswith("<"):
+        resume_model = None
     model = resume_model
     if not model and resume_harness == "claude":
         model = _resolve_host_session_model()

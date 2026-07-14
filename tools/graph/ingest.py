@@ -538,8 +538,11 @@ class ClaudeTurnExtractor:
         if len(text) < 5:
             return None
 
-        # Track model
-        if etype == "assistant" and msg.get("model"):
+        # Track model. Skip placeholder ids ("<synthetic>" on error /
+        # local-command entries): persisting one poisons the source metadata,
+        # which session resume uses as its model fallback.
+        if etype == "assistant" and msg.get("model") \
+                and not str(msg["model"]).startswith("<"):
             s["model"] = msg["model"]
 
         # Track tokens

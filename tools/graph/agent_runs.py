@@ -127,8 +127,10 @@ def parse_agent_trace(trace_path: Path) -> AgentRun:
             if len(text) < 5:
                 continue
 
-            # Track model
-            if etype == "assistant" and msg.get("model"):
+            # Track model. Skip placeholder ids ("<synthetic>" on error /
+            # local-command entries) — see ingest.py; same poisoning bug.
+            if etype == "assistant" and msg.get("model") \
+                    and not str(msg["model"]).startswith("<"):
                 run.model = msg["model"]
 
             # Track tokens
