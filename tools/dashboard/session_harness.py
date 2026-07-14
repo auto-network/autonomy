@@ -279,7 +279,13 @@ class ClaudeSessionHarness:
         if raw_entry.get("type") != "assistant":
             return current_model
         model = raw_entry.get("message", {}).get("model")
-        if isinstance(model, str) and model:
+        # Claude Code writes error/local-command entries with the literal
+        # placeholder id "<synthetic>". Persisting it poisons the row's model
+        # column, and resume forwards it as --model <synthetic> — an
+        # unresolvable model, so the relaunched session errors at boot
+        # ("issue with the selected model ()", 2026-07-14). Real ids never
+        # start with "<".
+        if isinstance(model, str) and model and not model.startswith("<"):
             return model
         return current_model
 
