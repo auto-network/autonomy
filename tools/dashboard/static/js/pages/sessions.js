@@ -513,7 +513,14 @@
       _isLaunching(s) {
         if (s._launching) return true;
         var L = window.Autonomy && window.Autonomy.lifecycle;
-        return !!(L && L.startupVisible(s));
+        if (!L) return false;
+        // Closing is not launching: a STOPPING session (stopping/cleaning
+        // chip) must stay in the Active grid on its way down, not jump into
+        // the Launching section (startupVisible is the card-strip gate and
+        // is true for any non-ready/non-dead state, including teardown).
+        var key = L.lifecycleState(s);
+        if (key === 'stopping' || key === 'cleaning') return false;
+        return !!L.startupVisible(s);
       },
       get launching() {
         var self = this;
@@ -706,6 +713,14 @@
         setTimeout(function() {
           self._recentRefreshQueued = false;
           self._fetchRecent();
+          // The endpoint serves a cache the server recomputes every ~5s off
+          // the request path. This fetch fires 150ms after registry churn —
+          // e.g. a session just ENDED — so it reads the PRE-churn snapshot
+          // and the freshly-ended card never appears (until some later
+          // manual fetch). Echo one more fetch after a full refresher
+          // cycle so the settled list always lands.
+          clearTimeout(self._recentEchoTimer);
+          self._recentEchoTimer = setTimeout(function() { self._fetchRecent(); }, 6500);
         }, 150);
       },
       init() {
