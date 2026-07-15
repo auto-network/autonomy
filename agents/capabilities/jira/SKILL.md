@@ -1,6 +1,6 @@
 ---
 name: jira
-description: Jira issue tracker (broker-backed, no credentials in the workspace). Read and search tickets, run the workspace's named queries, download attachments; post comments, set the Confirm Plan field, create tickets, upload attachments — every write pauses for operator approval.
+description: Jira issue tracker (broker-backed, no credentials in the workspace). Read and search tickets, run the workspace's named queries, download attachments; post comments, update Description/Confirm Plan and other rich-text fields (with inline images), create tickets, upload attachments — every write pauses for operator approval.
 ---
 
 # Jira capability — agent skill
@@ -56,10 +56,40 @@ Results page by opaque token: pass a returned `next_page_token` back via
 ```bash
 jira-comment ENTERPRISE-8385 -f findings.md     # or: echo "..." | jira-comment KEY
 jira-confirm-plan ENTERPRISE-8385 -f plan.md    # sets the Confirm Plan field
+jira-update ENTERPRISE-8385 --field Description -f body.md   # set any rich-text field
 jira-create payload.json                        # create a ticket
 jira-attach ENTERPRISE-8385 repro.log           # upload an attachment (10MB cap)
 jira-transition ENTERPRISE-8385 'Code Review'   # move through a workflow transition
 ```
+
+`jira-update` sets any **rich-text** field by display name (`Description`,
+`Confirm Plan`, textarea custom fields — or a literal `customfield_NNNNN`
+id). The id is discovered from the ticket's editmeta host-side, so display
+names are portable. The body is markdown. Option/user/array fields are not
+settable here — those belong on transition screens (`jira-transition
+--field`) or ticket creation. `jira-confirm-plan` remains the idiomatic
+shortcut for Confirm Plan.
+
+### Inline images
+
+In `jira-comment`, `jira-confirm-plan`, and `jira-update` bodies, a markdown
+image **alone on its line** whose target names an existing attachment of the
+same ticket renders inline at that spot:
+
+```bash
+jira-attach ENTERPRISE-8385 failure-screenshot.png     # first: attach (approval)
+cat > body.md <<'EOF'
+The dialog renders behind the viewer:
+
+![failure](failure-screenshot.png)
+EOF
+jira-update ENTERPRISE-8385 --field Description -f body.md
+```
+
+Resolution happens host-side at execution time by filename. An image whose
+target matches no attachment (or an image in the middle of a sentence) stays
+as literal text — the write never fails over an image. Attach files first;
+duplicate filenames resolve to the newest upload.
 
 ### Transitions
 
