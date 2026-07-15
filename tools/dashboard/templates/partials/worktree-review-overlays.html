@@ -550,7 +550,7 @@
 </template>
 
 <template x-if="approvalRequest">
-  <div class="fixed inset-0 z-50 overflow-y-auto bg-gray-950"
+  <div class="approval-request-overlay fixed inset-0 z-50 overflow-y-auto bg-gray-950"
        @click.self="approvalRequest = null"
        @keydown.escape.window="approvalRequest = null"
        data-testid="approval-request-overlay">

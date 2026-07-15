@@ -1561,6 +1561,13 @@
       background: #030712;
       padding-top: 0.75rem;
     }
+    /* The approval-request dialog must beat the session viewer layer
+       (z-index 90) and an open review overlay (120): an incoming
+       approval is the operator's next action wherever they are. The
+       partial's own z-50 only suffices against plain page content. */
+    #worktree-review-layer .approval-request-overlay {
+      z-index: 130;
+    }
     #worktree-review-layer .worktree-review-shell {
       min-height: 100vh;
       max-width: 100%;
