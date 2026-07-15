@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Usage: jira-update ISSUE_KEY --field "Description" -f body.md   (or stdin)
+# Sets any rich-text field by display name (or customfield_NNNNN id) — staged
+# for operator approval; blocks until decided. The field id is discovered
+# from the issue's editmeta host-side at execution time, so display names
+# work across instances. Rich-text fields only (Description, Confirm Plan,
+# textarea custom fields): the body is markdown, converted to ADF host-side.
+# Option/user/array fields are not settable here — those belong on
+# transition screens (jira-transition --field) or ticket creation.
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/_jira_lib.sh"
+
+KEY="${1:-}"
+[ -n "$KEY" ] || jira_fail "usage: jira-update ISSUE_KEY --field NAME -f body.md (or stdin)"
+shift
+
+FIELD=""
+if [ "${1:-}" = "--field" ]; then
+  [ -n "${2:-}" ] || jira_fail "jira-update: --field needs a value (e.g. --field Description)"
+  FIELD="$2"; shift 2
+fi
+[ -n "$FIELD" ] || jira_fail "jira-update: --field NAME is required (e.g. --field Description)"
+
+body_file="$(mktemp)"; req_file="$(mktemp)"
+trap 'rm -f "$body_file" "$req_file"' EXIT
+jira_read_body "$@" > "$body_file"
+[ -s "$body_file" ] || jira_fail "jira-update: empty body"
+
+python3 - "$SESSION" "$KEY" "$body_file" "$ORG" "$FIELD" > "$req_file" <<'PY'
+import json, re, sys
+session, key, path, org, field = sys.argv[1:6]
+# A literal customfield id skips editmeta name discovery host-side.
+field_key = "field_id" if re.fullmatch(r"customfield_\d+", field) else "field_name"
+print(json.dumps({"kind": "jira_write", "session": session, "request": {
+    "op": "set_field", "key": key, "org": org, field_key: field,
+    "body_markdown": open(path).read()}}))
+PY
+jira_approval_wait "$req_file"

@@ -50,6 +50,47 @@ def test_adf_round_trip_preserves_meaning():
     assert "## Steps" in back and "1. run `psql`" in back and "plain line" in back
 
 
+def test_image_targets_finds_block_images_only():
+    md = ("intro with inline ![nope](inline.png) stays text\n"
+          "![screenshot](failure.png)\n"
+          "  ![padded](padded.png)  \n"
+          "![](bare.png)\n")
+    assert adf.image_targets(md) == ["failure.png", "padded.png", "bare.png"]
+
+
+def test_markdown_to_adf_media_resolution():
+    md = "Before\n![the failure](shot.png)\n![missing](gone.png)\nAfter"
+    uuid = "9ea8bd05-3372-4f5c-9c8e-8e1b7f6f2a10"
+    doc = adf.markdown_to_adf(
+        md, media_resolver={"shot.png": uuid}.get)
+    types = [n["type"] for n in doc["content"]]
+    assert types == ["paragraph", "mediaSingle", "paragraph", "paragraph"]
+    media = doc["content"][1]["content"][0]
+    assert media == {"type": "media", "attrs": {
+        "type": "file", "id": uuid, "collection": "", "alt": "the failure"}}
+    # The unresolvable reference stays literal text — nothing is dropped.
+    assert doc["content"][2]["content"][0]["text"] == "![missing](gone.png)"
+
+
+def test_markdown_to_adf_without_resolver_is_unchanged():
+    doc = adf.markdown_to_adf("![alt](shot.png)")
+    assert [n["type"] for n in doc["content"]] == ["paragraph"]
+
+
+def test_adf_to_markdown_renders_media_nodes():
+    doc = {"type": "doc", "version": 1, "content": [
+        {"type": "mediaSingle", "attrs": {"layout": "center"}, "content": [
+            {"type": "media", "attrs": {"type": "file", "id": "u-u-i-d",
+                                        "alt": "shot.png"}}]},
+        {"type": "mediaGroup", "content": [
+            {"type": "media", "attrs": {"type": "external",
+                                        "url": "https://x/img.png"}}]},
+    ]}
+    back = adf.adf_to_markdown(doc)
+    assert "![shot.png](media:u-u-i-d)" in back
+    assert "![media](https://x/img.png)" in back
+
+
 def test_process_ticket_converts_all_adf(tmp_path):
     raw = {
         "key": "ENT-1",
@@ -161,6 +202,76 @@ def test_comment_sends_adf_and_shapes_response(jira_env, monkeypatch):
     _mock(monkeypatch, handler)
     out = api.add_comment(api.JiraConfig.resolve(), "ENT-1", "root cause: …")
     assert out == {"id": "64029", "author": "Op", "created": "now"}
+
+
+def test_comment_embeds_attached_images_as_media(jira_env, monkeypatch):
+    """A block-level ``![alt](filename)`` referencing an issue attachment
+    becomes a mediaSingle node. The media UUID only exists in the signed
+    URL the content endpoint redirects to, so resolution parses Location
+    from an unfollowed GET."""
+    uuid = "9ea8bd05-3372-4f5c-9c8e-8e1b7f6f2a10"
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/rest/api/3/issue/ENT-1":
+            assert request.url.params["fields"] == "attachment"
+            return httpx.Response(200, json={"fields": {"attachment": [
+                {"id": "9000", "filename": "failure.png", "created": "2026-01-01"},
+                {"id": "10001", "filename": "failure.png", "created": "2026-07-01"},
+            ]}})
+        if request.url.path == "/rest/api/3/attachment/content/10001":
+            return httpx.Response(303, headers={
+                "Location": f"https://api.media.test/file/{uuid}/binary?tok=x"})
+        assert request.url.path == "/rest/api/3/issue/ENT-1/comment"
+        body = json.loads(request.content)["body"]
+        types = [n["type"] for n in body["content"]]
+        assert types == ["paragraph", "mediaSingle", "paragraph"]
+        assert body["content"][1]["content"][0]["attrs"]["id"] == uuid
+        # Unattached filename fell back to literal text, not a failed write.
+        assert body["content"][2]["content"][0]["text"] == "![x](not-attached.png)"
+        return httpx.Response(201, json={"id": "1", "author": {}, "created": "c"})
+
+    _mock(monkeypatch, handler)
+    api.add_comment(api.JiraConfig.resolve(), "ENT-1",
+                    "See:\n![shot](failure.png)\n![x](not-attached.png)")
+    # Duplicate filename resolved to the NEWEST attachment (id 10001).
+    assert "/rest/api/3/attachment/content/10001" in calls
+
+
+def test_bodies_without_images_skip_media_resolution(jira_env, monkeypatch):
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(201, json={"id": "1", "author": {}, "created": "c"})
+
+    _mock(monkeypatch, handler)
+    api.add_comment(api.JiraConfig.resolve(), "ENT-1",
+                    "plain text, inline ![img](x.png) included")
+    assert calls == ["/rest/api/3/issue/ENT-1/comment"]
+
+
+def test_set_field_embeds_attached_images_as_media(jira_env, monkeypatch):
+    uuid = "0f0e0d0c-0b0a-4123-8456-789abcdef012"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rest/api/3/issue/ENT-1" and request.method == "GET":
+            return httpx.Response(200, json={"fields": {"attachment": [
+                {"id": "77", "filename": "arch.png", "created": "2026-07-01"}]}})
+        if request.url.path == "/rest/api/3/attachment/content/77":
+            return httpx.Response(303, headers={
+                "Location": f"https://api.media.test/file/{uuid}/binary"})
+        assert (request.method, request.url.path) == ("PUT", "/rest/api/3/issue/ENT-1")
+        value = json.loads(request.content)["fields"]["description"]
+        assert value["content"][0]["type"] == "mediaSingle"
+        assert value["content"][0]["content"][0]["attrs"]["id"] == uuid
+        return httpx.Response(204)
+
+    _mock(monkeypatch, handler)
+    out = api.set_field(api.JiraConfig.resolve(), "ENT-1", "description",
+                        "![arch](arch.png)")
+    assert out == {"field_id": "description"}
 
 
 def test_editmeta_discovers_field_id(jira_env, monkeypatch):

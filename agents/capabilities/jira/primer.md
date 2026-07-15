@@ -13,6 +13,8 @@ outcome or the decline).
 - `jira-attachment ID [-o FILE]` — download an attachment (ids in `jira-read`)
 - `jira-comment KEY -f body.md` — post a comment *(operator approval)*
 - `jira-confirm-plan KEY -f plan.md` — set the Confirm Plan field *(operator approval)*
+- `jira-update KEY --field Description -f body.md` — set any rich-text field
+  by display name *(operator approval)*
 - `jira-create payload.json` — create a ticket *(operator approval)*
 - `jira-attach KEY FILE` — upload an attachment *(operator approval)*
 - `jira-transition KEY 'Name' [--field 'Name=value' …]` — move through a
@@ -26,5 +28,8 @@ QA instructions to reproduce the bug and prove the fix — command-by-command
 narrative: findings, discussion, corrections. Don't dump repro steps into a
 comment — put them in Confirm Plan via `jira-confirm-plan`.
 
-Markdown in bodies is converted to Jira's document format host-side. For full
-usage see `agents/capabilities/jira/SKILL.md`.
+Markdown in bodies is converted to Jira's document format host-side. A
+markdown image alone on its line whose target names one of the ticket's
+attachments renders inline (attach first with `jira-attach`); anything
+unresolvable stays literal text. For full usage see
+`agents/capabilities/jira/SKILL.md`.

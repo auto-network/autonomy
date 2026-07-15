@@ -13,11 +13,36 @@ all ADF already converted to markdown.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
+
+# A block-level markdown image: the image is the whole line. Only these can
+# become ADF media nodes — mediaSingle is a block node, so an image in the
+# middle of a paragraph has no ADF equivalent and stays literal text.
+_BLOCK_IMAGE = re.compile(r'^!\[([^\]]*)\]\(([^)\s]+)\)\s*$')
 
 
-def markdown_to_adf(markdown_text: str) -> dict[str, Any]:
-    """Convert markdown to an ADF document node."""
+def image_targets(markdown_text: str) -> list[str]:
+    """The targets of block-level ``![alt](target)`` lines, in order.
+    Callers use this to decide whether media resolution is needed at all
+    (and which attachment filenames to resolve) before converting."""
+    out = []
+    for line in markdown_text.split('\n'):
+        m = _BLOCK_IMAGE.match(line.strip())
+        if m:
+            out.append(m.group(2))
+    return out
+
+
+def markdown_to_adf(markdown_text: str,
+                    media_resolver: Callable[[str], str | None] | None = None,
+                    ) -> dict[str, Any]:
+    """Convert markdown to an ADF document node.
+
+    *media_resolver* maps a block-image target (``![alt](target)`` alone on a
+    line) to a media-services file UUID, or ``None`` when it can't. Resolved
+    images become ``mediaSingle`` nodes — how Jira Cloud renders an attachment
+    inline. Unresolved (or with no resolver) the line stays literal text, the
+    pre-media behavior, so nothing is ever lost."""
 
     lines = markdown_text.split('\n')
     content = []
@@ -140,7 +165,22 @@ def markdown_to_adf(markdown_text: str) -> dict[str, Any]:
             i += 1
             continue
         else:
-            content.append({"type": "paragraph", "content": _parse_inline(line)})
+            image = _BLOCK_IMAGE.match(line.strip())
+            media_id = (media_resolver(image.group(2))
+                        if image and media_resolver else None)
+            if media_id:
+                attrs: dict[str, Any] = {"type": "file", "id": media_id,
+                                         "collection": ""}
+                if image.group(1):
+                    attrs["alt"] = image.group(1)
+                content.append({
+                    "type": "mediaSingle",
+                    "attrs": {"layout": "center"},
+                    "content": [{"type": "media", "attrs": attrs}],
+                })
+            else:
+                content.append({"type": "paragraph",
+                                "content": _parse_inline(line)})
 
         i += 1
 
@@ -234,6 +274,20 @@ def _process_content(content: list[dict[str, Any]]) -> list[str]:
 
         elif node_type == "table":
             lines.extend(_table_to_markdown(node))
+
+        elif node_type in ("mediaSingle", "mediaGroup"):
+            for media in node.get("content", []):
+                if media.get("type") != "media":
+                    continue
+                attrs = media.get("attrs", {})
+                alt = attrs.get("alt") or "media"
+                if attrs.get("type") == "external":
+                    lines.append(f"![{alt}]({attrs.get('url', '')})")
+                else:
+                    # File media ids are media-services UUIDs, not attachment
+                    # ids; the media: scheme marks them as non-downloadable
+                    # here (use the ticket's attachments list for content).
+                    lines.append(f"![{alt}](media:{attrs.get('id', '')})")
 
     return lines
 

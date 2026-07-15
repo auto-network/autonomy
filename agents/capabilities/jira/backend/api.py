@@ -16,9 +16,10 @@ vary per instance/project).
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -375,10 +376,61 @@ def transition_issue(cfg: JiraConfig, key: str, transition_name: str,
             "fields_set": sorted((payload.get("fields") or {}).keys())}
 
 
+# Signed media URLs look like https://api.media.atlassian.com/file/<uuid>/…
+_MEDIA_FILE_UUID = re.compile(
+    r"/file/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+    re.IGNORECASE)
+
+
+def _media_resolver(cfg: JiraConfig, key: str,
+                    targets: list[str]) -> Callable[[str], str | None]:
+    """Resolver mapping *key*'s attachment filenames -> media-services file
+    UUIDs, for inline (``mediaSingle``) embedding.
+
+    Jira's REST API never returns the media UUID directly; it only appears
+    in the signed media URL the attachment-content endpoint 303-redirects
+    to, so each referenced attachment costs one unfollowed GET whose
+    ``Location`` is parsed. Filenames that aren't attachments (or whose
+    redirect doesn't carry a UUID) resolve to ``None`` — the converter then
+    leaves the image line as literal text rather than failing the write."""
+    with _client(cfg) as c:
+        resp = c.get(f"/rest/api/3/issue/{key}",
+                     params={"fields": "attachment"})
+        _check(resp, f"read {key} attachments")
+        rows = (resp.json().get("fields") or {}).get("attachment") or []
+        by_name: dict[str, dict] = {}
+        for a in rows:
+            name = a.get("filename")
+            # Duplicate filenames: keep the newest upload.
+            if name and (name not in by_name
+                         or (a.get("created") or "") > (by_name[name].get("created") or "")):
+                by_name[name] = a
+        mapping: dict[str, str] = {}
+        for target in dict.fromkeys(targets):
+            row = by_name.get(target)
+            if not row or not row.get("id"):
+                continue
+            redirect = c.get(f"/rest/api/3/attachment/content/{row['id']}",
+                             follow_redirects=False)
+            match = _MEDIA_FILE_UUID.search(redirect.headers.get("location", ""))
+            if match:
+                mapping[target] = match.group(1)
+    return mapping.get
+
+
+def _rich_body(cfg: JiraConfig, key: str, body_markdown: str) -> dict[str, Any]:
+    """Markdown -> ADF, embedding block-image references to *key*'s
+    attachments as inline media. Resolution only runs when the body
+    actually references images."""
+    targets = adf.image_targets(body_markdown)
+    resolver = _media_resolver(cfg, key, targets) if targets else None
+    return adf.markdown_to_adf(body_markdown, media_resolver=resolver)
+
+
 def add_comment(cfg: JiraConfig, key: str, body_markdown: str) -> dict[str, Any]:
     with _client(cfg) as c:
         resp = c.post(f"/rest/api/3/issue/{key}/comment",
-                      json={"body": adf.markdown_to_adf(body_markdown)})
+                      json={"body": _rich_body(cfg, key, body_markdown)})
         _check(resp, f"comment on {key}")
         body = resp.json()
     return {"id": body.get("id"),
@@ -392,7 +444,7 @@ def set_field(cfg: JiraConfig, key: str, field_id: str,
     Success is HTTP 204 with no body."""
     with _client(cfg) as c:
         resp = c.put(f"/rest/api/3/issue/{key}",
-                     json={"fields": {field_id: adf.markdown_to_adf(body_markdown)}})
+                     json={"fields": {field_id: _rich_body(cfg, key, body_markdown)}})
         _check(resp, f"set {field_id} on {key}")
     return {"field_id": field_id}
 
