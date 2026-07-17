@@ -160,6 +160,17 @@ def test_first_org_from_env(tmp_path, monkeypatch):
     assert not (tmp_path / "data" / "orgs" / "autonomy.db").exists()
 
 
+def test_startup_bootstrap_respects_operator_named_org(tmp_path):
+    """Dashboard startup (no arg, no env) must not manufacture a default
+    'autonomy' org next to one the operator already created via init."""
+    initialize(tmp_path, first_org="acme", tls=False)
+    from tools.graph import org_ops
+
+    orgs = org_ops.ensure_bootstrap_orgs(root=tmp_path / "data" / "orgs")
+    assert {o.slug for o in orgs} == {"acme", "personal"}
+    assert not (tmp_path / "data" / "orgs" / "autonomy.db").exists()
+
+
 def test_default_first_org_is_autonomy(tmp_path):
     initialize(tmp_path, tls=False)
     assert (tmp_path / "data" / "orgs" / "autonomy.db").exists()
