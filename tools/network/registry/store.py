@@ -622,6 +622,7 @@ class RegistryStore:
             "entry_id": row["entry_id"],
         }
 
+    @_locked
     def witness_tip(self, org_uuid: str, topic: str) -> Optional[dict]:
         """The current head-set attestation entry, or ``None`` if empty."""
         row = self._conn.execute(
@@ -631,6 +632,7 @@ class RegistryStore:
         ).fetchone()
         return self._witness_row(row) if row is not None else None
 
+    @_locked
     def append_witness(
         self, org_uuid: str, topic: str, heads: list, publisher: str, *, now: int
     ) -> dict:
@@ -662,6 +664,7 @@ class RegistryStore:
         self._conn.commit()
         return {"entry": entry, "entry_id": eid}
 
+    @_locked
     def witness_since(
         self, org_uuid: str, topic: str, since: int, limit: int = 256
     ) -> list:
