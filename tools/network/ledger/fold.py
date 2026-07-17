@@ -216,6 +216,7 @@ class FoldState:
         ctx = folder.ctx
         self.heads: tuple = folder.heads
         self.org: str = folder.org
+        self.genesis_id: str = folder.genesis_id
         self.root: str = folder.root_at(ctx)
         self.lineage: tuple = tuple(folder.lineage_at(ctx))
         self.valid: Dict[str, bool] = dict(folder.valid)
@@ -258,6 +259,19 @@ class FoldState:
     def authority(self, key: str) -> frozenset:
         """Scope patterns *key* currently holds (root holds ``{'*'}``)."""
         return self._held.get(key, frozenset())
+
+    def authority_map(self) -> Dict[str, frozenset]:
+        """Every key with any held authority → its scope patterns (the
+        live-key set; projection layers read this)."""
+        return {k: frozenset(v) for k, v in self._held.items() if v}
+
+    def delegable_map(self) -> Dict[str, frozenset]:
+        return {k: frozenset(v) for k, v in self._deleg.items() if v}
+
+    @property
+    def bare_roles(self) -> Dict[str, tuple]:
+        """Role grants to keys that are not claimed member personas."""
+        return dict(self._bare_roles)
 
     def delegable(self, key: str) -> frozenset:
         """Scope patterns *key* may re-delegate."""

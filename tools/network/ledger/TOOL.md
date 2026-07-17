@@ -5,8 +5,9 @@ authority ledger: a **hash-linked DAG of signed authority events** plus the
 **deterministic fold** that turns the DAG into authority state. Built on
 idkit (`tools/network/idkit/` — the only dependency besides `cryptography`).
 
-Spec: graph note `eb245082-b76` §2–3, §11 · Bead: `auto-16cjl` (F1).
-Downstream: F2 storage/projections, F3 sync, F5 invites, F7 recovery.
+Spec: graph note `eb245082-b76` §2–3, §11 · Beads: `auto-16cjl` (F1 core),
+`auto-0kkpq` (F2 storage/projections). Downstream: F3 sync, F5 invites,
+F7 recovery.
 
 ## Data model
 
@@ -122,6 +123,44 @@ assert fold(replica).fingerprint() == state.fingerprint()
 
 The fold never reads the wall clock: pass `now` (unix ms) to evaluate
 invite expiry / delegation TTLs, omit it for a time-independent state.
+
+## Storage & projections (F2)
+
+`store.py` — **LedgerStore**, the per-org SQLite replica
+(`data/orgs/<slug>.ledger.db`, `org_ledger_db_path()` respects
+`AUTONOMY_ORGS_DIR`). Every open hydrates the full event set through the
+anti-malleable parser and verifies each row's content address
+(sha256(wire) == event_id) plus the heads table — silent DB tampering
+raises `TamperError` at open. Every append runs full F1 structural
+verification before the row persists.
+
+**L8 is enforced three times**: the event parser (unknown types cannot be
+minted or parsed), an independent whitelist check in `LedgerStore.append`
+(catches hand-constructed Event objects), and a SQL
+`CHECK (event_type IN (...))` on the events table (catches raw INSERTs).
+
+`projections.py` — fold-derived read models: `roster` (member rows with
+sponsor provenance), `roles` (role matrix with holders), `live-keys`
+(key → held scope patterns). Ops are the replicated primitive;
+projections are rebuildable caches stamped with the heads + fingerprint
+they derive from, rendered as canonical JSON so
+`LedgerStore.rebuild_projections()` is byte-identical after a wipe.
+`ledger_state_payload()` builds the replica-state document.
+
+**Checkpoints** become meaningful here: `checkpoint.state_hash` pins the
+fold fingerprint at the checkpoint's *parents*;
+`LedgerStore.verify_checkpoint()` re-derives and compares, and
+`LedgerStore.cold_join(path, bundle, checkpoint_id)` bootstraps a fresh
+replica only if the received history re-folds to the attested hash —
+tampered or truncated bundles cannot cold-join.
+
+**Graph Settings contracts** (`tools/graph/schemas/network_ledger.py`):
+`autonomy.network.ledger-state#1` (heads, fingerprint, last witnessed
+head, per-peer sync cursor — hashes only, L8 tripwire rejects smuggled
+event content) and `autonomy.network.ledger-projection#1` (the read
+models above, shape-validated per projection kind). Cross-pin tests
+validate real fold output against the schemas so contract and library
+cannot drift.
 
 ## Structural admission (Ledger.add)
 
