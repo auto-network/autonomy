@@ -62,6 +62,7 @@ from . import turn_correction  # noqa: F401 — autonomy.workspace.turn_correcti
 from . import claude_credentials  # noqa: F401 — dashboard.claude.credentials#1
 from . import claude_setup_tokens  # noqa: F401 — dashboard.claude.setup_tokens#1
 from . import feature_flags  # noqa: F401 — dashboard.feature_flags#1
+from . import bootstrap_allowlist  # noqa: F401 — autonomy.org.bootstrap-allowlist#1
 
 __all__ = [
     "SchemaValidationError",

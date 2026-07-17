@@ -1,0 +1,317 @@
+"""Idempotent first-run initialization (bead auto-q1fsp, H3).
+
+Turns a fresh checkout on a clean machine into a working **empty**
+deployment, from nothing:
+
+* data directories (``data/``, ``data/orgs``, ``data/agent-runs``,
+  ``data/session-traces``),
+* an empty schema'd ``data/graph.db``,
+* per-org DBs: ``personal`` plus one operator-named first org,
+* default Settings — org identity seeds plus the bootstrap
+  public-surface allowlist (``autonomy.org.bootstrap-allowlist#1``,
+  seeded from the committed curation YAML; ties to bead auto-mu1n1),
+* dashboard-side operational DBs (dashboard / auth / dispatch /
+  approval-requests / commit-workflow),
+* a TLS keypair at ``data/tls.crt`` + ``data/tls.key`` (self-signed;
+  ``start-dashboard.sh`` picks the pair up automatically). For a
+  browser-trusted cert use Tailscale (``renew-tls-cert.sh``) or
+  terminate TLS in a tunnel/reverse proxy with Let's Encrypt — see
+  ``DEPLOY.md``.
+
+Design: graph://dc310166-911. Every step is idempotent — pre-existing
+files, DBs, org rows and Settings are left untouched, so running init
+twice is a no-op the second time (``InitReport.changed`` is ``False``).
+Nothing here assumes seeded content: zero pre-existing graph rows is
+the expected state, not an error.
+
+Library entry point is :func:`initialize`; the CLI wrapper lives in
+``__main__.py`` (``python -m tools.init``).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import socket
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Directories the running system expects under <root>/data. Kept to the
+# documented set (DEPLOY.md); services create deeper structure lazily.
+DATA_SUBDIRS = ("orgs", "agent-runs", "session-traces")
+
+ALLOWLIST_YAML = (
+    REPO_ROOT / "tools" / "graph" / "curation" / "autonomy-bootstrap-allowlist.yaml"
+)
+
+# Step actions
+CREATED = "created"
+EXISTS = "exists"
+SKIPPED = "skipped"
+
+
+@dataclass
+class InitStep:
+    name: str
+    action: str  # created | exists | skipped
+    detail: str = ""
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "action": self.action, "detail": self.detail}
+
+
+@dataclass
+class InitReport:
+    root: str
+    steps: list[InitStep] = field(default_factory=list)
+
+    @property
+    def changed(self) -> bool:
+        """True when any step actually created something this run."""
+        return any(s.action == CREATED for s in self.steps)
+
+    def add(self, name: str, action: str, detail: str = "") -> InitStep:
+        step = InitStep(name=name, action=action, detail=detail)
+        self.steps.append(step)
+        return step
+
+    def to_dict(self) -> dict:
+        return {
+            "root": self.root,
+            "changed": self.changed,
+            "steps": [s.to_dict() for s in self.steps],
+        }
+
+
+def initialize(
+    root: Path | str | None = None,
+    *,
+    first_org: str | None = None,
+    first_org_name: str | None = None,
+    tls: bool = True,
+    tls_domain: str | None = None,
+) -> InitReport:
+    """Initialize an empty deployment under *root* (default: this checkout).
+
+    Idempotent: every step detects pre-existing state and reports
+    ``exists`` instead of touching it. ``first_org`` names the first
+    shared org (falls back to ``AUTONOMY_FIRST_ORG`` env, then
+    ``autonomy``); ``first_org_name`` sets its display name.
+    """
+    root = Path(root).resolve() if root is not None else REPO_ROOT
+    report = InitReport(root=str(root))
+    data = root / "data"
+
+    _init_data_dirs(data, report)
+    _init_graph_db(data, report)
+    _init_orgs(data, report, first_org=first_org, first_org_name=first_org_name)
+    _init_operational_dbs(data, report)
+    _seed_bootstrap_allowlist(data, report)
+    if tls:
+        _init_tls(data, report, domain=tls_domain)
+    else:
+        report.add("tls", SKIPPED, "disabled by caller (--no-tls)")
+    return report
+
+
+# ── Steps ────────────────────────────────────────────────────
+
+
+def _init_data_dirs(data: Path, report: InitReport) -> None:
+    for rel in ("",) + DATA_SUBDIRS:
+        path = data / rel if rel else data
+        name = f"dir:data/{rel}" if rel else "dir:data"
+        if path.is_dir():
+            report.add(name, EXISTS, str(path))
+        else:
+            path.mkdir(parents=True, exist_ok=True)
+            report.add(name, CREATED, str(path))
+
+
+def _init_graph_db(data: Path, report: InitReport) -> None:
+    """Ensure ``data/graph.db`` exists with the full canonical schema.
+
+    Opening a :class:`GraphDB` on a fresh path runs ``schema.sql`` plus
+    every migration — all idempotent, so we open unconditionally and
+    only report whether the file pre-existed.
+    """
+    from tools.graph.db import GraphDB
+
+    path = data / "graph.db"
+    existed = path.exists()
+    GraphDB(path).close()
+    report.add(
+        "graph.db",
+        EXISTS if existed else CREATED,
+        f"{path} (schema ensured)",
+    )
+
+
+def _init_orgs(
+    data: Path,
+    report: InitReport,
+    *,
+    first_org: str | None,
+    first_org_name: str | None,
+) -> None:
+    from tools.graph import org_ops
+
+    orgs_root = data / "orgs"
+    slug = org_ops.resolve_first_org_slug(first_org)
+    for org_slug in (slug, "personal"):
+        existed = (orgs_root / f"{org_slug}.db").exists()
+        report.add(
+            f"org:{org_slug}",
+            EXISTS if existed else CREATED,
+            str(orgs_root / f"{org_slug}.db"),
+        )
+    org_ops.ensure_bootstrap_orgs(
+        root=orgs_root, first_org=slug, first_org_name=first_org_name,
+    )
+
+
+def _init_operational_dbs(data: Path, report: InitReport) -> None:
+    """Dashboard-side sqlite stores, each via its own idempotent init_db."""
+    from agents import dispatch_db
+    from tools.dashboard.dao import (
+        approval_requests,
+        auth_db,
+        commit_workflow_db,
+        dashboard_db,
+    )
+
+    stores = (
+        ("dashboard.db", dashboard_db.init_db),
+        ("auth.db", auth_db.init_db),
+        ("dispatch.db", dispatch_db.init_db),
+        ("approval_requests.db", approval_requests.init_db),
+        ("commit_workflow.db", commit_workflow_db.init_db),
+    )
+    for filename, init_fn in stores:
+        path = data / filename
+        existed = path.exists()
+        init_fn(path)
+        report.add(filename, EXISTS if existed else CREATED, str(path))
+
+
+def _seed_bootstrap_allowlist(data: Path, report: InitReport) -> None:
+    """Seed ``autonomy.org.bootstrap-allowlist#1`` into ``personal.db``.
+
+    Records the upstream reference org's public surface (from the
+    committed curation YAML) so an empty deployment knows what canonical
+    content it subscribes to — without shipping any of that content
+    (graph://dc310166-911, comment a13a28c1). Skipped when the YAML is
+    absent; left untouched when the Setting already exists.
+    """
+    from tools.graph import schemas
+    from tools.graph.curation import allowlist as allowlist_mod
+    from tools.graph.db import GraphDB
+    from tools.graph.org_ops import _now_iso, uuid7
+    from tools.graph.schemas.bootstrap_allowlist import SCHEMA_REVISION, SET_ID
+
+    name = "setting:bootstrap-allowlist"
+    if not ALLOWLIST_YAML.exists():
+        report.add(name, SKIPPED, f"allowlist YAML not found: {ALLOWLIST_YAML}")
+        return
+
+    try:
+        allow = allowlist_mod.load(ALLOWLIST_YAML)
+    except Exception as exc:
+        report.add(name, SKIPPED, f"allowlist YAML unreadable: {exc}")
+        return
+
+    payload = {
+        "version": allow.version,
+        "canonical": list(allow.canonical),
+        "published": list(allow.published),
+        "source": str(ALLOWLIST_YAML.relative_to(REPO_ROOT)),
+    }
+    schemas.validate_payload(SET_ID, SCHEMA_REVISION, payload)
+
+    personal = data / "orgs" / "personal.db"
+    if not personal.exists():
+        report.add(name, SKIPPED, f"personal org DB missing: {personal}")
+        return
+
+    db = GraphDB(personal)
+    try:
+        row = db.conn.execute(
+            "SELECT id FROM settings WHERE set_id = ? AND key = ? "
+            "AND schema_revision = ?",
+            (SET_ID, allow.org, SCHEMA_REVISION),
+        ).fetchone()
+        if row is not None:
+            report.add(name, EXISTS, f"{SET_ID}#{SCHEMA_REVISION} key={allow.org}")
+            return
+        now = _now_iso()
+        db.conn.execute(
+            "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
+            "created_at, updated_at, expires_at) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                uuid7(), SET_ID, SCHEMA_REVISION, allow.org,
+                json.dumps(payload), now, now,
+                schemas.cache_expires_at(SET_ID, SCHEMA_REVISION, now),
+            ),
+        )
+        db.conn.commit()
+        report.add(name, CREATED, f"{SET_ID}#{SCHEMA_REVISION} key={allow.org}")
+    finally:
+        db.close()
+
+
+def _init_tls(data: Path, report: InitReport, *, domain: str | None) -> None:
+    """Self-signed keypair at ``data/tls.crt`` + ``data/tls.key``.
+
+    Good enough for LAN/tailnet HTTPS (browsers warn once). Never
+    overwrites: an existing pair reports ``exists``; a half-pair is left
+    alone for the operator to resolve. Missing/failing ``openssl``
+    degrades to ``skipped`` — the dashboard then serves plain HTTP.
+    """
+    crt, key = data / "tls.crt", data / "tls.key"
+    if crt.exists() and key.exists():
+        report.add("tls", EXISTS, f"{crt} + {key}")
+        return
+    if crt.exists() or key.exists():
+        half = crt if crt.exists() else key
+        report.add(
+            "tls", SKIPPED,
+            f"refusing to complete half-pair (only {half.name} exists); "
+            f"remove it or supply the missing file",
+        )
+        return
+
+    cn = domain or os.environ.get("DASHBOARD_DOMAIN") or socket.gethostname()
+    san = f"DNS:localhost,IP:127.0.0.1,DNS:{socket.gethostname()}"
+    if domain or os.environ.get("DASHBOARD_DOMAIN"):
+        san += f",DNS:{cn}"
+    cmd = [
+        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-sha256",
+        "-days", "825", "-nodes",
+        "-keyout", str(key), "-out", str(crt),
+        "-subj", f"/CN={cn}",
+        "-addext", f"subjectAltName={san}",
+    ]
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=60,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        report.add("tls", SKIPPED, f"openssl unavailable ({exc}); dashboard will serve HTTP")
+        return
+    if proc.returncode != 0:
+        # Never leave a half-pair behind on failure.
+        for p in (crt, key):
+            p.unlink(missing_ok=True)
+        report.add(
+            "tls", SKIPPED,
+            f"openssl failed (rc={proc.returncode}): {proc.stderr.strip()[:200]}",
+        )
+        return
+    key.chmod(0o600)
+    report.add("tls", CREATED, f"self-signed CN={cn} → {crt} + {key}")
