@@ -1,0 +1,203 @@
+"""E2E channel crypto — handshake pinning (I5) and the record layer."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+from tools.network.idkit import KeyPair, Subject, canonical_json, issue_cert
+from tools.network.relaykit.channel import (
+    CHUNK_SIZE,
+    ChannelCrypto,
+    HandshakeError,
+    RecordError,
+    build_client_hello,
+    build_server_hello,
+    parse_client_hello,
+    verify_server_hello,
+)
+
+from .conftest import ORG, TOKEN
+
+
+def handshake(root, session_key, session_cert, now):
+    """Run a full happy-path handshake; returns (client_crypto, server_crypto)."""
+    client_priv, client_hello = build_client_hello()
+    client_eph = parse_client_hello(client_hello)
+    server_priv, server_hello, server_th = build_server_hello(
+        session_key, session_cert, org=ORG, token=TOKEN, client_eph=client_eph
+    )
+    server_eph, client_th = verify_server_hello(
+        server_hello, root_pub=root.public_hex, org=ORG, token=TOKEN,
+        client_eph=client_eph, now=now,
+    )
+    assert client_th == server_th
+    return (
+        ChannelCrypto.client(client_priv, server_eph, client_th),
+        ChannelCrypto.server(server_priv, client_eph, server_th),
+    )
+
+
+class TestHandshake:
+    def test_happy_path_both_directions(self, root, session_key, session_cert, now):
+        client, server = handshake(root, session_key, session_cert, now)
+        for record in client.seal_message(b"hello from the viewer"):
+            message = server.open_record(record)
+        assert message == b"hello from the viewer"
+        for record in server.seal_message(b"hello from the dashboard"):
+            message = client.open_record(record)
+        assert message == b"hello from the dashboard"
+
+    def _server_hello(self, session_key, session_cert, client_eph):
+        _, server_hello, _ = build_server_hello(
+            session_key, session_cert, org=ORG, token=TOKEN, client_eph=client_eph
+        )
+        return server_hello
+
+    def test_mitm_server_eph_substitution_fails(self, root, session_key, session_cert, now):
+        """I5 core: a relay swapping in its OWN ECDH key cannot fix the
+        signature, so the viewer refuses the handshake."""
+        _, client_hello = build_client_hello()
+        client_eph = parse_client_hello(client_hello)
+        server_hello = self._server_hello(session_key, session_cert, client_eph)
+
+        mitm_eph = X25519PrivateKey.generate().public_key().public_bytes_raw().hex()
+        tampered = json.loads(server_hello)
+        tampered["eph_pub"] = mitm_eph
+        with pytest.raises(HandshakeError):
+            verify_server_hello(
+                canonical_json(tampered), root_pub=root.public_hex, org=ORG,
+                token=TOKEN, client_eph=client_eph, now=now,
+            )
+
+    def test_mitm_client_eph_substitution_fails(self, root, session_key, session_cert, now):
+        """The other MITM half: if the relay swapped the CLIENT eph on the
+        way to the dashboard, the dashboard signs the wrong client_eph and
+        the real viewer detects it."""
+        _, client_hello = build_client_hello()
+        real_client_eph = parse_client_hello(client_hello)
+        swapped_eph = X25519PrivateKey.generate().public_key().public_bytes_raw().hex()
+        # Dashboard saw (and signed) the relay's key, not the viewer's.
+        server_hello = self._server_hello(session_key, session_cert, swapped_eph)
+        with pytest.raises(HandshakeError):
+            verify_server_hello(
+                server_hello, root_pub=root.public_hex, org=ORG, token=TOKEN,
+                client_eph=real_client_eph, now=now,
+            )
+
+    def test_mitm_cert_substitution_fails(self, root, now):
+        """A relay minting its own root+cert chain can sign anything — but
+        it cannot chain to the org root the viewer pinned from the envelope."""
+        fake_root, fake_session = KeyPair.generate(), KeyPair.generate()
+        fake_cert = issue_cert(
+            fake_root, fake_session.public_hex, scope=("tunnel:serve",), org=ORG,
+            subject=Subject("operator", "mallory"),
+            not_before=now - 300, not_after=now + 86_400,
+        )
+        _, client_hello = build_client_hello()
+        client_eph = parse_client_hello(client_hello)
+        _, server_hello, _ = build_server_hello(
+            fake_session, fake_cert, org=ORG, token=TOKEN, client_eph=client_eph
+        )
+        with pytest.raises(HandshakeError):
+            verify_server_hello(
+                server_hello, root_pub=root.public_hex, org=ORG, token=TOKEN,
+                client_eph=client_eph, now=now,
+            )
+
+    def test_cert_without_tunnel_serve_scope_fails(self, root, session_key, now):
+        publisher = KeyPair.generate()
+        publisher_cert = issue_cert(
+            root, publisher.public_hex, scope=("link:publish",), org=ORG,
+            subject=Subject("operator", "op-1"),
+            not_before=now - 300, not_after=now + 86_400,
+        )
+        _, client_hello = build_client_hello()
+        client_eph = parse_client_hello(client_hello)
+        _, server_hello, _ = build_server_hello(
+            publisher, publisher_cert, org=ORG, token=TOKEN, client_eph=client_eph
+        )
+        with pytest.raises(HandshakeError):
+            verify_server_hello(
+                server_hello, root_pub=root.public_hex, org=ORG, token=TOKEN,
+                client_eph=client_eph, now=now,
+            )
+
+    def test_token_binding(self, root, session_key, session_cert, now):
+        """A SERVER_HELLO minted for one token cannot be replayed onto a
+        channel for another (the sig covers the token)."""
+        _, client_hello = build_client_hello()
+        client_eph = parse_client_hello(client_hello)
+        server_hello = self._server_hello(session_key, session_cert, client_eph)
+        with pytest.raises(HandshakeError):
+            verify_server_hello(
+                server_hello, root_pub=root.public_hex, org=ORG,
+                token="f" * 32, client_eph=client_eph, now=now,
+            )
+
+
+class TestRecordLayer:
+    def test_chunked_soak_1_55mb(self, root, session_key, session_cert, now):
+        """Q3 in-memory: a binder-sized message survives chunking intact."""
+        client, server = handshake(root, session_key, session_cert, now)
+        payload = bytes(range(256)) * (1_550_000 // 256 + 1)  # ≈1.55 MB
+        records = client.seal_message(payload)
+        assert len(records) == len(payload) // CHUNK_SIZE + 1
+        result = None
+        for record in records:
+            out = server.open_record(record)
+            if out is not None:
+                assert result is None
+                result = out
+        assert result == payload
+
+    def test_tampered_record_rejected(self, root, session_key, session_cert, now):
+        client, server = handshake(root, session_key, session_cert, now)
+        record = bytearray(client.seal_message(b"data")[0])
+        record[-1] ^= 0x01
+        with pytest.raises(RecordError):
+            server.open_record(bytes(record))
+
+    def test_replayed_record_rejected(self, root, session_key, session_cert, now):
+        client, server = handshake(root, session_key, session_cert, now)
+        record = client.seal_message(b"data")[0]
+        assert server.open_record(record) == b"data"
+        with pytest.raises(RecordError):
+            server.open_record(record)
+
+    def test_reordered_records_rejected(self, root, session_key, session_cert, now):
+        client, server = handshake(root, session_key, session_cert, now)
+        first = client.seal_message(b"x" * (CHUNK_SIZE + 1))
+        with pytest.raises(RecordError):
+            server.open_record(first[1])
+
+    def test_direction_separation(self, root, session_key, session_cert, now):
+        """A record sealed by the client cannot be opened as if it came
+        from the server (distinct directional keys + nonces + AAD)."""
+        client, _server = handshake(root, session_key, session_cert, now)
+        record = client.seal_message(b"data")[0]
+        with pytest.raises(RecordError):
+            client.open_record(record)  # client expects s2c records
+
+    def test_cross_channel_separation(self, root, session_key, session_cert, now):
+        """Records from one channel cannot be spliced into another — keys
+        derive from each handshake's transcript."""
+        client_a, _ = handshake(root, session_key, session_cert, now)
+        _, server_b = handshake(root, session_key, session_cert, now)
+        with pytest.raises(RecordError):
+            server_b.open_record(client_a.seal_message(b"data")[0])
+
+    def test_empty_message_roundtrip(self, root, session_key, session_cert, now):
+        client, server = handshake(root, session_key, session_cert, now)
+        records = client.seal_message(b"")
+        assert len(records) == 1
+        assert server.open_record(records[0]) == b""
+
+    def test_oversize_message_rejected(self, root, session_key, session_cert, now):
+        client, server = handshake(root, session_key, session_cert, now)
+        server._max_message_size = 16
+        with pytest.raises(RecordError):
+            for record in client.seal_message(b"z" * 64):
+                server.open_record(record)

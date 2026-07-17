@@ -28,7 +28,7 @@ import time
 import uuid
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 
 from tools.network.idkit import (
     ChainVerifyError,
@@ -44,6 +44,7 @@ from tools.network.idkit import (
 )
 from tools.network.idkit.keys import PUBLIC_KEY_HEX_LEN, _decode_hex
 
+from .relay import TunnelHub, tunnel_endpoint, viewer_endpoint
 from .signing import ENVELOPE_VERSION, MAX_CLOCK_SKEW, request_signing_input
 from .store import LinkGrant, OrgBinding, RegistryStore
 
@@ -249,8 +250,10 @@ def create_app(
     app = FastAPI(title="auto.network registry", version="1")
     store = RegistryStore(db_path)
     now_fn = now_fn or (lambda: int(time.time()))
+    hub = TunnelHub()
     app.state.store = store
     app.state.now_fn = now_fn
+    app.state.tunnel_hub = hub
 
     def now() -> int:
         return int(now_fn())
@@ -513,6 +516,16 @@ def create_app(
             # bootloader tries these before relay fallback once populated.
             "endpoints": [],
         }
+
+    # -- §5.1 relay tunnel ------------------------------------------------------
+
+    @app.websocket("/t/{org_uuid}")
+    async def relay_tunnel(websocket: WebSocket, org_uuid: str):
+        await tunnel_endpoint(websocket, org_uuid, hub, store, now_fn)
+
+    @app.websocket("/v1/links/{token}/channel")
+    async def relay_viewer(websocket: WebSocket, token: str):
+        await viewer_endpoint(websocket, token, hub, store, now_fn)
 
     @app.get("/healthz")
     async def healthz():

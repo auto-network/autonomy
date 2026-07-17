@@ -54,6 +54,8 @@ Two anchors sit outside the chain rule by construction:
 | `POST /v1/revocations` | the record itself (root-/ancestor-signed) | body: `{org, record, revoked_cert}` wire strings; `revoked_cert` proves the I7 retention horizon |
 | `GET /v1/links/{token}/envelope` | none (bootloader) | unknown/expired/revoked/dead-binding → one indistinguishable 404 (anti-enumeration); `endpoints: []` is the §5.4 direct-connect seam |
 | `GET /healthz` | none | systemd/Caddy probe |
+| `WS /t/{org}` | `tunnel:serve` hello (chain to bound root) | §5.1 relay tunnel — one outbound dashboard connection per org; see `tools/network/relaykit/TOOL.md` |
+| `WS /v1/links/{token}/channel` | none (bootloader) | viewer end of the relay; every failure closes `4404` (anti-enumeration) |
 
 `subject.kind == "persona"` on any chain → `501 rung-2` (viewer authn is
 Track E). Revocation records are retained only until the revoked key's
