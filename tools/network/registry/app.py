@@ -24,7 +24,9 @@ are rejected until Track E lands.
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
 import re
 import time
 import uuid
@@ -32,6 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket
+from fastapi.responses import StreamingResponse
 
 from tools.network.idkit import (
     ChainVerifyError,
@@ -48,6 +51,7 @@ from tools.network.idkit import (
 )
 from tools.network.idkit.keys import PUBLIC_KEY_HEX_LEN, _decode_hex
 
+from .assertion import IDENTIFY_SCOPE, MAX_ASSERTION_TTL, parse_assertion
 from .relay import TunnelHub, _resolve_live_link, tunnel_endpoint, viewer_endpoint
 from .signing import ENVELOPE_VERSION, MAX_CLOCK_SKEW, request_signing_input
 from .store import LinkGrant, OrgBinding, RegistryStore
@@ -109,6 +113,50 @@ MAX_BUNDLE_BYTES = 4 * 1024 * 1024
 #: would otherwise poison honest pullers' mailbox drains
 MIN_BUNDLE_BYTES = 12 + 16
 MAX_TOPIC_PAGE = 256
+
+
+# -- E1 session linking (spec §4.7, §4.8, §6.8) ------------------------------
+#
+# A first-party auto.network session is a single opaque cookie: the
+# server holds all identity state keyed by the cookie's random id, the
+# browser holds nothing but the pointer (I1-adjacent: no identity material
+# in the browser beyond the session pointer). The cookie is HttpOnly so
+# page scripts cannot read it, SameSite=Lax because redemption is a
+# top-level POST from the auto.network origin itself.
+SESSION_COOKIE = "an_link_session"
+SESSION_TTL = 24 * 3600          # identified session lifetime (matches §6.3)
+ANON_SESSION_TTL = 3600          # an anonymous QR-minting session
+CHALLENGE_TTL = 60               # §4.8: "~60s" cross-device challenge
+SSE_MAX_WAIT = 30                # hard real-time cap on one SSE hold
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
+
+
+class ChallengeHub:
+    """In-memory SSE wakeups: challenge nonce → asyncio.Event.
+
+    Purely an optimization — the store is the source of truth for whether
+    a challenge was redeemed. A waiter that registers after ``notify`` (or
+    misses the event entirely) still resolves correctly by re-reading the
+    store when its wait ends.
+    """
+
+    def __init__(self):
+        self._events: dict = {}
+
+    def waiter(self, nonce: str) -> asyncio.Event:
+        event = self._events.get(nonce)
+        if event is None:
+            event = asyncio.Event()
+            self._events[nonce] = event
+        return event
+
+    def notify(self, nonce: str) -> None:
+        event = self._events.pop(nonce, None)
+        if event is not None:
+            event.set()
 
 
 class AuthContext:
@@ -320,6 +368,7 @@ def create_app(
     now_fn=None,
     base_url: str = "https://auto.network",
     witness_key: Optional[KeyPair] = None,
+    secure_cookies: bool = True,
 ) -> FastAPI:
     """Build the registry app.
 
@@ -330,20 +379,45 @@ def create_app(
     attestations with; a fresh one is generated when omitted, but a
     persistent deployment must pass a stable key — clients *pin* the
     witness public key, and rotating it silently would break split-view
-    detection. Discover/pin it via ``GET /v1/witness/pubkey``.
+    detection. Discover/pin it via ``GET /v1/witness/pubkey``. *secure_cookies*
+    marks session cookies ``Secure`` (production default); tests over
+    plain-http ``testserver`` set it False so the client keeps the cookie.
     """
     app = FastAPI(title="auto.network registry", version="1")
     store = RegistryStore(db_path)
     now_fn = now_fn or (lambda: int(time.time()))
     hub = TunnelHub()
     witness_key = witness_key or KeyPair.generate()
+    challenge_hub = ChallengeHub()
     app.state.store = store
     app.state.now_fn = now_fn
     app.state.tunnel_hub = hub
     app.state.witness_key = witness_key
+    app.state.challenge_hub = challenge_hub
 
     def now() -> int:
         return int(now_fn())
+
+    def _set_session_cookie(response: Response, session_id: str, max_age: int) -> None:
+        response.set_cookie(
+            key=SESSION_COOKIE,
+            value=session_id,
+            max_age=max_age,
+            httponly=True,
+            secure=secure_cookies,
+            samesite="lax",
+            path="/",
+        )
+
+    def _current_session(request: Request, t: int):
+        """The caller's live session, or None (missing/expired cookie)."""
+        session_id = request.cookies.get(SESSION_COOKIE)
+        if not session_id:
+            return None
+        session = store.get_session(session_id)
+        if session is None or session.expires_at < t:
+            return None
+        return session
 
     # -- §4.1 register binding ----------------------------------------------
 
@@ -578,7 +652,7 @@ def create_app(
     # -- §4.6 grant envelope (bootloader) -------------------------------------
 
     @app.get("/v1/links/{token}/envelope")
-    async def link_envelope(token: str):
+    async def link_envelope(token: str, request: Request):
         # Anti-enumeration (§5.3): unknown, expired, revoked, and
         # dead-binding tokens are all the SAME 404 — a prober learns
         # nothing about which failure they hit.
@@ -593,6 +667,22 @@ def create_app(
         binding = store.get_org(link.org_uuid)
         if binding is None or binding.expires_at < t:
             raise HTTPException(status_code=404, detail="unknown link")
+
+        # I12: identity attaches to a VIEW only when the grant requires it.
+        # A plain bearer (no-auth) grant carries no identity attribution
+        # even when the fetching browser holds a fully identified session —
+        # we do not so much as look up its identity here, and nothing is
+        # written. When require_auth grants land (rung 2) this is the seam
+        # where an identified session's attribution gets recorded.
+        if link.meta.get("require_auth"):
+            session = _current_session(request, t)
+            if session is not None and session.identified:
+                store.record_view_attribution(
+                    session.session_id, token,
+                    subject_kind=session.subject_kind,
+                    subject_id=session.subject_id,
+                    org_uuid=session.org_uuid, now=t,
+                )
         return {
             "org": link.org_uuid,
             "target_uuid": link.target_uuid,
@@ -640,6 +730,216 @@ def create_app(
                 "X-Content-Type-Options": "nosniff",
             },
         )
+
+    # -- §4.7 bootstrap-assertion redemption ------------------------------------
+
+    @app.post("/v1/link")
+    async def redeem_assertion(request: Request, response: Response):
+        """Redeem a single-use ``viewer:identify`` assertion for a session.
+
+        The person's own dashboard signed this; here we only VERIFY. If it
+        chains to a bound org root, is fresh, identify-scoped, and unspent,
+        the caller (or, in the QR case, the challenge-bound browser) walks
+        away identified — no login page. Personas are first-class (this is
+        the rung-2 surface the mutation gate fences off).
+        """
+        try:
+            assertion = parse_assertion(await _read_json(request))
+        except MalformedError as exc:
+            raise _bad_request(str(exc))
+        org_uuid = _require_uuid(assertion.org, "org")
+
+        t = now()
+        # I7 hygiene: sweep stale replay/session/challenge state each redeem.
+        store.purge_expired_assertions(now=t)
+        store.purge_expired_challenges(now=t)
+        store.purge_expired_sessions(now=t)
+
+        # Identify-only (§7A): any other scope is out of bounds, full stop.
+        if assertion.scope != IDENTIFY_SCOPE:
+            raise _forbidden(f"assertion scope must be {IDENTIFY_SCOPE!r}")
+
+        # Seconds-scale TTL, and currently within its window.
+        if assertion.not_after - assertion.not_before > MAX_ASSERTION_TTL:
+            raise _bad_request(f"assertion validity window exceeds {MAX_ASSERTION_TTL}s")
+        if not (assertion.not_before <= t <= assertion.not_after):
+            raise HTTPException(status_code=401, detail="assertion is expired or not yet valid")
+
+        # The assertion's own signature over its identity claim. This is
+        # self-contained (no binding needed), so it is checked BEFORE the
+        # binding lookup: a bad signature is 401 whether or not the org is
+        # bound, so 401-vs-403 never leaks which org UUIDs are registered.
+        try:
+            verify_signature(assertion.signer, assertion.sig, assertion.signing_input())
+        except MalformedError as exc:
+            raise _bad_request(str(exc))
+        except IdkitError:
+            raise HTTPException(status_code=401, detail="assertion signature does not verify")
+
+        # A missing/dead binding means there is no registered root to chain
+        # to — the same verdict (403) as a chain reaching an unbound root.
+        binding = store.get_org(org_uuid)
+        if binding is None or binding.expires_at < t:
+            raise _forbidden("assertion does not chain to a registered org root")
+
+        # Delegation chain signer → org root, identify-scoped. verify_chain
+        # accepts persona subjects; only the mutation gate rejects them.
+        try:
+            cert = DelegationCert.from_json(assertion.cert)
+        except MalformedError as exc:
+            raise _bad_request(f"cert: {exc}")
+        if cert.child_pub != assertion.signer:
+            raise _forbidden("cert does not delegate to the assertion signer")
+        store.purge_expired_revocations(now=t)
+        try:
+            result = verify_chain(
+                cert, binding.root_pub, org=org_uuid, now=t,
+                revocations=store.revocation_set(org_uuid),
+                required_scope=IDENTIFY_SCOPE,
+            )
+        except ChainVerifyError as exc:
+            raise _forbidden(f"{type(exc).__name__}: {exc}")
+        except MalformedError as exc:
+            raise _bad_request(str(exc))
+
+        # Single-use (fast path; consume_assertion below is the atomic guard).
+        if store.assertion_consumed(assertion.nonce):
+            raise HTTPException(status_code=401, detail="assertion already redeemed")
+
+        qr = assertion.challenge is not None
+        if qr:
+            # Cross-device (§4.8): upgrade the challenge-BOUND anonymous
+            # session, never the submitter's. Missing / expired / already
+            # redeemed challenge is one indistinguishable 404 — the QR
+            # nonce must not be an enumeration oracle.
+            challenge = store.get_challenge(assertion.challenge)
+            if challenge is None or challenge.redeemed_at is not None or challenge.expires_at < t:
+                raise HTTPException(status_code=404, detail="unknown challenge")
+            target_session = challenge.session_id
+        else:
+            # Same-browser: always mint a FRESH session id (rotate on
+            # identify), so a pre-seeded cookie cannot fixate the session
+            # that walks away identified. Only the QR path reuses an id —
+            # and there the reused id is the anonymous browser's own,
+            # chosen by that browser, never an attacker's.
+            target_session = generate_token()
+
+        # Commit. The nonce consume is the atomic anti-replay guard; a lost
+        # race (concurrent double redeem) surfaces as replay.
+        if not store.consume_assertion(assertion.nonce, org_uuid, expires_at=assertion.not_after):
+            raise HTTPException(status_code=401, detail="assertion already redeemed")
+        if qr and not store.redeem_challenge(assertion.challenge, now=t):
+            # Single-use challenge lost its race after we spent the nonce.
+            raise HTTPException(status_code=404, detail="unknown challenge")
+
+        store.identify_session(
+            target_session,
+            org_uuid=org_uuid,
+            subject_kind=result.subject_kind,
+            subject_id=result.subject_id,
+            dashboard_origin=assertion.dashboard_origin,
+            now=t,
+            expires_at=t + SESSION_TTL,
+        )
+
+        if qr:
+            # Wake the anonymous browser's SSE waiter. Deliberately set NO
+            # cookie on this response: the submitter (the PWA) is not the
+            # browser that got identity.
+            challenge_hub.notify(assertion.challenge)
+            return {"linked": True}
+
+        _set_session_cookie(response, target_session, SESSION_TTL)
+        return {
+            "linked": True,
+            "org": org_uuid,
+            "subject": {"kind": result.subject_kind, "id": result.subject_id},
+        }
+
+    # -- §4.8 QR cross-device challenge -----------------------------------------
+
+    @app.post("/v1/link/challenge")
+    async def mint_challenge(request: Request, response: Response):
+        """An anonymous browser mints a ~60s challenge bound to ITS session.
+
+        The nonce is rendered as a QR code; the operator's PWA scans it,
+        signs an assertion carrying the nonce, and submits it to ``/v1/link``
+        from its OWN channel — which upgrades this browser's session (§4.8).
+        """
+        t = now()
+        store.purge_expired_challenges(now=t)
+        store.purge_expired_sessions(now=t)
+
+        session = _current_session(request, t)
+        if session is None:
+            session_id = generate_token()
+            store.create_anonymous_session(session_id, now=t, expires_at=t + ANON_SESSION_TTL)
+            _set_session_cookie(response, session_id, ANON_SESSION_TTL)
+        else:
+            session_id = session.session_id
+
+        nonce = generate_token()
+        store.create_challenge(nonce, session_id, now=t, expires_at=t + CHALLENGE_TTL)
+        return {"challenge": nonce, "expires_at": t + CHALLENGE_TTL}
+
+    @app.get("/v1/link/challenge/{nonce}")
+    async def challenge_status(nonce: str):
+        """Poll fallback (and the deterministic contract behind the SSE
+        wait): whether the challenge has been redeemed. Missing or expired
+        is one 404 — same anti-enumeration verdict as the wait stream."""
+        t = now()
+        challenge = store.get_challenge(nonce)
+        if challenge is None or challenge.expires_at < t:
+            raise HTTPException(status_code=404, detail="unknown challenge")
+        return {"linked": challenge.redeemed_at is not None}
+
+    @app.get("/v1/link/challenge/{nonce}/wait")
+    async def challenge_wait(nonce: str):
+        """SSE: emit ``linked`` once the challenge is redeemed, or
+        ``expired`` when its window closes. A push optimization over the
+        poll endpoint above — same cursorless contract, store-authoritative."""
+        t = now()
+        challenge = store.get_challenge(nonce)
+        if challenge is None or challenge.expires_at < t:
+            raise HTTPException(status_code=404, detail="unknown challenge")
+
+        async def stream():
+            ch = store.get_challenge(nonce)
+            if ch is not None and ch.redeemed_at is not None:
+                yield _sse("linked", {"linked": True})
+                return
+            event = challenge_hub.waiter(nonce)
+            remaining = max(0, ch.expires_at - now()) if ch is not None else 0
+            try:
+                await asyncio.wait_for(event.wait(), timeout=min(remaining, SSE_MAX_WAIT))
+            except asyncio.TimeoutError:
+                pass
+            ch = store.get_challenge(nonce)
+            if ch is not None and ch.redeemed_at is not None:
+                yield _sse("linked", {"linked": True})
+            else:
+                yield _sse("expired", {"linked": False})
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
+    # -- §6.8 signed endpoint hints (identified sessions only) ------------------
+
+    @app.get("/v1/link/hints")
+    async def link_hints(request: Request):
+        """Serve the org's signed endpoint hints — ONLY to an identified
+        session (§6.8). An anonymous or unlinked browser learns nothing:
+        strangers get no auto-discovery of a dashboard's whereabouts."""
+        t = now()
+        session = _current_session(request, t)
+        if session is None or not session.identified:
+            raise _forbidden("endpoint hints require an identified session")
+        binding = store.get_org(session.org_uuid)
+        hints = binding.endpoint_hints if binding is not None else None
+        return {"endpoint_hints": hints or []}
 
     # -- §6 ledger-sync topics (F3): hints + encrypted mailbox ------------------
 

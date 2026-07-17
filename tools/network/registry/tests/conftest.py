@@ -44,7 +44,9 @@ def clock():
 
 @pytest.fixture
 def app(clock):
-    return create_app(":memory:", now_fn=clock)
+    # secure_cookies=False: the TestClient talks plain http to `testserver`
+    # and would silently drop Secure session cookies otherwise.
+    return create_app(":memory:", now_fn=clock, secure_cookies=False)
 
 
 @pytest.fixture
@@ -95,6 +97,27 @@ def agent_cert(root, session_key, session_cert, agent_key):
         scope=("link:publish",),
         org=ORG,
         subject=Subject("agent", "sess-42"),
+        not_before=NOW - 50,
+        not_after=NOW + 200 * DAY,
+        parent_cert=session_cert,
+    )
+
+
+@pytest.fixture
+def persona_key():
+    return KeyPair.generate()
+
+
+@pytest.fixture
+def persona_cert(session_key, session_cert, persona_key):
+    """A persona delegate: session -> persona, identify-only. This is the
+    leaf a picker mints an assertion off for 'link this browser as P'."""
+    return issue_cert(
+        session_key,
+        persona_key.public_hex,
+        scope=("viewer:identify",),
+        org=ORG,
+        subject=Subject("persona", "persona-P"),
         not_before=NOW - 50,
         not_after=NOW + 200 * DAY,
         parent_cert=session_cert,
