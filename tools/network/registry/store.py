@@ -32,8 +32,10 @@ never reads the wall clock, which is what makes TTL behavior testable.
 
 from __future__ import annotations
 
+import functools
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -226,20 +228,47 @@ class LinkChallenge:
     redeemed_at: Optional[int]
 
 
+def _locked(method):
+    """Serialize a store method under the instance lock.
+
+    A single ``sqlite3.Connection`` is shared across threads
+    (``check_same_thread=False``), and the ASGI server runs handlers in a
+    threadpool — so without serialization two requests can drive the same
+    connection/cursor at once and provoke SQLite API-misuse errors. Every
+    method that touches the connection holds a reentrant lock for its whole
+    body, so each method (a possibly multi-statement read-modify-write) is
+    atomic against every other. The lock is reentrant so a locked method
+    may call another locked method (e.g. ``publish_hint`` → ``latest_hint``)
+    without deadlock.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class RegistryStore:
     def __init__(self, db_path: str = ":memory:"):
+        # RLock, not Lock: locked methods legitimately nest (see _locked).
+        self._lock = threading.RLock()
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
 
+    @_locked
     def close(self) -> None:
         self._conn.close()
 
     # -- orgs ---------------------------------------------------------------
 
+    @_locked
     def get_org(self, org_uuid: str) -> Optional[OrgBinding]:
         row = self._conn.execute("SELECT * FROM orgs WHERE org_uuid = ?", (org_uuid,)).fetchone()
         if row is None:
@@ -255,6 +284,7 @@ class RegistryStore:
             endpoint_hints=json.loads(row["endpoint_hints"]) if row["endpoint_hints"] else None,
         )
 
+    @_locked
     def create_org(
         self,
         org_uuid: str,
@@ -297,6 +327,7 @@ class RegistryStore:
         )
         self._conn.commit()
 
+    @_locked
     def renew_org(self, org_uuid: str, *, now: int, expires_at: int) -> None:
         self._conn.execute(
             "UPDATE orgs SET expires_at = ?, renewed_at = ? WHERE org_uuid = ?",
@@ -304,6 +335,7 @@ class RegistryStore:
         )
         self._conn.commit()
 
+    @_locked
     def rebind_org(self, org_uuid: str, old_root_pub: str, new_root_pub: str, *, now: int) -> None:
         self._conn.execute(
             "UPDATE orgs SET root_pub = ? WHERE org_uuid = ?", (new_root_pub, org_uuid)
@@ -315,6 +347,7 @@ class RegistryStore:
         )
         self._conn.commit()
 
+    @_locked
     def update_recovery_policy(
         self, org_uuid: str, recovery_policy: str, recovery_pub: Optional[str]
     ) -> None:
@@ -324,6 +357,7 @@ class RegistryStore:
         )
         self._conn.commit()
 
+    @_locked
     def rebind_history(self, org_uuid: str) -> list:
         rows = self._conn.execute(
             "SELECT old_root_pub, new_root_pub, rebound_at FROM rebinds"
@@ -334,6 +368,7 @@ class RegistryStore:
 
     # -- links --------------------------------------------------------------
 
+    @_locked
     def get_link(self, token: str) -> Optional[LinkGrant]:
         row = self._conn.execute("SELECT * FROM links WHERE token = ?", (token,)).fetchone()
         if row is None:
@@ -352,6 +387,7 @@ class RegistryStore:
             subject_id=row["subject_id"],
         )
 
+    @_locked
     def create_link(self, grant: LinkGrant) -> None:
         self._conn.execute(
             "INSERT INTO links (token, org_uuid, target_uuid, target_type, meta,"
@@ -372,12 +408,14 @@ class RegistryStore:
         )
         self._conn.commit()
 
+    @_locked
     def revoke_link(self, token: str, *, now: int) -> None:
         self._conn.execute("UPDATE links SET revoked_at = ? WHERE token = ?", (now, token))
         self._conn.commit()
 
     # -- revocations ---------------------------------------------------------
 
+    @_locked
     def add_revocation(self, org_uuid: str, record: RevocationRecord) -> None:
         """Store a *verified* record; keep the longer-lived one on conflict."""
         existing = self._conn.execute(
@@ -400,6 +438,7 @@ class RegistryStore:
         )
         self._conn.commit()
 
+    @_locked
     def revocation_set(self, org_uuid: str) -> RevocationSet:
         """The org's live denylist, as the object ``verify_chain`` consumes."""
         rows = self._conn.execute(
@@ -410,6 +449,7 @@ class RegistryStore:
             rset.add(RevocationRecord.from_json(row["record"]))
         return rset
 
+    @_locked
     def get_revocation(self, org_uuid: str, revoked_key_id: str) -> Optional[RevocationRecord]:
         row = self._conn.execute(
             "SELECT record FROM revocations WHERE org_uuid = ? AND revoked_key_id = ?",
@@ -417,6 +457,7 @@ class RegistryStore:
         ).fetchone()
         return RevocationRecord.from_json(row["record"]) if row else None
 
+    @_locked
     def purge_expired_revocations(self, *, now: int) -> int:
         """I7 sweep: drop records past the revoked key's natural expiry."""
         cur = self._conn.execute("DELETE FROM revocations WHERE expires_at < ?", (now,))
@@ -425,6 +466,7 @@ class RegistryStore:
 
     # -- topics (F3 broker path — hints + encrypted mailbox, L6) ---------------
 
+    @_locked
     def publish_hint(
         self, org_uuid: str, topic: str, heads: list, signer_pub: str, *, now: int
     ) -> int:
@@ -449,6 +491,7 @@ class RegistryStore:
         self._conn.commit()
         return row[0]
 
+    @_locked
     def hints_since(self, org_uuid: str, topic: str, since: int, limit: int = 256) -> list:
         rows = self._conn.execute(
             "SELECT seq, heads, published_at FROM topic_hints"
@@ -460,6 +503,7 @@ class RegistryStore:
             for r in rows
         ]
 
+    @_locked
     def latest_hint(self, org_uuid: str, topic: str) -> Optional[dict]:
         row = self._conn.execute(
             "SELECT seq, heads, published_at FROM topic_hints"
@@ -470,6 +514,7 @@ class RegistryStore:
             return None
         return {"seq": row["seq"], "heads": json.loads(row["heads"]), "published_at": row["published_at"]}
 
+    @_locked
     def deposit_bundle(
         self,
         org_uuid: str,
@@ -500,6 +545,7 @@ class RegistryStore:
         self._conn.commit()
         return row[0]
 
+    @_locked
     def bundles_since(
         self,
         org_uuid: str,
@@ -524,6 +570,7 @@ class RegistryStore:
             out.append(entry)
         return out
 
+    @_locked
     def bundles_with(self, org_uuid: str, topic: str, want: list, limit: int = 64) -> list:
         """Fetch-missing-by-hash: bundles containing any wanted event id.
 
@@ -640,12 +687,14 @@ class RegistryStore:
             expires_at=row["expires_at"],
         )
 
+    @_locked
     def get_session(self, session_id: str) -> Optional[LinkSession]:
         row = self._conn.execute(
             "SELECT * FROM link_sessions WHERE session_id = ?", (session_id,)
         ).fetchone()
         return self._row_to_session(row) if row is not None else None
 
+    @_locked
     def create_anonymous_session(self, session_id: str, *, now: int, expires_at: int) -> None:
         """Open a fresh anonymous session (identified=0, no identity)."""
         self._conn.execute(
@@ -656,36 +705,7 @@ class RegistryStore:
         )
         self._conn.commit()
 
-    def identify_session(
-        self,
-        session_id: str,
-        *,
-        org_uuid: str,
-        subject_kind: str,
-        subject_id: str,
-        dashboard_origin: str,
-        now: int,
-        expires_at: int,
-    ) -> None:
-        """Upgrade (or create) a session to an identified one.
-
-        Idempotent on session_id: a same-browser redemption with no prior
-        anonymous session INSERTs; a QR upgrade of an existing anonymous
-        session (or a re-redemption) UPDATEs in place. Either way the row
-        ends up identified for {subject, org} with the announced origin.
-        """
-        self._conn.execute(
-            "INSERT INTO link_sessions (session_id, org_uuid, subject_kind, subject_id,"
-            " dashboard_origin, identified, created_at, expires_at)"
-            " VALUES (?, ?, ?, ?, ?, 1, ?, ?)"
-            " ON CONFLICT (session_id) DO UPDATE SET"
-            " org_uuid = excluded.org_uuid, subject_kind = excluded.subject_kind,"
-            " subject_id = excluded.subject_id, dashboard_origin = excluded.dashboard_origin,"
-            " identified = 1, expires_at = excluded.expires_at",
-            (session_id, org_uuid, subject_kind, subject_id, dashboard_origin, now, expires_at),
-        )
-        self._conn.commit()
-
+    @_locked
     def purge_expired_sessions(self, *, now: int) -> int:
         cur = self._conn.execute("DELETE FROM link_sessions WHERE expires_at < ?", (now,))
         self._conn.commit()
@@ -693,6 +713,7 @@ class RegistryStore:
 
     # -- QR challenges ---------------------------------------------------------
 
+    @_locked
     def create_challenge(
         self, nonce: str, session_id: str, *, now: int, expires_at: int
     ) -> None:
@@ -703,6 +724,7 @@ class RegistryStore:
         )
         self._conn.commit()
 
+    @_locked
     def get_challenge(self, nonce: str) -> Optional[LinkChallenge]:
         row = self._conn.execute(
             "SELECT * FROM link_challenges WHERE nonce = ?", (nonce,)
@@ -717,21 +739,7 @@ class RegistryStore:
             redeemed_at=row["redeemed_at"],
         )
 
-    def redeem_challenge(self, nonce: str, *, now: int) -> bool:
-        """Mark a challenge redeemed exactly once.
-
-        Atomic single-use: the UPDATE only fires while redeemed_at IS NULL
-        AND the challenge is still fresh, so two racing redemptions cannot
-        both win. Returns True iff this call performed the transition.
-        """
-        cur = self._conn.execute(
-            "UPDATE link_challenges SET redeemed_at = ?"
-            " WHERE nonce = ? AND redeemed_at IS NULL AND expires_at >= ?",
-            (now, nonce, now),
-        )
-        self._conn.commit()
-        return cur.rowcount == 1
-
+    @_locked
     def purge_expired_challenges(self, *, now: int) -> int:
         cur = self._conn.execute("DELETE FROM link_challenges WHERE expires_at < ?", (now,))
         self._conn.commit()
@@ -739,27 +747,86 @@ class RegistryStore:
 
     # -- assertion anti-replay -------------------------------------------------
 
-    def consume_assertion(self, nonce: str, org_uuid: str, *, expires_at: int) -> bool:
-        """Record a redeemed assertion nonce; returns True iff newly seen.
+    @_locked
+    def commit_redemption(
+        self,
+        *,
+        nonce: str,
+        org_uuid: str,
+        assertion_expires_at: int,
+        challenge: Optional[str],
+        target_session: str,
+        subject_kind: str,
+        subject_id: str,
+        dashboard_origin: str,
+        now: int,
+        session_expires_at: int,
+    ) -> str:
+        """Atomically redeem an assertion → identified session.
 
-        A False return is a replay: the nonce was already consumed. The
-        INSERT is the atomic guard — a concurrent double-redemption has
-        exactly one INSERT succeed.
+        The whole state transition — spend the single-use assertion nonce,
+        redeem the single-use QR challenge (if any), and upgrade the target
+        session to identified — commits as ONE transaction under the store
+        lock. So under any level of concurrency the outcome is exactly one
+        winner and every loser a clean, deterministic verdict, never a torn
+        write or a SQLite API-misuse error. Returns:
+
+        - ``"ok"``        — this call performed the redemption;
+        - ``"replay"``    — the assertion nonce was already spent;
+        - ``"challenge"`` — the QR challenge was gone / expired / already
+          redeemed (a lost race), and NOTHING was committed (the nonce is
+          rolled back, so a retry with a fresh challenge is still possible).
+
+        Idempotency of the session upsert lets a QR flow upgrade an existing
+        anonymous row in place while a same-browser flow inserts a fresh id.
         """
-        cur = self._conn.execute(
-            "INSERT OR IGNORE INTO consumed_assertions (nonce, org_uuid, expires_at)"
-            " VALUES (?, ?, ?)",
-            (nonce, org_uuid, expires_at),
-        )
-        self._conn.commit()
-        return cur.rowcount == 1
+        try:
+            spent = self._conn.execute(
+                "INSERT OR IGNORE INTO consumed_assertions (nonce, org_uuid, expires_at)"
+                " VALUES (?, ?, ?)",
+                (nonce, org_uuid, assertion_expires_at),
+            )
+            if spent.rowcount != 1:
+                self._conn.rollback()
+                return "replay"
 
+            if challenge is not None:
+                redeemed = self._conn.execute(
+                    "UPDATE link_challenges SET redeemed_at = ?"
+                    " WHERE nonce = ? AND redeemed_at IS NULL AND expires_at >= ?",
+                    (now, challenge, now),
+                )
+                if redeemed.rowcount != 1:
+                    # Lost the single-use challenge race — undo the nonce
+                    # spend too, so this whole attempt is a clean no-op.
+                    self._conn.rollback()
+                    return "challenge"
+
+            self._conn.execute(
+                "INSERT INTO link_sessions (session_id, org_uuid, subject_kind, subject_id,"
+                " dashboard_origin, identified, created_at, expires_at)"
+                " VALUES (?, ?, ?, ?, ?, 1, ?, ?)"
+                " ON CONFLICT (session_id) DO UPDATE SET"
+                " org_uuid = excluded.org_uuid, subject_kind = excluded.subject_kind,"
+                " subject_id = excluded.subject_id, dashboard_origin = excluded.dashboard_origin,"
+                " identified = 1, expires_at = excluded.expires_at",
+                (target_session, org_uuid, subject_kind, subject_id, dashboard_origin,
+                 now, session_expires_at),
+            )
+            self._conn.commit()
+            return "ok"
+        except BaseException:
+            self._conn.rollback()
+            raise
+
+    @_locked
     def assertion_consumed(self, nonce: str) -> bool:
         row = self._conn.execute(
             "SELECT 1 FROM consumed_assertions WHERE nonce = ?", (nonce,)
         ).fetchone()
         return row is not None
 
+    @_locked
     def purge_expired_assertions(self, *, now: int) -> int:
         cur = self._conn.execute("DELETE FROM consumed_assertions WHERE expires_at < ?", (now,))
         self._conn.commit()
@@ -767,6 +834,7 @@ class RegistryStore:
 
     # -- I12 view attribution --------------------------------------------------
 
+    @_locked
     def record_view_attribution(
         self,
         session_id: str,
@@ -787,6 +855,7 @@ class RegistryStore:
         )
         self._conn.commit()
 
+    @_locked
     def view_attributions(self, token: Optional[str] = None) -> list:
         """All recorded view attributions (optionally for one token).
 
