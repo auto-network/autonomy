@@ -229,17 +229,17 @@
             var firstState = fixtureObj.states[stateKeys[0]];
             alpineHead = '<script>window.FIXTURE = ' + JSON.stringify(firstState) + ';' +
               'window.FIXTURE_STATES = ' + JSON.stringify(fixtureObj.states) + ';<\/script>' +
-              '<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"><\/script>';
+              '<script defer src="/static/vendor/alpine.min.js"><\/script>';
             pickerHtml = _buildStatePickerHtml(stateKeys);
           } else {
             alpineHead = '<script>window.FIXTURE = ' + fixtureRaw + ';<\/script>' +
-              '<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"><\/script>';
+              '<script defer src="/static/vendor/alpine.min.js"><\/script>';
           }
 
           doc.open();
           doc.write('<!DOCTYPE html><html><head><meta charset="utf-8">' +
             '<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
-            '<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"><\/script>' +
+            '<script src="/static/vendor/tailwind-browser.min.js"><\/script>' +
             '<style>' + parentCSS + '</style>' +
             '<style>html,body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#111827;color:#e5e7eb;overflow:auto !important;}</style>' +
             alpineHead +

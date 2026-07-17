@@ -36,11 +36,18 @@ AUTONOMY_FIRST_ORG=myorg docker compose up -d
 **Sovereign means:** the image builds from this checkout
 (`deploy/Dockerfile`); no account, token, or login to any registry is
 required; there is no license check and no phone-home. The only external
-fetches are anonymous — the base image (`python:3.12-slim`), PyPI wheels
-(`deploy/requirements.txt`), and the tailwind binary — and each is
-overridable via build args (`BASE_IMAGE`, `TAILWIND_URL`) to point at
-mirrors you control. Distribution is `git clone` / tarball / an image you
-push to a registry *you* choose — never a mandated one.
+fetches are anonymous and happen at **build time** — the base image
+(`python:3.12-slim`), PyPI wheels (`deploy/requirements.txt`), and the
+tailwind binary — and each is overridable to mirrors you control via
+compose env (`AUTONOMY_BASE_IMAGE`, `AUTONOMY_TAILWIND_URL`). At
+**runtime** the deployment is fully self-contained: every UI library the
+dashboard serves is vendored in the image
+(`tools/dashboard/static/vendor/`, see `VENDOR.md` there), the CSP names
+no third-party origin, and browsers never contact a CDN — a fresh
+install works offline. Pinned by
+`tools/dashboard/tests/test_no_cdn_dependencies.py`. Distribution is
+`git clone` / tarball / an image you push to a registry *you* choose —
+never a mandated one.
 
 The container entrypoint (`deploy/entrypoint.sh`) runs `python -m
 tools.init` (idempotent, honors `AUTONOMY_FIRST_ORG`) and then uvicorn,

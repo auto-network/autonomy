@@ -18,9 +18,12 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile
-      # args:
-      #   BASE_IMAGE: registry.example.internal/python:3.12-slim
-      #   TAILWIND_URL: https://mirror.example.internal/tailwindcss-linux-x64
+      args:
+        # Point at mirrors you control, e.g.:
+        #   AUTONOMY_BASE_IMAGE=registry.example.internal/python:3.12-slim
+        #   AUTONOMY_TAILWIND_URL=https://mirror.example.internal/tailwindcss-linux-x64
+        BASE_IMAGE: ${AUTONOMY_BASE_IMAGE:-python:3.12-slim}
+        TAILWIND_URL: ${AUTONOMY_TAILWIND_URL:-}
     image: ${AUTONOMY_IMAGE:-autonomy-dashboard:local}
     restart: unless-stopped
     ports:
