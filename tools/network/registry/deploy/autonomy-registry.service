@@ -1,0 +1,39 @@
+# auto.network registry v1 — systemd unit.
+#
+# Deploy target: the scripted auto.network estate (cattle, not pets —
+# graph note 8cb2a39c-4bc). The service binds loopback only; the estate's
+# Caddy front terminates TLS and reverse-proxies to it.
+#
+# Installed by deploy.sh to /etc/systemd/system/autonomy-registry.service.
+
+[Unit]
+Description=auto.network registry v1 (org bindings, share-link grants, revocations)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=true
+StateDirectory=autonomy-registry
+WorkingDirectory=/opt/autonomy-registry
+ExecStart=/opt/autonomy-registry/venv/bin/python -m tools.network.registry \
+    --db /var/lib/autonomy-registry/registry.db \
+    --host 127.0.0.1 --port 8477 \
+    --base-url https://auto.network
+Restart=on-failure
+RestartSec=2
+
+# Hardening: the service needs nothing but its code and its state dir.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
