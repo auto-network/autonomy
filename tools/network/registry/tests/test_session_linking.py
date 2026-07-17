@@ -9,13 +9,15 @@ single-use horizons are deterministic.
 
 from __future__ import annotations
 
+import concurrent.futures
+import threading
+
 from fastapi.testclient import TestClient
 
 from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.registry.app import SESSION_COOKIE
 from tools.network.registry.assertion import Assertion, IDENTIFY_SCOPE, build_assertion
-
-from tools.network.registry.store import LinkGrant
+from tools.network.registry.store import LinkGrant, RegistryStore
 
 from .conftest import DAY, NOW, ORG, TARGET, publish_link, signed
 
@@ -343,3 +345,97 @@ class TestI12NoAttribution:
         rows = store.view_attributions("authtok")
         assert len(rows) == 1
         assert rows[0]["subject_kind"] == "operator" and rows[0]["subject_id"] == "op-1"
+
+
+# -- concurrency — single-use guards hold under parallel load ------------------
+
+def _fan_out(fn, n):
+    """Run fn(0..n-1) on n threads released simultaneously at a barrier.
+
+    Returns (results, errors). errors is non-empty only if a call raised —
+    the exact failure the reviewer saw (SQLite API-misuse under a shared
+    connection) surfaces here, so an empty errors list IS the regression pin.
+    """
+    barrier = threading.Barrier(n)
+    results, errors = [], []
+    lock = threading.Lock()
+
+    def worker(i):
+        barrier.wait()
+        try:
+            r = fn(i)
+        except BaseException as exc:  # noqa: BLE001 — we want to SEE any error
+            with lock:
+                errors.append(repr(exc))
+        else:
+            with lock:
+                results.append(r)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n) as ex:
+        list(ex.map(worker, range(n)))
+    return results, errors
+
+
+class TestConcurrencyRaceSafety:
+    N = 64
+
+    def test_duplicate_assertion_redemption_one_winner(self):
+        """64 threads redeem the SAME assertion nonce at once: exactly one
+        'ok', every other a clean 'replay', zero exceptions."""
+        store = RegistryStore(":memory:")
+        try:
+            def fn(i):
+                return store.commit_redemption(
+                    nonce="a" * 32, org_uuid=ORG, assertion_expires_at=NOW + 60,
+                    challenge=None, target_session=f"sess-{i}",
+                    subject_kind="operator", subject_id="op-1",
+                    dashboard_origin=ORIGIN, now=NOW, session_expires_at=NOW + 3600,
+                )
+            results, errors = _fan_out(fn, self.N)
+            assert errors == [], errors
+            assert results.count("ok") == 1
+            assert results.count("replay") == self.N - 1
+        finally:
+            store.close()
+
+    def test_duplicate_qr_challenge_redemption_one_winner(self):
+        """64 DIFFERENT assertions racing to redeem ONE challenge: exactly
+        one 'ok', every other 'challenge', zero exceptions, and the bound
+        session identified exactly once."""
+        store = RegistryStore(":memory:")
+        try:
+            store.create_anonymous_session("anon", now=NOW, expires_at=NOW + 3600)
+            store.create_challenge("c" * 32, "anon", now=NOW, expires_at=NOW + 60)
+
+            def fn(i):
+                return store.commit_redemption(
+                    nonce=f"{i:032x}", org_uuid=ORG, assertion_expires_at=NOW + 60,
+                    challenge="c" * 32, target_session="anon",
+                    subject_kind="persona", subject_id="persona-P",
+                    dashboard_origin=ORIGIN, now=NOW, session_expires_at=NOW + 3600,
+                )
+            results, errors = _fan_out(fn, self.N)
+            assert errors == [], errors
+            assert results.count("ok") == 1
+            assert results.count("challenge") == self.N - 1
+            upgraded = store.get_session("anon")
+            assert upgraded.identified and upgraded.subject_id == "persona-P"
+        finally:
+            store.close()
+
+    def test_http_duplicate_redemption_exactly_one_200(
+        self, app, clock, bound_org, session_key, session_cert
+    ):
+        """End-to-end: N browsers POST the same assertion concurrently (each
+        its own TestClient → own event loop, one shared store). Exactly one
+        200, the rest 401, and never a 500."""
+        wire = operator_assertion(session_key, session_cert, nonce="e" * 32)
+
+        def fn(i):
+            return TestClient(app).post("/v1/link", json=wire).status_code
+
+        results, errors = _fan_out(fn, 32)
+        assert errors == [], errors
+        assert results.count(200) == 1
+        assert results.count(401) == 31
+        assert 500 not in results

@@ -824,23 +824,29 @@ def create_app(
             # chosen by that browser, never an attacker's.
             target_session = generate_token()
 
-        # Commit. The nonce consume is the atomic anti-replay guard; a lost
-        # race (concurrent double redeem) surfaces as replay.
-        if not store.consume_assertion(assertion.nonce, org_uuid, expires_at=assertion.not_after):
-            raise HTTPException(status_code=401, detail="assertion already redeemed")
-        if qr and not store.redeem_challenge(assertion.challenge, now=t):
-            # Single-use challenge lost its race after we spent the nonce.
-            raise HTTPException(status_code=404, detail="unknown challenge")
-
-        store.identify_session(
-            target_session,
+        # Atomic commit: spend the single-use nonce, redeem the QR challenge
+        # (if any), and upgrade the target session — all in ONE transaction
+        # under the store lock. Under concurrent duplicate redemptions this
+        # yields exactly one winner and clean deterministic verdicts for the
+        # rest, never a torn write or a 500.
+        outcome = store.commit_redemption(
+            nonce=assertion.nonce,
             org_uuid=org_uuid,
+            assertion_expires_at=assertion.not_after,
+            challenge=assertion.challenge,
+            target_session=target_session,
             subject_kind=result.subject_kind,
             subject_id=result.subject_id,
             dashboard_origin=assertion.dashboard_origin,
             now=t,
-            expires_at=t + SESSION_TTL,
+            session_expires_at=t + SESSION_TTL,
         )
+        if outcome == "replay":
+            raise HTTPException(status_code=401, detail="assertion already redeemed")
+        if outcome == "challenge":
+            # Single-use challenge gone/expired/already redeemed — one
+            # indistinguishable 404, nothing committed (nonce rolled back).
+            raise HTTPException(status_code=404, detail="unknown challenge")
 
         if qr:
             # Wake the anonymous browser's SSE waiter. Deliberately set NO
