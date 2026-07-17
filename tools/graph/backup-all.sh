@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Backup all databases: hourly (10 copies) and daily (7 copies).
 #
-# Crontab:
-#   0 * * * * /home/jeremy/workspace/autonomy/tools/graph/backup-all.sh hourly
-#   0 3 * * * /home/jeremy/workspace/autonomy/tools/graph/backup-all.sh daily
+# Crontab (AUTONOMY_ROOT defaults to the repo this script lives in):
+#   0 * * * * "$AUTONOMY_ROOT/tools/graph/backup-all.sh" hourly
+#   0 3 * * * "$AUTONOMY_ROOT/tools/graph/backup-all.sh" daily
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${AUTONOMY_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 SQLITE3="$(command -v sqlite3)"
-DOLT="/home/jeremy/go/bin/dolt"
-ROOT="/home/jeremy/workspace/autonomy"
+DOLT="${DOLT_BIN:-$(command -v dolt || echo dolt)}"
 BACKUP_ROOT="${ROOT}/data/backups"
 
 TIER="${1:-hourly}"

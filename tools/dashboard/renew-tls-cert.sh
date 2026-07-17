@@ -6,11 +6,14 @@
 # serve owns :443 (TCP passthrough), the dashboard only binds :8080, so no sudo.
 #
 # Installed crontab entry (monthly, 03:00 on the 1st):
-#   0 3 1 * * /home/jeremy/workspace/autonomy/tools/dashboard/renew-tls-cert.sh
+#   0 3 1 * * "$AUTONOMY_ROOT/tools/dashboard/renew-tls-cert.sh"
+# (AUTONOMY_ROOT defaults to the repo this script lives in; DASHBOARD_DOMAIN
+#  is the Tailscale hostname to issue the cert for.)
 set -euo pipefail
 
-REPO_ROOT=/home/jeremy/workspace/autonomy
-DOMAIN=desktop-noft5ms.tail35c24e.ts.net
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${AUTONOMY_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
+DOMAIN="${DASHBOARD_DOMAIN:-desktop-noft5ms.tail35c24e.ts.net}"
 LOG="$REPO_ROOT/data/cert-renew.log"
 
 exec >>"$LOG" 2>&1

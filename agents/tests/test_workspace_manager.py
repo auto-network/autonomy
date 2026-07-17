@@ -49,7 +49,7 @@ def test_managed_clone_path_layout(tmp_path):
 @pytest.mark.parametrize(
     "url, expected",
     [
-        ("/home/jeremy/workspace/dynbench", True),
+        ("/srv/checkouts/dynbench", True),
         ("/abs/path", True),
         ("git@github.com:anchore/enterprise.git", False),
         ("https://github.com/foo/bar.git", False),
@@ -62,15 +62,15 @@ def test_is_local_url(url, expected):
 
 
 def test_managed_clone_path_local(tmp_path):
-    p = wm.managed_clone_path("/home/jeremy/workspace/dynbench", repos_dir=tmp_path)
-    assert p == tmp_path / "local" / "home/jeremy/workspace/dynbench.git"
+    p = wm.managed_clone_path("/srv/checkouts/dynbench", repos_dir=tmp_path)
+    assert p == tmp_path / "local" / "srv/checkouts/dynbench.git"
 
 
 def test_worktree_basename_local():
-    assert wm._worktree_basename("/home/jeremy/workspace/dynbench") == "dynbench"
+    assert wm._worktree_basename("/srv/checkouts/dynbench") == "dynbench"
     # parse_repo_url stays strict for non-URLs — only the local helpers accept paths.
     with pytest.raises(wm.WorkspaceError):
-        wm.parse_repo_url("/home/jeremy/workspace/dynbench")
+        wm.parse_repo_url("/srv/checkouts/dynbench")
 
 
 def _make_local_checkout(tmp_path: Path) -> Path:

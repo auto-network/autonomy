@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Hourly graph.db backup with rolling 10-copy buffer.
-# Installed via crontab: 0 * * * * /home/jeremy/workspace/autonomy/tools/graph/backup-graph.sh
+# Installed via crontab: 0 * * * * "$AUTONOMY_ROOT/tools/graph/backup-graph.sh"
+# (AUTONOMY_ROOT defaults to the repo this script lives in.)
 
 set -euo pipefail
 
-DB="/home/jeremy/workspace/autonomy/data/graph.db"
-BACKUP_DIR="/home/jeremy/workspace/autonomy/data"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${AUTONOMY_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
+DB="${ROOT}/data/graph.db"
+BACKUP_DIR="${ROOT}/data"
 PREFIX="graph.db.hourly-"
 KEEP=10
 

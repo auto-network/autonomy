@@ -347,13 +347,14 @@ class TestAutonomyPathPatternsMapToAutonomy:
 
         assert session_org_slug({"project": "-workspace-repo"}) == "autonomy"
 
-    def test_home_jeremy_workspace_autonomy_maps_to_autonomy(self, isolated_orgs):
-        # Host session running in /home/jeremy/workspace/autonomy.
+    def test_home_workspace_autonomy_maps_to_autonomy(self, isolated_orgs):
+        # Any host session in a "…/workspace/autonomy" checkout, regardless of
+        # the operator's home dir, slugifies to "…-workspace-autonomy".
         isolated_orgs({})
         from tools.dashboard.org_identity import session_org_slug
 
         assert (
-            session_org_slug({"project": "-home-jeremy-workspace-autonomy"})
+            session_org_slug({"project": "-home-operator-workspace-autonomy"})
             == "autonomy"
         )
 

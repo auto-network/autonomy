@@ -6,6 +6,7 @@ into structured graph objects.
 
 from __future__ import annotations
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -835,24 +836,52 @@ def _load_session_meta(file_path: Path) -> dict:
     return {}
 
 
+def _encode_project_cwd(path: str) -> str:
+    """Slugify an absolute cwd the way Claude Code names its project dirs.
+
+    Claude Code stores host sessions under ``~/.claude/projects/-<encoded-cwd>/``
+    where the encoded form replaces every ``/`` with ``-`` (so a leading slash
+    becomes a leading dash).
+    """
+    return path.replace("/", "-")
+
+
 # Claude Code project-dir → org slug. Host sessions live at
 # ``~/.claude/projects/-<encoded-cwd>/<uuid>.jsonl`` and carry no
 # ``.session_meta.json``, so the only routing signal is the encoded cwd.
-# Add entries here when a new on-host project dir starts producing sessions.
-_HOST_PROJECT_TO_ORG: dict[str, str] = {
-    "-home-jeremy-workspace-enterprise-ng": "anchore",
-    "-home-jeremy-workspace-enterprise": "anchore",
-    "-home-jeremy-workspace-enterprise-dev-compose-files": "anchore",
-    "-home-jeremy-workspace-autonomy": "autonomy",
-    "-home-jeremy-infra": "blindhash",
-    "-home-jeremy-blindhash": "blindhash",
-    "-home-jeremy-jira": "personal",
-    "-home-jeremy-boatlore": "personal",
-    "-home-jeremy-boatlore-chartroom": "personal",
-    "-home-jeremy-boatlore-compendium": "personal",
-    "-home-jeremy-boatlore-passage": "personal",
-    "-home-jeremy-ai-pres-my-video": "personal",
-}
+# Keys derive from the operator's home (``Path.home()``) so the table stays
+# correct regardless of the host user; set AUTONOMY_HOST_PROJECT_ORGS to a JSON
+# ``{"<abs-cwd>": "<org>"}`` object to override/extend it on other deployments
+# (see DEPLOY.md). Add repos below when a new on-host project starts producing
+# sessions.
+def _build_host_project_to_org() -> dict[str, str]:
+    home = str(Path.home())
+    by_cwd = {
+        f"{home}/workspace/enterprise-ng": "anchore",
+        f"{home}/workspace/enterprise": "anchore",
+        f"{home}/workspace/enterprise-dev-compose-files": "anchore",
+        f"{home}/workspace/autonomy": "autonomy",
+        f"{home}/infra": "blindhash",
+        f"{home}/blindhash": "blindhash",
+        f"{home}/jira": "personal",
+        f"{home}/boatlore": "personal",
+        f"{home}/boatlore-chartroom": "personal",
+        f"{home}/boatlore-compendium": "personal",
+        f"{home}/boatlore-passage": "personal",
+        f"{home}/ai-pres-my-video": "personal",
+    }
+    overlay = os.environ.get("AUTONOMY_HOST_PROJECT_ORGS")
+    if overlay:
+        try:
+            parsed = json.loads(overlay)
+            if isinstance(parsed, dict):
+                by_cwd.update(parsed)
+        except json.JSONDecodeError:
+            pass
+    return {_encode_project_cwd(cwd): org for cwd, org in by_cwd.items()}
+
+
+_HOST_PROJECT_TO_ORG: dict[str, str] = _build_host_project_to_org()
 
 
 def _org_from_host_project_path(file_path: Path) -> str | None:
@@ -1043,10 +1072,42 @@ def _build_summary_meta(existing_meta: dict, parsed_meta: dict, file_path: Path,
     return out
 
 
+def _session_path_rewrites() -> list[tuple[str, str]]:
+    """Container-mount → host-canonical prefix rewrites for session paths.
+
+    A session trace is observed from different vantage points: an agent sees it
+    under its container mounts, while the host sees the same file under the real
+    repo/home. Rewriting to the host's canonical prefixes keeps ONE identity per
+    session regardless of who observed it. Defaults derive from the running repo
+    (``Path(__file__)``) and home (``Path.home()``), so a plain clone needs no
+    configuration; the four AUTONOMY_* env vars override each side (see
+    DEPLOY.md). Order matches the historical behaviour: home prefix first.
+    """
+    host_root = os.environ.get("AUTONOMY_HOST_ROOT") or str(_REPO_ROOT)
+    host_home = os.environ.get("AUTONOMY_HOST_HOME") or str(Path.home())
+    container_root = os.environ.get("AUTONOMY_CONTAINER_ROOT", "/workspace/repo")
+    container_home = os.environ.get("AUTONOMY_CONTAINER_HOME", "/home/agent")
+
+    def _slash(p: str) -> str:
+        return p.rstrip("/") + "/"
+
+    return [
+        (_slash(container_home), _slash(host_home)),
+        (_slash(container_root), _slash(host_root)),
+    ]
+
+
 def _normalize_session_path(file_path: Path) -> str:
+    """Canonicalize a session trace path to the host's absolute form.
+
+    Rewrites container-mount prefixes to the host's repo/home so the same
+    session ingested from inside a container and from the host resolves to one
+    identity. With no env overrides the mapping derives from the running repo
+    and home, so a fresh clone needs no configuration.
+    """
     abs_path = str(file_path.resolve())
-    abs_path = abs_path.replace("/home/agent/", "/home/jeremy/")
-    abs_path = abs_path.replace("/workspace/repo/", "/home/jeremy/workspace/autonomy/")
+    for src, dst in _session_path_rewrites():
+        abs_path = abs_path.replace(src, dst)
     return abs_path
 
 
@@ -1709,8 +1770,12 @@ def ingest_claude_code_project(
     every session into that connection — legacy / test behaviour.
     """
     if project_path is None:
-        # Default: current project
-        project_path = Path.home() / ".claude" / "projects" / "-home-jeremy-workspace-autonomy"
+        # Default: this repo's Claude Code project dir, derived from the repo
+        # root so it resolves correctly regardless of the operator's home.
+        project_path = (
+            Path.home() / ".claude" / "projects"
+            / _encode_project_cwd(str(_REPO_ROOT))
+        )
     project_path = Path(project_path)
 
     results = []

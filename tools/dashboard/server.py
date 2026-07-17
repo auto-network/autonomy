@@ -5234,8 +5234,8 @@ def _resolve_session_workspace(
 
     Reads the ``tmux_sessions`` row to recover the launch-time ``project``,
     then maps that to a workspace via :func:`agents.workspace_settings.get_workspace`.
-    For host/path-derived sessions (``-workspace-repo``,
-    ``-home-jeremy-workspace-autonomy``), falls back to the org slug derived
+    For host/path-derived sessions (e.g. ``-workspace-repo`` or a slugified
+    ``…-workspace-autonomy`` checkout), falls back to the org slug derived
     by :func:`tools.dashboard.org_identity.session_org_slug` and the first
     workspace whose ``graph_project`` matches that slug. Returns ``None``
     when nothing maps — the caller fails closed and skips graph persistence.

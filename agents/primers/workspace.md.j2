@@ -41,7 +41,7 @@ DASHBOARD=https://{{ 'localhost' if config.network_host else 'host.docker.intern
 REPO_NAME=$(curl -sk "$DASHBOARD/api/worktrees" | python3 -c 'import json, os, sys; rows=json.load(sys.stdin); print(next(r["repo_name"] for r in rows if r["session_name"] == os.environ["AUTONOMY_SESSION"]))')
 curl -sk -X POST "$DASHBOARD/api/worktrees/$AUTONOMY_SESSION/$REPO_NAME/sync-base"
 # Then your normal fetch+rebase will see the new commits:
-git fetch /home/jeremy/workspace/autonomy/data/repos/.../<repo>.git master:hostsync/master
+git fetch <autonomy-root>/data/repos/.../<repo>.git master:hostsync/master
 git rebase hostsync/master
 ```
 
