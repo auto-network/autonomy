@@ -102,6 +102,16 @@ REF_UPDATE_PERMISSIONS = (
 OVERRIDE_MODES = ("none", "narrow")
 AUDIT_LEVELS = ("minimal", "standard", "full")
 
+# auto.network link operation classes (spec graph://a17c8657-939 §6.6, §8).
+# Rows use contract="link", operation=<one of LINK_OPERATIONS>; the joined
+# class string ("link.publish") is what policy keys and prompts name. Each
+# class resolves to prompt|delegated per org/workspace — a prompt is a
+# missing delegation hop (§8), so the absence of a row means "prompt".
+LINK_CONTRACT = "link"
+LINK_OPERATIONS = ("publish", "revoke", "delegate")
+LINK_OPERATION_CLASSES = tuple(f"{LINK_CONTRACT}.{op}" for op in LINK_OPERATIONS)
+LINK_OPERATION_MODES = ("prompt", "delegated")
+
 
 _COMMIT_DIMENSIONS = {
     "commit_destination": COMMIT_DESTINATIONS,
@@ -223,6 +233,18 @@ class OperationPolicyV1(SettingSchema):
     audit_level: str = field(required=False, default="standard", enum=list(AUDIT_LEVELS))
     input_redaction_rules: list = field(required=False, default_factory=list)
     output_redaction_rules: list = field(required=False, default_factory=list)
+    mode: str = field(
+        required=False,
+        enum=list(LINK_OPERATION_MODES),
+        description=(
+            "prompt-vs-preauthorized resolution for auto.network link "
+            "operation classes (link.publish / link.revoke / link.delegate): "
+            "'prompt' asks the operator per operation, 'delegated' lets a "
+            "policy-minted agent key act promptlessly. Only defined for "
+            "contract='link'; absent rows resolve to 'prompt' (a prompt is "
+            "a missing delegation hop, spec §8)."
+        ),
+    )
     notes: str = field(required=False)
 
     @classmethod
@@ -230,11 +252,23 @@ class OperationPolicyV1(SettingSchema):
         super().validate(payload)
         if not isinstance(payload, dict):
             return
-        _require_string(payload, "contract", cls.__name__)
-        _require_string(payload, "operation", cls.__name__)
+        contract = _require_string(payload, "contract", cls.__name__)
+        operation = _require_string(payload, "operation", cls.__name__)
         _validate_enum(payload, "credential_boundary", CREDENTIAL_BOUNDARIES, cls.__name__)
         _validate_enum(payload, "audit_level", AUDIT_LEVELS, cls.__name__)
+        _validate_enum(payload, "mode", LINK_OPERATION_MODES, cls.__name__)
         _validate_list_of_strings(payload, "allowed_execution_classes", cls.__name__)
+        if contract == LINK_CONTRACT and operation not in LINK_OPERATIONS:
+            raise SchemaValidationError(
+                f"{cls.__name__}: unknown link operation {operation!r}; "
+                f"the link contract defines {LINK_OPERATIONS}"
+            )
+        if "mode" in payload and contract != LINK_CONTRACT:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'mode' is only defined for the "
+                f"{LINK_CONTRACT!r} contract's operation classes "
+                f"{LINK_OPERATION_CLASSES}, not contract {contract!r}"
+            )
         if "approval_required" in payload and not isinstance(payload["approval_required"], bool):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'approval_required' must be a boolean"
