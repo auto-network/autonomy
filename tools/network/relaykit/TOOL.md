@@ -6,6 +6,10 @@ the registry service (B1); the registry-side relay endpoints live in
 `tools/network/registry/relay.py` and are served by the same
 `python -m tools.network.registry` process.
 
+G1 (`auto-57hav`, spec `graph://eb245082-b76` §8) adds the network-fabric
+rungs above that floor: the peer relay, the direct path, and the fallback
+chain that walks them — see "G1: the connectivity fallback chain" below.
+
 ## Architecture
 
 ```
@@ -74,6 +78,61 @@ rather than a wired dashboard background task: launching it requires org
 key material that only exists after the C-track ceremonies (C2 session
 keys / C5 agent delegation) land. Echo mode is the reference handler.
 
+## G1: the connectivity fallback chain (spec §8)
+
+How two org endpoints get connected: **direct → org peer relay →
+auto.network floor.** The org absorbs load; the center provides the
+floor, not the ceiling. Every rung carries the SAME E2E channel — the
+transport is untrusted everywhere, so falling down the chain trades
+latency and metadata exposure, never confidentiality or integrity.
+
+```
+dialer ──1 direct──────────────────────────▶ node (direct.py listener)
+       ──2 peer relay (peer.py)──parked t──▶ node
+       ──3 central floor (B2 relay)──tunnel▶ node
+```
+
+- **`dialer.dial_peer()`** walks the chain: races the target's candidate
+  addresses from the registry's reachability hints (short per-attempt
+  timeout), degrades to org peer relays, floors at the B2 viewer channel.
+  A `HandshakeError` anywhere aborts the dial — a failed pin is an attack
+  indicator, never "try elsewhere"; every other failure routes around.
+- **`peer.PeerRelay`** — a member node's relay service. Nodes park B2-style
+  serve-tunnels at `/t/{org}` (keyed by the node's public key: the key IS
+  the address); dialers request bridges at `/dial/{org}`. The relay speaks
+  the B2 mux and never parses past the frame header.
+- **`relay:serve` is a delegation, not configuration.** The relay proves
+  it may serve by signing the client's fresh nonce with a `relay:serve`-
+  scoped chain to the org root (`peer.build_relay_hello` /
+  `verify_relay_hello`; dial hellos also bind target + session against
+  splicing). BOTH client roles verify before any channel byte flows: a
+  dialer refuses an undelegated relay, and a would-be parker never
+  presents its tunnel hello to one. The same grant is recorded in the org
+  authority ledger as a `delegate` event carrying `relay:serve` — the
+  ledger is discovery (`dialer.relay_candidates` = ledger live-keys ∩
+  registry hints), the chain is on-wire enforcement, and revoking the
+  ledger delegation drops the node from every fold's candidate set (L4).
+- **`direct.py`** — rung one: the node's plain WS listener + the candidate
+  client. "ICE-style" honestly: multiple address candidates from hints,
+  first-success-wins over ordinary outbound TCP/WS. Real STUN/UDP
+  hole-punching is a later additive transport (iroh/WebRTC territory);
+  the chain's *shape* is what G1 pins.
+- **`node.py`** — a member node's composite runtime behind ONE
+  `handler(token, message)` seam: direct listener, floor tunnel, verified
+  peer-relay parks, and the reachability announcer (hints are a lease —
+  refreshed on a heartbeat, expiring when the node goes quiet).
+- **Reachability hints** live in the registry
+  (`POST /v1/orgs/{org}/reachability[/query]`, scopes `node:announce` /
+  `node:lookup`): self-announced only (row keyed by the envelope signer),
+  TTL-expired, and Tier B both ways — anonymous sessions can never
+  enumerate an org's interior addresses.
+
+v1 boundaries, deliberate: the peer relay holds no revocation denylist
+(a revoked-but-unexpired tunnel cert is caught at the registry floor and
+by cert renewal); the floor rung addresses the org's B2 tunnel by link
+token (per-node floor addressing arrives when the floor learns node
+keys); transports are TCP/WS only.
+
 ## Tests
 
 ```bash
@@ -84,3 +143,12 @@ pytest tools/network/relaykit/tests/
 tests (two-process stack via the real `__main__` entrypoints: 1.55 MB soak,
 ciphertext-wire tap, uniform close codes, SIGKILL-and-reconnect, MITM ×2 +
 passthrough control).
+
+G1 adds 16 in-process tests (`test_peer.py`: relay-hello freshness/binding/
+scope refusal, park+dial bridge, dialer AND parker refusing an undelegated
+relay, relay-process frame scan seeing ciphertext only, MITM by an
+*authorized* relay failing closed, ledger∩hints discovery incl. revocation
+cascade) + 5 three-process acceptance tests (`test_fallback_integration.py`:
+registry + peer-relay + node subprocesses; direct control, simulated-NAT
+fall to peer relay, SIGKILL fall to floor, one payload digest across all
+three paths).

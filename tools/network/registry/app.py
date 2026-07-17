@@ -114,6 +114,16 @@ MAX_BUNDLE_BYTES = 4 * 1024 * 1024
 MIN_BUNDLE_BYTES = 12 + 16
 MAX_TOPIC_PAGE = 256
 
+# -- G1 node reachability hints (spec §8) -------------------------------------
+#
+# Short TTLs are the point: a hint is a live-address claim, not a record.
+# Nodes refresh on a heartbeat; anything that stops refreshing goes dark.
+MAX_NODE_ADDRS = 8
+MAX_NODE_URL_LEN = 256
+DEFAULT_HINT_TTL = 3_600
+MIN_HINT_TTL = 60
+MAX_HINT_TTL = 86_400
+
 
 # -- E1 session linking (spec §4.7, §4.8, §6.8) ------------------------------
 #
@@ -318,6 +328,24 @@ def _require_uuid(value: object, what: str) -> str:
         uuid.UUID(value)
     except ValueError:
         raise _bad_request(f"{what} is not a valid UUID")
+    return value
+
+
+def _require_ws_url(value: object, what: str) -> str:
+    """A reachability candidate: a ws:// or wss:// URL, bounded length.
+
+    Deliberately shallow — the registry stores hints, it never dials
+    them; a candidate that turns out to be garbage just fails the
+    dialer's connection attempt like any dead address."""
+    if (
+        not isinstance(value, str)
+        or not value.startswith(("ws://", "wss://"))
+        or len(value) > MAX_NODE_URL_LEN
+        or any(c.isspace() for c in value)
+    ):
+        raise _bad_request(
+            f"{what} must be a ws:// or wss:// URL of at most {MAX_NODE_URL_LEN} chars"
+        )
     return value
 
 
@@ -1065,6 +1093,67 @@ def create_app(
             # a want-mode match set is not a mailbox position — no cursor
             body["next_since"] = rows[-1]["seq"] if rows else payload.get("since", 0)
         return body
+
+    # -- §8 node reachability hints (G1 fabric path) -----------------------------
+    #
+    # The org roster IS the tracker: nodes self-announce direct-dial
+    # candidates (the ICE-style seed) and, when they hold relay:serve,
+    # the dial URL of their peer relay. Node identity is the envelope
+    # signer — a node can only announce ITSELF; there is no way to plant
+    # an address under someone else's key. Reads are Tier B (signed
+    # envelope, scope node:lookup): an org's interior addresses are never
+    # served to anonymous callers (E1 continuity).
+
+    async def _hint_gate(request: Request, org_uuid: str, scope: str) -> tuple:
+        envelope = _parse_envelope(await _read_json(request))
+        t = now()
+        binding = _require_binding(store, org_uuid, t)
+        auth = _authorize(
+            envelope, "POST", str(request.url.path), binding, store, t,
+            required_scope=scope,
+        )
+        return envelope["payload"], auth, t
+
+    @app.post("/v1/orgs/{org_uuid}/reachability", status_code=201)
+    async def announce_reachability(org_uuid: str, request: Request):
+        """Announce/refresh the SIGNER's own reachability hints."""
+        payload, auth, t = await _hint_gate(request, org_uuid, "node:announce")
+        _require_fields(
+            payload, allowed=frozenset({"addrs", "relay_url", "ttl"}),
+            required=frozenset({"addrs"}), what="reachability payload",
+        )
+        addrs = payload["addrs"]
+        if not isinstance(addrs, list) or len(addrs) > MAX_NODE_ADDRS:
+            raise _bad_request(
+                f"addrs must be a list of at most {MAX_NODE_ADDRS} candidate URLs"
+            )
+        for addr in addrs:
+            _require_ws_url(addr, "addrs entry")
+        relay_url = payload.get("relay_url")
+        if relay_url is not None:
+            _require_ws_url(relay_url, "relay_url")
+        ttl = payload.get("ttl", DEFAULT_HINT_TTL)
+        if type(ttl) is not int or ttl <= 0:
+            raise _bad_request("ttl must be a positive integer of seconds")
+        ttl = max(MIN_HINT_TTL, min(ttl, MAX_HINT_TTL))
+        store.purge_expired_node_hints(now=t)
+        store.upsert_node_hint(
+            org_uuid, auth.signer_pub, addrs, relay_url, now=t, expires_at=t + ttl
+        )
+        return {"node": auth.signer_pub, "expires_at": t + ttl}
+
+    @app.post("/v1/orgs/{org_uuid}/reachability/query")
+    async def query_reachability(org_uuid: str, request: Request):
+        """Live hints for the org's nodes (Tier B — never anonymous)."""
+        payload, _auth, t = await _hint_gate(request, org_uuid, "node:lookup")
+        _require_fields(
+            payload, allowed=frozenset({"node"}), required=frozenset(),
+            what="reachability query",
+        )
+        node = payload.get("node")
+        if node is not None:
+            _require_pub(node, "node")
+        return {"org": org_uuid, "hints": store.node_hints(org_uuid, now=t, node_pub=node)}
 
     # -- §6 equivocation witness (F4): signed, append-only head-set log ---------
     #

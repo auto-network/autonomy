@@ -57,6 +57,8 @@ Two anchors sit outside the chain rule by construction:
 | `POST /v1/orgs/{org}/topics/{topic}/heads/poll` | chain with `topic:<topic>` | cursor-based hint fanout (`since` seq) + latest announcement |
 | `POST /v1/orgs/{org}/topics/{topic}/bundles` | chain with `topic:<topic>` | F3 data plane: store-and-forward mailbox of ENCRYPTED event bundles — the broker stores topic + hashes + sizes + opaque ciphertext, nothing else (L6) |
 | `POST /v1/orgs/{org}/topics/{topic}/bundles/fetch` | chain with `topic:<topic>` | by cursor (`since`), by hash (`want` — fetch-missing-by-hash), or `meta_only` manifests for anti-entropy planning |
+| `POST /v1/orgs/{org}/reachability` | chain with `node:announce` | G1 fabric: self-announce direct-dial candidates + optional peer-relay URL; row keyed by the envelope SIGNER (a node can only announce itself); TTL-leased, stale rows expire |
+| `POST /v1/orgs/{org}/reachability/query` | chain with `node:lookup` | live hints for the org's nodes; Tier B by construction — anonymous callers never see interior addresses |
 | `POST /v1/orgs/{org}/topics/{topic}/witness` | chain with `topic:<topic>` | F4 equivocation witness: append the observed head-set to the per-topic hash-chained log; returns the tip **signed by the registry witness key** (idempotent on an unchanged head-set) |
 | `POST /v1/orgs/{org}/topics/{topic}/witness/head` | chain with `topic:<topic>` | serve the current signed head-set — identical to every member |
 | `POST /v1/orgs/{org}/topics/{topic}/witness/since` | chain with `topic:<topic>` | signed chain entries after `since` (the client's continuity walk) |

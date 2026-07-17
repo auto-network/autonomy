@@ -56,6 +56,40 @@ async def echo_handler(token: str, message: bytes) -> bytes:
     return message
 
 
+async def serve_channel(key: KeyPair, cert: DelegationCert, *, org: str, token: str,
+                        recv, send, handler) -> None:
+    """Serve one E2E channel from the org-key end, transport-agnostic.
+
+    *recv* returns the next incoming channel message (``None`` ends the
+    channel), *send* transmits one outgoing message. The tunnel path
+    feeds these from mux frames; the direct path (G1) feeds them from a
+    dedicated WebSocket. Handshake first, then request/response messages
+    through *handler*.
+    """
+    first = await recv()
+    if first is None:
+        return
+    client_eph = parse_client_hello(first)
+    eph_priv, server_hello, transcript_hash = build_server_hello(
+        key, cert, org=org, token=token, client_eph=client_eph
+    )
+    await send(server_hello)
+    crypto = ChannelCrypto.server(eph_priv, client_eph, transcript_hash)
+
+    while True:
+        record = await recv()
+        if record is None:
+            return
+        message = crypto.open_record(record)
+        if message is None:
+            continue
+        response = await handler(token, message)
+        if response is None:
+            continue
+        for out in crypto.seal_message(response):
+            await send(out)
+
+
 def file_handler(path: str, content_type: str):
     """Serve one file over channel fetch protocol v1 — the C4 seam.
 
@@ -118,12 +152,7 @@ class TunnelConnector:
                 # ciphertext-on-the-wire property directly observable.
                 async with websockets.connect(self._url, max_size=2**22,
                                               compression=None) as ws:
-                    await ws.send(build_tunnel_hello(
-                        self._key, self._cert, org=self._org, ts=int(time.time())
-                    ))
-                    reply = json.loads(await ws.recv())
-                    if not (isinstance(reply, dict) and reply.get("ok")):
-                        raise ConnectionError(f"hello rejected: {reply!r}")
+                    await self._handshake(ws)
                     backoff = self._min_backoff
                     self.connected.set()
                     try:
@@ -138,6 +167,17 @@ class TunnelConnector:
                 return
             await asyncio.sleep(backoff * (1 + random.random() * 0.25))
             backoff = min(backoff * 2, self._max_backoff)
+
+    async def _handshake(self, ws) -> None:
+        """Authenticate a fresh tunnel. The peer-relay park connector
+        (``peer.PeerParkConnector``) overrides this to first demand the
+        relay's own ``relay:serve`` proof before presenting a hello."""
+        await ws.send(build_tunnel_hello(
+            self._key, self._cert, org=self._org, ts=int(time.time())
+        ))
+        reply = json.loads(await ws.recv())
+        if not (isinstance(reply, dict) and reply.get("ok")):
+            raise ConnectionError(f"hello rejected: {reply!r}")
 
     async def _serve(self, ws) -> None:
         send_lock = asyncio.Lock()
@@ -191,28 +231,12 @@ class TunnelConnector:
                              queue: asyncio.Queue, send_frame, drop) -> None:
         """One viewer channel: handshake, then request/response messages."""
         try:
-            first = await queue.get()
-            if first is None:
-                return
-            client_eph = parse_client_hello(first)
-            eph_priv, server_hello, transcript_hash = build_server_hello(
-                self._key, self._cert, org=self._org, token=token, client_eph=client_eph
+            await serve_channel(
+                self._key, self._cert, org=self._org, token=token,
+                recv=queue.get,
+                send=lambda data: send_frame(FRAME_DATA, channel_id, data),
+                handler=self._handler,
             )
-            await send_frame(FRAME_DATA, channel_id, server_hello)
-            crypto = ChannelCrypto.server(eph_priv, client_eph, transcript_hash)
-
-            while True:
-                record = await queue.get()
-                if record is None:
-                    return
-                message = crypto.open_record(record)
-                if message is None:
-                    continue
-                response = await self._handler(token, message)
-                if response is None:
-                    continue
-                for out in crypto.seal_message(response):
-                    await send_frame(FRAME_DATA, channel_id, out)
         except Exception:  # HandshakeError, RecordError, transport failures
             with contextlib.suppress(Exception):
                 await send_frame(FRAME_CLOSE, channel_id)
