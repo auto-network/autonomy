@@ -671,9 +671,21 @@ def ensure_bootstrap_orgs(
     left untouched. Identity Setting seed is best-effort (skipped when
     ``autonomy.org#1`` schema is unregistered; auto-S1 owns the schema).
 
+    When neither the arg nor the env names a first org, an existing
+    shared org satisfies the bootstrap — startup never manufactures a
+    default ``autonomy`` org next to one the operator already created
+    (e.g. via ``python -m tools.init --org acme``).
+
     Returns the list of orgs after bootstrap.
     """
-    slug = resolve_first_org_slug(first_org)
+    slug = first_org or os.environ.get(FIRST_ORG_ENV)
+    if slug is None:
+        shared = [o for o in list_orgs(root=root) if o.type == "shared"]
+        if shared:
+            return shared + [
+                _ensure_org("personal", "personal", _PERSONAL_SEED_PAYLOAD, root=root),
+            ]
+        slug = "autonomy"
     _validate_slug(slug)
     return [
         _ensure_org(slug, "shared", _first_org_seed(slug, first_org_name), root=root),
