@@ -24,6 +24,8 @@ are rejected until Track E lands.
 
 from __future__ import annotations
 
+import base64
+import re
 import time
 import uuid
 from pathlib import Path
@@ -83,6 +85,28 @@ _BOOTLOADER_CSP = (
 
 _ENVELOPE_FIELDS = frozenset({"v", "signer", "ts", "payload", "cert", "sig"})
 _LINK_META_FIELDS = frozenset({"ttl", "label", "require_auth"})
+
+# -- F3 ledger-sync topics (spec §6–7, L6) -----------------------------------
+#
+# Per-org topics carry 32-byte head hints (notification plane) and a
+# store-and-forward mailbox of ENCRYPTED event bundles (data plane). The
+# broker's whole disclosure is topic + hashes + sizes; ciphertext is
+# opaque. Topic access is Tier B: every call is a signed envelope through
+# the I4 gate, scoped per topic (`topic:<name>`) for delegated signers.
+
+# \Z, not $ — $ would admit a trailing newline (a smuggled distinct
+# topic/scope string and un-ledgerable 65-char "hashes")
+_TOPIC_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}\Z")
+_HASH_RE = re.compile(r"^[0-9a-f]{64}\Z")
+
+BUNDLE_WIRE_VERSION = 1
+MAX_HINT_HEADS = 64
+MAX_BUNDLE_HASHES = 4_096
+MAX_BUNDLE_BYTES = 4 * 1024 * 1024
+#: nonce + GCM tag: no valid AEAD blob is smaller; garbage this short
+#: would otherwise poison honest pullers' mailbox drains
+MIN_BUNDLE_BYTES = 12 + 16
+MAX_TOPIC_PAGE = 256
 
 
 class AuthContext:
@@ -244,6 +268,32 @@ def _require_uuid(value: object, what: str) -> str:
         uuid.UUID(value)
     except ValueError:
         raise _bad_request(f"{what} is not a valid UUID")
+    return value
+
+
+def _require_topic(topic: str) -> str:
+    if not _TOPIC_RE.match(topic):
+        raise _bad_request(
+            "topic must be 1-64 chars of [a-z0-9._-] starting alphanumeric"
+        )
+    return topic
+
+
+def _require_hashes(value: object, what: str, max_len: int) -> list:
+    if not isinstance(value, list) or not value or len(value) > max_len:
+        raise _bad_request(f"{what} must be a non-empty list of at most {max_len} event ids")
+    for entry in value:
+        if not isinstance(entry, str) or not _HASH_RE.match(entry):
+            raise _bad_request(f"{what} entries must be 64-char lowercase hex event ids")
+    if value != sorted(set(value)):
+        raise _bad_request(f"{what} must be sorted and free of duplicates")
+    return value
+
+
+def _require_seq(payload: dict, field: str = "since") -> int:
+    value = payload.get(field, 0)
+    if type(value) is not int or value < 0:
+        raise _bad_request(f"{field} must be a non-negative integer sequence cursor")
     return value
 
 
@@ -580,6 +630,125 @@ def create_app(
                 "X-Content-Type-Options": "nosniff",
             },
         )
+
+    # -- §6 ledger-sync topics (F3): hints + encrypted mailbox ------------------
+
+    async def _topic_gate(request: Request, org_uuid: str, topic: str) -> tuple:
+        """Shared prologue: envelope + I4 chain with per-topic scope.
+
+        Every topic operation — publish and subscribe alike — is Tier B:
+        it must chain to the org's bound root. Delegated signers need the
+        exact scope ``topic:<name>``, so an attenuated key granted only
+        content topics can neither publish to nor read the authority
+        topic. Root-direct signers hold every scope by definition.
+        """
+        _require_topic(topic)
+        envelope = _parse_envelope(await _read_json(request))
+        t = now()
+        binding = _require_binding(store, org_uuid, t)
+        auth = _authorize(
+            envelope, "POST", str(request.url.path), binding, store, t,
+            required_scope=f"topic:{topic}",
+        )
+        return envelope["payload"], auth, t
+
+    @app.post("/v1/orgs/{org_uuid}/topics/{topic}/heads", status_code=201)
+    async def publish_heads(org_uuid: str, topic: str, request: Request):
+        """Notification plane: announce new DAG heads (32-byte hints only)."""
+        payload, auth, t = await _topic_gate(request, org_uuid, topic)
+        _require_fields(
+            payload, allowed=frozenset({"heads"}), required=frozenset({"heads"}),
+            what="heads payload",
+        )
+        heads = _require_hashes(payload["heads"], "heads", MAX_HINT_HEADS)
+        seq = store.publish_hint(org_uuid, topic, heads, auth.signer_pub, now=t)
+        return {"topic": topic, "seq": seq}
+
+    @app.post("/v1/orgs/{org_uuid}/topics/{topic}/heads/poll")
+    async def poll_heads(org_uuid: str, topic: str, request: Request):
+        """Fanout: hints after a cursor, plus the latest announcement.
+
+        Poll-based fanout keeps the broker a plain mailbox ("a well-known
+        peer that is always awake", §7); an SSE/WS push upgrade is a
+        transport optimization over this same cursor, not a new contract.
+        """
+        payload, _auth, _t = await _topic_gate(request, org_uuid, topic)
+        _require_fields(
+            payload, allowed=frozenset({"since"}), required=frozenset(), what="poll payload"
+        )
+        since = _require_seq(payload)
+        hints = store.hints_since(org_uuid, topic, since, limit=MAX_TOPIC_PAGE)
+        latest = store.latest_hint(org_uuid, topic)
+        next_since = hints[-1]["seq"] if hints else since
+        return {"topic": topic, "hints": hints, "latest": latest, "next_since": next_since}
+
+    @app.post("/v1/orgs/{org_uuid}/topics/{topic}/bundles", status_code=201)
+    async def deposit_bundle(org_uuid: str, topic: str, request: Request):
+        """Data plane: store-and-forward one ENCRYPTED event bundle.
+
+        L6 by construction: the accepted fields are a hash manifest and a
+        base64 blob. The broker records topic, hashes, and size; it never
+        holds a decryption key, and unknown fields (anywhere plaintext
+        could hide) are rejected by the strict field check.
+        """
+        payload, auth, t = await _topic_gate(request, org_uuid, topic)
+        _require_fields(
+            payload, allowed=frozenset({"v", "hashes", "ciphertext"}),
+            required=frozenset({"v", "hashes", "ciphertext"}), what="bundle payload",
+        )
+        if payload["v"] != BUNDLE_WIRE_VERSION:
+            raise _bad_request(f"unsupported bundle version: {payload['v']!r}")
+        hashes = _require_hashes(payload["hashes"], "hashes", MAX_BUNDLE_HASHES)
+        if not isinstance(payload["ciphertext"], str) or not payload["ciphertext"]:
+            raise _bad_request("ciphertext must be a non-empty base64 string")
+        try:
+            blob = base64.b64decode(payload["ciphertext"], validate=True)
+        except (ValueError, TypeError):
+            raise _bad_request("ciphertext is not valid base64")
+        if not MIN_BUNDLE_BYTES <= len(blob) <= MAX_BUNDLE_BYTES:
+            raise _bad_request(
+                f"ciphertext must be {MIN_BUNDLE_BYTES}..{MAX_BUNDLE_BYTES} bytes"
+            )
+        seq = store.deposit_bundle(
+            org_uuid, topic, payload["v"], hashes, blob, auth.signer_pub, now=t
+        )
+        return {"topic": topic, "seq": seq, "size": len(blob)}
+
+    @app.post("/v1/orgs/{org_uuid}/topics/{topic}/bundles/fetch")
+    async def fetch_bundles(org_uuid: str, topic: str, request: Request):
+        """Mailbox read: by cursor (store-and-forward catch-up) or by hash
+        (fetch-missing-by-hash), optionally metadata-only (hashes + sizes)
+        for anti-entropy planning without moving ciphertext."""
+        payload, _auth, _t = await _topic_gate(request, org_uuid, topic)
+        _require_fields(
+            payload, allowed=frozenset({"since", "want", "meta_only"}),
+            required=frozenset(), what="fetch payload",
+        )
+        meta_only = payload.get("meta_only", False)
+        if not isinstance(meta_only, bool):
+            raise _bad_request("meta_only must be a boolean")
+        if "want" in payload:
+            if "since" in payload:
+                raise _bad_request("fetch takes since or want, not both")
+            want = _require_hashes(payload["want"], "want", MAX_BUNDLE_HASHES)
+            rows = store.bundles_with(org_uuid, topic, want, limit=MAX_TOPIC_PAGE)
+        else:
+            since = _require_seq(payload)
+            rows = store.bundles_since(
+                org_uuid, topic, since, limit=MAX_TOPIC_PAGE, meta_only=meta_only
+            )
+        bundles = []
+        for row in rows:
+            entry = {"seq": row["seq"], "v": row["v"], "hashes": row["hashes"],
+                     "size": row["size"]}
+            if not meta_only and "ciphertext" in row:
+                entry["ciphertext"] = base64.b64encode(row["ciphertext"]).decode("ascii")
+            bundles.append(entry)
+        body = {"topic": topic, "bundles": bundles}
+        if "want" not in payload:
+            # a want-mode match set is not a mailbox position — no cursor
+            body["next_since"] = rows[-1]["seq"] if rows else payload.get("since", 0)
+        return body
 
     # -- §5.1 relay tunnel ------------------------------------------------------
 

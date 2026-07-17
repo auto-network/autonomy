@@ -66,6 +66,30 @@ from .store import (
     checkpoint_state_hash,
     org_ledger_db_path,
 )
+from .bundles import (
+    BUNDLE_DOMAIN,
+    BUNDLE_VERSION,
+    MAX_BUNDLE_EVENTS,
+    SYNC_KEY_INFO,
+    SYNC_KEY_LEN,
+    BundleError,
+    derive_sync_key,
+    open_bundle,
+    seal_bundle,
+    validate_bundle,
+)
+from .sync import (
+    MAX_SYNC_EVENTS,
+    MAX_SYNC_HEADS,
+    SYNC_VERSION,
+    SyncError,
+    SyncPeer,
+    SyncReport,
+    decode_message,
+    encode_message,
+    sync_pair,
+    validate_message,
+)
 from .scopes import (
     UNIVERSE,
     attenuates,
@@ -124,6 +148,28 @@ __all__ = [
     "INVITE_REVOKED",
     "INVITE_DEAD",
     "INVITE_EXPIRED",
+    # sync (F3 peer path; broker client lives in .broker — imports registry signing)
+    "SyncPeer",
+    "SyncReport",
+    "SyncError",
+    "sync_pair",
+    "encode_message",
+    "decode_message",
+    "validate_message",
+    "SYNC_VERSION",
+    "MAX_SYNC_EVENTS",
+    "MAX_SYNC_HEADS",
+    # bundles (F3 encrypted mailbox payloads, L6)
+    "BundleError",
+    "derive_sync_key",
+    "seal_bundle",
+    "open_bundle",
+    "validate_bundle",
+    "BUNDLE_DOMAIN",
+    "BUNDLE_VERSION",
+    "SYNC_KEY_INFO",
+    "SYNC_KEY_LEN",
+    "MAX_BUNDLE_EVENTS",
     # hlc
     "HLC",
     # scopes

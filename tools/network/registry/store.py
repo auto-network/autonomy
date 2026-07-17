@@ -13,6 +13,11 @@ Tables:
   subject that minted it (I6: promptless ≠ traceless).
 - ``revocations`` — verified revocation records, retained only until the
   revoked key's natural expiry (I7); ``purge_expired`` is the sweep.
+- ``topic_hints`` / ``topic_bundles`` — the F3 ledger-sync broker path
+  (spec §6, L6): per-org topics carrying 32-byte head hints and a
+  store-and-forward mailbox of ENCRYPTED event bundles. Both tables are
+  T0-blind by construction — they hold topic names, event hashes, sizes,
+  and opaque ciphertext; plaintext event bytes never reach this store.
 
 All timestamps are unix seconds, passed in by the caller — the store
 never reads the wall clock, which is what makes TTL behavior testable.
@@ -69,6 +74,29 @@ CREATE TABLE IF NOT EXISTS revocations (
     PRIMARY KEY (org_uuid, revoked_key_id)
 );
 CREATE INDEX IF NOT EXISTS idx_revocations_expiry ON revocations (expires_at);
+
+CREATE TABLE IF NOT EXISTS topic_hints (
+    org_uuid     TEXT NOT NULL,
+    topic        TEXT NOT NULL,
+    seq          INTEGER NOT NULL,
+    heads        TEXT NOT NULL,
+    signer_pub   TEXT NOT NULL,
+    published_at INTEGER NOT NULL,
+    PRIMARY KEY (org_uuid, topic, seq)
+);
+
+CREATE TABLE IF NOT EXISTS topic_bundles (
+    org_uuid     TEXT NOT NULL,
+    topic        TEXT NOT NULL,
+    seq          INTEGER NOT NULL,
+    v            INTEGER NOT NULL,
+    hashes       TEXT NOT NULL,
+    size         INTEGER NOT NULL,
+    ciphertext   BLOB NOT NULL,
+    signer_pub   TEXT NOT NULL,
+    deposited_at INTEGER NOT NULL,
+    PRIMARY KEY (org_uuid, topic, seq)
+);
 """
 
 
@@ -146,6 +174,8 @@ class RegistryStore:
             self._conn.execute("DELETE FROM orgs WHERE org_uuid = ?", (org_uuid,))
             self._conn.execute("DELETE FROM links WHERE org_uuid = ?", (org_uuid,))
             self._conn.execute("DELETE FROM revocations WHERE org_uuid = ?", (org_uuid,))
+            self._conn.execute("DELETE FROM topic_hints WHERE org_uuid = ?", (org_uuid,))
+            self._conn.execute("DELETE FROM topic_bundles WHERE org_uuid = ?", (org_uuid,))
         self._conn.execute(
             "INSERT INTO orgs (org_uuid, root_pub, recovery_policy, recovery_pub,"
             " created_at, expires_at, renewed_at, endpoint_hints)"
@@ -287,3 +317,139 @@ class RegistryStore:
         cur = self._conn.execute("DELETE FROM revocations WHERE expires_at < ?", (now,))
         self._conn.commit()
         return cur.rowcount
+
+    # -- topics (F3 broker path — hints + encrypted mailbox, L6) ---------------
+
+    def publish_hint(
+        self, org_uuid: str, topic: str, heads: list, signer_pub: str, *, now: int
+    ) -> int:
+        """Append a head announcement (hashes only); returns its seq.
+
+        Re-announcing the head set already at the tip is a no-op that
+        returns the existing seq — periodic heartbeat pushes from a quiet
+        org must not grow the hint stream.
+        """
+        latest = self.latest_hint(org_uuid, topic)
+        if latest is not None and latest["heads"] == heads:
+            return latest["seq"]
+        # seq allocation is a single INSERT..SELECT so concurrent writers
+        # cannot both observe the same MAX and collide on the PK
+        row = self._conn.execute(
+            "INSERT INTO topic_hints (org_uuid, topic, seq, heads, signer_pub, published_at)"
+            " SELECT ?, ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?"
+            " FROM topic_hints WHERE org_uuid = ? AND topic = ?"
+            " RETURNING seq",
+            (org_uuid, topic, json.dumps(heads), signer_pub, now, org_uuid, topic),
+        ).fetchone()
+        self._conn.commit()
+        return row[0]
+
+    def hints_since(self, org_uuid: str, topic: str, since: int, limit: int = 256) -> list:
+        rows = self._conn.execute(
+            "SELECT seq, heads, published_at FROM topic_hints"
+            " WHERE org_uuid = ? AND topic = ? AND seq > ? ORDER BY seq LIMIT ?",
+            (org_uuid, topic, since, limit),
+        ).fetchall()
+        return [
+            {"seq": r["seq"], "heads": json.loads(r["heads"]), "published_at": r["published_at"]}
+            for r in rows
+        ]
+
+    def latest_hint(self, org_uuid: str, topic: str) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT seq, heads, published_at FROM topic_hints"
+            " WHERE org_uuid = ? AND topic = ? ORDER BY seq DESC LIMIT 1",
+            (org_uuid, topic),
+        ).fetchone()
+        if row is None:
+            return None
+        return {"seq": row["seq"], "heads": json.loads(row["heads"]), "published_at": row["published_at"]}
+
+    def deposit_bundle(
+        self,
+        org_uuid: str,
+        topic: str,
+        v: int,
+        hashes: list,
+        ciphertext: bytes,
+        signer_pub: str,
+        *,
+        now: int,
+    ) -> int:
+        """Store-and-forward one ENCRYPTED bundle; returns its seq.
+
+        The row is the whole L6 disclosure: bundle version, topic,
+        hashes, size, and an opaque blob. The store never sees (and
+        cannot check) plaintext. ``v`` is stored verbatim so a future
+        format bump can still open (or deliberately migrate) old rows.
+        """
+        row = self._conn.execute(
+            "INSERT INTO topic_bundles (org_uuid, topic, seq, v, hashes, size, ciphertext,"
+            " signer_pub, deposited_at)"
+            " SELECT ?, ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ?"
+            " FROM topic_bundles WHERE org_uuid = ? AND topic = ?"
+            " RETURNING seq",
+            (org_uuid, topic, v, json.dumps(hashes), len(ciphertext), ciphertext,
+             signer_pub, now, org_uuid, topic),
+        ).fetchone()
+        self._conn.commit()
+        return row[0]
+
+    def bundles_since(
+        self,
+        org_uuid: str,
+        topic: str,
+        since: int,
+        limit: int = 64,
+        *,
+        meta_only: bool = False,
+    ) -> list:
+        columns = "seq, v, hashes, size" + ("" if meta_only else ", ciphertext")
+        rows = self._conn.execute(
+            f"SELECT {columns} FROM topic_bundles"
+            " WHERE org_uuid = ? AND topic = ? AND seq > ? ORDER BY seq LIMIT ?",
+            (org_uuid, topic, since, limit),
+        ).fetchall()
+        out = []
+        for r in rows:
+            entry = {"seq": r["seq"], "v": r["v"], "hashes": json.loads(r["hashes"]),
+                     "size": r["size"]}
+            if not meta_only:
+                entry["ciphertext"] = bytes(r["ciphertext"])
+            out.append(entry)
+        return out
+
+    def bundles_with(self, org_uuid: str, topic: str, want: list, limit: int = 64) -> list:
+        """Fetch-missing-by-hash: bundles containing any wanted event id.
+
+        Two-phase so the manifest scan never materializes ciphertext:
+        blob pages are read only for the (few) matching rows.
+        """
+        wanted = set(want)
+        matched = []
+        for row in self._conn.execute(
+            "SELECT seq, hashes FROM topic_bundles"
+            " WHERE org_uuid = ? AND topic = ? ORDER BY seq",
+            (org_uuid, topic),
+        ):
+            if wanted & set(json.loads(row["hashes"])):
+                matched.append(row["seq"])
+                if len(matched) >= limit:
+                    break
+        out = []
+        for seq in matched:
+            r = self._conn.execute(
+                "SELECT seq, v, hashes, size, ciphertext FROM topic_bundles"
+                " WHERE org_uuid = ? AND topic = ? AND seq = ?",
+                (org_uuid, topic, seq),
+            ).fetchone()
+            out.append(
+                {
+                    "seq": r["seq"],
+                    "v": r["v"],
+                    "hashes": json.loads(r["hashes"]),
+                    "size": r["size"],
+                    "ciphertext": bytes(r["ciphertext"]),
+                }
+            )
+        return out

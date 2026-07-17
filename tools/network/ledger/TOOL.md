@@ -5,9 +5,9 @@ authority ledger: a **hash-linked DAG of signed authority events** plus the
 **deterministic fold** that turns the DAG into authority state. Built on
 idkit (`tools/network/idkit/` — the only dependency besides `cryptography`).
 
-Spec: graph note `eb245082-b76` §2–3, §11 · Beads: `auto-16cjl` (F1 core),
-`auto-0kkpq` (F2 storage/projections). Downstream: F3 sync, F5 invites,
-F7 recovery.
+Spec: graph note `eb245082-b76` §2–3, §6–7, §11 · Beads: `auto-16cjl`
+(F1 core), `auto-0kkpq` (F2 storage/projections), `auto-rrzrt` (F3
+sync + broker mailbox). Downstream: F4 witness, F5 invites, F7 recovery.
 
 ## Data model
 
@@ -162,6 +162,46 @@ models above, shape-validated per projection kind). Cross-pin tests
 validate real fold output against the schemas so contract and library
 cannot drift.
 
+## Sync (F3) — peer path, sealed bundles, broker path
+
+**Peer sync** (`sync.py`, sans-IO): git-fetch semantics — exchange heads
+(the notification plane: 32-byte hints), ship only the events outside
+the other side's declared ancestry (the data plane: content-addressed
+pull). One pass is one round trip plus an optional same-pass push;
+`sync_pair(a, b)` runs it in-process and proves convergence. A node
+offline across any number of update rounds catches up against any
+single peer in ONE round trip (`SyncReport.round_trips` pins it).
+Messages are JSON objects (`encode_message`/`decode_message`) so any
+byte transport — a relaykit E2E channel, a pipe — can carry them.
+Different genesis ⇒ different org ⇒ `SyncError`, never a merge; a fresh
+replica can pin its org with `SyncPeer(store, expected_genesis=...)`.
+Cold bootstrap over a *trusted* peer works from empty; untrusted bundles
+go through checkpoint-gated `cold_join`.
+
+**Sealed bundles** (`bundles.py`): what the broker mailbox stores — a
+plaintext hash manifest + AES-256-GCM blob of the event wires. The **org
+sync key** derives from ledger state (HKDF-SHA256 of the genesis wire —
+unguessable without the replica since it embeds the root's signature;
+possession of the DAG ⇔ membership, the v1 boundary; rotation on
+membership change is spec §13 Q4, M-track). AAD binds
+`{org, topic, hashes}`: cross-topic/cross-org splices and doctored
+manifests fail authentication even against a dishonest broker, and the
+manifest is re-checked against decrypted event ids after opening.
+
+**Broker path** (`broker.py`; imports registry signing, so it is NOT
+re-exported from the package root): `BrokerClient` speaks the registry's
+per-org topic endpoints (scope `topic:<name>`) over an injected
+transport. `broker_push` diffs the local DAG against the mailbox's hash
+manifests and deposits exactly the delta; `broker_pull` reads the hint
+stream first and touches ciphertext only when hints announce unknown
+heads (notification/data separation, §7), draining the mailbox — plus
+fetch-missing-by-hash for out-of-cursor ancestry — in one pass. The
+broker sees topic + hashes + sizes only (**L6**, pinned by a disk-scan
+test in `tools/network/registry/tests/test_broker_sync.py`). The
+authority ledger rides the one mandatory topic (`AUTHORITY_TOPIC`);
+content streams are separate opt-in topics that an authority-only
+subscriber never receives.
+
 ## Structural admission (Ledger.add)
 
 Signature verify → parents exist → HLC strictly exceeds every parent →
@@ -184,7 +224,11 @@ L2 (attenuation incl. invites/roles), L3 (revoke-beats-grant, permanence,
 hash tiebreaks), L4 (cascade, explicit re-grant, multi-path survival),
 invite lifecycle (demotion, races, claim_requires), rotation/rekey, and
 adversarial suites (escalation laundering, revoke abuse, replica
-divergence) are all pinned.
+divergence) are all pinned. F3 lives in `tests/test_sync.py` (peer
+convergence, one-round-trip offline catch-up, bundle crypto fail-closed)
+and `tools/network/registry/tests/test_topics.py` +
+`test_broker_sync.py` (topic surface, broker convergence, L6 disk scan,
+plane separation, authority-vs-content scoping).
 
 ## v1 boundaries (deliberate)
 
