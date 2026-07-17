@@ -57,6 +57,10 @@ Two anchors sit outside the chain rule by construction:
 | `POST /v1/orgs/{org}/topics/{topic}/heads/poll` | chain with `topic:<topic>` | cursor-based hint fanout (`since` seq) + latest announcement |
 | `POST /v1/orgs/{org}/topics/{topic}/bundles` | chain with `topic:<topic>` | F3 data plane: store-and-forward mailbox of ENCRYPTED event bundles — the broker stores topic + hashes + sizes + opaque ciphertext, nothing else (L6) |
 | `POST /v1/orgs/{org}/topics/{topic}/bundles/fetch` | chain with `topic:<topic>` | by cursor (`since`), by hash (`want` — fetch-missing-by-hash), or `meta_only` manifests for anti-entropy planning |
+| `POST /v1/orgs/{org}/topics/{topic}/witness` | chain with `topic:<topic>` | F4 equivocation witness: append the observed head-set to the per-topic hash-chained log; returns the tip **signed by the registry witness key** (idempotent on an unchanged head-set) |
+| `POST /v1/orgs/{org}/topics/{topic}/witness/head` | chain with `topic:<topic>` | serve the current signed head-set — identical to every member |
+| `POST /v1/orgs/{org}/topics/{topic}/witness/since` | chain with `topic:<topic>` | signed chain entries after `since` (the client's continuity walk) |
+| `GET /v1/witness/pubkey` | none | the registry's pinnable witness verification key — public by nature; the pin is what makes split-view detection provable |
 | `GET /healthz` | none | systemd/Caddy probe |
 | `WS /t/{org}` | `tunnel:serve` hello (chain to bound root) | §5.1 relay tunnel — one outbound dashboard connection per org; see `tools/network/relaykit/TOOL.md` |
 | `WS /v1/links/{token}/channel` | none (bootloader) | viewer end of the relay; every failure closes `4404` (anti-enumeration) |
@@ -89,6 +93,41 @@ not to registry certs), and **no mailbox retention/quota yet** — spec
 §13 Q5 ties defaults to the first real Tier-C threshold; until then the
 mailbox grows monotonically (identical re-announcements are deduped
 server-side, so quiet-org heartbeats cost nothing).
+
+## Equivocation witness (F4, spec §6 role 2, L5)
+
+The registry's **T1-neutral anti-fork role** (`witness.py` + the
+`witness_log` store table; client verifier in `ledger/witness.py`, bead
+`auto-12jah`). It keeps a per-`(org, topic)` **append-only, hash-chained**
+log of published head-sets and serves each tip **signed by the registry
+witness key** — Certificate-Transparency split-view detection reduced to
+hashes, so it composes with the L6 encrypted mailbox untouched (the
+witness never sees an event, only its id).
+
+- **Provable equivocation.** Every served tip is non-repudiably signed and
+  carries its chain position (`seq` + `prev`). A server that shows two
+  members different histories signs two contradictory attestations; the
+  pair is a self-contained proof anyone re-checks against the pinned key
+  (`split-seq` — two entries at one seq; `fork-prev` — a `seq N+1` entry
+  rooted on a different `seq N` entry than the member holds). The witness
+  key is **pinned** (`GET /v1/witness/pubkey`, TOFU/out-of-band); a proof
+  only counts when both halves verify under the same trusted key, so a
+  split server cannot escape by signing each half under its own key.
+- **Append-only, two layers.** Structural: the store only appends, `seq`
+  is monotonic, and each entry commits to the previous by content address
+  — a rewrite breaks the chain members already hold signed. Semantic
+  (client-side, DAG-aware): a fresh head-set must *supersede* the last
+  (`ancestry(new) ⊇ old`); a head-set that drops a non-superseded head is
+  a rejected retraction; a descendant head passes.
+- **Witnessed-head query (F7 seam).** `ledger.witness.witnessed_fold` folds
+  "state as of witnessed head H" deterministically, and only against a
+  witness-signed head-set — a forged branch was never witnessed, which is
+  the L7 circularity defense for org-root recovery.
+- **Blindness (L5).** The `witness_log` row is hashes, a publisher pubkey,
+  and a timestamp — pinned by a disk-scan test (`tests/test_witness.py`).
+
+A stable deployment MUST pass a persistent `witness_key` to `create_app`;
+rotating it silently breaks pins and hence detection.
 
 ## Running
 

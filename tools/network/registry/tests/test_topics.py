@@ -265,8 +265,9 @@ def test_protocol_caps_are_cross_pinned():
         MAX_HINT_HEADS,
         MIN_BUNDLE_BYTES,
     )
+    from tools.network.registry.witness import MAX_WITNESS_HEADS
 
-    assert MAX_SYNC_HEADS == MAX_HINT_HEADS == 64  # 64 also pinned in the
+    assert MAX_SYNC_HEADS == MAX_HINT_HEADS == MAX_WITNESS_HEADS == 64  # 64 also pinned in the
     # ledger-state Settings schema's _require_heads (asserted via source)
     import inspect
 

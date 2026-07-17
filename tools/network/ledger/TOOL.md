@@ -202,6 +202,22 @@ authority ledger rides the one mandatory topic (`AUTHORITY_TOPIC`);
 content streams are separate opt-in topics that an authority-only
 subscriber never receives.
 
+## Equivocation witness — client (F4, `witness.py`)
+
+`witness.py` (like `broker.py`, imports registry signing, so it is NOT
+re-exported from the package root; bead `auto-12jah`) is the member's half
+of the anti-fork role. `WitnessClient` publishes the observed head-set and
+pulls the signed, hash-chained attestation log; `WitnessJournal` keeps the
+last attestation admitted and **pins** the witness key, advancing only on a
+clean forward extension. A contradiction that two signatures alone prove
+(`split-seq`, `fork-prev`) becomes an `EquivocationProof` — the portable
+transcript (the two signed responses) anyone re-checks against the pinned
+key. A retraction of the authority frontier (`dominates` false — a dropped
+head no descendant supersedes) is caught with the local DAG. `witnessed_fold`
+resolves "state as of witnessed head H" deterministically, and only for a
+witness-signed head-set (the F7 recovery seam). Registry surface + L5
+disk-scan: `tools/network/registry/tests/test_witness.py`.
+
 ## Structural admission (Ledger.add)
 
 Signature verify → parents exist → HLC strictly exceeds every parent →

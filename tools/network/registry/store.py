@@ -18,6 +18,13 @@ Tables:
   store-and-forward mailbox of ENCRYPTED event bundles. Both tables are
   T0-blind by construction — they hold topic names, event hashes, sizes,
   and opaque ciphertext; plaintext event bytes never reach this store.
+- ``witness_log`` — the F4 equivocation witness (spec §6 role 2, L5): a
+  per-``(org, topic)`` APPEND-ONLY, hash-chained log of the head-sets
+  members publish. Each row commits to the previous (``prev_id``), so the
+  served chain is tamper-evident; the store exposes only append + read,
+  never update or delete, which is what "append-only" means at this layer.
+  T1-blind like the broker tables — hashes, a publisher pubkey, and a
+  timestamp only; it composes with L6 because it never needs a plaintext.
 
 All timestamps are unix seconds, passed in by the caller — the store
 never reads the wall clock, which is what makes TTL behavior testable.
@@ -31,6 +38,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 from tools.network.idkit import RevocationRecord, RevocationSet
+
+from .witness import build_entry, entry_id as _entry_id
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS orgs (
@@ -97,6 +106,20 @@ CREATE TABLE IF NOT EXISTS topic_bundles (
     deposited_at INTEGER NOT NULL,
     PRIMARY KEY (org_uuid, topic, seq)
 );
+
+CREATE TABLE IF NOT EXISTS witness_log (
+    org_uuid     TEXT NOT NULL,
+    topic        TEXT NOT NULL,
+    seq          INTEGER NOT NULL,
+    heads        TEXT NOT NULL,
+    prev_id      TEXT,
+    entry_id     TEXT NOT NULL,
+    publisher    TEXT NOT NULL,
+    witnessed_at INTEGER NOT NULL,
+    PRIMARY KEY (org_uuid, topic, seq)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_witness_entry
+    ON witness_log (org_uuid, topic, entry_id);
 """
 
 
@@ -176,6 +199,7 @@ class RegistryStore:
             self._conn.execute("DELETE FROM revocations WHERE org_uuid = ?", (org_uuid,))
             self._conn.execute("DELETE FROM topic_hints WHERE org_uuid = ?", (org_uuid,))
             self._conn.execute("DELETE FROM topic_bundles WHERE org_uuid = ?", (org_uuid,))
+            self._conn.execute("DELETE FROM witness_log WHERE org_uuid = ?", (org_uuid,))
         self._conn.execute(
             "INSERT INTO orgs (org_uuid, root_pub, recovery_policy, recovery_pub,"
             " created_at, expires_at, renewed_at, endpoint_hints)"
@@ -453,3 +477,70 @@ class RegistryStore:
                 }
             )
         return out
+
+    # -- witness (F4 equivocation witness — append-only head-set log, L5) -------
+
+    def _witness_row(self, row) -> dict:
+        """A stored row as ``{entry, entry_id}`` — the shape the app signs."""
+        return {
+            "entry": {
+                "org": row["org_uuid"],
+                "topic": row["topic"],
+                "seq": row["seq"],
+                "heads": json.loads(row["heads"]),
+                "prev": row["prev_id"],
+                "publisher": row["publisher"],
+            },
+            "entry_id": row["entry_id"],
+        }
+
+    def witness_tip(self, org_uuid: str, topic: str) -> Optional[dict]:
+        """The current head-set attestation entry, or ``None`` if empty."""
+        row = self._conn.execute(
+            "SELECT * FROM witness_log WHERE org_uuid = ? AND topic = ?"
+            " ORDER BY seq DESC LIMIT 1",
+            (org_uuid, topic),
+        ).fetchone()
+        return self._witness_row(row) if row is not None else None
+
+    def append_witness(
+        self, org_uuid: str, topic: str, heads: list, publisher: str, *, now: int
+    ) -> dict:
+        """Append one head-set to the chain; returns its ``{entry, entry_id}``.
+
+        The new entry is chained to the current tip (``prev`` = tip's
+        content address, ``seq`` = tip seq + 1), which is what makes the
+        served log tamper-evident: a rewrite of any past entry breaks the
+        hash chain the members already hold signed. Re-attesting the head
+        set already at the tip is idempotent — it returns the tip unchanged
+        so a quiet org's heartbeat never grows the log (matching the hint
+        stream's dedup). The store is single-writer; the ``(org, topic,
+        seq)`` primary key is the backstop that turns any lost race into a
+        loud ``IntegrityError`` rather than a forked chain.
+        """
+        heads_sorted = sorted(set(heads))
+        tip = self.witness_tip(org_uuid, topic)
+        if tip is not None and tip["entry"]["heads"] == heads_sorted:
+            return tip
+        seq = 1 if tip is None else tip["entry"]["seq"] + 1
+        prev = None if tip is None else tip["entry_id"]
+        entry = build_entry(org_uuid, topic, seq, heads_sorted, prev, publisher)
+        eid = _entry_id(entry)
+        self._conn.execute(
+            "INSERT INTO witness_log (org_uuid, topic, seq, heads, prev_id,"
+            " entry_id, publisher, witnessed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (org_uuid, topic, seq, json.dumps(entry["heads"]), prev, eid, publisher, now),
+        )
+        self._conn.commit()
+        return {"entry": entry, "entry_id": eid}
+
+    def witness_since(
+        self, org_uuid: str, topic: str, since: int, limit: int = 256
+    ) -> list:
+        """Chain entries with ``seq > since`` (for the client's chain walk)."""
+        rows = self._conn.execute(
+            "SELECT * FROM witness_log WHERE org_uuid = ? AND topic = ? AND seq > ?"
+            " ORDER BY seq LIMIT ?",
+            (org_uuid, topic, since, limit),
+        ).fetchall()
+        return [self._witness_row(r) for r in rows]
