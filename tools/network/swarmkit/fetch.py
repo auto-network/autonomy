@@ -383,12 +383,21 @@ async def swarm_fetch(
         state.report.duration = time.perf_counter() - started
         return state.report
 
+    async def close_all() -> None:
+        for _, link in links:
+            with contextlib.suppress(Exception):
+                await link.close()
+
     try:
         if timeout is None:
             return await run()
         return await asyncio.wait_for(run(), timeout)
     except asyncio.TimeoutError:
-        for _, link in links:
-            with contextlib.suppress(Exception):
-                await link.close()
+        await close_all()
         raise SwarmFetchError(f"swarm fetch timed out after {timeout}s") from None
+    except BaseException:
+        # Ephemeral links, even in failure: errors raised BEFORE the
+        # sessions exist (e.g. no peer supplied a valid manifest) must
+        # not leak the channels the sessions would have closed.
+        await close_all()
+        raise

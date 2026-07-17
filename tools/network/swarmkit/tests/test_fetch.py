@@ -164,6 +164,20 @@ class TestFetch:
             run_fetch(store, aid, [("empty", HandlerLink(swarm_handler(empty)))],
                       timeout=0.5)
 
+    def test_links_closed_when_no_peer_has_manifest(self):
+        """Regression: the pre-session failure path (every peer refuses
+        the manifest) must close the supplied links, exactly like the
+        session paths do — no channel outlives the fetch."""
+        _, seed, aid = make_artifact()
+        links = [
+            (f"empty{i}", HandlerLink(swarm_handler(BlockStore())))
+            for i in range(3)
+        ]
+        store = BlockStore()
+        with pytest.raises(SwarmFetchError):
+            run_fetch(store, aid, links)
+        assert all(link.closed for _, link in links)
+
     def test_dead_link_routed_around(self):
         data, seed, aid = make_artifact()
 
