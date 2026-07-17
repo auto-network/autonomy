@@ -151,6 +151,38 @@ def test_tampered_claim_is_rejected(client, clock, root, bound_org):
     publish(client, clock, root, tampered, expect=403)
 
 
+def test_bool_version_malleability_is_rejected(client, clock, root, bound_org):
+    # True == 1 in Python: a claim whose payload carries "v":true would be
+    # a second accepted byte form of the same signed payload (the rebuilt
+    # v=1 payload still verifies) — one claim, two wires. Must be 400.
+    import json
+
+    claim = json.loads(make_claim(root))
+    claim["payload"]["v"] = True
+    mutated = json.dumps(claim, sort_keys=True, separators=(",", ":"))
+    publish(client, clock, root, mutated, expect=400)
+
+
+def test_unpaired_surrogate_is_rejected_not_a_crash(client, clock, root, bound_org):
+    # json.loads happily yields a str containing a lone surrogate, which
+    # has no UTF-8 encoding — must be a clean 400, not an encode crash.
+    # Sent as raw wire bytes carrying the \ud800 ESCAPE (a well-formed
+    # HTTP body no JSON parser rejects), the way an attacker would.
+    import json
+
+    from tools.network.registry.signing import sign_request
+
+    claim = make_claim(root).replace('"description":"a thing"',
+                                    '"description":"\ud800"')
+    envelope = sign_request(root, "POST", "/v1/listings", {"claim": claim},
+                            ts=clock.now)
+    body = json.dumps(envelope, ensure_ascii=True).encode("ascii")
+    response = client.post("/v1/listings", content=body,
+                           headers={"content-type": "application/json"})
+    assert response.status_code == 400, response.status_code
+    assert "surrogate" in response.json()["detail"]
+
+
 def test_oversized_description_is_rejected(client, clock, root, bound_org):
     import json
 
@@ -246,13 +278,40 @@ def test_expiry_reclaimer_cannot_touch_the_old_chain(client, clock, root):
     publish(client, clock, hijacker, fake, expect=403)
     # ...no fresh shadow listing under the occupied name...
     publish(client, clock, hijacker, make_claim(hijacker, ts=clock.now + 1),
-            expect=409)
+            expect=403)
     # ...and no delisting of the old continuity's card.
     signed(client, "DELETE", f"/v1/listings/{ORG}/studio", hijacker, {},
            clock, expect=403)
     # A different name is untouched territory.
     publish(client, clock, hijacker,
             make_claim(hijacker, name="fresh", ts=clock.now + 2), expect=201)
+
+
+def test_reclaimer_cannot_restart_a_revoked_chain(client, clock, root):
+    # Even a chain its owner already withdrew stays out of a UUID
+    # reclaimer's reach — a revoked name must not become squattable.
+    register(client, clock, root, ttl=DAY)
+    publish(client, clock, root, make_claim(root), expect=201)
+    signed(client, "DELETE", f"/v1/listings/{ORG}/studio", root, {}, clock,
+           expect=200)
+
+    clock.advance(2 * DAY)
+    hijacker = KeyPair.generate()
+    register(client, clock, hijacker, ttl=DAY)
+    publish(client, clock, hijacker, make_claim(hijacker, ts=clock.now),
+            expect=403)
+
+
+def test_owner_republishes_after_revoke(client, clock, root, bound_org):
+    v1 = publish(client, clock, root, make_claim(root), expect=201).json()
+    signed(client, "DELETE", f"/v1/listings/{ORG}/studio", root, {}, clock,
+           expect=200)
+    # The same continuity may resume, fresh or chained to the revoked head.
+    v2 = publish(client, clock, root,
+                 make_claim(root, version="2.0.0", prev=v1["listing_id"],
+                            ts=NOW + 60), expect=201).json()
+    index = client.get("/v1/listings").json()["listings"]
+    assert [e["listing_id"] for e in index] == [v2["listing_id"]]
 
 
 # -- names are labels ----------------------------------------------------------
@@ -312,6 +371,24 @@ def test_attestation_round_trip_and_expiry(client, clock, root, bound_org):
     clock.advance(31 * DAY)  # past ts + ttl
     assert client.get(f"/v1/attestations/{root.public_hex}") \
         .json()["attestations"] == []
+
+
+def test_attestation_refresh_replaces_not_accumulates(client, clock, root):
+    attestor = KeyPair.generate()
+    stale = make_attestation(attestor, root.public_hex, ts=NOW - DAY)
+    fresh = make_attestation(attestor, root.public_hex, ts=NOW)
+    assert client.post("/v1/attestations", json={"record": fresh}).status_code == 201
+    # A newer record replaced by force; a stale replay cannot roll it back.
+    assert client.post("/v1/attestations", json={"record": stale}).status_code == 201
+    got = client.get(f"/v1/attestations/{root.public_hex}").json()["attestations"]
+    assert len(got) == 1
+    assert got[0]["ts"] == NOW
+    assert got[0]["record"] == fresh
+    # A distinct claim_value is a distinct logical claim: second row.
+    other = make_attestation(attestor, root.public_hex, claim_value="Studio Ltd")
+    client.post("/v1/attestations", json={"record": other})
+    got = client.get(f"/v1/attestations/{root.public_hex}").json()["attestations"]
+    assert len(got) == 2
 
 
 def test_attestation_bad_signature_is_rejected(client, clock, root):
