@@ -120,6 +120,61 @@ CREATE TABLE IF NOT EXISTS witness_log (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_witness_entry
     ON witness_log (org_uuid, topic, entry_id);
+
+-- E1 session linking (spec §4.7, §4.8, §6.8) --------------------------------
+
+-- First-party auto.network viewing sessions. A row is created ANONYMOUS
+-- (identified=0, no org/subject) when a browser mints a QR challenge, and
+-- UPGRADED in place to identified=1 when an assertion redeems. Identity
+-- attaches ONLY through redemption (I12) — never from a bearer-link view.
+CREATE TABLE IF NOT EXISTS link_sessions (
+    session_id       TEXT PRIMARY KEY,
+    org_uuid         TEXT,
+    subject_kind     TEXT,
+    subject_id       TEXT,
+    dashboard_origin TEXT,
+    identified       INTEGER NOT NULL,
+    created_at       INTEGER NOT NULL,
+    expires_at       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_link_sessions_expiry ON link_sessions (expires_at);
+
+-- QR cross-device challenges (§4.8): an anonymous browser mints a ~60s
+-- nonce bound to ITS session; the trusted PWA later redeems it (via §4.7,
+-- nonce inside the signed assertion) to upgrade that bound session — not
+-- the submitter's. Single-use: redeemed_at is set exactly once.
+CREATE TABLE IF NOT EXISTS link_challenges (
+    nonce       TEXT PRIMARY KEY,
+    session_id  TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    expires_at  INTEGER NOT NULL,
+    redeemed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_link_challenges_expiry ON link_challenges (expires_at);
+
+-- Anti-replay for redeemed assertion nonces (§4.7). Retention is bounded
+-- by the assertion's own not_after (I7 discipline): once an assertion can
+-- no longer be fresh, remembering its nonce buys nothing.
+CREATE TABLE IF NOT EXISTS consumed_assertions (
+    nonce      TEXT PRIMARY KEY,
+    org_uuid   TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_consumed_assertions_expiry ON consumed_assertions (expires_at);
+
+-- I12 witness: identity is recorded against a VIEW only when the grant
+-- required auth. This table exists so the invariant is assertable on
+-- storage — for a plain bearer (no-auth) grant it stays empty even when
+-- the viewing session is identified.
+CREATE TABLE IF NOT EXISTS link_view_attributions (
+    session_id   TEXT NOT NULL,
+    token        TEXT NOT NULL,
+    subject_kind TEXT NOT NULL,
+    subject_id   TEXT NOT NULL,
+    org_uuid     TEXT NOT NULL,
+    viewed_at    INTEGER NOT NULL,
+    PRIMARY KEY (session_id, token)
+);
 """
 
 
@@ -148,6 +203,27 @@ class LinkGrant:
     signer_pub: str
     subject_kind: str
     subject_id: str
+
+
+@dataclass(frozen=True)
+class LinkSession:
+    session_id: str
+    org_uuid: Optional[str]
+    subject_kind: Optional[str]
+    subject_id: Optional[str]
+    dashboard_origin: Optional[str]
+    identified: bool
+    created_at: int
+    expires_at: int
+
+
+@dataclass(frozen=True)
+class LinkChallenge:
+    nonce: str
+    session_id: str
+    created_at: int
+    expires_at: int
+    redeemed_at: Optional[int]
 
 
 class RegistryStore:
@@ -200,6 +276,11 @@ class RegistryStore:
             self._conn.execute("DELETE FROM topic_hints WHERE org_uuid = ?", (org_uuid,))
             self._conn.execute("DELETE FROM topic_bundles WHERE org_uuid = ?", (org_uuid,))
             self._conn.execute("DELETE FROM witness_log WHERE org_uuid = ?", (org_uuid,))
+            # Identity tied to the OLD binding dies with it: reclaimed UUID,
+            # new root, no carried-over sessions, attributions, or nonces.
+            self._conn.execute("DELETE FROM link_sessions WHERE org_uuid = ?", (org_uuid,))
+            self._conn.execute("DELETE FROM consumed_assertions WHERE org_uuid = ?", (org_uuid,))
+            self._conn.execute("DELETE FROM link_view_attributions WHERE org_uuid = ?", (org_uuid,))
         self._conn.execute(
             "INSERT INTO orgs (org_uuid, root_pub, recovery_policy, recovery_pub,"
             " created_at, expires_at, renewed_at, endpoint_hints)"
@@ -544,3 +625,181 @@ class RegistryStore:
             (org_uuid, topic, since, limit),
         ).fetchall()
         return [self._witness_row(r) for r in rows]
+
+    # -- E1 session linking (§4.7, §4.8, §6.8) ---------------------------------
+
+    def _row_to_session(self, row) -> LinkSession:
+        return LinkSession(
+            session_id=row["session_id"],
+            org_uuid=row["org_uuid"],
+            subject_kind=row["subject_kind"],
+            subject_id=row["subject_id"],
+            dashboard_origin=row["dashboard_origin"],
+            identified=bool(row["identified"]),
+            created_at=row["created_at"],
+            expires_at=row["expires_at"],
+        )
+
+    def get_session(self, session_id: str) -> Optional[LinkSession]:
+        row = self._conn.execute(
+            "SELECT * FROM link_sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return self._row_to_session(row) if row is not None else None
+
+    def create_anonymous_session(self, session_id: str, *, now: int, expires_at: int) -> None:
+        """Open a fresh anonymous session (identified=0, no identity)."""
+        self._conn.execute(
+            "INSERT INTO link_sessions (session_id, org_uuid, subject_kind, subject_id,"
+            " dashboard_origin, identified, created_at, expires_at)"
+            " VALUES (?, NULL, NULL, NULL, NULL, 0, ?, ?)",
+            (session_id, now, expires_at),
+        )
+        self._conn.commit()
+
+    def identify_session(
+        self,
+        session_id: str,
+        *,
+        org_uuid: str,
+        subject_kind: str,
+        subject_id: str,
+        dashboard_origin: str,
+        now: int,
+        expires_at: int,
+    ) -> None:
+        """Upgrade (or create) a session to an identified one.
+
+        Idempotent on session_id: a same-browser redemption with no prior
+        anonymous session INSERTs; a QR upgrade of an existing anonymous
+        session (or a re-redemption) UPDATEs in place. Either way the row
+        ends up identified for {subject, org} with the announced origin.
+        """
+        self._conn.execute(
+            "INSERT INTO link_sessions (session_id, org_uuid, subject_kind, subject_id,"
+            " dashboard_origin, identified, created_at, expires_at)"
+            " VALUES (?, ?, ?, ?, ?, 1, ?, ?)"
+            " ON CONFLICT (session_id) DO UPDATE SET"
+            " org_uuid = excluded.org_uuid, subject_kind = excluded.subject_kind,"
+            " subject_id = excluded.subject_id, dashboard_origin = excluded.dashboard_origin,"
+            " identified = 1, expires_at = excluded.expires_at",
+            (session_id, org_uuid, subject_kind, subject_id, dashboard_origin, now, expires_at),
+        )
+        self._conn.commit()
+
+    def purge_expired_sessions(self, *, now: int) -> int:
+        cur = self._conn.execute("DELETE FROM link_sessions WHERE expires_at < ?", (now,))
+        self._conn.commit()
+        return cur.rowcount
+
+    # -- QR challenges ---------------------------------------------------------
+
+    def create_challenge(
+        self, nonce: str, session_id: str, *, now: int, expires_at: int
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO link_challenges (nonce, session_id, created_at, expires_at, redeemed_at)"
+            " VALUES (?, ?, ?, ?, NULL)",
+            (nonce, session_id, now, expires_at),
+        )
+        self._conn.commit()
+
+    def get_challenge(self, nonce: str) -> Optional[LinkChallenge]:
+        row = self._conn.execute(
+            "SELECT * FROM link_challenges WHERE nonce = ?", (nonce,)
+        ).fetchone()
+        if row is None:
+            return None
+        return LinkChallenge(
+            nonce=row["nonce"],
+            session_id=row["session_id"],
+            created_at=row["created_at"],
+            expires_at=row["expires_at"],
+            redeemed_at=row["redeemed_at"],
+        )
+
+    def redeem_challenge(self, nonce: str, *, now: int) -> bool:
+        """Mark a challenge redeemed exactly once.
+
+        Atomic single-use: the UPDATE only fires while redeemed_at IS NULL
+        AND the challenge is still fresh, so two racing redemptions cannot
+        both win. Returns True iff this call performed the transition.
+        """
+        cur = self._conn.execute(
+            "UPDATE link_challenges SET redeemed_at = ?"
+            " WHERE nonce = ? AND redeemed_at IS NULL AND expires_at >= ?",
+            (now, nonce, now),
+        )
+        self._conn.commit()
+        return cur.rowcount == 1
+
+    def purge_expired_challenges(self, *, now: int) -> int:
+        cur = self._conn.execute("DELETE FROM link_challenges WHERE expires_at < ?", (now,))
+        self._conn.commit()
+        return cur.rowcount
+
+    # -- assertion anti-replay -------------------------------------------------
+
+    def consume_assertion(self, nonce: str, org_uuid: str, *, expires_at: int) -> bool:
+        """Record a redeemed assertion nonce; returns True iff newly seen.
+
+        A False return is a replay: the nonce was already consumed. The
+        INSERT is the atomic guard — a concurrent double-redemption has
+        exactly one INSERT succeed.
+        """
+        cur = self._conn.execute(
+            "INSERT OR IGNORE INTO consumed_assertions (nonce, org_uuid, expires_at)"
+            " VALUES (?, ?, ?)",
+            (nonce, org_uuid, expires_at),
+        )
+        self._conn.commit()
+        return cur.rowcount == 1
+
+    def assertion_consumed(self, nonce: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM consumed_assertions WHERE nonce = ?", (nonce,)
+        ).fetchone()
+        return row is not None
+
+    def purge_expired_assertions(self, *, now: int) -> int:
+        cur = self._conn.execute("DELETE FROM consumed_assertions WHERE expires_at < ?", (now,))
+        self._conn.commit()
+        return cur.rowcount
+
+    # -- I12 view attribution --------------------------------------------------
+
+    def record_view_attribution(
+        self,
+        session_id: str,
+        token: str,
+        *,
+        subject_kind: str,
+        subject_id: str,
+        org_uuid: str,
+        now: int,
+    ) -> None:
+        """Attribute an identified view to a subject — ONLY ever called for
+        a grant that required auth (I12)."""
+        self._conn.execute(
+            "INSERT INTO link_view_attributions (session_id, token, subject_kind,"
+            " subject_id, org_uuid, viewed_at) VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT (session_id, token) DO UPDATE SET viewed_at = excluded.viewed_at",
+            (session_id, token, subject_kind, subject_id, org_uuid, now),
+        )
+        self._conn.commit()
+
+    def view_attributions(self, token: Optional[str] = None) -> list:
+        """All recorded view attributions (optionally for one token).
+
+        The I12 assertion surface: for a no-auth grant this is empty even
+        after an identified session fetched the envelope.
+        """
+        if token is None:
+            rows = self._conn.execute(
+                "SELECT * FROM link_view_attributions ORDER BY viewed_at"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM link_view_attributions WHERE token = ? ORDER BY viewed_at",
+                (token,),
+            ).fetchall()
+        return [dict(r) for r in rows]
