@@ -12,8 +12,18 @@ The registry-side relay endpoint lives in ``tools.network.registry.relay``
 — it consumes ``frames`` only, never ``channel``: the relay routes opaque
 ciphertext and holds no key material (I5).
 
+G1 adds the network-fabric rungs above the floor (spec
+``eb245082-b76`` §8, bead ``auto-57hav``):
+
+- ``peer``     — org peer relay (``relay:serve`` delegation proof, park +
+  dial bridging) and the park connector
+- ``direct``   — direct-dial listener + candidate client (rung one)
+- ``dialer``   — the fallback chain: direct → peer relay → floor
+- ``node``     — a member node's composite runtime (listener, parks,
+  floor tunnel, reachability announcer)
+
 Spec: graph note ``a17c8657-939`` §5.1, §5.2, §7 (I5).
-Bead: ``auto-xbt33`` (B2).
+Beads: ``auto-xbt33`` (B2), ``auto-57hav`` (G1).
 """
 
 from .channel import (

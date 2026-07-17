@@ -123,6 +123,27 @@ CREATE TABLE IF NOT EXISTS witness_log (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_witness_entry
     ON witness_log (org_uuid, topic, entry_id);
 
+-- G1 node reachability hints (spec §8) --------------------------------------
+
+-- Self-announced connectivity candidates for an org's nodes: direct-dial
+-- address candidates (the ICE-style seed for hole-punching) and, when the
+-- node offers to relay for its org, the dial URL of its peer relay. The
+-- node's identity IS the announcing envelope's signer key; a node can only
+-- ever announce itself. Rows expire by TTL (stale hints must die — a
+-- reconnecting laptop's old address is worse than none) and are re-upserted
+-- by each refresh. Tier B by construction: reads require a signed envelope,
+-- so anonymous sessions can never enumerate an org's interior addresses.
+CREATE TABLE IF NOT EXISTS node_hints (
+    org_uuid     TEXT NOT NULL,
+    node_pub     TEXT NOT NULL,
+    addrs        TEXT NOT NULL,
+    relay_url    TEXT,
+    announced_at INTEGER NOT NULL,
+    expires_at   INTEGER NOT NULL,
+    PRIMARY KEY (org_uuid, node_pub)
+);
+CREATE INDEX IF NOT EXISTS idx_node_hints_expiry ON node_hints (expires_at);
+
 -- E1 session linking (spec §4.7, §4.8, §6.8) --------------------------------
 
 -- First-party auto.network viewing sessions. A row is created ANONYMOUS
@@ -513,6 +534,64 @@ class RegistryStore:
         if row is None:
             return None
         return {"seq": row["seq"], "heads": json.loads(row["heads"]), "published_at": row["published_at"]}
+
+    # -- node reachability hints (G1 fabric path, spec §8) ---------------------
+
+    @_locked
+    def upsert_node_hint(
+        self,
+        org_uuid: str,
+        node_pub: str,
+        addrs: list,
+        relay_url: Optional[str],
+        *,
+        now: int,
+        expires_at: int,
+    ) -> None:
+        """Announce/refresh one node's reachability. Last write wins —
+        a refresh replaces the previous candidate set entirely, so an
+        address the node stopped announcing disappears immediately rather
+        than lingering until TTL."""
+        self._conn.execute(
+            "INSERT INTO node_hints (org_uuid, node_pub, addrs, relay_url,"
+            " announced_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT (org_uuid, node_pub) DO UPDATE SET"
+            " addrs = excluded.addrs, relay_url = excluded.relay_url,"
+            " announced_at = excluded.announced_at, expires_at = excluded.expires_at",
+            (org_uuid, node_pub, json.dumps(addrs), relay_url, now, expires_at),
+        )
+        self._conn.commit()
+
+    @_locked
+    def node_hints(
+        self, org_uuid: str, *, now: int, node_pub: Optional[str] = None
+    ) -> list:
+        """Live (non-expired) hints for an org, optionally one node's."""
+        query = (
+            "SELECT node_pub, addrs, relay_url, announced_at, expires_at"
+            " FROM node_hints WHERE org_uuid = ? AND expires_at >= ?"
+        )
+        params: tuple = (org_uuid, now)
+        if node_pub is not None:
+            query += " AND node_pub = ?"
+            params += (node_pub,)
+        rows = self._conn.execute(query + " ORDER BY node_pub", params).fetchall()
+        return [
+            {
+                "node": r["node_pub"],
+                "addrs": json.loads(r["addrs"]),
+                "relay_url": r["relay_url"],
+                "announced_at": r["announced_at"],
+                "expires_at": r["expires_at"],
+            }
+            for r in rows
+        ]
+
+    @_locked
+    def purge_expired_node_hints(self, *, now: int) -> int:
+        cur = self._conn.execute("DELETE FROM node_hints WHERE expires_at < ?", (now,))
+        self._conn.commit()
+        return cur.rowcount
 
     @_locked
     def deposit_bundle(
