@@ -46,12 +46,30 @@ def test_resign_after_roundtrip_is_bit_identical(chain):
     assert chain.root.sign_hex(parsed_root_hop.signing_input()) == chain.session_cert.sig
 
 
-def test_non_canonical_input_normalizes_to_canonical_bytes(chain):
-    """Reordered keys and whitespace in the incoming JSON must not change
-    what the cert *is*: parsing accepts it, re-serialization is canonical."""
-    data = json.loads(chain.session_cert.to_json())
+def test_from_json_rejects_noncanonical_wire_bytes(chain):
+    """Anti-malleability: from_json accepts EXACTLY the canonical byte form.
+    Reordered keys, whitespace, and unicode-escape aliases all decode to the
+    same object but are different bytes — rejected."""
+    canonical = chain.session_cert.to_json()
+    data = json.loads(canonical)
+
     sprawling = json.dumps(dict(reversed(list(data.items()))), indent=2)
-    parsed = DelegationCert.from_json(sprawling)
+    assert json.loads(sprawling) == data
+    with pytest.raises(MalformedError):
+        DelegationCert.from_json(sprawling)
+
+    escaped = canonical.decode("ascii").replace('"operator"', '"\\u006fperator"', 1)
+    assert json.loads(escaped) == data
+    with pytest.raises(MalformedError):
+        DelegationCert.from_json(escaped)
+
+
+def test_from_dict_accepts_parsed_objects_and_reserializes_canonically(chain):
+    """Canonicality is a wire-byte property. A consumer holding an already-
+    parsed dict (e.g. a cert embedded in a larger JSON document) can still
+    load it; signature verification recomputes canonical bytes internally."""
+    data = json.loads(chain.session_cert.to_json())
+    parsed = DelegationCert.from_dict(dict(reversed(list(data.items()))))
     assert parsed == chain.session_cert
     assert parsed.to_json() == chain.session_cert.to_json()
 
