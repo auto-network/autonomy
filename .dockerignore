@@ -1,0 +1,25 @@
+# Build context hygiene for deploy/Dockerfile (home-base image).
+# Persistent/host state never ships in the image — it lives in the
+# /app/data volume, created by first-run init (tools/init).
+
+.git
+.gitignore
+.venv
+.browser_profile
+data
+node_modules
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.dockerignore
+docker-compose.yml
+
+# Host-local binaries (gitignored anyway; agent images copy these, the
+# home-base image does not)
+agents/bin
+agents/images
+tools/dashboard/tailwindcss
+
+# Scratch
+*.log
+/tmp

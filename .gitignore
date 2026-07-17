@@ -35,6 +35,9 @@ data/*.db.*
 data/backups/
 data/*.log
 data/*.pid
+# Session runtime output (container /workspace/output handoff dirs).
+# NOT data/session-traces/ — that has deliberately tracked files.
+data/agent-runs/
 
 # Beads (Dolt local state — .beads/issues.jsonl IS tracked via git add -f)
 .beads/

@@ -23,6 +23,57 @@ The dashboard's own startup runs the same org bootstrap, honoring
 `AUTONOMY_FIRST_ORG` / `AUTONOMY_FIRST_ORG_NAME`, so exporting those before
 first launch is equivalent to passing `--org`/`--org-name`.
 
+## Sovereign distribution (Docker Compose)
+
+The container path packages the first-run story above into one command:
+
+```bash
+git clone <source you chose> autonomy && cd autonomy
+AUTONOMY_FIRST_ORG=myorg docker compose up -d
+# → https://localhost:8080  (self-signed cert; accept once)
+```
+
+**Sovereign means:** the image builds from this checkout
+(`deploy/Dockerfile`); no account, token, or login to any registry is
+required; there is no license check and no phone-home. The only external
+fetches are anonymous — the base image (`python:3.12-slim`), PyPI wheels
+(`deploy/requirements.txt`), and the tailwind binary — and each is
+overridable via build args (`BASE_IMAGE`, `TAILWIND_URL`) to point at
+mirrors you control. Distribution is `git clone` / tarball / an image you
+push to a registry *you* choose — never a mandated one.
+
+The container entrypoint (`deploy/entrypoint.sh`) runs `python -m
+tools.init` (idempotent, honors `AUTONOMY_FIRST_ORG`) and then uvicorn,
+serving HTTPS when the init-generated keypair is present (`DASHBOARD_TLS=off`
+for plain HTTP behind your own proxy).
+
+### Volume layout & backup
+
+One named volume, `autonomy-data`, mounted at `/app/data`, holds **all**
+persistent state:
+
+| Path in volume | What it is |
+|---|---|
+| `orgs/<slug>.db` | per-org graph DBs — identity Settings and credential rows (**the secret store**; `orgs/personal.db` is the per-operator DB) |
+| `graph.db` | main knowledge-graph DB |
+| `dashboard.db`, `auth.db`, `dispatch.db`, `approval_requests.db`, `commit_workflow.db` | operational stores |
+| `tls.crt`, `tls.key` | TLS keypair (self-signed by default) |
+| `agent-runs/`, `session-traces/` | session artifacts |
+
+Backing up the deployment = backing up that volume (stop the stack or use
+sqlite-consistent tooling — `tools/graph/backup-*.sh` — for hot backups).
+The image is disposable; the volume is not.
+
+### Optional beads (issue tracker) backend
+
+`docker compose --profile beads up -d` adds a `dolt` SQL-server service
+(image operator-chosen via `DOLT_IMAGE`). Without it — the default — the
+dashboard runs fine: beads surfaces degrade to empty with a single logged
+warning. The beads DAO honors `DOLT_SQL_HOST` / `DOLT_SQL_PORT` /
+`DOLT_SQL_USER` / `DOLT_SQL_PASSWORD` / `DOLT_SQL_DATABASE` for any
+topology. Writing beads additionally needs the `bd` CLI, installed
+separately.
+
 Autonomy roots itself **relatively**: every core path derives from the repo
 checkout (`Path(__file__)` walked up to the repo root) and the running user's
 home (`Path.home()`). A clean `git clone` at *any* path boots without editing a
