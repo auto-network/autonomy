@@ -1,0 +1,55 @@
+# Autonomy home base — sovereign Compose distribution (H5, DEPLOY.md).
+#
+#   git clone <source you chose> autonomy && cd autonomy
+#   AUTONOMY_FIRST_ORG=myorg docker compose up -d
+#   → https://localhost:8080  (self-signed cert; accept once)
+#
+# Everything builds from this checkout. No registry login, no license
+# check, no phone-home. The only external fetches are anonymous
+# (base image, PyPI, tailwind binary) and each is overridable via build
+# args to point at mirrors you control.
+#
+# Optional beads issue-tracker backend (dolt SQL server):
+#   docker compose --profile beads up -d
+# Without it the dashboard runs fine — beads surfaces are simply empty.
+
+services:
+  dashboard:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      # args:
+      #   BASE_IMAGE: registry.example.internal/python:3.12-slim
+      #   TAILWIND_URL: https://mirror.example.internal/tailwindcss-linux-x64
+    image: ${AUTONOMY_IMAGE:-autonomy-dashboard:local}
+    restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-8080}:8080"
+    environment:
+      AUTONOMY_FIRST_ORG: ${AUTONOMY_FIRST_ORG:-}
+      AUTONOMY_FIRST_ORG_NAME: ${AUTONOMY_FIRST_ORG_NAME:-}
+      DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN:-}
+      DASHBOARD_TLS: ${DASHBOARD_TLS:-}
+      # Points at the optional `beads` profile service; unreachable is a
+      # supported state (beads surfaces degrade to empty, one warning).
+      DOLT_SQL_HOST: dolt
+    volumes:
+      # THE persistent state: per-org DBs (identity + credential Settings
+      # — the secret store), graph.db, auth.db, TLS keypair, traces.
+      # Back this volume up and you have backed up the deployment.
+      - autonomy-data:/app/data
+
+  # Optional: dolt SQL server backing the beads issue tracker. Image
+  # source is operator-chosen via DOLT_IMAGE; the beads schema itself is
+  # created by the `bd` CLI (github.com/steveyegge/beads), which operators
+  # install separately if they want work tracking.
+  dolt:
+    profiles: ["beads"]
+    image: ${DOLT_IMAGE:-docker.io/dolthub/dolt-sql-server:latest}
+    restart: unless-stopped
+    volumes:
+      - dolt-data:/var/lib/dolt
+
+volumes:
+  autonomy-data:
+  dolt-data:

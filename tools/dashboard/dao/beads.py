@@ -11,6 +11,9 @@ each worker thread gets its own pymysql connection.
 
 from __future__ import annotations
 
+import functools
+import logging
+import os
 import threading
 from datetime import datetime
 from typing import Any
@@ -18,13 +21,46 @@ from typing import Any
 import pymysql
 import pymysql.cursors
 
-_DOLT_HOST = "127.0.0.1"
-_DOLT_PORT = 3306
-_DOLT_USER = "root"
-_DOLT_PASSWORD = ""
-_DOLT_DB = "auto"
+# Env overrides support non-localhost topologies (e.g. a `dolt` service in
+# the Compose distribution, DEPLOY.md). Defaults preserve the historical
+# same-host layout.
+_DOLT_HOST = os.environ.get("DOLT_SQL_HOST", "127.0.0.1")
+_DOLT_PORT = int(os.environ.get("DOLT_SQL_PORT", "3306"))
+_DOLT_USER = os.environ.get("DOLT_SQL_USER", "root")
+_DOLT_PASSWORD = os.environ.get("DOLT_SQL_PASSWORD", "")
+_DOLT_DB = os.environ.get("DOLT_SQL_DATABASE", "auto")
 
 _local = threading.local()
+
+_logger = logging.getLogger(__name__)
+_unreachable_logged = False
+
+
+def _degrade_when_unreachable(default_factory):
+    """Return a safe empty default when the Dolt server is unreachable.
+
+    A deployment without the beads toolchain (no dolt service — see
+    DEPLOY.md) is a supported empty state, not an error: readers get
+    zero beads instead of a 500 on every beads surface. Logged once per
+    process, at warning, so a misconfigured host is still diagnosable.
+    """
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            global _unreachable_logged
+            try:
+                return fn(*args, **kwargs)
+            except (pymysql.err.MySQLError, OSError) as exc:
+                if not _unreachable_logged:
+                    _unreachable_logged = True
+                    _logger.warning(
+                        "dolt unreachable at %s:%s (%s) — beads surfaces "
+                        "degrade to empty until it comes back",
+                        _DOLT_HOST, _DOLT_PORT, exc,
+                    )
+                return default_factory()
+        return wrapper
+    return decorate
 
 
 def _connect() -> pymysql.Connection:
@@ -91,6 +127,7 @@ _BEAD_COLS = """
 
 # ── Public API ─────────────────────────────────────────────────────────
 
+@_degrade_when_unreachable(lambda: {"approved_waiting": [], "approved_blocked": []})
 def get_dispatch_beads() -> dict[str, list[dict]]:
     """Return beads grouped by dispatch role for the Dispatch page.
 
@@ -172,6 +209,7 @@ def get_dispatch_beads() -> dict[str, list[dict]]:
     }
 
 
+@_degrade_when_unreachable(dict)
 def get_bead_title_priority(bead_ids: list[str]) -> dict[str, dict]:
     """Return a mapping of bead_id → {id, title, priority, labels} for the given IDs.
 
@@ -198,6 +236,7 @@ def get_bead_title_priority(bead_ids: list[str]) -> dict[str, dict]:
     return {r["id"]: _coerce(r) for r in rows}
 
 
+@_degrade_when_unreachable(lambda: None)
 def get_bead(bead_id: str) -> dict | None:
     """Return a single bead with its labels, deps, and comments.
 
@@ -277,6 +316,7 @@ def get_bead(bead_id: str) -> dict | None:
     return bead
 
 
+@_degrade_when_unreachable(list)
 def get_beads_by_label(label: str) -> list[dict]:
     """Return beads that have a specific label. Used for pinned beads strip."""
     conn = _get_conn()
@@ -295,6 +335,7 @@ def get_beads_by_label(label: str) -> list[dict]:
         return [_coerce(r) for r in _rows(cur)]
 
 
+@_degrade_when_unreachable(list)
 def get_open_beads(limit: int = 200) -> list[dict]:
     """Return the working set — all beads that are not closed.
 
@@ -318,6 +359,7 @@ def get_open_beads(limit: int = 200) -> list[dict]:
         return [_coerce(r) for r in _rows(cur)]
 
 
+@_degrade_when_unreachable(dict)
 def get_bead_counts() -> dict[str, int]:
     """Return lightweight counts for nav badges and dashboard header.
 

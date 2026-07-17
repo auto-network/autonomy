@@ -341,13 +341,21 @@ _KNOWN_PAUSE_LABELS = ["dashboard"]
 # ── CLI Subprocess Helper ─────────────────────────────────────
 
 async def run_cli(cmd: list[str], timeout: int = 30, stdin_data: str | None = None) -> tuple[str, str, int]:
-    """Run a CLI command async and return (stdout, stderr, returncode)."""
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    """Run a CLI command async and return (stdout, stderr, returncode).
+
+    A missing binary (e.g. no ``bd`` on a fresh deployment without the
+    beads toolchain, DEPLOY.md) degrades to the same soft-error shape as
+    a nonzero exit instead of 500ing every endpoint that shells out.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except (FileNotFoundError, PermissionError) as exc:
+        return "", f"{cmd[0]}: {exc}", 127
     try:
         input_bytes = stdin_data.encode() if stdin_data is not None else None
         stdout, stderr = await asyncio.wait_for(proc.communicate(input=input_bytes), timeout=timeout)
