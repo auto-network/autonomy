@@ -1,0 +1,81 @@
+<!doctype html>
+<!-- auto.network bootloader shell (B3, spec §5.3).
+
+     One static page for EVERY /l/{token}: the token is read client-side
+     from the URL. These bytes are identical for valid, expired, revoked,
+     and made-up tokens, and contain no org, target, or key material —
+     the URL is a pure network pointer, and everything identifying
+     arrives only through the envelope fetch and the E2E channel. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<title>auto.network</title>
+<style>
+  :root { color-scheme: dark light; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 15px/1.5 system-ui, -apple-system, sans-serif;
+    background: #101014; color: #d6d6de;
+    display: flex; flex-direction: column;
+  }
+  header {
+    padding: 6px 14px; font-size: 12px; color: #8a8a96;
+    border-bottom: 1px solid #26262e; display: flex; gap: 10px;
+    align-items: baseline; flex: none;
+  }
+  header .brand { color: #b9b9c6; font-weight: 600; letter-spacing: .04em; }
+  main { flex: 1; display: flex; min-height: 0; }
+  main > section { flex: 1; display: flex; min-height: 0; }
+  section[hidden] { display: none; }
+  #loading-view, #error-view, #download-view {
+    align-items: center; justify-content: center; flex-direction: column;
+    gap: 12px; text-align: center; padding: 24px;
+  }
+  #error-view h1 { font-size: 20px; margin: 0; color: #e8e8f0; }
+  #error-view p { max-width: 42ch; margin: 0; color: #8a8a96; }
+  #artifact-frame { flex: 1; border: 0; width: 100%; background: #fff; }
+  #text-view-pre {
+    flex: 1; margin: 0; padding: 16px; overflow: auto;
+    font: 13px/1.5 ui-monospace, monospace; white-space: pre-wrap;
+  }
+  .spinner {
+    width: 22px; height: 22px; border-radius: 50%;
+    border: 2px solid #33333d; border-top-color: #d6d6de;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  a { color: #9ab0ff; }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">auto.network</span>
+  <span id="status-line"></span>
+</header>
+<main>
+  <section id="loading-view">
+    <div class="spinner" aria-hidden="true"></div>
+    <div>establishing a secure channel…</div>
+  </section>
+  <section id="error-view" hidden>
+    <h1>This link isn&rsquo;t available</h1>
+    <p>It may have expired, been revoked, or never existed &mdash; or the
+       service behind it is offline right now. If someone shared it with
+       you, ask them for a fresh link.</p>
+  </section>
+  <section id="frame-view" hidden>
+    <iframe id="artifact-frame" sandbox="allow-scripts" title="shared artifact"></iframe>
+  </section>
+  <section id="text-view" hidden>
+    <pre id="text-view-pre"></pre>
+  </section>
+  <section id="download-view" hidden>
+    <a id="download-link">Download the shared file</a>
+  </section>
+</main>
+<script src="/l-assets/autonet.js"></script>
+</body>
+</html>

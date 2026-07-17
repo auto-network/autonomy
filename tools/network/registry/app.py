@@ -26,9 +26,10 @@ from __future__ import annotations
 
 import time
 import uuid
+from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket
 
 from tools.network.idkit import (
     ChainVerifyError,
@@ -44,7 +45,7 @@ from tools.network.idkit import (
 )
 from tools.network.idkit.keys import PUBLIC_KEY_HEX_LEN, _decode_hex
 
-from .relay import TunnelHub, tunnel_endpoint, viewer_endpoint
+from .relay import TunnelHub, _resolve_live_link, tunnel_endpoint, viewer_endpoint
 from .signing import ENVELOPE_VERSION, MAX_CLOCK_SKEW, request_signing_input
 from .store import LinkGrant, OrgBinding, RegistryStore
 
@@ -53,6 +54,32 @@ MIN_BINDING_TTL = 3_600
 MAX_BINDING_TTL = DEFAULT_BINDING_TTL
 
 RECOVERY_POLICIES = frozenset({"none", "recovery-key"})
+
+_BOOTLOADER_DIR = Path(__file__).resolve().parent / "bootloader"
+
+# Bootloader shell CSP. Two facts shape it:
+#
+# 1. The shell is a FIXED static byte string — no target/user data is ever
+#    interpolated into it (that IS the anti-enumeration property, §5.3), so
+#    it has no injection surface of its own. Its only script is the external
+#    autonet.js ('self').
+# 2. HTML artifacts (Present decks, microsites) are INTERACTIVE and must run
+#    their own scripts to render. They load into a `sandbox="allow-scripts"`
+#    iframe via a blob: URL — an OPAQUE origin with no same-origin access,
+#    no top-navigation, no forms, no popups. That sandbox, not CSP, is the
+#    isolation boundary between the untrusted artifact and this origin.
+#
+# blob: iframes inherit the embedder's CSP in Chromium, so script-src must
+# admit the artifact's inline scripts ('unsafe-inline' blob:) for decks to
+# work. Because the shell itself carries no inline script and no dynamic
+# HTML, 'unsafe-inline' opens no vector on the shell. connect-src 'self'
+# still bars the opaque-origin artifact from exfiltrating (an opaque origin
+# never matches 'self'), so an artifact renders but cannot phone home.
+_BOOTLOADER_CSP = (
+    "default-src 'none'; script-src 'self' 'unsafe-inline' blob:; "
+    "style-src 'unsafe-inline'; connect-src 'self'; img-src blob: data:; "
+    "frame-src blob:; base-uri 'none'; form-action 'none'"
+)
 
 _ENVELOPE_FIELDS = frozenset({"v", "signer", "ts", "payload", "cert", "sig"})
 _LINK_META_FIELDS = frozenset({"ttl", "label", "require_auth"})
@@ -516,6 +543,43 @@ def create_app(
             # bootloader tries these before relay fallback once populated.
             "endpoints": [],
         }
+
+    # -- §5.3 bootloader --------------------------------------------------------
+
+    shell_bytes = (_BOOTLOADER_DIR / "bootloader.html").read_bytes()
+    js_bytes = (_BOOTLOADER_DIR / "autonet.js").read_bytes()
+
+    @app.get("/l/{token}")
+    async def bootloader_page(token: str):
+        # ONE static byte sequence for every token — live, expired,
+        # revoked, or invented. The token is read client-side from the
+        # URL; nothing org- or target-identifying is in these bytes
+        # (§5.3: the URL is a pure network pointer). Only the STATUS
+        # differs, and it mirrors the envelope endpoint's liveness rule
+        # exactly, so it opens no oracle the envelope doesn't already.
+        live = _resolve_live_link(store, token, now()) is not None
+        return Response(
+            content=shell_bytes,
+            status_code=200 if live else 404,
+            media_type="text/html",
+            headers={
+                "Content-Security-Policy": _BOOTLOADER_CSP,
+                "Referrer-Policy": "no-referrer",
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @app.get("/l-assets/autonet.js")
+    async def bootloader_js():
+        return Response(
+            content=js_bytes,
+            media_type="text/javascript",
+            headers={
+                "Cache-Control": "public, max-age=300",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     # -- §5.1 relay tunnel ------------------------------------------------------
 
