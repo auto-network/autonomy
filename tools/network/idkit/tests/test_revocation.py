@@ -42,7 +42,57 @@ def _root_record(chain, key_id=None, **overrides):
 
 def test_root_signed_record_verifies(chain):
     record = _root_record(chain)
-    verify_revocation(record, chain.root_pub, org=ORG)
+    verify_revocation(record, chain.root_pub, org=ORG, revoked_cert=chain.agent_cert)
+
+
+def test_horizon_proof_is_mandatory_even_for_root(chain):
+    """The revoked key's cert is the only trustworthy source of its natural
+    not_after — verification without it is refused for every issuer shape."""
+    record = _root_record(chain)
+    with pytest.raises(RevocationError):
+        verify_revocation(record, chain.root_pub, org=ORG)
+
+
+def test_i7_regression_root_cannot_set_arbitrary_retention(chain):
+    """Regression (Codex cross-validation find): a root-signed record with
+    expires_at past the revoked key's natural expiry must be rejected BOTH
+    with the cert supplied and — critically — when the caller omits it.
+    Previously the horizon check was skipped when revoked_cert was None,
+    so the record verified OK and purge_expired retained it past the key's
+    natural expiry, violating I7."""
+    overlong = issue_revocation(
+        chain.root,
+        chain.agent_key.public_hex,
+        org=ORG,
+        revoked_at=NOW,
+        expires_at=AGENT_WINDOW[1] + 10 * HOUR,
+    )
+    with pytest.raises(RevocationError):
+        verify_revocation(overlong, chain.root_pub, org=ORG)
+    with pytest.raises(RevocationError):
+        verify_revocation(overlong, chain.root_pub, org=ORG, revoked_cert=chain.agent_cert)
+
+
+def test_issue_revocation_with_cert_refuses_overlong_horizon(chain):
+    """Issuance-time defense in depth mirrors the verification bound."""
+    with pytest.raises(MalformedError):
+        issue_revocation(
+            chain.root,
+            chain.agent_key.public_hex,
+            org=ORG,
+            revoked_at=NOW,
+            expires_at=AGENT_WINDOW[1] + 10 * HOUR,
+            revoked_cert=chain.agent_cert,
+        )
+    # and the well-behaved path still mints fine
+    record = issue_revocation(
+        chain.root,
+        chain.agent_key.public_hex,
+        org=ORG,
+        revoked_at=NOW,
+        expires_at=AGENT_WINDOW[1],
+        revoked_cert=chain.agent_cert,
+    )
     verify_revocation(record, chain.root_pub, org=ORG, revoked_cert=chain.agent_cert)
 
 
@@ -60,17 +110,26 @@ def test_record_roundtrips_bit_identically(chain):
     assert chain.root.sign_hex(parsed.signing_input()) == record.sig
 
 
+def test_record_from_json_rejects_noncanonical_wire(chain):
+    """Anti-malleability: a record has exactly one accepted wire encoding."""
+    record = _root_record(chain)
+    pretty = json.dumps(json.loads(record.to_json()), indent=1)
+    assert json.loads(pretty) == json.loads(record.to_json())
+    with pytest.raises(MalformedError):
+        RevocationRecord.from_json(pretty)
+
+
 def test_rejects_tampered_record(chain):
     record = _root_record(chain)
     tampered = dataclasses.replace(record, revoked_key_id=chain.session_key.public_hex)
     with pytest.raises(RevocationError):
-        verify_revocation(tampered, chain.root_pub, org=ORG)
+        verify_revocation(tampered, chain.root_pub, org=ORG, revoked_cert=chain.session_cert)
 
 
 def test_rejects_wrong_org_record(chain):
     record = _root_record(chain, org=OTHER_ORG)
     with pytest.raises(RevocationError):
-        verify_revocation(record, chain.root_pub, org=ORG)
+        verify_revocation(record, chain.root_pub, org=ORG, revoked_cert=chain.agent_cert)
 
 
 def test_rejects_impersonated_root_issuer(chain):
@@ -81,7 +140,7 @@ def test_rejects_impersonated_root_issuer(chain):
         forged, sig=mallory.sign_hex(forged.signing_input())
     )
     with pytest.raises(RevocationError):
-        verify_revocation(forged, chain.root_pub, org=ORG)
+        verify_revocation(forged, chain.root_pub, org=ORG, revoked_cert=chain.agent_cert)
 
 
 def test_root_record_must_not_carry_issuer_cert(chain):
@@ -96,7 +155,7 @@ def test_root_record_must_not_carry_issuer_cert(chain):
     smuggled = dataclasses.replace(record, issuer_cert=chain.session_cert)
     smuggled = dataclasses.replace(smuggled, sig=chain.root.sign_hex(smuggled.signing_input()))
     with pytest.raises(RevocationError):
-        verify_revocation(smuggled, chain.root_pub, org=ORG)
+        verify_revocation(smuggled, chain.root_pub, org=ORG, revoked_cert=chain.agent_cert)
 
 
 # --- parent-signed records: descendants only ------------------------------------
@@ -195,8 +254,10 @@ def test_delegated_record_requires_issuer_cert(chain):
 
 
 def test_delegated_record_requires_revoked_cert_descent_proof(chain):
+    """Without the revoked key's cert there is neither an expiry-horizon
+    proof nor a descent proof — refused at the universal requirement."""
     record = _session_revokes(chain, chain.agent_key.public_hex)
-    with pytest.raises(RevocationAuthorityError):
+    with pytest.raises(RevocationError):
         verify_revocation(record, chain.root_pub, org=ORG, revoked_cert=None)
 
 

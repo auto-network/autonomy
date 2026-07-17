@@ -69,8 +69,10 @@ distinguish *expired* from *escalating* from *revoked* from *forged*.
 
 Revocations verify against the org root; a delegated key may revoke **its
 own descendants only** — the verifier demands the revoked key's cert chain
-as proof of descent. Records carry a mandatory `expires_at` bounded by the
-revoked key's natural expiry, and `RevocationSet.purge_expired` drops dead
+as proof of descent. `verify_revocation` requires the revoked key's cert
+for **every** issuer shape (root included): it is the only trustworthy
+source of the key's natural `not_after`, and the record's mandatory
+`expires_at` must not outlive it. `RevocationSet.purge_expired` drops dead
 records (I7).
 
 ## Format notes
@@ -79,6 +81,10 @@ records (I7).
   scope/target_types lists must be sorted and duplicate-free. One accepted
   byte form per object → deserialize/re-sign is bit-identical (Ed25519 is
   deterministic).
+- **Anti-malleability**: `from_json` (certs and revocation records) accepts
+  exactly the canonical wire bytes — reordered keys, whitespace, unicode
+  escapes, and duplicate JSON keys are rejected, not normalized.
+  `from_dict` remains available for already-parsed objects.
 - **Domain separation**: cert signatures cover `CERT_DOMAIN || payload`,
   revocations `REVOCATION_DOMAIN || payload` — no cross-kind replay.
 - **Strict parsing**: unknown fields, wrong types, non-canonical lists and

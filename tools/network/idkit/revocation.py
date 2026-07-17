@@ -134,6 +134,8 @@ class RevocationRecord:
 
     @classmethod
     def from_json(cls, raw) -> "RevocationRecord":
+        """Parse canonical wire bytes; like ``DelegationCert.from_json``,
+        any non-canonical byte form is rejected (anti-malleability)."""
         if isinstance(raw, bytes):
             try:
                 raw = raw.decode("utf-8")
@@ -145,7 +147,10 @@ class RevocationRecord:
             data = json.loads(raw)
         except (json.JSONDecodeError, RecursionError) as exc:
             raise MalformedError("revocation record is not valid JSON") from exc
-        return cls.from_dict(data)
+        record = cls.from_dict(data)
+        if record.to_json() != raw.encode("utf-8"):
+            raise MalformedError("revocation record is not in canonical wire form")
+        return record
 
 
 def issue_revocation(
@@ -157,12 +162,19 @@ def issue_revocation(
     expires_at: int,
     reason: Optional[str] = None,
     issuer_cert: Optional[DelegationCert] = None,
+    revoked_cert: Optional[DelegationCert] = None,
 ) -> RevocationRecord:
     """Mint a revocation record signed by *issuer*.
 
     Pass ``issuer_cert=None`` when *issuer* is the org root; otherwise
     *issuer_cert* must be the delegation cert whose ``child_pub`` is the
     issuer's key.
+
+    *revoked_cert* is issuance-time defense in depth: if supplied, the
+    record's ``expires_at`` is checked against the revoked key's natural
+    ``not_after`` here too, so a well-behaved issuer never mints a record
+    that :func:`verify_revocation` (which always demands the proof) would
+    reject.
     """
     _decode_hex(revoked_key_id, PUBLIC_KEY_HEX_LEN, "revoked_key_id")
     _require_str(org, "org", max_len=128)
@@ -172,6 +184,13 @@ def issue_revocation(
         raise MalformedError("expires_at must be strictly after revoked_at")
     if issuer_cert is not None and issuer_cert.child_pub != issuer.public_hex:
         raise MalformedError("issuer_cert does not delegate to the signing key")
+    if revoked_cert is not None:
+        if revoked_cert.child_pub != revoked_key_id:
+            raise MalformedError("revoked_cert leaf key does not match revoked_key_id")
+        if expires_at > revoked_cert.not_after:
+            raise MalformedError(
+                "expires_at outlives the revoked key's natural expiry (I7: retention bounded)"
+            )
 
     unsigned = RevocationRecord(
         revoked_key_id=revoked_key_id,
@@ -207,18 +226,20 @@ def verify_revocation(
 
     - The record signature must verify against ``record.issuer_pub``.
     - The record org must match *org*.
+    - *revoked_cert* — the certificate of the key being revoked — is
+      REQUIRED for **every** issuer shape. It is the only trustworthy
+      source of the key's natural ``not_after``, and ``expires_at`` must
+      not outlive it (invariant I7: retention bounded by the key's natural
+      expiry). Without it, any issuer — root included — could set an
+      arbitrary retention horizon. It must be a signature-valid chain
+      under *root_pub* whose leaf is the revoked key.
     - **Root issuer** (``issuer_pub == root_pub``): may revoke any key in
       the org; ``issuer_cert`` must be absent.
     - **Delegated issuer**: ``issuer_cert`` must chain to *root_pub* (the
-      chain is checked for validity as of ``record.revoked_at``), and
-      *revoked_cert* — the certificate of the key being revoked — is
-      REQUIRED as proof of descent: the issuer's key id must appear as an
-      ancestor delegator in it. A delegated key can only revoke its own
+      chain is checked for validity as of ``record.revoked_at``), and the
+      issuer's key id must appear as an ancestor delegator inside
+      *revoked_cert*'s chain — a delegated key can only revoke its own
       descendants.
-    - When *revoked_cert* is supplied (either issuer shape), it must be a
-      signature-valid chain under *root_pub* whose leaf is the revoked key,
-      and ``expires_at`` must not outlive its ``not_after`` (invariant I7:
-      retention bounded by the key's natural expiry).
 
     Raises :class:`~.errors.RevocationError` (or a
     :class:`~.errors.ChainVerifyError` from embedded chain checks) on any
@@ -242,18 +263,21 @@ def verify_revocation(
     if record.org != org:
         raise RevocationError(f"revocation org {record.org!r} != expected org {org!r}")
 
-    revoked_chain = None
-    if revoked_cert is not None:
-        if revoked_cert.child_pub != record.revoked_key_id:
-            raise RevocationError("revoked_cert leaf key does not match revoked_key_id")
-        # Structural walk: signatures/org/narrowing enforced, absolute time
-        # skipped — a record must stay checkable while the registry retains
-        # it, even minutes before the revoked key's natural expiry.
-        revoked_chain = walk_chain(revoked_cert, root_pub, org=org, check_time=False)
-        if record.expires_at > revoked_cert.not_after:
-            raise RevocationError(
-                "expires_at outlives the revoked key's natural expiry (I7: retention bounded)"
-            )
+    if revoked_cert is None:
+        raise RevocationError(
+            "revoked_cert is required: expires_at must be proven against the revoked "
+            "key's natural not_after (I7: retention bounded by expiry horizon)"
+        )
+    if revoked_cert.child_pub != record.revoked_key_id:
+        raise RevocationError("revoked_cert leaf key does not match revoked_key_id")
+    # Structural walk: signatures/org/narrowing enforced, absolute time
+    # skipped — a record must stay checkable while the registry retains
+    # it, even minutes before the revoked key's natural expiry.
+    revoked_chain = walk_chain(revoked_cert, root_pub, org=org, check_time=False)
+    if record.expires_at > revoked_cert.not_after:
+        raise RevocationError(
+            "expires_at outlives the revoked key's natural expiry (I7: retention bounded)"
+        )
 
     if record.issuer_pub == root_pub:
         if record.issuer_cert is not None:
@@ -267,10 +291,6 @@ def verify_revocation(
         raise RevocationAuthorityError("issuer_cert does not delegate to issuer_pub")
     walk_chain(record.issuer_cert, root_pub, org=org, now=record.revoked_at, check_time=True)
 
-    if revoked_chain is None:
-        raise RevocationAuthorityError(
-            "delegated revocation requires revoked_cert as proof of descent"
-        )
     ancestors = {hop.child_pub for hop in revoked_chain[:-1]}
     if record.issuer_pub not in ancestors:
         raise RevocationAuthorityError(

@@ -208,6 +208,10 @@ class DelegationCert:
 
     @classmethod
     def from_json(cls, raw) -> "DelegationCert":
+        """Parse canonical wire bytes. Strictly anti-malleable: any byte
+        form other than the one :meth:`to_json` produces — reordered keys,
+        whitespace, unicode escapes, duplicate keys — is rejected, so a
+        given certificate has exactly one accepted wire encoding."""
         if isinstance(raw, bytes):
             try:
                 raw = raw.decode("utf-8")
@@ -219,7 +223,10 @@ class DelegationCert:
             data = json.loads(raw)
         except (json.JSONDecodeError, RecursionError) as exc:
             raise MalformedError("certificate is not valid JSON") from exc
-        return cls.from_dict(data)
+        cert = cls.from_dict(data)
+        if cert.to_json() != raw.encode("utf-8"):
+            raise MalformedError("certificate is not in canonical wire form")
+        return cert
 
     # -- chain access --------------------------------------------------------
 
