@@ -33,7 +33,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request, Response, WebSocket
+from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket
 from fastapi.responses import StreamingResponse
 
 from tools.network.idkit import (
@@ -52,13 +52,7 @@ from tools.network.idkit import (
 from tools.network.idkit.keys import PUBLIC_KEY_HEX_LEN, _decode_hex
 
 from .assertion import IDENTIFY_SCOPE, MAX_ASSERTION_TTL, parse_assertion
-from .listings import (
-    NAME_RE,
-    attestation_id,
-    listing_id,
-    parse_attestation_record,
-    parse_listing_claim,
-)
+from .listings import parse_attestation_record, parse_listing_claim
 from .relay import TunnelHub, _resolve_live_link, tunnel_endpoint, viewer_endpoint
 from .signing import ENVELOPE_VERSION, MAX_CLOCK_SKEW, request_signing_input
 from .store import LinkGrant, OrgBinding, RegistryStore
@@ -264,10 +258,28 @@ def _authorize(
     """
     _verify_envelope_signature(envelope, method, path, now)
     store.purge_expired_revocations(now=now)  # I7: sweep before every check
+    return _verify_signer_chain(
+        envelope["signer"], envelope.get("cert"), binding, store, now,
+        required_scope=required_scope, required_target_type=required_target_type,
+    )
 
-    cert_wire = envelope.get("cert")
+
+def _verify_signer_chain(
+    signer: str,
+    cert_wire: Optional[str],
+    binding: OrgBinding,
+    store: RegistryStore,
+    now: int,
+    *,
+    required_scope: Optional[str] = None,
+    required_target_type: Optional[str] = None,
+) -> AuthContext:
+    """Chain a signer to the org's bound root — the shared half of the I4
+    gate, used both for request envelopes (:func:`_authorize`) and for
+    durable signed artifacts that must verify on their own chain (listing
+    claims). One implementation so the two gates cannot drift."""
     if cert_wire is None:
-        if envelope["signer"] != binding.root_pub:
+        if signer != binding.root_pub:
             raise _forbidden("signer does not chain to the org's bound root key")
         return AuthContext(binding.root_pub, "root", binding.root_pub, None)
 
@@ -275,8 +287,8 @@ def _authorize(
         cert = DelegationCert.from_json(cert_wire)
     except MalformedError as exc:
         raise _bad_request(f"cert: {exc}")
-    if cert.child_pub != envelope["signer"]:
-        raise _forbidden("cert does not delegate to the envelope signer")
+    if cert.child_pub != signer:
+        raise _forbidden("cert does not delegate to the signer")
 
     try:
         result = verify_chain(
@@ -1237,45 +1249,18 @@ def create_app(
     # name and neither is privileged; display naming is the attestation
     # layer's problem, evaluated CLIENT-side.
 
-    def _verify_claim_chain(claim: dict, binding: OrgBinding, t: int) -> tuple:
-        """The claim-layer gate: the CARD's signer must chain to the
-        publisher's bound root with scope listing:publish.
-
-        Distinct from the envelope gate on purpose — the envelope
-        authorizes the HTTP write and dies with the request, while the
-        claim is the durable artifact third parties re-verify, so its
-        signature must stand on its own chain.
-        """
-        payload = claim["payload"]
-        cert_wire = claim.get("cert")
-        if cert_wire is None:
-            if payload["signer"] != binding.root_pub:
-                raise _forbidden(
-                    "listing claim signer does not chain to the publisher's bound root key"
-                )
-            return "root", binding.root_pub
-        try:
-            cert = DelegationCert.from_json(cert_wire)
-        except MalformedError as exc:
-            raise _bad_request(f"claim cert: {exc}")
-        if cert.child_pub != payload["signer"]:
-            raise _forbidden("claim cert does not delegate to the claim signer")
-        try:
-            result = verify_chain(
-                cert,
-                binding.root_pub,
-                org=binding.org_uuid,
-                now=t,
-                revocations=store.revocation_set(binding.org_uuid),
-                required_scope="listing:publish",
+    def _require_continuity(head: dict, binding: OrgBinding, action: str) -> None:
+        """The hijack rule: touching an existing chain — extending it,
+        restarting it, or delisting it — requires the CURRENT bound root
+        to be a rebind-trail successor of the root that accepted the
+        chain's head. A root that reclaimed the UUID after expiry
+        verifies against the binding just fine, but has no rebind edge to
+        the old continuity, so the chain stays out of its reach."""
+        if head["root_pub"] not in store.root_continuity(binding.org_uuid, binding.root_pub):
+            raise _forbidden(
+                f"{action} does not chain to the publisher key-continuity"
+                " that owns this listing"
             )
-        except ChainVerifyError as exc:
-            raise _forbidden(f"{type(exc).__name__}: {exc}")
-        except MalformedError as exc:
-            raise _bad_request(str(exc))
-        if result.subject_kind == "persona":
-            raise _rung2("persona subjects require viewer authn (Track E)")
-        return result.subject_kind, result.subject_id
 
     @app.post("/v1/listings", status_code=201)
     async def publish_listing(request: Request):
@@ -1299,13 +1284,27 @@ def create_app(
             envelope, "POST", str(request.url.path), binding, store, t,
             required_scope="listing:publish",
         )
-        subject_kind, subject_id = _verify_claim_chain(claim, binding, t)
+        # The claim-layer gate, distinct from the envelope gate on purpose:
+        # the envelope authorizes the HTTP write and dies with the request,
+        # while the claim is the durable artifact third parties re-verify,
+        # so its signature must stand on its own chain.
+        claim_auth = _verify_signer_chain(
+            payload["signer"], claim.get("cert"), binding, store, t,
+            required_scope="listing:publish",
+        )
 
-        lid = listing_id(payload)
+        lid = claim["listing_id"]
         if store.get_listing(lid) is not None:
             raise HTTPException(status_code=409, detail="listing is already published")
         head = store.listing_head(publisher, name)
+        if head is not None:
+            _require_continuity(head, binding, "publish")
         if payload["prev"] is None:
+            # A fresh chain start is allowed only where nothing ACTIVE
+            # stands — over empty ground or a chain this same continuity
+            # revoked. (The continuity check above already bars a UUID
+            # reclaimer from restarting over a dead continuity's revoked
+            # name.)
             if head is not None and head["revoked_at"] is None:
                 raise HTTPException(
                     status_code=409,
@@ -1319,15 +1318,6 @@ def create_app(
                     detail="prev does not reference the current head listing"
                            " for this publisher/name",
                 )
-            # The hijack rule: an update is only an update if it chains to
-            # the same publisher KEY-CONTINUITY. A root that reclaimed the
-            # UUID after expiry verifies against the binding just fine —
-            # but it has no rebind edge to the root that accepted the
-            # predecessor, so it cannot extend the chain.
-            if head["root_pub"] not in store.root_continuity(publisher, binding.root_pub):
-                raise _forbidden(
-                    "update does not chain to the same publisher key-continuity"
-                )
         seq = store.insert_listing(
             publisher=publisher,
             name=name,
@@ -1338,8 +1328,8 @@ def create_app(
             claim=envelope["payload"]["claim"],
             root_pub=binding.root_pub,
             signer_pub=payload["signer"],
-            subject_kind=subject_kind,
-            subject_id=subject_id,
+            subject_kind=claim_auth.subject_kind,
+            subject_id=claim_auth.subject_id,
             now=t,
         )
         return {"publisher": publisher, "name": name, "listing_id": lid,
@@ -1347,14 +1337,12 @@ def create_app(
 
     @app.get("/v1/listings")
     async def list_listings(
-        name: Optional[str] = None, publisher: Optional[str] = None, limit: int = 100
+        name: Optional[str] = None,
+        publisher: Optional[str] = None,
+        limit: int = Query(100, ge=1, le=MAX_LISTING_PAGE),
     ):
         """Directory index (Tier A, anonymous): unrevoked chain heads."""
-        if type(limit) is not int or limit < 1:
-            raise _bad_request("limit must be a positive integer")
-        rows = store.list_active_listings(
-            publisher=publisher, name=name, limit=min(limit, MAX_LISTING_PAGE)
-        )
+        rows = store.list_active_listings(publisher=publisher, name=name, limit=limit)
         return {
             "listings": [
                 {
@@ -1405,9 +1393,9 @@ def create_app(
             envelope["payload"], allowed=frozenset(), required=frozenset(),
             what="listing revoke payload",
         )
-        if not NAME_RE.match(name):
-            raise _bad_request("name must be 1-64 chars of [a-z0-9._-] starting alphanumeric")
         t = now()
+        # No name-grammar check needed: a name that could not have been
+        # published cannot have a head, so it falls out here as a 404.
         head = store.listing_head(org_uuid, name)
         if head is None:
             raise HTTPException(status_code=404, detail="unknown listing")
@@ -1416,13 +1404,7 @@ def create_app(
             envelope, "DELETE", str(request.url.path), binding, store, t,
             required_scope="listing:revoke",
         )
-        # Same continuity rule as updates: a UUID reclaimer must not be
-        # able to delist the previous continuity's chain either.
-        if head["root_pub"] not in store.root_continuity(org_uuid, binding.root_pub):
-            raise _forbidden(
-                "revocation does not chain to the publisher key-continuity"
-                " that owns this listing"
-            )
+        _require_continuity(head, binding, "revocation")
         revoked = store.revoke_listing(org_uuid, name, now=t)
         return {"publisher": org_uuid, "name": name, "revoked_at": t, "revoked": revoked}
 
@@ -1456,7 +1438,7 @@ def create_app(
         if expires_at <= t:
             raise _bad_request("attestation is already expired")
         store.purge_expired_attestations(now=t)
-        aid = attestation_id(payload)
+        aid = record["attestation_id"]
         store.add_attestation(aid, payload, body["record"], now=t)
         return {"attestation_id": aid, "subject": payload["subject"],
                 "expires_at": expires_at}
@@ -1465,7 +1447,9 @@ def create_app(
     async def attestations_for_subject(subject_pub: str):
         """Live attestations about a subject key (Tier A, anonymous)."""
         _require_pub(subject_pub, "subject_pub")
-        rows = store.attestations_for_subject(subject_pub, now=now())
+        rows = store.attestations_for_subject(
+            subject_pub, now=now(), limit=MAX_LISTING_PAGE
+        )
         return {"subject": subject_pub, "attestations": rows}
 
     # -- §5.1 relay tunnel ------------------------------------------------------

@@ -153,13 +153,14 @@ wire formats.
   dies with the request; the claim's own signature must independently
   chain to the publisher's bound root with scope `listing:publish`,
   because the card is the durable artifact third parties re-verify.
-- **Key-continuity updates (hijack rule).** An update (`prev` = current
-  head's id) is accepted only if the head was accepted under a root
-  connected to the current root through the `rebinds` trail. A recovery
-  rebind continues the chain; a root that reclaimed the UUID after expiry
-  does not — it cannot extend, revoke, or re-occupy the old chain
-  (listings deliberately survive expiry-reclaim, unlike links). Account
-  is never authority.
+- **Key-continuity (hijack rule).** ANY touch of an existing chain —
+  updating it (`prev` = current head's id), restarting it over a revoked
+  head, or delisting it — requires the current bound root to be
+  connected, through the `rebinds` trail, to the root that accepted the
+  head. A recovery rebind continues the chain; a root that reclaimed the
+  UUID after expiry does not — it cannot extend, revoke, or re-occupy
+  the old chain, revoked or live (listings deliberately survive
+  expiry-reclaim, unlike links). Account is never authority.
 - **Names are labels, not property.** Keyed `(publisher, name)`: no
   global namespace to squat. Impersonation is a *rendering* problem —
   attestations `{attestor, subject, claim_type: display_name|domain,
@@ -168,10 +169,14 @@ wire formats.
   (domain-rooted proof, web-of-trust, the venue as one default attestor
   among many). The registry curates views, never verdicts.
 
-V1 boundary, deliberate: attestation delivery is unauthenticated (the
-record is self-authorizing), size-capped, and TTL-expired, but has **no
-per-source quota yet** — same §13 Q5 seam as mailbox retention; the
-first real Tier-C threshold sets both.
+Attestations are stored **one row per logical claim** (attestor,
+subject, claim_type, claim_value): a newer `ts` replaces the row and a
+stale replay can never roll a refreshed claim back, so honest
+re-attestation never grows the table. Reads are paged (freshest first).
+V1 boundary, deliberate: delivery is unauthenticated (the record is
+self-authorizing), size-capped, and TTL-expired, but a flood of
+throwaway attestor keys still has **no per-source quota** — same §13 Q5
+seam as mailbox retention; the first real Tier-C threshold sets both.
 
 ## Running
 

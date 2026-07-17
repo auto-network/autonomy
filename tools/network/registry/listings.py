@@ -137,6 +137,35 @@ def _require_pub_field(value: object, what: str, err) -> str:
     return value  # type: ignore[return-value]
 
 
+def _parse_wire(raw, what: str, err) -> tuple:
+    """Shared wire-decode prologue: ``(parsed dict, exact raw bytes)``.
+
+    The returned bytes are what the caller's canonical-form equality check
+    compares against. Unpaired surrogates are rejected HERE — ``json.loads``
+    happily admits a str carrying a lone surrogate escape, but such a
+    string has no UTF-8 encoding, so it can never be canonical wire (and
+    an unguarded ``.encode()`` later would be an unhandled crash).
+    """
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise err(f"{what} bytes are not valid UTF-8") from exc
+    if not isinstance(raw, str):
+        raise err(f"{what} must be a canonical wire JSON string")
+    try:
+        raw_bytes = raw.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise err(f"{what} contains unpaired surrogates") from exc
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, RecursionError) as exc:
+        raise err(f"{what} is not valid JSON") from exc
+    if not isinstance(data, dict):
+        raise err(f"{what} must be a JSON object")
+    return data, raw_bytes
+
+
 # -- listing claims -----------------------------------------------------------
 
 
@@ -198,7 +227,10 @@ def validate_listing_payload(obj: object) -> dict:
         raise ListingFormatError("listing payload must be a JSON object")
     if set(obj) != set(_LISTING_FIELDS):
         raise ListingFormatError(f"listing payload must carry exactly {list(_LISTING_FIELDS)}")
-    if obj["v"] != LISTING_VERSION:
+    # `type is int`, not ==: bool True == 1 would admit a second byte form
+    # ("v":true) of the same signed payload — two accepted wires, one
+    # content address, exactly the malleability this format forbids.
+    if type(obj["v"]) is not int or obj["v"] != LISTING_VERSION:
         raise ListingFormatError(f"unsupported listing version: {obj['v']!r}")
     return build_listing_payload(
         publisher=obj["publisher"], name=obj["name"], version=obj["version"],
@@ -244,26 +276,15 @@ def parse_listing_claim(raw) -> dict:
 
     Strictly anti-malleable: any byte form other than the one
     :func:`sign_listing` produces is rejected, so a claim has exactly one
-    content address. Verifies the signature against the payload's own
-    ``signer``; whether that signer chains to the publisher's bound root
-    is the acceptor's job (it needs registry state).
+    content address (returned as ``listing_id``). Verifies the signature
+    against the payload's own ``signer``; whether that signer chains to
+    the publisher's bound root is the acceptor's job (it needs registry
+    state).
 
     Raises :class:`ListingFormatError` on malformed shape and an idkit
     ``SignatureError`` when the signature does not verify.
     """
-    if isinstance(raw, bytes):
-        try:
-            raw = raw.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ListingFormatError("listing claim bytes are not valid UTF-8") from exc
-    if not isinstance(raw, str):
-        raise ListingFormatError("listing claim must be a canonical wire JSON string")
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, RecursionError) as exc:
-        raise ListingFormatError("listing claim is not valid JSON") from exc
-    if not isinstance(data, dict):
-        raise ListingFormatError("listing claim must be a JSON object")
+    data, raw_bytes = _parse_wire(raw, "listing claim", ListingFormatError)
     unknown = set(data) - {"payload", "sig", "cert"}
     if unknown:
         raise ListingFormatError(f"listing claim carries unknown fields: {sorted(unknown)}")
@@ -273,10 +294,15 @@ def parse_listing_claim(raw) -> dict:
     payload = validate_listing_payload(data["payload"])
     if "cert" in data and not isinstance(data["cert"], str):
         raise ListingFormatError("listing claim cert must be a canonical wire JSON string")
-    if canonical_json(data) != raw.encode("utf-8"):
+    if canonical_json(data) != raw_bytes:
         raise ListingFormatError("listing claim is not in canonical wire form")
     verify_signature(payload["signer"], data["sig"], listing_signing_input(payload))
-    return {"payload": payload, "cert": data.get("cert"), "sig": data["sig"]}
+    return {
+        "payload": payload,
+        "cert": data.get("cert"),
+        "sig": data["sig"],
+        "listing_id": listing_id(payload),
+    }
 
 
 # -- attestations -------------------------------------------------------------
@@ -327,7 +353,8 @@ def validate_attestation_payload(obj: object) -> dict:
         raise AttestationFormatError(
             f"attestation payload must carry exactly {list(_ATTESTATION_FIELDS)}"
         )
-    if obj["v"] != ATTESTATION_VERSION:
+    # `type is int` bars the "v":true malleability (see listing validator).
+    if type(obj["v"]) is not int or obj["v"] != ATTESTATION_VERSION:
         raise AttestationFormatError(f"unsupported attestation version: {obj['v']!r}")
     return build_attestation_payload(
         attestor=obj["attestor"], subject=obj["subject"],
@@ -368,21 +395,15 @@ def parse_attestation_record(raw) -> dict:
     — whether the evidence is real, whether the attestor is believed —
     is the client's call.
     """
-    if isinstance(raw, bytes):
-        try:
-            raw = raw.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise AttestationFormatError("attestation bytes are not valid UTF-8") from exc
-    if not isinstance(raw, str):
-        raise AttestationFormatError("attestation must be a canonical wire JSON string")
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, RecursionError) as exc:
-        raise AttestationFormatError("attestation is not valid JSON") from exc
-    if not isinstance(data, dict) or set(data) != {"payload", "sig"}:
+    data, raw_bytes = _parse_wire(raw, "attestation", AttestationFormatError)
+    if set(data) != {"payload", "sig"}:
         raise AttestationFormatError("attestation must carry exactly {payload, sig}")
     payload = validate_attestation_payload(data["payload"])
-    if canonical_json(data) != raw.encode("utf-8"):
+    if canonical_json(data) != raw_bytes:
         raise AttestationFormatError("attestation is not in canonical wire form")
     verify_signature(payload["attestor"], data["sig"], attestation_signing_input(payload))
-    return {"payload": payload, "sig": data["sig"]}
+    return {
+        "payload": payload,
+        "sig": data["sig"],
+        "attestation_id": attestation_id(payload),
+    }

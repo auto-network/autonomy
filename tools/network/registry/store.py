@@ -137,16 +137,22 @@ CREATE TABLE IF NOT EXISTS listings (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_listings_id ON listings (listing_id);
 CREATE INDEX IF NOT EXISTS idx_listings_name ON listings (name);
 
+-- One row per LOGICAL claim (who says what about whom): a refresh with a
+-- newer ts replaces its predecessor, so honest re-attestation never grows
+-- the table and a single attestor can hold at most one live row per
+-- (subject, claim_type, claim_value) — the same keep-the-newer discipline
+-- revocations use.
 CREATE TABLE IF NOT EXISTS attestations (
-    attestation_id TEXT PRIMARY KEY,
     attestor_pub   TEXT NOT NULL,
     subject_pub    TEXT NOT NULL,
     claim_type     TEXT NOT NULL,
     claim_value    TEXT NOT NULL,
+    attestation_id TEXT NOT NULL,
     record         TEXT NOT NULL,
     ts             INTEGER NOT NULL,
     expires_at     INTEGER NOT NULL,
-    received_at    INTEGER NOT NULL
+    received_at    INTEGER NOT NULL,
+    PRIMARY KEY (attestor_pub, subject_pub, claim_type, claim_value)
 );
 CREATE INDEX IF NOT EXISTS idx_attestations_subject ON attestations (subject_pub);
 CREATE INDEX IF NOT EXISTS idx_attestations_expiry ON attestations (expires_at);
@@ -803,11 +809,16 @@ class RegistryStore:
         return row[0]
 
     def listing_history(self, publisher: str, name: str) -> list:
+        """Chain metadata, oldest first — deliberately WITHOUT the claim
+        column, so a long chain of icon-heavy cards stays cheap to list;
+        any single card is fetched by its head/id."""
         rows = self._conn.execute(
-            "SELECT * FROM listings WHERE publisher = ? AND name = ? ORDER BY seq",
+            "SELECT listing_id, seq, prev_id, version, bundle_hash, root_pub,"
+            " created_at, revoked_at"
+            " FROM listings WHERE publisher = ? AND name = ? ORDER BY seq",
             (publisher, name),
         ).fetchall()
-        return [self._listing_row(r) for r in rows]
+        return [dict(r) for r in rows]
 
     def list_active_listings(
         self, *, publisher: Optional[str] = None, name: Optional[str] = None,
@@ -853,18 +864,21 @@ class RegistryStore:
         set, which is exactly what "account is never authority" means for
         listing updates.
         """
-        edges = self._conn.execute(
+        predecessors: dict = {}
+        for edge in self._conn.execute(
             "SELECT old_root_pub, new_root_pub FROM rebinds WHERE org_uuid = ?",
             (org_uuid,),
-        ).fetchall()
+        ):
+            predecessors.setdefault(edge["new_root_pub"], []).append(edge["old_root_pub"])
+        # BFS over the reverse edges — linear in the rebind count, which an
+        # org can grow one signed rebind at a time.
         continuity = {current_root}
-        changed = True
-        while changed:
-            changed = False
-            for edge in edges:
-                if edge["new_root_pub"] in continuity and edge["old_root_pub"] not in continuity:
-                    continuity.add(edge["old_root_pub"])
-                    changed = True
+        frontier = [current_root]
+        while frontier:
+            for old_root in predecessors.get(frontier.pop(), ()):
+                if old_root not in continuity:
+                    continuity.add(old_root)
+                    frontier.append(old_root)
         return continuity
 
     # -- attestations ------------------------------------------------------------
@@ -874,25 +888,42 @@ class RegistryStore:
     ) -> None:
         """Store a signature-verified attestation record.
 
-        Content-addressed: redelivering the identical record is a no-op
-        (``INSERT OR IGNORE`` on the id, which commits to every byte).
+        Keyed by the logical claim; a record with a newer ``ts`` replaces
+        the row, an older-or-equal one is a no-op (redelivery of the
+        identical record therefore idempotent) — so a replayed stale
+        attestation can never roll a refreshed claim back.
         """
+        existing = self._conn.execute(
+            "SELECT ts FROM attestations WHERE attestor_pub = ? AND subject_pub = ?"
+            " AND claim_type = ? AND claim_value = ?",
+            (payload["attestor"], payload["subject"],
+             payload["claim_type"], payload["claim_value"]),
+        ).fetchone()
+        if existing is not None and existing["ts"] >= payload["ts"]:
+            return
         self._conn.execute(
-            "INSERT OR IGNORE INTO attestations (attestation_id, attestor_pub,"
-            " subject_pub, claim_type, claim_value, record, ts, expires_at,"
-            " received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (attestation_id, payload["attestor"], payload["subject"],
-             payload["claim_type"], payload["claim_value"], record,
+            "INSERT INTO attestations (attestor_pub, subject_pub, claim_type,"
+            " claim_value, attestation_id, record, ts, expires_at, received_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT (attestor_pub, subject_pub, claim_type, claim_value)"
+            " DO UPDATE SET attestation_id = excluded.attestation_id,"
+            " record = excluded.record, ts = excluded.ts,"
+            " expires_at = excluded.expires_at, received_at = excluded.received_at",
+            (payload["attestor"], payload["subject"], payload["claim_type"],
+             payload["claim_value"], attestation_id, record,
              payload["ts"], payload["ts"] + payload["ttl"], now),
         )
         self._conn.commit()
 
-    def attestations_for_subject(self, subject_pub: str, *, now: int) -> list:
-        """Live (unexpired) attestation records about *subject_pub*."""
+    def attestations_for_subject(
+        self, subject_pub: str, *, now: int, limit: int = 256
+    ) -> list:
+        """Live (unexpired) attestation records about *subject_pub*,
+        freshest first (the useful end when the page cap bites)."""
         rows = self._conn.execute(
             "SELECT * FROM attestations WHERE subject_pub = ? AND expires_at > ?"
-            " ORDER BY ts, attestation_id",
-            (subject_pub, now),
+            " ORDER BY ts DESC, attestation_id LIMIT ?",
+            (subject_pub, now, limit),
         ).fetchall()
         return [
             {
