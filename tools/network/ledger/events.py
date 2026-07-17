@@ -77,6 +77,30 @@ def _require_hash(value: object, what: str) -> str:
     return value
 
 
+def require_hash_list(
+    value: object,
+    what: str,
+    max_len: int,
+    *,
+    allow_empty: bool = True,
+    exc: type = SchemaError,
+) -> list:
+    """A sorted, duplicate-free list of event ids — the one hash-list
+    grammar shared by sync messages and bundle manifests (F3)."""
+    if not isinstance(value, list) or len(value) > max_len:
+        raise exc(f"{what} must be a list of at most {max_len} event ids")
+    if not value and not allow_empty:
+        raise exc(f"{what} must not be empty")
+    for entry in value:
+        try:
+            _require_hash(entry, f"{what} entry")
+        except SchemaError as e:
+            raise exc(str(e)) from None
+    if value != sorted(set(value)):
+        raise exc(f"{what} must be sorted and free of duplicates")
+    return value
+
+
 def _require_ts(value: object, what: str) -> int:
     if type(value) is not int or value < 0 or value > 2**63 - 1:
         raise SchemaError(f"{what} must be an integer unix-ms timestamp in [0, 2**63)")

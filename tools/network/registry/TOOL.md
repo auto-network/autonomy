@@ -53,6 +53,10 @@ Two anchors sit outside the chain rule by construction:
 | `DELETE /v1/links/{token}` | chain with `link:revoke` | soft-revoke; envelope 404s afterwards |
 | `POST /v1/revocations` | the record itself (root-/ancestor-signed) | body: `{org, record, revoked_cert}` wire strings; `revoked_cert` proves the I7 retention horizon |
 | `GET /v1/links/{token}/envelope` | none (bootloader) | unknown/expired/revoked/dead-binding → one indistinguishable 404 (anti-enumeration); `endpoints: []` is the §5.4 direct-connect seam |
+| `POST /v1/orgs/{org}/topics/{topic}/heads` | chain with `topic:<topic>` | F3 notification plane: announce ledger DAG heads (32-byte hints only) |
+| `POST /v1/orgs/{org}/topics/{topic}/heads/poll` | chain with `topic:<topic>` | cursor-based hint fanout (`since` seq) + latest announcement |
+| `POST /v1/orgs/{org}/topics/{topic}/bundles` | chain with `topic:<topic>` | F3 data plane: store-and-forward mailbox of ENCRYPTED event bundles — the broker stores topic + hashes + sizes + opaque ciphertext, nothing else (L6) |
+| `POST /v1/orgs/{org}/topics/{topic}/bundles/fetch` | chain with `topic:<topic>` | by cursor (`since`), by hash (`want` — fetch-missing-by-hash), or `meta_only` manifests for anti-entropy planning |
 | `GET /healthz` | none | systemd/Caddy probe |
 | `WS /t/{org}` | `tunnel:serve` hello (chain to bound root) | §5.1 relay tunnel — one outbound dashboard connection per org; see `tools/network/relaykit/TOOL.md` |
 | `WS /v1/links/{token}/channel` | none (bootloader) | viewer end of the relay; every failure closes `4404` (anti-enumeration) |
@@ -62,6 +66,29 @@ Two anchors sit outside the chain rule by construction:
 `subject.kind == "persona"` on any chain → `501 rung-2` (viewer authn is
 Track E). Revocation records are retained only until the revoked key's
 natural expiry and purged lazily on every mutation (I7).
+
+## Ledger-sync topics (F3, spec §6–7)
+
+Per-org topics are the broker path for the org authority ledger
+(`tools/network/ledger/` — sync/bundles/broker modules; bead
+`auto-rrzrt`). The registry acts as **T0-blind pub/sub + mailbox**:
+"a well-known peer that is always awake". Every topic call — publish
+*and* subscribe (Tier B) — passes the I4 gate; delegated signers need
+the exact per-topic scope `topic:<name>`, so a key granted only content
+topics cannot touch the mandatory `authority` topic, and vice versa.
+Bundle ciphertext is sealed client-side under the org sync key
+(HKDF of the genesis wire — see `ledger/bundles.py`) with AAD binding
+org + topic + hash manifest: the broker can deny service but can never
+read, forge, or cross-topic-splice a bundle. L6 is pinned by a disk-scan
+test (`tests/test_broker_sync.py`).
+
+Two v1 boundaries, deliberate: **cert scopes are exact strings** (idkit
+chains have no wildcard semantics — mint one `topic:<name>` entry per
+topic; ledger scope *patterns* like `topic:*` apply to ledger events,
+not to registry certs), and **no mailbox retention/quota yet** — spec
+§13 Q5 ties defaults to the first real Tier-C threshold; until then the
+mailbox grows monotonically (identical re-announcements are deduped
+server-side, so quiet-org heartbeats cost nothing).
 
 ## Running
 
