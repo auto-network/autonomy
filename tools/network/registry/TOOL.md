@@ -56,6 +56,8 @@ Two anchors sit outside the chain rule by construction:
 | `GET /healthz` | none | systemd/Caddy probe |
 | `WS /t/{org}` | `tunnel:serve` hello (chain to bound root) | §5.1 relay tunnel — one outbound dashboard connection per org; see `tools/network/relaykit/TOOL.md` |
 | `WS /v1/links/{token}/channel` | none (bootloader) | viewer end of the relay; every failure closes `4404` (anti-enumeration) |
+| `GET /l/{token}` | none (bootloader shell) | §5.3 — one static page for every token; identical bytes, status mirrors envelope liveness; no identifiers before the channel is up; see `bootloader/README.md` |
+| `GET /l-assets/autonet.js` | none | the WebCrypto channel client (viewer side of B2's handshake) |
 
 `subject.kind == "persona"` on any chain → `501 rung-2` (viewer authn is
 Track E). Revocation records are retained only until the revoked key's

@@ -56,6 +56,32 @@ async def echo_handler(token: str, message: bytes) -> bytes:
     return message
 
 
+def file_handler(path: str, content_type: str):
+    """Serve one file over channel fetch protocol v1 — the C4 seam.
+
+    Protocol: request is canonical JSON ``{"op": "fetch", "v": 1}``;
+    response is a JSON header line (``{v, status, content_type}``), a
+    newline, then the body bytes. C4's real target resolver replaces this
+    with grant-checked (I9) per-target lookup behind the same protocol.
+    """
+    from tools.network.idkit import canonical_json
+
+    body = open(path, "rb").read()
+    ok = canonical_json({"v": 1, "status": 200, "content_type": content_type}) + b"\n" + body
+    bad = canonical_json({"v": 1, "status": 400, "content_type": "text/plain"}) + b"\nbad request"
+
+    async def handler(token: str, message: bytes) -> bytes:
+        try:
+            request = json.loads(message)
+        except ValueError:
+            return bad
+        if not isinstance(request, dict) or request.get("op") != "fetch":
+            return bad
+        return ok
+
+    return handler
+
+
 class TunnelConnector:
     def __init__(
         self,
@@ -200,7 +226,9 @@ def main() -> None:
     parser.add_argument("--org", required=True)
     parser.add_argument("--key-file", required=True, help="file holding the private key hex")
     parser.add_argument("--cert-file", required=True, help="file holding the cert wire JSON")
-    parser.add_argument("--mode", choices=["echo"], default="echo")
+    parser.add_argument("--mode", choices=["echo", "serve-file"], default="echo")
+    parser.add_argument("--file", help="file to serve (serve-file mode)")
+    parser.add_argument("--content-type", default="text/html")
     parser.add_argument("--min-backoff", type=float, default=0.2)
     parser.add_argument("--max-backoff", type=float, default=5.0)
     args = parser.parse_args()
@@ -210,8 +238,15 @@ def main() -> None:
     with open(args.cert_file) as fh:
         cert = DelegationCert.from_json(fh.read().strip())
 
+    if args.mode == "serve-file":
+        if not args.file:
+            parser.error("--mode serve-file requires --file")
+        handler = file_handler(args.file, args.content_type)
+    else:
+        handler = echo_handler
+
     connector = TunnelConnector(
-        args.relay, args.org, key, cert, echo_handler,
+        args.relay, args.org, key, cert, handler,
         min_backoff=args.min_backoff, max_backoff=args.max_backoff,
     )
     asyncio.run(connector.run())
