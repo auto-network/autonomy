@@ -245,6 +245,64 @@ def test_a_forged_next_entry_that_breaks_the_chain_is_proven(app, org, clock, wi
     assert exc.value.proof.verify(witness_pub)
 
 
+def test_both_sides_of_a_chain_break_produce_a_proof(app, org, witness_pub):
+    """A fork-prev split must be provable from EITHER side: the member
+    holding the honest N shown the bad N+1, AND the member holding the bad
+    N+1 shown the honest N. Both victims catch it — not just one."""
+    wk = app.state.witness_key
+    store = org.store()
+    org.delegate(store)
+    h1 = list(store.heads())
+    org.delegate(store)
+    h2 = list(store.heads())
+
+    seq1 = sign_attestation(wk, build_entry(ORG, TOPIC, 1, h1, None, org.root.public_hex))
+    # a bad N+1 rooted on a fabricated seq-1 entry (breaks the chain)
+    seq2_bad = sign_attestation(
+        wk, build_entry(ORG, TOPIC, 2, h2, "ff" * 32, org.root.public_hex)
+    )
+
+    # A holds the honest N, is shown the bad N+1 (the direction that worked)
+    ja = WitnessJournal(witness_pub, org=ORG, topic=TOPIC)
+    ja.admit(seq1, store)
+    proof_a = ja.reconcile(seq2_bad)
+
+    # B first-witnessed the bad N+1 (TOFU at seq 2), is later shown honest N
+    jb = WitnessJournal(witness_pub, org=ORG, topic=TOPIC)
+    jb.admit(seq2_bad, store)
+    proof_b = jb.reconcile(seq1)
+
+    assert proof_a is not None and proof_b is not None
+    assert proof_a.kind == proof_b.kind == "fork-prev"
+    assert proof_a.verify(witness_pub) and proof_b.verify(witness_pub)
+    # both sides derive the SAME (lower, higher) ordered proof
+    assert proof_a.transcript() == proof_b.transcript()
+
+
+def test_honest_adjacent_chain_reconciles_clean_from_either_side(app, org, witness_pub):
+    """The symmetric check must not false-positive on an honest chain: N and
+    a well-linked N+1 reconcile to no proof, whichever one a member holds."""
+    wk = app.state.witness_key
+    store = org.store()
+    org.delegate(store)
+    h1 = list(store.heads())
+    org.delegate(store)
+    h2 = list(store.heads())
+
+    seq1 = sign_attestation(wk, build_entry(ORG, TOPIC, 1, h1, None, org.root.public_hex))
+    seq2 = sign_attestation(
+        wk, build_entry(ORG, TOPIC, 2, h2, seq1["entry_id"], org.root.public_hex)
+    )
+
+    holds_n = WitnessJournal(witness_pub, org=ORG, topic=TOPIC)
+    holds_n.admit(seq1, store)
+    assert holds_n.reconcile(seq2) is None
+
+    holds_n1 = WitnessJournal(witness_pub, org=ORG, topic=TOPIC)
+    holds_n1.admit(seq2, store)
+    assert holds_n1.reconcile(seq1) is None
+
+
 # ── acceptance 2: append-only — supersede passes, retraction rejected ─
 
 

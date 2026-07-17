@@ -206,12 +206,24 @@ class WitnessJournal:
             return None
         last_entry = self._last["entry"]
         last_id = entry_id(last_entry)  # canonical, not the served field
+        incoming_id = entry_id(entry)
         if entry["seq"] == last_entry["seq"]:
-            if entry_id(entry) != last_id:
+            if incoming_id != last_id:
                 return EquivocationProof(self._last, attestation, "split-seq")
             return None
+        # fork-prev is a chain break at an adjacent seq, and it must be
+        # detectable from EITHER side of the split — the whole point is that
+        # both victims of an equivocation catch it, not just whichever one
+        # happens to hold the lower entry. So check both orientations, always
+        # ordering the proof (a, b) as (lower seq, higher seq) so the entry
+        # at seq N and the entry at seq N+1 that fails to chain to it are
+        # compared the same way regardless of which one we were holding.
         if entry["seq"] == last_entry["seq"] + 1 and entry["prev"] != last_id:
+            # we hold N; shown an N+1 whose prev does not point back to it
             return EquivocationProof(self._last, attestation, "fork-prev")
+        if entry["seq"] == last_entry["seq"] - 1 and last_entry["prev"] != incoming_id:
+            # we hold N+1; shown an N that our prev does not point back to
+            return EquivocationProof(attestation, self._last, "fork-prev")
         return None
 
     def admit(self, attestation: dict, store: LedgerStore) -> dict:
