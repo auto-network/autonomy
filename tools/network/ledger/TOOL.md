@@ -161,3 +161,8 @@ divergence) are all pinned.
   cold-join land with storage (F2).
 - HLC-based expiry (invite `expiry`, delegate `ttl`) is advisory ordering
   metadata; revocation is the authoritative kill switch.
+- `claim_requires` countersignatures are issuance-time attestations: an
+  admin-ack approver demoted *concurrently* with the claim does not
+  retract the approval (the approver held the scope in the claim's causal
+  ancestry). The *inviter's* authority, by contrast, is race-checked —
+  demotion concurrent with a claim kills it.
