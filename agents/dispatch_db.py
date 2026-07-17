@@ -137,20 +137,25 @@ def _ensure_dispatcher_state(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _get_conn() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+def _get_conn(db_path: Path | str | None = None) -> sqlite3.Connection:
+    path = Path(db_path) if db_path is not None else DB_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
-def init_db() -> None:
+def init_db(db_path: Path | str | None = None) -> None:
     """Create the dispatch_runs table and indexes if they don't exist.
 
     Also runs column migrations for databases created before new columns
     were added. ALTER TABLE errors from duplicate columns are silently ignored.
+
+    ``db_path`` overrides the module default (``DISPATCH_DB`` env /
+    ``data/dispatch.db``) — used by first-run init (``tools/init``) to
+    target an explicit deployment root.
     """
-    conn = _get_conn()
+    conn = _get_conn(db_path)
     try:
         conn.execute(CREATE_TABLE)
         conn.execute(CREATE_INDEX)

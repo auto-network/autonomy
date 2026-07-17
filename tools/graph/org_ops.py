@@ -632,11 +632,40 @@ _PERSONAL_SEED_PAYLOAD: dict[str, Any] = {
 }
 
 
+# First-run env overrides (H3, graph://dc310166-911): a fresh deployment
+# names its own first shared org instead of inheriting "autonomy".
+FIRST_ORG_ENV = "AUTONOMY_FIRST_ORG"
+FIRST_ORG_NAME_ENV = "AUTONOMY_FIRST_ORG_NAME"
+
+
+def resolve_first_org_slug(slug: str | None = None) -> str:
+    """First-org slug resolution: explicit arg > env > ``autonomy``."""
+    return slug or os.environ.get(FIRST_ORG_ENV) or "autonomy"
+
+
+def _first_org_seed(slug: str, display_name: str | None) -> dict[str, Any]:
+    if slug == "autonomy" and display_name is None:
+        return _AUTONOMY_SEED_PAYLOAD
+    name = (
+        display_name
+        or os.environ.get(FIRST_ORG_NAME_ENV)
+        or slug.replace("-", " ").replace("_", " ").title()
+    )
+    return {"name": name, "type": "shared"}
+
+
 def ensure_bootstrap_orgs(
     *,
     root: Path | str | None = None,
+    first_org: str | None = None,
+    first_org_name: str | None = None,
 ) -> list[OrgRef]:
-    """Ensure ``autonomy.db`` and ``personal.db`` exist under ``data/orgs/``.
+    """Ensure the first shared org and ``personal.db`` exist under ``data/orgs/``.
+
+    The first org defaults to ``autonomy`` (this host's historical
+    behavior) but a fresh deployment names its own: pass ``first_org``
+    explicitly, or set ``AUTONOMY_FIRST_ORG`` (display name via
+    ``AUTONOMY_FIRST_ORG_NAME``) before first launch.
 
     Idempotent — runs at every dashboard startup; pre-existing DBs are
     left untouched. Identity Setting seed is best-effort (skipped when
@@ -644,8 +673,10 @@ def ensure_bootstrap_orgs(
 
     Returns the list of orgs after bootstrap.
     """
+    slug = resolve_first_org_slug(first_org)
+    _validate_slug(slug)
     return [
-        _ensure_org("autonomy", "shared", _AUTONOMY_SEED_PAYLOAD, root=root),
+        _ensure_org(slug, "shared", _first_org_seed(slug, first_org_name), root=root),
         _ensure_org("personal", "personal", _PERSONAL_SEED_PAYLOAD, root=root),
     ]
 

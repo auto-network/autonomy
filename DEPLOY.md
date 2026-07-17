@@ -1,5 +1,28 @@
 # Deploying Autonomy — environment surface
 
+## First-run initialization
+
+A fresh checkout becomes a working **empty** deployment with one command
+(idempotent — safe to re-run any time; see `tools/init/TOOL.md`):
+
+```bash
+python -m tools.init --org myorg --org-name "My Org"
+./tools/dashboard/start-dashboard.sh
+```
+
+This creates the data dirs, an empty schema'd `data/graph.db`, per-org DBs
+(`personal` + your named first org) with identity Settings, the dashboard
+operational DBs, the bootstrap public-surface allowlist Setting, and a
+self-signed TLS keypair at `data/tls.crt`/`tls.key` (picked up automatically
+by `start-dashboard.sh`; for browser-trusted certs use
+`tools/dashboard/renew-tls-cert.sh` on a tailnet, or terminate TLS in a
+reverse proxy / tunnel with Let's Encrypt). No seeded content is assumed or
+required — search and list surfaces start out empty.
+
+The dashboard's own startup runs the same org bootstrap, honoring
+`AUTONOMY_FIRST_ORG` / `AUTONOMY_FIRST_ORG_NAME`, so exporting those before
+first launch is equivalent to passing `--org`/`--org-name`.
+
 Autonomy roots itself **relatively**: every core path derives from the repo
 checkout (`Path(__file__)` walked up to the repo root) and the running user's
 home (`Path.home()`). A clean `git clone` at *any* path boots without editing a
@@ -31,6 +54,8 @@ no configuration is needed there either.
 | Variable | Default | Purpose |
 |---|---|---|
 | `AUTONOMY_ORGS_DIR` | `<repo>/data/orgs` | Per-org graph DB directory (`<slug>.db`). |
+| `AUTONOMY_FIRST_ORG` | `autonomy` | Slug of the first shared org created by first-run init / dashboard startup bootstrap. |
+| `AUTONOMY_FIRST_ORG_NAME` | title-cased slug | Display name seeded into the first org's `autonomy.org#1` identity Setting. |
 | `GRAPH_DB` / `GRAPH_API` | `<repo>/data/graph.db` / *(unset → local DB)* | Graph DB path, or a remote graph API base URL. |
 | `DASHBOARD_DB` | `<repo>/data/dashboard.db` | Dashboard overlay DB. |
 | `DISPATCH_DB` | `<repo>/data/dispatch.db` | Dispatch state DB. |
