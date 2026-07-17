@@ -133,6 +133,10 @@ by cert renewal); the floor rung addresses the org's B2 tunnel by link
 token (per-node floor addressing arrives when the floor learns node
 keys); transports are TCP/WS only.
 
+Bulk transfer over these links — content-addressed blocks, have/want
+maps, rarest-first — is G2, `tools/network/swarmkit/` (rides the same
+channel contract via `swarm_handler`).
+
 ## Tests
 
 ```bash

@@ -85,6 +85,12 @@ class DirectChannelServer:
     def port(self) -> int:
         return self._port
 
+    @property
+    def connection_count(self) -> int:
+        """Open WebSocket connections right now (links are ephemeral —
+        the swarm acceptance asserts this returns to zero post-transfer)."""
+        return len(self._server.connections) if self._server is not None else 0
+
     async def start(self) -> int:
         self._server = await websockets.serve(
             self._handle, self._host, self._port, max_size=2**22, compression=None
