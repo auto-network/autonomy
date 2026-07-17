@@ -31,6 +31,33 @@ def test_run_cli_json_missing_binary_returns_error_shape():
     assert "error" in result
 
 
+def test_run_cli_json_missing_binary_degrades_to_empty():
+    """List-shaped bd endpoints hand the frontend a real empty list."""
+    result = asyncio.run(
+        server.run_cli_json(["definitely-not-a-real-binary-xyz"], empty=[])
+    )
+    assert result == []
+
+
+def test_api_beads_list_empty_when_bd_missing(monkeypatch):
+    """The API endpoint itself returns [], not a 200-with-error object."""
+    import json
+
+    async def missing_binary_run_cli(cmd, timeout=30, stdin_data=None):
+        return "", f"{cmd[0]}: not found", 127
+
+    monkeypatch.setattr(server, "run_cli", missing_binary_run_cli)
+    monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
+
+    class _Req:
+        pass
+
+    for endpoint in (server.api_beads_list, server.api_beads_ready):
+        response = asyncio.run(endpoint(_Req()))
+        assert response.status_code == 200
+        assert json.loads(response.body) == []
+
+
 @pytest.fixture()
 def _dead_dolt(monkeypatch):
     """Point the DAO at a port nothing listens on, with a fast timeout."""

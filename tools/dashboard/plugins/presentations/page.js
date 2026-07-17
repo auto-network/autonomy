@@ -207,8 +207,8 @@
     return '<!DOCTYPE html><html><head><meta charset="utf-8">' +
       '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">' +
       parts.head +
-      '<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"><\/script>' +
-      '<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"><\/script>' +
+      '<script src="/static/vendor/tailwind-browser.min.js"><\/script>' +
+      '<script defer src="/static/vendor/alpine.min.js"><\/script>' +
       '<style>' +
       'html,body{height:100%;margin:0;overflow:hidden;background:#020617;color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}' +
       '#present-scroll-root{height:100%;overflow-y:auto;overflow-x:hidden;scroll-snap-type:y mandatory;scroll-behavior:smooth;}' +

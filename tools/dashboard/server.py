@@ -365,9 +365,20 @@ async def run_cli(cmd: list[str], timeout: int = 30, stdin_data: str | None = No
         return "", "timeout", -1
 
 
-async def run_cli_json(cmd: list[str], timeout: int = 30) -> list | dict:
-    """Run CLI command and parse JSON output."""
+async def run_cli_json(
+    cmd: list[str], timeout: int = 30, *, empty: list | dict | None = None,
+) -> list | dict:
+    """Run CLI command and parse JSON output.
+
+    ``empty`` is returned when the binary itself is missing (rc 127 from
+    ``run_cli``) — deployments without the beads toolchain get a real
+    empty collection from list-shaped endpoints instead of an error
+    object the frontend has to special-case (DEPLOY.md, clean-machine
+    degradation). Left ``None``, the error shape passes through.
+    """
     stdout, stderr, rc = await run_cli(cmd, timeout)
+    if rc == 127 and empty is not None:
+        return empty
     if rc != 0 or not stdout.strip():
         return {"error": stderr or "no output", "returncode": rc}
     try:
@@ -400,12 +411,12 @@ async def api_health(request):
 async def api_beads_ready(request):
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse(dao_beads.get_open_beads())
-    return JSONResponse(await run_cli_json(["bd", "ready", "--json"]))
+    return JSONResponse(await run_cli_json(["bd", "ready", "--json"], empty=[]))
 
 async def api_beads_list(request):
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse(dao_beads.get_open_beads(limit=100))
-    return JSONResponse(await run_cli_json(["bd", "list", "--json", "-n", "100", "--sort", "updated"]))
+    return JSONResponse(await run_cli_json(["bd", "list", "--json", "-n", "100", "--sort", "updated"], empty=[]))
 
 async def api_bead_show(request):
     bead_id = request.path_params["id"]
@@ -420,7 +431,7 @@ async def api_bead_tree(request):
     bead_id = request.path_params["id"]
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse(dao_beads.get_bead_deps(bead_id))
-    return JSONResponse(await run_cli_json(["bd", "dep", "tree", bead_id, "--json"]))
+    return JSONResponse(await run_cli_json(["bd", "dep", "tree", bead_id, "--json"], empty=[]))
 
 
 async def api_bead_deps(request):
@@ -429,8 +440,8 @@ async def api_bead_deps(request):
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse(dao_beads.get_bead_deps(bead_id))
     down, up = await asyncio.gather(
-        run_cli_json(["bd", "dep", "list", bead_id, "--json"]),
-        run_cli_json(["bd", "dep", "list", bead_id, "--direction=up", "--json"]),
+        run_cli_json(["bd", "dep", "list", bead_id, "--json"], empty=[]),
+        run_cli_json(["bd", "dep", "list", bead_id, "--direction=up", "--json"], empty=[]),
     )
     blockers = down if isinstance(down, list) else []
     dependents = up if isinstance(up, list) else []
@@ -812,9 +823,9 @@ async def api_dispatch_status(request):
             "containers": [],
             "running_runs": running,
         })
-    claimed = await run_cli_json(["bd", "query", 'label="work:claimed"', "--json"])
+    claimed = await run_cli_json(["bd", "query", 'label="work:claimed"', "--json"], empty=[])
     # Also query beads with active dispatch states for richer status
-    dispatching = await run_cli_json(["bd", "query", 'label="dispatch:running" OR label="dispatch:launching" OR label="dispatch:collecting" OR label="dispatch:merging" OR label="dispatch:queued"', "--json"])
+    dispatching = await run_cli_json(["bd", "query", 'label="dispatch:running" OR label="dispatch:launching" OR label="dispatch:collecting" OR label="dispatch:merging" OR label="dispatch:queued"', "--json"], empty=[])
     # Containers are still useful for runtime info (uptime, image)
     stdout, _, _ = await run_cli(["docker", "ps", "--filter", "name=agent-", "--format", '{"name":"{{.Names}}","status":"{{.Status}}","image":"{{.Image}}"}'])
     containers = []
@@ -842,7 +853,7 @@ async def api_dispatch_approved(request):
     """
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse(dao_beads.get_dispatch_beads())
-    all_beads = await run_cli_json(["bd", "list", "--json", "-n", "100"])
+    all_beads = await run_cli_json(["bd", "list", "--json", "-n", "100"], empty=[])
     bead_list = all_beads if isinstance(all_beads, list) else []
 
     # Filter to open, approved beads not currently being dispatched
@@ -863,7 +874,7 @@ async def api_dispatch_approved(request):
 
     # Check dependencies for each approved bead in parallel
     async def check_deps(bead):
-        dep_data = await run_cli_json(["bd", "dep", "list", bead["id"], "--json"])
+        dep_data = await run_cli_json(["bd", "dep", "list", bead["id"], "--json"], empty=[])
         if not isinstance(dep_data, list):
             return bead, []
         open_blockers = []
@@ -15911,8 +15922,8 @@ class _CSPMiddleware(BaseHTTPMiddleware):
 
     _CSP = (
         "default-src 'self'; "
-        "script-src 'self' cdn.jsdelivr.net 'unsafe-inline' 'unsafe-eval'; "
-        "style-src 'self' cdn.jsdelivr.net 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+        "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
         "connect-src 'self' ws: wss:; "
         "frame-ancestors 'none'"
@@ -15920,8 +15931,8 @@ class _CSPMiddleware(BaseHTTPMiddleware):
 
     _CSP_FRAMEABLE = (
         "default-src 'self'; "
-        "script-src 'self' cdn.jsdelivr.net 'unsafe-inline' 'unsafe-eval'; "
-        "style-src 'self' cdn.jsdelivr.net 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+        "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
         "connect-src 'self' ws: wss:; "
         "frame-ancestors 'self'"
