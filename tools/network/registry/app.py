@@ -37,6 +37,7 @@ from tools.network.idkit import (
     ChainVerifyError,
     DelegationCert,
     IdkitError,
+    KeyPair,
     MalformedError,
     RevocationError,
     RevocationRecord,
@@ -50,6 +51,7 @@ from tools.network.idkit.keys import PUBLIC_KEY_HEX_LEN, _decode_hex
 from .relay import TunnelHub, _resolve_live_link, tunnel_endpoint, viewer_endpoint
 from .signing import ENVELOPE_VERSION, MAX_CLOCK_SKEW, request_signing_input
 from .store import LinkGrant, OrgBinding, RegistryStore
+from .witness import MAX_WITNESS_HEADS, sign_attestation
 
 DEFAULT_BINDING_TTL = 30 * 86_400  # spec §4.2: binding TTL default 30d
 MIN_BINDING_TTL = 3_600
@@ -317,20 +319,28 @@ def create_app(
     *,
     now_fn=None,
     base_url: str = "https://auto.network",
+    witness_key: Optional[KeyPair] = None,
 ) -> FastAPI:
     """Build the registry app.
 
     *now_fn* is the clock (unix seconds); injectable so TTL, expiry, and
     purge behavior are deterministic under test. *base_url* prefixes the
-    share-link URLs returned by ``POST /v1/links``.
+    share-link URLs returned by ``POST /v1/links``. *witness_key* is the
+    Ed25519 key the equivocation witness (F4) signs its head-set
+    attestations with; a fresh one is generated when omitted, but a
+    persistent deployment must pass a stable key — clients *pin* the
+    witness public key, and rotating it silently would break split-view
+    detection. Discover/pin it via ``GET /v1/witness/pubkey``.
     """
     app = FastAPI(title="auto.network registry", version="1")
     store = RegistryStore(db_path)
     now_fn = now_fn or (lambda: int(time.time()))
     hub = TunnelHub()
+    witness_key = witness_key or KeyPair.generate()
     app.state.store = store
     app.state.now_fn = now_fn
     app.state.tunnel_hub = hub
+    app.state.witness_key = witness_key
 
     def now() -> int:
         return int(now_fn())
@@ -749,6 +759,67 @@ def create_app(
             # a want-mode match set is not a mailbox position — no cursor
             body["next_since"] = rows[-1]["seq"] if rows else payload.get("since", 0)
         return body
+
+    # -- §6 equivocation witness (F4): signed, append-only head-set log ---------
+    #
+    # The anti-fork role (L5). Members publish the authority head-set they
+    # observe; the witness appends it to a per-(org, topic) hash-chained log
+    # and serves each tip SIGNED by the registry witness key. A server that
+    # shows two members different histories signs two contradictory
+    # attestations — a self-contained proof anyone can check. Hashes only,
+    # so it composes with the L6 encrypted mailbox untouched.
+
+    @app.get("/v1/witness/pubkey")
+    async def witness_pubkey():
+        """The registry's witness verification key — clients pin this.
+
+        Public by nature (it only *verifies* signatures) and unauthenticated
+        so a fresh member can pin it before it holds any org credential. The
+        pin is load-bearing: equivocation is provable only between two
+        attestations that verify under the SAME trusted key, never the key a
+        response advertises.
+        """
+        return {"witness_pub": witness_key.public_hex, "v": 1}
+
+    @app.post("/v1/orgs/{org_uuid}/topics/{topic}/witness", status_code=201)
+    async def publish_witness(org_uuid: str, topic: str, request: Request):
+        """Append the observed head-set to the log; return the signed tip."""
+        payload, auth, t = await _topic_gate(request, org_uuid, topic)
+        _require_fields(
+            payload, allowed=frozenset({"heads"}), required=frozenset({"heads"}),
+            what="witness payload",
+        )
+        heads = _require_hashes(payload["heads"], "heads", MAX_WITNESS_HEADS)
+        row = store.append_witness(org_uuid, topic, heads, auth.signer_pub, now=t)
+        return sign_attestation(witness_key, row["entry"])
+
+    @app.post("/v1/orgs/{org_uuid}/topics/{topic}/witness/head")
+    async def witness_head(org_uuid: str, topic: str, request: Request):
+        """Serve the current signed head-set — identical to every member."""
+        _payload, _auth, _t = await _topic_gate(request, org_uuid, topic)
+        tip = store.witness_tip(org_uuid, topic)
+        if tip is None:
+            return {"topic": topic, "attestation": None}
+        return {"topic": topic, "attestation": sign_attestation(witness_key, tip["entry"])}
+
+    @app.post("/v1/orgs/{org_uuid}/topics/{topic}/witness/since")
+    async def witness_since(org_uuid: str, topic: str, request: Request):
+        """Serve signed chain entries after a cursor (the client's walk).
+
+        Lets a member verify a fresh tip actually *extends* the chain it
+        last witnessed, entry by entry — a served chain whose entry at an
+        already-witnessed seq differs from the one the member holds signed
+        is provable equivocation.
+        """
+        payload, _auth, _t = await _topic_gate(request, org_uuid, topic)
+        _require_fields(
+            payload, allowed=frozenset({"since"}), required=frozenset(), what="witness since",
+        )
+        since = _require_seq(payload)
+        rows = store.witness_since(org_uuid, topic, since, limit=MAX_TOPIC_PAGE)
+        entries = [sign_attestation(witness_key, r["entry"]) for r in rows]
+        next_since = rows[-1]["entry"]["seq"] if rows else since
+        return {"topic": topic, "entries": entries, "next_since": next_since}
 
     # -- §5.1 relay tunnel ------------------------------------------------------
 
