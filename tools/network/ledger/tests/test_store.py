@@ -268,8 +268,10 @@ class TestTamperDetection:
         raw = sqlite3.connect(db)
         with raw:
             raw.execute("DELETE FROM heads")
+            # genesis always has children here, so it is never a real head
             raw.execute(
-                "INSERT INTO heads(event_id) SELECT event_id FROM events LIMIT 1"
+                "INSERT INTO heads(event_id) SELECT event_id FROM events"
+                " WHERE event_type='genesis'"
             )
         raw.close()
         with pytest.raises(TamperError):
