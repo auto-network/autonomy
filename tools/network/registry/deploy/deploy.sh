@@ -36,6 +36,7 @@ echo "==> syncing code to $TARGET:$APP_DIR"
 ssh "$TARGET" "mkdir -p $APP_DIR/tools/network"
 rsync -az --delete --exclude '__pycache__' --exclude 'tests' \
     "$REPO_ROOT/tools/network/idkit" \
+    "$REPO_ROOT/tools/network/relaykit" \
     "$REPO_ROOT/tools/network/registry" \
     "$TARGET:$APP_DIR/tools/network/"
 
@@ -47,7 +48,7 @@ if [ ! -x venv/bin/python ]; then
     python3 -m venv venv
 fi
 venv/bin/pip install --quiet --upgrade pip
-venv/bin/pip install --quiet 'fastapi>=0.110' 'uvicorn>=0.29' 'cryptography>=42'
+venv/bin/pip install --quiet 'fastapi>=0.110' 'uvicorn>=0.29' 'cryptography>=42' 'websockets>=13'
 EOF
 
 echo "==> systemd unit"
