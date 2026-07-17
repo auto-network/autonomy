@@ -151,7 +151,12 @@ divergence) are all pinned.
 
 - Role scopes are **non-delegable** (use `delegate` for onward grants).
 - `member.rekey` policy is self-or-root; M-of-N trustee policies land in
-  F7 (`approvals[]` is already carried and signature-checked).
+  F7 (`approvals[]` is already carried and signature-checked). A **revoked
+  key cannot authorize its own rekey** — ancestrally revoked self-rekeys
+  are invalid and concurrent ones lose the race (fail closed; a revoked
+  key must not rotate its authority out of the revocation). Root-authorized
+  rekey of a compromised member remains valid: that is the recovery path.
+  Revoking the abandoned old key *after* a rekey is a no-op.
 - `checkpoint` is schema + authority only; state-hash verification and
   cold-join land with storage (F2).
 - HLC-based expiry (invite `expiry`, delegate `ttl`) is advisory ordering

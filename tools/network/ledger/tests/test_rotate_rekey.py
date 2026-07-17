@@ -7,6 +7,7 @@ from tools.network.ledger import fold, sign_rotate_continuity
 from tools.network.ledger.fold import (
     R_BAD_CONTINUITY,
     R_NOT_ROOT,
+    R_REKEY_REVOKED_KEY,
     R_REKEY_UNAUTHORIZED,
     R_REKEY_WRONG_KEY,
     R_UNKNOWN_PERSONA,
@@ -141,6 +142,50 @@ class TestRekey:
         state = fold(sim.ledger)
         assert state.valid[bad] is False
         assert state.reasons[bad] == R_UNKNOWN_PERSONA
+
+    def test_revoked_key_cannot_self_rekey_out_of_revocation(self):
+        """Codex-found hole (auto-16cjl validation): a revoked key must not
+        escape revocation by rekeying itself to a fresh key. Exact repro:
+        define role -> invite -> claim -> revoke_key -> self-rekey."""
+        sim, persona = self.build_member()
+        sim.revoke_key(sim.root, persona)
+        new_key = KeyPair.generate()
+        escape = sim.rekey(persona, persona, persona, new_key)  # signed by revoked key
+        for state in replay_states(sim):
+            assert state.valid[escape] is False
+            assert state.reasons[escape] == R_REKEY_REVOKED_KEY
+            member = state.members[persona.public_hex]
+            assert member.current_key == persona.public_hex  # binding unchanged
+            assert not state.holds(new_key.public_hex, "link:publish")
+            assert not state.holds(persona.public_hex, "link:publish")
+
+    def test_self_rekey_racing_key_revoke_loses(self):
+        """The concurrent variant: revoke wins the race in every replay
+        order — a revoked key cannot outrun revocation on a fork either."""
+        sim, persona = self.build_member()
+        new_key = KeyPair.generate()
+        base = sim.ledger.heads()
+        sim.revoke_key(sim.root, persona, parents=base)
+        escape = sim.rekey(persona, persona, persona, new_key, parents=base)
+        sim.checkpoint(sim.root)
+        for state in replay_states(sim):
+            assert state.valid[escape] is True  # issuance-valid in its ancestry…
+            member = state.members[persona.public_hex]
+            assert member.current_key == persona.public_hex  # …but the revoke wins
+            assert not state.holds(new_key.public_hex, "link:publish")
+            assert not state.holds(persona.public_hex, "link:publish")
+
+    def test_revoking_stale_old_key_after_rekey_is_noop(self):
+        """Cleanup-revoking the abandoned old key must not undo a rekey
+        that causally preceded it."""
+        sim, persona = self.build_member()
+        new_key = KeyPair.generate()
+        sim.rekey(persona, persona, persona, new_key)
+        sim.revoke_key(sim.root, persona)  # causally after the rekey
+        for state in replay_states(sim):
+            member = state.members[persona.public_hex]
+            assert member.current_key == new_key.public_hex
+            assert state.holds(new_key.public_hex, "link:publish")
 
     def test_rekey_after_key_compromise_restores_role_scopes(self):
         sim, persona = self.build_member()

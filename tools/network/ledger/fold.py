@@ -80,6 +80,7 @@ R_APPROVAL_MISSING = "approval-missing"
 R_UNKNOWN_PERSONA = "unknown-persona"
 R_REKEY_WRONG_KEY = "rekey-wrong-key"
 R_REKEY_UNAUTHORIZED = "rekey-unauthorized"
+R_REKEY_REVOKED_KEY = "rekey-revoked-key"
 R_NOT_ROOT = "not-root"
 R_ROTATE_WRONG_OLD = "rotate-wrong-old"
 R_BAD_CONTINUITY = "bad-continuity"
@@ -176,6 +177,7 @@ class _Rekey:
     persona: str
     old_pub: str
     new_pub: str
+    self_authorized: bool  # signed by the old key itself (not root)
 
 
 @dataclass(frozen=True)
@@ -652,14 +654,25 @@ class _Folder:
         current = members[p["persona"]][2]
         if p["old_pub"] != current:
             return R_REKEY_WRONG_KEY
-        if event.author_key not in (current, self.root_at(ctx)):
+        self_authorized = event.author_key == current
+        if not self_authorized and event.author_key != self.root_at(ctx):
             return R_REKEY_UNAUTHORIZED
+        # Fail closed: a revoked key cannot authorize its own rekey — that
+        # would let it rotate to a fresh key and carry its authority out of
+        # the revocation. Root-authorized rekey of a compromised member
+        # remains valid (that IS the recovery path).
+        if self_authorized and self._key_revoked(current, ctx):
+            return R_REKEY_REVOKED_KEY
         taken = set(members)
         taken.update(rec[2] for rec in members.values())
         if p["new_pub"] in taken:
             return R_PERSONA_EXISTS
         self.rekeys[event.event_id] = _Rekey(
-            id=event.event_id, persona=p["persona"], old_pub=p["old_pub"], new_pub=p["new_pub"]
+            id=event.event_id,
+            persona=p["persona"],
+            old_pub=p["old_pub"],
+            new_pub=p["new_pub"],
+            self_authorized=self_authorized,
         )
         return None
 
@@ -883,6 +896,7 @@ class _Folder:
 
         # Apply rekey chains (concurrent rekeys: lowest event hash wins).
         result: Dict[str, tuple] = {}
+        view = ctx | extra
         for pid, (claim, invite) in members.items():
             current = pid
             used = set()
@@ -895,6 +909,7 @@ class _Folder:
                     and self.valid[rid]
                     and rk.persona == pid
                     and rk.old_pub == current
+                    and self._rekey_alive(rk, view)
                 ]
                 if not candidates:
                     break
@@ -914,6 +929,23 @@ class _Folder:
         out = (result, {k: frozenset(v) for k, v in persona_roles.items()})
         self._members_cache[cache_key] = out
         return out
+
+    def _rekey_alive(self, rk: _Rekey, view: frozenset) -> bool:
+        """A self-authorized rekey loses a race with the revocation of its
+        authorizing key (a revoked key cannot outrun revocation by rekeying);
+        an ancestral revoke already made it issuance-invalid, and a revoke
+        causally *after* the rekey targets an abandoned key — a no-op.
+        Root-authorized rekeys are the recovery path and never race-lose."""
+        if not rk.self_authorized:
+            return True
+        for r in self._kills(view):
+            if (
+                r.target_key == rk.old_pub
+                and r.id not in self.anc[rk.id]
+                and rk.id not in self.anc[r.id]
+            ):
+                return False
+        return True
 
     def _claim_role_alive(self, claim: _Claim, invite: _Invite, ctx, extra) -> bool:
         """The invite-granted role can be stripped by role.revoke without
