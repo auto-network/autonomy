@@ -18,6 +18,14 @@ Tables:
   store-and-forward mailbox of ENCRYPTED event bundles. Both tables are
   T0-blind by construction — they hold topic names, event hashes, sizes,
   and opaque ciphertext; plaintext event bytes never reach this store.
+- ``listings`` / ``attestations`` — the L1 listing directory
+  (``graph://29ff28a8-b39``): signed listing CARDS keyed
+  ``(publisher, name)`` — never bundle bytes — and third-party attestation
+  records keyed by subject public key. Listing rows record the publisher's
+  bound root at accept time (``root_pub``), which is what the
+  key-continuity update rule anchors to. Unlike links, listings survive an
+  expiry-reclaim of the org UUID: the chain belongs to the key-continuity,
+  not the binding, so a reclaimer can neither extend nor revoke it.
 - ``witness_log`` — the F4 equivocation witness (spec §6 role 2, L5): a
   per-``(org, topic)`` APPEND-ONLY, hash-chained log of the head-sets
   members publish. Each row commits to the previous (``prev_id``), so the
@@ -108,6 +116,40 @@ CREATE TABLE IF NOT EXISTS topic_bundles (
     deposited_at INTEGER NOT NULL,
     PRIMARY KEY (org_uuid, topic, seq)
 );
+
+CREATE TABLE IF NOT EXISTS listings (
+    publisher    TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    seq          INTEGER NOT NULL,
+    listing_id   TEXT NOT NULL,
+    prev_id      TEXT,
+    version      TEXT NOT NULL,
+    bundle_hash  TEXT NOT NULL,
+    claim        TEXT NOT NULL,
+    root_pub     TEXT NOT NULL,
+    signer_pub   TEXT NOT NULL,
+    subject_kind TEXT NOT NULL,
+    subject_id   TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    revoked_at   INTEGER,
+    PRIMARY KEY (publisher, name, seq)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_listings_id ON listings (listing_id);
+CREATE INDEX IF NOT EXISTS idx_listings_name ON listings (name);
+
+CREATE TABLE IF NOT EXISTS attestations (
+    attestation_id TEXT PRIMARY KEY,
+    attestor_pub   TEXT NOT NULL,
+    subject_pub    TEXT NOT NULL,
+    claim_type     TEXT NOT NULL,
+    claim_value    TEXT NOT NULL,
+    record         TEXT NOT NULL,
+    ts             INTEGER NOT NULL,
+    expires_at     INTEGER NOT NULL,
+    received_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_attestations_subject ON attestations (subject_pub);
+CREATE INDEX IF NOT EXISTS idx_attestations_expiry ON attestations (expires_at);
 
 CREATE TABLE IF NOT EXISTS witness_log (
     org_uuid     TEXT NOT NULL,
@@ -320,7 +362,12 @@ class RegistryStore:
     ) -> None:
         if replacing_expired:
             # Expired binding reclaimed: the old org's grants and
-            # revocations died with its binding.
+            # revocations died with its binding. Listings deliberately
+            # survive — they belong to the publisher KEY-CONTINUITY, not
+            # the UUID, so the reclaimer (a fresh continuity) cannot
+            # extend, revoke, or re-occupy the old chains (L1).
+            # Attestations are keyed by subject public key and never
+            # touch org bindings at all.
             self._conn.execute("DELETE FROM orgs WHERE org_uuid = ?", (org_uuid,))
             self._conn.execute("DELETE FROM links WHERE org_uuid = ?", (org_uuid,))
             self._conn.execute("DELETE FROM revocations WHERE org_uuid = ?", (org_uuid,))
@@ -684,6 +731,188 @@ class RegistryStore:
                 }
             )
         return out
+
+    # -- listings (L1 listing directory — signed cards + attestations) ----------
+
+    @staticmethod
+    def _listing_row(row) -> dict:
+        return {
+            "publisher": row["publisher"],
+            "name": row["name"],
+            "seq": row["seq"],
+            "listing_id": row["listing_id"],
+            "prev_id": row["prev_id"],
+            "version": row["version"],
+            "bundle_hash": row["bundle_hash"],
+            "claim": row["claim"],
+            "root_pub": row["root_pub"],
+            "created_at": row["created_at"],
+            "revoked_at": row["revoked_at"],
+        }
+
+    def get_listing(self, listing_id: str) -> Optional[dict]:
+        row = self._conn.execute(
+            "SELECT * FROM listings WHERE listing_id = ?", (listing_id,)
+        ).fetchone()
+        return self._listing_row(row) if row is not None else None
+
+    def listing_head(self, publisher: str, name: str) -> Optional[dict]:
+        """The newest row for ``(publisher, name)`` — revoked or not."""
+        row = self._conn.execute(
+            "SELECT * FROM listings WHERE publisher = ? AND name = ?"
+            " ORDER BY seq DESC LIMIT 1",
+            (publisher, name),
+        ).fetchone()
+        return self._listing_row(row) if row is not None else None
+
+    def insert_listing(
+        self,
+        *,
+        publisher: str,
+        name: str,
+        listing_id: str,
+        prev_id: Optional[str],
+        version: str,
+        bundle_hash: str,
+        claim: str,
+        root_pub: str,
+        signer_pub: str,
+        subject_kind: str,
+        subject_id: str,
+        now: int,
+    ) -> int:
+        """Append one accepted listing claim; returns its chain seq.
+
+        ``root_pub`` is the publisher org's bound root AT ACCEPT TIME —
+        the anchor the key-continuity update rule checks against. seq
+        allocation is a single INSERT..SELECT so concurrent writers
+        cannot both observe the same MAX and collide on the PK.
+        """
+        row = self._conn.execute(
+            "INSERT INTO listings (publisher, name, seq, listing_id, prev_id,"
+            " version, bundle_hash, claim, root_pub, signer_pub, subject_kind,"
+            " subject_id, created_at, revoked_at)"
+            " SELECT ?, ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL"
+            " FROM listings WHERE publisher = ? AND name = ?"
+            " RETURNING seq",
+            (publisher, name, listing_id, prev_id, version, bundle_hash, claim,
+             root_pub, signer_pub, subject_kind, subject_id, now,
+             publisher, name),
+        ).fetchone()
+        self._conn.commit()
+        return row[0]
+
+    def listing_history(self, publisher: str, name: str) -> list:
+        rows = self._conn.execute(
+            "SELECT * FROM listings WHERE publisher = ? AND name = ? ORDER BY seq",
+            (publisher, name),
+        ).fetchall()
+        return [self._listing_row(r) for r in rows]
+
+    def list_active_listings(
+        self, *, publisher: Optional[str] = None, name: Optional[str] = None,
+        limit: int = 256,
+    ) -> list:
+        """Directory view: the unrevoked head of every listing chain.
+
+        Names are labels, not property — a name filter can return heads
+        from several publishers, none privileged over the others.
+        """
+        query = (
+            "SELECT * FROM listings AS l WHERE l.revoked_at IS NULL"
+            " AND l.seq = (SELECT MAX(seq) FROM listings"
+            "              WHERE publisher = l.publisher AND name = l.name)"
+        )
+        args: list = []
+        if publisher is not None:
+            query += " AND l.publisher = ?"
+            args.append(publisher)
+        if name is not None:
+            query += " AND l.name = ?"
+            args.append(name)
+        query += " ORDER BY l.publisher, l.name LIMIT ?"
+        args.append(limit)
+        return [self._listing_row(r) for r in self._conn.execute(query, args)]
+
+    def revoke_listing(self, publisher: str, name: str, *, now: int) -> int:
+        """Mark every unrevoked row of the chain revoked; returns count."""
+        cur = self._conn.execute(
+            "UPDATE listings SET revoked_at = ?"
+            " WHERE publisher = ? AND name = ? AND revoked_at IS NULL",
+            (now, publisher, name),
+        )
+        self._conn.commit()
+        return cur.rowcount
+
+    def root_continuity(self, org_uuid: str, current_root: str) -> set:
+        """Roots connected to *current_root* through the org's rebind trail.
+
+        The set of keys the CURRENT binding is a legitimate successor of:
+        walk the ``rebinds`` audit edges backwards from the current root.
+        A root that got the UUID by expiry-reclaim has no edge into this
+        set, which is exactly what "account is never authority" means for
+        listing updates.
+        """
+        edges = self._conn.execute(
+            "SELECT old_root_pub, new_root_pub FROM rebinds WHERE org_uuid = ?",
+            (org_uuid,),
+        ).fetchall()
+        continuity = {current_root}
+        changed = True
+        while changed:
+            changed = False
+            for edge in edges:
+                if edge["new_root_pub"] in continuity and edge["old_root_pub"] not in continuity:
+                    continuity.add(edge["old_root_pub"])
+                    changed = True
+        return continuity
+
+    # -- attestations ------------------------------------------------------------
+
+    def add_attestation(
+        self, attestation_id: str, payload: dict, record: str, *, now: int
+    ) -> None:
+        """Store a signature-verified attestation record.
+
+        Content-addressed: redelivering the identical record is a no-op
+        (``INSERT OR IGNORE`` on the id, which commits to every byte).
+        """
+        self._conn.execute(
+            "INSERT OR IGNORE INTO attestations (attestation_id, attestor_pub,"
+            " subject_pub, claim_type, claim_value, record, ts, expires_at,"
+            " received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (attestation_id, payload["attestor"], payload["subject"],
+             payload["claim_type"], payload["claim_value"], record,
+             payload["ts"], payload["ts"] + payload["ttl"], now),
+        )
+        self._conn.commit()
+
+    def attestations_for_subject(self, subject_pub: str, *, now: int) -> list:
+        """Live (unexpired) attestation records about *subject_pub*."""
+        rows = self._conn.execute(
+            "SELECT * FROM attestations WHERE subject_pub = ? AND expires_at > ?"
+            " ORDER BY ts, attestation_id",
+            (subject_pub, now),
+        ).fetchall()
+        return [
+            {
+                "attestation_id": r["attestation_id"],
+                "attestor": r["attestor_pub"],
+                "subject": r["subject_pub"],
+                "claim_type": r["claim_type"],
+                "claim_value": r["claim_value"],
+                "record": r["record"],
+                "ts": r["ts"],
+                "expires_at": r["expires_at"],
+            }
+            for r in rows
+        ]
+
+    def purge_expired_attestations(self, *, now: int) -> int:
+        """TTL sweep: drop records past their declared expiry."""
+        cur = self._conn.execute("DELETE FROM attestations WHERE expires_at <= ?", (now,))
+        self._conn.commit()
+        return cur.rowcount
 
     # -- witness (F4 equivocation witness — append-only head-set log, L5) -------
 

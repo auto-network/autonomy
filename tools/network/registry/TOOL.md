@@ -63,6 +63,12 @@ Two anchors sit outside the chain rule by construction:
 | `POST /v1/orgs/{org}/topics/{topic}/witness/head` | chain with `topic:<topic>` | serve the current signed head-set — identical to every member |
 | `POST /v1/orgs/{org}/topics/{topic}/witness/since` | chain with `topic:<topic>` | signed chain entries after `since` (the client's continuity walk) |
 | `GET /v1/witness/pubkey` | none | the registry's pinnable witness verification key — public by nature; the pin is what makes split-view detection provable |
+| `POST /v1/listings` | envelope with `listing:publish` + the claim's own chain | L1 directory: store a signed listing CARD (KB), never the bundle; keyed `(publisher, name)`; `prev` chains updates under the same publisher key-continuity |
+| `GET /v1/listings` | none (Tier A) | anonymous public index of unrevoked chain heads; `?name=`/`?publisher=` filters — a name can return several publishers, none privileged |
+| `GET /v1/listings/{org}/{name}` | none (Tier A) | one chain in full: head card + history, revoked rows visible |
+| `DELETE /v1/listings/{org}/{name}` | envelope with `listing:revoke` + key-continuity | delist the whole chain; a UUID reclaimer cannot revoke the old continuity's cards |
+| `POST /v1/attestations` | the record itself (attestor-signed) | anyone may DELIVER; server verifies the signature ONLY — claim content is evaluated client-side |
+| `GET /v1/attestations/{subject_pub}` | none (Tier A) | live (unexpired) attestation records about a subject key, served verbatim |
 | `GET /healthz` | none | systemd/Caddy probe |
 | `WS /t/{org}` | `tunnel:serve` hello (chain to bound root) | §5.1 relay tunnel — one outbound dashboard connection per org; see `tools/network/relaykit/TOOL.md` |
 | `WS /v1/links/{token}/channel` | none (bootloader) | viewer end of the relay; every failure closes `4404` (anti-enumeration) |
@@ -130,6 +136,42 @@ witness never sees an event, only its id).
 
 A stable deployment MUST pass a persistent `witness_key` to `create_app`;
 rotating it silently breaks pins and hence detection.
+
+## Listing directory (L1, design `graph://29ff28a8-b39`)
+
+The app-store/leaderboard/product-listing primitive: a central venue for
+**signed claims** plus client-recomputable views. `listings.py` owns the
+wire formats.
+
+- **The card, never the content.** A listing is `{publisher, name,
+  version, bundle_hash, description, icon, provider_hints, prev, ts,
+  signer}` + sig (`LISTING_DOMAIN`, canonical JSON, one accepted byte
+  form). `listing_id = sha256(canonical payload)`. Bundles are fetched
+  from any org holding bytes that match `bundle_hash` — popularity
+  increases availability; the registry never becomes a CDN.
+- **Two gates on publish.** The I4 envelope authorizes the HTTP write and
+  dies with the request; the claim's own signature must independently
+  chain to the publisher's bound root with scope `listing:publish`,
+  because the card is the durable artifact third parties re-verify.
+- **Key-continuity updates (hijack rule).** An update (`prev` = current
+  head's id) is accepted only if the head was accepted under a root
+  connected to the current root through the `rebinds` trail. A recovery
+  rebind continues the chain; a root that reclaimed the UUID after expiry
+  does not — it cannot extend, revoke, or re-occupy the old chain
+  (listings deliberately survive expiry-reclaim, unlike links). Account
+  is never authority.
+- **Names are labels, not property.** Keyed `(publisher, name)`: no
+  global namespace to squat. Impersonation is a *rendering* problem —
+  attestations `{attestor, subject, claim_type: display_name|domain,
+  claim_value, evidence_type, evidence, ts, ttl}` are stored on signature
+  validity alone and served verbatim; the client picks its attestors
+  (domain-rooted proof, web-of-trust, the venue as one default attestor
+  among many). The registry curates views, never verdicts.
+
+V1 boundary, deliberate: attestation delivery is unauthenticated (the
+record is self-authorizing), size-capped, and TTL-expired, but has **no
+per-source quota yet** — same §13 Q5 seam as mailbox retention; the
+first real Tier-C threshold sets both.
 
 ## Running
 

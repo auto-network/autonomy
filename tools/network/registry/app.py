@@ -52,6 +52,13 @@ from tools.network.idkit import (
 from tools.network.idkit.keys import PUBLIC_KEY_HEX_LEN, _decode_hex
 
 from .assertion import IDENTIFY_SCOPE, MAX_ASSERTION_TTL, parse_assertion
+from .listings import (
+    NAME_RE,
+    attestation_id,
+    listing_id,
+    parse_attestation_record,
+    parse_listing_claim,
+)
 from .relay import TunnelHub, _resolve_live_link, tunnel_endpoint, viewer_endpoint
 from .signing import ENVELOPE_VERSION, MAX_CLOCK_SKEW, request_signing_input
 from .store import LinkGrant, OrgBinding, RegistryStore
@@ -113,6 +120,9 @@ MAX_BUNDLE_BYTES = 4 * 1024 * 1024
 #: would otherwise poison honest pullers' mailbox drains
 MIN_BUNDLE_BYTES = 12 + 16
 MAX_TOPIC_PAGE = 256
+MAX_LISTING_PAGE = 256
+#: An attestation minted further in the future than this is junk, not skew.
+MAX_ATTESTATION_FUTURE_TS = MAX_CLOCK_SKEW
 
 # -- G1 node reachability hints (spec §8) -------------------------------------
 #
@@ -1215,6 +1225,248 @@ def create_app(
         entries = [sign_attestation(witness_key, r["entry"]) for r in rows]
         next_since = rows[-1]["entry"]["seq"] if rows else since
         return {"topic": topic, "entries": entries, "next_since": next_since}
+
+    # -- L1 listing directory (graph://29ff28a8-b39) ----------------------------
+    #
+    # The registry stores signed CARDS, never bundles: a listing is a
+    # portable claim (listings.py) anyone can re-verify offline. Publishing
+    # is Tier B (I4 envelope + the claim's own chain to the publisher's
+    # bound root, scope listing:publish); browsing is Tier A (anonymous
+    # public index — a directory that hid itself would be no directory).
+    # Names are labels keyed (publisher, name): two orgs may claim the same
+    # name and neither is privileged; display naming is the attestation
+    # layer's problem, evaluated CLIENT-side.
+
+    def _verify_claim_chain(claim: dict, binding: OrgBinding, t: int) -> tuple:
+        """The claim-layer gate: the CARD's signer must chain to the
+        publisher's bound root with scope listing:publish.
+
+        Distinct from the envelope gate on purpose — the envelope
+        authorizes the HTTP write and dies with the request, while the
+        claim is the durable artifact third parties re-verify, so its
+        signature must stand on its own chain.
+        """
+        payload = claim["payload"]
+        cert_wire = claim.get("cert")
+        if cert_wire is None:
+            if payload["signer"] != binding.root_pub:
+                raise _forbidden(
+                    "listing claim signer does not chain to the publisher's bound root key"
+                )
+            return "root", binding.root_pub
+        try:
+            cert = DelegationCert.from_json(cert_wire)
+        except MalformedError as exc:
+            raise _bad_request(f"claim cert: {exc}")
+        if cert.child_pub != payload["signer"]:
+            raise _forbidden("claim cert does not delegate to the claim signer")
+        try:
+            result = verify_chain(
+                cert,
+                binding.root_pub,
+                org=binding.org_uuid,
+                now=t,
+                revocations=store.revocation_set(binding.org_uuid),
+                required_scope="listing:publish",
+            )
+        except ChainVerifyError as exc:
+            raise _forbidden(f"{type(exc).__name__}: {exc}")
+        except MalformedError as exc:
+            raise _bad_request(str(exc))
+        if result.subject_kind == "persona":
+            raise _rung2("persona subjects require viewer authn (Track E)")
+        return result.subject_kind, result.subject_id
+
+    @app.post("/v1/listings", status_code=201)
+    async def publish_listing(request: Request):
+        envelope = _parse_envelope(await _read_json(request))
+        _require_fields(
+            envelope["payload"], allowed=frozenset({"claim"}),
+            required=frozenset({"claim"}), what="listing payload",
+        )
+        try:
+            claim = parse_listing_claim(envelope["payload"]["claim"])
+        except MalformedError as exc:
+            raise _bad_request(str(exc))
+        except IdkitError:
+            raise _forbidden("listing claim signature does not verify against its signer")
+        payload = claim["payload"]
+        publisher, name = payload["publisher"], payload["name"]
+
+        t = now()
+        binding = _require_binding(store, publisher, t)
+        _authorize(
+            envelope, "POST", str(request.url.path), binding, store, t,
+            required_scope="listing:publish",
+        )
+        subject_kind, subject_id = _verify_claim_chain(claim, binding, t)
+
+        lid = listing_id(payload)
+        if store.get_listing(lid) is not None:
+            raise HTTPException(status_code=409, detail="listing is already published")
+        head = store.listing_head(publisher, name)
+        if payload["prev"] is None:
+            if head is not None and head["revoked_at"] is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="an active listing exists for this publisher/name;"
+                           " an update must reference its predecessor",
+                )
+        else:
+            if head is None or head["listing_id"] != payload["prev"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="prev does not reference the current head listing"
+                           " for this publisher/name",
+                )
+            # The hijack rule: an update is only an update if it chains to
+            # the same publisher KEY-CONTINUITY. A root that reclaimed the
+            # UUID after expiry verifies against the binding just fine —
+            # but it has no rebind edge to the root that accepted the
+            # predecessor, so it cannot extend the chain.
+            if head["root_pub"] not in store.root_continuity(publisher, binding.root_pub):
+                raise _forbidden(
+                    "update does not chain to the same publisher key-continuity"
+                )
+        seq = store.insert_listing(
+            publisher=publisher,
+            name=name,
+            listing_id=lid,
+            prev_id=payload["prev"],
+            version=payload["version"],
+            bundle_hash=payload["bundle_hash"],
+            claim=envelope["payload"]["claim"],
+            root_pub=binding.root_pub,
+            signer_pub=payload["signer"],
+            subject_kind=subject_kind,
+            subject_id=subject_id,
+            now=t,
+        )
+        return {"publisher": publisher, "name": name, "listing_id": lid,
+                "version": payload["version"], "seq": seq}
+
+    @app.get("/v1/listings")
+    async def list_listings(
+        name: Optional[str] = None, publisher: Optional[str] = None, limit: int = 100
+    ):
+        """Directory index (Tier A, anonymous): unrevoked chain heads."""
+        if type(limit) is not int or limit < 1:
+            raise _bad_request("limit must be a positive integer")
+        rows = store.list_active_listings(
+            publisher=publisher, name=name, limit=min(limit, MAX_LISTING_PAGE)
+        )
+        return {
+            "listings": [
+                {
+                    "publisher": r["publisher"],
+                    "name": r["name"],
+                    "version": r["version"],
+                    "listing_id": r["listing_id"],
+                    "seq": r["seq"],
+                    "bundle_hash": r["bundle_hash"],
+                    "created_at": r["created_at"],
+                    "claim": r["claim"],
+                }
+                for r in rows
+            ]
+        }
+
+    @app.get("/v1/listings/{org_uuid}/{name}")
+    async def get_listing(org_uuid: str, name: str):
+        """One chain in full: head card + history (revoked rows included,
+        with their status visible — an installer must be able to see that
+        a version it holds was withdrawn)."""
+        head = store.listing_head(org_uuid, name)
+        if head is None:
+            raise HTTPException(status_code=404, detail="unknown listing")
+        history = store.listing_history(org_uuid, name)
+        return {
+            "publisher": org_uuid,
+            "name": name,
+            "head": head,
+            "history": [
+                {
+                    "listing_id": r["listing_id"],
+                    "seq": r["seq"],
+                    "prev": r["prev_id"],
+                    "version": r["version"],
+                    "bundle_hash": r["bundle_hash"],
+                    "created_at": r["created_at"],
+                    "revoked_at": r["revoked_at"],
+                }
+                for r in history
+            ],
+        }
+
+    @app.delete("/v1/listings/{org_uuid}/{name}")
+    async def revoke_listing(org_uuid: str, name: str, request: Request):
+        envelope = _parse_envelope(await _read_json(request))
+        _require_fields(
+            envelope["payload"], allowed=frozenset(), required=frozenset(),
+            what="listing revoke payload",
+        )
+        if not NAME_RE.match(name):
+            raise _bad_request("name must be 1-64 chars of [a-z0-9._-] starting alphanumeric")
+        t = now()
+        head = store.listing_head(org_uuid, name)
+        if head is None:
+            raise HTTPException(status_code=404, detail="unknown listing")
+        binding = _require_binding(store, org_uuid, t)
+        _authorize(
+            envelope, "DELETE", str(request.url.path), binding, store, t,
+            required_scope="listing:revoke",
+        )
+        # Same continuity rule as updates: a UUID reclaimer must not be
+        # able to delist the previous continuity's chain either.
+        if head["root_pub"] not in store.root_continuity(org_uuid, binding.root_pub):
+            raise _forbidden(
+                "revocation does not chain to the publisher key-continuity"
+                " that owns this listing"
+            )
+        revoked = store.revoke_listing(org_uuid, name, now=t)
+        return {"publisher": org_uuid, "name": name, "revoked_at": t, "revoked": revoked}
+
+    # -- L1 attestations ---------------------------------------------------------
+    #
+    # Same delivery model as revocations: the record is self-authorizing
+    # (signed by the attestor key it names), so anyone may DELIVER one;
+    # only the attestor key can MINT one. The registry verifies the
+    # signature — a record is authentic to its key — and stores it. It
+    # never evaluates the claim: which attestors to believe is the
+    # client's display policy, not the venue's verdict.
+
+    @app.post("/v1/attestations", status_code=201)
+    async def add_attestation(request: Request):
+        body = await _read_json(request)
+        _require_fields(
+            body, allowed=frozenset({"record"}), required=frozenset({"record"}),
+            what="attestation payload",
+        )
+        try:
+            record = parse_attestation_record(body["record"])
+        except MalformedError as exc:
+            raise _bad_request(str(exc))
+        except IdkitError:
+            raise _forbidden("attestation signature does not verify against its attestor")
+        payload = record["payload"]
+        t = now()
+        if payload["ts"] > t + MAX_ATTESTATION_FUTURE_TS:
+            raise _bad_request("attestation ts is in the future")
+        expires_at = payload["ts"] + payload["ttl"]
+        if expires_at <= t:
+            raise _bad_request("attestation is already expired")
+        store.purge_expired_attestations(now=t)
+        aid = attestation_id(payload)
+        store.add_attestation(aid, payload, body["record"], now=t)
+        return {"attestation_id": aid, "subject": payload["subject"],
+                "expires_at": expires_at}
+
+    @app.get("/v1/attestations/{subject_pub}")
+    async def attestations_for_subject(subject_pub: str):
+        """Live attestations about a subject key (Tier A, anonymous)."""
+        _require_pub(subject_pub, "subject_pub")
+        rows = store.attestations_for_subject(subject_pub, now=now())
+        return {"subject": subject_pub, "attestations": rows}
 
     # -- §5.1 relay tunnel ------------------------------------------------------
 
