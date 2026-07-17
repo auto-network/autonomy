@@ -60,7 +60,7 @@ def isolated_dao(tmp_path, monkeypatch):
          ingested_at, last_activity_at)
         VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         ("src-old-active", "[Image #1]",
-         "/home/jeremy/sessions/old-active.jsonl",
+         "/tmp/sessions/old-active.jsonl",
          json.dumps({"session_uuid": "uuid-old-active",
                      "total_input_tokens": 100, "total_output_tokens": 200,
                      "total_turns": 627, "ended_at": "2026-04-18T22:00:00Z"}),
@@ -73,7 +73,7 @@ def isolated_dao(tmp_path, monkeypatch):
          ingested_at, last_activity_at)
         VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         ("src-fresh-stale", "Some title",
-         "/home/jeremy/sessions/fresh-stale.jsonl",
+         "/tmp/sessions/fresh-stale.jsonl",
          json.dumps({"session_uuid": "uuid-fresh-stale",
                      "total_turns": 5, "ended_at": "2026-04-17T23:00:00Z"}),
          "2026-04-17T22:00:00Z",  # created an hour earlier than activity
@@ -85,7 +85,7 @@ def isolated_dao(tmp_path, monkeypatch):
          ingested_at, last_activity_at)
         VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         ("src-with-label", "Stale graph title — should be overridden",
-         "/home/jeremy/sessions/with-label.jsonl",
+         "/tmp/sessions/with-label.jsonl",
          json.dumps({"session_uuid": "uuid-with-label",
                      "total_turns": 50, "bead_id": "auto-test"}),
          "2026-04-16T00:00:00Z",
@@ -108,7 +108,7 @@ def isolated_dao(tmp_path, monkeypatch):
          created_at, state, ended_at, last_activity, last_message, entry_count,
          context_tokens, label, role)
         VALUES (?, 'container', 'autonomy', ?, ?, ?, ?, 'ENDED', ?, ?, ?, ?, ?, ?, ?)""",
-        ("auto-0418-200000", "/home/jeremy/sessions/with-label.jsonl",
+        ("auto-0418-200000", "/tmp/sessions/with-label.jsonl",
          "uuid-with-label", "auto-test",
          time.time() - 3600,  # created an hour ago
          time.time() - 600,   # ended 10 min ago
@@ -122,7 +122,7 @@ def isolated_dao(tmp_path, monkeypatch):
          created_at, state, attention, last_activity, last_message, entry_count,
          context_tokens, label, role)
         VALUES (?, 'container', 'autonomy', ?, ?, ?, ?, 'ACTIVE', 'idle', ?, ?, ?, ?, ?, ?)""",
-        ("auto-live-session", "/home/jeremy/sessions/old-active.jsonl",
+        ("auto-live-session", "/tmp/sessions/old-active.jsonl",
          "uuid-old-active", None,
          time.time() - 1800, time.time() - 60,
          "still working", 100, 50000, "live label", "builder"),
@@ -319,7 +319,7 @@ def duration_dao(tmp_path, monkeypatch):
          ingested_at, last_activity_at)
         VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         ("src-short", "Short session",
-         "/home/jeremy/sessions/short.jsonl",
+         "/tmp/sessions/short.jsonl",
          json.dumps({"session_uuid": "uuid-short", "session_type": "interactive"}),
          "2026-04-18T22:00:00Z", "2026-04-18T22:30:00Z",
          "2026-04-18T22:30:00Z"),
@@ -330,7 +330,7 @@ def duration_dao(tmp_path, monkeypatch):
          ingested_at, last_activity_at)
         VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         ("src-long", "Long session",
-         "/home/jeremy/sessions/long.jsonl",
+         "/tmp/sessions/long.jsonl",
          json.dumps({"session_uuid": "uuid-long", "session_type": "interactive"}),
          "2026-04-18T20:00:00Z", "2026-04-18T22:00:00Z",
          "2026-04-18T22:00:00Z"),
@@ -341,7 +341,7 @@ def duration_dao(tmp_path, monkeypatch):
          ingested_at, last_activity_at)
         VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         ("src-tiny", "Tiny session",
-         "/home/jeremy/sessions/tiny.jsonl",
+         "/tmp/sessions/tiny.jsonl",
          json.dumps({"session_uuid": "uuid-tiny", "session_type": "interactive"}),
          "2026-04-18T22:55:00Z", "2026-04-18T23:00:00Z",
          "2026-04-18T23:00:00Z"),
@@ -403,7 +403,7 @@ def librarian_dao(tmp_path, monkeypatch):
          ingested_at, last_activity_at)
         VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         ("src-lib-1", "librarian-review_report-781221-65a80c94",
-         "/home/jeremy/sessions/lib.jsonl",
+         "/tmp/sessions/lib.jsonl",
          json.dumps({
              "session_uuid": "uuid-lib",
              "session_type": "librarian",
@@ -420,7 +420,7 @@ def librarian_dao(tmp_path, monkeypatch):
          ingested_at, last_activity_at)
         VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
         ("src-inter-1", "Some interactive",
-         "/home/jeremy/sessions/inter.jsonl",
+         "/tmp/sessions/inter.jsonl",
          json.dumps({"session_uuid": "uuid-inter", "session_type": "interactive"}),
          "2026-04-18T22:00:00Z", "2026-04-18T22:01:00Z",
          "2026-04-18T22:30:00Z"),
@@ -522,7 +522,7 @@ class TestLibrarianTitleFields:
              ingested_at, last_activity_at)
             VALUES (?, 'session', 'claude-code', ?, ?, ?, ?, ?, ?)""",
             ("src-orphan", "librarian-review_report-1-deadbeef",
-             "/home/jeremy/sessions/orphan.jsonl",
+             "/tmp/sessions/orphan.jsonl",
              json.dumps({
                  "session_uuid": "uuid-orphan",
                  "session_type": "librarian",
@@ -626,7 +626,7 @@ def quota_dao(tmp_path, monkeypatch):
             (
                 f"src-dispatch-{i:03d}",
                 f"Dispatch run {i}",
-                f"/home/jeremy/sessions/dispatch-{i}.jsonl",
+                f"/tmp/sessions/dispatch-{i}.jsonl",
                 json.dumps({
                     "session_uuid": f"uuid-dispatch-{i}",
                     "session_type": "dispatch",
@@ -648,7 +648,7 @@ def quota_dao(tmp_path, monkeypatch):
             (
                 f"src-librarian-{i:03d}",
                 f"Librarian task {i}",
-                f"/home/jeremy/sessions/librarian-{i}.jsonl",
+                f"/tmp/sessions/librarian-{i}.jsonl",
                 json.dumps({
                     "session_uuid": f"uuid-librarian-{i}",
                     "session_type": "librarian",
@@ -668,7 +668,7 @@ def quota_dao(tmp_path, monkeypatch):
             (
                 f"src-interactive-{i:03d}",
                 f"Interactive session {i}",
-                f"/home/jeremy/sessions/interactive-{i}.jsonl",
+                f"/tmp/sessions/interactive-{i}.jsonl",
                 json.dumps({
                     "session_uuid": f"uuid-interactive-{i}",
                     "session_type": "interactive",
@@ -785,7 +785,7 @@ class TestSessionStatusGraphSourceRepair:
             (
                 "auto-live-stale-graph",
                 "src-stale-missing",
-                "/home/jeremy/sessions/live-stale.jsonl",
+                "/tmp/sessions/live-stale.jsonl",
                 "uuid-live-stale",
                 time.time() - 300,
                 time.time() - 10,
@@ -802,7 +802,7 @@ class TestSessionStatusGraphSourceRepair:
             (
                 "src-live-current",
                 "Live stale repaired",
-                "/home/jeremy/sessions/live-stale.jsonl",
+                "/tmp/sessions/live-stale.jsonl",
                 json.dumps({"session_uuid": "uuid-live-stale", "total_turns": 12}),
                 "2026-04-30T03:30:00Z",
                 "2026-04-30T03:30:05Z",

@@ -48,7 +48,6 @@ UNRESOLVED_COLOR = "#4b5563"
 # falls back to the parent directory name with separators rewritten.
 _AUTONOMY_PATH_PATTERNS: tuple[str, ...] = (
     "-workspace-repo",                  # dashboard container mount
-    "-home-jeremy-workspace-autonomy",  # host session in autonomy repo
 )
 
 
@@ -187,9 +186,10 @@ def session_org_slug(session: dict) -> str:
     if not raw:
         return UNKNOWN_SLUG
     # Known autonomy path patterns map to the autonomy org. Covers the
-    # dashboard container ("-workspace-repo") and host sessions living
-    # in /home/jeremy/workspace/autonomy — both produce path-derived
-    # project values that should identify as autonomy.
+    # dashboard container ("-workspace-repo") and any host session living in a
+    # "…/workspace/autonomy" checkout (slugified to "…-workspace-autonomy",
+    # regardless of the operator's home) — both produce path-derived project
+    # values that should identify as autonomy.
     if raw in _AUTONOMY_PATH_PATTERNS or raw.endswith("-workspace-autonomy"):
         return "autonomy"
     # Other path-derived ingest junk never identifies an org. Treat it

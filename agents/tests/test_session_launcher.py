@@ -1218,7 +1218,7 @@ def test_meta_doc_omits_token_when_none(
 
 
 def test_no_hardcoded_license_mount(tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch):
-    """The ad-hoc /home/jeremy/workspace/license.yaml overlay must be gone.
+    """The ad-hoc host license.yaml overlay must be gone.
 
     Artifact mounting is now driven by the ProjectConfig.artifacts layer and
     lands at /etc/autonomy/artifacts/ inside the container. This test pretends
