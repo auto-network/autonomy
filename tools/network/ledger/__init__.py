@@ -46,6 +46,26 @@ from .fold import (
 )
 from .hlc import HLC
 from .ledger import Ledger
+from .projections import (
+    LEDGER_PROJECTION_SET_ID,
+    LEDGER_STATE_SET_ID,
+    PROJECTION_NAMES,
+    build_live_keys,
+    build_projections,
+    build_role_matrix,
+    build_roster,
+    ledger_state_payload,
+    projection_bytes,
+)
+from .store import (
+    LEDGER_DB_SUFFIX,
+    LEDGER_SCHEMA_VERSION,
+    LedgerStore,
+    StoreError,
+    TamperError,
+    checkpoint_state_hash,
+    org_ledger_db_path,
+)
 from .scopes import (
     UNIVERSE,
     attenuates,
@@ -59,6 +79,24 @@ from .scopes import (
 __all__ = [
     # container
     "Ledger",
+    # store
+    "LedgerStore",
+    "StoreError",
+    "TamperError",
+    "checkpoint_state_hash",
+    "org_ledger_db_path",
+    "LEDGER_DB_SUFFIX",
+    "LEDGER_SCHEMA_VERSION",
+    # projections
+    "PROJECTION_NAMES",
+    "build_projections",
+    "build_roster",
+    "build_role_matrix",
+    "build_live_keys",
+    "projection_bytes",
+    "ledger_state_payload",
+    "LEDGER_STATE_SET_ID",
+    "LEDGER_PROJECTION_SET_ID",
     # events
     "Event",
     "make_event",
