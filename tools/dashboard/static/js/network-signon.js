@@ -365,6 +365,34 @@
     return resp.json();
   }
 
+  // Like _fetchJson but a 404 reads as "not configured" → null. Used for
+  // the OPTIONAL registry binding: unlocking a key is a local act and
+  // must not require the org to have registered with any registry (the
+  // sovereign model — auto.network is a broker, not part of sign-in).
+  async function _fetchJsonOrNull(url) {
+    var resp = await fetch(url);
+    if (resp.status === 404) return null;
+    if (!resp.ok) {
+      var detail = '';
+      try { detail = (await resp.json()).error || ''; } catch (e) { /* ignore */ }
+      throw new Error(detail || ('request failed: ' + url + ' → ' + resp.status));
+    }
+    return resp.json();
+  }
+
+  // Does this org hold a stored (encrypted) identity key? Drives the
+  // chrome's signed-out branch: a key present → the unlock form; none →
+  // the getting-started/welcome entry. Never throws.
+  async function hasIdentity(org) {
+    var orgQ = org ? ('?org=' + encodeURIComponent(org)) : '';
+    try {
+      var k = await _fetchJsonOrNull('/api/network/org-key' + orgQ);
+      return !!(k && k.armored_private_key);
+    } catch (e) {
+      return false;
+    }
+  }
+
   // Passphrase → decrypt root ONCE → mint session key + cert → drop root.
   async function signOn(passphrase, opts) {
     opts = opts || {};
@@ -374,26 +402,32 @@
       throw new Error('session TTL must be between 1 minute and 30 days');
     }
     var orgQ = opts.org ? ('?org=' + encodeURIComponent(opts.org)) : '';
-    var results = await Promise.all([
-      _fetchJson('/api/network/binding' + orgQ),
-      _fetchJson('/api/network/org-key' + orgQ),
-    ]);
-    var binding = results[0], orgKey = results[1];
-    if (!binding.org_uuid || !binding.root_pub || !binding.registry_url) {
-      throw new Error('the org has no usable auto.network binding — run the ' +
-        'org identity ceremony first');
-    }
+    // Sign-in unlocks YOUR key locally. The org key is REQUIRED; the
+    // registry binding is OPTIONAL — an org that has minted its sovereign
+    // key but not (yet) registered with any broker can still sign in. When
+    // a binding is present its coordinates pin the session; when absent the
+    // sovereign root itself anchors the local session.
+    var orgKey = await _fetchJson('/api/network/org-key' + orgQ);
     if (!orgKey.armored_private_key) {
-      throw new Error('no auto.network org key is stored for this org');
+      throw new Error('no identity key is stored for this org yet — create ' +
+        'one from the getting-started flow first');
     }
+    var binding = await _fetchJsonOrNull('/api/network/binding' + orgQ);
+    var bound = !!(binding && binding.org_uuid && binding.root_pub &&
+                   binding.registry_url);
+    // The root the session must match: the registry-bound root when the
+    // org is registered, else the root recorded alongside the stored key.
+    var expectedRoot = bound ? binding.root_pub : (orgKey.root_pub || null);
+    var orgId = bound ? binding.org_uuid : orgKey.root_pub;
+    var registryUrl = bound ? binding.registry_url : null;
 
     var opened = await decryptArmor(orgKey.armored_private_key, passphrase);
     var diagnostics = { rootDropped: false, extractable: null };
     var sessionKeys, certWire;
     try {
-      if (opened.rootPub !== binding.root_pub) {
-        throw new Error('the stored org key does not match the registry ' +
-          'binding root — refusing to sign on');
+      if (expectedRoot && opened.rootPub !== expectedRoot) {
+        throw new Error('the stored org key does not match its recorded ' +
+          'root — refusing to sign in');
       }
       var rootKey = await _importRootKey(opened.seed);
       // I1: the plaintext seed dies here, before any signing happens.
@@ -410,7 +444,7 @@
         v: 1,
         child_pub: sessionPub,
         scope: SESSION_SCOPES.slice(),
-        org: binding.org_uuid,
+        org: orgId,
         subject: { kind: 'operator', id: _browserSubjectId() },
         not_before: now - NOT_BEFORE_SKEW_S,
         not_after: now + ttl,
@@ -431,9 +465,9 @@
     var session = await _installSession({
       key: sessionKeys.privateKey,
       certWire: certWire,
-      org: binding.org_uuid,
-      registryUrl: binding.registry_url,
-      rootPub: binding.root_pub,
+      org: orgId,
+      registryUrl: registryUrl,
+      rootPub: expectedRoot || opened.rootPub,
       orgSlug: opts.org || null,
       createdAt: _nowS(),
     });
@@ -589,20 +623,22 @@
       'data-testid': 'network-signon-indicator',
       'data-state': live ? 'signed-in' : 'signed-out',
       'class': 'network-signon-btn' + (live ? ' signed-in' : ''),
-      title: live ? 'auto.network session key — click for details'
-                  : 'Sign on to auto.network',
+      // Sign-in unlocks YOUR local identity key; it is not a session on
+      // auto.network (a broker), so the chrome never says so.
+      title: live ? 'Signed in — click for identity details'
+                  : 'Sign in — unlock your identity key',
     });
     btn.appendChild(_el('span', { 'class': 'network-signon-dot' }));
     if (live) {
       btn.appendChild(_el('span', {
         'data-testid': 'network-signon-expiry',
         'class': 'network-signon-text',
-      }, 'auto.network · ' + _fmtRemaining(_state.session.cert.not_after)));
+      }, 'Signed in · ' + _fmtRemaining(_state.session.cert.not_after)));
     } else {
       btn.appendChild(_el('span', {
         'data-testid': 'network-signon-affordance',
         'class': 'network-signon-text',
-      }, 'Sign on to auto.network'));
+      }, 'Sign in'));
     }
     btn.addEventListener('click', function () { _togglePanel(); });
     host.appendChild(btn);
@@ -613,11 +649,28 @@
   var _panelError = null;
   var _panelBusy = false;
   var _revokeStep = false;
+  var _panelHasKey = null;   // null = not yet probed; true/false once known
+
+  // Probe (once per open) whether this device holds an identity key, so
+  // the signed-out panel can choose the unlock form vs the getting-started
+  // entry without the operator guessing.
+  function _probeHasKey() {
+    var org = _state.session && _state.session.orgSlug;
+    hasIdentity(org).then(function (present) {
+      if (!_panelOpen || available()) return;
+      _panelHasKey = present;
+      _renderPanel();
+    });
+  }
 
   function _togglePanel(force) {
     _panelOpen = (force !== undefined) ? !!force : !_panelOpen;
     _panelError = null;
     _revokeStep = false;
+    if (_panelOpen && !available()) {
+      _panelHasKey = null;
+      _probeHasKey();
+    }
     _renderPanel();
   }
 
@@ -631,9 +684,13 @@
       'data-testid': 'network-signon-panel',
       'class': 'network-signon-panel',
     });
-    panel.appendChild(_el('div', { 'class': 'network-signon-title' }, 'auto.network'));
+    // The panel is about YOUR identity, never the broker: title reflects
+    // the local state (signed in / signing in), not "auto.network".
+    var signedIn = available();
+    panel.appendChild(_el('div', { 'class': 'network-signon-title' },
+      signedIn ? 'Your identity' : 'Sign in'));
 
-    if (available()) {
+    if (signedIn) {
       var s = _state.session;
       var list = _el('div', { id: 'network-key-list', 'data-testid': 'network-key-list' });
       listKeys().forEach(function (k) {
@@ -697,28 +754,40 @@
         form.appendChild(go);
         panel.appendChild(form);
       }
-    } else {
-      // C1 entry point: orgs without a network identity start here; the
-      // identity module itself shows status instead of the create flow
-      // when a key already exists.
-      var idBtn = _el('button', {
-        id: 'network-identity-entry', 'data-testid': 'network-identity-entry',
+    } else if (_panelHasKey === null) {
+      // Deciding between the unlock form and the getting-started entry
+      // needs to know whether a key exists; the check is in flight.
+      panel.appendChild(_el('div', {
+        'data-testid': 'network-signon-checking', 'class': 'network-key-meta',
+      }, 'Checking for an identity on this device…'));
+    } else if (_panelHasKey === false) {
+      // No key: this is the getting-started/welcome case. The core chrome
+      // does NOT host the create ceremony — it points at it. (Onboarding
+      // is destined to be the pre-bundled Welcome plugin.)
+      panel.appendChild(_el('div', {
+        'data-testid': 'network-signon-nokey', 'class': 'network-key-meta',
+      }, 'No identity on this device yet. Create one to publish share-links ' +
+         'and sign your org’s requests.'));
+      var startBtn = _el('button', {
+        id: 'network-getstarted-btn', 'data-testid': 'network-getstarted-btn',
         'class': 'network-signon-action',
-      }, 'Org identity…');
-      idBtn.addEventListener('click', function () {
+      }, 'Get started');
+      startBtn.addEventListener('click', function () {
         _togglePanel(false);
         if (window.AutonomyNetworkIdentity) window.AutonomyNetworkIdentity.open();
       });
-      panel.appendChild(idBtn);
-
+      panel.appendChild(startBtn);
+    } else {
+      // Key present: the pure unlock form. Enter the passphrase, mint a
+      // session key locally, forget the passphrase. No registry involved.
       var form2 = _el('div', { 'class': 'network-signon-form' });
       form2.appendChild(_el('div', { 'class': 'network-key-meta' },
-        'Signing on decrypts the org key once, mints a session key in this ' +
-        'browser, and forgets the passphrase.'));
+        'Unlocking decrypts your identity key once, mints a session key in ' +
+        'this browser, and forgets the passphrase.'));
       var pp2 = _el('input', {
         type: 'password', id: 'network-signon-passphrase',
         'data-testid': 'network-signon-passphrase',
-        placeholder: 'Org passphrase', 'class': 'network-signon-input',
+        placeholder: 'Passphrase', 'class': 'network-signon-input',
       });
       form2.appendChild(pp2);
       var ttlSel = _el('select', {
@@ -735,19 +804,23 @@
       var goBtn = _el('button', {
         id: 'network-signon-submit', 'data-testid': 'network-signon-submit',
         'class': 'network-signon-action',
-      }, 'Sign on');
-      goBtn.addEventListener('click', function () {
+      }, 'Sign in');
+      function _submitSignOn() {
         if (_panelBusy) return;
         _panelBusy = true; _panelError = null; _renderPanel();
         signOn(pp2.value, { ttlSeconds: parseInt(ttlSel.value, 10) })
           .then(function () {
             _panelBusy = false; _togglePanel(false);
-            if (window.showToast) window.showToast('Signed on to auto.network', 'success');
+            if (window.showToast) window.showToast('Signed in', 'success');
           })
           .catch(function (e) {
             _panelBusy = false; _panelError = e.message || String(e);
             _renderIndicator(); _panelOpen = true; _renderPanel();
           });
+      }
+      goBtn.addEventListener('click', _submitSignOn);
+      pp2.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Enter') _submitSignOn();
       });
       form2.appendChild(goBtn);
       panel.appendChild(form2);

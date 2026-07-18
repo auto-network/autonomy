@@ -220,6 +220,7 @@
       recoveryBlock: null, recoveryAck: false, resultBinding: null,
     };
     _render();
+    document.addEventListener('keydown', _onKeydown);
     try {
       var results = await Promise.all([
         _fetchJsonOrNull('/api/network/registry'),
@@ -241,7 +242,14 @@
     return W.step;
   }
 
+  // Escape closes the modal (unless a crypto step is mid-flight). Paired
+  // with the X button and the backdrop click — three real ways out.
+  function _onKeydown(ev) {
+    if (ev.key === 'Escape' && W && !W.busy) { ev.preventDefault(); close(); }
+  }
+
   function close() {
+    document.removeEventListener('keydown', _onKeydown);
     W = null;   // drops the transient rootKey reference with it
     var el = document.getElementById('network-identity-modal');
     if (el) el.remove();
@@ -364,6 +372,15 @@
       if (ev.target === overlay && !W.busy) close();
     });
 
+    // Always-present X — the modal is never a trap. Disabled only while a
+    // crypto step is mid-flight (the backdrop + Escape are gated the same).
+    var xBtn = _el('button', {
+      id: 'network-identity-x', 'data-testid': 'network-identity-x',
+      'class': 'network-identity-x', 'aria-label': 'Close', title: 'Close',
+    }, '×');
+    xBtn.addEventListener('click', function () { if (W && !W.busy) close(); });
+    card.appendChild(xBtn);
+
     _renderStep(card);
     if (W.busy) {
       card.appendChild(_el('div', { 'class': 'network-key-meta' }, 'working…'));
@@ -394,13 +411,13 @@
 
   function _renderStep(card) {
     if (W.step === 'loading') {
-      _title(card, 'auto.network', 'Loading identity state…');
+      _title(card, 'Getting started', 'Loading identity state…');
       return;
     }
 
     if (W.step === 'status') {
-      _title(card, 'Org network identity',
-        'This org already holds its auto.network root key.');
+      _title(card, 'Your identity',
+        'This org already holds its sovereign root key.');
       var st = _el('div', { 'data-testid': 'network-identity-status',
                             'class': 'network-key-row' });
       st.appendChild(_el('div', { 'class': 'network-key-id',
@@ -440,14 +457,11 @@
     }
 
     if (W.step === 'intro') {
-      _title(card, 'Create your org’s network identity',
-        'This generates a signing key in this browser — the anchor of ' +
-        'everything your org publishes on auto.network. The key stays ' +
-        'yours: only a passphrase-encrypted copy is stored.');
-      if (W.registryUrl) {
-        card.appendChild(_el('div', { 'class': 'network-key-meta' },
-          'Registers with ' + W.registryUrl));
-      }
+      _title(card, 'Create your identity',
+        'This generates a sovereign signing key in this browser — the anchor ' +
+        'of everything your org signs and publishes. The key stays yours: ' +
+        'only a passphrase-encrypted copy is stored. Registering it with a ' +
+        'registry is a separate, optional step you can do later.');
       _button(card, 'network-identity-continue', 'Continue', true,
         function () { _step('passphrase'); });
       _button(card, 'network-identity-cancel', 'Not now', false, close);
@@ -541,9 +555,11 @@
     }
 
     if (W.step === 'register') {
-      _title(card, 'Register on auto.network',
-        'The registration is signed by the new org key itself — the ' +
-        'registry binds the org UUID to it, first come, first bound.');
+      _title(card, 'Register with a registry (optional)',
+        'Your identity already exists on this device. Registering publishes ' +
+        'your org’s reachability so others can resolve the share-links you ' +
+        'publish — it’s signed by your new key. You can skip this and register ' +
+        'any time later.');
       var rev = _el('div', { 'class': 'network-key-row' });
       rev.appendChild(_el('div', { 'class': 'network-key-id' },
         'root ' + _shortHex(W.rootPub)));
@@ -554,20 +570,26 @@
       rev.appendChild(_el('div', { 'class': 'network-key-meta' },
         'recovery: ' + W.recovery));
       card.appendChild(rev);
-      _button(card, 'network-identity-register', 'Register identity', true,
+      _button(card, 'network-identity-register', 'Register now', true,
         function () {
           _busySet(true);
           _register()
             .then(function () { _step('success'); })
             .catch(_fail);
         });
+      _button(card, 'network-identity-skip', 'Not now — finish', false,
+        function () { _step('success'); });
       return;
     }
 
     if (W.step === 'success') {
-      _title(card, 'Your org is on auto.network',
-        'The identity is created and the binding is registered. Sign on ' +
-        'with the passphrase to start publishing.');
+      var registered = !!W.resultBinding;
+      _title(card, 'Your identity is ready',
+        registered
+          ? 'Your key is created and registered. Sign in with your passphrase ' +
+            'to start publishing.'
+          : 'Your key is created and stored on this device. Sign in with your ' +
+            'passphrase to use it — you can register with a registry any time.');
       var ok = _el('div', { 'data-testid': 'network-identity-success',
                             'class': 'network-key-row' });
       ok.appendChild(_el('div', { 'class': 'network-key-id' },
