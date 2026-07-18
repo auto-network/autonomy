@@ -49,9 +49,13 @@ class FountainMetrics:
     """What a serving node observed — the egress ledger for symbols.
 
     ``served_bytes`` is the publisher-egress instrumentation the ≈1×
-    acceptance reads; ``served_ids`` keeps *distinct* symbols served, so
-    ``served_packets - len(served_ids)`` is exactly the duplicate waste
-    (stripe collisions past n_stripes seeders, and nothing else).
+    acceptance reads; ``served_ids`` keeps *distinct* symbols served.
+    One node never re-serves (``served_packets == len(served_ids)``,
+    cursor arithmetic) — but under stripe collisions *different*
+    seeders serve the same ids, so swarm-wide the ≈1× claim is about
+    the distinct union, and total bandwidth degrades ~N_collision×.
+    Comparing ``served_ids`` across seeders is how collision (and the
+    v2 dynamic-reassignment trigger) is detected.
     """
 
     def __init__(self) -> None:
