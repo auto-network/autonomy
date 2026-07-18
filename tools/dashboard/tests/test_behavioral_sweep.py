@@ -13218,7 +13218,7 @@ class TestNetworkSignOn:
         c = self._checks
         assert c["out_state"] == "signed-out"
         assert c["out_affordance"] is True
-        assert "Sign on to auto.network" in c["out_text"]
+        assert "Sign in" in c["out_text"]
 
     def test_wrong_passphrase_clean_error(self):
         c = self._checks
@@ -13231,7 +13231,7 @@ class TestNetworkSignOn:
         c = self._checks
         assert c["in_state"] == "signed-in"
         assert c["expiry_el"] is True
-        assert "auto.network" in c["in_text"]
+        assert "Signed in" in c["in_text"]
         # 3600s TTL renders as minutes-or-hours remaining
         assert "59m" in c["in_text"] or "1h" in c["in_text"], c["in_text"]
         assert c["available"] is True
@@ -13499,10 +13499,13 @@ _NETWORK_IDENTITY_JS = r"""
         try { await S._internals.decryptArmor(__NONCANON__, PASS); }
         catch (e) { r.noncanon_reject = String(e.message || e); }
 
-        // 1 · entry point visible in the signed-out sign-on panel
+        // 1 · getting-started entry appears in the no-key sign-on panel
+        // (the create ceremony is reached from here, not bolted onto the
+        // nav button). The panel probes for a key first, so wait for it.
         document.querySelector('[data-testid=network-signon-indicator]').click();
-        r.entry_visible = !!q('network-identity-entry');
-        q('network-identity-entry').click();
+        await waitFor(() => q('network-getstarted-btn'));
+        r.entry_visible = !!q('network-getstarted-btn');
+        q('network-getstarted-btn').click();
         await waitFor(() => step() === 'intro');
         r.first_step = step();
         r.modal_open = !!q('network-identity-modal');

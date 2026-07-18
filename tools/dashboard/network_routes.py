@@ -73,6 +73,20 @@ def _mock_mode() -> bool:
     return bool(os.environ.get("DASHBOARD_MOCK"))
 
 
+def _caller_org(request: Request):
+    """Resolve the org a network read is scoped to.
+
+    An explicit ``?org=`` query param wins (the create ceremony targets a
+    named org). Otherwise fall back to :data:`settings_ops.CALLER_ORG` —
+    the env-cascade resolver (per-request contextvar → ``GRAPH_ORG`` env →
+    scopeless) — so a single-org dashboard resolves ITS OWN key without
+    the browser having to know the slug. Passing literal ``None`` here was
+    the foot-gun (graph://53f7412f-51e): it forced the scopeless DB and
+    hid the org's real key/binding even when ``GRAPH_ORG`` named the org.
+    """
+    return request.query_params.get("org") or settings_ops.CALLER_ORG
+
+
 def _first_member(set_id: str, org: str | None):
     """Lexically-first member of a keyed set, or None. One row is the
     common case; with several, the lexically first key wins
@@ -90,7 +104,7 @@ async def get_org_key(request: Request) -> JSONResponse:
     """The org's armored (encrypted) network root key, or 404."""
     if _mock_mode():
         return JSONResponse({"error": "no network org key configured"}, status_code=404)
-    org = request.query_params.get("org") or None
+    org = _caller_org(request)
     try:
         member = _first_member(NETWORK_ORG_KEY_SET_ID, org)
     except Exception as e:
@@ -112,7 +126,7 @@ async def get_binding(request: Request) -> JSONResponse:
     """The org's registry binding row, or 404."""
     if _mock_mode():
         return JSONResponse({"error": "no network binding configured"}, status_code=404)
-    org = request.query_params.get("org") or None
+    org = _caller_org(request)
     try:
         member = _first_member(NETWORK_BINDING_SET_ID, org)
     except Exception as e:
@@ -157,7 +171,7 @@ async def post_revocation(request: Request) -> JSONResponse:
             "body must carry 'record' and 'revoked_cert' as canonical wire "
             "JSON strings"
         )}, status_code=400)
-    org = body.get("org") or None
+    org = body.get("org") or settings_ops.CALLER_ORG
     try:
         member = _first_member(NETWORK_BINDING_SET_ID, org)
     except Exception as e:
@@ -240,7 +254,7 @@ async def put_org_key(request: Request) -> JSONResponse:
             "root_pub does not match the armor's enclosed public key"
         )}, status_code=400)
 
-    org = body.get("org") or None
+    org = body.get("org") or settings_ops.CALLER_ORG
     label = body.get("label") or "default"
     if not isinstance(label, str) or len(label) > 64:
         return JSONResponse({"ok": False, "error": "label must be a short string"},
@@ -317,7 +331,7 @@ async def post_register(request: Request) -> JSONResponse:
             "registration must be self-signed by the root_pub being bound"
         )}, status_code=403)
 
-    org = body.get("org") or None
+    org = body.get("org") or settings_ops.CALLER_ORG
     try:
         stored = _first_member(NETWORK_ORG_KEY_SET_ID, org)
     except Exception as e:
