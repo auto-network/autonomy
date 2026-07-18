@@ -76,13 +76,12 @@
         (typeof signer.available === 'function' && !signer.available())) {
       throw new Error('no operator session key — the auto.network sign-on ceremony (C2) has not landed yet, so share-links cannot be click-signed');
     }
+    // The staged request (destination included) was frozen SERVER-SIDE at
+    // first render; the executor forwards to that snapshot only, so this
+    // decision carries just the signature over it. Nothing the client
+    // sends can move the destination.
     const envelope = await signer.signRegistryRequest(rr.method, rr.path, rr.payload);
-    // The envelope binds method/path/payload but NOT the destination host.
-    // Pin the displayed registry_url onto the decision so the executor can
-    // refuse if the org binding is swapped between render and approval
-    // (confused-deputy guard — the operator approves a destination, not
-    // "wherever the binding points now").
-    return { envelope, registry_url: rr.registry_url };
+    return { envelope };
   }
 
   async function _jsonOrError(resp) {
@@ -2048,6 +2047,9 @@
             if (r.registry_request) lines.push('Registry: ' + r.registry_request.registry_url);
             if (r.target_error) lines.push('', '⚠ ' + r.target_error);
             if (r.binding_error) lines.push('', '⚠ ' + r.binding_error);
+            if (r.binding_drift) {
+              lines.push('', '⚠ the org binding changed after this request was staged — approving will be refused; decline and re-run the publish');
+            }
             self.approvalRequest = {
               id: r.id, kind: r.kind, session: r.session,
               title: 'Publish share-link', actionLabel: 'Approve & publish',
@@ -2071,6 +2073,9 @@
             if (r.label) lines.push('Label: ' + r.label);
             if (!r.cached) lines.push('', '⚠ this token is not in the local grant cache');
             if (r.binding_error) lines.push('', '⚠ ' + r.binding_error);
+            if (r.binding_drift) {
+              lines.push('', '⚠ the org binding changed after this request was staged — approving will be refused; decline and re-run the revoke');
+            }
             self.approvalRequest = {
               id: r.id, kind: r.kind, session: r.session,
               title: 'Revoke share-link', actionLabel: 'Approve & revoke',
