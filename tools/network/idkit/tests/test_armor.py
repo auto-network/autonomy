@@ -172,3 +172,18 @@ def test_canonicalize_refuses_smuggled_armor(root, armor):
     data["private_hex"] = root.private_hex
     with pytest.raises(ArmorError):
         canonicalize_armor(_reencode(data))
+
+
+@pytest.mark.parametrize("dup_key", ["v", "ct", "root_pub"])
+def test_duplicate_body_keys_rejected_at_parser(armor, dup_key):
+    """json.loads is last-key-wins on duplicates — a clean-looking parse
+    could hide a shadowed field. Rejected at the parser boundary."""
+    data = parse_armor(armor)
+    obj = json.dumps(data)
+    assert obj.endswith("}")
+    forged_json = obj[:-1] + f', "{dup_key}": {json.dumps(data[dup_key])}}}'
+    forged = "\n".join(
+        [ARMOR_BEGIN, base64.b64encode(forged_json.encode()).decode(), ARMOR_END]
+    )
+    with pytest.raises(ArmorError, match="duplicate"):
+        parse_armor(forged)

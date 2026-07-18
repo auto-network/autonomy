@@ -159,9 +159,21 @@ def parse_armor(armor: str) -> dict:
     lines = [ln.strip() for ln in armor.strip().splitlines() if ln.strip()]
     if len(lines) < 3 or lines[0] != ARMOR_BEGIN or lines[-1] != ARMOR_END:
         raise ArmorError("armor is missing its BEGIN/END lines")
+
+    def _no_dup_pairs(pairs):
+        # json.loads is last-key-wins on duplicates, which would let a
+        # clean-looking parse hide a shadowed field. One key, one value —
+        # rejected at the parser boundary, not papered over downstream.
+        obj = {}
+        for k, v in pairs:
+            if k in obj:
+                raise ArmorError(f"armor body has duplicate key {k!r}")
+            obj[k] = v
+        return obj
+
     try:
         body = base64.b64decode("".join(lines[1:-1]), validate=True)
-        data = json.loads(body)
+        data = json.loads(body, object_pairs_hook=_no_dup_pairs)
     except (binascii.Error, ValueError) as exc:
         raise ArmorError(f"armor body does not decode: {exc}") from exc
     if not isinstance(data, dict):

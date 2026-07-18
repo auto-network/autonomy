@@ -13371,6 +13371,36 @@ def _c1_smuggled_armor() -> tuple[str, str]:
 
 C1_SMUGGLED_ARMOR, C1_SMUGGLED_SEED = _c1_smuggled_armor()
 
+
+def _c1_noncanonical_b64_armor() -> str:
+    """Codex FAIL 2 repro: same decoded salt bytes, non-canonical base64
+    (nonzero pad bits). Python's parse_armor rejects it; the browser
+    decrypt must too, or a blob could be valid on one side of the C1/C2
+    contract and refused on the other."""
+    import base64 as _b64
+    import string as _string
+
+    root = KeyPair.generate()
+    armor = encrypt_root_key(root, C1_PASSPHRASE, iterations=10_000)
+    lines = armor.strip().splitlines()
+    body = json.loads(_b64.b64decode("".join(lines[1:-1])))
+    salt = body["kdf"]["salt"]          # 16 bytes → 24 chars, ends "=="
+    assert salt.endswith("==")
+    decoded = _b64.b64decode(salt, validate=True)
+    alphabet = _string.ascii_uppercase + _string.ascii_lowercase + _string.digits + "+/"
+    for c in alphabet:
+        cand = salt[:-3] + c + "=="
+        if cand != salt and _b64.b64decode(cand, validate=True) == decoded:
+            body["kdf"]["salt"] = cand
+            break
+    else:  # pragma: no cover — 3 alternates always exist for "=="-padded b64
+        raise AssertionError("could not build a non-canonical base64 variant")
+    b64 = _b64.b64encode(json.dumps(body).encode()).decode()
+    return "\n".join([lines[0], b64, lines[-1]])
+
+
+C1_NONCANON_ARMOR = _c1_noncanonical_b64_armor()
+
 _NETWORK_IDENTITY_JS = r"""
 (async () => {
     const S = window.AutonomyNetworkSession;
@@ -13458,11 +13488,16 @@ _NETWORK_IDENTITY_JS = r"""
         await S.signOut();
         ID.close();
 
-        // 0 · fail-closed regression (Codex I1 finding): an armor with a
-        // smuggled body field must not open in the browser either
+        // 0 · fail-closed regressions (Codex I1 findings): an armor with
+        // a smuggled body field must not open in the browser, and neither
+        // must one whose base64 fields are non-canonical (same decoded
+        // bytes, different byte form — Python rejects it, so must JS)
         r.smuggle_reject = null;
         try { await S._internals.decryptArmor(__SMUGGLED__, PASS); }
         catch (e) { r.smuggle_reject = String(e.message || e); }
+        r.noncanon_reject = null;
+        try { await S._internals.decryptArmor(__NONCANON__, PASS); }
+        catch (e) { r.noncanon_reject = String(e.message || e); }
 
         // 1 · entry point visible in the signed-out sign-on panel
         document.querySelector('[data-testid=network-signon-indicator]').click();
@@ -13552,6 +13587,7 @@ def _network_identity_js() -> str:
         .replace("__PASSPHRASE__", json.dumps(C1_PASSPHRASE))
         .replace("__EXPIRY__", json.dumps(C1_EXPIRY_ISO))
         .replace("__SMUGGLED__", json.dumps(C1_SMUGGLED_ARMOR))
+        .replace("__NONCANON__", json.dumps(C1_NONCANON_ARMOR))
     )
 
 
@@ -13593,6 +13629,18 @@ class TestNetworkIdentityCeremony:
         assert "non-canonical" in (c["smuggle_reject"] or ""), c.get("smuggle_reject")
         # And the smuggled seed never reached any POST in the run.
         assert C1_SMUGGLED_SEED not in json.dumps(c["captured"])
+
+    def test_noncanonical_base64_fails_closed_in_browser(self):
+        """Codex FAIL 2 regression: base64 with nonzero pad bits decodes
+        to the same bytes but is NOT the canonical byte form — Python
+        rejects it, and the browser decrypt must match (one accepted
+        byte form on both sides of the C1/C2 contract)."""
+        from tools.network.idkit.armor import ArmorError, parse_armor
+
+        c = self._checks
+        assert "non-canonical" in (c["noncanon_reject"] or ""), c.get("noncanon_reject")
+        with pytest.raises(ArmorError, match="canonical"):
+            parse_armor(C1_NONCANON_ARMOR)   # pinned: Python agrees
 
     # ── acceptance: the stored blob is armor only, and it is C2's armor ──
 

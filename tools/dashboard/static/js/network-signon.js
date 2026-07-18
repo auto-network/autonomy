@@ -186,8 +186,19 @@
       return obj && typeof obj === 'object' && !Array.isArray(obj) &&
         Object.keys(obj).sort().join(',') === keys.slice().sort().join(',');
     }
-    function b64Len(s) {
-      try { return b64ToBytes(s).length; } catch (e) { return -1; }
+    // Decoded length ONLY if the string is canonical base64 — decode,
+    // re-encode, compare exactly, mirroring armor.py. atob() tolerates
+    // nonzero pad bits (and other lax forms) that Python REJECTS; the
+    // two sides must accept one identical byte form or a blob could be
+    // valid on one side of the C1/C2 contract and refused on the other.
+    function b64CanonLen(s) {
+      if (typeof s !== 'string') return -1;
+      var bytes;
+      try { bytes = b64ToBytes(s); } catch (e) { return -1; }
+      var bin = '';
+      for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      if (btoa(bin) !== s) return -1;
+      return bytes.length;
     }
     if (!sameKeys(data, ['v', 'kdf', 'cipher', 'root_pub', 'ct']) ||
         data.v !== 1 ||
@@ -198,9 +209,9 @@
         !sameKeys(data.cipher, ['name', 'iv']) ||
         data.cipher.name !== 'AES-256-GCM' ||
         typeof data.root_pub !== 'string' || !/^[0-9a-f]{64}$/.test(data.root_pub) ||
-        typeof data.kdf.salt !== 'string' || b64Len(data.kdf.salt) !== 16 ||
-        typeof data.cipher.iv !== 'string' || b64Len(data.cipher.iv) !== 12 ||
-        typeof data.ct !== 'string' || b64Len(data.ct) !== 48) {
+        b64CanonLen(data.kdf.salt) !== 16 ||
+        b64CanonLen(data.cipher.iv) !== 12 ||
+        b64CanonLen(data.ct) !== 48) {
       throw new Error('unsupported or non-canonical armor format');
     }
     var material = await crypto.subtle.importKey(

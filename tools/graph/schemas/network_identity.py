@@ -20,6 +20,10 @@ Vocabulary is pinned to A1 (``tools/network/idkit``): subject kinds,
 token shape, and key-id hex length are duplicated here as constants so
 this module stays importable without ``cryptography`` installed;
 ``test_network_identity_schemas.py`` asserts they match idkit exactly.
+The org-key validator DOES import idkit — lazily, at validation time —
+because the strict/canonical armor check is the I1 gate for every write
+path (settings_ops, the dashboard route, POST /api/graph/setting) and
+must fail closed when the verifier is unavailable.
 
 Rung-2 reservations: subject kind ``persona`` and grant meta
 ``require_auth: true`` appear in the schema now but are rejected by
@@ -159,9 +163,11 @@ class NetworkOrgKeyV1(SettingSchema):
     armored_private_key: str = field(
         required=True,
         description=(
-            "The armored, passphrase-encrypted Ed25519 org root private key. "
-            "Encrypted at rest; only ever decrypted in the operator's "
-            "browser with the passphrase, which the server never sees (I1)."
+            "The armored, passphrase-encrypted Ed25519 org root private key "
+            "in the CANONICAL idkit byte form (tools/network/idkit/armor.py "
+            "canonicalize_armor). Encrypted at rest; only ever decrypted in "
+            "the operator's browser with the passphrase, which the server "
+            "never sees (I1)."
         ),
     )
     root_pub: str = field(
@@ -181,15 +187,60 @@ class NetworkOrgKeyV1(SettingSchema):
         armor = _require_str(payload, "armored_private_key", cls.__name__, max_len=16384)
         # I1 tripwire: a raw Ed25519 private key is exactly 64 hex chars.
         # Anything that parses as one is plaintext key material, not an
-        # encrypted armor — refuse it loudly.
+        # encrypted armor — refuse it loudly (kept for the clearer message;
+        # the canonical check below refuses it too).
         if len(armor) == 2 * 32 and _HEX_RE.match(armor):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'armored_private_key' looks like a raw hex "
                 "Ed25519 private key — plaintext key material must never be "
                 "stored (I1); store the passphrase-encrypted armor instead"
             )
+
+        # THE I1 gate, at the layer every write path shares. A hardened
+        # HTTP route is not enough: settings_ops.add_setting and
+        # POST /api/graph/setting reach this schema directly, so the
+        # strict/canonical armor requirement must live here. The armor
+        # must be EXACTLY the canonical idkit byte form — strict parse
+        # (exact field sets, formats, lengths, no duplicate keys) plus
+        # byte-for-byte equality with its own re-serialization, so no
+        # unknown field, smuggled plaintext, or alternate encoding can
+        # ride into storage through ANY path. Import is deliberately
+        # lazy (tools.graph stays importable without `cryptography`) and
+        # FAIL-CLOSED: no verifier available → no write.
+        try:
+            from tools.network.idkit.armor import (
+                ArmorError,
+                canonicalize_armor,
+                parse_armor,
+            )
+        except Exception as exc:  # pragma: no cover — env without idkit deps
+            raise SchemaValidationError(
+                f"{cls.__name__}: cannot verify 'armored_private_key' — "
+                f"tools.network.idkit is unavailable ({exc}); refusing the "
+                "write (I1 fail-closed)"
+            ) from exc
+        try:
+            armor_data = parse_armor(armor)
+            if canonicalize_armor(armor) != armor:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: 'armored_private_key' must be the "
+                    "canonical armor byte form — re-emit it with "
+                    "tools.network.idkit.armor.canonicalize_armor (I1)"
+                )
+        except ArmorError as e:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'armored_private_key' is not a canonical "
+                f"passphrase-encrypted org key armor (I1 — plaintext key "
+                f"material must never be stored): {e}"
+            ) from e
+
         if "root_pub" in payload:
             _require_hex(payload, "root_pub", cls.__name__, length=NETWORK_PUB_HEX_LEN)
+            if payload["root_pub"] != armor_data["root_pub"]:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: 'root_pub' does not match the armor's "
+                    "enclosed public key"
+                )
 
 
 # ── autonomy.network.binding ──────────────────────────────────
