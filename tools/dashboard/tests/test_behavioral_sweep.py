@@ -12988,7 +12988,8 @@ NETWORK_PASSPHRASE = "sweep horse battery staple"
 # use armor.DEFAULT_ITERATIONS.
 NETWORK_ARMOR = encrypt_root_key(NETWORK_ROOT, NETWORK_PASSPHRASE, iterations=10_000)
 NETWORK_ORG_UUID = "22222222-2222-4222-8222-222222222222"
-NETWORK_SCOPES = ("delegate:agent", "link:publish", "link:revoke", "tunnel:serve")
+NETWORK_SCOPES = ("delegate:agent", "link:publish", "link:revoke",
+                  "tunnel:serve", "viewer:identify")
 NETWORK_BINDING = {
     "org_uuid": NETWORK_ORG_UUID,
     "root_pub": NETWORK_ROOT.public_hex,
@@ -13009,13 +13010,21 @@ NETWORK_CANON_VECTOR = {
     "nested": {"z": [], "y": {}, "x": ""},
 }
 
-# An expired cert planted straight into IndexedDB must read as
-# signed-out on load and purge the store (I7 client-side).
+# A cert outside its validity window planted straight into IndexedDB must
+# read as signed-out on load and purge the store (I7 client-side) — both
+# ends: expired, and NOT YET VALID (Codex validation finding: a future
+# not_before must not read as locally signed-in; the registry 403s it).
 _expired_child = KeyPair.generate()
 NETWORK_EXPIRED_CERT = issue_cert(
     NETWORK_ROOT, _expired_child.public_hex, scope=NETWORK_SCOPES,
     org=NETWORK_ORG_UUID, subject=Subject("operator", "browser-expired"),
     not_before=NOW - 7200, not_after=NOW - 3600,
+).to_json().decode()
+_future_child = KeyPair.generate()
+NETWORK_FUTURE_CERT = issue_cert(
+    NETWORK_ROOT, _future_child.public_hex, scope=NETWORK_SCOPES,
+    org=NETWORK_ORG_UUID, subject=Subject("operator", "browser-future"),
+    not_before=NOW + 3600, not_after=NOW + 7200,
 ).to_json().decode()
 
 
@@ -13122,26 +13131,48 @@ _NETWORK_SIGNON_JS = r"""
         r.after_revoke = {state: state(), idb: await idbCount(),
                           available: window.AutonomyNetworkSigner.available()};
 
-        // an expired cert planted in the store reads as signed-out + purge
-        const ghost = await crypto.subtle.generateKey(
-            {name: 'Ed25519'}, false, ['sign', 'verify']);
-        await new Promise((res, rej) => {
-            const rq = indexedDB.open('autonomy-network', 1);
-            rq.onupgradeneeded = () => rq.result.createObjectStore('session');
-            rq.onsuccess = () => {
-                const db = rq.result;
-                const p = db.transaction('session', 'readwrite')
-                    .objectStore('session')
-                    .put({key: ghost.privateKey, certWire: __EXPIRED_CERT__,
-                          org: BINDING.org_uuid, registryUrl: BINDING.registry_url,
-                          rootPub: BINDING.root_pub, createdAt: 0}, 'current');
-                p.onsuccess = () => { db.close(); res(); };
-                p.onerror = () => { db.close(); rej(p.error); };
-            };
-            rq.onerror = () => rej(rq.error);
-        });
+        // certs outside their validity window planted straight into the
+        // store must read as signed-out on load and purge — BOTH ends
+        async function plantCert(certWire) {
+            const ghost = await crypto.subtle.generateKey(
+                {name: 'Ed25519'}, false, ['sign', 'verify']);
+            await new Promise((res, rej) => {
+                const rq = indexedDB.open('autonomy-network', 1);
+                rq.onupgradeneeded = () => rq.result.createObjectStore('session');
+                rq.onsuccess = () => {
+                    const db = rq.result;
+                    const p = db.transaction('session', 'readwrite')
+                        .objectStore('session')
+                        .put({key: ghost.privateKey, certWire: certWire,
+                              org: BINDING.org_uuid, registryUrl: BINDING.registry_url,
+                              rootPub: BINDING.root_pub, createdAt: 0}, 'current');
+                    p.onsuccess = () => { db.close(); res(); };
+                    p.onerror = () => { db.close(); rej(p.error); };
+                };
+                rq.onerror = () => rej(rq.error);
+            });
+        }
+        await plantCert(__EXPIRED_CERT__);
         const loaded = await I.loadFromStore();
         r.expired_load = {live: loaded !== null, idb: await idbCount()};
+
+        // Codex validation regression: a FUTURE not_before cert must be
+        // refused at install and dead+purged on load — the registry 403s
+        // it, so the browser must never claim signed-in with one
+        r.future_install_reject = null;
+        try {
+            const g2 = await crypto.subtle.generateKey(
+                {name: 'Ed25519'}, false, ['sign', 'verify']);
+            await I.installSession({
+                key: g2.privateKey, certWire: __FUTURE_CERT__,
+                org: BINDING.org_uuid, registryUrl: BINDING.registry_url,
+                rootPub: BINDING.root_pub, createdAt: 0});
+        } catch (e) { r.future_install_reject = String(e.message || e); }
+        r.future_install_available = window.AutonomyNetworkSigner.available();
+        await plantCert(__FUTURE_CERT__);
+        const loadedF = await I.loadFromStore();
+        r.future_load = {live: loadedF !== null, idb: await idbCount(),
+                         available: window.AutonomyNetworkSigner.available()};
     } finally {
         window.fetch = origFetch;
         await S.signOut();
@@ -13159,6 +13190,7 @@ def _network_signon_js() -> str:
         .replace("__PASSPHRASE__", json.dumps(NETWORK_PASSPHRASE))
         .replace("__VECTOR__", json.dumps(NETWORK_CANON_VECTOR))
         .replace("__EXPIRED_CERT__", json.dumps(NETWORK_EXPIRED_CERT))
+        .replace("__FUTURE_CERT__", json.dumps(NETWORK_FUTURE_CERT))
     )
 
 
@@ -13289,3 +13321,14 @@ class TestNetworkSignOn:
         c = self._checks
         assert c["expired_load"]["live"] is False
         assert c["expired_load"]["idb"] == 0
+
+    def test_future_not_before_cert_refused(self):
+        """Codex validation finding: a cert with a FUTURE not_before must
+        not read as locally signed-in — the registry 403s it, so it is
+        refused at install and dead+purged on load, same as expired."""
+        c = self._checks
+        assert "validity window" in (c["future_install_reject"] or "")
+        assert c["future_install_available"] is False
+        assert c["future_load"]["live"] is False
+        assert c["future_load"]["idb"] == 0
+        assert c["future_load"]["available"] is False
