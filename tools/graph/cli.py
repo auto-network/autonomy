@@ -2565,6 +2565,34 @@ def cmd_bead(args):
     db.close()
 
 
+def cmd_link_router(args):
+    """Route 'graph link ...' between share-link ops and the legacy edge form."""
+    pos = args.args_pos or []
+    if pos and pos[0] in ("publish", "revoke", "list"):
+        from .link_cmd import cmd_link_list, cmd_link_publish, cmd_link_revoke
+        verb = pos[0]
+        if verb == "list":
+            if len(pos) != 1:
+                print("Error: usage: graph link list [--org slug]", file=sys.stderr)
+                sys.exit(1)
+            cmd_link_list(args)
+            return
+        if len(pos) != 2:
+            print(f"Error: usage: graph link {verb} "
+                  f"<{'target-id' if verb == 'publish' else 'token'}> [options]",
+                  file=sys.stderr)
+            sys.exit(1)
+        args.target = pos[1]
+        (cmd_link_publish if verb == "publish" else cmd_link_revoke)(args)
+        return
+    if len(pos) != 2:
+        print("Error: usage: graph link <bead|src_id> <src_id> [--relation ...], or\n"
+              "       graph link publish|revoke|list (share-links)", file=sys.stderr)
+        sys.exit(1)
+    args.bead, args.source = pos
+    cmd_link(args)
+
+
 def cmd_link(args):
     """Create an edge between two graph nodes (bead, source, or note)."""
     client = get_client()
@@ -5270,14 +5298,28 @@ def main():
     p.set_defaults(func=cmd_bead)
 
     # link
-    p = sub.add_parser("link", help="Create edge between two graph nodes (bead, source, or note)")
-    p.add_argument("bead", help="Source node: bead ID (auto-xxx), source/note ID, or prefix")
-    p.add_argument("source", help="Source ID or prefix")
+    p = sub.add_parser(
+        "link",
+        help="Share-links (publish/revoke/list) or create edge between two graph nodes",
+        epilog="Share-links (operator-approved, spec graph://a17c8657-939):\n"
+               "  graph link publish <target-id> --type present|design|note|file [--ttl 7d] [--label text]\n"
+               "  graph link revoke <token>\n"
+               "  graph link list\n"
+               "Edges: graph link <bead|src_id> <src_id> [--relation ...] [--turns N]",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("args_pos", nargs="*", metavar="ARGS",
+                   help="publish|revoke|list …, or <from> <to> for an edge")
     p.add_argument("--relation", "-r", default="informed_by",
-                   help="Relation type: informed_by, implemented_by, conceived_at, discussed_at (default: informed_by)")
-    p.add_argument("--turns", "-t", help="Turn range (e.g. 286 or 338-344)")
-    p.add_argument("--note", "-n", help="Context note for this link")
-    p.set_defaults(func=cmd_link)
+                   help="Edge relation: informed_by, implemented_by, conceived_at, discussed_at (default: informed_by)")
+    p.add_argument("--turns", "-t", help="Edge turn range (e.g. 286 or 338-344)")
+    p.add_argument("--note", "-n", help="Context note for this edge")
+    p.add_argument("--type", dest="target_type",
+                   choices=["present", "design", "note", "file"],
+                   help="publish: what kind of artifact the target id names")
+    p.add_argument("--ttl", help="publish: link lifetime (e.g. 3600, 24h, 7d); default no expiry")
+    p.add_argument("--label", help="publish: human label carried on the grant")
+    p.add_argument("--org", help="Org slug (default: GRAPH_ORG)")
+    p.set_defaults(func=cmd_link_router)
 
     # attention
     p = sub.add_parser("attention", help="Show human input from sessions chronologically")

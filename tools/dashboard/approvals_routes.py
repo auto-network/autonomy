@@ -93,10 +93,15 @@ def _enrich_commit_sign(row: dict) -> dict:
     return {"files": files, "patch": patch}
 
 
+# Share-link approval kinds (link_publish / link_revoke) live in their own
+# module; it exports plain dicts so this file stays the single registry.
+from tools.dashboard import link_approvals as _link_approvals
+
 # Per-kind GET enrichment — the only kind-specific hook on the server side of
 # the primitive. A kind whose stored request is self-describing needs no entry.
 ENRICH = {
     "commit_sign": _enrich_commit_sign,
+    **_link_approvals.ENRICH,
 }
 
 
@@ -105,14 +110,19 @@ ENRICH = {
 # number of concurrently-awaited pending requests.
 _decision_waiters: dict[str, asyncio.Event] = {}
 
-# Per-kind post-approval executors: async (row) -> execution outcome dict.
-# For a kind registered here, the operator's approval is acknowledged
-# immediately and the operation runs as a backend task; the single result
-# write happens when it completes — {approved: true, execution: {...}} — so
-# the requester's held GET delivers the actual outcome, not just the verdict.
-# A decline never executes anything. Kinds without an executor (commit_sign:
-# the browser itself produces the signature) store the verdict body directly.
-EXECUTORS: dict = {}
+# Per-kind post-approval executors: async (row, decision_body) -> execution
+# outcome dict. For a kind registered here, the operator's approval is
+# acknowledged immediately and the operation runs as a backend task; the
+# single result write happens when it completes — {approved: true,
+# execution: {...}} — so the requester's held GET delivers the actual
+# outcome, not just the verdict. The decision body is passed through so
+# kinds whose approval carries client-produced material (e.g. the signed
+# registry envelope for link_publish) can consume it. A decline never
+# executes anything. Kinds without an executor (commit_sign: the browser
+# itself produces the signature) store the verdict body directly.
+EXECUTORS: dict = {
+    **_link_approvals.EXECUTORS,
+}
 
 # Requests whose executor is running: the verdict is committed but the result
 # row is written only on completion, so further decisions must be refused here
@@ -223,7 +233,7 @@ async def decide_approval(request: Request) -> JSONResponse:
 
         async def run_and_record():
             try:
-                outcome = await executor(r)
+                outcome = await executor(r, body)
             except Exception as e:  # the requester gets a failure, never a hang
                 outcome = {"ok": False, "error": str(e)}
             finally:
