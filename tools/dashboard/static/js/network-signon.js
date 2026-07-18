@@ -178,10 +178,30 @@
     } catch (e) {
       throw new Error('armor body does not decode');
     }
-    if (!data || data.v !== 1 || !data.kdf || data.kdf.name !== 'PBKDF2' ||
-        data.kdf.hash !== 'SHA-256' || !data.cipher || data.cipher.name !== 'AES-256-GCM' ||
-        typeof data.root_pub !== 'string' || typeof data.ct !== 'string') {
-      throw new Error('unsupported armor format');
+    // STRICT shape check mirroring armor.py's parse_armor: exact key
+    // sets, formats, and decoded lengths. Fail closed on ANY unknown
+    // field — a tolerated extra field is a smuggling channel for
+    // plaintext key material inside an otherwise-valid armor (I1).
+    function sameKeys(obj, keys) {
+      return obj && typeof obj === 'object' && !Array.isArray(obj) &&
+        Object.keys(obj).sort().join(',') === keys.slice().sort().join(',');
+    }
+    function b64Len(s) {
+      try { return b64ToBytes(s).length; } catch (e) { return -1; }
+    }
+    if (!sameKeys(data, ['v', 'kdf', 'cipher', 'root_pub', 'ct']) ||
+        data.v !== 1 ||
+        !sameKeys(data.kdf, ['name', 'hash', 'iterations', 'salt']) ||
+        data.kdf.name !== 'PBKDF2' || data.kdf.hash !== 'SHA-256' ||
+        !Number.isSafeInteger(data.kdf.iterations) ||
+        data.kdf.iterations < 10000 || data.kdf.iterations > 100000000 ||
+        !sameKeys(data.cipher, ['name', 'iv']) ||
+        data.cipher.name !== 'AES-256-GCM' ||
+        typeof data.root_pub !== 'string' || !/^[0-9a-f]{64}$/.test(data.root_pub) ||
+        typeof data.kdf.salt !== 'string' || b64Len(data.kdf.salt) !== 16 ||
+        typeof data.cipher.iv !== 'string' || b64Len(data.cipher.iv) !== 12 ||
+        typeof data.ct !== 'string' || b64Len(data.ct) !== 48) {
+      throw new Error('unsupported or non-canonical armor format');
     }
     var material = await crypto.subtle.importKey(
       'raw', _te.encode(passphrase), 'PBKDF2', false, ['deriveKey']);

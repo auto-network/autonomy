@@ -106,3 +106,69 @@ def test_structural_rejections(armor, mangle):
 def test_iteration_floor():
     with pytest.raises(ArmorError):
         encrypt_root_key(KeyPair.generate(), "pp", iterations=9_999)
+
+
+# ── strict parsing: the smuggling channel is closed (Codex finding) ───
+#
+# parse_armor tolerated unknown decoded fields, so a decryptable armor
+# could carry {private_hex: <seed>} in its body and ride into storage
+# verbatim. Strict parsing rejects any non-canonical shape outright.
+
+
+def _reencode(data: dict) -> str:
+    return "\n".join(
+        [ARMOR_BEGIN, base64.b64encode(json.dumps(data).encode()).decode(), ARMOR_END]
+    )
+
+
+def test_smuggled_field_rejected(root, armor):
+    data = parse_armor(armor)
+    data["private_hex"] = root.private_hex
+    with pytest.raises(ArmorError, match="unknown fields|exactly"):
+        parse_armor(_reencode(data))
+
+
+@pytest.mark.parametrize("where", ["kdf", "cipher"])
+def test_smuggled_nested_field_rejected(root, armor, where):
+    data = parse_armor(armor)
+    data[where]["private_hex"] = root.private_hex
+    with pytest.raises(ArmorError):
+        parse_armor(_reencode(data))
+
+
+@pytest.mark.parametrize(
+    "mangle",
+    [
+        lambda d: d.__setitem__("root_pub", d["root_pub"].upper()),
+        lambda d: d.__setitem__("root_pub", d["root_pub"][:32]),
+        lambda d: d["kdf"].__setitem__("salt", base64.b64encode(b"short").decode()),
+        lambda d: d["cipher"].__setitem__("iv", base64.b64encode(b"x" * 16).decode()),
+        lambda d: d.__setitem__("ct", base64.b64encode(b"x" * 47).decode()),
+        lambda d: d.__setitem__("ct", "not*base64!"),
+        lambda d: d.pop("ct"),
+        lambda d: d["kdf"].pop("salt"),
+    ],
+)
+def test_malformed_fields_rejected(armor, mangle):
+    data = parse_armor(armor)
+    mangle(data)
+    with pytest.raises(ArmorError):
+        parse_armor(_reencode(data))
+
+
+def test_canonicalize_roundtrip(root, armor):
+    from tools.network.idkit.armor import canonicalize_armor
+
+    canonical = canonicalize_armor(armor)
+    assert canonical == armor  # encrypt_root_key already emits canonical form
+    opened = decrypt_root_key(canonical, "correct horse")
+    assert opened.private_hex == root.private_hex
+
+
+def test_canonicalize_refuses_smuggled_armor(root, armor):
+    from tools.network.idkit.armor import canonicalize_armor
+
+    data = parse_armor(armor)
+    data["private_hex"] = root.private_hex
+    with pytest.raises(ArmorError):
+        canonicalize_armor(_reencode(data))

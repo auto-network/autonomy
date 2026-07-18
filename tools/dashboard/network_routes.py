@@ -220,15 +220,19 @@ async def put_org_key(request: Request) -> JSONResponse:
         )}, status_code=400)
 
     # I1 gate: only the canonical passphrase-encrypted armor is storable.
-    # parse_armor authenticates the SHAPE (BEGIN/END lines, PBKDF2/AES-GCM
-    # parameters, base64 fields) without decrypting anything.
-    from tools.network.idkit.armor import ArmorError, parse_armor
+    # parse_armor is STRICT (exact field sets, formats, lengths — unknown
+    # fields refused so nothing can be smuggled inside the body), and the
+    # armor is RE-SERIALIZED from the parsed fields before storage, so the
+    # persisted bytes can only ever carry the canonical armor fields.
+    from tools.network.idkit.armor import ArmorError, canonicalize_armor, parse_armor
     try:
-        armor_data = parse_armor(body["armored_private_key"])
+        canonical_armor = canonicalize_armor(body["armored_private_key"])
+        armor_data = parse_armor(canonical_armor)
     except ArmorError as e:
         return JSONResponse({"ok": False, "error": (
-            f"refusing to store: not a passphrase-encrypted org key armor "
-            f"(I1 — plaintext key material must never be persisted): {e}"
+            f"refusing to store: not a canonical passphrase-encrypted org "
+            f"key armor (I1 — plaintext key material must never be "
+            f"persisted): {e}"
         )}, status_code=400)
     root_pub = armor_data["root_pub"]
     if body.get("root_pub") is not None and body["root_pub"] != root_pub:
@@ -255,7 +259,7 @@ async def put_org_key(request: Request) -> JSONResponse:
     try:
         settings_ops.upsert_by_key(
             NETWORK_ORG_KEY_SET_ID, NETWORK_ORG_KEY_REVISION, label,
-            {"armored_private_key": body["armored_private_key"], "root_pub": root_pub},
+            {"armored_private_key": canonical_armor, "root_pub": root_pub},
             org=org,
         )
     except Exception as e:
