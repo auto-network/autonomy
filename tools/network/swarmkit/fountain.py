@@ -22,7 +22,9 @@ needs to emit symbols nobody else is emitting:
   the same fresh symbol twice, so its egress for an artifact is the
   count of *distinct* symbols it contributed, regardless of link
   latency. Different leechers polling one seeder receive complementary
-  slices and complete by trading — the ≈1× property is structural.
+  slices and complete by trading — the ≈1× property is structural
+  (per seeder; swarm-wide it additionally needs collision-free
+  stripes, see below).
 - **Stripes** — the codec's Python bindings only generate the packet
   stream as a prefix (there is no arbitrary-ESI repair API), and the
   stream is deterministic in ``(data, symbol_size)``, so two complete
@@ -219,8 +221,13 @@ def roster_stripe(pub_hex: str, roster: Iterable[str],
 # offered symbols it already holds (skipped by its exclude ranges) or
 # receive a duplicate across concurrent requests (dropped by
 # ``add_packet``). Pure bandwidth waste, never wrong bytes — decode
-# correctness is untouched. Raise ``n_stripes`` (roster-wide, so every
-# member derives the same assignment) when swarms outgrow the default.
+# correctness and the ≈1× *distinct*-symbol union are untouched, but
+# TOTAL serving bandwidth degrades to ~N_collision× (validated under
+# forced collisions + delayed responses): the ≈1× total-egress claim
+# holds only under collision-free striping. Raise ``n_stripes``
+# (roster-wide, so every member derives the same assignment) when
+# swarms outgrow the default; dynamic reassignment on detected
+# duplicate serving is the v2 lever.
 
 
 class _StripePool:

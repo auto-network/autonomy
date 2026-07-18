@@ -16,7 +16,9 @@ suspect's, topping up from the remaining links when that leaves fewer
 than the decoder needs. The exclusion that yields a hash-verified
 decode names the polluter (and completes the fetch honestly); if no
 single exclusion does, the artifact stays failed-closed with the
-contributor set reported. Attribution is to the *serving* member —
+contributor set reported. Attribution is therefore single-polluter:
+multiple simultaneous polluters still fail *closed* — safe, just
+unresolved. Attribution is to the *serving* member —
 an org member vouches for every symbol it serves, wherever it learned
 it; per-symbol publisher signatures are the v2 hardening that would
 localise poison through honest relays too.
@@ -27,7 +29,11 @@ monotonic cursor happened to serve — every publisher symbol is fresh,
 so publisher egress equals *distinct symbols contributed*, latency
 cannot inflate it, and leechers holding complementary cursor slices
 complete each other by trading. The block scheduler's bound was a
-latency accident; this one is arithmetic.
+latency accident; this one is arithmetic. Scope: that arithmetic is
+per seeder — swarm-wide *total* bandwidth is ≈1× only under
+collision-free roster striping; colliding complete seeders re-serve
+the same positions (~N_collision× total, distinct union still ≈1×,
+decode still byte-exact).
 
 Links are ephemeral: every link is closed by the time the fetch
 returns, on every path — success, timeout, pollution, or error.

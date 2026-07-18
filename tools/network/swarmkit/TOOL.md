@@ -40,6 +40,14 @@ integrity is end-to-end, the transport stays untrusted.
 
 ### Why publisher egress ≈1× is structural now
 
+**Scope of the claim (Codex-validated):** the ≈1× bound is a
+*distinct-symbol* property and holds for **total** bandwidth only
+under **collision-free roster striping**. When multiple complete
+seeders share a stripe (roster mis-assignment, or more seeders than
+`n_stripes`), they serve the same positions against the same exclude
+snapshots: the distinct-symbol union stays ≈1× and decode stays
+byte-exact, but total serving bandwidth degrades to ~N_collision×.
+
 - A complete seeder serves **fresh symbols through a monotonic
   per-artifact cursor** — it never re-serves a symbol, so its egress
   equals the count of *distinct* symbols it contributed. Latency
@@ -54,12 +62,14 @@ integrity is end-to-end, the transport stays untrusted.
   n_stripes)` (cost O(served × n_stripes) at ~800 MB/s marginal
   encode, not O(stripe base)). Stripes derive from the org roster's
   stable member ordering (`roster_stripe`) — no runtime coordination.
-  Past `n_stripes` seeders, stripes recycle: duplicate waste, never
-  wrong bytes.
+  Past `n_stripes` seeders, stripes recycle: colliding seeders spend
+  up to ~N_collision× total bandwidth re-serving the same positions —
+  duplicate waste, never wrong bytes.
 
 Measured on zero-latency in-process links (the case the block
-scheduler failed at 3.0×): publisher egress **1.023×**, zero duplicate
-serves, ~⅔ of every leecher's symbols traded from fellow leechers.
+scheduler failed at 3.0×), *with collision-free striping*: publisher
+egress **1.023×**, zero duplicate serves, ~⅔ of every leecher's
+symbols traded from fellow leechers.
 
 ### Pollution (the one real fountain tradeoff)
 
@@ -69,9 +79,12 @@ decode. Handling: verify the **decoded object** against its hash and
 fail closed; then leave-one-out over contributing members (re-decode
 from everyone-but-one, topping up from surviving links) — a
 hash-verified decode names the polluter and completes the fetch
-honestly; no single-exclusion success = stay failed closed. Peers are
-authenticated org members, so the named member is revocable via the
-ledger. Attribution is to the *serving* member (a member vouches for
+honestly; no single-exclusion success = stay failed closed.
+Identification is **single-polluter**: with multiple simultaneous
+polluters the fetch still fails *closed* (Codex-confirmed safe) but
+does not attribute — the contributor set is reported unresolved.
+Peers are authenticated org members, so a named member is revocable
+via the ledger. Attribution is to the *serving* member (a member vouches for
 what it serves); publisher-signed per-symbol commitments are the v2
 hardening that would also localise poison relayed through honest
 members.
@@ -138,7 +151,9 @@ Block-path tests (36 unit + 3 network) remain and pass.
   relay attributes to the relay (which vouches by serving); signed
   symbol commitments are the hardening path.
 - `n_stripes` defaults to 8; raise roster-wide when swarms outgrow it
-  (stripe recycling degrades to bandwidth waste, never corruption).
+  (stripe recycling degrades total bandwidth ~N_collision×, never
+  correctness). Dynamic stripe reassignment on *detected* duplicate
+  serving (the `served_ids` overlap is observable) is the v2 lever.
 - Publisher-vs-peer intake balance rides asyncio fairness per round;
   a shortfall-biased scheduler (poll peers first, publisher for the
   remainder) is the lever if real-world topologies skew it.
