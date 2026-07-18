@@ -33,6 +33,7 @@
   <link rel="stylesheet" href="/static/vendor/xterm.min.css?v=__STATIC_VERSION__">
   <script src="/static/vendor/purify.min.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/js/markdown.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/js/network-signon.js?v=__STATIC_VERSION__" defer></script>
   <script defer src="/static/vendor/alpine.min.js?v=__STATIC_VERSION__"></script>
   <script>
     // iOS standalone detection — 100vh is unreliable in PWA mode (fluctuates 787/812/874).
@@ -95,6 +96,44 @@
       padding-top: 0.75rem;
       border-top: 1px solid #374151;
     }
+    /* auto.network sign-on chrome (C2) */
+    .network-signon-btn {
+      display: flex; align-items: center; gap: 0.5rem; width: 100%;
+      padding: 0.375rem 0.5rem; margin-bottom: 0.5rem; border-radius: 0.375rem;
+      font-size: 0.75rem; color: #9ca3af; background: transparent;
+      border: 1px solid #374151; cursor: pointer; text-align: left;
+    }
+    .network-signon-btn:hover { background: #374151; color: #e5e7eb; }
+    .network-signon-dot {
+      width: 0.5rem; height: 0.5rem; border-radius: 9999px; flex-shrink: 0;
+      background: #6b7280;
+    }
+    .network-signon-btn.signed-in .network-signon-dot { background: #16a34a; }
+    .network-signon-btn.signed-in { color: #d1d5db; }
+    .network-signon-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .network-signon-panel {
+      position: fixed; left: 1rem; bottom: 3.5rem; z-index: 60; width: 20rem;
+      max-width: calc(100vw - 2rem); background: #1f2937; border: 1px solid #4b5563;
+      border-radius: 0.5rem; padding: 0.75rem; box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+      font-size: 0.8125rem; color: #d1d5db;
+    }
+    .network-signon-title { font-weight: 600; color: #a5b4fc; margin-bottom: 0.5rem; }
+    .network-key-row { border: 1px solid #374151; border-radius: 0.375rem; padding: 0.5rem; margin-bottom: 0.5rem; }
+    .network-key-id { font-family: monospace; font-size: 0.75rem; color: #e5e7eb; }
+    .network-key-meta { font-size: 0.6875rem; color: #9ca3af; margin-top: 0.25rem; }
+    .network-signon-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+    .network-signon-action {
+      flex: 1; padding: 0.375rem 0.5rem; border-radius: 0.375rem; font-size: 0.75rem;
+      background: #4f46e5; color: white; border: none; cursor: pointer;
+    }
+    .network-signon-action:hover { filter: brightness(1.1); }
+    .network-signon-danger { background: #b91c1c; }
+    .network-signon-form { margin-top: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem; }
+    .network-signon-input {
+      width: 100%; padding: 0.375rem 0.5rem; border-radius: 0.375rem;
+      background: #111827; border: 1px solid #4b5563; color: #e5e7eb; font-size: 0.75rem;
+    }
+    .network-signon-error { margin-top: 0.5rem; color: #fca5a5; font-size: 0.75rem; }
     .nav-badge { display: inline-flex; align-items: center; justify-content: center; font-size: 0.6875rem; font-weight: 600; line-height: 1; min-width: 1.25rem; padding: 0.125rem 0.375rem; border-radius: 9999px; }
     .nav-badge:empty { display: none; }
     .nav-badge-indigo { background: #4f46e5; color: white; }
@@ -1781,6 +1820,8 @@
       <!-- Plugin sidebar slot — populated client-side from /api/plugins. -->
       <div id="sidebar-plugins" class="space-y-1"></div>
       <div class="sidebar-footer">
+        <!-- auto.network signed-in indicator (C2 sign-on ceremony) -->
+        <div id="network-signon"></div>
         <div id="harness-usage"></div>
         <div class="text-xs text-gray-500" id="stats-summary">loading...</div>
       </div>

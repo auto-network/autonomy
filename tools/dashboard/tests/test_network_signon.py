@@ -1,0 +1,234 @@
+"""C2 sign-on ceremony — server-side routes (network_routes).
+
+The browser does the actual ceremony (see the L2.B sweep in
+``test_behavioral_sweep.py::TestNetworkSignOn``); these tests pin the
+server half: the org-key route serves ONLY the encrypted armor (I1), the
+binding route serves the registry coordinates the cert is pinned to, and
+the revocation route forwards a root-signed record to the REAL B1
+registry (httpx.ASGITransport) with end-to-end effect — a chain
+containing the revoked session key stops verifying (spec §4.5, I7).
+"""
+
+from __future__ import annotations
+
+import time
+
+import httpx
+import pytest
+from starlette.applications import Starlette
+from starlette.testclient import TestClient
+
+from tools.dashboard import network_routes
+from tools.graph import settings_ops
+from tools.graph.schemas.network_identity import (
+    NETWORK_BINDING_SET_ID,
+    NETWORK_BINDING_REVISION,
+    NETWORK_ORG_KEY_SET_ID,
+    NETWORK_ORG_KEY_REVISION,
+)
+from tools.network.idkit import KeyPair, Subject, issue_cert, issue_revocation
+from tools.network.idkit.armor import encrypt_root_key
+from tools.network.registry.app import create_app as create_registry_app
+from tools.network.registry.signing import sign_request
+
+ORG = "netorg"
+ORG_UUID = "11111111-1111-4111-8111-111111111111"
+REGISTRY_URL = "http://registry.test"
+PASSPHRASE = "correct horse"
+
+SESSION_SCOPE = ("delegate:agent", "link:publish", "link:revoke", "tunnel:serve")
+
+
+@pytest.fixture
+def root():
+    return KeyPair.generate()
+
+
+@pytest.fixture
+def registry_app(root):
+    app = create_registry_app(":memory:", base_url=REGISTRY_URL,
+                              secure_cookies=False)
+    rc = TestClient(app)
+    envelope = sign_request(
+        root, "POST", "/v1/orgs",
+        {"org_uuid": ORG_UUID, "root_pub": root.public_hex,
+         "recovery_policy": "none"},
+        ts=int(time.time()),
+    )
+    r = rc.post("/v1/orgs", json=envelope)
+    assert r.status_code == 201, r.json()
+    return app
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch, registry_app):
+    from tools.graph.db import GraphDB
+
+    GraphDB.close_all_pooled()
+    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
+
+    def fake_registry_client(base_url):
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=registry_app), base_url=base_url)
+
+    monkeypatch.setattr(network_routes, "_registry_client", fake_registry_client)
+
+    with TestClient(Starlette(routes=network_routes.ROUTES)) as client:
+        yield client
+    GraphDB.close_all_pooled()
+
+
+def _store_binding(root):
+    settings_ops.add_setting(
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry.test",
+        {
+            "org_uuid": ORG_UUID,
+            "root_pub": root.public_hex,
+            "registry_url": REGISTRY_URL,
+            "recovery_policy": {"mode": "none"},
+            "binding_expires_at": "2030-01-01T00:00:00Z",
+        },
+        org=ORG,
+    )
+
+
+def _store_org_key(root, armor):
+    settings_ops.add_setting(
+        NETWORK_ORG_KEY_SET_ID, NETWORK_ORG_KEY_REVISION, "default",
+        {"armored_private_key": armor, "root_pub": root.public_hex},
+        org=ORG,
+    )
+
+
+def _session_cert(root, session_key, *, ttl=86400):
+    now = int(time.time())
+    return issue_cert(
+        root, session_key.public_hex, scope=SESSION_SCOPE, org=ORG_UUID,
+        subject=Subject("operator", "browser-deadbeef"),
+        not_before=now - 60, not_after=now + ttl,
+    )
+
+
+# ── org-key + binding routes ─────────────────────────────────
+
+
+def test_org_key_404_when_unset(env):
+    r = env.get(f"/api/network/org-key?org={ORG}")
+    assert r.status_code == 404
+    assert "org identity ceremony" in r.json()["error"]
+
+
+def test_org_key_serves_encrypted_armor_only(env, root):
+    armor = encrypt_root_key(root, PASSPHRASE, iterations=10_000)
+    _store_org_key(root, armor)
+    r = env.get(f"/api/network/org-key?org={ORG}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["armored_private_key"] == armor
+    assert body["root_pub"] == root.public_hex
+    # I1: nothing in the response is usable without the passphrase.
+    assert root.private_hex not in r.text
+
+
+def test_binding_404_when_unset(env):
+    r = env.get(f"/api/network/binding?org={ORG}")
+    assert r.status_code == 404
+
+
+def test_binding_serves_registry_coordinates(env, root):
+    _store_binding(root)
+    r = env.get(f"/api/network/binding?org={ORG}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["org_uuid"] == ORG_UUID
+    assert body["root_pub"] == root.public_hex
+    assert body["registry_url"] == REGISTRY_URL
+    assert body["registry"] == "registry.test"
+
+
+# ── revocation forwarding (§4.5) ─────────────────────────────
+
+
+def test_revocation_end_to_end(env, root, registry_app):
+    """Root-signed record → forwarded → the revoked session key's chain
+    stops verifying at the registry."""
+    _store_binding(root)
+    session_key = KeyPair.generate()
+    cert = _session_cert(root, session_key)
+    now = int(time.time())
+
+    # Before revocation the session key publishes fine.
+    rc = TestClient(registry_app)
+    publish = sign_request(
+        session_key, "POST", "/v1/links",
+        {"org": ORG_UUID, "target_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+         "target_type": "note"},
+        ts=now, cert=cert,
+    )
+    r = rc.post("/v1/links", json=publish)
+    assert r.status_code == 201, r.json()
+
+    record = issue_revocation(
+        root, session_key.public_hex, org=ORG_UUID,
+        revoked_at=now, expires_at=cert.not_after,
+        reason="operator revoked from key list",
+        revoked_cert=cert,
+    )
+    resp = env.post("/api/network/revocations", json={
+        "org": ORG,
+        "record": record.to_json().decode(),
+        "revoked_cert": cert.to_json().decode(),
+    })
+    assert resp.status_code == 200, resp.json()
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["revoked_key_id"] == session_key.public_hex
+
+    # The revoked key's chain is now dead at the registry.
+    publish2 = sign_request(
+        session_key, "POST", "/v1/links",
+        {"org": ORG_UUID, "target_uuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+         "target_type": "note"},
+        ts=int(time.time()), cert=cert,
+    )
+    r2 = rc.post("/v1/links", json=publish2)
+    assert r2.status_code == 403
+    assert "Revoked" in r2.json()["detail"]
+
+
+def test_revocation_rejects_malformed_body(env, root):
+    _store_binding(root)
+    r = env.post("/api/network/revocations", json={"org": ORG})
+    assert r.status_code == 400
+    r = env.post("/api/network/revocations", json={
+        "org": ORG, "record": 42, "revoked_cert": "x"})
+    assert r.status_code == 400
+
+
+def test_revocation_404_without_binding(env):
+    r = env.post("/api/network/revocations", json={
+        "org": ORG, "record": "{}", "revoked_cert": "{}"})
+    assert r.status_code == 404
+
+
+def test_revocation_foreign_root_refused(env, root):
+    """A record minted by a key that is NOT the bound root is the
+    registry's 403, surfaced as our 502 with its detail."""
+    _store_binding(root)
+    mallory = KeyPair.generate()
+    session_key = KeyPair.generate()
+    cert = _session_cert(root, session_key)
+    now = int(time.time())
+    forged = issue_revocation(
+        mallory, session_key.public_hex, org=ORG_UUID,
+        revoked_at=now, expires_at=cert.not_after,
+    )
+    r = env.post("/api/network/revocations", json={
+        "org": ORG,
+        "record": forged.to_json().decode(),
+        "revoked_cert": cert.to_json().decode(),
+    })
+    assert r.status_code == 502
+    assert "registry refused the revocation" in r.json()["error"]

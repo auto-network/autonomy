@@ -115,6 +115,7 @@ from tools.dashboard import session_trace
 from tools.dashboard.dao import auth_db, dashboard_db
 from tools.dashboard import approvals_routes
 from tools.dashboard import jira_routes
+from tools.dashboard import network_routes
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
     from tools.dashboard.dao import mock as dao_dispatch
@@ -15565,6 +15566,10 @@ routes = [
     # On-demand approval rendezvous (requester <-> operator browser),
     # e.g. commit signing
     *approvals_routes.ROUTES,
+
+    # auto.network identity (C2 sign-on ceremony): encrypted org key,
+    # binding record, revocation forwarding
+    *network_routes.ROUTES,
 
     # Jira broker (issue_tracker capability): host-side reads; writes ride the
     # approval rendezvous as kind=jira_write
