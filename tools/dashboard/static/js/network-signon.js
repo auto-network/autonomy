@@ -667,6 +667,19 @@
         panel.appendChild(form);
       }
     } else {
+      // C1 entry point: orgs without a network identity start here; the
+      // identity module itself shows status instead of the create flow
+      // when a key already exists.
+      var idBtn = _el('button', {
+        id: 'network-identity-entry', 'data-testid': 'network-identity-entry',
+        'class': 'network-signon-action',
+      }, 'Org identity…');
+      idBtn.addEventListener('click', function () {
+        _togglePanel(false);
+        if (window.AutonomyNetworkIdentity) window.AutonomyNetworkIdentity.open();
+      });
+      panel.appendChild(idBtn);
+
       var form2 = _el('div', { 'class': 'network-signon-form' });
       form2.appendChild(_el('div', { 'class': 'network-key-meta' },
         'Signing on decrypts the org key once, mints a session key in this ' +

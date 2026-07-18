@@ -52,7 +52,7 @@ from tools.network.idkit import (
     issue_cert,
     verify_chain,
 )
-from tools.network.idkit.armor import encrypt_root_key
+from tools.network.idkit.armor import decrypt_root_key, encrypt_root_key
 from tools.network.idkit.canonical import canonical_json
 from tools.network.idkit.keys import verify_signature
 from tools.network.idkit.revocation import RevocationRecord, verify_revocation
@@ -13332,3 +13332,329 @@ class TestNetworkSignOn:
         assert c["future_load"]["live"] is False
         assert c["future_load"]["idb"] == 0
         assert c["future_load"]["available"] is False
+
+
+# ═══ auto.network create-org-identity ceremony (C1, spec §6.2–6.3) ═══
+#
+# The ceremony runs in the browser: generate the org root keypair, armor
+# the seed under a passphrase (idkit armor format), optionally mint a
+# COLD recovery keypair rendered as a block that is never stored, sign
+# the root-direct registration, submit. The sweep drives the REAL wizard
+# DOM (static/js/network-identity.js) with the dashboard API mocked at
+# window.fetch, then verifies every captured artifact in Python with
+# idkit — including POSTing the browser-minted registration envelope to
+# the REAL B1 registry. The keystone cross-bead check: the armor the
+# ceremony stored must open C2's sign-on (S.signOn) in the same browser.
+
+C1_PASSPHRASE = "sweep ceremony passphrase"
+C1_EXPIRY_ISO = "2026-08-17T00:00:00Z"
+
+_NETWORK_IDENTITY_JS = r"""
+(async () => {
+    const S = window.AutonomyNetworkSession;
+    const ID = window.AutonomyNetworkIdentity;
+    if (!S || !ID) return JSON.stringify({fatal: 'identity modules not loaded'});
+    const II = ID._internals;
+    II.overrideIterations(10000);
+    const PASS = __PASSPHRASE__;
+    const r = {};
+    const q = (t) => document.querySelector('[data-testid=' + t + ']');
+    const step = () => (II.state() || {}).step || null;
+    const waitFor = async (fn, ms) => {
+        const t0 = Date.now();
+        while (Date.now() - t0 < (ms || 8000)) {
+            const v = fn();
+            if (v) return v;
+            await new Promise(res => setTimeout(res, 40));
+        }
+        return null;
+    };
+
+    // Mock dashboard API: an org with NO network identity yet. The mock
+    // mirrors the real routes' contracts (404 until stored, armor-only
+    // writes, 409 on second key) so the module sees production shapes.
+    let storedKey = null;
+    let storedBinding = null;
+    const captured = {orgKeyPosts: [], registerPosts: []};
+    const origFetch = window.fetch;
+    window.fetch = async function (url, opts) {
+        const u = String(url);
+        const method = ((opts || {}).method || 'GET').toUpperCase();
+        if (u.indexOf('/api/network/registry') === 0) {
+            return {ok: true, status: 200,
+                    json: async () => ({registry_url: 'http://registry.sweep.test'})};
+        }
+        if (u.indexOf('/api/network/org-key') === 0 && method === 'GET') {
+            return storedKey
+                ? {ok: true, status: 200, json: async () => storedKey}
+                : {ok: false, status: 404, json: async () => ({error: 'no key'})};
+        }
+        if (u.indexOf('/api/network/org-key') === 0 && method === 'POST') {
+            const body = JSON.parse(opts.body);
+            captured.orgKeyPosts.push(body);
+            if (!/^-----BEGIN AUTONOMY NETWORK ROOT KEY-----/.test(
+                    body.armored_private_key || '')) {
+                return {ok: false, status: 400,
+                        json: async () => ({ok: false, error: 'not armor (I1)'})};
+            }
+            if (storedKey) {
+                return {ok: false, status: 409,
+                        json: async () => ({ok: false, error: 'exists'})};
+            }
+            storedKey = {label: 'default',
+                         armored_private_key: body.armored_private_key,
+                         root_pub: body.root_pub};
+            return {ok: true, status: 200,
+                    json: async () => ({ok: true, label: 'default',
+                                        root_pub: body.root_pub})};
+        }
+        if (u.indexOf('/api/network/register') === 0 && method === 'POST') {
+            const body = JSON.parse(opts.body);
+            captured.registerPosts.push(body);
+            const p = body.envelope.payload;
+            storedBinding = {
+                registry: 'registry.sweep.test', org_uuid: p.org_uuid,
+                root_pub: p.root_pub, registry_url: 'http://registry.sweep.test',
+                recovery_policy: Object.assign({mode: p.recovery_policy},
+                    p.recovery_pub ? {recovery_pub: p.recovery_pub} : {}),
+                binding_expires_at: __EXPIRY__,
+            };
+            return {ok: true, status: 200,
+                    json: async () => ({ok: true, registry: 'registry.sweep.test',
+                                        binding: storedBinding})};
+        }
+        if (u.indexOf('/api/network/binding') === 0) {
+            return storedBinding
+                ? {ok: true, status: 200, json: async () => storedBinding}
+                : {ok: false, status: 404, json: async () => ({error: 'no binding'})};
+        }
+        return origFetch.call(this, url, opts);
+    };
+
+    try {
+        await S.ready();
+        await S.signOut();
+        ID.close();
+
+        // 1 · entry point visible in the signed-out sign-on panel
+        document.querySelector('[data-testid=network-signon-indicator]').click();
+        r.entry_visible = !!q('network-identity-entry');
+        q('network-identity-entry').click();
+        await waitFor(() => step() === 'intro');
+        r.first_step = step();
+        r.modal_open = !!q('network-identity-modal');
+
+        // 2 · intro → passphrase; a mismatch is a clean inline error
+        q('network-identity-continue').click();
+        r.pass_step_shown = !!q('network-identity-passphrase');
+        document.getElementById('network-identity-passphrase').value = PASS;
+        document.getElementById('network-identity-passphrase2').value = 'different';
+        q('network-identity-generate').click();
+        await waitFor(() => q('network-identity-error'));
+        r.mismatch_error = (q('network-identity-error') || {}).textContent || null;
+        r.mismatch_no_post = captured.orgKeyPosts.length;
+
+        // the real generate: keypair + armor + org-key POST
+        document.getElementById('network-identity-passphrase').value = PASS;
+        document.getElementById('network-identity-passphrase2').value = PASS;
+        q('network-identity-generate').click();
+        await waitFor(() => step() === 'recovery');
+        r.recovery_step = step();
+        r.org_key_posts = captured.orgKeyPosts.length;
+
+        // 3 · recovery-key path: printable/downloadable block, never stored
+        q('network-identity-recovery-key').click();
+        await waitFor(() => q('network-identity-recovery-block'));
+        r.recovery_block = (q('network-identity-recovery-block') || {}).textContent || '';
+        const dl = q('network-identity-recovery-download');
+        r.download_name = dl ? dl.getAttribute('download') : null;
+        r.download_is_blob = dl ? dl.getAttribute('href').indexOf('blob:') === 0 : null;
+        r.continue_disabled_before_ack =
+            !!q('network-identity-recovery-continue').disabled;
+        const ack = document.getElementById('network-identity-recovery-ack');
+        ack.checked = true;
+        ack.dispatchEvent(new Event('change'));
+        q('network-identity-recovery-continue').click();
+        await waitFor(() => step() === 'register');
+        r.register_step = step();
+
+        // 4 · register → success shows the binding expiry
+        q('network-identity-register').click();
+        await waitFor(() => step() === 'success');
+        r.success_shown = !!q('network-identity-success');
+        r.expiry_text = (q('network-identity-binding-expiry') || {}).textContent || '';
+        r.captured = captured;
+        r.stored_armor = storedKey && storedKey.armored_private_key;
+        r.state_recovery_block_after = (II.state() || {}).recoveryBlock;
+        ID.close();
+
+        // 5 · keystone: C2's sign-on opens the armor C1 just stored
+        try {
+            const so = await S.signOn(PASS, {ttlSeconds: 3600});
+            r.signon = {sessionPub: so.sessionPub, certWire: so.certWire};
+            r.signon_state = (document.querySelector(
+                '[data-testid=network-signon-indicator]') || {dataset: {}})
+                .dataset.state || null;
+        } catch (e) {
+            r.signon_error = String(e.message || e);
+        }
+        await S.signOut();
+
+        // 6 · an org WITH a key sees status, never the create flow
+        await ID.open();
+        r.reopen_step = step();
+        r.status_view = !!q('network-identity-status');
+        r.status_expiry = (q('network-identity-binding-expiry') || {}).textContent || '';
+        r.create_controls_absent = !q('network-identity-passphrase') &&
+            !q('network-identity-continue');
+        ID.close();
+    } finally {
+        window.fetch = origFetch;
+        ID.close();
+        await S.signOut();
+    }
+    return JSON.stringify(r);
+})()
+"""
+
+
+def _network_identity_js() -> str:
+    return (
+        _NETWORK_IDENTITY_JS
+        .replace("__PASSPHRASE__", json.dumps(C1_PASSPHRASE))
+        .replace("__EXPIRY__", json.dumps(C1_EXPIRY_ISO))
+    )
+
+
+class TestNetworkIdentityCeremony:
+    """L2.B for the C1 create-org-identity ceremony (bead auto-40fob).
+
+    Every artifact asserted below was minted by the real browser wizard;
+    Python verifies with idkit and the REAL registry app, and the armor
+    round-trips through C2's sign-on inside the same browser run.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        _navigate_and_check("/sessions", "", wait_ms=600)
+        request.cls._checks = _run_async_eval(_network_identity_js())
+
+    def test_ceremony_ran(self):
+        c = self._checks
+        assert c and not c.get("fatal"), f"ceremony eval failed: {c}"
+
+    # ── acceptance: entry point visible for an org without a key ──
+
+    def test_entry_point_visible_without_key(self):
+        c = self._checks
+        assert c["entry_visible"] is True
+        assert c["modal_open"] is True
+        assert c["first_step"] == "intro"
+
+    def test_passphrase_mismatch_clean_error_and_no_write(self):
+        c = self._checks
+        assert "do not match" in (c["mismatch_error"] or "")
+        assert c["mismatch_no_post"] == 0
+
+    # ── acceptance: the stored blob is armor only, and it is C2's armor ──
+
+    def test_stored_blob_is_canonical_armor_i1(self):
+        c = self._checks
+        assert c["org_key_posts"] == 1
+        post = c["captured"]["orgKeyPosts"][0]
+        # Nothing beyond the armor and its public half ever leaves the page.
+        assert set(post) == {"org", "armored_private_key", "root_pub"}
+        opened = decrypt_root_key(post["armored_private_key"], C1_PASSPHRASE)
+        assert opened.public_hex == post["root_pub"]
+
+    def test_c1_armor_opens_c2_signon(self):
+        """THE cross-bead contract: C2's sign-on decrypted the armor C1
+        stored, minted a session key, and flipped the chrome."""
+        c = self._checks
+        assert c.get("signon_error") is None, c.get("signon_error")
+        assert c["signon"]["sessionPub"]
+        assert c["signon_state"] == "signed-in"
+        # And the minted cert chains to the ceremony-generated root.
+        root_pub = c["captured"]["orgKeyPosts"][0]["root_pub"]
+        org_uuid = c["captured"]["registerPosts"][0]["envelope"]["payload"]["org_uuid"]
+        cert = DelegationCert.from_json(c["signon"]["certWire"])
+        result = verify_chain(cert, root_pub, org=org_uuid,
+                              required_scope="link:publish")
+        assert result.leaf_pub == c["signon"]["sessionPub"]
+
+    # ── acceptance: recovery block is real, downloadable, never stored ──
+
+    def test_recovery_block_downloadable_and_cold(self):
+        c = self._checks
+        block = c["recovery_block"]
+        assert "AUTONOMY NETWORK RECOVERY KEY" in block
+        assert c["download_name"] == "autonomy-recovery-key.txt"
+        assert c["download_is_blob"] is True
+        assert c["continue_disabled_before_ack"] is True
+
+    def test_recovery_seed_never_leaves_the_page(self):
+        """The cold private seed appears in the rendered block and NOWHERE
+        else — not in the armor, not in any POST body (tested rejection:
+        a stored recovery key would gut I3)."""
+        c = self._checks
+        m = re.search(r"Recovery seed:\s+([0-9a-f]{64})", c["recovery_block"])
+        assert m, "recovery block carries no seed"
+        seed_hex = m.group(1)
+        pub_m = re.search(r"Recovery pub:\s+([0-9a-f]{64})", c["recovery_block"])
+        assert pub_m, "recovery block carries no pub"
+        # The block's keypair is real and matches the declared policy.
+        assert KeyPair.from_private_hex(seed_hex).public_hex == pub_m.group(1)
+        everything_posted = json.dumps(c["captured"])
+        assert seed_hex not in everything_posted
+        assert seed_hex not in c["stored_armor"]
+        payload = c["captured"]["registerPosts"][0]["envelope"]["payload"]
+        assert payload["recovery_policy"] == "recovery-key"
+        assert payload["recovery_pub"] == pub_m.group(1)
+        # The wizard dropped its copy once registration completed.
+        assert c["state_recovery_block_after"] is None
+
+    # ── acceptance: the registration is what the registry expects ──
+
+    def test_registration_envelope_verifies_against_generated_root(self):
+        c = self._checks
+        env = c["captured"]["registerPosts"][0]["envelope"]
+        assert set(env) == {"v", "signer", "ts", "payload", "sig"}  # root-direct
+        assert env["signer"] == env["payload"]["root_pub"]
+        assert env["signer"] == c["captured"]["orgKeyPosts"][0]["root_pub"]
+        verify_signature(
+            env["signer"], env["sig"],
+            request_signing_input("POST", "/v1/orgs", env["ts"],
+                                  env["signer"], env["payload"]),
+        )
+
+    def test_registration_accepted_by_real_registry(self):
+        """The browser-minted envelope, POSTed verbatim to the REAL B1
+        registry app, binds the org (I6: signed + attributable)."""
+        from starlette.testclient import TestClient as _TC
+
+        from tools.network.registry.app import create_app as _create_registry
+
+        c = self._checks
+        env = c["captured"]["registerPosts"][0]["envelope"]
+        app = _create_registry(":memory:", secure_cookies=False)
+        resp = _TC(app).post("/v1/orgs", json=env)
+        assert resp.status_code == 201, resp.text
+        bound = app.state.store.get_org(env["payload"]["org_uuid"])
+        assert bound.root_pub == env["payload"]["root_pub"]
+        assert bound.recovery_pub == env["payload"]["recovery_pub"]
+
+    # ── acceptance: success shows binding expiry ──
+
+    def test_success_shows_binding_expiry(self):
+        c = self._checks
+        assert c["success_shown"] is True
+        assert C1_EXPIRY_ISO in c["expiry_text"]
+
+    # ── acceptance: org WITH a key sees status, not the create flow ──
+
+    def test_existing_key_shows_status_not_create(self):
+        c = self._checks
+        assert c["reopen_step"] == "status"
+        assert c["status_view"] is True
+        assert C1_EXPIRY_ISO in c["status_expiry"]
+        assert c["create_controls_absent"] is True
