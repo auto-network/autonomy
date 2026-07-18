@@ -1,99 +1,111 @@
 # swarmkit — content-addressed swarm bulk fetch (G2)
 
-Spec `graph://eb245082-b76` §8, bead `auto-25dz3`. Builds on relaykit
-(G1): large artifacts move as fixed-size **blocks** pulled from any org
-peer that holds them, over the same E2E channels the fallback chain
+Spec `graph://eb245082-b76` §8; fountain revision per the RaptorQ
+decision note `graph://454424ca-10e` (bead `auto-0m2kp`, supersedes the
+block scheduler of `auto-25dz3`). Builds on relaykit (G1): large
+artifacts move over the same E2E channels the fallback chain
 establishes — direct, peer relay, or central floor; the application
 seam cannot tell which.
 
-## Trust model
+## Two transfers, one seam
 
-The transport is untrusted end to end; two hashes carry all integrity:
+| | fountain (primary) | blocks (superseded, retained) |
+|---|---|---|
+| unit | RaptorQ encoded symbol (RFC 6330) | fixed-size hashed block |
+| scheduling | none — any symbol is useful | rarest-first + want-lists |
+| publisher ≈1× egress | structural (cursor arithmetic) | latency accident (failed review at 3× on loopback) |
+| integrity | decoded-object hash, fail closed | per-block hash |
+| polluter handling | leave-one-out identification | per-block strike-out |
+| modules | `fountain*.py` | `store.py`/`protocol.py`/`fetch.py` |
 
-- **Artifact id** = SHA-256 of the canonical-JSON manifest. A manifest
-  fetched from any peer verifies against the id alone
-  (`store.add_manifest`); a forged manifest cannot name the same id.
-- **Block hashes** live in the manifest. Every block re-hashes on
-  receipt (`store.add_block`); corrupt bytes are refused, the sender is
-  struck (3 strikes drops it for the fetch), and the index returns to
-  the want-list for any other holder to serve.
+The block path stays for now because its store/manifest/handler shapes
+are load-bearing elsewhere and its per-block-verifiable manifests still
+fit small hot artifacts; new bulk-transfer callers use the fountain
+path. Both compose behind one handler chain:
 
-Who may *serve* is the same question as G1: swarm traffic rides the
-channel contract, so a serving node authenticates with its
-`tunnel:serve` chain like any other endpoint.
+    fountain_handler(fstore, fallback=swarm_handler(bstore, fallback=app))
+
+## Fountain transfer (RaptorQ, RFC 6330)
+
+The codec is the vetted `raptorq` PyPI package — PyO3 bindings of the
+Apache-2.0 [cberner/raptorq](https://github.com/cberner/raptorq) crate
+(pinned in `deploy/requirements.txt`; attribution note there). The
+codec is **never** reimplemented here.
+
+An object is committed by a tiny manifest `{size, symbol_size,
+object-sha256}`; the artifact id is the SHA-256 of the canonical-JSON
+manifest. Any peer emits interchangeable encoded symbols; a leecher
+collects any K+ε from anyone, decodes, and verifies the object hash —
+integrity is end-to-end, the transport stays untrusted.
+
+### Why publisher egress ≈1× is structural now
+
+- A complete seeder serves **fresh symbols through a monotonic
+  per-artifact cursor** — it never re-serves a symbol, so its egress
+  equals the count of *distinct* symbols it contributed. Latency
+  cannot inflate it. Concurrent leechers receive complementary slices
+  and complete by **trading** (partial holders serve their stored
+  packets round-robin).
+- Requests carry the leecher's holdings as packed `(SBN,ESI)` id
+  ranges (`exclude`), so nothing already held crosses the wire.
+- **Stripes** make multiple complete seeders complementary: the
+  bindings only generate the deterministic packet stream as a prefix,
+  so seeder `i` owns interleaved stream positions `p ≡ stripe_i (mod
+  n_stripes)` (cost O(served × n_stripes) at ~800 MB/s marginal
+  encode, not O(stripe base)). Stripes derive from the org roster's
+  stable member ordering (`roster_stripe`) — no runtime coordination.
+  Past `n_stripes` seeders, stripes recycle: duplicate waste, never
+  wrong bytes.
+
+Measured on zero-latency in-process links (the case the block
+scheduler failed at 3.0×): publisher egress **1.023×**, zero duplicate
+serves, ~⅔ of every leecher's symbols traded from fellow leechers.
+
+### Pollution (the one real fountain tradeoff)
+
+Coded symbols don't self-verify against a fixed manifest — a member
+can serve wrong-linear-combination symbols that corrupt the whole
+decode. Handling: verify the **decoded object** against its hash and
+fail closed; then leave-one-out over contributing members (re-decode
+from everyone-but-one, topping up from surviving links) — a
+hash-verified decode names the polluter and completes the fetch
+honestly; no single-exclusion success = stay failed closed. Peers are
+authenticated org members, so the named member is revocable via the
+ledger. Attribution is to the *serving* member (a member vouches for
+what it serves); publisher-signed per-symbol commitments are the v2
+hardening that would also localise poison relayed through honest
+members.
+
+### Wire ops (over the `handler(token, message)` seam)
+
+    {"v":1, "op":"fountain.manifest", "artifact": <64 hex>}
+    {"v":1, "op":"fountain.symbols",  "artifact": ..., "count": 1..64,
+     "exclude": [[start,end], ...]?}
+
+Symbol responses are a canonical-JSON header line + `n` serialized
+packets (4-byte payload id + one symbol each). `n=0` means "nothing
+new for you right now" — idle, not an error. `fountain_handler.metrics`
+(`FountainMetrics`) meters egress in bytes, packets, *and distinct
+symbol ids* — `served_packets == len(served_ids)` is the never-re-served
+invariant the acceptance pins.
+
+### Fetch (`fountain_fetch`)
+
+One session per link; each loops "up to *n* symbols I don't hold",
+feeds an incremental decoder, and completion is **decoder-driven**
+(no fixed K+ε count — RaptorQ usually finishes at exactly K,
+occasionally a couple more). Sessions yield to the event loop each
+round, so zero-latency links schedule fairly (this is what makes the
+loopback egress test honest). Links are ephemeral: closed on every
+path — success, timeout, pollution, error.
 
 ## Discovery — the roster is the tracker (no DHT)
 
-An org is a closed, authenticated world: the ledger's member/live-keys
-projection says who exists, the registry's reachability hints say where
-to dial them. `dial_links()` turns those rows into established channels
-through the G1 chain (`dial_peer`: direct → peer relay → floor).
-There is nothing to crawl and nobody anonymous to ask — no DHT inside
-an org, by design.
-
-## Protocol (over the `handler(token, message)` seam)
-
-    {"v":1, "op":"swarm.manifest", "artifact": <64 hex>}
-    {"v":1, "op":"swarm.have",     "artifact": ..., "want": <hex bitmap>?}
-    {"v":1, "op":"swarm.block",    "artifact": ..., "index": i}
-
-Have-maps are LSB-first hex bitmaps (a 10 GiB artifact at the 256 KiB
-default block size is a 5 KiB bitmap). Block responses are a canonical
-JSON header line + raw bytes. `swarm_handler(store, fallback=...)`
-composes with an application handler behind one seam;
-`handler.metrics` (`SwarmMetrics`) meters block egress — the
-countersigned-usage seam (§10) and the publisher-egress acceptance
-both read it.
-
-The `want` field is the fetcher's want-list. In v1 it is advisory
-(recorded, not acted on): scheduling is pull — the fetcher re-polls
-have-maps while peers acquire blocks. Server-initiated HAVE push (the
-BitTorrent HAVE message; needs channel push, which the request/response
-seam doesn't do yet) is the v2 lever that would erase the remaining
-~0.25× duplicate publisher egress measured on loopback.
-
-## Scheduling (`swarm_fetch`)
-
-One session per peer link, one request in flight per session:
-
-1. **Prime**: initial have-map exchange across all links (bitfield-on-
-   connect) — rarity counts must span the swarm before the first pick.
-2. **Pick** = min `(rarity, holder-rank, weight)`:
-   - *rarity* — count of peers advertising the block (rarest-first);
-   - *holder-rank* — prefer pulling from the smallest-library holder,
-     so the full-copy peer's link spends last on blocks other peers
-     already carry;
-   - *weight* — a per-fetcher fixed random ranking, so concurrent
-     fetchers spread across an equal-rarity pool instead of colliding
-     birthday-style.
-3. **Budgeted drain**: at most `blocks_per_poll` (4) blocks between
-   have-map refreshes, tapering to 1 as the want-set shrinks —
-   measured on loopback, an unbounded drain let the publisher serve
-   1.74× the artifact; the budget + taper hold it at ~1.25×.
-4. An idle session (peer had nothing wanted) re-polls immediately
-   while the swarm is progressing, and backs off `have_refresh` only
-   when it is quiet.
-5. **Ephemeral links**: every session closes its channel when the
-   fetch completes, its peer is dropped, or the fetch errors — pinned
-   by a connection-count-returns-to-zero assertion.
-
-In-flight indices are excluded from other sessions' picks, so a block
-is never fetched twice by one fetcher (asserted); across independent
-fetchers the weight ranking keeps duplication low.
-
-## Library spike (spec §13 Q6) — why hand-rolled
-
-Measured in the agent container (2026-07-17, decision recorded as a
-comment on `graph://eb245082-b76`):
-
-| candidate | verdict |
-|---|---|
-| iroh 1.1.0 (PyPI) | installs clean; bindings expose the QUIC endpoint layer ONLY (no blobs/bitswap) — the swarm logic would be hand-rolled anyway; 50 MB bi-stream measured **10 MB/s** (FFI-bound, buffer-size invariant); parallel identity+transport universe next to G1 |
-| py-libp2p 0.7.0 | ships bitswap now, but pins `fastecdsa==2.3.2` (source-only, needs gcc+GMP — not installable in the agent container) and is trio-based against our asyncio stack |
-| hand-rolled over relaykit | existing E2E channel measured **667 MB/s** single channel / 871 MB/s ×4 on loopback; sha256 verify 2341 MB/s (~4% of one channel); inherits G1 auth + fallback chain natively |
-
-iroh remains the candidate for a real UDP hole-punching *transport*
-rung later (`direct.py` v1 boundary); it is not a swarm layer for us.
+Unchanged from the block design: the ledger's member/live-keys
+projection says who exists, the registry's reachability hints say
+where to dial, `dial_links()` establishes G1 channels (direct → peer
+relay → floor). The same roster ordering hands every member its
+stripe.
 
 ## Tests
 
@@ -101,27 +113,32 @@ rung later (`direct.py` v1 boundary); it is not a swarm layer for us.
 pytest tools/network/swarmkit/tests/
 ```
 
-36 unit tests (store/content addressing, protocol ops + refusals,
-scheduler properties incl. corruption recovery, forged manifest,
-resume) + 3 network acceptance tests over real relaykit stacks
-(`test_swarm_integration.py`):
+Fountain: 35 unit/handler/loopback tests (manifest + range codecs,
+stripe disjointness incl. past-N recycling, monotonic cursor, seam
+composition, zero-latency 3-leecher egress ≈1×, multi-seeder
+complementarity, churn, polluter identification, fail-closed single
+source, link hygiene) + 3 network acceptance tests over real relaykit
+stacks (`test_fountain_integration.py`):
 
-- **50 MB, 3 concurrent leechers**: all verify byte-exact; publisher
-  block egress asserted < 1.5× (measured ~1.22–1.33× across seeds;
-  peer-to-peer share ~57–60%).
-- **Corrupt peer**: flipped bytes on the wire caught by hash, peer
-  struck out, blocks re-fetched from the honest holder.
-- **Slow peer, rarest-first**: two fast partial seeders + slow full
-  seeder — completes at fast-peer speed, every block exactly once,
-  single-fast-holder blocks served by their fast holder.
+- **50 MB, 3 leechers**: all decode + verify; publisher
+  `served_packets == distinct` and distinct < 1.35×K; links idle out.
+- **Multi-seeder**: two roster-striped seeders, two leechers —
+  served sets provably disjoint, aggregate fresh symbols ≈ one object.
+- **Polluting member**: poisoned payloads on the wire → decode-verify
+  catches, leave-one-out names the member, fetch completes honestly.
+
+Block-path tests (36 unit + 3 network) remain and pass.
 
 ## v1 boundaries, deliberate
 
-- Stores are in-memory; a disk-backed store slots behind the same
-  `BlockStore` surface when artifact sizes demand.
-- Pull-only have-map polling (no server push) — see want-list note.
-- `choose()` scans candidate blocks per pick (fine to ~tens of
-  thousands of blocks; rarity bucketing is the known upgrade).
-- No cross-fetcher endgame coordination and no upload choking — org
-  swarms are small and authenticated; incentives are the ledger's
-  problem (§10), not the scheduler's.
+- Stores are in-memory; pool extension transiently materialises the
+  stream prefix (fine at tens of MB; disk-backed store + windowed
+  generation slot behind the same surface later).
+- Symbols are not individually signed — pollution through an honest
+  relay attributes to the relay (which vouches by serving); signed
+  symbol commitments are the hardening path.
+- `n_stripes` defaults to 8; raise roster-wide when swarms outgrow it
+  (stripe recycling degrades to bandwidth waste, never corruption).
+- Publisher-vs-peer intake balance rides asyncio fairness per round;
+  a shortfall-biased scheduler (poll peers first, publisher for the
+  remainder) is the lever if real-world topologies skew it.

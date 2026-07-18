@@ -1,11 +1,30 @@
 """swarmkit — content-addressed swarm bulk fetch (G2, spec §8).
 
-Large artifacts move as verified blocks pulled from ANY org peer that
-holds them; the transport (relaykit channels over any rung of the
-fallback chain) is untrusted — hashes are integrity, signatures are
-authorship.
+Large artifacts move from ANY org peer over untrusted transport
+(relaykit channels, any rung of the fallback chain) — hashes are
+integrity, signatures are authorship. The primary transfer is the
+RaptorQ fountain path (``fountain*`` — interchangeable coded symbols,
+publisher egress ≈1× by construction); the block scheduler
+(``store``/``protocol``/``fetch``) is superseded but retained.
 """
 
+from .fountain import (
+    DEFAULT_N_STRIPES,
+    DEFAULT_SYMBOL_SIZE,
+    FountainError,
+    FountainStore,
+    build_fountain_manifest,
+    check_fountain_manifest,
+    fountain_id,
+    roster_stripe,
+    source_symbols,
+)
+from .fountain_protocol import FountainMetrics, fountain_handler
+from .fountain_fetch import (
+    FountainFetchError,
+    FountainReport,
+    fountain_fetch,
+)
 from .store import (
     BLOCK_SIZE,
     BlockError,
@@ -27,6 +46,20 @@ from .fetch import (
 )
 
 __all__ = [
+    "DEFAULT_N_STRIPES",
+    "DEFAULT_SYMBOL_SIZE",
+    "FountainError",
+    "FountainStore",
+    "build_fountain_manifest",
+    "check_fountain_manifest",
+    "fountain_id",
+    "roster_stripe",
+    "source_symbols",
+    "FountainMetrics",
+    "fountain_handler",
+    "FountainFetchError",
+    "FountainReport",
+    "fountain_fetch",
     "BLOCK_SIZE",
     "BlockError",
     "BlockStore",

@@ -21,3 +21,8 @@ pyyaml==6.0.3
 pydantic==2.13.4
 cryptography==49.0.0
 python-gnupg==0.5.6
+# RaptorQ (RFC 6330) codec for swarmkit fountain transfer — PyO3
+# bindings of the Apache-2.0 cberner/raptorq crate. Attribution:
+# "raptorq — Copyright Christopher Berner — Apache-2.0,
+# github.com/cberner/raptorq" (no upstream NOTICE file).
+raptorq==2.0.0
