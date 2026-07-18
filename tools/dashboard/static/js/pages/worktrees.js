@@ -53,6 +53,33 @@
     }
   }
 
+  function _linkTtlText(ttl) {
+    if (!ttl) return 'no expiry';
+    if (ttl % 86400 === 0) return (ttl / 86400) + 'd';
+    if (ttl % 3600 === 0) return (ttl / 3600) + 'h';
+    if (ttl % 60 === 0) return (ttl / 60) + 'm';
+    return ttl + 's';
+  }
+
+  // Session-key signing seam (C2 dependency). The sign-on ceremony installs
+  // window.AutonomyNetworkSigner = { available(): bool,
+  // signRegistryRequest(method, path, payload) -> envelope } backed by the
+  // operator's non-extractable session key. Until it lands, approving a
+  // share-link surfaces this error instead of publishing.
+  async function _signLinkDecision(req) {
+    const rr = req.registryRequest;
+    if (!rr) {
+      throw new Error('this request carried no registry request to sign — check the org binding');
+    }
+    const signer = window.AutonomyNetworkSigner;
+    if (!signer || typeof signer.signRegistryRequest !== 'function' ||
+        (typeof signer.available === 'function' && !signer.available())) {
+      throw new Error('no operator session key — the auto.network sign-on ceremony (C2) has not landed yet, so share-links cannot be click-signed');
+    }
+    const envelope = await signer.signRegistryRequest(rr.method, rr.path, rr.payload);
+    return { envelope };
+  }
+
   async function _jsonOrError(resp) {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
@@ -1996,6 +2023,59 @@
             }
           },
         },
+        // Share-link ceremony (spec §6.4): the enrichment resolved the target
+        // title from trusted local stores and staged the EXACT registry
+        // request to sign; approve click-signs it with the operator session
+        // key and rides the envelope on the decision. The server-side
+        // executor forwards it to the registry and returns the URL.
+        link_publish: {
+          open(self, r) {
+            const req = r.request || {};
+            const title = r.target_title || req.target_uuid || '?';
+            const lines = [
+              'Share ' + (r.type_label || req.target_type || '?') +
+                ' “' + title + '” on auto.network.',
+              '',
+              'Link TTL: ' + _linkTtlText(r.ttl),
+            ];
+            if (r.label) lines.push('Label: ' + r.label);
+            if (req.org) lines.push('Org: ' + req.org);
+            if (r.registry_request) lines.push('Registry: ' + r.registry_request.registry_url);
+            if (r.target_error) lines.push('', '⚠ ' + r.target_error);
+            if (r.binding_error) lines.push('', '⚠ ' + r.binding_error);
+            self.approvalRequest = {
+              id: r.id, kind: r.kind, session: r.session,
+              title: 'Publish share-link', actionLabel: 'Approve & publish',
+              op: req.target_type || 'share', target: title,
+              bodyMarkdown: lines.join('\n'),
+              registryRequest: r.registry_request || null,
+            };
+          },
+          decision: (self, req) => _signLinkDecision(req),
+        },
+        link_revoke: {
+          open(self, r) {
+            const req = r.request || {};
+            const title = r.target_title || req.token || '?';
+            const lines = [
+              'Revoke the share-link for ' + (r.type_label ? r.type_label + ' ' : '') +
+                '“' + title + '”.',
+              '',
+              'Token: ' + (req.token || '?'),
+            ];
+            if (r.label) lines.push('Label: ' + r.label);
+            if (!r.cached) lines.push('', '⚠ this token is not in the local grant cache');
+            if (r.binding_error) lines.push('', '⚠ ' + r.binding_error);
+            self.approvalRequest = {
+              id: r.id, kind: r.kind, session: r.session,
+              title: 'Revoke share-link', actionLabel: 'Approve & revoke',
+              op: 'revoke', target: title,
+              bodyMarkdown: lines.join('\n'),
+              registryRequest: r.registry_request || null,
+            };
+          },
+          decision: (self, req) => _signLinkDecision(req),
+        },
         commit_sign: {
           async open(self, r) {
             // Render the pending commit in THIS overlay, in sign mode.
@@ -2132,17 +2212,23 @@
         try { await this._idbOp('readwrite', (s) => s.delete('k')); } catch (e) { /* ignore */ }
       },
 
-      // Approve for kinds whose result is the bare verdict (no client-produced
-      // output like a signature). Execution happens server-side afterwards; the
-      // requester receives the outcome through the approval result.
+      // Approve from the generic overlay. Kinds whose approval must carry
+      // client-produced material (e.g. the session-key-signed registry
+      // envelope for link_publish) declare a ``decision`` builder in
+      // _approvalKinds; its return value is merged into the decision body.
+      // Execution happens server-side afterwards; the requester receives
+      // the outcome through the approval result.
       async approveRequest() {
         const req = this.approvalRequest;
         if (!req || this.approvalBusy) return;
         this.approvalBusy = true;
         try {
+          const kindDef = this._approvalKinds[req.kind];
+          const extra = (kindDef && kindDef.decision)
+            ? await kindDef.decision(this, req) : {};
           const resp = await fetch('/api/approvals/' + encodeURIComponent(req.id) + '/decision', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ approved: true }),
+            body: JSON.stringify({ approved: true, ...extra }),
           });
           if (!resp.ok || !(await resp.json()).ok) {
             throw new Error('the dashboard rejected the decision');

@@ -5385,6 +5385,162 @@ WORKTREES_REBASE_STATUS_CHECKS = """(async () => {
 })()"""
 
 
+LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
+    var r = {};
+    var sleep = function(ms) { return new Promise(resolve => setTimeout(resolve, ms)); };
+    var waitFor = async function(predicate, timeoutMs) {
+        var deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            if (predicate()) return true;
+            await sleep(40);
+        }
+        return false;
+    };
+    var tick = async function() { await Alpine.nextTick(); await sleep(60); };
+    var q = function(id) { return document.querySelector('[data-testid="' + id + '"]'); };
+    var textOf = function(el) { return el ? el.textContent.replace(/\\s+/g, ' ').trim() : ''; };
+
+    r.has_page = await waitFor(function() {
+        return !!document.querySelector('[data-testid="worktrees-page"]');
+    }, 3000);
+    if (!r.has_page) return JSON.stringify(r);
+    // The approval overlay is hosted on the persistent review layer
+    // component (base.html #worktree-review-layer), not the page root —
+    // the same instance window.openApprovalOverlay drives.
+    var data = window._worktreeReviewOverlay;
+    if (!data) { r.error = 'no review-overlay component'; return JSON.stringify(r); }
+
+    // The enriched GET /api/approvals/{id} response the server produces for
+    // a link_publish request (title resolved server-side, TTL, staged
+    // registry request).
+    var row = {
+        id: 'apr-link-1', kind: 'link_publish', session: 'auto-agent-1', result: null,
+        request: { org: 'netorg', target_uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                   target_type: 'present', meta: { ttl: 604800, label: 'binder' } },
+        target_title: 'OSS Insights briefing binder',
+        type_label: 'Present deck', ttl: 604800, label: 'binder',
+        registry_request: {
+            method: 'POST', path: '/v1/links', registry_url: 'https://auto.network',
+            payload: { org: '11111111-1111-4111-8111-111111111111',
+                       target_uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                       target_type: 'present',
+                       meta: { ttl: 604800, label: 'binder' } },
+        },
+    };
+
+    var origFetch = window.fetch;
+    var origSigner = window.AutonomyNetworkSigner;
+    var origToast = window.showToast;
+    var toasts = [];
+    var posted = [];
+    try {
+        window.showToast = function(msg, type) { toasts.push({ msg: msg, type: type }); };
+
+        // ── render: the operator sees WHAT is being shared ───────────
+        data._approvalKinds.link_publish.open(data, row);
+        await tick();
+        r.overlay_open = !!q('approval-request-overlay');
+        r.title_bar = textOf(q('approval-title-bar'));
+        r.body_text = textOf(q('approval-body'));
+
+        window.fetch = async function(url, opts) {
+            posted.push({ url: String(url), body: JSON.parse((opts || {}).body || 'null') });
+            return { ok: true, json: async function() { return { ok: true }; } };
+        };
+
+        // ── approve with NO session key: the C2 seam surfaces cleanly ─
+        delete window.AutonomyNetworkSigner;
+        await data.approveRequest();
+        await tick();
+        r.no_signer_posted = posted.length;
+        r.no_signer_overlay_still_open = !!q('approval-request-overlay');
+        var errToast = toasts.filter(function(t) { return t.type === 'error'; }).pop();
+        r.no_signer_toast = errToast ? errToast.msg : '';
+
+        // ── approve with the C2 signer installed: envelope rides along ─
+        window.AutonomyNetworkSigner = {
+            available: function() { return true; },
+            signRegistryRequest: async function(method, path, payload) {
+                return { v: 1, signer: 'ab', ts: 123, payload: payload,
+                         sig: 'cd', cert: '{"stub":true}',
+                         _signed: method + ' ' + path };
+            },
+        };
+        await data.approveRequest();
+        await tick();
+        var approvePost = posted[posted.length - 1] || {};
+        r.approve_url = approvePost.url || '';
+        r.approve_body = approvePost.body || null;
+        r.approve_overlay_closed = !q('approval-request-overlay');
+
+        // ── decline: kind-agnostic, surfaces to the requester ─────────
+        data._approvalKinds.link_publish.open(data, row);
+        await tick();
+        await data.declineApproval();
+        await tick();
+        var declinePost = posted[posted.length - 1] || {};
+        r.decline_url = declinePost.url || '';
+        r.decline_body = declinePost.body || null;
+        r.decline_overlay_closed = !q('approval-request-overlay');
+    } finally {
+        window.fetch = origFetch;
+        if (origSigner === undefined) { delete window.AutonomyNetworkSigner; }
+        else { window.AutonomyNetworkSigner = origSigner; }
+        if (origToast) { window.showToast = origToast; } else { delete window.showToast; }
+        data.approvalRequest = null;
+    }
+    return JSON.stringify(r);
+})()"""
+
+
+class TestLinkPublishApprovalOverlay:
+    """L2.B for the C3 share-link ceremony on the existing approvals surface.
+
+    The link_publish dialog must show WHAT is being shared (resolved target
+    title + TTL), approve must click-sign the staged registry request via
+    the C2 signer seam and post the envelope on the decision, and decline
+    must post the plain refusal the requester's held GET surfaces.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        result = _navigate_and_eval_async(
+            "/worktrees", LINK_PUBLISH_APPROVAL_CHECKS, wait_ms=1200)
+        request.cls._checks = result
+
+    def test_dialog_renders_target_title_and_ttl(self):
+        c = self._checks
+        assert c.get("overlay_open"), f"approval overlay never opened: {c}"
+        assert "Publish share-link" in c.get("title_bar", "")
+        assert "OSS Insights briefing binder" in c.get("body_text", "")
+        assert "Link TTL: 7d" in c.get("body_text", "")
+        assert "Present deck" in c.get("body_text", "")
+
+    def test_approve_without_session_key_is_a_clean_c2_error(self):
+        c = self._checks
+        assert c.get("no_signer_posted") == 0, "decision must not post without a signature"
+        assert c.get("no_signer_overlay_still_open"), "overlay must stay open on signer failure"
+        assert "C2" in c.get("no_signer_toast", ""), (
+            f"C2 seam error not surfaced: {c.get('no_signer_toast')!r}")
+
+    def test_approve_signs_staged_request_and_resolves(self):
+        c = self._checks
+        assert c.get("approve_url", "").endswith("/api/approvals/apr-link-1/decision")
+        body = c.get("approve_body") or {}
+        assert body.get("approved") is True
+        envelope = body.get("envelope") or {}
+        assert envelope.get("_signed") == "POST /v1/links", (
+            f"signer saw the wrong staged request: {envelope}")
+        assert (envelope.get("payload") or {}).get("meta", {}).get("ttl") == 604800
+        assert c.get("approve_overlay_closed"), "overlay should close after approve"
+
+    def test_decline_posts_plain_refusal(self):
+        c = self._checks
+        assert c.get("decline_url", "").endswith("/api/approvals/apr-link-1/decision")
+        assert c.get("decline_body") == {"approved": False}
+        assert c.get("decline_overlay_closed"), "overlay should close after decline"
+
+
 class TestWorktreesRebaseStatusBehavior:
     """Worktrees page agent-→dashboard rebase status channel (auto-r1dc4).
 

@@ -253,7 +253,7 @@ def test_executor_runs_after_verdict_and_delivers_outcome(tmp_path, monkeypatch)
     monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approval_requests.db")
     calls = []
 
-    async def fake_executor(row):
+    async def fake_executor(row, decision):
         calls.append(row["request"])
         await asyncio.sleep(0.05)
         return {"ok": True, "ticket": "ENT-1"}
@@ -282,7 +282,7 @@ def test_executor_never_runs_on_decline(tmp_path, monkeypatch):
     monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approval_requests.db")
     calls = []
 
-    async def fake_executor(row):
+    async def fake_executor(row, decision):
         calls.append(row)
         return {"ok": True}
 
@@ -298,7 +298,7 @@ def test_executor_never_runs_on_decline(tmp_path, monkeypatch):
 def test_executor_failure_reported_not_hung(tmp_path, monkeypatch):
     monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approval_requests.db")
 
-    async def fake_executor(row):
+    async def fake_executor(row, decision):
         raise ValueError("boom")
 
     monkeypatch.setitem(approvals_routes.EXECUTORS, "jira_write", fake_executor)
@@ -318,7 +318,7 @@ def test_double_approve_executes_once(tmp_path, monkeypatch):
     monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approval_requests.db")
     calls = []
 
-    async def slow_executor(row):
+    async def slow_executor(row, decision):
         calls.append(1)
         await asyncio.sleep(0.2)
         return {"ok": True}
