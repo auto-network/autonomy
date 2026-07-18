@@ -37,13 +37,18 @@ Invariants enforced here:
 * staged-request integrity — the envelope's payload must equal the payload
   derived from the *stored* request row; what the operator saw is exactly
   what gets published.
-* audience pinning (confused-deputy guard) — the registry envelope binds
-  only method/path/payload, not the destination host, and the executor
-  reloads the org binding at execution time. So the approve decision also
-  carries the ``registry_url`` the dialog displayed and the signer saw,
-  and the executor REFUSES when the current binding's ``registry_url``
-  differs: a binding swap between render and approval must never silently
-  redirect an operator-approved publish to a different registry.
+* audience freezing (confused-deputy guard) — the registry envelope binds
+  only method/path/payload, not the destination host. So the FIRST render
+  of the dialog freezes the full staged request server-side (method, path,
+  payload, ``registry_url``, and a binding snapshot incl. ``root_pub``)
+  onto the approval row, write-once. Execution takes its destination from
+  that frozen snapshot ONLY — never from the decision body (client-
+  controlled: a compromised browser could claim any audience) and never
+  from a re-read of the mutable binding — and additionally REFUSES when
+  the current binding has drifted from the snapshot (registry_url,
+  org_uuid, or root_pub), so a swap between render and approval surfaces
+  as a "re-run the publish", never as a silent redirect. What the operator
+  was shown is exactly what executes.
 """
 
 from __future__ import annotations
@@ -53,6 +58,7 @@ import time
 
 import httpx
 
+from tools.dashboard.dao import approval_requests as ar
 from tools.graph import settings_ops
 # Importing registers the autonomy.network.* Setting schemas (they
 # self-register on import), so grant-cache writes validate.
@@ -154,6 +160,38 @@ def _registry_payload(req: dict, binding: dict) -> dict:
 
 
 # ── GET enrichment (what the operator reviews) ────────────────
+#
+# The first render FREEZES the staged registry request onto the approval
+# row (write-once, server-side). Every later render — and the execution —
+# reads the frozen snapshot, so a binding change after first render can
+# never move the destination out from under the operator; it can only
+# surface as a drift warning here and a refusal at execute.
+
+
+def _staged_registry_request(row: dict, build) -> tuple[dict | None, str | None, bool]:
+    """The frozen staged request for *row* → (staged, binding_error, drift).
+
+    Freezes via *build(binding)* on first render; afterwards returns the
+    stored snapshot and flags drift against the current binding.
+    """
+    org = row["request"].get("org")
+    binding, binding_error = _load_binding(org)
+    staged = row.get("staged")
+    if staged is None:
+        if binding is None:
+            return None, binding_error, False
+        staged = build(binding)
+        staged["binding"] = {
+            "org_uuid": binding["org_uuid"],
+            "root_pub": binding["root_pub"],
+            "registry_url": binding["registry_url"],
+        }
+        ar.set_staged(row["id"], staged)
+        # Re-read: a concurrent first render may have won the write-once.
+        fresh = ar.get(row["id"])
+        staged = (fresh or {}).get("staged") or staged
+    drift = binding is not None and _binding_drift_error(staged, binding) is not None
+    return staged, None, drift
 
 
 def _enrich_link_publish(row: dict) -> dict:
@@ -161,7 +199,15 @@ def _enrich_link_publish(row: dict) -> dict:
     org = req.get("org")
     meta = req.get("meta") or {}
     target = _resolve_target(req.get("target_type", ""), req.get("target_uuid", ""), org)
-    binding, binding_error = _load_binding(org)
+    staged, binding_error, drift = _staged_registry_request(
+        row,
+        lambda binding: {
+            "method": "POST",
+            "path": "/v1/links",
+            "registry_url": binding["registry_url"],
+            "payload": _registry_payload(req, binding),
+        },
+    )
     out = {
         "target_title": target["title"],
         "target_error": target["error"],
@@ -169,14 +215,11 @@ def _enrich_link_publish(row: dict) -> dict:
         "ttl": meta.get("ttl"),
         "label": meta.get("label"),
         "binding_error": binding_error,
+        "binding_drift": drift,
     }
-    if binding:
-        out["registry_request"] = {
-            "method": "POST",
-            "path": "/v1/links",
-            "registry_url": binding["registry_url"],
-            "payload": _registry_payload(req, binding),
-        }
+    if staged:
+        out["registry_request"] = {k: staged[k]
+                                   for k in ("method", "path", "registry_url", "payload")}
     return out
 
 
@@ -184,7 +227,6 @@ def _enrich_link_revoke(row: dict) -> dict:
     req = row["request"]
     org = req.get("org")
     token = req.get("token", "")
-    binding, binding_error = _load_binding(org)
     # Show which grant dies: resolve the token through the local grant cache.
     grant = _cached_grant(token, org)
     target_title, type_label = None, None
@@ -194,20 +236,26 @@ def _enrich_link_revoke(row: dict) -> dict:
         target_title = resolved["title"] or grant.get("target_uuid")
         type_label = _TYPE_LABELS.get(grant.get("target_type", ""),
                                       grant.get("target_type"))
+    staged, binding_error, drift = _staged_registry_request(
+        row,
+        lambda binding: {
+            "method": "DELETE",
+            "path": f"/v1/links/{token}",
+            "registry_url": binding["registry_url"],
+            "payload": {},
+        },
+    )
     out = {
         "target_title": target_title,
         "type_label": type_label,
         "label": (grant.get("meta") or {}).get("label") if grant else None,
         "cached": grant is not None,
         "binding_error": binding_error,
+        "binding_drift": drift,
     }
-    if binding:
-        out["registry_request"] = {
-            "method": "DELETE",
-            "path": f"/v1/links/{token}",
-            "registry_url": binding["registry_url"],
-            "payload": {},
-        }
+    if staged:
+        out["registry_request"] = {k: staged[k]
+                                   for k in ("method", "path", "registry_url", "payload")}
     return out
 
 
@@ -234,25 +282,42 @@ def _fail(error: str) -> dict:
     return {"ok": False, "error": error}
 
 
-def _audience_error(decision: dict, binding: dict) -> str | None:
-    """The confused-deputy guard: the destination the operator approved must
-    be exactly the destination this execution would forward to."""
-    approved_url = decision.get("registry_url")
-    if not isinstance(approved_url, str) or not approved_url:
+def _binding_drift_error(staged: dict, binding: dict) -> str | None:
+    """Confused-deputy guard, half two: the frozen snapshot is the ONLY
+    execution context, and any drift of the live binding away from it
+    (destination, org identity, or root key) refuses the execution rather
+    than executing against state the operator never reviewed."""
+    frozen = staged.get("binding")
+    if not isinstance(frozen, dict):
+        return "staged request carries no binding snapshot — refusing to forward"
+    drifted = [
+        f"{key}: approved {frozen.get(key)!r}, now {binding.get(key)!r}"
+        for key in ("registry_url", "org_uuid", "root_pub")
+        if frozen.get(key) != binding.get(key)
+    ]
+    if drifted:
         return (
-            "decision carried no registry_url — the approved destination "
-            "must ride the decision so a binding swap cannot redirect the "
-            "signed request (confused-deputy guard)"
-        )
-    if approved_url != binding["registry_url"]:
-        return (
-            "the org's registry binding changed between review and approval "
-            f"(operator approved {approved_url!r}, binding now points at "
-            f"{binding['registry_url']!r}) — refusing to forward the signed "
-            "request; re-run the publish so the operator reviews the new "
-            "destination"
+            "the org's auto.network binding changed between review and "
+            "approval (" + "; ".join(drifted) + ") — refusing to forward "
+            "the signed request; re-run the publish so the operator reviews "
+            "the new destination"
         )
     return None
+
+
+def _frozen_staged(row: dict) -> tuple[dict | None, str | None]:
+    """The server-frozen staged request an execution is allowed to use.
+
+    Nothing client-supplied substitutes for it: if the request was never
+    rendered (so never frozen), the execution refuses outright."""
+    staged = row.get("staged")
+    if not isinstance(staged, dict) or not staged.get("registry_url"):
+        return None, (
+            "this request was never staged — the dialog render freezes the "
+            "exact registry request server-side, and execution refuses to "
+            "proceed without that snapshot (confused-deputy guard)"
+        )
+    return staged, None
 
 
 def _envelope_and_subject(decision: dict) -> tuple[dict | None, dict | None, str | None]:
@@ -289,14 +354,16 @@ def _envelope_and_subject(decision: dict) -> tuple[dict | None, dict | None, str
     return envelope, subject, None
 
 
-async def _forward_to_registry(binding: dict, envelope: dict, method: str,
-                               path: str) -> tuple[httpx.Response | None, str | None]:
+async def _forward_to_registry(staged: dict, envelope: dict) -> tuple[httpx.Response | None, str | None]:
+    """Forward the signed envelope to the FROZEN destination — method, path,
+    and registry_url all come from the server-side snapshot, never from the
+    decision body or a re-read binding."""
     try:
-        async with _registry_client(binding["registry_url"]) as client:
-            resp = await client.request(method, path, json=envelope)
+        async with _registry_client(staged["registry_url"]) as client:
+            resp = await client.request(staged["method"], staged["path"], json=envelope)
         return resp, None
     except httpx.HTTPError as e:
-        return None, f"could not reach the registry at {binding['registry_url']}: {e}"
+        return None, f"could not reach the registry at {staged['registry_url']}: {e}"
 
 
 def _registry_error(resp: httpx.Response) -> str:
@@ -313,17 +380,19 @@ async def _execute_link_publish(row: dict, decision: dict) -> dict:
     envelope, subject, err = _envelope_and_subject(decision)
     if err:
         return _fail(err)
+    staged, err = _frozen_staged(row)
+    if err:
+        return _fail(err)
     binding, binding_error = _load_binding(org)
     if binding_error:
         return _fail(binding_error)
-    audience_error = _audience_error(decision, binding)
-    if audience_error:
-        return _fail(audience_error)
-    expected = _registry_payload(req, binding)
-    if envelope.get("payload") != expected:
-        # What was staged is exactly what an approval applies to.
-        return _fail("signed payload does not match the approved request — refusing to publish")
-    resp, err = await _forward_to_registry(binding, envelope, "POST", "/v1/links")
+    drift_error = _binding_drift_error(staged, binding)
+    if drift_error:
+        return _fail(drift_error)
+    if envelope.get("payload") != staged["payload"]:
+        # What was staged (and displayed) is exactly what an approval applies to.
+        return _fail("signed payload does not match the staged request — refusing to publish")
+    resp, err = await _forward_to_registry(staged, envelope)
     if err:
         return _fail(err)
     if resp.status_code != 201:
@@ -355,15 +424,18 @@ async def _execute_link_revoke(row: dict, decision: dict) -> dict:
     envelope, _subject, err = _envelope_and_subject(decision)
     if err:
         return _fail(err)
+    staged, err = _frozen_staged(row)
+    if err:
+        return _fail(err)
     binding, binding_error = _load_binding(org)
     if binding_error:
         return _fail(binding_error)
-    audience_error = _audience_error(decision, binding)
-    if audience_error:
-        return _fail(audience_error)
+    drift_error = _binding_drift_error(staged, binding)
+    if drift_error:
+        return _fail(drift_error)
     if envelope.get("payload") != {}:
         return _fail("revoke envelopes carry an empty payload — refusing to forward")
-    resp, err = await _forward_to_registry(binding, envelope, "DELETE", f"/v1/links/{token}")
+    resp, err = await _forward_to_registry(staged, envelope)
     if err:
         return _fail(err)
     # 404 = the registry never had (or already dropped) it; the local cache

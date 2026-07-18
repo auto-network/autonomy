@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS approval_requests (
     kind        TEXT NOT NULL,   -- e.g. 'commit_sign'; per-kind behavior lives in handlers, not columns
     session     TEXT NOT NULL,   -- the requesting session (the routing key)
     request     TEXT NOT NULL,   -- kind-specific JSON: what the operator reviews / what gets executed
+    staged      TEXT,            -- server-frozen execution context, written ONCE at first render
     result      TEXT,            -- NULL = pending; decision JSON {"approved": bool, ...kind fields}
     created_at  REAL NOT NULL
 );
@@ -41,6 +42,11 @@ def _conn(db_path: Path | str | None = None) -> sqlite3.Connection:
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA journal_mode=WAL")
     c.executescript(SCHEMA)  # cheap CREATE IF NOT EXISTS; keeps callers simple
+    try:  # pre-``staged`` databases: additive migration
+        c.execute("ALTER TABLE approval_requests ADD COLUMN staged TEXT")
+        c.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
     return c
 
 
@@ -76,8 +82,28 @@ def get(request_id: str, db_path: Path | str | None = None) -> dict | None:
         return None
     d = dict(r)
     d["request"] = json.loads(d["request"])
+    d["staged"] = json.loads(d["staged"]) if d.get("staged") is not None else None
     d["result"] = json.loads(d["result"]) if d["result"] is not None else None
     return d
+
+
+def set_staged(request_id: str, staged: dict, db_path: Path | str | None = None) -> bool:
+    """Freeze the server-computed execution context (e.g. the exact registry
+    request a link_publish will forward, destination included) the first
+    time the request is rendered. Write-once — first writer wins — so what
+    the operator was shown is immutably what an approval executes; nothing
+    client-supplied and no later state change can move it. Returns True iff
+    this call did the freeze."""
+    c = _conn(db_path)
+    try:
+        cur = c.execute(
+            "UPDATE approval_requests SET staged = ? WHERE id = ? AND staged IS NULL",
+            (json.dumps(staged), request_id),
+        )
+        c.commit()
+        return cur.rowcount > 0
+    finally:
+        c.close()
 
 
 def set_result(request_id: str, result: dict, db_path: Path | str | None = None) -> bool:

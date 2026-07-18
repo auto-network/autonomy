@@ -151,11 +151,11 @@ def _cached_grants():
             for m in settings_ops.read_set(NETWORK_LINK_GRANT_SET_ID, org=ORG)}
 
 
-def _approve_body(envelope, rr):
-    """What the browser posts: the signed envelope + the displayed
-    destination (the confused-deputy audience pin)."""
-    return {"approved": True, "envelope": envelope,
-            "registry_url": rr["registry_url"]}
+def _approve_body(envelope, rr=None):
+    """What the browser posts: just the verdict + the signed envelope. The
+    destination is frozen server-side at render; the decision cannot carry
+    or influence it."""
+    return {"approved": True, "envelope": envelope}
 
 
 def _publish(client, session_key, session_cert, meta=None):
@@ -299,16 +299,121 @@ def test_binding_swap_between_render_and_approve_refused(
     assert _cached_grants() == {}   # and nothing entered the serving cache
 
 
-def test_decision_without_registry_url_refused(env, session_key, session_cert):
-    """The audience pin is mandatory: an approve that omits registry_url
-    (e.g. a stale or hostile client) is refused, not defaulted."""
+def test_forged_audience_claim_ignored(env, session_key, session_cert,
+                                       registry_app, monkeypatch):
+    """Codex escalation repro: the attacker swaps the binding to evil AND
+    forges the decision body to claim registry_url=evil so a client-trusting
+    check would 'match'. The executor takes its destination from the
+    server-frozen snapshot only — the forged claim changes nothing, the
+    drift refuses, and nothing is ever forwarded to evil."""
+    forwarded = []
+
+    def recording_client(base_url):
+        forwarded.append(base_url)
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=registry_app), base_url=base_url)
+
+    monkeypatch.setattr(link_approvals, "_registry_client", recording_client)
+
     rid = _create_publish(env)
     rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
     envelope = _signed_envelope(session_key, session_cert, rr)
-    result = _decide_and_wait(env, rid, {"approved": True, "envelope": envelope})
-    assert result["execution"]["ok"] is False
-    assert "confused-deputy" in result["execution"]["error"]
+    settings_ops.upsert_by_key(
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry.test",
+        {
+            "org_uuid": ORG_UUID,
+            "root_pub": envelope["signer"],
+            "registry_url": "http://evil-registry.test",
+            "recovery_policy": {"mode": "none"},
+            "binding_expires_at": "2030-01-01T00:00:00Z",
+        },
+        org=ORG,
+    )
+    result = _decide_and_wait(env, rid, {
+        "approved": True, "envelope": envelope,
+        "registry_url": "http://evil-registry.test",   # the forged claim
+    })
+    execution = result["execution"]
+    assert execution["ok"] is False
+    assert "changed between review and approval" in execution["error"]
+    assert "http://evil-registry.test" not in forwarded
+    assert forwarded == []
     assert _cached_grants() == {}
+
+
+def test_root_pub_swap_after_render_refused(env, session_key, session_cert,
+                                            registry_app, root, monkeypatch):
+    """Codex escalation repro: same registry_url, but the binding's root_pub
+    is swapped after render (an org-identity substitution). The frozen
+    binding snapshot catches it; execution refuses, nothing forwarded."""
+    forwarded = []
+
+    def recording_client(base_url):
+        forwarded.append(base_url)
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=registry_app), base_url=base_url)
+
+    monkeypatch.setattr(link_approvals, "_registry_client", recording_client)
+
+    rid = _create_publish(env)
+    rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
+    envelope = _signed_envelope(session_key, session_cert, rr)
+    settings_ops.upsert_by_key(
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry.test",
+        {
+            "org_uuid": ORG_UUID,
+            "root_pub": KeyPair.generate().public_hex,   # swapped identity
+            "registry_url": REGISTRY_URL,                # url unchanged
+            "recovery_policy": {"mode": "none"},
+            "binding_expires_at": "2030-01-01T00:00:00Z",
+        },
+        org=ORG,
+    )
+    result = _decide_and_wait(env, rid, _approve_body(envelope))
+    execution = result["execution"]
+    assert execution["ok"] is False
+    assert "root_pub" in execution["error"]
+    assert forwarded == []
+    assert _cached_grants() == {}
+
+
+def test_unstaged_approval_refused(env, session_key, session_cert):
+    """No render, no freeze, no execution: a decision on a request that was
+    never staged server-side is refused — the client cannot substitute its
+    own idea of the registry request."""
+    rid = _create_publish(env)
+    payload = {"org": ORG_UUID, "target_uuid": TARGET, "target_type": "present"}
+    envelope = sign_request(session_key, "POST", "/v1/links", payload,
+                            ts=int(time.time()), cert=session_cert)
+    result = _decide_and_wait(env, rid, _approve_body(envelope))
+    assert result["execution"]["ok"] is False
+    assert "never staged" in result["execution"]["error"]
+    assert _cached_grants() == {}
+
+
+def test_rerender_shows_frozen_destination_and_drift(env, session_key,
+                                                     session_cert):
+    """A re-open after a binding swap still shows the FROZEN destination —
+    the operator can never see (and approve) a moved target — plus a drift
+    flag the dialog turns into a warning."""
+    rid = _create_publish(env)
+    first = env.get(f"/api/approvals/{rid}").json()
+    assert first["registry_request"]["registry_url"] == REGISTRY_URL
+    assert first["binding_drift"] is False
+    settings_ops.upsert_by_key(
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry.test",
+        {
+            "org_uuid": ORG_UUID,
+            "root_pub": KeyPair.generate().public_hex,
+            "registry_url": "http://evil-registry.test",
+            "recovery_policy": {"mode": "none"},
+            "binding_expires_at": "2030-01-01T00:00:00Z",
+        },
+        org=ORG,
+    )
+    second = env.get(f"/api/approvals/{rid}").json()
+    assert second["registry_request"]["registry_url"] == REGISTRY_URL  # frozen
+    assert second["binding_drift"] is True
 
 
 def test_registry_rejection_propagates(env, session_key, root):
