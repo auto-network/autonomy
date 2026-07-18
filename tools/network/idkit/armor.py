@@ -36,6 +36,7 @@ import base64
 import binascii
 import json
 import os
+import re
 import textwrap
 
 from cryptography.exceptions import InvalidTag
@@ -120,8 +121,39 @@ def encrypt_root_key(
     return "\n".join([ARMOR_BEGIN, *textwrap.wrap(b64, 64), ARMOR_END])
 
 
+#: GCM ciphertext of the 32-byte seed: seed + 16-byte auth tag.
+_CT_LEN = _SEED_LEN + 16
+
+_ROOT_PUB_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _b64_field(container: dict, key: str, *, length: int, what: str) -> bytes:
+    value = container.get(key)
+    if not isinstance(value, str):
+        raise ArmorError(f"armor {what} must be a base64 string")
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ArmorError(f"armor {what} does not base64-decode: {exc}") from exc
+    if len(raw) != length:
+        raise ArmorError(f"armor {what} must decode to exactly {length} bytes")
+    if base64.b64encode(raw).decode("ascii") != value:
+        # One accepted byte form (anti-malleability): no alternate
+        # paddings/alphabets that decode equal but store different.
+        raise ArmorError(f"armor {what} is not canonical base64")
+    return raw
+
+
 def parse_armor(armor: str) -> dict:
-    """Parse the armor text into its inner dict without decrypting."""
+    """Parse the armor text into its inner dict without decrypting.
+
+    STRICT: the decoded body must carry EXACTLY the canonical fields —
+    ``{v, kdf{name, hash, iterations, salt}, cipher{name, iv}, root_pub,
+    ct}`` — with valid formats and lengths. Unknown fields are rejected
+    outright: the armor is the ONLY thing the org-key store persists, so
+    a tolerated extra field would be a smuggling channel for plaintext
+    key material riding inside an otherwise-valid armor (I1).
+    """
     if not isinstance(armor, str):
         raise ArmorError("armor must be a string")
     lines = [ln.strip() for ln in armor.strip().splitlines() if ln.strip()]
@@ -134,27 +166,67 @@ def parse_armor(armor: str) -> dict:
         raise ArmorError(f"armor body does not decode: {exc}") from exc
     if not isinstance(data, dict):
         raise ArmorError("armor body must be a JSON object")
-    if data.get("v") != ARMOR_VERSION:
-        raise ArmorError(f"unsupported armor version: {data.get('v')!r}")
-    kdf, cipher = data.get("kdf"), data.get("cipher")
+    if set(data) != {"v", "kdf", "cipher", "root_pub", "ct"}:
+        raise ArmorError(
+            "armor body must carry exactly {v, kdf, cipher, root_pub, ct} — "
+            f"got {sorted(data)}; unknown fields are refused (I1: the armor "
+            "must not be a carrier for anything else)"
+        )
+    if data["v"] != ARMOR_VERSION:
+        raise ArmorError(f"unsupported armor version: {data['v']!r}")
+    kdf, cipher = data["kdf"], data["cipher"]
     if (
         not isinstance(kdf, dict)
-        or kdf.get("name") != "PBKDF2"
-        or kdf.get("hash") != "SHA-256"
-        or type(kdf.get("iterations")) is not int
+        or set(kdf) != {"name", "hash", "iterations", "salt"}
+        or kdf["name"] != "PBKDF2"
+        or kdf["hash"] != "SHA-256"
+        or type(kdf["iterations"]) is not int
         or not (_MIN_ITERATIONS <= kdf["iterations"] <= _MAX_ITERATIONS)
-        or not isinstance(kdf.get("salt"), str)
     ):
-        raise ArmorError("armor kdf must be PBKDF2/SHA-256 with sane iterations and a salt")
+        raise ArmorError(
+            "armor kdf must be exactly {name: PBKDF2, hash: SHA-256, "
+            "iterations, salt} with sane iterations"
+        )
     if (
         not isinstance(cipher, dict)
-        or cipher.get("name") != "AES-256-GCM"
-        or not isinstance(cipher.get("iv"), str)
+        or set(cipher) != {"name", "iv"}
+        or cipher["name"] != "AES-256-GCM"
     ):
-        raise ArmorError("armor cipher must be AES-256-GCM with an iv")
-    if not isinstance(data.get("root_pub"), str) or not isinstance(data.get("ct"), str):
-        raise ArmorError("armor must carry root_pub and ct")
+        raise ArmorError("armor cipher must be exactly {name: AES-256-GCM, iv}")
+    if not isinstance(data["root_pub"], str) or not _ROOT_PUB_RE.match(data["root_pub"]):
+        raise ArmorError("armor root_pub must be 64 lowercase hex chars")
+    _b64_field(kdf, "salt", length=_SALT_LEN, what="kdf.salt")
+    _b64_field(cipher, "iv", length=_IV_LEN, what="cipher.iv")
+    _b64_field(data, "ct", length=_CT_LEN, what="ct")
     return data
+
+
+def canonicalize_armor(armor: str) -> str:
+    """Strict-parse *armor* and re-emit it in the one canonical byte form.
+
+    Belt-and-suspenders for anything that PERSISTS an armor it did not
+    mint itself (the dashboard org-key store): the output is rebuilt
+    field-by-field from the strictly-parsed dict, so only the allowed
+    fields can survive into storage regardless of how the input text was
+    laid out.
+    """
+    data = parse_armor(armor)
+    body = canonical_json(
+        {
+            "v": ARMOR_VERSION,
+            "kdf": {
+                "name": "PBKDF2",
+                "hash": "SHA-256",
+                "iterations": data["kdf"]["iterations"],
+                "salt": data["kdf"]["salt"],
+            },
+            "cipher": {"name": "AES-256-GCM", "iv": data["cipher"]["iv"]},
+            "root_pub": data["root_pub"],
+            "ct": data["ct"],
+        }
+    )
+    b64 = base64.b64encode(body).decode("ascii")
+    return "\n".join([ARMOR_BEGIN, *textwrap.wrap(b64, 64), ARMOR_END])
 
 
 def decrypt_root_key(armor: str, passphrase: str) -> KeyPair:

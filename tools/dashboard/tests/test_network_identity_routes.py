@@ -295,3 +295,80 @@ def test_mock_mode_stores_nothing(env, monkeypatch, root):
                     json={"armored_private_key": _armor(root)}).status_code == 502
     assert env.post("/api/network/register",
                     json={"envelope": {}}).status_code == 502
+
+
+# ── smuggled-plaintext regression (Codex I1 finding) ──────────────────
+#
+# A decryptable armor whose base64 body carried an EXTRA
+# {private_hex: <seed>} field used to be stored verbatim and served
+# back — plaintext in graph.db, invisible to a raw-hex grep because it
+# rode base64-encoded. The store must refuse it, and the pin must grep
+# the DECODED body of whatever got persisted.
+
+import base64
+import json
+
+
+def _smuggled_armor(root: KeyPair) -> str:
+    """Codex's repro: valid armor + private_hex smuggled into the body."""
+    import textwrap
+    armor = _armor(root)
+    lines = armor.strip().splitlines()
+    body = json.loads(base64.b64decode("".join(lines[1:-1])))
+    body["private_hex"] = root.private_hex
+    b64 = base64.b64encode(json.dumps(body).encode()).decode()
+    return "\n".join([lines[0], *textwrap.wrap(b64, 64), lines[-1]])
+
+
+def _decoded_stored_armor_bodies() -> list[dict]:
+    """Every persisted org-key armor, base64-DECODED back to its dict."""
+    bodies = []
+    for m in settings_ops.read_set(NETWORK_ORG_KEY_SET_ID, org=ORG).members:
+        lines = m.payload["armored_private_key"].strip().splitlines()
+        bodies.append(json.loads(base64.b64decode("".join(lines[1:-1]))))
+    return bodies
+
+
+def test_smuggled_plaintext_armor_refused(env, root):
+    r = env.post("/api/network/org-key",
+                 json={"org": ORG, "armored_private_key": _smuggled_armor(root)})
+    assert r.status_code == 400
+    assert "I1" in r.json()["error"]
+    # Nothing persisted at all — served 404, zero rows, so the seed is
+    # absent from graph.db in ANY encoding.
+    assert env.get(f"/api/network/org-key?org={ORG}").status_code == 404
+    assert settings_ops.read_set(NETWORK_ORG_KEY_SET_ID, org=ORG).members == []
+
+
+def test_stored_armor_body_decodes_to_canonical_fields_only(env, root):
+    """Decoded-payload pin: the persisted armor body carries EXACTLY the
+    canonical fields and no trace of the seed in decoded form."""
+    _store_key(env, root)
+    bodies = _decoded_stored_armor_bodies()
+    assert len(bodies) == 1
+    body = bodies[0]
+    assert set(body) == {"v", "kdf", "cipher", "root_pub", "ct"}
+    assert set(body["kdf"]) == {"name", "hash", "iterations", "salt"}
+    assert set(body["cipher"]) == {"name", "iv"}
+    decoded_text = json.dumps(body)
+    assert root.private_hex not in decoded_text
+    assert "private_hex" not in decoded_text
+    # The ct field is real ciphertext, not a disguised seed: GCM output
+    # of the 32-byte seed is exactly 48 bytes and differs from the seed.
+    ct = base64.b64decode(body["ct"])
+    assert len(ct) == 48
+    assert bytes.fromhex(root.private_hex) not in ct
+
+
+def test_store_reserializes_to_canonical_form(env, root):
+    """Belt-and-suspenders: even a cosmetically re-wrapped (but clean)
+    armor is stored in the ONE canonical byte form."""
+    from tools.network.idkit.armor import canonicalize_armor
+    armor = _armor(root)
+    lines = armor.strip().splitlines()
+    rewrapped = "\n".join([lines[0], "".join(lines[1:-1]), lines[-1]])  # one long line
+    r = env.post("/api/network/org-key",
+                 json={"org": ORG, "armored_private_key": rewrapped})
+    assert r.status_code == 200, r.text
+    served = env.get(f"/api/network/org-key?org={ORG}").json()
+    assert served["armored_private_key"] == canonicalize_armor(armor)

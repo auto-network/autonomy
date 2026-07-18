@@ -13349,6 +13349,28 @@ class TestNetworkSignOn:
 C1_PASSPHRASE = "sweep ceremony passphrase"
 C1_EXPIRY_ISO = "2026-08-17T00:00:00Z"
 
+
+def _c1_smuggled_armor() -> tuple[str, str]:
+    """Codex I1 finding repro: a decryptable armor whose base64 body
+    carries an extra {private_hex: <seed>} field. The browser decrypt
+    must fail closed on it (mirror of armor.py's strict parse)."""
+    import base64 as _b64
+
+    smuggle_root = KeyPair.generate()
+    armor = encrypt_root_key(smuggle_root, C1_PASSPHRASE, iterations=10_000)
+    lines = armor.strip().splitlines()
+    body = json.loads(_b64.b64decode("".join(lines[1:-1])))
+    body["private_hex"] = smuggle_root.private_hex
+    forged = "\n".join([
+        lines[0],
+        _b64.b64encode(json.dumps(body).encode()).decode(),
+        lines[-1],
+    ])
+    return forged, smuggle_root.private_hex
+
+
+C1_SMUGGLED_ARMOR, C1_SMUGGLED_SEED = _c1_smuggled_armor()
+
 _NETWORK_IDENTITY_JS = r"""
 (async () => {
     const S = window.AutonomyNetworkSession;
@@ -13435,6 +13457,12 @@ _NETWORK_IDENTITY_JS = r"""
         await S.ready();
         await S.signOut();
         ID.close();
+
+        // 0 · fail-closed regression (Codex I1 finding): an armor with a
+        // smuggled body field must not open in the browser either
+        r.smuggle_reject = null;
+        try { await S._internals.decryptArmor(__SMUGGLED__, PASS); }
+        catch (e) { r.smuggle_reject = String(e.message || e); }
 
         // 1 · entry point visible in the signed-out sign-on panel
         document.querySelector('[data-testid=network-signon-indicator]').click();
@@ -13523,6 +13551,7 @@ def _network_identity_js() -> str:
         _NETWORK_IDENTITY_JS
         .replace("__PASSPHRASE__", json.dumps(C1_PASSPHRASE))
         .replace("__EXPIRY__", json.dumps(C1_EXPIRY_ISO))
+        .replace("__SMUGGLED__", json.dumps(C1_SMUGGLED_ARMOR))
     )
 
 
@@ -13555,6 +13584,15 @@ class TestNetworkIdentityCeremony:
         c = self._checks
         assert "do not match" in (c["mismatch_error"] or "")
         assert c["mismatch_no_post"] == 0
+
+    def test_smuggled_armor_fails_closed_in_browser(self):
+        """Codex I1 regression: an armor body carrying a smuggled
+        private_hex field is refused by the browser decrypt BEFORE any
+        key derivation — the strict shape check mirrors armor.py."""
+        c = self._checks
+        assert "non-canonical" in (c["smuggle_reject"] or ""), c.get("smuggle_reject")
+        # And the smuggled seed never reached any POST in the run.
+        assert C1_SMUGGLED_SEED not in json.dumps(c["captured"])
 
     # ── acceptance: the stored blob is armor only, and it is C2's armor ──
 
