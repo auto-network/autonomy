@@ -77,7 +77,12 @@
       throw new Error('no operator session key — the auto.network sign-on ceremony (C2) has not landed yet, so share-links cannot be click-signed');
     }
     const envelope = await signer.signRegistryRequest(rr.method, rr.path, rr.payload);
-    return { envelope };
+    // The envelope binds method/path/payload but NOT the destination host.
+    // Pin the displayed registry_url onto the decision so the executor can
+    // refuse if the org binding is swapped between render and approval
+    // (confused-deputy guard — the operator approves a destination, not
+    // "wherever the binding points now").
+    return { envelope, registry_url: rr.registry_url };
   }
 
   async function _jsonOrError(resp) {

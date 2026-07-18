@@ -5532,6 +5532,10 @@ class TestLinkPublishApprovalOverlay:
         assert envelope.get("_signed") == "POST /v1/links", (
             f"signer saw the wrong staged request: {envelope}")
         assert (envelope.get("payload") or {}).get("meta", {}).get("ttl") == 604800
+        # Confused-deputy guard: the decision pins the DISPLAYED destination
+        # so the executor can refuse a binding swapped after render.
+        assert body.get("registry_url") == "https://auto.network", (
+            f"approve decision did not pin the displayed registry_url: {body}")
         assert c.get("approve_overlay_closed"), "overlay should close after approve"
 
     def test_decline_posts_plain_refusal(self):
