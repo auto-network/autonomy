@@ -151,13 +151,20 @@ def _cached_grants():
             for m in settings_ops.read_set(NETWORK_LINK_GRANT_SET_ID, org=ORG)}
 
 
+def _approve_body(envelope, rr):
+    """What the browser posts: the signed envelope + the displayed
+    destination (the confused-deputy audience pin)."""
+    return {"approved": True, "envelope": envelope,
+            "registry_url": rr["registry_url"]}
+
+
 def _publish(client, session_key, session_cert, meta=None):
     """Full happy path: create → enrich → sign → approve → executed result."""
     rid = _create_publish(client, meta=meta)
     enriched = client.get(f"/api/approvals/{rid}").json()
     rr = enriched["registry_request"]
     envelope = _signed_envelope(session_key, session_cert, rr)
-    result = _decide_and_wait(client, rid, {"approved": True, "envelope": envelope})
+    result = _decide_and_wait(client, rid, _approve_body(envelope, rr))
     return rid, enriched, result
 
 
@@ -230,7 +237,7 @@ def test_root_direct_envelope_refused_i6(env, root):
     rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
     envelope = sign_request(root, rr["method"], rr["path"], rr["payload"],
                             ts=int(time.time()))
-    result = _decide_and_wait(env, rid, {"approved": True, "envelope": envelope})
+    result = _decide_and_wait(env, rid, _approve_body(envelope, rr))
     assert result["execution"]["ok"] is False
     assert "I6" in result["execution"]["error"]
     assert _cached_grants() == {}
@@ -243,9 +250,64 @@ def test_tampered_payload_refused(env, session_key, session_cert):
     tampered = dict(rr["payload"], target_uuid="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
     envelope = sign_request(session_key, rr["method"], rr["path"], tampered,
                             ts=int(time.time()), cert=session_cert)
-    result = _decide_and_wait(env, rid, {"approved": True, "envelope": envelope})
+    result = _decide_and_wait(env, rid, _approve_body(envelope, rr))
     assert result["execution"]["ok"] is False
     assert "does not match" in result["execution"]["error"]
+    assert _cached_grants() == {}
+
+
+def test_binding_swap_between_render_and_approve_refused(
+        env, session_key, session_cert, registry_app, monkeypatch):
+    """Confused-deputy regression (Codex validator finding on C3): the org
+    binding's registry_url is swapped AFTER the dialog renders (and the
+    envelope is signed) but BEFORE the approval executes. The operator
+    approved 'publish to registry.test'; nothing may be forwarded to the
+    swapped destination — the execution must be REFUSED and no grant cached.
+    """
+    forwarded = []
+
+    def recording_client(base_url):
+        forwarded.append(base_url)
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=registry_app), base_url=base_url)
+
+    monkeypatch.setattr(link_approvals, "_registry_client", recording_client)
+
+    rid = _create_publish(env)
+    rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
+    assert rr["registry_url"] == REGISTRY_URL          # what the operator sees
+    envelope = _signed_envelope(session_key, session_cert, rr)
+
+    # The attacker swaps the binding under the pending approval.
+    settings_ops.upsert_by_key(
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry.test",
+        {
+            "org_uuid": ORG_UUID,
+            "root_pub": envelope["signer"],  # any valid pub; url is the attack
+            "registry_url": "http://evil-registry.test",
+            "recovery_policy": {"mode": "none"},
+            "binding_expires_at": "2030-01-01T00:00:00Z",
+        },
+        org=ORG,
+    )
+
+    result = _decide_and_wait(env, rid, _approve_body(envelope, rr))
+    execution = result["execution"]
+    assert execution["ok"] is False
+    assert "changed between review and approval" in execution["error"]
+    assert forwarded == []          # the signed request never left the house
+    assert _cached_grants() == {}   # and nothing entered the serving cache
+
+
+def test_decision_without_registry_url_refused(env, session_key, session_cert):
+    """The audience pin is mandatory: an approve that omits registry_url
+    (e.g. a stale or hostile client) is refused, not defaulted."""
+    rid = _create_publish(env)
+    rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
+    envelope = _signed_envelope(session_key, session_cert, rr)
+    result = _decide_and_wait(env, rid, {"approved": True, "envelope": envelope})
+    assert result["execution"]["ok"] is False
+    assert "confused-deputy" in result["execution"]["error"]
     assert _cached_grants() == {}
 
 
@@ -260,7 +322,7 @@ def test_registry_rejection_propagates(env, session_key, root):
     rid = _create_publish(env)
     rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
     envelope = _signed_envelope(session_key, weak_cert, rr)
-    result = _decide_and_wait(env, rid, {"approved": True, "envelope": envelope})
+    result = _decide_and_wait(env, rid, _approve_body(envelope, rr))
     assert result["execution"]["ok"] is False
     assert "registry refused" in result["execution"]["error"]
     assert _cached_grants() == {}
@@ -279,7 +341,7 @@ def test_malformed_registry_token_not_cached_i2(env, session_key, session_cert,
     rid = _create_publish(env)
     rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
     envelope = _signed_envelope(session_key, session_cert, rr)
-    result = _decide_and_wait(env, rid, {"approved": True, "envelope": envelope})
+    result = _decide_and_wait(env, rid, _approve_body(envelope, rr))
     assert result["execution"]["ok"] is False
     assert "malformed grant token" in result["execution"]["error"]
     assert _cached_grants() == {}
@@ -301,7 +363,7 @@ def test_revoke_end_to_end(env, session_key, session_cert, registry_app):
     assert rr == {"method": "DELETE", "path": f"/v1/links/{token}",
                   "registry_url": REGISTRY_URL, "payload": {}}
     envelope = _signed_envelope(session_key, session_cert, rr)
-    outcome = _decide_and_wait(env, rid, {"approved": True, "envelope": envelope})
+    outcome = _decide_and_wait(env, rid, _approve_body(envelope, rr))
     execution = outcome["execution"]
     assert execution["ok"] is True and execution["cache_removed"] is True
     assert token not in _cached_grants()          # I9: serving stops immediately

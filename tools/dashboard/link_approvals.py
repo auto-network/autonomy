@@ -37,6 +37,13 @@ Invariants enforced here:
 * staged-request integrity — the envelope's payload must equal the payload
   derived from the *stored* request row; what the operator saw is exactly
   what gets published.
+* audience pinning (confused-deputy guard) — the registry envelope binds
+  only method/path/payload, not the destination host, and the executor
+  reloads the org binding at execution time. So the approve decision also
+  carries the ``registry_url`` the dialog displayed and the signer saw,
+  and the executor REFUSES when the current binding's ``registry_url``
+  differs: a binding swap between render and approval must never silently
+  redirect an operator-approved publish to a different registry.
 """
 
 from __future__ import annotations
@@ -227,6 +234,27 @@ def _fail(error: str) -> dict:
     return {"ok": False, "error": error}
 
 
+def _audience_error(decision: dict, binding: dict) -> str | None:
+    """The confused-deputy guard: the destination the operator approved must
+    be exactly the destination this execution would forward to."""
+    approved_url = decision.get("registry_url")
+    if not isinstance(approved_url, str) or not approved_url:
+        return (
+            "decision carried no registry_url — the approved destination "
+            "must ride the decision so a binding swap cannot redirect the "
+            "signed request (confused-deputy guard)"
+        )
+    if approved_url != binding["registry_url"]:
+        return (
+            "the org's registry binding changed between review and approval "
+            f"(operator approved {approved_url!r}, binding now points at "
+            f"{binding['registry_url']!r}) — refusing to forward the signed "
+            "request; re-run the publish so the operator reviews the new "
+            "destination"
+        )
+    return None
+
+
 def _envelope_and_subject(decision: dict) -> tuple[dict | None, dict | None, str | None]:
     """Validate the decision's signed envelope; return (envelope, subject, error).
 
@@ -288,6 +316,9 @@ async def _execute_link_publish(row: dict, decision: dict) -> dict:
     binding, binding_error = _load_binding(org)
     if binding_error:
         return _fail(binding_error)
+    audience_error = _audience_error(decision, binding)
+    if audience_error:
+        return _fail(audience_error)
     expected = _registry_payload(req, binding)
     if envelope.get("payload") != expected:
         # What was staged is exactly what an approval applies to.
@@ -327,6 +358,9 @@ async def _execute_link_revoke(row: dict, decision: dict) -> dict:
     binding, binding_error = _load_binding(org)
     if binding_error:
         return _fail(binding_error)
+    audience_error = _audience_error(decision, binding)
+    if audience_error:
+        return _fail(audience_error)
     if envelope.get("payload") != {}:
         return _fail("revoke envelopes carry an empty payload — refusing to forward")
     resp, err = await _forward_to_registry(binding, envelope, "DELETE", f"/v1/links/{token}")

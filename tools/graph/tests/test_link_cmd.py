@@ -60,7 +60,8 @@ class OperatorFixture:
             ts=int(time.time()), cert=self.session_cert,
         )
         self.client.post(f"/api/approvals/{rid}/decision",
-                         json={"approved": True, "envelope": envelope})
+                         json={"approved": True, "envelope": envelope,
+                               "registry_url": rr["registry_url"]})
 
 
 @pytest.fixture
