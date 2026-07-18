@@ -372,3 +372,37 @@ def test_store_reserializes_to_canonical_form(env, root):
     assert r.status_code == 200, r.text
     served = env.get(f"/api/network/org-key?org={ORG}").json()
     assert served["armored_private_key"] == canonicalize_armor(armor)
+
+
+def test_smuggle_via_generic_settings_api_refused(test_app, tmp_path, monkeypatch, root):
+    """Codex's second bypass: POST /api/graph/setting straight at the
+    org-key set_id. The schema-layer gate must refuse it there too, with
+    nothing — raw or base64-wrapped — reaching graph.db."""
+    from tools.graph.db import GraphDB
+    from starlette.testclient import TestClient as _TC
+
+    GraphDB.close_all_pooled()
+    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
+
+    forged = _smuggled_armor(root)
+    with _TC(test_app) as client:
+        r = client.post("/api/graph/setting", json={
+            "set_id": NETWORK_ORG_KEY_SET_ID,
+            "schema_revision": 1,
+            "key": "default",
+            "payload": {"armored_private_key": forged},
+        })
+    assert r.status_code == 400, r.text
+    assert "I1" in json.dumps(r.json())
+
+    GraphDB.close_all_pooled()
+    blob = b"".join(
+        p.read_bytes() for p in tmp_path.glob("graph.db*") if p.is_file()
+    )
+    assert root.private_hex.encode() not in blob
+    assert bytes.fromhex(root.private_hex) not in blob
+    # The forged base64 body (seed inside, encoded) must be absent too.
+    for line in forged.splitlines()[1:-1]:
+        assert line.encode() not in blob
