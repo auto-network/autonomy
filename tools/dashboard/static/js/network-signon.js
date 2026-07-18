@@ -29,8 +29,8 @@
  *        and dropped before either returns. Nothing root-shaped is stored.
  *   §6.3 — the session private key is created with extractable:false and
  *        _installSession refuses any key claiming otherwise.
- *   I7 — the cert TTL is enforced on load: an expired cert reads as
- *        signed-out and the store is purged.
+ *   I7 — the cert validity window is enforced on load: an expired or
+ *        not-yet-valid cert reads as signed-out and the store is purged.
  */
 (function () {
   'use strict';
@@ -46,8 +46,9 @@
   var MIN_TTL_S = 60;
   var MAX_TTL_S = 30 * 24 * 3600;
   var NOT_BEFORE_SKEW_S = 60;             // tolerate modest clock skew
-  var SESSION_SCOPES = [                  // sorted; must stay so (idkit)
+  var SESSION_SCOPES = [                  // spec §6.3 defaults; sorted (idkit)
     'delegate:agent', 'link:publish', 'link:revoke', 'tunnel:serve',
+    'viewer:identify',
   ];
 
   var DB_NAME = 'autonomy-network';
@@ -250,7 +251,14 @@
   function _nowS() { return Math.floor(Date.now() / 1000); }
 
   function _sessionLive(session) {
-    return !!(session && session.cert && _nowS() < session.cert.not_after);
+    // Both window bounds: a FUTURE not_before is as dead as an expired
+    // not_after — the registry 403s either, so the chrome must never
+    // claim signed-in for a cert the registry would refuse.
+    if (!session || !session.cert) return false;
+    var now = _nowS();
+    return typeof session.cert.not_before === 'number' &&
+           typeof session.cert.not_after === 'number' &&
+           now >= session.cert.not_before && now < session.cert.not_after;
   }
 
   function _browserSubjectId() {
@@ -280,7 +288,8 @@
       orgSlug: rec.orgSlug || null, createdAt: rec.createdAt,
     };
     // Tested rejection: a session key that is somehow extractable, or a
-    // cert past its TTL, must not come back to life on load.
+    // cert outside its validity window (expired OR not yet valid), must
+    // not come back to life on load.
     if (rec.key.extractable !== false || !_sessionLive(session)) {
       try { await _idbOp('readwrite', function (s) { return s.clear(); }); } catch (e) { /* ignore */ }
       return null;
@@ -297,8 +306,11 @@
       throw new Error('session key must be a private CryptoKey');
     }
     var cert = JSON.parse(record.certWire);
-    if (typeof cert.not_after !== 'number' || _nowS() >= cert.not_after) {
-      throw new Error('refusing to install an expired session certificate');
+    var now = _nowS();
+    if (typeof cert.not_before !== 'number' || typeof cert.not_after !== 'number' ||
+        now < cert.not_before || now >= cert.not_after) {
+      throw new Error('refusing to install a session certificate outside its ' +
+        'validity window (expired or not yet valid)');
     }
     await _idbOp('readwrite', function (s) { return s.put(record, DB_KEY); });
     _state.session = {

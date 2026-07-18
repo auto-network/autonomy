@@ -36,7 +36,8 @@ ORG_UUID = "11111111-1111-4111-8111-111111111111"
 REGISTRY_URL = "http://registry.test"
 PASSPHRASE = "correct horse"
 
-SESSION_SCOPE = ("delegate:agent", "link:publish", "link:revoke", "tunnel:serve")
+SESSION_SCOPE = ("delegate:agent", "link:publish", "link:revoke",
+                 "tunnel:serve", "viewer:identify")
 
 
 @pytest.fixture
