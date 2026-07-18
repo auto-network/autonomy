@@ -67,7 +67,7 @@ def env(tmp_path, monkeypatch, registry_app):
 
     GraphDB.close_all_pooled()
     monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
-    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    monkeypatch.setenv("GRAPH_ORG", ORG)  # this dashboard IS this org — own-org caller
     monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
 
     def fake_registry_client(base_url):

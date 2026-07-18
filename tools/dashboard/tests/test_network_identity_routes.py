@@ -58,7 +58,7 @@ def env(tmp_path, monkeypatch, registry_app):
 
     GraphDB.close_all_pooled()
     monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
-    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    monkeypatch.setenv("GRAPH_ORG", ORG)  # this dashboard IS this org — own-org caller
     monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
     monkeypatch.setenv("AUTONOMY_NETWORK_REGISTRY_URL", REGISTRY_URL)
 
@@ -121,6 +121,41 @@ def test_store_org_key_roundtrip(env, root):
     opened = decrypt_root_key(served["armored_private_key"], PASSPHRASE)
     assert opened.public_hex == root.public_hex
     assert opened.private_hex == root.private_hex
+
+
+def test_cross_org_read_and_write_refused(env, root):
+    """A caller must not read or write ANOTHER org's encrypted key /
+    registry binding through a ``?org=`` / body ``org`` override — the
+    org-key blob is offline-attackable, so a cross-org read is a real
+    leak (Codex validation FAIL). The env caller IS ``netorg``; every
+    request naming a foreign org is refused 403, while the caller's own
+    org still resolves.
+    """
+    _store_key(env, root)                     # netorg's own key exists
+    FOREIGN = "victimorg"
+
+    # reads of a foreign org's key/binding → 403 (not 200-with-their-data)
+    assert env.get(f"/api/network/org-key?org={FOREIGN}").status_code == 403
+    assert env.get(f"/api/network/binding?org={FOREIGN}").status_code == 403
+
+    # writes into a foreign org → 403 (must not plant a key/binding either)
+    assert env.post(
+        "/api/network/org-key",
+        json={"org": FOREIGN, "armored_private_key": _armor(root)},
+    ).status_code == 403
+    assert env.post(
+        "/api/network/register",
+        json={"org": FOREIGN, "envelope": _registration_envelope(root)},
+    ).status_code == 403
+    assert env.post(
+        "/api/network/revocations",
+        json={"org": FOREIGN, "record": "{}", "revoked_cert": "{}"},
+    ).status_code == 403
+
+    # own-org access is unaffected: default (no override) and explicit
+    # own-org both resolve the caller's own key.
+    assert env.get("/api/network/org-key").status_code == 200
+    assert env.get(f"/api/network/org-key?org={ORG}").status_code == 200
 
 
 def test_stored_payload_contains_only_armor_fields(env, root):
@@ -383,7 +418,7 @@ def test_smuggle_via_generic_settings_api_refused(test_app, tmp_path, monkeypatc
 
     GraphDB.close_all_pooled()
     monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
-    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    monkeypatch.setenv("GRAPH_ORG", ORG)  # this dashboard IS this org — own-org caller
     monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
 
     forged = _smuggled_armor(root)

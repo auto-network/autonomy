@@ -73,18 +73,32 @@ def _mock_mode() -> bool:
     return bool(os.environ.get("DASHBOARD_MOCK"))
 
 
-def _caller_org(request: Request):
-    """Resolve the org a network read is scoped to.
+def _scoped_org(requested_org):
+    """Resolve the org a network route is scoped to, refusing cross-org access.
 
-    An explicit ``?org=`` query param wins (the create ceremony targets a
-    named org). Otherwise fall back to :data:`settings_ops.CALLER_ORG` —
-    the env-cascade resolver (per-request contextvar → ``GRAPH_ORG`` env →
-    scopeless) — so a single-org dashboard resolves ITS OWN key without
-    the browser having to know the slug. Passing literal ``None`` here was
-    the foot-gun (graph://53f7412f-51e): it forced the scopeless DB and
-    hid the org's real key/binding even when ``GRAPH_ORG`` named the org.
+    A network route reads/writes another org's ENCRYPTED root key + registry
+    binding — an org-key blob is offline-attackable, so a cross-org read is a
+    real leak. The caller's own org is the env-cascade resolution
+    (per-request ``X-Graph-Org`` contextvar → ``GRAPH_ORG`` env → scopeless).
+    An explicit ``?org=`` / body ``org`` is honored ONLY when it names the
+    caller's OWN org; any other value is a cross-org attempt and is refused.
+
+    Returns ``(org, None)`` on success — where ``org`` is
+    :data:`settings_ops.CALLER_ORG`, the env-cascade sentinel, so the route
+    resolves the caller's own DB without the browser needing the slug — or
+    ``(None, JSONResponse)`` (403) when an unauthorized override was passed.
+    A single-org dashboard has no legitimate cross-org network-key access
+    from the browser, so this is a drop of the override, not a restriction of
+    any real workflow.
     """
-    return request.query_params.get("org") or settings_ops.CALLER_ORG
+    if requested_org:
+        caller = settings_ops._resolve_settings_caller(None)
+        if requested_org != caller:
+            return None, JSONResponse({"error": (
+                "cross-org access to another org's network identity is not "
+                "permitted"
+            )}, status_code=403)
+    return settings_ops.CALLER_ORG, None
 
 
 def _first_member(set_id: str, org: str | None):
@@ -104,7 +118,9 @@ async def get_org_key(request: Request) -> JSONResponse:
     """The org's armored (encrypted) network root key, or 404."""
     if _mock_mode():
         return JSONResponse({"error": "no network org key configured"}, status_code=404)
-    org = _caller_org(request)
+    org, refused = _scoped_org(request.query_params.get("org"))
+    if refused is not None:
+        return refused
     try:
         member = _first_member(NETWORK_ORG_KEY_SET_ID, org)
     except Exception as e:
@@ -126,7 +142,9 @@ async def get_binding(request: Request) -> JSONResponse:
     """The org's registry binding row, or 404."""
     if _mock_mode():
         return JSONResponse({"error": "no network binding configured"}, status_code=404)
-    org = _caller_org(request)
+    org, refused = _scoped_org(request.query_params.get("org"))
+    if refused is not None:
+        return refused
     try:
         member = _first_member(NETWORK_BINDING_SET_ID, org)
     except Exception as e:
@@ -165,13 +183,19 @@ async def post_revocation(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
-    if not isinstance(body, dict) or not isinstance(body.get("record"), str) \
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "error": "body must be a JSON object"},
+                            status_code=400)
+    # Refuse a cross-org revocation before touching the (foreign) binding.
+    org, refused = _scoped_org(body.get("org"))
+    if refused is not None:
+        return refused
+    if not isinstance(body.get("record"), str) \
             or not isinstance(body.get("revoked_cert"), str):
         return JSONResponse({"ok": False, "error": (
             "body must carry 'record' and 'revoked_cert' as canonical wire "
             "JSON strings"
         )}, status_code=400)
-    org = body.get("org") or settings_ops.CALLER_ORG
     try:
         member = _first_member(NETWORK_BINDING_SET_ID, org)
     except Exception as e:
@@ -233,6 +257,11 @@ async def put_org_key(request: Request) -> JSONResponse:
             "body must carry 'armored_private_key' as the armor text"
         )}, status_code=400)
 
+    # Refuse a cross-org write BEFORE processing the (foreign) payload.
+    org, refused = _scoped_org(body.get("org"))
+    if refused is not None:
+        return refused
+
     # I1 gate: only the canonical passphrase-encrypted armor is storable.
     # parse_armor is STRICT (exact field sets, formats, lengths — unknown
     # fields refused so nothing can be smuggled inside the body), and the
@@ -254,7 +283,6 @@ async def put_org_key(request: Request) -> JSONResponse:
             "root_pub does not match the armor's enclosed public key"
         )}, status_code=400)
 
-    org = body.get("org") or settings_ops.CALLER_ORG
     label = body.get("label") or "default"
     if not isinstance(label, str) or len(label) > 64:
         return JSONResponse({"ok": False, "error": "label must be a short string"},
@@ -315,6 +343,11 @@ async def post_register(request: Request) -> JSONResponse:
             "is fixed server-side"
         )}, status_code=400)
 
+    # Refuse a cross-org registration BEFORE processing the foreign envelope.
+    org, refused = _scoped_org(body.get("org"))
+    if refused is not None:
+        return refused
+
     envelope = body["envelope"]
     payload = envelope.get("payload")
     if not isinstance(payload, dict) or not isinstance(payload.get("root_pub"), str) \
@@ -331,7 +364,6 @@ async def post_register(request: Request) -> JSONResponse:
             "registration must be self-signed by the root_pub being bound"
         )}, status_code=403)
 
-    org = body.get("org") or settings_ops.CALLER_ORG
     try:
         stored = _first_member(NETWORK_ORG_KEY_SET_ID, org)
     except Exception as e:
