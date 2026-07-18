@@ -45,6 +45,18 @@ from tools.dashboard.test_lib.l2b_harness import (
     stop_mock_server,
 )
 from tools.dashboard.tests._xdist import worker_test_port
+from tools.network.idkit import (
+    DelegationCert,
+    KeyPair,
+    Subject,
+    issue_cert,
+    verify_chain,
+)
+from tools.network.idkit.armor import encrypt_root_key
+from tools.network.idkit.canonical import canonical_json
+from tools.network.idkit.keys import verify_signature
+from tools.network.idkit.revocation import RevocationRecord, verify_revocation
+from tools.network.registry.signing import request_signing_input
 
 # ── Fixture data ──────────────────────────────────────────────────────
 
@@ -12957,3 +12969,323 @@ class TestCoordinatorBoardRelativeTimeAndPendingCommits:
         assert isinstance(result, dict), result
         assert result["count"] == 0, result
         assert result["errored"] is False, result
+
+
+# ═══ auto.network sign-on ceremony (C2, spec §6.3) ════════════════════
+#
+# The ceremony itself runs in the browser: passphrase → armor decrypt →
+# root import → non-extractable session key + root-signed delegation
+# cert → root plaintext dropped. The sweep drives the REAL module
+# (static/js/network-signon.js) end to end with the network mocked at
+# window.fetch, then hands every artifact the browser minted back to
+# Python, where idkit — the same code the registry runs — verifies it.
+# Cross-language byte-compatibility (canonical JSON) is pinned with a
+# hostile vector.
+
+NETWORK_ROOT = KeyPair.generate()
+NETWORK_PASSPHRASE = "sweep horse battery staple"
+# Floor-of-range PBKDF2 iterations keep the sweep fast; real ceremonies
+# use armor.DEFAULT_ITERATIONS.
+NETWORK_ARMOR = encrypt_root_key(NETWORK_ROOT, NETWORK_PASSPHRASE, iterations=10_000)
+NETWORK_ORG_UUID = "22222222-2222-4222-8222-222222222222"
+NETWORK_SCOPES = ("delegate:agent", "link:publish", "link:revoke", "tunnel:serve")
+NETWORK_BINDING = {
+    "org_uuid": NETWORK_ORG_UUID,
+    "root_pub": NETWORK_ROOT.public_hex,
+    "registry_url": "http://registry.sweep.test",
+}
+
+# Sort + escaping torture vector: astral-plane vs U+FFFF keys pin the
+# code-POINT key ordering (UTF-16 code-unit sort would flip them), and
+# the values sweep every escaping class Python's ensure_ascii emits.
+NETWORK_CANON_VECTOR = {
+    "b": 1,
+    "a": [None, True, False, -7, 2**53 - 1],
+    "B": "quote\" back\\slash",
+    "_": "ctrl\b\t\n\f\r\x1f\x7f",
+    "unicode": "é 😀 ￿",
+    "￿": "bmp-max key",
+    "😀": "astral key",
+    "nested": {"z": [], "y": {}, "x": ""},
+}
+
+# An expired cert planted straight into IndexedDB must read as
+# signed-out on load and purge the store (I7 client-side).
+_expired_child = KeyPair.generate()
+NETWORK_EXPIRED_CERT = issue_cert(
+    NETWORK_ROOT, _expired_child.public_hex, scope=NETWORK_SCOPES,
+    org=NETWORK_ORG_UUID, subject=Subject("operator", "browser-expired"),
+    not_before=NOW - 7200, not_after=NOW - 3600,
+).to_json().decode()
+
+
+_NETWORK_SIGNON_JS = r"""
+(async () => {
+    const S = window.AutonomyNetworkSession;
+    const I = S._internals;
+    const r = {};
+    if (!S || !I) return JSON.stringify({fatal: 'network-signon.js not loaded'});
+    const q = (id) => document.getElementById(id);
+    const state = () => (q('network-signon-indicator') || {dataset: {}}).dataset.state || null;
+    async function idbCount() {
+        return await new Promise((res, rej) => {
+            const rq = indexedDB.open('autonomy-network', 1);
+            rq.onupgradeneeded = () => rq.result.createObjectStore('session');
+            rq.onsuccess = () => {
+                const db = rq.result;
+                const c = db.transaction('session', 'readonly').objectStore('session').count();
+                c.onsuccess = () => { db.close(); res(c.result); };
+                c.onerror = () => { db.close(); rej(c.error); };
+            };
+            rq.onerror = () => rej(rq.error);
+        });
+    }
+
+    const BINDING = __BINDING__;
+    const ORGKEY = {label: 'default', armored_private_key: __ARMOR__,
+                    root_pub: BINDING.root_pub};
+    const PASS = __PASSPHRASE__;
+    const posted = [];
+    const origFetch = window.fetch;
+
+    await S.ready();
+    await S.signOut();
+
+    // signed-out chrome: the sign-on affordance is rendered
+    r.out_state = state();
+    r.out_affordance = !!document.querySelector('[data-testid=network-signon-affordance]');
+    r.out_text = (q('network-signon-indicator') || {}).textContent || '';
+
+    window.fetch = async function (url, opts) {
+        const u = String(url);
+        if (u.indexOf('/api/network/binding') === 0) {
+            return {ok: true, json: async () => BINDING};
+        }
+        if (u.indexOf('/api/network/org-key') === 0) {
+            return {ok: true, json: async () => ORGKEY};
+        }
+        if (u.indexOf('/api/network/revocations') === 0) {
+            const body = JSON.parse(opts.body);
+            posted.push(body);
+            return {ok: true, json: async () => (
+                {ok: true, revoked_key_id: JSON.parse(body.record).revoked_key_id})};
+        }
+        return origFetch.call(this, url, opts);
+    };
+    try {
+        // wrong passphrase: clean error, still signed out
+        r.wrong_pass = null;
+        try { await S.signOn('not the passphrase', {ttlSeconds: 3600}); }
+        catch (e) { r.wrong_pass = String(e.message || e); }
+        r.wrong_pass_state = state();
+
+        // the real ceremony
+        r.signon = await S.signOn(PASS, {ttlSeconds: 3600});
+        r.in_state = state();
+        r.in_text = (q('network-signon-indicator') || {}).textContent || '';
+        r.expiry_el = !!document.querySelector('[data-testid=network-signon-expiry]');
+        r.available = window.AutonomyNetworkSigner.available();
+        r.idb_signed_in = await idbCount();
+        r.keys = S.listKeys();
+
+        // the C3 seam: a signed registry envelope
+        r.envelope = await window.AutonomyNetworkSigner.signRegistryRequest(
+            'POST', '/v1/links',
+            {org: BINDING.org_uuid,
+             target_uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+             target_type: 'note', meta: {ttl: 3600, label: 'sweep'}});
+
+        // tested rejection: an EXTRACTABLE key must never install
+        r.extractable_reject = null;
+        try {
+            const bad = await crypto.subtle.generateKey(
+                {name: 'Ed25519'}, true, ['sign', 'verify']);
+            await I.installSession({
+                key: bad.privateKey, certWire: r.signon.certWire,
+                org: BINDING.org_uuid, registryUrl: BINDING.registry_url,
+                rootPub: BINDING.root_pub, createdAt: 0});
+        } catch (e) { r.extractable_reject = String(e.message || e); }
+        r.still_available = window.AutonomyNetworkSigner.available();
+
+        // cross-language canonical JSON vector
+        r.canon = I.canonicalJson(__VECTOR__);
+
+        // sign-out destroys key + cert locally (store CLEARED)
+        await S.signOut();
+        r.after_signout = {state: state(), idb: await idbCount(),
+                           available: window.AutonomyNetworkSigner.available()};
+
+        // revoke: fresh sign-on, then root step-up revocation
+        await S.signOn(PASS, {ttlSeconds: 3600});
+        r.revoke = await S.revokeCurrentKey(PASS, 'sweep revoke');
+        r.revoke_posted = posted[0] || null;
+        r.after_revoke = {state: state(), idb: await idbCount(),
+                          available: window.AutonomyNetworkSigner.available()};
+
+        // an expired cert planted in the store reads as signed-out + purge
+        const ghost = await crypto.subtle.generateKey(
+            {name: 'Ed25519'}, false, ['sign', 'verify']);
+        await new Promise((res, rej) => {
+            const rq = indexedDB.open('autonomy-network', 1);
+            rq.onupgradeneeded = () => rq.result.createObjectStore('session');
+            rq.onsuccess = () => {
+                const db = rq.result;
+                const p = db.transaction('session', 'readwrite')
+                    .objectStore('session')
+                    .put({key: ghost.privateKey, certWire: __EXPIRED_CERT__,
+                          org: BINDING.org_uuid, registryUrl: BINDING.registry_url,
+                          rootPub: BINDING.root_pub, createdAt: 0}, 'current');
+                p.onsuccess = () => { db.close(); res(); };
+                p.onerror = () => { db.close(); rej(p.error); };
+            };
+            rq.onerror = () => rej(rq.error);
+        });
+        const loaded = await I.loadFromStore();
+        r.expired_load = {live: loaded !== null, idb: await idbCount()};
+    } finally {
+        window.fetch = origFetch;
+        await S.signOut();
+    }
+    return JSON.stringify(r);
+})()
+"""
+
+
+def _network_signon_js() -> str:
+    return (
+        _NETWORK_SIGNON_JS
+        .replace("__BINDING__", json.dumps(NETWORK_BINDING))
+        .replace("__ARMOR__", json.dumps(NETWORK_ARMOR))
+        .replace("__PASSPHRASE__", json.dumps(NETWORK_PASSPHRASE))
+        .replace("__VECTOR__", json.dumps(NETWORK_CANON_VECTOR))
+        .replace("__EXPIRED_CERT__", json.dumps(NETWORK_EXPIRED_CERT))
+    )
+
+
+class TestNetworkSignOn:
+    """L2.B for the C2 sign-on ceremony (bead auto-uoj3g acceptance).
+
+    Every cryptographic artifact asserted here was minted by the real
+    browser module; Python verifies with idkit — the registry's own
+    verifier — so a green run means the browser output is accepted by
+    the actual security boundary.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        _navigate_and_check("/sessions", "", wait_ms=600)
+        request.cls._checks = _run_async_eval(_network_signon_js())
+
+    def test_ceremony_ran(self):
+        c = self._checks
+        assert c and not c.get("fatal"), f"ceremony eval failed: {c}"
+
+    # ── acceptance: signed-out state shows sign-on affordance ──
+
+    def test_signed_out_shows_affordance(self):
+        c = self._checks
+        assert c["out_state"] == "signed-out"
+        assert c["out_affordance"] is True
+        assert "Sign on to auto.network" in c["out_text"]
+
+    def test_wrong_passphrase_clean_error(self):
+        c = self._checks
+        assert "wrong passphrase" in (c["wrong_pass"] or "")
+        assert c["wrong_pass_state"] == "signed-out"
+
+    # ── acceptance: after sign-on the indicator flips + shows expiry ──
+
+    def test_sign_on_flips_indicator_with_expiry(self):
+        c = self._checks
+        assert c["in_state"] == "signed-in"
+        assert c["expiry_el"] is True
+        assert "auto.network" in c["in_text"]
+        # 3600s TTL renders as minutes-or-hours remaining
+        assert "59m" in c["in_text"] or "1h" in c["in_text"], c["in_text"]
+        assert c["available"] is True
+        assert c["idb_signed_in"] == 1
+        assert c["keys"] and c["keys"][0]["this_browser"] is True
+
+    # ── acceptance: minted cert chain-verifies to root via idkit ──
+
+    def test_minted_cert_chain_verifies_to_root(self):
+        c = self._checks
+        cert = DelegationCert.from_json(c["signon"]["certWire"])
+        result = verify_chain(
+            cert, NETWORK_ROOT.public_hex, org=NETWORK_ORG_UUID,
+            required_scope="link:publish",
+        )
+        assert result.leaf_pub == c["signon"]["sessionPub"]
+        assert result.subject_kind == "operator"
+        assert result.subject_id.startswith("browser-")
+        assert result.scope == NETWORK_SCOPES
+        assert 0 < result.not_after - NOW <= 3600 + 600
+
+    def test_envelope_verifies_like_the_registry(self):
+        """The seam's envelope is exactly what registry/signing.py
+        expects: same fields, same domain-separated signing input."""
+        c = self._checks
+        env = c["envelope"]
+        assert set(env) == {"v", "signer", "ts", "payload", "cert", "sig"}
+        assert env["v"] == 1
+        assert env["cert"] == c["signon"]["certWire"]
+        cert = DelegationCert.from_json(env["cert"])
+        assert cert.child_pub == env["signer"]
+        verify_signature(
+            env["signer"], env["sig"],
+            request_signing_input("POST", "/v1/links", env["ts"],
+                                  env["signer"], env["payload"]),
+        )
+
+    def test_canonical_json_matches_python_byte_for_byte(self):
+        c = self._checks
+        assert c["canon"] == canonical_json(NETWORK_CANON_VECTOR).decode("ascii")
+
+    # ── invariants: non-extractable key, root dropped ──
+
+    def test_session_key_non_extractable_and_root_dropped(self):
+        c = self._checks
+        assert c["signon"]["diagnostics"]["extractable"] is False
+        assert c["signon"]["diagnostics"]["rootDropped"] is True
+
+    def test_extractable_key_install_refused(self):
+        c = self._checks
+        assert "non-extractable" in (c["extractable_reject"] or "")
+        assert c["still_available"] is True  # the good session survived
+
+    # ── acceptance: sign-out returns to signed-out state ──
+
+    def test_sign_out_destroys_key_and_cert(self):
+        c = self._checks
+        after = c["after_signout"]
+        assert after["state"] == "signed-out"
+        assert after["idb"] == 0  # IndexedDB cleared on sign-out
+        assert after["available"] is False
+
+    # ── revoke: root step-up mints a registry-valid record ──
+
+    def test_revocation_record_verifies_and_signs_out(self):
+        c = self._checks
+        assert c["revoke"]["revoked"] is True
+        posted = c["revoke_posted"]
+        assert posted, "revocation was never POSTed"
+        record = RevocationRecord.from_json(posted["record"])
+        revoked_cert = DelegationCert.from_json(posted["revoked_cert"])
+        verify_revocation(
+            record, NETWORK_ROOT.public_hex, org=NETWORK_ORG_UUID,
+            revoked_cert=revoked_cert,
+        )
+        assert record.issuer_pub == NETWORK_ROOT.public_hex
+        assert record.revoked_key_id == revoked_cert.child_pub
+        assert record.expires_at == revoked_cert.not_after  # I7 bound
+        after = c["after_revoke"]
+        assert after["state"] == "signed-out"
+        assert after["idb"] == 0
+        assert after["available"] is False
+
+    # ── acceptance: expired key treated as signed-out on load ──
+
+    def test_expired_cert_reads_signed_out_and_purges(self):
+        c = self._checks
+        assert c["expired_load"]["live"] is False
+        assert c["expired_load"]["idb"] == 0
