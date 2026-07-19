@@ -11789,7 +11789,13 @@ async def _materialize_uploads(form, key: str = "attachments"):
 
 
 async def api_graph_note(request):
-    """Create a note via direct ops call. JSON or multipart (attachments)."""
+    """Create a note via direct ops call. JSON or multipart (attachments).
+
+    ``session_hint`` (a tmux session name) lets ``graph_ops.create_note``
+    resolve the ``conceived_at`` provenance edge itself — the server always
+    has a live DB, unlike the container CLI, which can't do this locally
+    over the HttpClient path (see ``ops._resolve_note_provenance``).
+    """
     content_type = request.headers.get("content-type", "")
     org = _caller_org(request)
 
@@ -11807,6 +11813,9 @@ async def api_graph_note(request):
         if tags_raw and not _GRAPH_TAGS_RE.match(str(tags_raw)):
             return JSONResponse({"error": f"invalid tags: {tags_raw!r}"}, status_code=400)
         author = str(form["author"]) if form.get("author") else None
+        session_hint = str(form["session_hint"]) if form.get("session_hint") else None
+        auto_provenance_source_id = str(form["auto_provenance_source_id"]) if form.get("auto_provenance_source_id") else None
+        auto_provenance_turn = int(form["auto_provenance_turn"]) if form.get("auto_provenance_turn") else None
         short_description = str(form["short_description"]) if form.get("short_description") else None
         keywords = str(form["keywords"]) if form.get("keywords") else None
         tmp_paths, err = await _materialize_uploads(form)
@@ -11830,6 +11839,9 @@ async def api_graph_note(request):
         if tags_raw and not _GRAPH_TAGS_RE.match(tags_raw):
             return JSONResponse({"error": f"invalid tags: {tags_raw!r}"}, status_code=400)
         author = body.get("author")
+        session_hint = body.get("session_hint")
+        auto_provenance_source_id = body.get("auto_provenance_source_id")
+        auto_provenance_turn = body.get("auto_provenance_turn")
         short_description = body.get("short_description")
         keywords = body.get("keywords")
         tmp_paths = []
@@ -11843,6 +11855,9 @@ async def api_graph_note(request):
             content,
             tags=tags,
             author=author,
+            session_hint=session_hint,
+            auto_provenance_source_id=auto_provenance_source_id,
+            auto_provenance_turn=auto_provenance_turn,
             attachments=tmp_paths or None,
             html_path=html_path,
             short_description=short_description,
@@ -12750,6 +12765,12 @@ async def api_graph_sources_list(request):
     Per ``graph://bcce359d-a1d`` § Merge algorithms. Peer rows are
     clamped to ``published``/``canonical``. ``?only_org=<slug>`` pins to
     a single DB; ``X-Graph-Org`` header supplies ``org``.
+
+    ``since``/``until``/``author``/``states``/``include_raw``/
+    ``session_source_ids``/``session_author_pattern`` mirror what
+    ``HttpClient.list_sources`` sends — previously dropped here, which
+    silently made ``graph notes --since`` (and every other filter besides
+    type/tags) a no-op over the container API path.
     """
     limit = int(request.query_params.get("limit", "50"))
     source_type = request.query_params.get("type")
@@ -12759,9 +12780,22 @@ async def api_graph_sources_list(request):
     peers_param = request.query_params.get("peers")
     peers = [p for p in peers_param.split(",") if p] if peers_param is not None else None
     org = request.headers.get("X-Graph-Org")
+    since = request.query_params.get("since")
+    until = request.query_params.get("until")
+    author = request.query_params.get("author")
+    states_param = request.query_params.get("states")
+    states = [s for s in states_param.split(",") if s] if states_param else None
+    include_raw = bool(request.query_params.get("include_raw"))
+    ssi_param = request.query_params.get("session_source_ids")
+    session_source_ids = [s for s in ssi_param.split(",") if s] if ssi_param else None
+    session_author_pattern = request.query_params.get("session_author_pattern")
     sources = graph_ops.list_sources(
         org=org, peers=peers, only_org=only_org,
         limit=limit, source_type=source_type, tags=tags,
+        since=since, until=until, author=author,
+        states=states, include_raw=include_raw,
+        session_source_ids=session_source_ids,
+        session_author_pattern=session_author_pattern,
     )
     return JSONResponse({"sources": sources})
 

@@ -2671,108 +2671,6 @@ def cmd_link(args):
                 print(f'  → "{short}..."')
 
 
-def _query_attention(db, since=None, search=None, last=None, session=None, context=0):
-    """Query human input across all sessions from graph.db.
-
-    Returns list of dicts with keys: created_at, content, source_id,
-    turn_number, is_queued, session_name, session_type.
-    When context > 0, each dict also has a 'context' key with up to N
-    surrounding agent derivations.
-
-    Reusable by graph news, graph catchup, and other consumers.
-    """
-    conditions = [
-        "s.type = 'session'",
-        "s.platform IN ('claude-code', 'codex-cli', 'codex-tui')",
-        "t.role = 'user'",
-        # Human-present session types (terminal, chatwith, or host/pre-container NULL)
-        """(json_extract(s.metadata, '$.session_type') IN ('terminal', 'chatwith')
-            OR json_extract(s.metadata, '$.session_type') IS NULL)""",
-        # Filter system noise
-        "t.content NOT LIKE '<crosstalk %'",
-        "t.content NOT LIKE '<system-%'",
-        "t.content NOT LIKE '<local-command%'",
-        "t.content NOT LIKE '<task-notification%'",
-        "t.content NOT LIKE '<command-name>%'",
-    ]
-    params = []
-
-    if since:
-        try:
-            secs = _parse_duration(since)
-        except ValueError:
-            secs = None
-        if secs is not None:
-            from datetime import datetime, timezone, timedelta
-            since_iso = (datetime.now(timezone.utc) - timedelta(seconds=secs)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            conditions.append("t.created_at >= ?")
-            params.append(since_iso)
-        else:
-            # Assume raw ISO timestamp
-            conditions.append("t.created_at >= ?")
-            params.append(since)
-
-    if search:
-        conditions.append("t.content LIKE ?")
-        params.append(f"%{search}%")
-
-    if session:
-        conditions.append("json_extract(s.metadata, '$.session_id') = ?")
-        params.append(session)
-
-    where = " AND ".join(conditions)
-    limit_val = last if last else 500
-    limit_clause = f"LIMIT {int(limit_val)}"
-
-    rows = db.conn.execute(f"""
-        SELECT t.created_at, t.content, t.source_id, t.turn_number,
-               json_extract(t.metadata, '$.queued') as is_queued,
-               json_extract(s.metadata, '$.session_id') as session_name,
-               json_extract(s.metadata, '$.session_type') as session_type
-        FROM thoughts t
-        JOIN sources s ON s.id = t.source_id
-        WHERE {where}
-        ORDER BY t.created_at DESC
-        {limit_clause}
-    """, params).fetchall()
-
-    # Reverse for chronological display when using --last
-    results = list(reversed(rows)) if last else list(rows)
-
-    items = [
-        {
-            "created_at": r[0] or "",
-            "content": r[1] or "",
-            "source_id": r[2] or "",
-            "turn_number": r[3],
-            "is_queued": bool(r[4]),
-            "session_name": r[5] or "host",
-            "session_type": r[6] or "host",
-        }
-        for r in results
-    ]
-
-    if context and context > 0:
-        for item in items:
-            src_id = item["source_id"]
-            turn = item["turn_number"]
-            if turn is None:
-                item["context"] = []
-                continue
-            derivs = db.conn.execute("""
-                SELECT turn_number, content, created_at
-                FROM derivations
-                WHERE source_id = ? AND turn_number BETWEEN ? AND ?
-                ORDER BY turn_number
-            """, (src_id, turn, turn + context)).fetchall()
-            item["context"] = [
-                {"turn": d[0], "content": d[1] or "", "created_at": d[2] or ""}
-                for d in derivs
-            ]
-
-    return items
-
-
 def cmd_attention(args):
     """Show human input from sessions, chronologically. Fast query for sovereign content."""
     client = get_client()
@@ -3234,20 +3132,26 @@ def _parse_duration(s: str) -> float:
 
 
 def cmd_notes(args):
-    """List notes, optionally filtered by recency."""
+    """List notes, optionally filtered by recency, creating session, or org."""
     since_iso = None
     if args.since:
         try:
-            secs = _parse_duration(args.since)
+            since_iso = _parse_journal_timestamp(args.since)
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
-        from datetime import datetime, timezone, timedelta
-        since_dt = datetime.now(timezone.utc) - timedelta(seconds=secs)
-        since_iso = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    until_iso = None
+    if getattr(args, "until", None):
+        try:
+            until_iso = _parse_journal_timestamp(args.until)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
 
     tags = [t.strip() for t in args.tags.split(",")] if args.tags else None
     states, include_raw = _parse_state_args(args)
+    only_org, peers = _parse_org_args(args)
 
     client = get_client()
     session_ids: list[str] | None = None
@@ -3264,9 +3168,12 @@ def cmd_notes(args):
         sources = client.list_sources(
             source_type="note",
             since=since_iso,
+            until=until_iso,
+            author=getattr(args, "session", None),
             tags=tags,
             limit=args.limit,
             states=states, include_raw=include_raw,
+            only_org=only_org, peers=peers,
             session_source_ids=session_ids,
             session_author_pattern=author_pattern,
             org=os.environ.get("GRAPH_ORG"),
@@ -3687,10 +3594,14 @@ def cmd_note(args):
     html_path = getattr(args, "html", None)
     attach_paths = getattr(args, "attach", None) or []
 
-    # Auto-provenance runs in the CLI layer so the graph sessions refresh
-    # subprocess (which rereads the local JSONL feeds) is scoped to the
-    # interactive caller, not every API write. Host-only — the container
-    # can't read the caller's tmux session state from its bind mount.
+    # Host-direct callers can resolve provenance locally (and do, via the
+    # richer title-matched _auto_provenance) since they have a live sqlite
+    # handle. Container/HttpClient callers don't — they instead pass
+    # session_hint (the tmux name) and let the server resolve it, since the
+    # server always has a live DB for the org (see
+    # ops._resolve_note_provenance). Without this, conceived_at edges almost
+    # never got created outside host-direct use, since HttpClient is the
+    # dominant caller path today.
     auto_src_id: str | None = None
     auto_turn: int | None = None
     if not isinstance(get_client(), HttpClient):
@@ -3705,13 +3616,26 @@ def cmd_note(args):
                 own_db.close()
         except Exception:
             pass
+    session_hint = _resolve_session_name()
+
+    # Default to the caller's own BD_ACTOR (schema `{session_type}:{tmux_name}`,
+    # e.g. "terminal:auto-0322-153000" or "librarian:librarian-review-9c74b60f")
+    # rather than the server's — the server has no visibility into the
+    # container's env, so an unset arg here previously fell back to the
+    # server's own (unset) BD_ACTOR and every note ended up attributed to
+    # "user", making session-based lookup impossible. Prefer AUTONOMY_SESSION
+    # only when BD_ACTOR isn't set — see graph://35b4ba19-8f8 for the
+    # original attribution-fix design and graph://2b10a939-080 for why the
+    # session_type prefix (terminal/chatwith/librarian/dispatch) must survive.
+    author = args.author or os.environ.get("BD_ACTOR") or os.environ.get("AUTONOMY_SESSION")
 
     with _pin_db(args):
         try:
             result = get_client().create_note(
                 text,
                 tags=tags,
-                author=args.author,
+                author=author,
+                session_hint=session_hint,
                 attachments=attach_paths,
                 html_path=html_path,
                 auto_provenance_source_id=auto_src_id,
@@ -5342,7 +5266,7 @@ def main():
     p_note.add_argument("text", nargs="*", help="Note text (or 'update <src_id>' to update an existing note)")
     p_note.add_argument("-c", dest="content_stdin", nargs="?", const="-", default=None, help="Read content from stdin")
     p_note.add_argument("--tags", "-t", help="Comma-separated tags")
-    p_note.add_argument("--author", help="Who wrote this (default: user)")
+    p_note.add_argument("--author", help="Who wrote this (default: current session's tmux name, e.g. auto-0322-153000)")
     p_note.add_argument("--force", action="store_true", help="Bypass single-line length check")
     p_note.add_argument("--integrate", dest="integrate_ids", action="append", default=[], help="Comment ID to mark as integrated (repeatable)")
     p_note.add_argument("--attach", action="append", default=[], help="Attach file to note (repeatable). Use {1}, {2} in text for inline placement. For images use markdown syntax: ![alt]({1}). Unplaced attachments appear as downloads")
@@ -5355,15 +5279,29 @@ def main():
                         help="Comma-separated synonym/alias list for search (indexed by sources_fts; e.g. 'worktree,worktrees,branch checkout')")
     p_note.set_defaults(func=cmd_note_router)
 
-    # notes (list notes with optional recency filter)
+    # notes (list notes with optional recency/session/org filter)
     p_notes = sub.add_parser("notes", help="List notes")
-    p_notes.add_argument("--since", help="Duration filter, e.g. 1h, 30m, 2d, 1w")
+    p_notes.add_argument("--since", help="Lower bound: duration ago (1h, 30m, 2d, 1w) or ISO8601")
+    p_notes.add_argument("--until", help="Upper bound: duration ago (1h, 30m, 2d, 1w) or ISO8601 — pairs with --since for a range")
+    p_notes.add_argument("--session", help="Filter to notes created by a specific tmux session (e.g. auto-0322-153000)")
     p_notes.add_argument("--tags", help="Filter by tag (comma-separated)")
     p_notes.add_argument("--limit", type=int, default=20, help="Max results (default: 20)")
     p_notes.add_argument("--short", action="store_true", help="One-line compact output")
     p_notes.add_argument("--headline", action="store_true", help="Digest table: id, time, tags, title, author")
     p_notes.add_argument("--state", help="Filter by publication_state (comma-separated: raw,curated,published,canonical)")
     p_notes.add_argument("--include", choices=["raw"], help="Include additional state categories (use 'raw' to surface raw notes from other sessions)")
+    p_notes.add_argument(
+        "--only-org",
+        dest="only_org",
+        metavar="SLUG",
+        help="Restrict to a single org (own slug or a peer). Skips cross-org RRF merge.",
+    )
+    p_notes.add_argument(
+        "--org",
+        dest="org_mode",
+        metavar="SLUG",
+        help="Peer scope: 'all' includes every known org (admin); any other slug is an alias for --only-org.",
+    )
     p_notes.set_defaults(func=cmd_notes)
 
     # journal

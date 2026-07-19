@@ -433,7 +433,7 @@ class HttpClient:
     # ── writes ─────────────────────────────────────────────
 
     def create_note(
-        self, content, *, tags=None, author=None,
+        self, content, *, tags=None, author=None, session_hint=None,
         attachments=None, html_path=None,
         auto_provenance_source_id=None, auto_provenance_turn=None,
         short_description=None,
@@ -443,7 +443,7 @@ class HttpClient:
         if attachments or html_path:
             return self._create_note_multipart(
                 content,
-                tags=tags, author=author,
+                tags=tags, author=author, session_hint=session_hint,
                 attachments=attachments, html_path=html_path,
                 auto_provenance_source_id=auto_provenance_source_id,
                 auto_provenance_turn=auto_provenance_turn,
@@ -456,6 +456,8 @@ class HttpClient:
             body["tags"] = ",".join(tags)
         if author:
             body["author"] = author
+        if session_hint:
+            body["session_hint"] = session_hint
         if auto_provenance_source_id:
             body["auto_provenance_source_id"] = auto_provenance_source_id
         if auto_provenance_turn:
@@ -468,7 +470,7 @@ class HttpClient:
         return _normalize_note_result(result, content)
 
     def _create_note_multipart(
-        self, content, *, tags, author,
+        self, content, *, tags, author, session_hint=None,
         attachments, html_path,
         auto_provenance_source_id, auto_provenance_turn,
         short_description, keywords, org,
@@ -478,6 +480,8 @@ class HttpClient:
             fields["tags"] = ",".join(tags)
         if author:
             fields["author"] = author
+        if session_hint:
+            fields["session_hint"] = session_hint
         if auto_provenance_source_id:
             fields["auto_provenance_source_id"] = auto_provenance_source_id
         if auto_provenance_turn is not None:
