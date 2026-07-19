@@ -111,6 +111,7 @@
         !signer || typeof signer.signRegistryRequest !== 'function') {
       throw new Error('Approval is unavailable in this browser. Reload the dashboard and try again.');
     }
+    if (typeof session.ready === 'function') await session.ready();
 
     let retained = _matchingApprovalAuthority(req);
     if (!retained) {
@@ -131,7 +132,10 @@
         throw error;
       }
       retained = _matchingApprovalAuthority(req);
-      if (!retained) throw new Error('The unlocked authority does not match this organization.');
+      if (!retained) {
+        await session.signOut();
+        throw new Error('The unlocked authority does not match this organization.');
+      }
     }
 
     const ttl = req.duration === 'none' ? null : Number(req.duration);
@@ -2102,7 +2106,9 @@
         // key and rides the envelope on the decision. The server-side
         // executor forwards it to the registry and returns the URL.
         link_publish: {
-          open(self, r) {
+          async open(self, r) {
+            const session = window.AutonomyNetworkSession;
+            if (session && typeof session.ready === 'function') await session.ready();
             const req = r.request || {};
             const title = r.target_title || req.target_uuid || '?';
             const acting = r.acting_identity || {};
