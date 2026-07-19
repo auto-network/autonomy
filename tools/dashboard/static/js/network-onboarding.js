@@ -423,8 +423,12 @@
     on('onboarding-back', function () { _goto(O.step - 1); });
     on('onboarding-skip-orgs', close);
     on('onboarding-create-org', function () {
+      // The dedicated create-org screen (auto-yn5yn) — NOT the C1 org-key
+      // ceremony this button used to trigger. 'Later' there returns here.
       close();
-      if (window.AutonomyNetworkIdentity) window.AutonomyNetworkIdentity.open();
+      if (window.AutonomyCreateOrg) {
+        window.AutonomyCreateOrg.open({ entry: 'onboarding' });
+      }
     });
     on('onboarding-primary', function () {
       if (O.step === 1) {
