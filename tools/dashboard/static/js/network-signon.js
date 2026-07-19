@@ -349,7 +349,6 @@
       registryUrl: record.registryUrl, rootPub: record.rootPub,
       orgSlug: record.orgSlug || null, createdAt: record.createdAt,
     };
-    _renderIndicator();
     return _state.session;
   }
 
@@ -378,19 +377,6 @@
       throw new Error(detail || ('request failed: ' + url + ' → ' + resp.status));
     }
     return resp.json();
-  }
-
-  // Does this org hold a stored (encrypted) identity key? Drives the
-  // chrome's signed-out branch: a key present → the unlock form; none →
-  // the getting-started/welcome entry. Never throws.
-  async function hasIdentity(org) {
-    var orgQ = org ? ('?org=' + encodeURIComponent(org)) : '';
-    try {
-      var k = await _fetchJsonOrNull('/api/network/org-key' + orgQ);
-      return !!(k && k.armored_private_key);
-    } catch (e) {
-      return false;
-    }
   }
 
   // Passphrase → decrypt root ONCE → mint session key + cert → drop root.
@@ -484,7 +470,6 @@
   async function signOut() {
     _state.session = null;
     try { await _idbOp('readwrite', function (s) { return s.clear(); }); } catch (e) { /* ignore */ }
-    _renderIndicator();
   }
 
   // Root step-up: revoking a session key is a root-authority act — it
@@ -592,265 +577,12 @@
     };
   }
 
-  // ── persistent-chrome indicator + panel ────────────────────────────
-
-  function _fmtRemaining(notAfter) {
-    var left = notAfter - _nowS();
-    if (left <= 0) return 'expired';
-    if (left < 3600) return Math.max(1, Math.floor(left / 60)) + 'm';
-    if (left < 48 * 3600) {
-      var h = Math.floor(left / 3600);
-      var m = Math.floor((left % 3600) / 60);
-      return h + 'h' + (m ? ' ' + m + 'm' : '');
-    }
-    return Math.floor(left / 86400) + 'd';
-  }
-
-  function _el(tag, attrs, text) {
-    var el = document.createElement(tag);
-    for (var k in (attrs || {})) el.setAttribute(k, attrs[k]);
-    if (text != null) el.textContent = text;
-    return el;
-  }
-
-  function _renderIndicator() {
-    var host = document.getElementById('network-signon');
-    if (!host) return;
-    host.textContent = '';
-    var live = available();
-    var btn = _el('button', {
-      id: 'network-signon-indicator',
-      'data-testid': 'network-signon-indicator',
-      'data-state': live ? 'signed-in' : 'signed-out',
-      'class': 'network-signon-btn' + (live ? ' signed-in' : ''),
-      // Sign-in unlocks YOUR local identity key; it is not a session on
-      // auto.network (a broker), so the chrome never says so.
-      title: live ? 'Signed in — click for identity details'
-                  : 'Sign in — unlock your identity key',
-    });
-    btn.appendChild(_el('span', { 'class': 'network-signon-dot' }));
-    if (live) {
-      btn.appendChild(_el('span', {
-        'data-testid': 'network-signon-expiry',
-        'class': 'network-signon-text',
-      }, 'Signed in · ' + _fmtRemaining(_state.session.cert.not_after)));
-    } else {
-      btn.appendChild(_el('span', {
-        'data-testid': 'network-signon-affordance',
-        'class': 'network-signon-text',
-      }, 'Sign in'));
-    }
-    btn.addEventListener('click', function () { _togglePanel(); });
-    host.appendChild(btn);
-    _renderPanel();
-  }
-
-  var _panelOpen = false;
-  var _panelError = null;
-  var _panelBusy = false;
-  var _revokeStep = false;
-  var _panelHasKey = null;   // null = not yet probed; true/false once known
-
-  // Probe (once per open) whether this device holds an identity key, so
-  // the signed-out panel can choose the unlock form vs the getting-started
-  // entry without the operator guessing.
-  function _probeHasKey() {
-    var org = _state.session && _state.session.orgSlug;
-    hasIdentity(org).then(function (present) {
-      if (!_panelOpen || available()) return;
-      _panelHasKey = present;
-      _renderPanel();
-    });
-  }
-
-  function _togglePanel(force) {
-    _panelOpen = (force !== undefined) ? !!force : !_panelOpen;
-    _panelError = null;
-    _revokeStep = false;
-    if (_panelOpen && !available()) {
-      _panelHasKey = null;
-      _probeHasKey();
-    }
-    _renderPanel();
-  }
-
-  function _renderPanel() {
-    var existing = document.getElementById('network-signon-panel');
-    if (existing) existing.remove();
-    if (!_panelOpen) return;
-
-    var panel = _el('div', {
-      id: 'network-signon-panel',
-      'data-testid': 'network-signon-panel',
-      'class': 'network-signon-panel',
-    });
-    // The panel is about YOUR identity, never the broker: title reflects
-    // the local state (signed in / signing in), not "auto.network".
-    var signedIn = available();
-    panel.appendChild(_el('div', { 'class': 'network-signon-title' },
-      signedIn ? 'Your identity' : 'Sign in'));
-
-    if (signedIn) {
-      var s = _state.session;
-      var list = _el('div', { id: 'network-key-list', 'data-testid': 'network-key-list' });
-      listKeys().forEach(function (k) {
-        var row = _el('div', { 'class': 'network-key-row', 'data-key-id': k.key_id });
-        row.appendChild(_el('div', { 'class': 'network-key-id' },
-          k.key_id.slice(0, 16) + '… · ' + k.subject.id +
-          (k.this_browser ? ' (this browser)' : '')));
-        row.appendChild(_el('div', { 'class': 'network-key-meta' },
-          'scopes: ' + k.scope.join(' ')));
-        row.appendChild(_el('div', { 'class': 'network-key-meta' },
-          'expires in ' + _fmtRemaining(k.not_after) + ' · org ' + k.org.slice(0, 8) + '…'));
-        list.appendChild(row);
-      });
-      panel.appendChild(list);
-
-      var actions = _el('div', { 'class': 'network-signon-actions' });
-      var outBtn = _el('button', {
-        id: 'network-signout-btn', 'data-testid': 'network-signout-btn',
-        'class': 'network-signon-action',
-      }, 'Sign out');
-      outBtn.addEventListener('click', function () {
-        signOut().then(function () { _togglePanel(false); });
-      });
-      actions.appendChild(outBtn);
-
-      var revBtn = _el('button', {
-        id: 'network-revoke-btn', 'data-testid': 'network-revoke-btn',
-        'class': 'network-signon-action network-signon-danger',
-      }, _revokeStep ? 'Cancel revoke' : 'Revoke this key…');
-      revBtn.addEventListener('click', function () {
-        _revokeStep = !_revokeStep; _panelError = null; _renderPanel();
-      });
-      actions.appendChild(revBtn);
-      panel.appendChild(actions);
-
-      if (_revokeStep) {
-        // Root step-up: passphrase required to mint the revocation record.
-        var form = _el('div', { 'class': 'network-signon-form' });
-        form.appendChild(_el('div', { 'class': 'network-key-meta' },
-          'Revoking publishes a root-signed denylist entry and signs this browser out.'));
-        var pp = _el('input', {
-          type: 'password', id: 'network-revoke-passphrase',
-          'data-testid': 'network-revoke-passphrase',
-          placeholder: 'Org passphrase (step-up)', 'class': 'network-signon-input',
-        });
-        form.appendChild(pp);
-        var go = _el('button', {
-          id: 'network-revoke-confirm', 'data-testid': 'network-revoke-confirm',
-          'class': 'network-signon-action network-signon-danger',
-        }, 'Revoke session key');
-        go.addEventListener('click', function () {
-          if (_panelBusy) return;
-          _panelBusy = true; _panelError = null;
-          revokeCurrentKey(pp.value).then(function () {
-            _panelBusy = false; _togglePanel(false);
-            if (window.showToast) window.showToast('Session key revoked', 'success');
-          }).catch(function (e) {
-            _panelBusy = false; _panelError = e.message || String(e); _renderPanel();
-          });
-        });
-        form.appendChild(go);
-        panel.appendChild(form);
-      }
-    } else if (_panelHasKey === null) {
-      // Deciding between the unlock form and the getting-started entry
-      // needs to know whether a key exists; the check is in flight.
-      panel.appendChild(_el('div', {
-        'data-testid': 'network-signon-checking', 'class': 'network-key-meta',
-      }, 'Checking for an identity on this device…'));
-    } else if (_panelHasKey === false) {
-      // No key: this is the getting-started/welcome case. The core chrome
-      // does NOT host the create ceremony — it points at it. (Onboarding
-      // is destined to be the pre-bundled Welcome plugin.)
-      panel.appendChild(_el('div', {
-        'data-testid': 'network-signon-nokey', 'class': 'network-key-meta',
-      }, 'No identity on this device yet. Create one to publish share-links ' +
-         'and sign your org’s requests.'));
-      var startBtn = _el('button', {
-        id: 'network-getstarted-btn', 'data-testid': 'network-getstarted-btn',
-        'class': 'network-signon-action',
-      }, 'Get started');
-      startBtn.addEventListener('click', function () {
-        _togglePanel(false);
-        // The Get-started surface (personal identity + passkey) is the
-        // front door; the C1 org ceremony is reachable from its org step.
-        if (window.AutonomyOnboarding) {
-          window.AutonomyOnboarding.open();
-        } else if (window.AutonomyNetworkIdentity) {
-          window.AutonomyNetworkIdentity.open();
-        }
-      });
-      panel.appendChild(startBtn);
-    } else {
-      // Key present: the pure unlock form. Enter the passphrase, mint a
-      // session key locally, forget the passphrase. No registry involved.
-      var form2 = _el('div', { 'class': 'network-signon-form' });
-      form2.appendChild(_el('div', { 'class': 'network-key-meta' },
-        'Unlocking decrypts your identity key once, mints a session key in ' +
-        'this browser, and forgets the passphrase.'));
-      var pp2 = _el('input', {
-        type: 'password', id: 'network-signon-passphrase',
-        'data-testid': 'network-signon-passphrase',
-        placeholder: 'Passphrase', 'class': 'network-signon-input',
-      });
-      form2.appendChild(pp2);
-      var ttlSel = _el('select', {
-        id: 'network-signon-ttl', 'data-testid': 'network-signon-ttl',
-        'class': 'network-signon-input',
-      });
-      [['3600', '1 hour'], ['28800', '8 hours'], ['86400', '24 hours (default)'],
-       ['604800', '7 days']].forEach(function (opt) {
-        var o = _el('option', { value: opt[0] }, opt[1]);
-        if (opt[0] === '86400') o.setAttribute('selected', '');
-        ttlSel.appendChild(o);
-      });
-      form2.appendChild(ttlSel);
-      var goBtn = _el('button', {
-        id: 'network-signon-submit', 'data-testid': 'network-signon-submit',
-        'class': 'network-signon-action',
-      }, 'Sign in');
-      function _submitSignOn() {
-        if (_panelBusy) return;
-        _panelBusy = true; _panelError = null; _renderPanel();
-        signOn(pp2.value, { ttlSeconds: parseInt(ttlSel.value, 10) })
-          .then(function () {
-            _panelBusy = false; _togglePanel(false);
-            if (window.showToast) window.showToast('Signed in', 'success');
-          })
-          .catch(function (e) {
-            _panelBusy = false; _panelError = e.message || String(e);
-            _renderIndicator(); _panelOpen = true; _renderPanel();
-          });
-      }
-      goBtn.addEventListener('click', _submitSignOn);
-      pp2.addEventListener('keydown', function (ev) {
-        if (ev.key === 'Enter') _submitSignOn();
-      });
-      form2.appendChild(goBtn);
-      panel.appendChild(form2);
-    }
-
-    if (_panelBusy) {
-      panel.appendChild(_el('div', { 'class': 'network-key-meta' }, 'working…'));
-    }
-    if (_panelError) {
-      panel.appendChild(_el('div', {
-        id: 'network-signon-error', 'data-testid': 'network-signon-error',
-        'class': 'network-signon-error',
-      }, _panelError));
-    }
-    document.body.appendChild(panel);
-  }
-
-  // Countdown / expiry watchdog: an expired cert flips the chrome to
-  // signed-out without a reload (and the next load purges the store).
+  // Expiry watchdog: an expired delegation is destroyed locally. This
+  // module no longer owns shell chrome; authority is acquired on demand by
+  // the action-specific Gate 2 flow.
   setInterval(function () {
     if (_state.session && !_sessionLive(_state.session)) {
       signOut();
-    } else if (_state.session) {
-      _renderIndicator();
     }
   }, 30000);
 
@@ -858,11 +590,6 @@
 
   _ready = _loadFromStore().then(function (session) {
     _state.session = session;
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', _renderIndicator);
-    } else {
-      _renderIndicator();
-    }
     return session;
   }).catch(function () { return null; });
 
@@ -891,7 +618,6 @@
       decryptArmor: decryptArmor,
       installSession: _installSession,
       loadFromStore: _loadFromStore,
-      renderIndicator: _renderIndicator,
       hexToBytes: hexToBytes,
       bytesToHex: bytesToHex,
       domains: {

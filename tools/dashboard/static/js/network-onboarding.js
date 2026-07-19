@@ -93,6 +93,10 @@
     catch (e) { /* ignore */ }
   }
 
+  function _identityChanged() {
+    window.dispatchEvent(new Event('autonomy:identity-changed'));
+  }
+
   // ── ceremony steps ─────────────────────────────────────────────────
 
   // Step 1: generate + armor + store the personal root. The plaintext
@@ -125,7 +129,7 @@
   async function _enrollPasskey() {
     if (!window.PublicKeyCredential || !navigator.credentials) {
       throw new Error('this browser does not support passkeys — ' +
-        'you can enroll another device later from Account settings');
+        'you can enroll a passkey from a supported browser later');
     }
     var minted = await _postJson('/api/identity/passkey/register-options', {});
     var pk = minted.options;
@@ -303,7 +307,7 @@
       '<p class="text-sm text-gray-400 mt-2">This device &middot; Face&nbsp;ID / Touch&nbsp;ID</p>' +
       '<div class="flex gap-2.5 ' + _BOX_CLS + ' p-3 mt-6 text-sm text-gray-400 leading-relaxed text-left">' +
       '<span>' + _INFO + '</span>' +
-      '<span>You can enroll more devices later from Account settings. Lose this device and your identity ' +
+      '<span>You can enroll more passkeys later. Lose this device and your identity ' +
       'is still yours &mdash; it’s your password that matters.</span></div>' +
       '<details class="mt-4 text-left">' +
       '<summary class="text-xs text-gray-500 cursor-pointer">Technical detail</summary>' +
@@ -433,20 +437,18 @@
             if (!O) return;
             O.hasIdentity = true;
             O.userName = name;
+            _identityChanged();
             _goto(2);
           })
           .catch(_fail);
       } else if (O.step === 2) {
         _busySet(true);
         _enrollPasskey()
-          .then(function () { _goto(3); })
+          .then(function () { _identityChanged(); _goto(3); })
           .catch(_fail);
       } else {
         close();
-        try {
-          var s = window.AutonomyNetworkSession;
-          if (s && s._internals) s._internals.renderIndicator();
-        } catch (e) { /* chrome refresh only */ }
+        _identityChanged();
       }
     });
   }
