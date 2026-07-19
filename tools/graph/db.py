@@ -15,6 +15,19 @@ from .models import Source, Thought, Derivation, Entity, Claim, Edge, Node, Atta
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Schema-init perf guard (2026-07-19). `_init_schema` re-runs the whole schema
+# script + every migration + tag seeding + schema-meta flush on EVERY writable
+# open — all writes that take the SQLite write lock, and under concurrency they
+# serialize and can stall the caller (notably the dashboard event loop) for
+# many seconds. We skip that re-init when the DB's `PRAGMA user_version` already
+# equals this constant. It is set MANUALLY and is deliberately dumb:
+#   >>> If you change schema.sql, add/alter/remove any `_migrate_*` method, or
+#   >>> change `_seed_tags`/`_flush_schema_meta`, you MUST bump this number, or
+#   >>> existing databases will NOT pick up your change.
+# (A future enhancement can auto-derive this from the schema; for now the whole
+# point is to prove the perf win with the smallest possible change.)
+_SCHEMA_USER_VERSION = 1
 DEFAULT_DB = REPO_ROOT / "data" / "graph.db"
 DEFAULT_ORGS_DIR = REPO_ROOT / "data" / "orgs"
 
@@ -221,6 +234,11 @@ class GraphDB:
         self.read_only = True
 
     def _init_schema(self):
+        # Perf guard: skip the whole re-init (all writes) when this DB is already
+        # at the expected schema version. See _SCHEMA_USER_VERSION above — bump
+        # that constant whenever you change the schema/migrations/seed below.
+        if self.conn.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_USER_VERSION:
+            return
         schema = SCHEMA_PATH.read_text()
         self.conn.executescript(schema)
         self._migrate_attachments_alt_text()
@@ -239,6 +257,8 @@ class GraphDB:
         self._migrate_message_id_unique()
         self._seed_tags()
         self._flush_schema_meta()
+        # Stamp the version so subsequent opens hit the fast-path guard above.
+        self.conn.execute(f"PRAGMA user_version = {_SCHEMA_USER_VERSION}")
 
     def _flush_schema_meta(self):
         """Lazy-flush schema metadata Settings on connection open.
