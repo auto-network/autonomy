@@ -13812,18 +13812,21 @@ _ONBOARDING_JS = r"""
         r.step3_skip = text('onboarding-skip-orgs');
         r.step3_primary = text('onboarding-primary');
 
-        // Create-a-new-organization hands off to the C1 org ceremony.
+        // Create-a-new-organization opens the dedicated create-org screen
+        // (auto-yn5yn) — NEVER the retired C1 identity ceremony.
         q('onboarding-create-org').click();
         const t1 = Date.now();
-        while (Date.now() - t1 < 3000 && !q('network-identity-modal')) {
+        while (Date.now() - t1 < 3000 && !q('create-org')) {
             await new Promise(res => setTimeout(res, 40));
         }
-        r.create_org_opens_c1 = !!q('network-identity-modal');
+        r.create_org_opens_screen = !!q('create-org');
+        r.create_org_never_opens_c1 = !q('network-identity-modal');
         r.onboarding_closed_after_handoff =
             !document.getElementById('network-onboarding');
-        if (window.AutonomyNetworkIdentity) window.AutonomyNetworkIdentity.close();
+        if (window.AutonomyCreateOrg) window.AutonomyCreateOrg.close();
     } finally {
         OB.close();
+        if (window.AutonomyCreateOrg) window.AutonomyCreateOrg.close();
         if (window.AutonomyNetworkIdentity) window.AutonomyNetworkIdentity.close();
     }
     return JSON.stringify(r);
@@ -13835,7 +13838,7 @@ class TestOnboardingSurface:
     """L2.B for the Get-started onboarding (mockup d49be06b): the three
     steps render with the converged wording, the password mismatch is a
     client-side rejection (nothing posted), and the Organizations step
-    hands off to the C1 create-org ceremony."""
+    hands off to the dedicated create-org screen (auto-yn5yn)."""
 
     @pytest.fixture(scope="class", autouse=True)
     def checks(self, browser, request):
@@ -13873,7 +13876,218 @@ class TestOnboardingSurface:
         assert "Skip for now" in c["step3_skip"]
         assert c["step3_primary"] == "Finish"
 
-    def test_create_org_hands_off_to_c1_ceremony(self):
+    def test_create_org_opens_dedicated_screen(self):
         c = self._checks
-        assert c["create_org_opens_c1"] is True
+        assert c["create_org_opens_screen"] is True
+        assert c["create_org_never_opens_c1"] is True
         assert c["onboarding_closed_after_handoff"] is True
+
+
+# ── Create-org screen (auto-yn5yn, design fe06a4a3/2bed959b) ─────────
+
+_CREATE_ORG_JS = r"""
+(async () => {
+    const CO = window.AutonomyCreateOrg;
+    if (!CO) return JSON.stringify({fatal: 'create-org module not loaded'});
+    const r = {};
+    const q = (t) => document.querySelector('[data-testid=' + t + ']');
+    const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+    const type = (value) => {
+        const input = q('create-org-name');
+        input.value = value;
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+    };
+    const markColor = () => {
+        const m = q('create-org-mark');
+        return m ? m.style.background : null;
+    };
+    const overlayText = () =>
+        (document.getElementById('create-org') || {}).textContent || '';
+
+    const origFetch = window.fetch;
+    try {
+        // ── standalone entry: form state ──────────────────────────
+        CO.open({entry: 'standalone'});
+        r.title = ((q('create-org-title') || {}).textContent || '').trim();
+        r.concept_line = overlayText().indexOf(
+            'group, arrange, and share your work') !== -1;
+        r.bullet_workspaces = overlayText().indexOf(
+            'shared workspaces with the development environment') !== -1;
+        r.bullet_knowledge = overlayText().indexOf(
+            'organizational knowledge graph') !== -1;
+        r.mark_hidden_when_empty = !q('create-org-mark');
+        r.submit_disabled_when_empty = q('create-org-submit').disabled;
+        r.dismiss_standalone = ((q('create-org-dismiss') || {}).textContent || '').trim();
+        r.no_crypto_jargon = overlayText().indexOf('ceremony') === -1 &&
+            overlayText().indexOf('mint') === -1 &&
+            overlayText().indexOf('keypair') === -1;
+        r.techdetail_present = !!q('create-org-techdetail');
+
+        // ── color pins on first keystroke, survives typing ────────
+        type('R');
+        await sleep(60);
+        const c1 = markColor();
+        type('Riverside Robotics');
+        await sleep(60);
+        r.color_pinned_across_typing = markColor() === c1;
+        r.mark_shows_initial = ((q('create-org-mark') || {}).textContent || '')
+            .trim().indexOf('R') === 0;
+        r.submit_enabled_when_typed = !q('create-org-submit').disabled;
+
+        // ── picker: manual pick wins and survives a rename ────────
+        q('create-org-mark').click();
+        await sleep(60);
+        r.picker_opens = !!q('create-org-mark-picker');
+        r.swatch_count = document.querySelectorAll(
+            '[data-testid=create-org-swatch]').length;
+        r.upload_label = overlayText().indexOf('Upload an icon') !== -1;
+        const swatches = document.querySelectorAll('[data-testid=create-org-swatch]');
+        swatches[3].click();
+        await sleep(60);
+        const picked = markColor();
+        r.picker_closes_on_pick = !q('create-org-mark-picker');
+        type('Completely Different Name');
+        await sleep(60);
+        r.manual_pick_survives_rename = markColor() === picked;
+
+        // ── 409 → operator error copy; success → created page ─────
+        window.fetch = async function (url, opts) {
+            if (String(url).indexOf('/api/orgs') !== -1 &&
+                ((opts || {}).method || 'GET') === 'POST') {
+                r.posted_body = JSON.parse(opts.body);
+                if (r.fail409) {
+                    return new Response(JSON.stringify({error: 'org exists'}),
+                        {status: 409, headers: {'Content-Type': 'application/json'}});
+                }
+                return new Response(JSON.stringify({slug: r.posted_body.slug}),
+                    {status: 201, headers: {'Content-Type': 'application/json'}});
+            }
+            return origFetch.call(this, url, opts);
+        };
+        r.fail409 = true;
+        q('create-org-submit').click();
+        const t0 = Date.now();
+        while (Date.now() - t0 < 3000 &&
+               !((q('create-org-error') || {}).textContent || '').trim()) {
+            await sleep(40);
+        }
+        r.error_409 = ((q('create-org-error') || {}).textContent || '').trim();
+        r.form_still_alive_after_409 = !!q('create-org-name');
+
+        r.fail409 = false;
+        q('create-org-submit').click();
+        const t1 = Date.now();
+        while (Date.now() - t1 < 3000 && !q('create-org-success')) {
+            await sleep(40);
+        }
+        r.success_page = !!q('create-org-success');
+        r.success_heading = overlayText().indexOf('has been created') !== -1;
+        r.posted_slug = (r.posted_body || {}).slug;
+        r.posted_identity_name = ((r.posted_body || {}).identity || {}).name;
+        r.posted_identity_color = ((r.posted_body || {}).identity || {}).color;
+        r.next_steps = {
+            settings: !!q('create-org-goto-settings'),
+            workspace: !!q('create-org-create-workspace'),
+            invite: !!q('create-org-invite'),
+        };
+        r.invite_copy = ((q('create-org-invite') || {}).textContent || '')
+            .indexOf('Invite teammates') !== -1;
+        r.finish_standalone = ((q('create-org-finish') || {}).textContent || '').trim();
+        CO.close();
+
+        // ── onboarding entry: Later returns to step 3 ─────────────
+        CO.open({entry: 'onboarding'});
+        r.dismiss_onboarding = ((q('create-org-dismiss') || {}).textContent || '').trim();
+        q('create-org-dismiss').click();
+        const t2 = Date.now();
+        while (Date.now() - t2 < 3000 &&
+               !document.getElementById('network-onboarding')) {
+            await sleep(40);
+        }
+        const ob = document.getElementById('network-onboarding');
+        r.later_returns_to_onboarding = !!ob;
+        r.later_lands_on_step3 = !!ob && ob.getAttribute('data-step') === '3';
+        r.create_org_closed_after_later = !document.getElementById('create-org');
+    } finally {
+        window.fetch = origFetch;
+        CO.close();
+        if (window.AutonomyOnboarding) window.AutonomyOnboarding.close();
+    }
+    delete r.posted_body;
+    delete r.fail409;
+    return JSON.stringify(r);
+})()
+"""
+
+
+class TestCreateOrgScreen:
+    """L2.B for the create-org screen (auto-yn5yn, approved design
+    fe06a4a3 rev 2bed959b): the dedicated screen — not the C1 ceremony —
+    with pinned mark color, tap-to-pick color/icon, operator copy, a
+    surviving form on 409, the created page's next steps, and the
+    onboarding 'Later' path that never blanks the app."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        _navigate_and_check("/sessions", "", wait_ms=600)
+        request.cls._checks = _run_async_eval(_CREATE_ORG_JS)
+
+    def test_surface_ran(self):
+        c = self._checks
+        assert c and not c.get("fatal"), f"create-org eval failed: {c}"
+
+    def test_form_copy_and_structure(self):
+        c = self._checks
+        assert c["title"] == "Create a new organization"
+        assert c["concept_line"] is True
+        assert c["bullet_workspaces"] is True
+        assert c["bullet_knowledge"] is True
+        assert c["techdetail_present"] is True
+        assert c["no_crypto_jargon"] is True
+
+    def test_mark_appears_with_name_and_color_pins(self):
+        c = self._checks
+        assert c["mark_hidden_when_empty"] is True
+        assert c["mark_shows_initial"] is True
+        assert c["color_pinned_across_typing"] is True
+
+    def test_submit_gating(self):
+        c = self._checks
+        assert c["submit_disabled_when_empty"] is True
+        assert c["submit_enabled_when_typed"] is True
+
+    def test_mark_picker(self):
+        c = self._checks
+        assert c["picker_opens"] is True
+        assert c["swatch_count"] == 6
+        assert c["upload_label"] is True
+        assert c["picker_closes_on_pick"] is True
+        assert c["manual_pick_survives_rename"] is True
+
+    def test_conflict_shows_operator_copy_and_keeps_form(self):
+        c = self._checks
+        assert "already in use" in c["error_409"]
+        assert c["form_still_alive_after_409"] is True
+
+    def test_create_posts_real_payload_and_lands_on_created_page(self):
+        c = self._checks
+        assert c["posted_slug"] == "completely-different-name"
+        assert c["posted_identity_name"] == "Completely Different Name"
+        assert c["posted_identity_color"].startswith("#")
+        assert c["success_page"] is True
+        assert c["success_heading"] is True
+
+    def test_created_page_next_steps(self):
+        c = self._checks
+        assert c["next_steps"] == {"settings": True, "workspace": True,
+                                   "invite": True}
+        assert c["invite_copy"] is True
+        assert c["finish_standalone"] == "Close"
+
+    def test_dismiss_labels_and_later_returns_to_onboarding(self):
+        c = self._checks
+        assert c["dismiss_standalone"] == "Not now"
+        assert c["dismiss_onboarding"] == "Later"
+        assert c["later_returns_to_onboarding"] is True
+        assert c["later_lands_on_step3"] is True
+        assert c["create_org_closed_after_later"] is True
