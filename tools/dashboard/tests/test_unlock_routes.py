@@ -109,6 +109,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("DASHBOARD_SESSION_SECRET_FILE",
                        str(tmp_path / "session.secret"))
     monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
+    monkeypatch.delenv("DASHBOARD_AUTH", raising=False)
     identity_routes._pending.clear()
     unlock_routes._assert_pending.clear()
     unlock_routes._pw_pending.clear()
@@ -362,6 +363,90 @@ def test_websocket_refused_under_enforcement(env, root):
     with pytest.raises(Exception):
         with env.websocket_connect("/ws/terminal"):
             pass
+
+
+# ── DASHBOARD_AUTH kill-switch (env-only recovery hatch) ──────────────
+
+
+def test_kill_switch_disables_enforcement(env, root, monkeypatch):
+    _store_identity(env, root)
+    env.cookies.clear()
+    assert env.get("/beads", follow_redirects=False).status_code == 302
+    for value in ("off", "OFF", " Off ", "0", "false", "False", "no", "NO"):
+        monkeypatch.setenv("DASHBOARD_AUTH", value)
+        assert env.get("/beads").status_code == 200, value
+        assert env.get("/pages/beads").status_code == 200, value
+    with env.websocket_connect("/ws/terminal") as ws:
+        assert ws.receive_text() == "hello"
+    # the gated register endpoints open too — recovery mode is total
+    assert env.post("/api/identity/passkey/register-options",
+                    json={}).status_code == 200
+
+
+def test_kill_switch_fails_safe_on_any_other_value(env, root, monkeypatch):
+    _store_identity(env, root)
+    env.cookies.clear()
+    for value in ("", "on", "1", "true", "yes", "enforce", "of", "OFF!",
+                  "disable", "none", "null"):
+        monkeypatch.setenv("DASHBOARD_AUTH", value)
+        r = env.get("/beads", follow_redirects=False)
+        assert r.status_code == 302, f"DASHBOARD_AUTH={value!r} must enforce"
+    monkeypatch.delenv("DASHBOARD_AUTH")
+    assert env.get("/beads", follow_redirects=False).status_code == 302
+
+
+def test_kill_switch_is_never_request_controllable(env, root):
+    _store_identity(env, root)
+    env.cookies.clear()
+    attempts = [
+        {"headers": {"X-Dashboard-Auth": "off"}},
+        {"headers": {"DASHBOARD_AUTH": "off"}},
+        {"headers": {"Cookie": "DASHBOARD_AUTH=off"}},
+        {"params": {"DASHBOARD_AUTH": "off"}},
+        {"params": {"dashboard_auth": "off"}},
+    ]
+    for kw in attempts:
+        r = env.get("/beads", follow_redirects=False, **kw)
+        assert r.status_code == 302, kw
+    r = env.post("/api/identity/passkey/register-options", json={},
+                 headers={"X-Dashboard-Auth": "off"})
+    assert r.status_code == 401
+
+
+def test_kill_switch_reenables_the_moment_env_changes(env, root, monkeypatch):
+    _store_identity(env, root)
+    env.cookies.clear()
+    monkeypatch.setenv("DASHBOARD_AUTH", "off")
+    assert env.get("/beads").status_code == 200
+    monkeypatch.setenv("DASHBOARD_AUTH", "back-on")
+    assert env.get("/beads", follow_redirects=False).status_code == 302
+
+
+def test_kill_switch_beats_wedged_enrollment_read(env, root, monkeypatch):
+    """The hatch must work even when the settings-DB read is broken —
+    that is exactly the failure it exists to recover from, so it is
+    checked BEFORE the enrollment lookup."""
+    _store_identity(env, root)
+    env.cookies.clear()
+
+    def boom(_org):
+        raise RuntimeError("settings DB wedged")
+
+    monkeypatch.setattr(unlock_routes, "_personal_member", boom)
+    monkeypatch.setattr(unlock_routes, "_passkey_rows", boom)
+    unlock_routes._enforce_cache.update({"at": 0.0, "value": True})
+    assert env.get("/beads", follow_redirects=False).status_code == 302
+    monkeypatch.setenv("DASHBOARD_AUTH", "off")
+    assert env.get("/beads").status_code == 200
+
+
+def test_status_surfaces_gate_disabled(env, root, monkeypatch):
+    _store_identity(env, root)
+    assert env.get("/api/identity/status").json()["gate_disabled"] is False
+    monkeypatch.setenv("DASHBOARD_AUTH", "off")
+    assert env.get("/api/identity/status").json()["gate_disabled"] is True
+    monkeypatch.setenv("DASHBOARD_AUTH", "on")
+    assert env.get("/api/identity/status").json()["gate_disabled"] is False
 
 
 def test_bootstrap_session_minted_on_identity_creation(env, root):
