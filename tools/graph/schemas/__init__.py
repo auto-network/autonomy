@@ -54,6 +54,7 @@ from . import org_capability_install  # noqa: F401 — autonomy.org.capability.i
 from . import workspace_capability_enable  # noqa: F401 — autonomy.workspace.capability.enable#1
 from . import commit_policy  # noqa: F401 — autonomy.commit.policy#1 + operation_policy#1
 from . import network_identity  # noqa: F401 — autonomy.network.{org-key,binding,link-grant}#1
+from . import personal_identity  # noqa: F401 — autonomy.identity.{personal,passkey}#1
 from . import network_ledger  # noqa: F401 — autonomy.network.{ledger-state,ledger-projection}#1
 from . import worktree_review_binding  # noqa: F401 — autonomy.worktree.review_binding#1
 from . import source_control_review_state  # noqa: F401 — autonomy.source_control.review_state#1
