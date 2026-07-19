@@ -3,7 +3,7 @@
 The enforcement half of the identity system whose enrollment half lives
 in :mod:`identity_routes` (model notes ``graph://53f65f2f-d73`` two-gate
 matrix, ``graph://80ef5131-9f0`` fail-open-then-enforce + password-as-
-access-floor, mockup design d49be06b 'Unlock' state). Three pieces:
+access-floor, mockup design d49be06b 'Unlock' state). Four pieces:
 
 * **Passkey unlock** — the WebAuthn ASSERT ceremony ('Unlock with
   Face ID'). Same ceremony discipline as the register side: the
@@ -23,6 +23,12 @@ access-floor, mockup design d49be06b 'Unlock' state). Three pieces:
   verifies the Ed25519 signature against the stored ``root_pub``.
   Removing the last passkey therefore never locks the user out — the
   password path needs no enrolled credential.
+
+* **Approval unlock** — a headless session raises an ordinary pending
+  approval with a one-use ephemeral key. An authenticated operator signs the
+  server-frozen two-hour ``dashboard:ui`` grant with the personal root; the
+  requester proves possession of the ephemeral private key and atomically
+  redeems that grant into the same revocable session store.
 
 * **The session + the gate** — success on either path mints a signed,
   tamper-evident session token (HMAC-SHA256 over a server-side secret)
@@ -60,6 +66,11 @@ from starlette.routing import Route
 
 from tools.graph import settings_ops
 from tools.dashboard.dao import identity_sessions
+from tools.dashboard.dashboard_access_approvals import (
+    GRANT_SIGNING_DOMAIN as APPROVAL_GRANT_SIGNING_DOMAIN,
+    REDEEM_SIGNING_DOMAIN as APPROVAL_REDEEM_SIGNING_DOMAIN,
+    valid_nonce as _valid_approval_nonce,
+)
 from tools.dashboard.network_routes import _mock_mode
 from tools.dashboard.identity_routes import (
     PENDING_MAX,
@@ -194,9 +205,9 @@ def mint_session_token(method: str, *, request: Request | None = None,
         "iat": issued_at,
         "exp": expiry,
     }
+    secret = _session_secret()
     body = _b64url(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-    sig = _b64url(hmac.new(_session_secret(), body.encode("ascii"),
-                           hashlib.sha256).digest())
+    sig = _b64url(hmac.new(secret, body.encode("ascii"), hashlib.sha256).digest())
     user_agent, source_ip = _request_session_metadata(request)
     identity_sessions.create_session(
         sid=payload["sid"], method=method, credential_id=credential_id,
@@ -204,6 +215,18 @@ def mint_session_token(method: str, *, request: Request | None = None,
         user_agent=user_agent, source_ip=source_ip,
         grantee=grantee, scope=scope,
     )
+    return f"{body}.{sig}"
+
+
+def _token_for_persisted_session(*, sid: str, method: str, issued_at: int,
+                                 expires_at: int, secret: bytes) -> str:
+    """Sign token claims for a session already inserted transactionally."""
+    payload = {
+        "v": 1, "sid": sid, "method": method,
+        "iat": issued_at, "exp": expires_at,
+    }
+    body = _b64url(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    sig = _b64url(hmac.new(secret, body.encode("ascii"), hashlib.sha256).digest())
     return f"{body}.{sig}"
 
 
@@ -253,10 +276,11 @@ def verify_session_token(token: str | None) -> dict | None:
     return payload if active else None
 
 
-def attach_session_cookie(response: Response, request: Request, token: str) -> None:
+def attach_session_cookie(response: Response, request: Request, token: str,
+                          *, max_age: int = SESSION_TTL_S) -> None:
     response.set_cookie(
         SESSION_COOKIE, token,
-        max_age=SESSION_TTL_S, path="/", httponly=True, samesite="lax",
+        max_age=max_age, path="/", httponly=True, samesite="lax",
         # Authentication never rides cleartext.  This also avoids trusting a
         # caller-controlled X-Forwarded-Proto header or a proxy that omits it.
         secure=True,
@@ -650,6 +674,108 @@ async def post_unlock_password(request: Request) -> JSONResponse:
     return response
 
 
+# ── operator-approved headless unlock ─────────────────────────────────
+
+
+async def post_unlock_approval(request: Request) -> JSONResponse:
+    """Redeem one personal-root-approved grant with ephemeral-key proof."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"},
+                            status_code=400)
+    if not isinstance(body, dict) or set(body) != {"nonce", "proof"} \
+            or not isinstance(body.get("nonce"), str) \
+            or not isinstance(body.get("proof"), str):
+        return JSONResponse({"ok": False, "error": (
+            "body must carry only 'nonce' and 'proof' strings"
+        )}, status_code=400)
+    if not _valid_approval_nonce(body["nonce"]):
+        return JSONResponse({"ok": False,
+                             "error": "nonce must be 64 lowercase hex characters"},
+                            status_code=400)
+    try:
+        grant = identity_sessions.get_access_grant(body["nonce"])
+    except identity_sessions.SessionStoreError as exc:
+        return JSONResponse({"ok": False, "error": (
+            f"could not read the dashboard access grant: {exc}"
+        )}, status_code=503)
+    if grant is None:
+        return JSONResponse({"ok": False, "error": "access grant not found"},
+                            status_code=404)
+    if grant["consumed_at"] is not None:
+        return JSONResponse({"ok": False,
+                             "error": "access grant has already been used"},
+                            status_code=409)
+    now = _now()
+    if grant["expires_at"] <= now:
+        return JSONResponse({"ok": False, "error": "access grant has expired"},
+                            status_code=410)
+
+    from tools.network.idkit.canonical import canonical_json
+    from tools.network.idkit.errors import IdkitError
+    from tools.network.idkit.keys import verify_signature
+
+    proof_input = APPROVAL_REDEEM_SIGNING_DOMAIN + canonical_json({
+        "v": 1, "nonce": body["nonce"],
+    })
+    try:
+        verify_signature(grant["ephemeral_pub"], body["proof"], proof_input)
+    except IdkitError:
+        return JSONResponse({"ok": False,
+                             "error": "the ephemeral-key proof does not verify"},
+                            status_code=403)
+
+    # Load the cookie key before the atomic datastore transition. If its file
+    # cannot be read or created, the grant remains unconsumed and retryable.
+    try:
+        secret = _session_secret()
+    except OSError as exc:
+        return JSONResponse({"ok": False,
+                             "error": f"could not load the session key: {exc}"},
+                            status_code=503)
+    issued_at = int(now)
+    sid = secrets.token_hex(16)
+    user_agent, source_ip = _request_session_metadata(request)
+    try:
+        redeemed = identity_sessions.redeem_access_grant(
+            nonce=body["nonce"], sid=sid, now=now, created_at=issued_at,
+            user_agent=user_agent, source_ip=source_ip,
+        )
+    except (ValueError, identity_sessions.SessionStoreError) as exc:
+        return JSONResponse({"ok": False,
+                             "error": f"could not create the approved session: {exc}"},
+                            status_code=503)
+    if redeemed["status"] == "not_found":
+        return JSONResponse({"ok": False, "error": "access grant not found"},
+                            status_code=404)
+    if redeemed["status"] == "expired":
+        return JSONResponse({"ok": False, "error": "access grant has expired"},
+                            status_code=410)
+    if redeemed["status"] == "consumed":
+        return JSONResponse({"ok": False,
+                             "error": "access grant has already been used"},
+                            status_code=409)
+
+    token = _token_for_persisted_session(
+        sid=redeemed["sid"], method="approval",
+        issued_at=redeemed["created_at"], expires_at=redeemed["expires_at"],
+        secret=secret,
+    )
+    response = JSONResponse({
+        "ok": True,
+        "method": "approval",
+        "grantee": redeemed["grantee"],
+        "scope": redeemed["scope"],
+        "expires_at": redeemed["expires_at"],
+    })
+    attach_session_cookie(
+        response, request, token,
+        max_age=max(1, redeemed["expires_at"] - issued_at),
+    )
+    return response
+
+
 # ── session chrome + lock ─────────────────────────────────────────────
 
 
@@ -808,6 +934,8 @@ ROUTES = [
     Route("/api/identity/unlock/password/options", post_unlock_password_options,
           methods=["POST"]),
     Route("/api/identity/unlock/password", post_unlock_password,
+          methods=["POST"]),
+    Route("/api/identity/unlock/approval", post_unlock_approval,
           methods=["POST"]),
     Route("/api/identity/session", get_session, methods=["GET"]),
     Route("/api/identity/lock", post_lock, methods=["POST"]),

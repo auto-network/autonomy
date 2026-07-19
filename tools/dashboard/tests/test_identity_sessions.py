@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from tools.dashboard.dao import identity_sessions
@@ -89,7 +91,7 @@ def test_active_check_matches_signed_provenance_and_throttles_touch():
 def test_hot_verification_reuses_connection_and_runs_one_indexed_lookup():
     _create("hot-path")
     conn, _lock = identity_sessions._open_pooled(identity_sessions.db_path())
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
     statements = []
     conn.set_trace_callback(statements.append)
     try:
@@ -104,6 +106,39 @@ def test_hot_verification_reuses_connection_and_runs_one_indexed_lookup():
                 if statement.lstrip().upper().startswith("SELECT")]) == 1
     assert not any("CREATE TABLE" in statement.upper() for statement in sql)
     assert identity_sessions._open_pooled(identity_sessions.db_path())[0] is conn
+
+
+def test_v1_store_migrates_access_grants_without_rewriting_sessions(session_db):
+    conn = sqlite3.connect(session_db)
+    conn.executescript("""
+        CREATE TABLE identity_sessions (
+            sid TEXT PRIMARY KEY, method TEXT NOT NULL, credential_id TEXT,
+            created_at INTEGER NOT NULL, last_activity REAL NOT NULL,
+            user_agent TEXT, source_ip TEXT, status TEXT NOT NULL,
+            end_reason TEXT, ended_at REAL, expires_at INTEGER NOT NULL,
+            grantee TEXT, scope_json TEXT
+        );
+        CREATE INDEX idx_identity_sessions_credential
+            ON identity_sessions(credential_id, status, created_at DESC);
+        CREATE INDEX idx_identity_sessions_status
+            ON identity_sessions(status, expires_at);
+        PRAGMA user_version = 1;
+    """)
+    conn.execute(
+        """INSERT INTO identity_sessions
+           VALUES ('legacy', 'password', NULL, 1000, 1000, NULL, NULL,
+                   'active', NULL, NULL, 2000, NULL, NULL)"""
+    )
+    conn.commit()
+    conn.close()
+
+    pooled, _lock = identity_sessions._open_pooled(session_db)
+    assert pooled.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert identity_sessions.get_session("legacy", now=1001)["method"] == "password"
+    assert pooled.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name='dashboard_access_grants'"
+    ).fetchone() is not None
 
 
 def test_lock_ends_only_one_session_and_history_is_retained():
