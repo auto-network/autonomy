@@ -356,7 +356,7 @@
     on('create-org-goto-settings', function () { window.location.assign('/settings'); });
     on('create-org-create-workspace', function () {
       var row = overlay.querySelector('[data-testid=create-org-create-workspace] .text-gray-500');
-      if (row) row.textContent = 'Coming soon — workspaces are configured in Settings for now.';
+      if (row) row.textContent = 'Workspace creation is coming soon.';
     });
     on('create-org-invite', function () {
       var row = overlay.querySelector('[data-testid=create-org-invite] .text-gray-500');
