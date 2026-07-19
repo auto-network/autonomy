@@ -26,9 +26,13 @@ enforces it is a later bead.
 * ``POST /api/identity/passkey/register`` — verifies the authenticator's
   attestation response against the pinned challenge/origin/RP ID and
   stores the credential (``autonomy.identity.passkey``, keyed by
-  credential id — one row per enrolled device/install). Tested
-  rejections: unknown/expired/replayed challenge, origin or RP ID
-  mismatch, duplicate credential, malformed attestation.
+  credential id — one row per enrolled device/install). Ceremony
+  binding (Codex validation): the completion request must arrive on the
+  SAME host that minted the options, and minting new options
+  invalidates prior pending ceremonies for the same caller+RP ID.
+  Tested rejections: unknown/expired/replayed/superseded challenge,
+  cross-host completion, origin or RP ID mismatch, duplicate
+  credential, malformed attestation.
 
 The pending-challenge store is in-process (the dashboard runs as one
 uvicorn process); a restart mid-ceremony just means re-requesting
@@ -401,11 +405,19 @@ async def post_register_options(request: Request) -> JSONResponse:
     )
 
     _prune_pending()
+    caller = _caller_slug()
+    # A new ceremony INVALIDATES prior pending ones for the same
+    # caller+RP ID (Codex finding 2): only the latest minted options can
+    # complete. Ceremonies for other hosts are untouched — enrolling on
+    # localhost and on the .ts.net name are separate, parallel flows.
+    for stale in [c for c, p in _pending.items()
+                  if p["caller"] == caller and p["rp_id"] == rp_id]:
+        _pending.pop(stale, None)
     challenge_key = _b64url(options.challenge)
     _pending[challenge_key] = {
         "rp_id": rp_id,
         "origin": origin,
-        "caller": _caller_slug(),
+        "caller": caller,
         "expires": _now() + PENDING_TTL_S,
     }
     return JSONResponse({
@@ -475,6 +487,23 @@ async def post_register(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": (
             "this passkey ceremony was started by a different org context"
         )}, status_code=403)
+    # The COMPLETION request must arrive on the same host the ceremony
+    # was minted for (Codex finding 1): without this, a credential could
+    # be stored bound to a host the user isn't actually on — passkeys
+    # are domain-bound, so that row could never assert where the user
+    # signs in. The ceremony is already consumed (single-use): a
+    # cross-host completion burns it; re-request options on the right
+    # host.
+    rp_id, origin, rp_err = _rp_from_request(request)
+    if rp_err is not None:
+        return rp_err
+    if rp_id != pending["rp_id"] or origin != pending["origin"]:
+        return JSONResponse({"ok": False, "error": (
+            f"this passkey ceremony was started on {pending['origin']} but "
+            f"is being completed from {origin} — ceremonies must complete "
+            "on the host that minted them; request fresh registration "
+            "options from this host"
+        )}, status_code=400)
 
     from webauthn import verify_registration_response
     from webauthn.helpers.exceptions import InvalidRegistrationResponse

@@ -440,7 +440,9 @@ def test_register_refuses_wrong_rp_id_hash(env, root):
 
 def test_register_cannot_cross_hosts_mid_ceremony(env, root):
     """Options minted on localhost cannot be completed as a .ts.net
-    enrollment: the pinned tuple wins, not the verify request's host."""
+    enrollment: the completion-host check refuses before any
+    verification, and the pinned tuple would refuse the attestation
+    anyway."""
     _store_identity(env, root)
     opts = env.post("/api/identity/passkey/register-options", json={},
                     headers={"host": HOST}).json()
@@ -450,7 +452,70 @@ def test_register_cannot_cross_hosts_mid_ceremony(env, root):
     r = env.post("/api/identity/passkey/register", json={"credential": credential},
                  headers={"host": TSNET_HOST})
     assert r.status_code == 400
-    assert "did not verify" in r.json()["error"]
+    assert "must complete on the host" in r.json()["error"]
+
+
+def test_register_refuses_completion_from_different_host(env, root):
+    """Codex finding 1 repro: a VALID attestation for the pinned
+    localhost tuple, POSTed with a .ts.net Host header, must refuse —
+    otherwise the stored row binds rp_id=localhost while the user is on
+    the other host, a credential that can never assert where they sign
+    in. The cross-host attempt also burns the ceremony (single-use)."""
+    _store_identity(env, root)
+    opts = env.post("/api/identity/passkey/register-options", json={},
+                    headers={"host": HOST}).json()
+    credential = _make_attestation(
+        opts["options"]["challenge"], rp_id="localhost",
+        origin="https://localhost:8080")   # valid for the frozen tuple
+    r = env.post("/api/identity/passkey/register", json={"credential": credential},
+                 headers={"host": TSNET_HOST})
+    assert r.status_code == 400
+    assert "must complete on the host" in r.json()["error"]
+    # Nothing was stored...
+    rows = settings_ops.read_set(PASSKEY_SET_ID,
+                                 org=settings_ops.CALLER_ORG).members
+    assert rows == []
+    # ...and the burned ceremony cannot be replayed on the right host.
+    retry = env.post("/api/identity/passkey/register",
+                     json={"credential": credential}, headers={"host": HOST})
+    assert retry.status_code == 400
+    assert "no pending" in retry.json()["error"]
+
+
+def test_new_ceremony_invalidates_prior_pending(env, root):
+    """Codex finding 2 repro: options #1, options #2, complete with the
+    challenge from #1 → refused. Only the LATEST minted ceremony for a
+    caller+RP ID can complete; the fresh one still succeeds."""
+    _store_identity(env, root)
+    opts1 = env.post("/api/identity/passkey/register-options", json={}).json()
+    opts2 = env.post("/api/identity/passkey/register-options", json={}).json()
+    stale = _make_attestation(
+        opts1["options"]["challenge"], rp_id="localhost",
+        origin="https://localhost:8080")
+    r = env.post("/api/identity/passkey/register", json={"credential": stale})
+    assert r.status_code == 400
+    assert "no pending" in r.json()["error"]
+    fresh = _make_attestation(
+        opts2["options"]["challenge"], rp_id="localhost",
+        origin="https://localhost:8080")
+    r2 = env.post("/api/identity/passkey/register", json={"credential": fresh})
+    assert r2.status_code == 200, r2.text
+
+
+def test_new_ceremony_leaves_other_hosts_pending(env, root):
+    """Superseding is scoped per RP ID: minting .ts.net options must not
+    kill a live localhost ceremony — the two hosts enroll in parallel."""
+    _store_identity(env, root)
+    opts_local = env.post("/api/identity/passkey/register-options", json={},
+                          headers={"host": HOST}).json()
+    env.post("/api/identity/passkey/register-options", json={},
+             headers={"host": TSNET_HOST})
+    credential = _make_attestation(
+        opts_local["options"]["challenge"], rp_id="localhost",
+        origin="https://localhost:8080")
+    r = env.post("/api/identity/passkey/register", json={"credential": credential},
+                 headers={"host": HOST})
+    assert r.status_code == 200, r.text
 
 
 def test_register_requires_user_verification_flag(env, root):
