@@ -16,10 +16,14 @@ Type=simple
 DynamicUser=true
 StateDirectory=autonomy-registry
 WorkingDirectory=/opt/autonomy-registry
+# --base-url: minted links must resolve from OUTSIDE. The bare
+# auto.network vanity domain has no public A record or TLS cert yet
+# (operator-gated DNS work, tracked in auto-pqcsh) — switch back only
+# after both exist. Evidence: graph note 0af56d2b-ee1.
 ExecStart=/opt/autonomy-registry/venv/bin/python -m tools.network.registry \
     --db /var/lib/autonomy-registry/registry.db \
     --host 127.0.0.1 --port 8477 \
-    --base-url https://auto.network
+    --base-url https://registry.auto.network
 Restart=on-failure
 RestartSec=2
 
