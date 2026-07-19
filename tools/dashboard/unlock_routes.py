@@ -85,6 +85,22 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 #: (which use their own domains).
 UNLOCK_SIGNING_DOMAIN = b"autonomy.identity.unlock.v1\n"
 
+#: Recovery kill-switch (bead auto-dmnm9). Env-ONLY — nothing derived
+#: from a request may ever feed this decision. Only these EXPLICIT
+#: values disable the gate; unset, empty, or anything else (including
+#: typos like "of") keeps enforcement ON — the switch fails safe.
+_AUTH_DISABLING_VALUES = frozenset({"off", "0", "false", "no"})
+
+
+def gate_disabled() -> bool:
+    """True only while DASHBOARD_AUTH holds an explicit disabling value
+    (off/0/false/no, case-insensitive). The operator's escape hatch if
+    an unlock ever breaks; read per call so tests and in-process flips
+    take effect immediately."""
+    value = os.environ.get("DASHBOARD_AUTH")
+    return value is not None and value.strip().lower() in _AUTH_DISABLING_VALUES
+
+
 SESSION_COOKIE = "autonomy_dashboard_session"
 #: 'Persistent session' per the two-gate model — access only; signing
 #: authority still re-proves itself per action with the password.
@@ -684,7 +700,10 @@ class HumanGateMiddleware:
     otherwise hand out a shell prompt without ever loading a page.
 
     Fail-open-then-enforce: :func:`human_auth_enrolled` decides per
-    request (cached, write-busted). Refusals: page loads redirect to
+    request (cached, write-busted). :func:`gate_disabled` — the env-only
+    DASHBOARD_AUTH recovery switch — short-circuits enforcement entirely
+    and is checked before the enrollment read so a wedged settings DB
+    can't defeat the escape hatch. Refusals: page loads redirect to
     ``/unlock?next=…`` so the human lands on the mockup's lock screen;
     fragment/API-shaped requests get 401 JSON; websockets get a 4401
     handshake close.
@@ -699,6 +718,9 @@ class HumanGateMiddleware:
             return
         path = scope.get("path", "")
         if not _path_is_gated(path):
+            await self.app(scope, receive, send)
+            return
+        if gate_disabled():
             await self.app(scope, receive, send)
             return
         if not human_auth_enrolled():
