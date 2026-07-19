@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Unlock — Autonomy Dashboard</title>
+  <link rel="manifest" href="/static/manifest.json?v=__STATIC_VERSION__">
+  <link rel="apple-touch-icon" href="/static/icon-192.png?v=__STATIC_VERSION__">
+  <link rel="stylesheet" href="/static/tailwind.css?v=__STATIC_VERSION__">
+  <style>
+    html, body { margin: 0; height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #111827; color: #e5e7eb; }
+  </style>
+  <!-- Crypto internals only: the armor decrypt + canonical JSON live in
+       network-signon.js, the Ed25519 key import in network-identity.js —
+       one implementation serves onboarding AND unlock. Neither renders
+       chrome here (their mount points don't exist on this page), and
+       network-onboarding.js is deliberately absent: enrollment never
+       runs on the outside of the gate. -->
+  <script src="/static/js/network-signon.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/js/network-identity.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/js/unlock.js?v=__STATIC_VERSION__" defer></script>
+</head>
+<body>
+  <div class="h-full w-full overflow-hidden">
+
+    <!-- Dashboard skeleton behind the lock (mockup: locked = you can
+         tell your dashboard is there, you just can't read it yet). -->
+    <div class="hidden md:block p-8 opacity-60" aria-hidden="true">
+      <div class="flex items-center gap-4">
+        <div class="h-8 w-28 rounded-lg bg-gray-800"></div>
+        <div class="h-8 w-20 rounded-lg bg-gray-800"></div>
+        <div class="h-8 w-24 rounded-lg bg-gray-800"></div>
+        <div class="ml-auto h-8 w-8 rounded-full bg-gray-800"></div>
+      </div>
+      <div class="h-9 w-96 max-w-full rounded-lg bg-gray-800 mt-8"></div>
+      <div class="grid grid-cols-4 gap-5 mt-8">
+        <div class="space-y-4"><div class="h-24 rounded-lg bg-gray-800"></div><div class="h-24 rounded-lg bg-gray-800"></div></div>
+        <div><div class="h-24 rounded-lg bg-gray-800"></div></div>
+        <div><div class="h-32 rounded-lg bg-gray-800"></div></div>
+        <div><div class="h-24 rounded-lg bg-gray-800"></div></div>
+      </div>
+    </div>
+
+    <!-- The lock: full-screen on mobile, dim+blur overlay panel on desktop -->
+    <div class="fixed inset-0 z-40 flex flex-col items-center justify-center
+                bg-gray-900 md:bg-gray-950/70 md:backdrop-blur-sm px-6 py-10">
+      <div id="unlock-card" data-testid="unlock-card"
+           class="w-full h-full md:h-auto md:max-w-sm flex flex-col text-center
+                  md:bg-gray-800 md:border md:border-gray-700 md:rounded-2xl md:shadow-2xl md:p-8">
+        <!-- populated by unlock.js -->
+        <div class="flex flex-col items-center flex-1 md:flex-none justify-center">
+          <div class="text-sm text-gray-500">Loading&hellip;</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

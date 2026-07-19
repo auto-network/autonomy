@@ -116,6 +116,7 @@ from tools.dashboard.dao import auth_db, dashboard_db
 from tools.dashboard import approvals_routes
 from tools.dashboard import jira_routes
 from tools.dashboard import identity_routes
+from tools.dashboard import unlock_routes
 from tools.dashboard import network_routes
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
@@ -8835,6 +8836,16 @@ async def api_version(request):
 async def page_index(request):
     return RedirectResponse(url="/beads")
 
+async def page_unlock(request):
+    """The Unlock screen (mockup d49be06b 'Unlock' state) — the one page
+    the human gate never covers. Skips itself when there is nothing to
+    unlock (gate not enforced) or the session is already valid."""
+    if not unlock_routes.human_auth_enrolled() \
+            or unlock_routes.session_from_request(request) is not None:
+        return RedirectResponse(
+            url=unlock_routes.sanitize_next(request.query_params.get("next")))
+    return HTMLResponse(_load_template("unlock.html"))
+
 async def page_beads(request):
     return HTMLResponse(_load_template("base.html"))
 
@@ -15575,6 +15586,10 @@ routes = [
     # Personal identity + passkey enrollment (Get started onboarding)
     *identity_routes.ROUTES,
 
+    # Human unlock gate: passkey assert + password fallback + session
+    Route("/unlock", page_unlock),
+    *unlock_routes.ROUTES,
+
     # Jira broker (issue_tracker capability): host-side reads; writes ride the
     # approval rendezvous as kind=jira_write
     *jira_routes.ROUTES,
@@ -16011,6 +16026,15 @@ app = Starlette(
         # stack picks up the caller org automatically.
         Middleware(_CallerOrgMiddleware),
         Middleware(_CSPMiddleware),
+        # Innermost: the human unlock gate (fail-open-then-enforce).
+        # Covers page loads, fragments, and browser websockets; the
+        # agent/container ``/api`` surface passes through untouched.
+        # Its enrollment read deliberately IGNORES the request's caller
+        # org (X-Graph-Org is client-controlled — honouring it would let
+        # anyone name an un-enrolled org and fail the lock open), pinning
+        # to the dashboard's own org instead. It sits inside _CSPMiddleware
+        # so its redirect/401 responses still carry the standard headers.
+        Middleware(unlock_routes.HumanGateMiddleware),
     ],
 )
 

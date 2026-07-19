@@ -61,6 +61,10 @@ def env(tmp_path, monkeypatch):
     GraphDB.close_all_pooled()
     monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
     monkeypatch.setenv("GRAPH_ORG", ORG)
+    # post_personal mints the bootstrap unlock session — keep its HMAC
+    # secret out of the repo's data/ during tests.
+    monkeypatch.setenv("DASHBOARD_SESSION_SECRET_FILE",
+                       str(tmp_path / "session.secret"))
     monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
     identity_routes._pending.clear()
     with TestClient(Starlette(routes=identity_routes.ROUTES),

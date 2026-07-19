@@ -4,7 +4,11 @@ Backs the "Get started" flow in ``static/js/network-onboarding.js``
 (model notes ``graph://53f65f2f-d73`` two-gate matrix, ``graph://
 80ef5131-9f0`` fail-open-then-enforce, mockup design d49be06b). This
 module is ENROLLMENT ONLY: it creates state; the sign-in gate that
-enforces it is a later bead.
+enforces it lives in :mod:`unlock_routes` (passkey assert + password
+unlock + the HumanGateMiddleware). Two touch points back: a successful
+``POST /api/identity/personal`` mints the BOOTSTRAP session (the
+enrolling browser must survive the gate turning itself on mid-flow),
+and both write paths bust the gate's enrollment cache.
 
 * ``GET  /api/identity/status`` — what exists: personal identity
   (public metadata only), enrolled passkeys, and whether onboarding is
@@ -319,8 +323,29 @@ async def post_personal(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False,
                              "error": f"could not store the personal identity: {e}"},
                             status_code=500)
-    return JSONResponse({"ok": True, "label": label, "root_pub": root_pub,
-                         "display_name": display_name})
+    response = JSONResponse({"ok": True, "label": label, "root_pub": root_pub,
+                             "display_name": display_name})
+    # Creating the identity is the moment the unlock gate turns itself ON
+    # (fail-open-then-enforce). The browser that created it — in the
+    # fail-open window, by definition the operator's — gets the FIRST
+    # session, so onboarding continues seamlessly into the now-gated
+    # passkey-enrollment step instead of locking its own user out.
+    #
+    # Best-effort: if the session-secret store is unwritable (read-only
+    # mount, full disk) minting throws — but the identity is already
+    # persisted, and failing the whole request here would 500 AFTER the
+    # write, leaving the operator with a 409-on-retry and a gate they
+    # can't pass. Swallow it: they land on /unlock and the password floor
+    # still works (it re-mints on the same store, surfacing the real
+    # error there if it persists).
+    from tools.dashboard import unlock_routes
+    unlock_routes.bust_enforce_cache()
+    try:
+        unlock_routes.attach_session_cookie(
+            response, request, unlock_routes.mint_session_token("bootstrap"))
+    except Exception:
+        pass
+    return response
 
 
 # ── passkey enrollment (WebAuthn) ─────────────────────────────────────
@@ -560,6 +585,10 @@ async def post_register(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False,
                              "error": f"could not store the credential: {e}"},
                             status_code=500)
+    # A first passkey also flips the unlock gate on (fail-open-then-
+    # enforce) — make enforcement see it immediately.
+    from tools.dashboard import unlock_routes
+    unlock_routes.bust_enforce_cache()
     return JSONResponse({"ok": True, "credential_id": credential_id,
                          "rp_id": pending["rp_id"], "label": label,
                          "transports": transports})

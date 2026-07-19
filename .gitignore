@@ -11,6 +11,9 @@ data/worktrees/
 # Project artifacts (licenses, secrets) — layered config-driven mounts
 data/artifacts/
 
+# Dashboard session-cookie HMAC key (unlock gate) — machine-local secret
+data/dashboard-session.secret
+
 # Operator-supplied attachments/screenshots (runtime, not source)
 data/uploads/
 data/host-uploads/
