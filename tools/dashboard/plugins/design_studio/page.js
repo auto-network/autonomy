@@ -953,6 +953,19 @@ function designStudioPage() {
     },
 
     _updateTopbar: function () {
+      // Own the shared app topbar ONLY while on the Design library page.
+      // session:registry and design-revision events keep calling this after
+      // navigation (the component/handlers can outlive the page on mobile SPA
+      // nav); without this guard they overwrite another page's topbar with the
+      // Design one — the "design presence on /sessions" corruption. Off /design,
+      // release our handle and no-op so the current page keeps its own topbar.
+      if (window.location.pathname !== '/design') {
+        if (this.topbarHandle && typeof this.topbarHandle.destroy === 'function') {
+          this.topbarHandle.destroy();
+        }
+        this.topbarHandle = null;
+        return;
+      }
       if (!window.Autonomy || !window.Autonomy.topbar
           || typeof window.Autonomy.topbar.set !== 'function') {
         return;

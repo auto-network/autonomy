@@ -396,11 +396,14 @@ window.Autonomy.topbar.set = function (initialOptions) {
     },
     destroy() {
       destroyed = true;
-      cleanupBindings();
-      const header = document.querySelector('header');
-      if (header) header.classList.remove('app-topbar-has-search');
-      if (appTopbarSlot) appTopbarSlot.innerHTML = '';
+      cleanupBindings();  // always release our own control bindings
+      // Only touch the shared topbar DOM if we still own it. A stale handle
+      // destroying after another page has taken the topbar (via topbar.set)
+      // must not blank the destination page's slot.
       if (window.Autonomy._activeTopbarHandle === handle) {
+        const header = document.querySelector('header');
+        if (header) header.classList.remove('app-topbar-has-search');
+        if (appTopbarSlot) appTopbarSlot.innerHTML = '';
         window.Autonomy._activeTopbarHandle = null;
       }
     },
