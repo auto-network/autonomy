@@ -116,6 +116,7 @@ no configuration is needed there either.
 | `AUTONOMY_FIRST_ORG_NAME` | title-cased slug | Display name seeded into the first org's `autonomy.org#1` identity Setting. |
 | `GRAPH_DB` / `GRAPH_API` | `<repo>/data/graph.db` / *(unset → local DB)* | Graph DB path, or a remote graph API base URL. |
 | `DASHBOARD_DB` | `<repo>/data/dashboard.db` | Dashboard overlay DB. |
+| `DASHBOARD_IDENTITY_SESSION_DB` | `<repo>/data/dashboard_identity_sessions.db` | Local revocation and history store for human dashboard sessions. Keep this writable; verification fails closed if it is unavailable. |
 | `DISPATCH_DB` | `<repo>/data/dispatch.db` | Dispatch state DB. |
 | `APPROVAL_REQUESTS_DB` / `COMMIT_WORKFLOW_DB` | `<repo>/data/*.db` | Approval-request and commit-workflow DBs. |
 | `DASHBOARD_AGENT_RUNS_DIR` | `<repo>/data/agent-runs` | Where agent-run session traces land (the container→host handoff dir). |
@@ -131,6 +132,13 @@ no configuration is needed there either.
 | `DOLT_BIN` | `dolt` on `PATH` | Path to the `dolt` binary used by `backup-all.sh`. |
 | `GRAPH_SCOPE` / `GRAPH_ORG` | *(unset)* | Scope graph CLI access to an org (see `graph-<project>` wrappers). |
 | `AUTONOMY_SESSION` | *(set by launcher)* | Current session's tmux/routing name. |
+
+The revocable-session migration intentionally does not grandfather old
+stateless dashboard cookies. After deploying it, each open browser unlocks the
+dashboard once to create its server-side session record. This is expected, not
+a lost identity or passkey. `DASHBOARD_AUTH=off` remains the recovery path if
+the session database is unavailable during rollout; remove the override after
+the store is writable.
 
 ## Clean-clone smoke
 

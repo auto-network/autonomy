@@ -36,6 +36,7 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from tools.dashboard import identity_routes
+from tools.dashboard.dao import identity_sessions
 from tools.graph import settings_ops
 from tools.graph.schemas.personal_identity import (
     PASSKEY_SET_ID,
@@ -66,12 +67,16 @@ def env(tmp_path, monkeypatch):
     # secret out of the repo's data/ during tests.
     monkeypatch.setenv("DASHBOARD_SESSION_SECRET_FILE",
                        str(tmp_path / "session.secret"))
+    monkeypatch.setenv("DASHBOARD_IDENTITY_SESSION_DB",
+                       str(tmp_path / "identity-sessions.db"))
     monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
     identity_routes._pending.clear()
+    identity_sessions.reset_for_tests()
     with TestClient(Starlette(routes=identity_routes.ROUTES),
                     base_url=f"https://{HOST}") as client:
         yield client
     identity_routes._pending.clear()
+    identity_sessions.reset_for_tests()
     GraphDB.close_all_pooled()
 
 
@@ -560,29 +565,25 @@ def test_register_refuses_completion_from_different_host(env, root):
     assert "no pending" in retry.json()["error"]
 
 
-def test_new_ceremony_invalidates_prior_pending(env, root):
-    """Codex finding 2 repro: options #1, options #2, complete with the
-    challenge from #1 → refused. Only the LATEST minted ceremony for a
-    caller+RP ID can complete; the fresh one still succeeds."""
+def test_two_browsers_can_complete_concurrent_registration_options(env, root):
+    """Same-host browsers get independent, single-use challenges."""
     _store_identity(env, root)
     opts1 = env.post("/api/identity/passkey/register-options", json={}).json()
     opts2 = env.post("/api/identity/passkey/register-options", json={}).json()
-    stale = _make_attestation(
+    first = _make_attestation(
         opts1["options"]["challenge"], rp_id="localhost",
-        origin="https://localhost:8080")
-    r = env.post("/api/identity/passkey/register", json={"credential": stale})
-    assert r.status_code == 400
-    assert "no pending" in r.json()["error"]
-    fresh = _make_attestation(
+        origin="https://localhost:8080", cred_id=b"browser-one-credential")
+    r = env.post("/api/identity/passkey/register", json={"credential": first})
+    assert r.status_code == 200, r.text
+    second = _make_attestation(
         opts2["options"]["challenge"], rp_id="localhost",
-        origin="https://localhost:8080")
-    r2 = env.post("/api/identity/passkey/register", json={"credential": fresh})
+        origin="https://localhost:8080", cred_id=b"browser-two-credential")
+    r2 = env.post("/api/identity/passkey/register", json={"credential": second})
     assert r2.status_code == 200, r2.text
 
 
 def test_new_ceremony_leaves_other_hosts_pending(env, root):
-    """Superseding is scoped per RP ID: minting .ts.net options must not
-    kill a live localhost ceremony — the two hosts enroll in parallel."""
+    """Different RP IDs also remain independent and complete in parallel."""
     _store_identity(env, root)
     opts_local = env.post("/api/identity/passkey/register-options", json={},
                           headers={"host": HOST}).json()
@@ -594,6 +595,19 @@ def test_new_ceremony_leaves_other_hosts_pending(env, root):
     r = env.post("/api/identity/passkey/register", json={"credential": credential},
                  headers={"host": HOST})
     assert r.status_code == 200, r.text
+
+
+def test_registration_pending_fifo_reserves_exact_capacity(env, monkeypatch):
+    monkeypatch.setattr(identity_routes, "_now", lambda: 1000.0)
+    identity_routes._pending.update({
+        f"challenge-{index}": {"expires": 2000.0}
+        for index in range(identity_routes.PENDING_MAX)
+    })
+    identity_routes._prune_pending(reserve=1)
+    assert len(identity_routes._pending) == identity_routes.PENDING_MAX - 1
+    assert "challenge-0" not in identity_routes._pending
+    identity_routes._pending["newest"] = {"expires": 2000.0}
+    assert len(identity_routes._pending) == identity_routes.PENDING_MAX
 
 
 def test_register_requires_user_verification_flag(env, root):

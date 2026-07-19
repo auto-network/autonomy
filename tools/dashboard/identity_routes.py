@@ -82,11 +82,12 @@ def _now() -> float:
     return time.time()
 
 
-def _prune_pending() -> None:
+def _prune_pending(*, reserve: int = 0) -> None:
     cutoff = _now()
     for challenge in [c for c, p in _pending.items() if p["expires"] <= cutoff]:
         _pending.pop(challenge, None)
-    while len(_pending) > PENDING_MAX:
+    limit = max(PENDING_MAX - reserve, 0)
+    while len(_pending) > limit:
         _pending.pop(next(iter(_pending)))
 
 
@@ -374,7 +375,9 @@ async def post_personal(request: Request) -> JSONResponse:
     unlock_routes.bust_enforce_cache()
     try:
         unlock_routes.attach_session_cookie(
-            response, request, unlock_routes.mint_session_token("bootstrap"))
+            response, request,
+            unlock_routes.mint_session_token("bootstrap", request=request),
+        )
     except Exception:
         pass
     return response
@@ -458,13 +461,9 @@ async def post_register_options(request: Request) -> JSONResponse:
         exclude_credentials=exclude or None,
     )
 
-    _prune_pending()
-    # A new ceremony INVALIDATES prior pending ones for the same
-    # personal identity + RP ID (Codex finding 2): only the latest minted options can
-    # complete. Ceremonies for other hosts are untouched — enrolling on
-    # localhost and on the .ts.net name are separate, parallel flows.
-    for stale in [c for c, p in _pending.items() if p["rp_id"] == rp_id]:
-        _pending.pop(stale, None)
+    # Two browsers can enroll concurrently on the same RP ID.  Challenges are
+    # independently single-use; exact FIFO capacity bounds abandoned options.
+    _prune_pending(reserve=1)
     challenge_key = _b64url(options.challenge)
     _pending[challenge_key] = {
         "rp_id": rp_id,

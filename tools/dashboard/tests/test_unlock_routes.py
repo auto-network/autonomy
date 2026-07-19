@@ -15,7 +15,7 @@ server half and the gate itself:
   register endpoints (an open register path would let anyone enroll
   their own credential and walk in);
 * passkey ASSERT ceremony discipline matches the register side:
-  challenge single-use + TTL + superseded-by-new-options, completion
+  challenge single-use + TTL + bounded concurrent options, completion
   host-locked, unknown credentials refused, user-verification required,
   sign-count regressions refused and the stored count advances;
 * password unlock is the always-available floor: works with zero
@@ -42,6 +42,7 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.testclient import TestClient
 
 from tools.dashboard import identity_routes, unlock_routes
+from tools.dashboard.dao import identity_sessions
 from tools.graph import settings_ops
 from tools.network.idkit import KeyPair
 from tools.network.idkit.armor import encrypt_root_key
@@ -108,6 +109,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("GRAPH_ORG", ORG)
     monkeypatch.setenv("DASHBOARD_SESSION_SECRET_FILE",
                        str(tmp_path / "session.secret"))
+    monkeypatch.setenv("DASHBOARD_IDENTITY_SESSION_DB",
+                       str(tmp_path / "identity-sessions.db"))
     monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
     monkeypatch.delenv("DASHBOARD_AUTH", raising=False)
     identity_routes._pending.clear()
@@ -115,6 +118,7 @@ def env(tmp_path, monkeypatch):
     unlock_routes._pw_pending.clear()
     unlock_routes._secret_cache.update({"path": None, "value": None})
     unlock_routes._enforce_cache.update({"at": 0.0, "value": None})
+    identity_sessions.reset_for_tests()
     with TestClient(_build_app(), base_url=f"https://{HOST}") as client:
         yield client
     identity_routes._pending.clear()
@@ -122,6 +126,7 @@ def env(tmp_path, monkeypatch):
     unlock_routes._pw_pending.clear()
     unlock_routes._secret_cache.update({"path": None, "value": None})
     unlock_routes._enforce_cache.update({"at": 0.0, "value": None})
+    identity_sessions.reset_for_tests()
     GraphDB.close_all_pooled()
 
 
@@ -310,6 +315,21 @@ def test_session_token_rejects_expired(env):
                "iat": 1000, "exp": 2000}   # long past
     body = _b64url(json.dumps(payload, separators=(",", ":")).encode())
     sig = _b64url(hmac_mod.new(secret, body.encode(), hashlib.sha256).digest())
+    identity_sessions.create_session(
+        sid="x", method="passkey", created_at=1000, expires_at=2000,
+        last_activity=1000,
+    )
+    assert unlock_routes.verify_session_token(f"{body}.{sig}") is None
+
+
+def test_signed_cookie_without_server_row_is_rejected(env):
+    secret = unlock_routes._session_secret()
+    now = int(unlock_routes._now())
+    payload = {"v": 1, "sid": "legacy-stateless", "method": "passkey",
+               "iat": now, "exp": now + 3600}
+    body = _b64url(json.dumps(payload, separators=(",", ":")).encode())
+    sig = _b64url(hmac_mod.new(secret, body.encode(), hashlib.sha256).digest())
+    assert unlock_routes._verified_session_payload(f"{body}.{sig}") == payload
     assert unlock_routes.verify_session_token(f"{body}.{sig}") is None
 
 
@@ -333,6 +353,15 @@ def test_everything_open_before_enrollment(env):
     assert r.status_code == 409          # needs an identity — NOT the gate
     with env.websocket_connect("/ws/terminal") as ws:
         assert ws.receive_text() == "hello"
+
+
+def test_broken_session_store_does_not_brick_unenrolled_bootstrap(
+        env, monkeypatch):
+    def should_not_run(**_kwargs):
+        raise AssertionError("session store must not decide enrollment")
+
+    monkeypatch.setattr(identity_sessions, "check_active", should_not_run)
+    assert env.get("/beads").status_code == 200
 
 
 def test_identity_enrollment_turns_the_gate_on(env, root):
@@ -435,6 +464,19 @@ def test_kill_switch_beats_wedged_enrollment_read(env, root, monkeypatch):
     monkeypatch.setattr(unlock_routes, "_personal_member", boom)
     monkeypatch.setattr(unlock_routes, "_passkey_rows", boom)
     unlock_routes._enforce_cache.update({"at": 0.0, "value": True})
+    assert env.get("/beads", follow_redirects=False).status_code == 302
+    monkeypatch.setenv("DASHBOARD_AUTH", "off")
+    assert env.get("/beads").status_code == 200
+
+
+def test_store_failure_is_closed_when_enrolled_but_kill_switch_escapes(
+        env, root, monkeypatch):
+    _store_identity(env, root)
+
+    def unavailable(**_kwargs):
+        raise identity_sessions.SessionStoreError("disk unavailable")
+
+    monkeypatch.setattr(identity_sessions, "check_active", unavailable)
     assert env.get("/beads", follow_redirects=False).status_code == 302
     monkeypatch.setenv("DASHBOARD_AUTH", "off")
     assert env.get("/beads").status_code == 200
@@ -768,6 +810,10 @@ def test_passkey_unlock_happy_path(env, root):
     assert r.status_code == 200, r.text
     assert r.json()["method"] == "passkey"
     assert unlock_routes.SESSION_COOKIE in r.cookies
+    token = r.cookies.get(unlock_routes.SESSION_COOKIE)
+    payload = unlock_routes._verified_session_payload(token)
+    row = identity_sessions.get_session(payload["sid"], now=unlock_routes._now())
+    assert row["credential_id"] == _b64url(b"test-credential-0001")
     assert env.get("/beads").status_code == 200        # gate passes now
 
 
@@ -829,16 +875,42 @@ def test_assert_rejects_expired_challenge(env, root, monkeypatch):
     assert r.status_code == 400
 
 
-def test_new_assert_options_supersede_prior(env, root):
+def test_two_browsers_can_complete_concurrent_assert_options(env, root):
     _store_identity(env, root)
     key = _enroll_passkey(env)
     env.cookies.clear()
     first = _assert_options(env)
-    _assert_options(env)                 # supersedes the first ceremony
+    _assert_options(env)                 # another browser on the same host
     assertion = _make_assertion(key, first["options"]["challenge"],
                                 rp_id=first["rp_id"], origin=first["origin"])
     r = env.post("/api/identity/unlock/passkey", json={"credential": assertion})
-    assert r.status_code == 400
+    assert r.status_code == 200
+
+
+def test_two_browsers_can_complete_concurrent_password_options(env, root):
+    _store_identity(env, root)
+    env.cookies.clear()
+    first = env.post("/api/identity/unlock/password/options", json={}).json()
+    second = env.post("/api/identity/unlock/password/options", json={}).json()
+    assert first["challenge"] != second["challenge"]
+    sig = _pw_sign(root, first["challenge"], first["origin"])
+    r = env.post("/api/identity/unlock/password", json={
+        "challenge": first["challenge"], "signature": sig,
+    })
+    assert r.status_code == 200
+
+
+def test_pending_fifo_reserves_exact_capacity(env, monkeypatch):
+    monkeypatch.setattr(unlock_routes, "_now", lambda: 1000.0)
+    store = {
+        f"challenge-{index}": {"expires": 2000.0}
+        for index in range(unlock_routes.PENDING_MAX)
+    }
+    unlock_routes._prune(store, reserve=1)
+    assert len(store) == unlock_routes.PENDING_MAX - 1
+    assert "challenge-0" not in store
+    store["newest"] = {"expires": 2000.0}
+    assert len(store) == unlock_routes.PENDING_MAX
 
 
 def test_assert_cannot_complete_cross_host(env, root):
@@ -940,7 +1012,25 @@ def test_password_unlock_happy_path_with_zero_passkeys(env, root):
     assert r.status_code == 200, r.text
     assert r.json()["method"] == "password"
     assert r.json()["display_name"] == "Alex"
+    token = r.cookies.get(unlock_routes.SESSION_COOKIE)
+    payload = unlock_routes._verified_session_payload(token)
+    row = identity_sessions.get_session(payload["sid"], now=unlock_routes._now())
+    assert row["credential_id"] is None
     assert env.get("/beads").status_code == 200
+
+
+def test_verified_password_proof_fails_closed_if_session_cannot_persist(
+        env, root, monkeypatch):
+    _store_identity(env, root)
+    env.cookies.clear()
+
+    def unavailable(**_kwargs):
+        raise identity_sessions.SessionStoreError("disk unavailable")
+
+    monkeypatch.setattr(identity_sessions, "create_session", unavailable)
+    r = _unlock_with_password(env, root)
+    assert r.status_code == 503
+    assert "could not create a revocable session" in r.json()["error"]
 
 
 def test_password_options_require_an_identity(env):
@@ -1035,11 +1125,39 @@ def test_session_endpoint_reflects_state(env, root):
 
 
 def test_lock_drops_the_session(env, root):
-    _store_identity(env, root)
+    created = _store_identity(env, root)
+    token = created.cookies.get(unlock_routes.SESSION_COOKIE)
+    payload = unlock_routes._verified_session_payload(token)
+    other = unlock_routes.mint_session_token("password")
+    other_payload = unlock_routes._verified_session_payload(other)
     assert env.get("/beads").status_code == 200
     assert env.post("/api/identity/lock").json() == {"ok": True}
+    locked = identity_sessions.get_session(payload["sid"], now=unlock_routes._now())
+    assert locked["status"] == "ended"
+    assert locked["end_reason"] == "locked"
+    assert identity_sessions.get_session(
+        other_payload["sid"], now=unlock_routes._now()
+    )["status"] == "active"
+    assert unlock_routes.verify_session_token(token) is None
+    assert unlock_routes.verify_session_token(other) is not None
     r = env.get("/beads", follow_redirects=False)
     assert r.status_code == 302
+
+
+def test_server_revoke_refuses_a_still_valid_cookie(env, root):
+    created = _store_identity(env, root)
+    token = created.cookies.get(unlock_routes.SESSION_COOKIE)
+    payload = unlock_routes._verified_session_payload(token)
+    assert payload["exp"] > unlock_routes._now()
+    assert identity_sessions.revoke_session(
+        payload["sid"], now=unlock_routes._now(),
+    ) is True
+    assert env.get("/beads", follow_redirects=False).status_code == 302
+
+
+def test_session_cookie_is_always_secure(env, root):
+    created = _store_identity(env, root)
+    assert "secure" in created.headers["set-cookie"].lower()
 
 
 def test_garbage_cookie_does_not_pass(env, root):
