@@ -254,17 +254,18 @@ def test_note_preview_comes_from_trusted_graph_target(env):
     assert "requester-controlled" not in str(enriched["target_preview"])
 
 
-def test_ttl_override_is_forwarded_and_cached(env, session_key, session_cert):
+@pytest.mark.parametrize("ttl", [86400, 365 * 86400])
+def test_ttl_override_is_forwarded_and_cached(env, session_key, session_cert, ttl):
     rid = _create_publish(env, meta={"ttl": 3600, "label": "binder"})
     rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
-    adjusted = _registry_request_with_ttl(rr, 86400)
+    adjusted = _registry_request_with_ttl(rr, ttl)
     envelope = _signed_envelope(session_key, session_cert, adjusted)
     result = _decide_and_wait(env, rid, {
-        "approved": True, "envelope": envelope, "ttl": 86400,
+        "approved": True, "envelope": envelope, "ttl": ttl,
     })
     assert result["execution"]["ok"] is True
     token = result["execution"]["token"]
-    assert _cached_grants()[token]["meta"] == {"ttl": 86400, "label": "binder"}
+    assert _cached_grants()[token]["meta"] == {"ttl": ttl, "label": "binder"}
 
 
 def test_no_expiration_removes_only_ttl(env, session_key, session_cert):
