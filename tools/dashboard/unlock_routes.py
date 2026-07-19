@@ -59,6 +59,7 @@ from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 from tools.graph import settings_ops
+from tools.dashboard.dao import identity_sessions
 from tools.dashboard.network_routes import _mock_mode
 from tools.dashboard.identity_routes import (
     PENDING_MAX,
@@ -113,11 +114,13 @@ _assert_pending: dict[str, dict] = {}
 _pw_pending: dict[str, dict] = {}
 
 
-def _prune(store: dict) -> None:
+def _prune(store: dict, *, reserve: int = 0) -> None:
+    """Expire old ceremonies and reserve bounded FIFO capacity for new ones."""
     cutoff = _now()
     for key in [k for k, p in store.items() if p["expires"] <= cutoff]:
         store.pop(key, None)
-    while len(store) > PENDING_MAX:
+    limit = max(PENDING_MAX - reserve, 0)
+    while len(store) > limit:
         store.pop(next(iter(store)))
 
 
@@ -165,27 +168,47 @@ def _session_secret() -> bytes:
     return raw
 
 
-def mint_session_token(method: str) -> str:
-    """A signed session token: b64url(payload) + '.' + b64url(hmac)."""
+def _request_session_metadata(request: Request | None) -> tuple[str | None, str | None]:
+    if request is None:
+        return None, None
+    user_agent = (request.headers.get("user-agent") or "").strip()[:1024] or None
+    source_ip = request.client.host[:128] if request.client and request.client.host else None
+    return user_agent, source_ip
+
+
+def mint_session_token(method: str, *, request: Request | None = None,
+                       credential_id: str | None = None,
+                       grantee: str | None = None, scope=None,
+                       expires_at: int | None = None) -> str:
+    """Persist and sign a revocable dashboard session token.
+
+    The durable row is written before the token can reach a caller.  A valid
+    HMAC without its matching active row is deliberately not a session.
+    """
+    issued_at = int(_now())
+    expiry = expires_at if expires_at is not None else issued_at + SESSION_TTL_S
     payload = {
         "v": 1,
-        "sid": secrets.token_hex(8),
+        "sid": secrets.token_hex(16),
         "method": method,
-        "iat": int(_now()),
-        "exp": int(_now()) + SESSION_TTL_S,
+        "iat": issued_at,
+        "exp": expiry,
     }
     body = _b64url(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
     sig = _b64url(hmac.new(_session_secret(), body.encode("ascii"),
                            hashlib.sha256).digest())
+    user_agent, source_ip = _request_session_metadata(request)
+    identity_sessions.create_session(
+        sid=payload["sid"], method=method, credential_id=credential_id,
+        created_at=issued_at, expires_at=expiry, last_activity=_now(),
+        user_agent=user_agent, source_ip=source_ip,
+        grantee=grantee, scope=scope,
+    )
     return f"{body}.{sig}"
 
 
-def verify_session_token(token: str | None) -> dict | None:
-    """The token's payload when authentic and unexpired, else None.
-
-    Tamper-evidence is the HMAC (constant-time compare); everything in
-    the payload is untrusted until the signature checks out.
-    """
+def _verified_session_payload(token: str | None) -> dict | None:
+    """Verify only the cookie's HMAC and structural signed claims."""
     if not token or not isinstance(token, str) or token.count(".") != 1:
         return None
     body, sig = token.split(".")
@@ -199,23 +222,44 @@ def verify_session_token(token: str | None) -> dict | None:
         return None
     if not isinstance(payload, dict) or payload.get("v") != 1:
         return None
-    exp = payload.get("exp")
-    if not isinstance(exp, int) or exp <= _now():
+    if not isinstance(payload.get("sid"), str) or not payload["sid"] \
+            or not isinstance(payload.get("method"), str) or not payload["method"] \
+            or not isinstance(payload.get("iat"), int) \
+            or isinstance(payload.get("iat"), bool) \
+            or not isinstance(payload.get("exp"), int) \
+            or isinstance(payload.get("exp"), bool) \
+            or payload["exp"] <= payload["iat"]:
         return None
     return payload
 
 
-def _request_is_https(request: Request) -> bool:
-    scheme = (request.headers.get("x-forwarded-proto")
-              or request.url.scheme or "").split(",")[0].strip()
-    return scheme == "https"
+def verify_session_token(token: str | None) -> dict | None:
+    """The payload when both cookie and durable revocation state are valid.
+
+    Store absence or failure is fail-closed.  The enrollment check remains
+    store-independent, so an unenrolled dashboard still bootstraps open and the
+    env-only recovery switch can always bypass this lookup.
+    """
+    payload = _verified_session_payload(token)
+    if payload is None:
+        return None
+    try:
+        active = identity_sessions.check_active(
+            sid=payload["sid"], method=payload["method"],
+            created_at=payload["iat"], expires_at=payload["exp"], now=_now(),
+        )
+    except identity_sessions.SessionStoreError:
+        return None
+    return payload if active else None
 
 
 def attach_session_cookie(response: Response, request: Request, token: str) -> None:
     response.set_cookie(
         SESSION_COOKIE, token,
         max_age=SESSION_TTL_S, path="/", httponly=True, samesite="lax",
-        secure=_request_is_https(request),
+        # Authentication never rides cleartext.  This also avoids trusting a
+        # caller-controlled X-Forwarded-Proto header or a proxy that omits it.
+        secure=True,
     )
 
 
@@ -341,10 +385,10 @@ async def post_unlock_passkey_options(request: Request) -> JSONResponse:
         # Touch ID / PIN), not merely present.
         user_verification=UserVerificationRequirement.REQUIRED,
     )
-    _prune(_assert_pending)
-    for stale in [c for c, p in _assert_pending.items()
-                  if p["rp_id"] == rp_id]:
-        _assert_pending.pop(stale, None)
+    # Multiple browsers may legitimately start on the same RP ID.  Each
+    # challenge is already single-use; keep concurrent ceremonies while the
+    # global FIFO bound prevents abandoned-option memory growth.
+    _prune(_assert_pending, reserve=1)
     _assert_pending[_b64url(options.challenge)] = {
         "rp_id": rp_id,
         "origin": origin,
@@ -455,7 +499,16 @@ async def post_unlock_passkey(request: Request) -> JSONResponse:
         )}, status_code=500)
 
     response = JSONResponse({"ok": True, "method": "passkey"})
-    attach_session_cookie(response, request, mint_session_token("passkey"))
+    try:
+        token = mint_session_token(
+            "passkey", request=request, credential_id=raw_id,
+        )
+    except (OSError, identity_sessions.SessionStoreError) as exc:
+        return JSONResponse({"ok": False, "error": (
+            "the credential verified, but the dashboard could not create a "
+            f"revocable session: {exc}"
+        )}, status_code=503)
+    attach_session_cookie(response, request, token)
     return response
 
 
@@ -496,10 +549,7 @@ async def post_unlock_password_options(request: Request) -> JSONResponse:
             "can unlock"
         )}, status_code=409)
 
-    _prune(_pw_pending)
-    for stale in [c for c, p in _pw_pending.items()
-                  if p["origin"] == origin]:
-        _pw_pending.pop(stale, None)
+    _prune(_pw_pending, reserve=1)
     challenge = secrets.token_hex(32)
     _pw_pending[challenge] = {
         "origin": origin,
@@ -589,7 +639,14 @@ async def post_unlock_password(request: Request) -> JSONResponse:
 
     response = JSONResponse({"ok": True, "method": "password",
                              "display_name": personal.payload.get("display_name")})
-    attach_session_cookie(response, request, mint_session_token("password"))
+    try:
+        token = mint_session_token("password", request=request)
+    except (OSError, identity_sessions.SessionStoreError) as exc:
+        return JSONResponse({"ok": False, "error": (
+            "the password proof verified, but the dashboard could not create "
+            f"a revocable session: {exc}"
+        )}, status_code=503)
+    attach_session_cookie(response, request, token)
     return response
 
 
@@ -617,7 +674,22 @@ async def get_session(request: Request) -> JSONResponse:
 
 
 async def post_lock(request: Request) -> JSONResponse:
-    """Drop the dashboard session (the 'lock' action)."""
+    """End this browser's server session and drop only its cookie."""
+    payload = _verified_session_payload(request.cookies.get(SESSION_COOKIE))
+    if payload is not None:
+        try:
+            identity_sessions.end_session(
+                payload["sid"], reason="locked", now=_now(),
+            )
+        except identity_sessions.SessionStoreError as exc:
+            # Still clear this browser's cookie.  A 503 is honest that the
+            # durable row could not be changed; verification remains fail-closed
+            # while the store is unavailable and the operator can retry.
+            response = JSONResponse({"ok": False, "error": (
+                f"could not end the server-side dashboard session: {exc}"
+            )}, status_code=503)
+            response.delete_cookie(SESSION_COOKIE, path="/")
+            return response
     response = JSONResponse({"ok": True})
     response.delete_cookie(SESSION_COOKIE, path="/")
     return response
