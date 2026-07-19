@@ -774,7 +774,13 @@
       }, 'Get started');
       startBtn.addEventListener('click', function () {
         _togglePanel(false);
-        if (window.AutonomyNetworkIdentity) window.AutonomyNetworkIdentity.open();
+        // The Get-started surface (personal identity + passkey) is the
+        // front door; the C1 org ceremony is reachable from its org step.
+        if (window.AutonomyOnboarding) {
+          window.AutonomyOnboarding.open();
+        } else if (window.AutonomyNetworkIdentity) {
+          window.AutonomyNetworkIdentity.open();
+        }
       });
       panel.appendChild(startBtn);
     } else {

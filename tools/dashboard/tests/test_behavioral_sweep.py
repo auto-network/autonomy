@@ -13500,12 +13500,17 @@ _NETWORK_IDENTITY_JS = r"""
         catch (e) { r.noncanon_reject = String(e.message || e); }
 
         // 1 · getting-started entry appears in the no-key sign-on panel
-        // (the create ceremony is reached from here, not bolted onto the
-        // nav button). The panel probes for a key first, so wait for it.
+        // and opens the personal Get-started front door (onboarding);
+        // the C1 create-org ceremony lives behind its Organizations
+        // step, so the sweep drives it directly from here on.
         document.querySelector('[data-testid=network-signon-indicator]').click();
         await waitFor(() => q('network-getstarted-btn'));
         r.entry_visible = !!q('network-getstarted-btn');
         q('network-getstarted-btn').click();
+        await waitFor(() => q('network-onboarding'));
+        r.entry_opens_onboarding = !!q('network-onboarding');
+        if (window.AutonomyOnboarding) window.AutonomyOnboarding.close();
+        await ID.open();
         await waitFor(() => step() === 'intro');
         r.first_step = step();
         r.modal_open = !!q('network-identity-modal');
@@ -13616,6 +13621,10 @@ class TestNetworkIdentityCeremony:
     def test_entry_point_visible_without_key(self):
         c = self._checks
         assert c["entry_visible"] is True
+        # The panel's Get started opens the personal onboarding front
+        # door; the org-create modal is reached from its Organizations
+        # step (driven directly by the sweep after this assertion).
+        assert c["entry_opens_onboarding"] is True
         assert c["modal_open"] is True
         assert c["first_step"] == "intro"
 
@@ -13747,3 +13756,137 @@ class TestNetworkIdentityCeremony:
         assert c["status_view"] is True
         assert C1_EXPIRY_ISO in c["status_expiry"]
         assert c["create_controls_absent"] is True
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Get-started onboarding surface (personal identity + passkey)
+# ═══════════════════════════════════════════════════════════════════
+
+_ONBOARDING_JS = r"""
+(async () => {
+    const OB = window.AutonomyOnboarding;
+    if (!OB) return JSON.stringify({fatal: 'onboarding module not loaded'});
+    const r = {};
+    const q = (t) => document.querySelector('[data-testid=' + t + ']');
+    const text = (t) => ((q(t) || {}).textContent || '').trim();
+    const overlayText = () =>
+        (document.getElementById('network-onboarding') || {}).textContent || '';
+
+    try {
+        // mock status answers onboarding_needed:false, so nothing
+        // auto-opened; each step is opened explicitly.
+        await OB.open({step: 1});
+        r.step1_heading = (document.querySelector(
+            '#network-onboarding h1') || {}).textContent || '';
+        r.step1_has_password_help = overlayText().indexOf(
+            'Choose a password to encrypt and protect your identity') !== -1;
+        r.step1_inputs = !!(q('onboarding-name') && q('onboarding-password')
+                            && q('onboarding-password2'));
+        r.step1_progress = overlayText().indexOf('You') !== -1 &&
+            overlayText().indexOf('This device') !== -1 &&
+            overlayText().indexOf('Organizations') !== -1;
+        r.step1_notnow = text('onboarding-notnow');
+        r.step1_primary = text('onboarding-primary');
+
+        // client-side rejection: password mismatch never leaves the page
+        let posts = 0;
+        const origFetch = window.fetch;
+        window.fetch = async function (url, opts) {
+            if (String(url).indexOf('/api/identity/personal') !== -1 &&
+                ((opts || {}).method || 'GET') === 'POST') posts += 1;
+            return origFetch.call(this, url, opts);
+        };
+        try {
+            q('onboarding-name').value = 'Alex';
+            q('onboarding-password').value = 'week-glacier-thirty-nine';
+            q('onboarding-password2').value = 'different-password';
+            q('onboarding-primary').click();
+            const t0 = Date.now();
+            while (Date.now() - t0 < 3000 && !text('onboarding-error')) {
+                await new Promise(res => setTimeout(res, 40));
+            }
+            r.mismatch_error = text('onboarding-error');
+            r.mismatch_no_post = posts;
+        } finally {
+            window.fetch = origFetch;
+        }
+
+        await OB.open({step: 2});
+        r.step2_heading = (document.querySelector(
+            '#network-onboarding h1') || {}).textContent || '';
+        r.step2_access_only = overlayText().indexOf(
+            'It only unlocks access') !== -1;
+        r.step2_primary = text('onboarding-primary');
+
+        await OB.open({step: 3});
+        r.step3_heading = (document.querySelector(
+            '#network-onboarding h1') || {}).textContent || '';
+        r.step3_create_org = text('onboarding-create-org');
+        r.step3_skip = text('onboarding-skip-orgs');
+        r.step3_primary = text('onboarding-primary');
+
+        // Create-a-new-organization hands off to the C1 org ceremony.
+        q('onboarding-create-org').click();
+        const t1 = Date.now();
+        while (Date.now() - t1 < 3000 && !q('network-identity-modal')) {
+            await new Promise(res => setTimeout(res, 40));
+        }
+        r.create_org_opens_c1 = !!q('network-identity-modal');
+        r.onboarding_closed_after_handoff =
+            !document.getElementById('network-onboarding');
+        if (window.AutonomyNetworkIdentity) window.AutonomyNetworkIdentity.close();
+    } finally {
+        OB.close();
+        if (window.AutonomyNetworkIdentity) window.AutonomyNetworkIdentity.close();
+    }
+    return JSON.stringify(r);
+})()
+"""
+
+
+class TestOnboardingSurface:
+    """L2.B for the Get-started onboarding (mockup d49be06b): the three
+    steps render with the converged wording, the password mismatch is a
+    client-side rejection (nothing posted), and the Organizations step
+    hands off to the C1 create-org ceremony."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        _navigate_and_check("/sessions", "", wait_ms=600)
+        request.cls._checks = _run_async_eval(_ONBOARDING_JS)
+
+    def test_surface_ran(self):
+        c = self._checks
+        assert c and not c.get("fatal"), f"onboarding eval failed: {c}"
+
+    def test_step1_you(self):
+        c = self._checks
+        assert c["step1_heading"] == "Get started"
+        assert c["step1_inputs"] is True
+        assert c["step1_has_password_help"] is True   # password, not passphrase
+        assert c["step1_progress"] is True
+        assert c["step1_notnow"] == "Not now"
+        assert c["step1_primary"] == "Continue"
+
+    def test_step1_password_mismatch_is_client_side(self):
+        c = self._checks
+        assert "do not match" in c["mismatch_error"]
+        assert c["mismatch_no_post"] == 0
+
+    def test_step2_this_device(self):
+        c = self._checks
+        assert c["step2_heading"] == "Add this device"
+        assert c["step2_access_only"] is True         # access, never signing
+        assert c["step2_primary"] == "Enroll Face\xa0ID"  # &nbsp; per mockup
+
+    def test_step3_organizations(self):
+        c = self._checks
+        assert c["step3_heading"] == "Organizations"
+        assert "Create a new organization" in c["step3_create_org"]
+        assert "Skip for now" in c["step3_skip"]
+        assert c["step3_primary"] == "Finish"
+
+    def test_create_org_hands_off_to_c1_ceremony(self):
+        c = self._checks
+        assert c["create_org_opens_c1"] is True
+        assert c["onboarding_closed_after_handoff"] is True
