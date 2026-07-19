@@ -61,28 +61,15 @@
     return ttl + 's';
   }
 
-  const _LINK_DURATION_OPTIONS = [
-    { value: '3600', label: '1 hour' },
-    { value: '86400', label: '1 day' },
-    { value: '604800', label: '7 days' },
-    { value: '2592000', label: '30 days' },
-    { value: '7776000', label: '90 days' },
-    { value: 'none', label: 'No expiration' },
-  ];
+  const _LINK_DURATION_VALUES = new Set([
+    '3600', '86400', '604800', '2592000', '7776000',
+  ]);
 
-  function _durationOptions(current) {
-    const value = current == null ? 'none' : String(current);
-    if (_LINK_DURATION_OPTIONS.some((option) => option.value === value)) {
-      return _LINK_DURATION_OPTIONS.slice();
-    }
-    return [{ value, label: _linkTtlText(current) }, ..._LINK_DURATION_OPTIONS];
-  }
-
-  function _linkPayloadWithTtl(payload, duration) {
+  function _linkPayloadWithTtl(payload, ttl) {
     const next = JSON.parse(JSON.stringify(payload || {}));
     const meta = Object.assign({}, next.meta || {});
-    if (duration === 'none') delete meta.ttl;
-    else meta.ttl = Number(duration);
+    if (ttl === null) delete meta.ttl;
+    else meta.ttl = ttl;
     if (Object.keys(meta).length) next.meta = meta;
     else delete next.meta;
     return next;
@@ -139,8 +126,9 @@
       }
     }
 
-    const ttl = req.duration === 'none' ? null : Number(req.duration);
-    const payload = _linkPayloadWithTtl(rr.payload, req.duration);
+    const ttl = req.duration === 'none' ? null
+      : (req.duration === 'custom' ? req.customDurationSeconds : Number(req.duration));
+    const payload = _linkPayloadWithTtl(rr.payload, ttl);
     try {
       let envelope;
       try {
@@ -2114,7 +2102,9 @@
             const title = r.target_title || req.target_uuid || '?';
             const acting = r.acting_identity || {};
             const actor = r.actor_identity || {};
-            const duration = r.ttl == null ? 'none' : String(r.ttl);
+            const currentDuration = r.ttl == null ? 'none' : String(r.ttl);
+            const customDuration = r.ttl != null && !_LINK_DURATION_VALUES.has(currentDuration);
+            const duration = customDuration ? 'custom' : currentDuration;
             const approval = {
               id: r.id, kind: r.kind, session: r.session,
               gate2: true,
@@ -2123,7 +2113,9 @@
               targetType: r.type_label || req.target_type || 'Item', target: title,
               service: 'auto.network', orgSlug: req.org || '',
               actingIdentity: acting, actorIdentity: actor,
-              duration, durationOptions: _durationOptions(r.ttl),
+              duration,
+              customDurationSeconds: customDuration ? r.ttl : null,
+              customDurationLabel: customDuration ? _linkTtlText(r.ttl) : '',
               password: '', showPassword: false,
               allowSessionApprovals: false,
               previewOpen: false, targetPreview: r.target_preview || null,
