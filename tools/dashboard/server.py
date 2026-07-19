@@ -15659,6 +15659,64 @@ async def _recent_sessions_refresher():
         await asyncio.sleep(5)
 
 
+# ── Event-loop stall SAMPLER (companion to the watchdog coroutine below) ──
+# The watchdog coroutine runs ON the loop, so it can only MEASURE a stall after
+# the fact — it can't capture WHAT blocked the loop, because it isn't running
+# while the loop is blocked. This sampler runs on a separate OS thread: the
+# coroutine bumps _loop_heartbeat every tick; the sampler watches that heartbeat
+# and, the instant it goes stale (loop not ticking = blocked right now), reads
+# the loop thread's live stack via sys._current_frames() and logs it. That's a
+# READ of existing frame objects, not a suspend — the blocked thread is never
+# signalled or paused. Turns each stall into a named blocking stack.
+_loop_heartbeat = time.monotonic()
+_loop_thread_id: int | None = None
+_stall_sampler_started = False
+_STALL_SAMPLE_S = 0.5   # start sampling once the loop has been stalled this long
+_STALL_RESAMPLE_S = 0.4  # re-sample the stack this often WHILE a stall persists
+_STALL_MAX_DUMPS = 60   # cap samples per episode (60 * 0.4s = ~24s of coverage)
+
+
+def _loop_stall_sampler():
+    """Sample the loop thread's stack REPEATEDLY through a stall.
+
+    A single once-per-episode dump can't distinguish "one call stuck for 20s"
+    from "a rapid burst of short blocks" — so we re-sample every
+    ``_STALL_RESAMPLE_S`` for as long as the loop stays stalled, giving a stack
+    timeline across the whole episode. ``#N`` in the log line is the sample
+    index within one episode; a run of identical stacks = one long blocking
+    call, varied stacks = accumulation.
+    """
+    import traceback
+    episode_hb = None
+    dumps = 0
+    last_dump_t = 0.0
+    while True:
+        time.sleep(0.1)
+        tid = _loop_thread_id
+        if tid is None:
+            continue
+        hb = _loop_heartbeat
+        now = time.monotonic()
+        stalled = now - hb
+        if stalled < _STALL_SAMPLE_S:
+            continue
+        if hb != episode_hb:          # new stall episode (loop ticked since last)
+            episode_hb = hb
+            dumps = 0
+            last_dump_t = 0.0
+        if dumps >= _STALL_MAX_DUMPS or (now - last_dump_t) < _STALL_RESAMPLE_S:
+            continue
+        frame = sys._current_frames().get(tid)
+        if frame is not None:
+            stack = "".join(traceback.format_stack(frame))
+            logger.error(
+                "EVENT-LOOP STALL STACK #%d (stalled %.2fs, loop thread mid-call):\n%s",
+                dumps + 1, stalled, stack,
+            )
+        dumps += 1
+        last_dump_t = now
+
+
 async def _event_loop_watchdog():
     """Detect event-loop stalls and log them LOUD.
 
@@ -15672,13 +15730,17 @@ async def _event_loop_watchdog():
 
     Cheap: one 100ms timer tick; the measurement is two ``monotonic()`` reads.
     """
+    global _loop_heartbeat, _loop_thread_id
+    _loop_thread_id = threading.get_ident()
     _TICK = 0.1
     _LAG_WARN_S = 0.5
     _LAG_HANG_S = 2.0
     while True:
         t0 = time.monotonic()
         await asyncio.sleep(_TICK)
-        lag = time.monotonic() - t0 - _TICK
+        now = time.monotonic()
+        _loop_heartbeat = now
+        lag = now - t0 - _TICK
         if lag >= _LAG_HANG_S:
             logger.error(
                 "EVENT-LOOP STALL: loop blocked %.2fs — a sync or CPU-bound "
@@ -15816,6 +15878,12 @@ async def _on_startup():
         await resource_monitor.start(event_bus=event_bus)
     _dispatch_watcher_task = asyncio.create_task(_dispatch_watcher())
     _event_loop_watchdog_task = asyncio.create_task(_event_loop_watchdog())
+    global _stall_sampler_started
+    if not _stall_sampler_started:
+        _stall_sampler_started = True
+        threading.Thread(
+            target=_loop_stall_sampler, name="loop-stall-sampler", daemon=True,
+        ).start()
     _recent_sessions_refresher_task = asyncio.create_task(_recent_sessions_refresher())
     # Session lifecycle worker (FSM redesign 2026-06-18): start the single
     # off-loop thread that owns workspace start/stop/retry. It sits idle until
