@@ -8,10 +8,9 @@ split the same way:
   ``tools/graph/link_cmd.py``) posts a pending request and blocks on the
   held GET;
 * the **operator's browser** reviews WHAT is being shared (the enrichment
-  below resolves the target's real title from trusted local stores — the
-  requesting agent cannot spoof it) and, on approve, signs the exact
-  registry request with the operator's SESSION key (click only, no
-  passphrase — spec §6.4) and posts the signed envelope in the decision;
+  below resolves the target's real title and preview from trusted local
+  stores — the requesting agent cannot spoof them), unlocks the existing
+  browser signer on demand, and posts the signed envelope in the decision;
 * the **executor** below forwards that envelope to the auto.network
   registry (``POST /v1/links`` / ``DELETE /v1/links/{token}``, spec §4.4),
   caches the issued grant to ``autonomy.network.link-grant`` (the I9
@@ -53,6 +52,7 @@ Invariants enforced here:
 
 from __future__ import annotations
 
+import copy
 import re
 import time
 
@@ -70,6 +70,7 @@ from tools.graph.schemas.network_identity import (  # noqa: F401
 )
 
 _TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")  # 128-bit CSPRNG token shape (I2)
+MAX_LINK_TTL_S = 365 * 24 * 60 * 60
 
 _TYPE_LABELS = {
     "present": "Present deck",
@@ -125,11 +126,19 @@ def _resolve_target(target_type: str, target_uuid: str, org: str | None) -> dict
             return {"title": design.get("title") or target_uuid, "error": None}
         if target_type == "note":
             from tools.graph import ops as graph_ops
-            src = graph_ops.get_source(target_uuid, org=org)
-            if not src:
+            data = graph_ops.read_source_full(target_uuid, max_chars=0, org=org)
+            src = (data or {}).get("source") or {}
+            if not src or src.get("type") != "note":
                 return {"title": None, "error": f"note {target_uuid} not found in the graph"}
-            return {"title": src.get("title") or src.get("label") or target_uuid,
-                    "error": None}
+            content = "\n\n".join(
+                entry.get("content") or "" for entry in data.get("entries") or []
+            )
+            title = src.get("title") or src.get("label") or target_uuid
+            return {
+                "title": title,
+                "error": None,
+                "preview": {"title": title, "content": content},
+            }
         if target_type == "file":
             from tools.graph import ops as graph_ops
             att = None
@@ -142,6 +151,32 @@ def _resolve_target(target_type: str, target_uuid: str, org: str | None) -> dict
     except Exception as e:
         return {"title": None, "error": f"target resolution failed: {e}"}
     return {"title": None, "error": f"unknown target type {target_type!r}"}
+
+
+def _approval_identities(org: str | None) -> dict:
+    """Trusted acting-org and personal-actor labels for Gate 2."""
+    from tools.dashboard.identity_routes import _personal_member
+    from tools.dashboard.org_identity import resolve_org_identity
+
+    org_identity = resolve_org_identity(org)
+    try:
+        personal = _personal_member()
+    except Exception:
+        personal = None
+    payload = personal.payload if personal and isinstance(personal.payload, dict) else {}
+    return {
+        "acting_identity": {
+            "slug": org_identity.get("slug"),
+            "name": org_identity.get("name"),
+            "initial": org_identity.get("initial"),
+            "color": org_identity.get("color"),
+            "favicon": org_identity.get("favicon"),
+        },
+        "actor_identity": {
+            "display_name": payload.get("display_name"),
+            "root_pub": payload.get("root_pub"),
+        },
+    }
 
 
 def _registry_payload(req: dict, binding: dict) -> dict:
@@ -216,7 +251,10 @@ def _enrich_link_publish(row: dict) -> dict:
         "label": meta.get("label"),
         "binding_error": binding_error,
         "binding_drift": drift,
+        **_approval_identities(org),
     }
+    if target.get("preview"):
+        out["target_preview"] = target["preview"]
     if staged:
         out["registry_request"] = {k: staged[k]
                                    for k in ("method", "path", "registry_url", "payload")}
@@ -320,6 +358,43 @@ def _frozen_staged(row: dict) -> tuple[dict | None, str | None]:
     return staged, None
 
 
+def _publish_payload_for_decision(staged: dict, decision: dict) -> tuple[dict | None, str | None]:
+    """Rebuild the publish payload from frozen state plus the sole edit: TTL.
+
+    An absent ``ttl`` decision field preserves the staged value for older
+    clients. JSON null means no expiration and removes ``meta.ttl``. Every
+    other request coordinate remains a deep copy of the server-frozen row.
+    """
+    payload = copy.deepcopy(staged.get("payload"))
+    if not isinstance(payload, dict):
+        return None, "staged request carries no publish payload"
+    if "ttl" not in decision:
+        return payload, None
+
+    ttl = decision.get("ttl")
+    if ttl is not None and (
+        type(ttl) is not int or ttl <= 0 or ttl > MAX_LINK_TTL_S
+    ):
+        return None, (
+            "link duration must be No expiration or a whole number of "
+            "seconds between 1 and 365 days"
+        )
+
+    raw_meta = payload.get("meta")
+    if raw_meta is not None and not isinstance(raw_meta, dict):
+        return None, "staged request metadata is malformed"
+    meta = copy.deepcopy(raw_meta or {})
+    if ttl is None:
+        meta.pop("ttl", None)
+    else:
+        meta["ttl"] = ttl
+    if meta:
+        payload["meta"] = meta
+    else:
+        payload.pop("meta", None)
+    return payload, None
+
+
 def _envelope_and_subject(decision: dict) -> tuple[dict | None, dict | None, str | None]:
     """Validate the decision's signed envelope; return (envelope, subject, error).
 
@@ -330,8 +405,8 @@ def _envelope_and_subject(decision: dict) -> tuple[dict | None, dict | None, str
     envelope = decision.get("envelope")
     if not isinstance(envelope, dict):
         return None, None, (
-            "decision carried no signed envelope — the sign-on ceremony (C2) "
-            "has not landed, so there is no operator session key to sign with"
+            "decision carried no signed approval — unlock the organization "
+            "in the browser and try again"
         )
     cert_wire = envelope.get("cert")
     if not isinstance(cert_wire, str) or not cert_wire:
@@ -389,7 +464,10 @@ async def _execute_link_publish(row: dict, decision: dict) -> dict:
     drift_error = _binding_drift_error(staged, binding)
     if drift_error:
         return _fail(drift_error)
-    if envelope.get("payload") != staged["payload"]:
+    final_payload, payload_error = _publish_payload_for_decision(staged, decision)
+    if payload_error:
+        return _fail(payload_error)
+    if envelope.get("payload") != final_payload:
         # What was staged (and displayed) is exactly what an approval applies to.
         return _fail("signed payload does not match the staged request — refusing to publish")
     resp, err = await _forward_to_registry(staged, envelope)
@@ -406,7 +484,7 @@ async def _execute_link_publish(row: dict, decision: dict) -> dict:
         "token": token,
         "target_uuid": req["target_uuid"],
         "target_type": req["target_type"],
-        "meta": req.get("meta") or {},
+        "meta": final_payload.get("meta") or {},
         "subject": subject,  # I6: the issuing cert's subject
         "issued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
@@ -414,7 +492,12 @@ async def _execute_link_publish(row: dict, decision: dict) -> dict:
         NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION,
         token, grant, org=org,
     )
-    return {"ok": True, "url": url, "token": token}
+    return {
+        "ok": True,
+        "url": url,
+        "token": token,
+        "actor": _approval_identities(org)["actor_identity"],
+    }
 
 
 async def _execute_link_revoke(row: dict, decision: dict) -> dict:

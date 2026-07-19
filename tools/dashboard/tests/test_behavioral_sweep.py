@@ -5411,150 +5411,282 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
     var tick = async function() { await Alpine.nextTick(); await sleep(60); };
     var q = function(id) { return document.querySelector('[data-testid="' + id + '"]'); };
     var textOf = function(el) { return el ? el.textContent.replace(/\\s+/g, ' ').trim() : ''; };
+    var input = function(id, value) {
+        var el = q(id); el.value = value;
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+    };
 
     r.has_page = await waitFor(function() {
         return !!document.querySelector('[data-testid="worktrees-page"]');
     }, 3000);
     if (!r.has_page) return JSON.stringify(r);
-    // The approval overlay is hosted on the persistent review layer
-    // component (base.html #worktree-review-layer), not the page root —
-    // the same instance window.openApprovalOverlay drives.
     var data = window._worktreeReviewOverlay;
     if (!data) { r.error = 'no review-overlay component'; return JSON.stringify(r); }
 
-    // The enriched GET /api/approvals/{id} response the server produces for
-    // a link_publish request (title resolved server-side, TTL, staged
-    // registry request).
-    var row = {
+    var baseRow = {
         id: 'apr-link-1', kind: 'link_publish', session: 'auto-agent-1', result: null,
         request: { org: 'netorg', target_uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-                   target_type: 'present', meta: { ttl: 604800, label: 'binder' } },
-        target_title: 'OSS Insights briefing binder',
-        type_label: 'Present deck', ttl: 604800, label: 'binder',
+                   target_type: 'note', meta: { ttl: 604800, label: 'binder' } },
+        target_title: 'Release checklist', type_label: 'Note', ttl: 604800,
+        acting_identity: {slug: 'netorg', name: 'Network Org', initial: 'N',
+                          color: '#0f766e', favicon: null},
+        actor_identity: {display_name: 'Alex Operator', root_pub: 'aa'.repeat(32)},
+        target_preview: {title: 'Release checklist',
+                         content: 'Trusted note body\\n\\n- first\\n- second'},
         registry_request: {
-            method: 'POST', path: '/v1/links', registry_url: 'https://auto.network',
+            method: 'POST', path: '/v1/links', registry_url: 'https://registry.test',
             payload: { org: '11111111-1111-4111-8111-111111111111',
                        target_uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-                       target_type: 'present',
-                       meta: { ttl: 604800, label: 'binder' } },
+                       target_type: 'note', meta: { ttl: 604800, label: 'binder' } },
         },
     };
+    var row = function(id) { return Object.assign({}, baseRow, {id: id || baseRow.id}); };
 
     var origFetch = window.fetch;
     var origSigner = window.AutonomyNetworkSigner;
+    var origSession = window.AutonomyNetworkSession;
     var origToast = window.showToast;
-    var toasts = [];
-    var posted = [];
+    var posted = [], signed = [], signOnCalls = [], signOutCount = 0;
+    var authority = false, responseMode = 'success';
     try {
-        window.showToast = function(msg, type) { toasts.push({ msg: msg, type: type }); };
-
-        // ── render: the operator sees WHAT is being shared ───────────
-        data._approvalKinds.link_publish.open(data, row);
-        await tick();
-        r.overlay_open = !!q('approval-request-overlay');
-        r.title_bar = textOf(q('approval-title-bar'));
-        r.body_text = textOf(q('approval-body'));
-
-        window.fetch = async function(url, opts) {
-            posted.push({ url: String(url), body: JSON.parse((opts || {}).body || 'null') });
-            return { ok: true, json: async function() { return { ok: true }; } };
+        window.showToast = function() {};
+        window.AutonomyNetworkSession = {
+            state: function() { return authority ? {
+                signedIn: true, org: baseRow.registry_request.payload.org,
+                subject: {kind: 'operator', id: 'browser-test'}
+            } : {signedIn: false}; },
+            signOn: async function(password, opts) {
+                signOnCalls.push({password: password, org: opts.org});
+                if (password === 'missing key') {
+                    var missing = new Error('no identity key is stored for this org');
+                    missing.status = 404;
+                    throw missing;
+                }
+                if (password !== 'correct password') throw new Error('wrong passphrase');
+                authority = true;
+            },
+            signOut: async function() { authority = false; signOutCount += 1; },
         };
-
-        // ── approve with NO session key: the C2 seam surfaces cleanly ─
-        delete window.AutonomyNetworkSigner;
-        await data.approveRequest();
-        await tick();
-        r.no_signer_posted = posted.length;
-        r.no_signer_overlay_still_open = !!q('approval-request-overlay');
-        var errToast = toasts.filter(function(t) { return t.type === 'error'; }).pop();
-        r.no_signer_toast = errToast ? errToast.msg : '';
-
-        // ── approve with the C2 signer installed: envelope rides along ─
         window.AutonomyNetworkSigner = {
-            available: function() { return true; },
+            available: function() { return authority; },
             signRegistryRequest: async function(method, path, payload) {
-                return { v: 1, signer: 'ab', ts: 123, payload: payload,
-                         sig: 'cd', cert: '{"stub":true}',
-                         _signed: method + ' ' + path };
+                signed.push({method: method, path: path, payload: payload});
+                return {v: 1, signer: 'ab', ts: 123, payload: payload,
+                        sig: 'cd', cert: '{"stub":true}'};
             },
         };
-        await data.approveRequest();
-        await tick();
-        var approvePost = posted[posted.length - 1] || {};
-        r.approve_url = approvePost.url || '';
-        r.approve_body = approvePost.body || null;
-        r.approve_overlay_closed = !q('approval-request-overlay');
+        window.fetch = async function(url, opts) {
+            var u = String(url);
+            if (u.indexOf('/decision') !== -1) {
+                var body = JSON.parse((opts || {}).body || '{}');
+                posted.push({url: u, body: body});
+                if (responseMode === 'stale') return {
+                    ok: true, json: async function() { return {
+                        ok: false, error: 'This approval has already been completed.'}; }
+                };
+                return {ok: true, json: async function() { return {ok: true}; }};
+            }
+            if (u.indexOf('?wait=20') !== -1) return {
+                ok: true, json: async function() { return {
+                    result: {approved: true, execution: {ok: true, token: 'token'}}}; }
+            };
+            return origFetch.call(this, url, opts);
+        };
 
-        // ── decline: kind-agnostic, surfaces to the requester ─────────
-        data._approvalKinds.link_publish.open(data, row);
+        // Approved sheet content and initial form state.
+        data._approvalKinds.link_publish.open(data, row());
         await tick();
-        await data.declineApproval();
+        r.sheet_open = !!q('approval-sheet');
+        r.generic_overlay_absent = !q('approval-request-overlay');
+        r.sheet_text = textOf(q('approval-sheet'));
+        r.password_inside_sheet = !!q('approval-sheet').querySelector('[data-testid=approval-password]');
+        r.password_count = document.querySelectorAll('[data-testid=approval-password]').length;
+        r.option_unchecked = !q('approval-session-option').checked;
+        r.duration_initial = q('approval-duration').value;
+        r.desktop_attached_class = q('approval-sheet').className.indexOf('md:w-[28rem]') !== -1;
+        r.mobile_bottom_class = q('approval-sheet').className.indexOf('inset-x-0') !== -1;
+
+        // Trusted preview replaces the sheet and preserves all form state.
+        input('approval-password', 'preserved password');
+        q('approval-session-option').click();
+        q('approval-duration').value = '2592000';
+        q('approval-duration').dispatchEvent(new Event('change', {bubbles: true}));
+        q('approval-preview-note').click();
         await tick();
-        var declinePost = posted[posted.length - 1] || {};
-        r.decline_url = declinePost.url || '';
-        r.decline_body = declinePost.body || null;
-        r.decline_overlay_closed = !q('approval-request-overlay');
+        r.preview_open = !!q('approval-note-preview');
+        r.preview_trusted_content = textOf(q('approval-note-content'));
+        r.preview_has_no_confirm = !q('approval-confirm');
+        q('approval-preview-back').click();
+        await tick();
+        r.preview_password_preserved = q('approval-password').value === 'preserved password';
+        r.preview_option_preserved = q('approval-session-option').checked;
+        r.preview_duration_preserved = q('approval-duration').value === '2592000';
+        data.dismissApproval();
+        await tick();
+
+        // Every dismissal path is local only: no decline/decision POST.
+        var dismissBefore = posted.length;
+        data._approvalKinds.link_publish.open(data, row('cancel')); await tick();
+        q('approval-cancel').click(); await tick();
+        r.cancel_local = !q('approval-sheet') && posted.length === dismissBefore;
+        data._approvalKinds.link_publish.open(data, row('close')); await tick();
+        q('approval-close').click(); await tick();
+        r.close_local = !q('approval-sheet') && posted.length === dismissBefore;
+        data._approvalKinds.link_publish.open(data, row('outside')); await tick();
+        q('approval-required-layer').click(); await tick();
+        r.outside_local = !q('approval-sheet') && posted.length === dismissBefore;
+        data._approvalKinds.link_publish.open(data, row('escape')); await tick();
+        window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'})); await tick();
+        r.escape_local = !q('approval-sheet') && posted.length === dismissBefore;
+
+        // A newly-created org without authority has a clean follow-up seam.
+        data._approvalKinds.link_publish.open(data, row('no-key')); await tick();
+        input('approval-password', 'missing key');
+        await data.approveRequest(); await tick();
+        r.no_key_error = textOf(q('approval-error'));
+        r.no_key_stays_open = !!q('approval-sheet');
+        r.no_key_posts = posted.length - dismissBefore;
+        data.dismissApproval(); await tick();
+
+        // Wrong password stays in the sheet and never posts a decision.
+        data._approvalKinds.link_publish.open(data, row('wrong')); await tick();
+        input('approval-password', 'wrong password');
+        await data.approveRequest(); await tick();
+        r.wrong_password_error = textOf(q('approval-error'));
+        r.wrong_password_stays_open = !!q('approval-sheet');
+        r.wrong_password_posts = posted.length - dismissBefore;
+        data.dismissApproval(); await tick();
+
+        // Unchecked: one explicit action, no password in POST, authority cleared.
+        data._approvalKinds.link_publish.open(data, row('once')); await tick();
+        input('approval-password', 'correct password');
+        q('approval-duration').value = 'none';
+        q('approval-duration').dispatchEvent(new Event('change', {bubbles: true}));
+        await data.approveRequest(); await tick();
+        var once = posted[posted.length - 1];
+        r.once_closed = !q('approval-sheet');
+        r.once_body = once.body;
+        r.once_signed_payload = signed[signed.length - 1].payload;
+        r.once_authority_cleared = !authority;
+        r.once_password_not_posted = JSON.stringify(once.body).indexOf('correct password') === -1;
+
+        // Checked: authority survives, next concrete action still needs Confirm.
+        data._approvalKinds.link_publish.open(data, row('retain')); await tick();
+        input('approval-password', 'correct password');
+        q('approval-session-option').click();
+        await data.approveRequest(); await tick();
+        r.retained_after_first = authority;
+        var callsBeforeNext = signOnCalls.length;
+        data._approvalKinds.link_publish.open(data, row('next')); await tick();
+        r.next_sheet_still_present = !!q('approval-confirm');
+        r.next_option_checked = q('approval-session-option').checked;
+        r.next_password_disabled = q('approval-password').disabled;
+        await data.approveRequest(); await tick();
+        r.next_skipped_password = signOnCalls.length === callsBeforeNext;
+        r.retained_after_next = authority;
+        await window.AutonomyNetworkSession.signOut();
+        r.lock_store_clear = !authority;
+
+        // A consumed request remains dismissible and shows the server cause.
+        responseMode = 'stale';
+        data._approvalKinds.link_publish.open(data, row('stale')); await tick();
+        input('approval-password', 'correct password');
+        await data.approveRequest(); await tick();
+        r.stale_stays_open = !!q('approval-sheet');
+        r.stale_error = textOf(q('approval-error'));
+        r.stale_can_cancel = !!q('approval-cancel');
     } finally {
         window.fetch = origFetch;
-        if (origSigner === undefined) { delete window.AutonomyNetworkSigner; }
-        else { window.AutonomyNetworkSigner = origSigner; }
-        if (origToast) { window.showToast = origToast; } else { delete window.showToast; }
+        window.AutonomyNetworkSigner = origSigner;
+        window.AutonomyNetworkSession = origSession;
+        if (origToast) window.showToast = origToast; else delete window.showToast;
         data.approvalRequest = null;
     }
     return JSON.stringify(r);
 })()"""
 
 
-class TestLinkPublishApprovalOverlay:
-    """L2.B for the C3 share-link ceremony on the existing approvals surface.
-
-    The link_publish dialog must show WHAT is being shared (resolved target
-    title + TTL), approve must click-sign the staged registry request via
-    the C2 signer seam and post the envelope on the decision, and decline
-    must post the plain refusal the requester's held GET surfaces.
-    """
+class TestApprovalRequired:
+    """L2.B for Gate 2's action-specific auto.network approval sheet."""
 
     @pytest.fixture(scope="class", autouse=True)
     def checks(self, browser, request):
-        result = _navigate_and_eval_async(
+        request.cls._checks = _navigate_and_eval_async(
             "/worktrees", LINK_PUBLISH_APPROVAL_CHECKS, wait_ms=1200)
-        request.cls._checks = result
 
-    def test_dialog_renders_target_title_and_ttl(self):
+    def test_sheet_names_action_and_identities(self):
         c = self._checks
-        assert c.get("overlay_open"), f"approval overlay never opened: {c}"
-        assert "Publish share-link" in c.get("title_bar", "")
-        assert "OSS Insights briefing binder" in c.get("body_text", "")
-        assert "Link TTL: 7d" in c.get("body_text", "")
-        assert "Present deck" in c.get("body_text", "")
+        assert c.get("sheet_open"), c
+        assert c["generic_overlay_absent"] is True
+        assert "Publish a share link" in c["sheet_text"]
+        assert "Network Org" in c["sheet_text"]
+        assert "Authorized by Alex Operator" in c["sheet_text"]
+        assert "Service auto.network" in c["sheet_text"]
 
-    def test_approve_without_session_key_is_a_clean_c2_error(self):
+    def test_initial_password_and_session_option(self):
         c = self._checks
-        assert c.get("no_signer_posted") == 0, "decision must not post without a signature"
-        assert c.get("no_signer_overlay_still_open"), "overlay must stay open on signer failure"
-        assert "C2" in c.get("no_signer_toast", ""), (
-            f"C2 seam error not surfaced: {c.get('no_signer_toast')!r}")
+        assert c["password_inside_sheet"] is True
+        assert c["password_count"] == 1
+        assert c["option_unchecked"] is True
+        assert c["duration_initial"] == "604800"
 
-    def test_approve_signs_staged_request_and_resolves(self):
+    def test_responsive_sheet_contract(self):
         c = self._checks
-        assert c.get("approve_url", "").endswith("/api/approvals/apr-link-1/decision")
-        body = c.get("approve_body") or {}
-        assert body.get("approved") is True
-        envelope = body.get("envelope") or {}
-        assert envelope.get("_signed") == "POST /v1/links", (
-            f"signer saw the wrong staged request: {envelope}")
-        assert (envelope.get("payload") or {}).get("meta", {}).get("ttl") == 604800
-        # Confused-deputy guard: the destination is frozen SERVER-SIDE at
-        # render; the decision carries nothing that could move it.
-        assert set(body.keys()) == {"approved", "envelope"}, (
-            f"approve decision should carry only the verdict + envelope: {body}")
-        assert c.get("approve_overlay_closed"), "overlay should close after approve"
+        assert c["desktop_attached_class"] is True
+        assert c["mobile_bottom_class"] is True
 
-    def test_decline_posts_plain_refusal(self):
+    def test_trusted_preview_preserves_form_and_cannot_approve(self):
         c = self._checks
-        assert c.get("decline_url", "").endswith("/api/approvals/apr-link-1/decision")
-        assert c.get("decline_body") == {"approved": False}
-        assert c.get("decline_overlay_closed"), "overlay should close after decline"
+        assert c["preview_open"] is True
+        assert "Trusted note body" in c["preview_trusted_content"]
+        assert c["preview_has_no_confirm"] is True
+        assert c["preview_password_preserved"] is True
+        assert c["preview_option_preserved"] is True
+        assert c["preview_duration_preserved"] is True
+
+    def test_all_cancel_paths_are_local_only(self):
+        c = self._checks
+        assert c["cancel_local"] is True
+        assert c["close_local"] is True
+        assert c["outside_local"] is True
+        assert c["escape_local"] is True
+
+    def test_wrong_password_is_recoverable_without_post(self):
+        c = self._checks
+        assert c["wrong_password_posts"] == 0
+        assert c["wrong_password_stays_open"] is True
+        assert "did not work" in c["wrong_password_error"]
+
+    def test_missing_org_key_has_clean_followup_seam(self):
+        c = self._checks
+        assert c["no_key_posts"] == 0
+        assert c["no_key_stays_open"] is True
+        assert "not ready for approvals" in c["no_key_error"]
+
+    def test_unchecked_approval_is_one_action_and_no_expiration(self):
+        c = self._checks
+        assert c["once_closed"] is True
+        assert c["once_body"]["approved"] is True
+        assert c["once_body"]["ttl"] is None
+        assert "ttl" not in c["once_signed_payload"].get("meta", {})
+        assert c["once_authority_cleared"] is True
+        assert c["once_password_not_posted"] is True
+
+    def test_retention_still_requires_each_action_and_lock_clears(self):
+        c = self._checks
+        assert c["retained_after_first"] is True
+        assert c["next_sheet_still_present"] is True
+        assert c["next_option_checked"] is True
+        assert c["next_password_disabled"] is True
+        assert c["next_skipped_password"] is True
+        assert c["retained_after_next"] is True
+        assert c["lock_store_clear"] is True
+
+    def test_consumed_request_shows_cause_and_can_close(self):
+        c = self._checks
+        assert c["stale_stays_open"] is True
+        assert "already been completed" in c["stale_error"]
+        assert c["stale_can_cancel"] is True
 
 
 class TestWorktreesRebaseStatusBehavior:

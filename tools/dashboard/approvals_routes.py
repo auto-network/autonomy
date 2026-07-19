@@ -225,7 +225,15 @@ async def decide_approval(request: Request) -> JSONResponse:
     if r is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     if rid in _executing:
-        return JSONResponse({"ok": False})
+        return JSONResponse({
+            "ok": False,
+            "error": "This approval is already being processed.",
+        })
+    if r["result"] is not None:
+        return JSONResponse({
+            "ok": False,
+            "error": "This approval has already been completed.",
+        })
 
     executor = EXECUTORS.get(r["kind"])
     if body["approved"] and executor:
@@ -247,7 +255,12 @@ async def decide_approval(request: Request) -> JSONResponse:
     updated = ar.set_result(rid, body)
     if updated:
         _finalize_decision(rid, r["kind"], r["session"])
-    return JSONResponse({"ok": updated})
+    return JSONResponse({
+        "ok": updated,
+        **({} if updated else {
+            "error": "This approval has already been completed.",
+        }),
+    })
 
 
 ROUTES = [

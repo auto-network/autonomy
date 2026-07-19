@@ -92,8 +92,12 @@ def test_first_writer_wins(client):
     assert client.post(f"/api/approvals/{rid}/decision",
                        json={"approved": True, "signature": "SIG"}).json() == {"ok": True}
     # a second decision on an already-decided request does nothing
-    assert client.post(f"/api/approvals/{rid}/decision",
-                       json={"approved": False}).json() == {"ok": False}
+    refused = client.post(f"/api/approvals/{rid}/decision",
+                          json={"approved": False}).json()
+    assert refused == {
+        "ok": False,
+        "error": "This approval has already been completed.",
+    }
     assert client.get(f"/api/approvals/{rid}").json()["result"]["signature"] == "SIG"
 
 
@@ -273,7 +277,10 @@ def test_executor_runs_after_verdict_and_delivers_outcome(tmp_path, monkeypatch)
             assert calls == [{"op": "comment", "key": "ENT-1", "body_markdown": "hi"}]
             # after completion the result row is decided; further decisions refused
             again = await c.post(f"/api/approvals/{rid}/decision", json={"approved": False})
-            assert again.json() == {"ok": False}
+            assert again.json() == {
+                "ok": False,
+                "error": "This approval has already been completed.",
+            }
 
     asyncio.run(scenario())
 
@@ -331,7 +338,10 @@ def test_double_approve_executes_once(tmp_path, monkeypatch):
             first = await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
             second = await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
             assert first.json() == {"ok": True}
-            assert second.json() == {"ok": False}   # already executing
+            assert second.json() == {
+                "ok": False,
+                "error": "This approval is already being processed.",
+            }
             d = (await c.get(f"/api/approvals/{rid}?wait=10")).json()
             assert d["result"]["execution"] == {"ok": True}
             assert calls == [1]
