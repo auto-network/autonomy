@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import GraphDB, resolve_caller_db_path
+from .duration import parse_duration as _shared_parse_duration
 from . import cross_org
 from .cross_org import (
     PEER_VISIBLE_STATES,
@@ -516,6 +517,112 @@ def locate_source_org(
             "type": src.get("type") or "",
         }
     return None
+
+
+# Fields this repair primitive is allowed to touch — an explicit allowlist,
+# not an open "patch any metadata key" API. Extend deliberately.
+_BACKFILL_SCALAR_FIELDS = frozenset({"author"})
+_BACKFILL_OBJECT_FIELDS = frozenset({"identity"})
+
+
+def backfill_note_metadata(
+    updates: list[dict],
+    *,
+    field: str,
+    dry_run: bool = True,
+) -> dict:
+    """Bulk-patch one metadata field on an explicit list of existing notes.
+
+    A one-off repair primitive for the historical author/identity
+    attribution gap (graph note defaulted to author='user' for every
+    container-created note until the bug was fixed; conceived_at edges
+    almost never got created) — NOT a general metadata-editing API.
+    Deliberately narrow:
+
+    - ``field`` must be in ``_BACKFILL_SCALAR_FIELDS`` (plain string, e.g.
+      ``author``) or ``_BACKFILL_OBJECT_FIELDS`` (JSON object, e.g.
+      ``identity``) — anything else raises ``ValueError``.
+    - Every target is resolved to its home org via :func:`locate_source_org`
+      and patched through that org's own ``GraphDB`` handle (WAL-mode,
+      same code path the live dashboard uses) — never a raw sqlite write
+      against a file the server has open, which is unsafe to do
+      out-of-band.
+    - Every target must already be ``type == 'note'``; anything else is
+      skipped, not silently written.
+    - No predicate-based bulk update: ``updates`` is an explicit list of
+      ``{"id": note_id, "value": new_value}`` dicts, one row at a time.
+    - ``dry_run=True`` (default) computes and returns the full before/after
+      diff without writing anything. The caller must pass
+      ``dry_run=False`` to actually commit.
+
+    Returns ``{"dry_run": bool, "applied": int, "skipped": [...],
+    "changes": [{"id", "org", "before", "after"}, ...]}``.
+    """
+    if field in _BACKFILL_SCALAR_FIELDS:
+        is_object_field = False
+    elif field in _BACKFILL_OBJECT_FIELDS:
+        is_object_field = True
+    else:
+        raise ValueError(
+            f"backfill_note_metadata: unsupported field {field!r} "
+            f"(allowed: {sorted(_BACKFILL_SCALAR_FIELDS | _BACKFILL_OBJECT_FIELDS)})"
+        )
+
+    changes: list[dict] = []
+    skipped: list[dict] = []
+    by_org: dict[str, list[tuple[str, object]]] = {}
+
+    for u in updates:
+        note_id = u["id"]
+        value = u["value"]
+        hit = locate_source_org(note_id)
+        if hit is None:
+            skipped.append({"id": note_id, "reason": "not found in any org"})
+            continue
+        if hit["type"] != "note":
+            skipped.append({
+                "id": note_id,
+                "reason": f"type={hit['type']!r}, not a note",
+            })
+            continue
+        org = hit["org"]
+        full_id = hit["id"]
+        db = _open(org)
+        try:
+            row = db.conn.execute(
+                "SELECT metadata FROM sources WHERE id = ?", (full_id,),
+            ).fetchone()
+        finally:
+            db.close()
+        meta = json.loads(row["metadata"]) if row and row["metadata"] else {}
+        before = meta.get(field)
+        changes.append({"id": full_id, "org": org, "before": before, "after": value})
+        by_org.setdefault(org, []).append((full_id, value))
+
+    if dry_run:
+        return {"dry_run": True, "applied": 0, "skipped": skipped, "changes": changes}
+
+    applied = 0
+    for org, items in by_org.items():
+        db = _open(org)
+        try:
+            for full_id, value in items:
+                if is_object_field:
+                    db.conn.execute(
+                        "UPDATE sources SET metadata = json_set(metadata, '$.' || ?, json(?)) WHERE id = ?",
+                        (field, json.dumps(value), full_id),
+                    )
+                else:
+                    db.conn.execute(
+                        "UPDATE sources SET metadata = json_set(metadata, '$.' || ?, ?) WHERE id = ?",
+                        (field, value, full_id),
+                    )
+                applied += 1
+            db.commit()
+        finally:
+            db.close()
+
+    return {"dry_run": False, "applied": applied, "skipped": skipped, "changes": changes}
 
 
 def resolve_source_strict(
@@ -2322,12 +2429,65 @@ def _store_attachment_db(
     return att
 
 
+_NOTE_PROVENANCE_STOPWORDS = {
+    "the", "a", "an", "is", "in", "on", "at", "to", "for", "of",
+    "and", "or", "with", "from", "by", "not", "no",
+}
+
+
+def _resolve_note_provenance(
+    db: GraphDB, session_hint: str, title: str = "",
+) -> tuple[str | None, int | None]:
+    """Resolve (session_source_id, turn_number) for a note from a session hint.
+
+    Server-side equivalent of ``cli._auto_provenance`` — that function only
+    ever ran for host-direct CLI callers because it needed a local sqlite
+    mirror of the caller's session; container/HttpClient callers (the
+    dominant path today) never had one, so ``conceived_at`` edges almost
+    never got created outside host-direct use. The server always has a live
+    DB for ``org``, so it can do the same resolution given just the tmux
+    session name the client already knows (``AUTONOMY_SESSION``/``BD_ACTOR``).
+
+    ``title`` narrows to the best-matching recent turn by keyword overlap
+    (minimum 2 non-stopword words in common); falls back to the session's
+    latest turn when no match is found.
+    """
+    row = db.conn.execute(
+        "SELECT * FROM sources WHERE type = 'session' AND ("
+        "  json_extract(metadata, '$.session_id') = ?"
+        "  OR json_extract(metadata, '$.session_uuid') = ?"
+        "  OR json_extract(metadata, '$.tmux_session') = ?"
+        ") LIMIT 1",
+        (session_hint, session_hint, session_hint),
+    ).fetchone()
+    if not row:
+        return None, None
+    source_id = row["id"]
+
+    if title:
+        title_words = set(title.lower().split()) - _NOTE_PROVENANCE_STOPWORDS
+        if len(title_words) >= 2:
+            recent = db.get_recent_turns(source_id, limit=50)
+            best_turn, best_score = None, 0
+            for t in recent:
+                content_words = set((t["content"] or "").lower().split())
+                score = len(title_words & content_words)
+                if score > best_score:
+                    best_score = score
+                    best_turn = t["turn_number"]
+            if best_score >= 2 and best_turn is not None:
+                return source_id, best_turn
+
+    return source_id, db.get_latest_turn(source_id)
+
+
 def create_note(
     content: str,
     *,
     title: str | None = None,
     tags: list[str] | None = None,
     author: str | None = None,
+    session_hint: str | None = None,
     attachments: list[str] | None = None,
     html_path: str | None = None,
     auto_provenance_source_id: str | None = None,
@@ -2337,6 +2497,11 @@ def create_note(
     org: str | None = None,
 ) -> dict:
     """Create a note source + turn-1 thought in ``org``'s DB.
+
+    ``session_hint`` (a tmux session name) resolves the ``conceived_at``
+    provenance edge server-side when ``auto_provenance_source_id``/
+    ``auto_provenance_turn`` aren't already given explicitly — see
+    :func:`_resolve_note_provenance`.
 
     Returns a dict with ``id``, ``source_id`` (same as ``id``), ``title``,
     ``short_description``, ``org``, ``lines``, ``chars``, ``attachments``
@@ -2426,6 +2591,11 @@ def create_note(
         for name, etype in extract_entities(content):
             eid = db.upsert_entity(name, etype)
             db.add_mention(eid, thought.id, "thought")
+
+        if session_hint and not (auto_provenance_source_id and auto_provenance_turn):
+            auto_provenance_source_id, auto_provenance_turn = _resolve_note_provenance(
+                db, session_hint, title=content[:80],
+            )
 
         if auto_provenance_source_id and auto_provenance_turn:
             db.insert_edge(Edge(
@@ -3558,10 +3728,17 @@ def _query_attention(
     session: str | None = None,
     context: int = 0,
 ) -> list[dict]:
-    """Internal: scan thoughts for human input across sessions."""
+    """Internal: scan thoughts for human input across sessions.
+
+    No platform allowlist: ``session_type IN ('terminal', 'chatwith') OR
+    NULL`` already scopes this to human-present sessions regardless of
+    which harness/platform produced them. A prior ``s.platform IN
+    ('claude-code', 'codex-cli', 'codex-tui')`` condition silently excluded
+    every ``platform='claude'`` session (the interactive container-agent
+    path, in production since 2026-07-03) from attention entirely.
+    """
     conditions = [
         "s.type = 'session'",
-        "s.platform IN ('claude-code', 'codex-cli', 'codex-tui')",
         "t.role = 'user'",
         """(json_extract(s.metadata, '$.session_type') IN ('terminal', 'chatwith')
             OR json_extract(s.metadata, '$.session_type') IS NULL)""",
@@ -3574,8 +3751,19 @@ def _query_attention(
     params: list = []
 
     if since:
-        conditions.append("t.created_at >= ?")
-        params.append(since)
+        try:
+            secs = _shared_parse_duration(since)
+        except ValueError:
+            secs = None
+        if secs is not None:
+            from datetime import datetime, timezone, timedelta
+            since_iso = (datetime.now(timezone.utc) - timedelta(seconds=secs)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            conditions.append("t.created_at >= ?")
+            params.append(since_iso)
+        else:
+            # Not a duration string — assume a raw ISO8601 timestamp.
+            conditions.append("t.created_at >= ?")
+            params.append(since)
     if search:
         conditions.append("t.content LIKE ?")
         params.append(f"%{search}%")

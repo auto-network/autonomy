@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from tools.graph import cli as graph_cli
+from tools.graph import ops as graph_ops
 from tools.graph.db import GraphDB
 from tools.graph.ingest import (
     detect_session_format,
@@ -167,7 +168,7 @@ def test_attention_includes_codex_user_messages(graph_db, tmp_path):
     ])
 
     ingest_session_file(graph_db, jsonl)
-    rows = graph_cli._query_attention(
+    rows = graph_ops._query_attention(
         graph_db,
         search="read marker so that it is created on the API path",
         last=20,

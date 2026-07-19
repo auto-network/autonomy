@@ -8,6 +8,7 @@ own tmp file so concurrent runs cannot collide.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -93,6 +94,86 @@ def test_list_sources_filters_by_tag(graph_db_env):
     assert "other note" not in titles
 
 
+def test_create_note_session_hint_resolves_conceived_at_edge(graph_db_env):
+    """create_note(session_hint=...) links the note to the caller's session + turn.
+
+    This is the server-side path that replaces cli._auto_provenance for
+    HttpClient/container callers, who have no local sqlite mirror to
+    resolve provenance against themselves.
+    """
+    db = GraphDB(str(graph_db_env))
+    session = Source(
+        type="session", platform="claude-code",
+        title="a session",
+        metadata={"session_id": "auto-0322-153000"},
+    )
+    db.insert_source(session)
+    db.insert_thought(Thought(
+        source_id=session.id, content="let's talk about passkey enrollment",
+        role="user", turn_number=1,
+    ))
+    db.insert_thought(Thought(
+        source_id=session.id, content="unrelated later turn",
+        role="user", turn_number=2,
+    ))
+    db.commit()
+    db.close()
+
+    result = ops.create_note(
+        "passkey enrollment notes", tags=[], session_hint="auto-0322-153000",
+    )
+    assert result["auto_provenance"] == {"source_id": session.id, "turn": 1}
+
+    db2 = GraphDB(str(graph_db_env))
+    edge = db2.conn.execute(
+        "SELECT * FROM edges WHERE source_id = ? AND relation = 'conceived_at'",
+        (result["source_id"],),
+    ).fetchone()
+    db2.close()
+    assert edge is not None
+    assert edge["target_id"] == session.id
+
+
+def test_create_note_session_hint_unknown_session_is_noop(graph_db_env):
+    """An unresolvable session_hint doesn't fail note creation, just skips the edge."""
+    GraphDB(str(graph_db_env)).close()
+    result = ops.create_note(
+        "orphan note", tags=[], session_hint="auto-does-not-exist",
+    )
+    assert result["auto_provenance"] is None
+
+
+def test_query_attention_includes_claude_platform_sessions(graph_db_env):
+    """platform='claude' (the interactive container-agent path, live since
+    2026-07-03) must not be excluded from attention.
+
+    A prior ``s.platform IN ('claude-code', 'codex-cli', 'codex-tui')``
+    allowlist silently dropped every platform='claude' session — the
+    session_type check already scopes correctly to human-present sessions,
+    so the platform condition was a redundant, over-narrow proxy.
+    """
+    db = GraphDB(str(graph_db_env))
+    session = Source(
+        type="session", platform="claude",
+        title="an interactive container session",
+        metadata={"session_id": "auto-0719-124323", "session_type": "terminal"},
+    )
+    db.insert_source(session)
+    db.insert_thought(Thought(
+        source_id=session.id, content="please check the backfill approval",
+        role="user", turn_number=1,
+    ))
+    db.commit()
+    db.close()
+
+    db2 = GraphDB(str(graph_db_env))
+    rows = ops._query_attention(db2, session="auto-0719-124323")
+    db2.close()
+
+    assert len(rows) == 1
+    assert rows[0]["content"] == "please check the backfill approval"
+
+
 def test_add_tag_returns_true_on_first_application(graph_db_env):
     """Tag is newly added on first call, no-op on second."""
     db = GraphDB(str(graph_db_env))
@@ -101,6 +182,120 @@ def test_add_tag_returns_true_on_first_application(graph_db_env):
 
     assert ops.add_tag(src.id, "shiny") is True
     assert ops.add_tag(src.id, "shiny") is False
+
+
+def _fake_locate(note_id_to_org: dict):
+    def _locate(source_id, *, org=None):
+        if source_id not in note_id_to_org:
+            return None
+        return {"org": note_id_to_org[source_id], "id": source_id, "type": "note"}
+    return _locate
+
+
+def test_backfill_note_metadata_dry_run_does_not_write(graph_db_env, monkeypatch):
+    """dry_run=True (the default) reports the diff without touching the DB."""
+    db = GraphDB(str(graph_db_env))
+    note = _seed_note(db, title="orphan note", tags=[])
+    db.close()
+
+    monkeypatch.setattr(ops, "locate_source_org", _fake_locate({note.id: "autonomy"}))
+
+    result = ops.backfill_note_metadata(
+        [{"id": note.id, "value": "auto-0322-153000"}], field="author",
+    )
+    assert result["dry_run"] is True
+    assert result["applied"] == 0
+    assert result["changes"] == [
+        {"id": note.id, "org": "autonomy", "before": "test", "after": "auto-0322-153000"},
+    ]
+
+    reread = ops.get_source(note.id)
+    meta = reread["metadata"]
+    if isinstance(meta, str):
+        meta = json.loads(meta)
+    assert meta.get("author") == "test"  # unchanged
+
+
+def test_backfill_note_metadata_commits_scalar_field(graph_db_env, monkeypatch):
+    """dry_run=False patches metadata.author on exactly the named note."""
+    db = GraphDB(str(graph_db_env))
+    note = _seed_note(db, title="orphan note", tags=[])
+    other = _seed_note(db, title="untouched note", tags=[])
+    db.close()
+
+    monkeypatch.setattr(
+        ops, "locate_source_org",
+        _fake_locate({note.id: "autonomy", other.id: "autonomy"}),
+    )
+
+    result = ops.backfill_note_metadata(
+        [{"id": note.id, "value": "auto-0322-153000"}], field="author", dry_run=False,
+    )
+    assert result["applied"] == 1
+    assert result["skipped"] == []
+
+    patched = ops.get_source(note.id)
+    meta = patched["metadata"]
+    if isinstance(meta, str):
+        meta = json.loads(meta)
+    assert meta["author"] == "auto-0322-153000"
+    assert meta["tags"] == []  # other metadata keys survive the json_set patch
+
+    untouched = ops.get_source(other.id)
+    umeta = untouched["metadata"]
+    if isinstance(umeta, str):
+        umeta = json.loads(umeta)
+    assert umeta["author"] == "test"
+
+
+def test_backfill_note_metadata_commits_object_field(graph_db_env, monkeypatch):
+    """dry_run=False patches an object-valued field (metadata.identity) correctly."""
+    db = GraphDB(str(graph_db_env))
+    note = _seed_note(db, title="orphan note", tags=[])
+    db.close()
+
+    monkeypatch.setattr(ops, "locate_source_org", _fake_locate({note.id: "autonomy"}))
+
+    identity_value = {"root_pub": "be2afef6", "attested": "operator-backfill-2026-07-19"}
+    result = ops.backfill_note_metadata(
+        [{"id": note.id, "value": identity_value}], field="identity", dry_run=False,
+    )
+    assert result["applied"] == 1
+
+    patched = ops.get_source(note.id)
+    meta = patched["metadata"]
+    if isinstance(meta, str):
+        meta = json.loads(meta)
+    assert meta["identity"] == identity_value
+
+
+def test_backfill_note_metadata_rejects_unknown_field(graph_db_env):
+    """Only the explicit allowlist (author, identity) is patchable."""
+    with pytest.raises(ValueError):
+        ops.backfill_note_metadata([{"id": "whatever", "value": "x"}], field="title")
+
+
+def test_backfill_note_metadata_skips_non_note_and_missing(graph_db_env, monkeypatch):
+    """Non-note sources and unresolvable ids are skipped, not silently patched."""
+    monkeypatch.setattr(
+        ops, "locate_source_org",
+        lambda source_id, org=None: (
+            {"org": "autonomy", "id": "a-session-id", "type": "session"}
+            if source_id == "a-session-id" else None
+        ),
+    )
+    result = ops.backfill_note_metadata(
+        [
+            {"id": "a-session-id", "value": "x"},
+            {"id": "does-not-exist", "value": "x"},
+        ],
+        field="author",
+    )
+    assert result["applied"] == 0
+    assert result["changes"] == []
+    reasons = {s["id"]: s["reason"] for s in result["skipped"]}
+    assert "not a note" in reasons["a-session-id"]
+    assert "not found" in reasons["does-not-exist"]
 
 
 def test_remove_tag_round_trips(graph_db_env):

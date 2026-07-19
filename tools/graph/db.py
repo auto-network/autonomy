@@ -1797,6 +1797,11 @@ class GraphDB:
         Publication-state defaults: excludes raw sources from other sessions.
         Pass `include_raw=True` to disable the filter, or `states=[...]` to
         restrict to specific states.
+
+        ``author`` is an exact match against ``metadata.author`` — this is
+        also how callers filter to a specific creating session, since notes
+        are stamped with the creating tmux session's name by default (see
+        ``cmd_note``).
         """
         query = "SELECT * FROM sources s WHERE 1=1"
         params: list = []
