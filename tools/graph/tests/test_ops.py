@@ -298,6 +298,103 @@ def test_backfill_note_metadata_skips_non_note_and_missing(graph_db_env, monkeyp
     assert "not found" in reasons["does-not-exist"]
 
 
+def test_backfill_note_provenance_dry_run_does_not_write(graph_db_env, monkeypatch):
+    """dry_run=True (the default) plans the edge without creating it."""
+    db = GraphDB(str(graph_db_env))
+    note = _seed_note(db, title="orphan note", tags=[])
+    session = Source(type="session", platform="claude", title="s")
+    db.insert_source(session)
+    db.close()
+
+    monkeypatch.setattr(ops, "locate_source_org", _fake_locate({note.id: "autonomy"}))
+
+    result = ops.backfill_note_provenance(
+        [{"id": note.id, "session_source_id": session.id, "turn": 4, "confidence": 0.95}],
+    )
+    assert result["dry_run"] is True
+    assert result["applied"] == 0
+    assert result["changes"] == [
+        {"id": note.id, "org": "autonomy", "session_source_id": session.id,
+         "turn": 4, "confidence": 0.95},
+    ]
+
+    db2 = GraphDB(str(graph_db_env))
+    edge = db2.conn.execute(
+        "SELECT * FROM edges WHERE source_id = ? AND relation = 'conceived_at'",
+        (note.id,),
+    ).fetchone()
+    db2.close()
+    assert edge is None
+
+
+def test_backfill_note_provenance_commits_edge(graph_db_env, monkeypatch):
+    """dry_run=False creates a conceived_at edge with turn + confidence metadata."""
+    db = GraphDB(str(graph_db_env))
+    note = _seed_note(db, title="orphan note", tags=[])
+    session = Source(type="session", platform="claude", title="s")
+    db.insert_source(session)
+    db.close()
+
+    monkeypatch.setattr(ops, "locate_source_org", _fake_locate({note.id: "autonomy"}))
+
+    result = ops.backfill_note_provenance(
+        [{"id": note.id, "session_source_id": session.id, "turn": 4, "confidence": 0.95}],
+        dry_run=False,
+    )
+    assert result["applied"] == 1
+
+    db2 = GraphDB(str(graph_db_env))
+    edge = db2.conn.execute(
+        "SELECT * FROM edges WHERE source_id = ? AND relation = 'conceived_at'",
+        (note.id,),
+    ).fetchone()
+    db2.close()
+    assert edge is not None
+    assert edge["target_id"] == session.id
+    meta = json.loads(edge["metadata"])
+    assert meta["turns"] == {"from": 4, "to": 4}
+    assert meta["confidence"] == 0.95
+
+
+def test_backfill_note_provenance_skips_existing_edge(graph_db_env, monkeypatch):
+    """A note that already has a conceived_at edge is skipped, never overwritten."""
+    db = GraphDB(str(graph_db_env))
+    note = _seed_note(db, title="already linked", tags=[])
+    session_a = Source(type="session", platform="claude", title="a")
+    session_b = Source(type="session", platform="claude", title="b")
+    db.insert_source(session_a)
+    db.insert_source(session_b)
+    db.close()
+
+    # Simulate the going-forward fix already having created a correct edge.
+    live_result = ops.create_note(
+        "placeholder", tags=[], auto_provenance_source_id=session_a.id,
+        auto_provenance_turn=1,
+    )
+    note_with_edge = live_result["source_id"]
+
+    monkeypatch.setattr(
+        ops, "locate_source_org", _fake_locate({note_with_edge: "autonomy"}),
+    )
+
+    result = ops.backfill_note_provenance(
+        [{"id": note_with_edge, "session_source_id": session_b.id, "turn": 9, "confidence": 0.5}],
+        dry_run=False,
+    )
+    assert result["applied"] == 0
+    assert result["skipped"] == [
+        {"id": note_with_edge, "reason": "already has a conceived_at edge"},
+    ]
+
+    db3 = GraphDB(str(graph_db_env))
+    edge = db3.conn.execute(
+        "SELECT target_id FROM edges WHERE source_id = ? AND relation = 'conceived_at'",
+        (note_with_edge,),
+    ).fetchone()
+    db3.close()
+    assert edge["target_id"] == session_a.id  # untouched, not overwritten by session_b
+
+
 def test_remove_tag_round_trips(graph_db_env):
     """add_tag → remove_tag → tag absent."""
     db = GraphDB(str(graph_db_env))

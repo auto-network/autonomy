@@ -625,6 +625,118 @@ def backfill_note_metadata(
     return {"dry_run": False, "applied": applied, "skipped": skipped, "changes": changes}
 
 
+def backfill_note_provenance(
+    updates: list[dict],
+    *,
+    dry_run: bool = True,
+) -> dict:
+    """Bulk-create ``conceived_at`` edges for an explicit list of notes.
+
+    Companion to :func:`backfill_note_metadata`, for the turn-level half of
+    the historical attribution repair — same safety shape:
+
+    - ``updates`` is an explicit list of ``{"id": note_id,
+      "session_source_id": ..., "turn": int, "confidence": float}`` dicts.
+      No predicate-based bulk update; every row is named.
+    - Every ``id`` must resolve (via :func:`locate_source_org`) to an
+      existing ``type == 'note'`` source; anything else is skipped, not
+      written.
+    - A note that already carries a ``conceived_at`` edge is skipped, not
+      overwritten — this repair pass must never clobber an edge the
+      going-forward fix (``session_hint`` resolution in ``create_note``)
+      already created correctly.
+    - Writes go through the note's home-org ``GraphDB`` (WAL-mode, same
+      code path the live dashboard uses), never a raw sqlite edit.
+    - ``dry_run=True`` (default) returns the full plan without writing;
+      pass ``dry_run=False`` to commit.
+
+    ``confidence`` is carried into the edge's ``metadata`` purely as an
+    audit trail (this recovery pass vs. organic resolution) — the caller
+    is responsible for having already filtered to whatever confidence
+    threshold they trust before calling this.
+
+    Returns ``{"dry_run": bool, "applied": int, "skipped": [...],
+    "changes": [{"id", "org", "session_source_id", "turn", "confidence"}, ...]}``.
+    """
+    from .models import Edge, new_id
+
+    changes: list[dict] = []
+    skipped: list[dict] = []
+    by_org: dict[str, list[dict]] = {}
+
+    for u in updates:
+        note_id = u["id"]
+        session_source_id = u["session_source_id"]
+        turn = u["turn"]
+        confidence = u.get("confidence")
+
+        hit = locate_source_org(note_id)
+        if hit is None:
+            skipped.append({"id": note_id, "reason": "not found in any org"})
+            continue
+        if hit["type"] != "note":
+            skipped.append({
+                "id": note_id,
+                "reason": f"type={hit['type']!r}, not a note",
+            })
+            continue
+        org = hit["org"]
+        full_id = hit["id"]
+
+        db = _open(org)
+        try:
+            existing = db.conn.execute(
+                "SELECT id FROM edges WHERE source_id = ? AND relation = 'conceived_at' LIMIT 1",
+                (full_id,),
+            ).fetchone()
+        finally:
+            db.close()
+        if existing is not None:
+            skipped.append({
+                "id": note_id,
+                "reason": "already has a conceived_at edge",
+            })
+            continue
+
+        changes.append({
+            "id": full_id, "org": org,
+            "session_source_id": session_source_id, "turn": turn,
+            "confidence": confidence,
+        })
+        by_org.setdefault(org, []).append({
+            "id": full_id, "session_source_id": session_source_id,
+            "turn": turn, "confidence": confidence,
+        })
+
+    if dry_run:
+        return {"dry_run": True, "applied": 0, "skipped": skipped, "changes": changes}
+
+    applied = 0
+    for org, items in by_org.items():
+        db = _open(org)
+        try:
+            for item in items:
+                db.insert_edge(Edge(
+                    id=new_id(),
+                    source_id=item["id"],
+                    source_type="source",
+                    target_id=item["session_source_id"],
+                    target_type="source",
+                    relation="conceived_at",
+                    metadata={
+                        "turns": {"from": item["turn"], "to": item["turn"]},
+                        "confidence": item["confidence"],
+                        "recovery": "uuid-grep-backfill-2026-07-19",
+                    },
+                ))
+                applied += 1
+            db.commit()
+        finally:
+            db.close()
+
+    return {"dry_run": False, "applied": applied, "skipped": skipped, "changes": changes}
+
+
 def resolve_source_strict(
     source_id: str,
     *,
