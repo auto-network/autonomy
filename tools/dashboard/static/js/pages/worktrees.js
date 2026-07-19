@@ -133,6 +133,7 @@
       }
       retained = _matchingApprovalAuthority(req);
       if (!retained) {
+        req.password = '';
         await session.signOut();
         throw new Error('The unlocked authority does not match this organization.');
       }

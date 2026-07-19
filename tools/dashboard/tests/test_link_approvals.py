@@ -355,13 +355,13 @@ def test_decline_surfaces_to_requester(env):
     assert ar.pending_for_session(SESSION) is None
 
 
-def test_no_envelope_is_a_clean_c2_error(env):
-    """Approving without a signed envelope (C2 absent) fails cleanly."""
+def test_no_envelope_has_an_actionable_error(env):
+    """Approving without a browser signature fails with operator wording."""
     rid = _create_publish(env)
     result = _decide_and_wait(env, rid, {"approved": True})
     execution = result["execution"]
     assert execution["ok"] is False
-    assert "C2" in execution["error"]
+    assert "unlock the organization" in execution["error"]
     assert _cached_grants() == {}
 
 
