@@ -91,6 +91,8 @@
 
         init: function () {
           window._designPage = this;
+          this._destroyed = false;
+          this._loadGen = 0;   // invalidates in-flight fetches on nav/destroy
           this.revisionId = _revisionIdFromPath();
           this._load();
           var self = this;
@@ -127,10 +129,11 @@
         },
 
         destroy: function () {
+          this._destroyed = true;
           if (window._designPage === this) window._designPage = null;
-          if (window._designSeriesCleanup) {
-            window._designSeriesCleanup();
-            window._designSeriesCleanup = null;
+          if (this._designSeriesCleanup) {
+            this._designSeriesCleanup();
+            this._designSeriesCleanup = null;
           }
           if (this._popstateHandler) {
             window.removeEventListener('popstate', this._popstateHandler);
@@ -144,10 +147,13 @@
         // ── Data loading ──────────────────────────────────────────────────
 
         _load: async function () {
+          var gen = ++this._loadGen;
           this.state = 'loading';
           try {
             var resp = await fetch('/api/design/' + this.revisionId + '/full');
+            if (this._destroyed || gen !== this._loadGen) return;  // navigated/destroyed mid-fetch
             var data = await resp.json();
+            if (this._destroyed || gen !== this._loadGen) return;
             if (data.error) {
               this.state = 'error';
               return;
@@ -166,8 +172,13 @@
             // Restore chat state from design-scoped key
             this.chatOpen = localStorage.getItem('design-chatOpen-' + this.designId) === 'true';
 
-            // Post-render: inject iframe content
-            this.$nextTick(function () { this._injectIframe(data); }.bind(this));
+            // Post-render: inject iframe content. Guard at EXECUTION time —
+            // $nextTick callbacks are not canceled by destroy/supersede, and
+            // _injectIframe writes into the global #design-iframe.
+            this.$nextTick(function () {
+              if (this._destroyed || gen !== this._loadGen) return;
+              this._injectIframe(data);
+            }.bind(this));
 
             // Auto-reconnect Chat With if session was previously selected
             this._checkChatWith();
@@ -299,20 +310,40 @@
 
         _swapRevision: async function (newRevisionId) {
           if (newRevisionId === this.revisionId) return;
+          var gen = ++this._loadGen;
           try {
             var resp = await fetch('/api/design/' + newRevisionId + '/full');
+            if (this._destroyed || gen !== this._loadGen) return;  // navigated/destroyed mid-fetch
             var data = await resp.json();
+            if (this._destroyed || gen !== this._loadGen) return;
             if (data.error) return;
 
             this.revisionId = newRevisionId;
             this.design = data;
+            // Keep the design identity in sync with the body so the title bar
+            // can never lag behind the revision shown; if the swap crossed into a
+            // different design (e.g. browser back/forward), move the live
+            // subscription onto that design's topic too.
+            if (data.design_id && data.design_id !== this.designId) {
+              this.designId = data.design_id;
+              this._subscribeToDesign();
+              // registerHandler can synchronously replay cached topic data and
+              // re-enter _swapRevision (bumping _loadGen); bail if this call was
+              // superseded so it can't schedule a stale injection or history push.
+              if (this._destroyed || gen !== this._loadGen) return;
+            }
             var revisions = data.revisions || [];
             this.iterCount = revisions.length || 1;
             this.iterIndex = revisions.indexOf(newRevisionId);
             if (this.iterIndex < 0) this.iterIndex = revisions.length - 1;
 
-            // Re-inject iframe with new content
-            this.$nextTick(function () { this._injectIframe(data); }.bind(this));
+            // Re-inject iframe with new content. Guard at EXECUTION time —
+            // $nextTick callbacks survive destroy/supersede and _injectIframe
+            // writes into the global #design-iframe.
+            this.$nextTick(function () {
+              if (this._destroyed || gen !== this._loadGen) return;
+              this._injectIframe(data);
+            }.bind(this));
 
             // Update URL without navigation
             history.pushState({}, '', '/design/' + newRevisionId);
@@ -481,17 +512,30 @@
         // ── SSE design subscription ───────────────────────────────────────
 
         _subscribeToDesign: function () {
+          if (this._destroyed) return;
+          // Idempotent: drop any prior subscription so re-subscribing (e.g. a
+          // cross-design swap, or a fetch that resolved late) never leaves two
+          // handlers registered.
+          if (this._designSeriesCleanup) { this._designSeriesCleanup(); this._designSeriesCleanup = null; }
           var designId = this.designId;
           if (!designId) return;
           var self = this;
           var designTopic = 'design:' + designId;
           var handler = function (data) {
+            if (self._destroyed) return;
             if (!data.revision_id || data.revision_id === self.revisionId) return;
-            // New iteration: soft swap (no page reload)
+            // Only swap for THIS design's own revisions — never let a revision
+            // pushed to a different design hijack the view being watched.
+            if (data.design_id && data.design_id !== self.designId) return;
+            // New iteration of the current design: soft swap (no page reload)
             self._swapRevision(data.revision_id);
           };
           registerHandler(designTopic, handler);
-          window._designSeriesCleanup = function () { unregisterHandler(designTopic, handler); };
+          // Instance-scoped cleanup. A single shared global gets clobbered when
+          // another design mounts before this one destroys, stranding this
+          // handler — so a revision pushed to a previously-viewed design would
+          // hijack the design currently on screen. Keep the unsubscribe here.
+          this._designSeriesCleanup = function () { unregisterHandler(designTopic, handler); };
         },
 
       };
