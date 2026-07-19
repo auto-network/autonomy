@@ -551,11 +551,11 @@ def test_sanitize_next():
 
 
 def test_gate_ignores_attacker_caller_org(env, root, monkeypatch):
-    """The gate must resolve enrollment against the dashboard's OWN org,
+    """The gate resolves enrollment through explicit personal scope,
     never the request's X-Graph-Org. If it honoured the header, an
     attacker could name an un-enrolled org and fail the lock open (and
-    poison the shared cache to False for everyone). Verify the caller-org
-    contextvar is cleared before the enrollment lookup runs."""
+    poison the shared cache to False for everyone). The helper takes no org
+    argument, so even a bound caller context cannot redirect the lookup."""
     from tools.graph import ops
     _store_identity(env, root)
     unlock_routes.bust_enforce_cache()
@@ -563,9 +563,9 @@ def test_gate_ignores_attacker_caller_org(env, root, monkeypatch):
     seen = {}
     real = unlock_routes._personal_member
 
-    def spy(org):
+    def spy():
         seen["ctx"] = ops._caller_org_var.get()
-        return real(org)
+        return real()
 
     monkeypatch.setattr(unlock_routes, "_personal_member", spy)
     # Simulate _CallerOrgMiddleware having bound an attacker-chosen org.
@@ -575,7 +575,7 @@ def test_gate_ignores_attacker_caller_org(env, root, monkeypatch):
     finally:
         ops.reset_caller_org(token)
     assert result is True                # still sees the real enrollment
-    assert seen["ctx"] is None           # lookup ran with the header cleared
+    assert seen["ctx"] == "attacker-bogus-org"  # context cannot affect helper
 
 
 def test_gate_enforces_despite_bogus_org_header(env, root):
@@ -672,7 +672,7 @@ def test_canonical_label_pin_defeats_a_shadow_row(env, root, monkeypatch):
             "display_name": "attacker",
             "created_at": "2026-07-19T00:00:00Z",
         }, org=ORG)
-    member = identity_routes._personal_member(settings_ops.CALLER_ORG)
+    member = identity_routes._personal_member()
     assert member.key == "default"
     assert member.payload["root_pub"] == root.public_hex
     env.cookies.clear()
@@ -690,7 +690,7 @@ def test_every_mutation_path_refuses_protected_identity_sets(env, root):
     with _sops.identity_write_context():
         pk_id = _sops.add_setting(_PASSKEY_SET, 1, "victim-cred",
                                  _valid_passkey_payload("victim-cred"), org=ORG)
-        personal = identity_routes._personal_member(settings_ops.CALLER_ORG)
+        personal = identity_routes._personal_member()
     # Resolve the personal row's setting id for the id-based paths.
     personal_rows = _sops.read_set(_PERSONAL_SET, org=ORG).members
     personal_id = next(m.id for m in personal_rows if m.key == "default")

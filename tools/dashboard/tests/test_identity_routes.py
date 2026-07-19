@@ -18,7 +18,8 @@ the server half:
   attestation — what platform authenticators send);
 * tested rejections: unknown/expired/replayed challenge, origin
   mismatch, RP ID mismatch, missing user-verification flag, duplicate
-  credential, options before an identity exists, cross-org access.
+  credential, and options before an identity exists; caller org context
+  is ignored by every personal identity operation.
 """
 
 from __future__ import annotations
@@ -215,30 +216,67 @@ def test_status_never_leaks_the_armor(env, root):
     assert "armored_private_key" not in json.dumps(body)
 
 
-def test_status_pins_reads_to_personal_scope(env, root, monkeypatch):
+def test_status_pins_reads_to_personal_scope(env, root):
     """The shell's org header/query must never move personal identity."""
     _store_identity(env, root)
-    seen = []
-    real_personal = identity_routes._personal_member
-    real_passkeys = identity_routes._passkey_rows
-
-    def personal(org):
-        seen.append(("personal", org))
-        return real_personal(org)
-
-    def passkeys(org):
-        seen.append(("passkeys", org))
-        return real_passkeys(org)
-
-    monkeypatch.setattr(identity_routes, "_personal_member", personal)
-    monkeypatch.setattr(identity_routes, "_passkey_rows", passkeys)
     response = env.get(
         "/api/identity/status?org=someone-else",
         headers={"X-Graph-Org": "someone-else"},
     )
     assert response.status_code == 200
     assert response.json()["personal_identity"]["display_name"] == "Alex"
-    assert seen == [("personal", None), ("passkeys", None)]
+
+
+def test_personal_scope_stays_consistent_when_graph_org_is_set(
+    tmp_path, monkeypatch, root,
+):
+    """Writes, gate reads, and status reads use one physical personal DB.
+
+    ``GRAPH_DB`` would make every org argument resolve to one fixture file,
+    masking the production split this test is intended to catch. Materialize
+    distinct personal and env-org databases instead.
+    """
+    from tools.dashboard import unlock_routes
+    from tools.graph.db import GraphDB
+
+    GraphDB.close_all_pooled()
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir()
+    personal_db = orgs_dir / "personal.db"
+    env_org_db = orgs_dir / f"{ORG}.db"
+    GraphDB(personal_db).close()
+    GraphDB(env_org_db).close()
+
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.setenv("GRAPH_ORG", ORG)
+    monkeypatch.setenv("DASHBOARD_SESSION_SECRET_FILE",
+                       str(tmp_path / "session.secret"))
+    monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
+    identity_routes._pending.clear()
+    unlock_routes.bust_enforce_cache()
+
+    with TestClient(Starlette(routes=identity_routes.ROUTES),
+                    base_url=f"https://{HOST}") as client:
+        created = client.post(
+            "/api/identity/personal",
+            json={"org": ORG, "display_name": "Personal Alex",
+                  "armored_private_key": _armor(root)},
+            headers={"X-Graph-Org": ORG},
+        )
+        assert created.status_code == 200, created.text
+        status = client.get(
+            "/api/identity/status?org=another-org",
+            headers={"X-Graph-Org": "another-org"},
+        ).json()
+
+    assert status["personal_identity"]["display_name"] == "Personal Alex"
+    assert status["enforced"] is True
+    assert len(settings_ops.read_set(PERSONAL_IDENTITY_SET_ID,
+                                     org=None).members) == 1
+    assert settings_ops.read_set(PERSONAL_IDENTITY_SET_ID,
+                                 org=ORG).members == []
+    GraphDB.close_all_pooled()
 
 
 def test_status_org_identity_does_not_satisfy_personal(env, root):
@@ -302,7 +340,7 @@ def test_personal_is_distinct_from_org_key(env, root):
                                      org=settings_ops.CALLER_ORG).members
     assert org_rows == []
     personal_rows = settings_ops.read_set(PERSONAL_IDENTITY_SET_ID,
-                                          org=settings_ops.CALLER_ORG).members
+                                          org=None).members
     assert len(personal_rows) == 1
 
 
@@ -319,13 +357,16 @@ def test_personal_seed_never_touches_disk(env, root, tmp_path):
     assert base64.b64encode(bytes.fromhex(seed_hex)) not in db_bytes
 
 
-def test_personal_cross_org_refused(env, root):
+def test_personal_org_context_is_ignored(env, root):
     r = env.post("/api/identity/personal",
                  json={"org": "someone-else", "display_name": "Mallory",
-                       "armored_private_key": _armor(root)})
-    assert r.status_code == 403
-    r2 = env.get("/api/identity/personal", params={"org": "someone-else"})
-    assert r2.status_code == 403
+                       "armored_private_key": _armor(root)},
+                 headers={"X-Graph-Org": "someone-else"})
+    assert r.status_code == 200
+    r2 = env.get("/api/identity/personal", params={"org": "another-org"},
+                 headers={"X-Graph-Org": "another-org"})
+    assert r2.status_code == 200
+    assert r2.json()["display_name"] == "Mallory"
 
 
 # ── passkey options: RP ID from the request host ──────────────────────

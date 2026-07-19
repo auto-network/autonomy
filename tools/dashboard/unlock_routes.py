@@ -10,7 +10,7 @@ access-floor, mockup design d49be06b 'Unlock' state). Three pieces:
   challenge + RP ID + origin are frozen server-side at options time,
   single-use, 10-minute TTL, the completion must arrive on the host
   that minted the options, and minting new options invalidates prior
-  pending ceremonies for the same caller+RP ID. Verification is
+  pending ceremonies for the same personal identity + RP ID. Verification is
   py_webauthn ``verify_authentication_response`` against the STORED
   credential public key + sign count; a sign-count regression (clone
   signal) is a rejection, and the stored count advances on success.
@@ -59,13 +59,12 @@ from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 from tools.graph import settings_ops
-from tools.dashboard.network_routes import _mock_mode, _scoped_org
+from tools.dashboard.network_routes import _mock_mode
 from tools.dashboard.identity_routes import (
     PENDING_MAX,
     PENDING_TTL_S,
     _b64url,
     _b64url_decode,
-    _caller_slug,
     _client_challenge,
     _now,
     _passkey_rows,
@@ -106,11 +105,11 @@ SESSION_COOKIE = "autonomy_dashboard_session"
 #: authority still re-proves itself per action with the password.
 SESSION_TTL_S = 7 * 24 * 3600
 
-#: Pending ASSERT ceremonies: challenge(b64url) → {rp_id, origin,
-#: caller, expires}. Same store discipline as the register side.
+#: Pending ASSERT ceremonies: challenge(b64url) → {rp_id, origin, expires}.
+#: Same store discipline as the register side.
 _assert_pending: dict[str, dict] = {}
 
-#: Pending PASSWORD challenges: challenge(hex) → {origin, caller, expires}.
+#: Pending PASSWORD challenges: challenge(hex) → {origin, expires}.
 _pw_pending: dict[str, dict] = {}
 
 
@@ -242,16 +241,10 @@ def human_auth_enrolled() -> bool:
     activation condition: False → the gate stays open (bootstrap is
     never locked out); True → the human path requires a session.
 
-    SECURITY: the enrollment lookup is pinned to the DASHBOARD's OWN org,
-    NOT the request's caller org. ``_resolve_org`` honours the per-request
-    ``X-Graph-Org`` contextvar (priority 2) — which is client-controlled —
-    so reading enrollment through it would let anyone bypass the lock by
-    naming an un-enrolled org (``X-Graph-Org: nothing-here`` → no identity
-    found → fail-open), and worse, poison the shared cache to False for
-    every other client during the TTL. We temporarily clear the caller-org
-    contextvar so resolution falls to the env/scopeless cascade — exactly
-    where the headerless onboarding fetches wrote the identity — making the
-    gate immune to the header and the cached posture single-valued.
+    SECURITY: enrollment is always read from explicit personal scope
+    (``org=None``). It never follows the request's ``X-Graph-Org`` context or
+    the process's ``GRAPH_ORG`` fallback, either of which could otherwise
+    split enrollment from shell status and poison the shared cache.
     """
     if _mock_mode():
         return False
@@ -259,14 +252,11 @@ def human_auth_enrolled() -> bool:
     if _enforce_cache["value"] is not None \
             and now - _enforce_cache["at"] < _ENFORCE_TTL_S:
         return _enforce_cache["value"]
-    from tools.graph import ops as _graph_ops
-    token = _graph_ops.set_caller_org(None)
     try:
-        org = settings_ops.CALLER_ORG
-        personal = _personal_member(org)
+        personal = _personal_member()
         has_identity = (personal is not None
                         and bool(personal.payload.get("armored_private_key")))
-        enrolled = has_identity or bool(_passkey_rows(org))
+        enrolled = has_identity or bool(_passkey_rows())
     except Exception:
         # No fresh answer. A dashboard that has ever resolved state keeps
         # its last known posture (a transient read error must not swing a
@@ -276,8 +266,6 @@ def human_auth_enrolled() -> bool:
         # read on the event loop (amortize the failure like a success).
         _enforce_cache["at"] = now
         return bool(_enforce_cache["value"])
-    finally:
-        _graph_ops.reset_caller_org(token)
     _enforce_cache["value"] = enrolled
     _enforce_cache["at"] = now
     return enrolled
@@ -305,15 +293,12 @@ async def post_unlock_passkey_options(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         return JSONResponse({"ok": False, "error": "body must be a JSON object"},
                             status_code=400)
-    org, refused = _scoped_org(body.get("org"))
-    if refused is not None:
-        return refused
     rp_id, origin, rp_err = _rp_from_request(request)
     if rp_err is not None:
         return rp_err
 
     try:
-        rows = [r for r in _passkey_rows(org)
+        rows = [r for r in _passkey_rows()
                 if r.payload.get("rp_id") == rp_id]
     except Exception as e:
         return JSONResponse({"ok": False,
@@ -357,14 +342,12 @@ async def post_unlock_passkey_options(request: Request) -> JSONResponse:
         user_verification=UserVerificationRequirement.REQUIRED,
     )
     _prune(_assert_pending)
-    caller = _caller_slug()
     for stale in [c for c, p in _assert_pending.items()
-                  if p["caller"] == caller and p["rp_id"] == rp_id]:
+                  if p["rp_id"] == rp_id]:
         _assert_pending.pop(stale, None)
     _assert_pending[_b64url(options.challenge)] = {
         "rp_id": rp_id,
         "origin": origin,
-        "caller": caller,
         "expires": _now() + PENDING_TTL_S,
     }
     return JSONResponse({
@@ -378,7 +361,7 @@ async def post_unlock_passkey_options(request: Request) -> JSONResponse:
 async def post_unlock_passkey(request: Request) -> JSONResponse:
     """Verify an authenticator's assertion → mint the dashboard session.
 
-    Body: ``{org?, credential: <AuthenticationResponseJSON>}``. The
+    Body: ``{credential: <AuthenticationResponseJSON>}``. The
     pending ceremony is consumed on lookup (single-use); verification is
     pinned to the tuple frozen at options time and to the STORED
     credential public key. The stored sign count advances on success —
@@ -398,10 +381,6 @@ async def post_unlock_passkey(request: Request) -> JSONResponse:
             "body must carry 'credential' — the JSON-serialized "
             "navigator.credentials.get() result"
         )}, status_code=400)
-    org, refused = _scoped_org(body.get("org"))
-    if refused is not None:
-        return refused
-
     credential = body["credential"]
     challenge_key = _client_challenge(credential)
     _prune(_assert_pending)
@@ -412,10 +391,6 @@ async def post_unlock_passkey(request: Request) -> JSONResponse:
             "fresh options and retry (challenges are single-use and expire "
             "after 10 minutes)"
         )}, status_code=400)
-    if pending["caller"] != _caller_slug():
-        return JSONResponse({"ok": False, "error": (
-            "this unlock ceremony was started by a different org context"
-        )}, status_code=403)
     rp_id, origin, rp_err = _rp_from_request(request)
     if rp_err is not None:
         return rp_err
@@ -432,7 +407,7 @@ async def post_unlock_passkey(request: Request) -> JSONResponse:
             "the credential response carries no id"
         )}, status_code=400)
     try:
-        row = next((r for r in _passkey_rows(org)
+        row = next((r for r in _passkey_rows()
                     if r.payload.get("credential_id") == raw_id), None)
     except Exception as e:
         return JSONResponse({"ok": False,
@@ -472,7 +447,7 @@ async def post_unlock_passkey(request: Request) -> JSONResponse:
         # identity set; the unlock route carries the capability.
         with settings_ops.identity_write_context():
             settings_ops.upsert_by_key(
-                PASSKEY_SET_ID, PASSKEY_REVISION, row.key, payload, org=org,
+                PASSKEY_SET_ID, PASSKEY_REVISION, row.key, payload, org=None,
             )
     except Exception as e:
         return JSONResponse({"ok": False, "error": (
@@ -506,14 +481,11 @@ async def post_unlock_password_options(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         return JSONResponse({"ok": False, "error": "body must be a JSON object"},
                             status_code=400)
-    org, refused = _scoped_org(body.get("org"))
-    if refused is not None:
-        return refused
     rp_id, origin, rp_err = _rp_from_request(request)
     if rp_err is not None:
         return rp_err
     try:
-        personal = _personal_member(org)
+        personal = _personal_member()
     except Exception as e:
         return JSONResponse({"ok": False,
                              "error": f"could not read the personal identity: {e}"},
@@ -525,14 +497,12 @@ async def post_unlock_password_options(request: Request) -> JSONResponse:
         )}, status_code=409)
 
     _prune(_pw_pending)
-    caller = _caller_slug()
     for stale in [c for c, p in _pw_pending.items()
-                  if p["caller"] == caller and p["origin"] == origin]:
+                  if p["origin"] == origin]:
         _pw_pending.pop(stale, None)
     challenge = secrets.token_hex(32)
     _pw_pending[challenge] = {
         "origin": origin,
-        "caller": caller,
         "expires": _now() + PENDING_TTL_S,
     }
     return JSONResponse({"ok": True, "challenge": challenge, "origin": origin,
@@ -542,7 +512,7 @@ async def post_unlock_password_options(request: Request) -> JSONResponse:
 async def post_unlock_password(request: Request) -> JSONResponse:
     """Verify the root-key signature over the challenge → mint the session.
 
-    Body: ``{org?, challenge, signature}`` where ``signature`` is hex
+    Body: ``{challenge, signature}`` where ``signature`` is hex
     Ed25519 over ``UNLOCK_SIGNING_DOMAIN + canonical_json({v, challenge,
     origin})``. Verified against the STORED ``root_pub`` — the client
     never says which key it used.
@@ -561,10 +531,6 @@ async def post_unlock_password(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": (
             "body must carry 'challenge' and 'signature' (hex)"
         )}, status_code=400)
-    org, refused = _scoped_org(body.get("org"))
-    if refused is not None:
-        return refused
-
     _prune(_pw_pending)
     pending = _pw_pending.pop(body["challenge"], None)
     if pending is None:
@@ -572,10 +538,6 @@ async def post_unlock_password(request: Request) -> JSONResponse:
             "no pending unlock challenge matches — request a fresh one and "
             "retry (challenges are single-use and expire after 10 minutes)"
         )}, status_code=400)
-    if pending["caller"] != _caller_slug():
-        return JSONResponse({"ok": False, "error": (
-            "this unlock challenge was minted for a different org context"
-        )}, status_code=403)
     rp_id, origin, rp_err = _rp_from_request(request)
     if rp_err is not None:
         return rp_err
@@ -587,7 +549,7 @@ async def post_unlock_password(request: Request) -> JSONResponse:
         )}, status_code=400)
 
     try:
-        personal = _personal_member(org)
+        personal = _personal_member()
     except Exception as e:
         return JSONResponse({"ok": False,
                              "error": f"could not read the personal identity: {e}"},
