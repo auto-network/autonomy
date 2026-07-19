@@ -62,7 +62,7 @@
   }
 
   const _LINK_DURATION_VALUES = new Set([
-    '3600', '86400', '604800', '2592000', '7776000',
+    '604800', '2592000', '31536000',
   ]);
 
   function _linkPayloadWithTtl(payload, ttl) {
