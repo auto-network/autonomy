@@ -144,7 +144,30 @@ def _rp_from_request(request: Request):
     return hostname, f"{scheme}://{host.lower()}", None
 
 
+#: The one label a personal identity is ever written under (post_personal
+#: defaults to it and refuses overwrite — one root per person).
+PERSONAL_CANONICAL_LABEL = "default"
+
+
 def _personal_member(org):
+    """The canonical personal identity row.
+
+    Defense-in-depth against a shadowing row: ``_first_member`` picks the
+    lexically-FIRST key, so a stray ``autonomy.identity.personal`` row
+    with a low-sorting key (e.g. ``000-…``) would shadow the operator's
+    ``default`` and be verified against on password unlock. The write
+    guard (settings_ops.PROTECTED_IDENTITY_SET_IDS) blocks such a row from
+    ever being injected via the generic API, but the selection is pinned
+    to the canonical ``default`` label anyway so the gate can never be
+    fooled by key ordering. Only when no ``default`` exists (legacy rows
+    predating this label) does it fall back to the first member.
+    """
+    members = [m for m in settings_ops.read_set(PERSONAL_IDENTITY_SET_ID,
+                                                org=org).members
+               if isinstance(m.payload, dict)]
+    for m in members:
+        if m.key == PERSONAL_CANONICAL_LABEL:
+            return m
     return _first_member(PERSONAL_IDENTITY_SET_ID, org)
 
 
@@ -315,10 +338,13 @@ async def post_personal(request: Request) -> JSONResponse:
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     try:
-        settings_ops.upsert_by_key(
-            PERSONAL_IDENTITY_SET_ID, PERSONAL_IDENTITY_REVISION, label,
-            payload, org=org,
-        )
+        # The identity sets are write-protected against the generic
+        # settings API; the enrollment routes carry the capability.
+        with settings_ops.identity_write_context():
+            settings_ops.upsert_by_key(
+                PERSONAL_IDENTITY_SET_ID, PERSONAL_IDENTITY_REVISION, label,
+                payload, org=org,
+            )
     except Exception as e:
         return JSONResponse({"ok": False,
                              "error": f"could not store the personal identity: {e}"},
@@ -578,9 +604,10 @@ async def post_register(request: Request) -> JSONResponse:
     if verification.aaguid:
         payload["aaguid"] = verification.aaguid
     try:
-        settings_ops.upsert_by_key(
-            PASSKEY_SET_ID, PASSKEY_REVISION, credential_id, payload, org=org,
-        )
+        with settings_ops.identity_write_context():
+            settings_ops.upsert_by_key(
+                PASSKEY_SET_ID, PASSKEY_REVISION, credential_id, payload, org=org,
+            )
     except Exception as e:
         return JSONResponse({"ok": False,
                              "error": f"could not store the credential: {e}"},

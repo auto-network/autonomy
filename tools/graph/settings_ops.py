@@ -52,6 +52,94 @@ PRECEDENCE = {"canonical": 0, "published": 1, "curated": 2, "raw": 3}
 PEER_VISIBLE_STATES = ("published", "canonical")
 
 
+# ── protected identity sets (dashboard-access credentials) ───
+#
+# These set IDs store the human dashboard-access credentials that the
+# unlock gate (tools/dashboard/unlock_routes.py) enforces on. Mutating
+# them from the GENERIC settings surface (POST /api/graph/setting and the
+# override/exclude/promote/deprecate/delete/migrate routes, all of which
+# land here) would defeat the gate outright — an attacker with only
+# network reach to the still-open /api surface could:
+#   * INSERT their own passkey row, then assert against it → session;
+#   * INSERT a personal-identity row with a low-sorting key to SHADOW the
+#     operator's, then password-unlock against their own root;
+#   * DELETE/exclude the operator's enrollment → the gate reads "nothing
+#     enrolled" → fail-OPEN.
+# So every mutation path below refuses these set IDs UNLESS the caller is
+# the trusted identity/unlock route, which brackets its write in
+# :func:`identity_write_context`. This is the C1 I1 lesson applied: the
+# guard lives at the one data layer every write funnels through, so no
+# individual route can forget it. Reads are unaffected (the gate must be
+# able to read enrollment); only mutations are gated.
+
+import contextvars as _contextvars
+
+PROTECTED_IDENTITY_SET_IDS = frozenset({
+    "autonomy.identity.personal",
+    "autonomy.identity.passkey",
+})
+
+
+class ProtectedSettingError(PermissionError):
+    """A generic-settings mutation targeted a protected identity set
+    without the internal identity-route capability. Surfaces as 403."""
+
+
+_identity_write_allowed: "_contextvars.ContextVar[bool]" = _contextvars.ContextVar(
+    "settings_identity_write_allowed", default=False,
+)
+
+
+class _IdentityWriteContext:
+    """Context manager AND decorator granting the identity-route
+    capability to mutate the protected identity sets. Only
+    tools/dashboard/identity_routes.py and unlock_routes.py use it."""
+
+    def __enter__(self):
+        self._token = _identity_write_allowed.set(True)
+        return self
+
+    def __exit__(self, *exc):
+        _identity_write_allowed.reset(self._token)
+        return False
+
+
+def identity_write_context() -> _IdentityWriteContext:
+    """Grant the current context permission to write the protected
+    identity sets (:data:`PROTECTED_IDENTITY_SET_IDS`). The trusted
+    identity/unlock routes bracket their ``upsert_by_key`` call in this;
+    the generic settings API never does, so it stays refused."""
+    return _IdentityWriteContext()
+
+
+def _guard_protected_set(set_id: str | None) -> None:
+    """Refuse a mutation of a protected identity set unless the caller
+    carries the identity-route capability."""
+    if set_id in PROTECTED_IDENTITY_SET_IDS and not _identity_write_allowed.get():
+        raise ProtectedSettingError(
+            f"{set_id!r} is a protected dashboard-identity set; it can only "
+            "be mutated through the identity/unlock routes, not the generic "
+            "settings API"
+        )
+
+
+def _guard_protected_setting_id(setting_id: str, org: str | None) -> None:
+    """Guard an id-addressed mutation: resolve the target row's set_id and
+    refuse if it is a protected identity set (unless capability-carrying).
+    A missing row is left to the function's own not-found handling."""
+    if _identity_write_allowed.get():
+        return
+    db = _open(org)
+    try:
+        row = db.conn.execute(
+            "SELECT set_id FROM settings WHERE id = ?", (setting_id,)
+        ).fetchone()
+    finally:
+        db.close()
+    if row is not None:
+        _guard_protected_set(row["set_id"])
+
+
 # ── org= argument contract (auto-cfb8u) ──────────────────────
 
 
@@ -829,6 +917,7 @@ def add_setting(
     failure, ``ValueError`` on bad ``state``.
     """
     org = _resolve_org_arg(org)
+    _guard_protected_set(set_id)
     if state not in VALID_STATES:
         raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
     schemas.validate_payload(set_id, schema_revision, payload)
@@ -903,6 +992,7 @@ def upsert_by_key(
     ``org`` is **required** — see :func:`add_setting` for the contract.
     """
     org = _resolve_org_arg(org)
+    _guard_protected_set(set_id)
     if state not in VALID_STATES:
         raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
     schemas.validate_payload(set_id, schema_revision, payload)
@@ -965,6 +1055,7 @@ def override_setting(
     ``org`` is **required** — see :func:`add_setting` for the contract.
     """
     org = _resolve_org_arg(org)
+    _guard_protected_setting_id(target_id, org)
     if state not in VALID_STATES:
         raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
     target = _fetch_setting_any_org(target_id, org)
@@ -1019,6 +1110,7 @@ def exclude_setting(
     ``org`` is **required** — see :func:`add_setting` for the contract.
     """
     org = _resolve_org_arg(org)
+    _guard_protected_setting_id(target_id, org)
     if state not in VALID_STATES:
         raise ValueError(f"invalid state {state!r}; valid: {VALID_STATES}")
     target = _fetch_setting_any_org(target_id, org)
@@ -1094,6 +1186,7 @@ def promote_setting(
     ``org`` is **required** — see :func:`add_setting` for the contract.
     """
     org = _resolve_org_arg(org)
+    _guard_protected_setting_id(setting_id, org)
     if to_state not in VALID_STATES:
         raise ValueError(f"invalid state {to_state!r}; valid: {VALID_STATES}")
     now = _now_iso()
@@ -1149,6 +1242,7 @@ def deprecate_setting(
     ``org`` is **required** — see :func:`add_setting` for the contract.
     """
     org = _resolve_org_arg(org)
+    _guard_protected_setting_id(setting_id, org)
     now = _now_iso()
     db = _open(org)
     snapshot = None
@@ -1209,6 +1303,7 @@ def remove_settings_by_key_prefix(
     nothing in the local DB and returns 0 — there is no silent writethrough.
     """
     org = _resolve_org_arg(org)
+    _guard_protected_set(set_id)
     db = _open(org)
     deleted_keys: list[tuple[str, int, str, str, bool]] = []
     try:
@@ -1255,6 +1350,7 @@ def remove_setting(
     ``org`` is **required** — see :func:`add_setting` for the contract.
     """
     org = _resolve_org_arg(org)
+    _guard_protected_setting_id(setting_id, org)
     db = _open(org)
     snapshot = None
     try:
@@ -1943,6 +2039,7 @@ def migrate_setting_revisions(
     ``org`` is **required** — see :func:`add_setting` for the contract.
     """
     org = _resolve_org_arg(org)
+    _guard_protected_set(set_id)
     report = MigrationReport(
         set_id=set_id, to_revision=int(to_revision), dry_run=dry_run,
     )

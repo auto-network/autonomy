@@ -487,6 +487,164 @@ def test_gate_enforces_despite_bogus_org_header(env, root):
     assert env.get("/beads", follow_redirects=False).status_code == 302
 
 
+# ── generic-settings write guard (Codex bypass regressions) ───────────
+#
+# The unlock gate leaves the /api surface open for agents, but the passkey
+# and personal-identity Settings sets ARE dashboard credentials — writing
+# them through the generic settings API (add/upsert/override/exclude/
+# promote/deprecate/delete/migrate) would defeat the gate. settings_ops
+# refuses those set IDs unless the caller carries the identity-route
+# capability. These tests drive the ops layer directly (the same functions
+# POST /api/graph/setting and friends call).
+
+from tools.graph import settings_ops as _sops
+from tools.graph.schemas.personal_identity import (
+    PASSKEY_SET_ID as _PASSKEY_SET,
+    PERSONAL_IDENTITY_SET_ID as _PERSONAL_SET,
+)
+
+
+def _valid_passkey_payload(cred_id="attacker-injected-cred1"):
+    return {
+        "credential_id": cred_id,
+        "public_key": _b64url(b"\x01" * 64),
+        "sign_count": 0,
+        "rp_id": "localhost",
+        "origin": f"https://{HOST}",
+        "label": "attacker device",
+        "transports": ["internal"],
+        "created_at": "2026-07-19T00:00:00Z",
+    }
+
+
+def test_passkey_injection_via_generic_settings_is_refused(env, root):
+    """Codex bypass #1: a no-session caller POSTs a valid passkey row via
+    the generic settings create path, then unlocks with their own key.
+    The write must be refused at the data layer."""
+    _store_identity(env, root)
+    with pytest.raises(_sops.ProtectedSettingError):
+        _sops.add_setting(_PASSKEY_SET, 1, "attacker-injected-cred1",
+                          _valid_passkey_payload(), org=ORG)
+    # upsert path too (what an attacker might reach for next).
+    with pytest.raises(_sops.ProtectedSettingError):
+        _sops.upsert_by_key(_PASSKEY_SET, 1, "attacker-injected-cred1",
+                            _valid_passkey_payload(), org=ORG)
+    assert _sops.read_set(_PASSKEY_SET, org=ORG).members == []
+
+
+def test_identity_shadow_via_generic_settings_is_refused(env, root):
+    """Codex bypass #2: a no-session caller writes a personal-identity row
+    with a low-sorting key to SHADOW the operator's 'default', then
+    password-unlocks against their own root. The write must be refused,
+    and even if one existed the canonical-label pin must ignore it."""
+    _store_identity(env, root)
+    attacker = KeyPair.generate()
+    shadow_payload = {
+        "armored_private_key": _armor(attacker),
+        "root_pub": attacker.public_hex,
+        "display_name": "attacker",
+        "created_at": "2026-07-19T00:00:00Z",
+    }
+    with pytest.raises(_sops.ProtectedSettingError):
+        _sops.add_setting(_PERSONAL_SET, 1, "000-attacker-shadows-default",
+                          shadow_payload, org=ORG)
+    # The operator's identity is still the one that verifies.
+    env.cookies.clear()
+    assert _unlock_with_password(env, root).status_code == 200
+    env.cookies.clear()
+    assert _unlock_with_password(env, attacker).status_code == 403
+
+
+def test_canonical_label_pin_defeats_a_shadow_row(env, root, monkeypatch):
+    """Defense-in-depth: even if a shadow row is present (written WITH the
+    capability, e.g. a bug elsewhere), _personal_member pins to 'default'
+    so the operator's root — not the low-key attacker row — verifies."""
+    _store_identity(env, root)                     # writes key 'default'
+    attacker = KeyPair.generate()
+    with _sops.identity_write_context():           # simulate a row slipping in
+        _sops.add_setting(_PERSONAL_SET, 1, "000-shadow", {
+            "armored_private_key": _armor(attacker),
+            "root_pub": attacker.public_hex,
+            "display_name": "attacker",
+            "created_at": "2026-07-19T00:00:00Z",
+        }, org=ORG)
+    member = identity_routes._personal_member(settings_ops.CALLER_ORG)
+    assert member.key == "default"
+    assert member.payload["root_pub"] == root.public_hex
+    env.cookies.clear()
+    assert _unlock_with_password(env, attacker).status_code == 403
+    env.cookies.clear()
+    assert _unlock_with_password(env, root).status_code == 200
+
+
+def test_every_mutation_path_refuses_protected_identity_sets(env, root):
+    """add / upsert / override / exclude / promote / deprecate / delete /
+    remove-by-prefix / migrate must ALL refuse the protected sets without
+    the capability. Create the target rows WITH the capability first, so
+    the id-based paths have something to aim at."""
+    _store_identity(env, root)
+    with _sops.identity_write_context():
+        pk_id = _sops.add_setting(_PASSKEY_SET, 1, "victim-cred",
+                                 _valid_passkey_payload("victim-cred"), org=ORG)
+        personal = identity_routes._personal_member(settings_ops.CALLER_ORG)
+    # Resolve the personal row's setting id for the id-based paths.
+    personal_rows = _sops.read_set(_PERSONAL_SET, org=ORG).members
+    personal_id = next(m.id for m in personal_rows if m.key == "default")
+
+    # set_id-addressed paths
+    for call in (
+        lambda: _sops.add_setting(_PASSKEY_SET, 1, "x",
+                                  _valid_passkey_payload("x"), org=ORG),
+        lambda: _sops.upsert_by_key(_PERSONAL_SET, 1, "default", {}, org=ORG),
+        lambda: _sops.remove_settings_by_key_prefix(_PASSKEY_SET, prefix="",
+                                                    org=ORG),
+        lambda: _sops.migrate_setting_revisions(_PASSKEY_SET, 1, org=ORG),
+    ):
+        with pytest.raises(_sops.ProtectedSettingError):
+            call()
+
+    # id-addressed paths (resolve the target's set_id, then refuse)
+    for call in (
+        lambda: _sops.override_setting(pk_id, {"sign_count": 999}, org=ORG),
+        lambda: _sops.exclude_setting(personal_id, org=ORG),
+        lambda: _sops.promote_setting(pk_id, "published", org=ORG),
+        lambda: _sops.deprecate_setting(personal_id, org=ORG),
+        lambda: _sops.remove_setting(personal_id, org=ORG),
+    ):
+        with pytest.raises(_sops.ProtectedSettingError):
+            call()
+
+    # Nothing was mutated: the victim rows survive, the operator still unlocks.
+    assert len(_sops.read_set(_PASSKEY_SET, org=ORG).members) == 1
+    env.cookies.clear()
+    assert _unlock_with_password(env, root).status_code == 200
+
+
+def test_delete_of_enrollment_cannot_disable_the_gate(env, root):
+    """The nastiest variant: DELETE the operator's identity to make the
+    gate read 'nothing enrolled' → fail-open. Must be refused."""
+    _store_identity(env, root)
+    unlock_routes.bust_enforce_cache()
+    assert unlock_routes.human_auth_enrolled() is True
+    personal_id = next(m.id for m in _sops.read_set(_PERSONAL_SET, org=ORG).members
+                       if m.key == "default")
+    with pytest.raises(_sops.ProtectedSettingError):
+        _sops.remove_setting(personal_id, org=ORG)
+    unlock_routes.bust_enforce_cache()
+    assert unlock_routes.human_auth_enrolled() is True     # gate still on
+
+
+def test_non_identity_sets_are_unaffected_by_the_guard(env):
+    """The guard is scoped to the identity sets — ordinary settings writes
+    through the generic path keep working."""
+    from tools.graph import schemas
+    # A throwaway schema-less write would fail validation; use an existing
+    # benign set if present, else assert the guard only trips on our sets.
+    assert "some.other.set" not in _sops.PROTECTED_IDENTITY_SET_IDS
+    # Directly: the guard helper is a no-op for non-protected ids.
+    _sops._guard_protected_set("some.other.set")           # must not raise
+
+
 def test_mock_mode_never_enforces(env, root, monkeypatch):
     _store_identity(env, root)
     env.cookies.clear()

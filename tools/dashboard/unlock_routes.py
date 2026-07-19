@@ -452,9 +452,12 @@ async def post_unlock_passkey(request: Request) -> JSONResponse:
     payload = dict(row.payload)
     payload["sign_count"] = verification.new_sign_count
     try:
-        settings_ops.upsert_by_key(
-            PASSKEY_SET_ID, PASSKEY_REVISION, row.key, payload, org=org,
-        )
+        # Advancing the stored sign count is a write to a protected
+        # identity set; the unlock route carries the capability.
+        with settings_ops.identity_write_context():
+            settings_ops.upsert_by_key(
+                PASSKEY_SET_ID, PASSKEY_REVISION, row.key, payload, org=org,
+            )
     except Exception as e:
         return JSONResponse({"ok": False, "error": (
             f"could not advance the credential sign count: {e}"
