@@ -613,15 +613,17 @@
             </div>
             <div class="grid grid-cols-[6.5rem_minmax(0,1fr)] items-center gap-3 border-b border-slate-800 py-3 text-sm">
               <label for="approval-duration" class="text-slate-500">Duration</label>
-              <select id="approval-duration" x-model="approvalRequest.duration"
+              <select id="approval-duration"
+                      @change="approvalRequest.duration = $event.target.value"
                       data-testid="approval-duration"
                       class="h-9 min-w-0 rounded border border-slate-600 bg-gray-950 px-2 text-sm text-slate-200 outline-none focus:border-indigo-400">
                 <option value="custom" x-show="approvalRequest.customDurationSeconds !== null"
-                        x-text="approvalRequest.customDurationLabel"></option>
-                <option value="604800">1 week</option>
-                <option value="2592000">1 month</option>
-                <option value="31536000">1 year</option>
-                <option value="none">No expiration</option>
+                        x-text="approvalRequest.customDurationLabel"
+                        :selected="approvalRequest.duration === $el.value"></option>
+                <option value="604800" :selected="approvalRequest.duration === $el.value">1 week</option>
+                <option value="2592000" :selected="approvalRequest.duration === $el.value">1 month</option>
+                <option value="31536000" :selected="approvalRequest.duration === $el.value">1 year</option>
+                <option value="none" :selected="approvalRequest.duration === $el.value">No expiration</option>
               </select>
             </div>
             <div class="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-3 py-3 text-sm">
