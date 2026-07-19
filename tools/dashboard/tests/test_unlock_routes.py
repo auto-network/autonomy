@@ -449,6 +449,25 @@ def test_status_surfaces_gate_disabled(env, root, monkeypatch):
     assert env.get("/api/identity/status").json()["gate_disabled"] is False
 
 
+def test_session_surfaces_gate_disabled_and_zeroes_enforced(env, root,
+                                                            monkeypatch):
+    """The chrome's forced-open marker: while the switch is on,
+    'enforced' reports what the gate actually does (nothing), not what
+    enrollment alone would imply."""
+    _store_identity(env, root)
+    r = env.get("/api/identity/session").json()
+    assert r["enforced"] is True
+    assert r["gate_disabled"] is False
+    monkeypatch.setenv("DASHBOARD_AUTH", "off")
+    r = env.get("/api/identity/session").json()
+    assert r["enforced"] is False
+    assert r["gate_disabled"] is True
+    monkeypatch.setenv("DASHBOARD_AUTH", "definitely-not-off")
+    r = env.get("/api/identity/session").json()
+    assert r["enforced"] is True
+    assert r["gate_disabled"] is False
+
+
 def test_bootstrap_session_minted_on_identity_creation(env, root):
     r = _store_identity(env, root)
     assert unlock_routes.SESSION_COOKIE in r.cookies
@@ -1007,7 +1026,7 @@ def test_password_signature_is_domain_separated(env, root):
 def test_session_endpoint_reflects_state(env, root):
     r = env.get("/api/identity/session").json()
     assert r == {"enforced": False, "unlocked": False, "method": None,
-                 "expires_at": None}
+                 "expires_at": None, "gate_disabled": False}
     _store_identity(env, root)
     r = env.get("/api/identity/session").json()
     assert r["enforced"] is True
