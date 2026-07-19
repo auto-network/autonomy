@@ -3967,6 +3967,17 @@ def cmd_ui_design(args):
         resp = urllib.request.urlopen(req, context=ctx)
         return json.loads(resp.read())
 
+    def _activate_in_present(did):
+        """Register the design in Present's deck library so it appears in
+        /present. This is a SEPARATE step from creating the Design Studio
+        design, and is the #1 recurring miss: a design that is only created
+        (never activated) lives in the Studio and never reaches the Present
+        app. GET loads/creates the deck entry; POST /shown surfaces it."""
+        for endpoint, method in ((f"/api/presentations/deck/{did}", "GET"),
+                                 (f"/api/presentations/deck/{did}/shown", "POST")):
+            req = urllib.request.Request(f"{api_base}{endpoint}", method=method)
+            urllib.request.urlopen(req, context=ctx, timeout=10).read()
+
     def _scan_variants():
         variants = {}
         for f in sorted(dir_path.glob("*.html")):
@@ -4015,6 +4026,29 @@ def cmd_ui_design(args):
     print(f"  Variants: {', '.join(variants.keys())}")
     print(f"  URL: {api_base}/design/{exp_id}")
     print(f"  Screenshot: {dir_path}/screenshot.png (auto-updated from browser)")
+
+    # Design Studio vs Present are TWO surfaces: creating a design lands it in the
+    # Studio only. A presentation/board must be registered in the Present deck
+    # library (--present) to show in /present — forgetting this is the #1 recurring
+    # miss. Default is Studio-only (keeps the Present library curated for real
+    # presentations, not design-review mockups); --present activates, and the
+    # reminder below makes the activation path impossible to overlook.
+    if args.design:
+        pass  # appending to an existing design — deck entry already exists
+    elif args.present:
+        try:
+            _activate_in_present(design_id)
+            print(f"  ✓ Activated in Present — live now at {api_base}/present")
+        except Exception as e:
+            print(f"  ⚠ --present failed ({e}); activate manually:", file=sys.stderr)
+            print(f"      curl -sk {api_base}/api/presentations/deck/{design_id} >/dev/null", file=sys.stderr)
+            print(f"      curl -sk -X POST {api_base}/api/presentations/deck/{design_id}/shown >/dev/null", file=sys.stderr)
+    else:
+        print(f"  ↪ Design Studio only. For a PRESENTATION/board that should appear in")
+        print(f"    the Present app (/present), re-run with --present — or activate now:")
+        print(f"      curl -sk {api_base}/api/presentations/deck/{design_id} >/dev/null")
+        print(f"      curl -sk -X POST {api_base}/api/presentations/deck/{design_id}/shown >/dev/null")
+
     print(f"\n  Watching {dir_path}/ for changes... (Ctrl+C to stop)\n")
 
     latest_exp_id = exp_id
@@ -5412,6 +5446,10 @@ def main():
     p.add_argument("--description", help="Subtitle/summary stored on each design revision")
     p.add_argument("--fixture", help="Path to fixture JSON file")
     p.add_argument("--api", default="https://localhost:8080", help="Dashboard API base URL")
+    p.add_argument("--present", action="store_true",
+                   help="Also activate the design in the Present app (register it in the /present "
+                        "deck library). Use for presentations/boards meant to be shown; omit for "
+                        "design-review mockups, which stay in the Design Studio.")
     p.set_defaults(func=cmd_ui_design)
 
     # Legacy alias for backwards compat
@@ -5422,6 +5460,8 @@ def main():
     p_alias.add_argument("--description", help="Subtitle/summary stored on each design revision")
     p_alias.add_argument("--fixture", help="Path to fixture JSON file")
     p_alias.add_argument("--api", default="https://localhost:8080", help="Dashboard API base URL")
+    p_alias.add_argument("--present", action="store_true",
+                         help="Also activate the design in the Present app (deck library at /present).")
     p_alias.set_defaults(func=cmd_ui_design)
 
     # dispatch
