@@ -638,13 +638,19 @@ async def get_session(request: Request) -> JSONResponse:
     """What the chrome needs: is the gate enforced, are we unlocked."""
     if _mock_mode():
         return JSONResponse({"enforced": False, "unlocked": False,
-                             "method": None})
+                             "method": None,
+                             "gate_disabled": gate_disabled()})
     payload = session_from_request(request)
+    disabled = gate_disabled()
     return JSONResponse({
-        "enforced": human_auth_enrolled(),
+        # 'enforced' is what the gate actually DOES right now — the
+        # kill-switch zeroes it even while enrollment exists, so the
+        # chrome renders the forced-open marker instead of 'Locked'.
+        "enforced": human_auth_enrolled() and not disabled,
         "unlocked": payload is not None,
         "method": (payload or {}).get("method"),
         "expires_at": (payload or {}).get("exp"),
+        "gate_disabled": disabled,
     })
 
 
