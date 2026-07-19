@@ -20,6 +20,10 @@ describe('identity indicator state matrix', () => {
     assert.equal(indicator.deriveIdentityState(null), 'loading');
   });
 
+  it('renders an explicit retry state when initial status loading fails', () => {
+    assert.equal(indicator.deriveIdentityState({ error: 'offline' }), 'error');
+  });
+
   it('routes a missing personal identity to Get started', () => {
     assert.equal(indicator.deriveIdentityState(status({
       personal_identity: null, passkeys: [], signed_in: false, enforced: false,
@@ -47,6 +51,13 @@ describe('identity indicator state matrix', () => {
     const value = status({ passkeys: [], onboarding_needed: true, method: 'password' });
     assert.equal(indicator.deriveIdentityState(value), 'setup');
     assert.equal(indicator.statusLabel(value), 'Unlocked \u00b7 Password');
+  });
+
+  it('describes a bootstrap session as unfinished setup, not a login mode', () => {
+    const value = status({ passkeys: [], method: 'bootstrap' });
+    assert.equal(indicator.methodLabel(value), 'Setup unfinished');
+    assert.equal(indicator.statusLabel(value),
+      'Unlocked \u00b7 Setup unfinished');
   });
 
   it('marks any unlocked identity with an enrolled passkey as ready', () => {

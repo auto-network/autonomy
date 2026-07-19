@@ -46,7 +46,7 @@
     if (!value || value.signed_in !== true) return '';
     if (value.method === 'passkey') return 'Passkey';
     if (value.method === 'password') return 'Password';
-    if (value.method === 'bootstrap') return 'Setup session';
+    if (value.method === 'bootstrap') return 'Setup unfinished';
     return 'This session';
   }
 
@@ -170,7 +170,7 @@
     button.setAttribute('aria-label', identityName(status) + '. ' + statusLabel(status));
     button.setAttribute('aria-haspopup', 'dialog');
     button.setAttribute('aria-expanded', panelOpen ? 'true' : 'false');
-    button.title = state === 'setup' ? 'Finish identity setup' : identityName(status);
+    button.title = state === 'setup' ? 'Add a passkey' : identityName(status);
     button.addEventListener('click', togglePanel);
     return button;
   }
@@ -294,7 +294,6 @@
       if (!response.ok) throw new Error(body.error || 'Identity status is unavailable');
       status = body;
     } catch (error) {
-      status = null;
       loadError = (error && error.message) || String(error);
     }
     render();

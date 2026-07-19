@@ -33,7 +33,7 @@ and both write paths bust the gate's enrollment cache.
   credential id — one row per enrolled device/install). Ceremony
   binding (Codex validation): the completion request must arrive on the
   SAME host that minted the options, and minting new options
-  invalidates prior pending ceremonies for the same caller+RP ID.
+  invalidates prior pending ceremonies for the same personal identity + RP ID.
   Tested rejections: unknown/expired/replayed/superseded challenge,
   cross-host completion, origin or RP ID mismatch, duplicate
   credential, malformed attestation.
@@ -55,7 +55,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from tools.graph import settings_ops
-from tools.dashboard.network_routes import _first_member, _mock_mode, _scoped_org
+from tools.dashboard.network_routes import _first_member, _mock_mode
 # Importing registers the autonomy.identity.* Setting schemas.
 from tools.graph.schemas.personal_identity import (  # noqa: F401
     PASSKEY_REVISION,
@@ -74,7 +74,7 @@ PENDING_TTL_S = 600
 #: Backstop against an abandoned-ceremony flood; oldest rows fall off.
 PENDING_MAX = 64
 
-#: challenge(b64url, unpadded) → {rp_id, origin, caller, expires}
+#: challenge(b64url, unpadded) → {rp_id, origin, expires}
 _pending: dict[str, dict] = {}
 
 
@@ -88,14 +88,6 @@ def _prune_pending() -> None:
         _pending.pop(challenge, None)
     while len(_pending) > PENDING_MAX:
         _pending.pop(next(iter(_pending)))
-
-
-def _caller_slug() -> str | None:
-    """The caller's own org, for pinning a ceremony to who started it."""
-    try:
-        return settings_ops._resolve_settings_caller(None)
-    except Exception:
-        return None
 
 
 def _is_ip_literal(hostname: str) -> bool:
@@ -149,7 +141,7 @@ def _rp_from_request(request: Request):
 PERSONAL_CANONICAL_LABEL = "default"
 
 
-def _personal_member(org):
+def _personal_member():
     """The canonical personal identity row.
 
     Defense-in-depth against a shadowing row: ``_first_member`` picks the
@@ -163,17 +155,17 @@ def _personal_member(org):
     predating this label) does it fall back to the first member.
     """
     members = [m for m in settings_ops.read_set(PERSONAL_IDENTITY_SET_ID,
-                                                org=org).members
+                                                org=None).members
                if isinstance(m.payload, dict)]
     for m in members:
         if m.key == PERSONAL_CANONICAL_LABEL:
             return m
-    return _first_member(PERSONAL_IDENTITY_SET_ID, org)
+    return _first_member(PERSONAL_IDENTITY_SET_ID, None)
 
 
-def _passkey_rows(org):
+def _passkey_rows():
     members = sorted(
-        settings_ops.read_set(PASSKEY_SET_ID, org=org).members,
+        settings_ops.read_set(PASSKEY_SET_ID, org=None).members,
         key=lambda m: m.key,
     )
     return [m for m in members if isinstance(m.payload, dict)]
@@ -216,8 +208,8 @@ async def get_status(request: Request) -> JSONResponse:
                              "gate_disabled": disabled})
     rp_id, _origin, _rp_err = _rp_from_request(request)
     try:
-        personal = _personal_member(None)
-        passkeys = _passkey_rows(None)
+        personal = _personal_member()
+        passkeys = _passkey_rows()
     except Exception as e:
         return JSONResponse({"error": f"could not read identity settings: {e}"},
                             status_code=500)
@@ -265,11 +257,8 @@ async def get_personal(request: Request) -> JSONResponse:
     if _mock_mode():
         return JSONResponse({"error": "no personal identity configured"},
                             status_code=404)
-    org, refused = _scoped_org(request.query_params.get("org"))
-    if refused is not None:
-        return refused
     try:
-        member = _personal_member(org)
+        member = _personal_member()
     except Exception as e:
         return JSONResponse({"error": f"could not read the personal identity: {e}"},
                             status_code=500)
@@ -289,7 +278,7 @@ async def get_personal(request: Request) -> JSONResponse:
 async def post_personal(request: Request) -> JSONResponse:
     """Store the personal root key's password-encrypted armor (step 1, 'You').
 
-    Body: ``{org?, label?, display_name, armored_private_key, root_pub?}``.
+    Body: ``{label?, display_name, armored_private_key, root_pub?}``.
     The canonical-armor check (I1) lives in the PersonalIdentityV1 schema
     — shared by every write path — but is ALSO applied here so the error
     surfaces as a 400 with a clear message rather than a schema string.
@@ -309,10 +298,6 @@ async def post_personal(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": (
             "body must carry 'armored_private_key' as the armor text"
         )}, status_code=400)
-    org, refused = _scoped_org(body.get("org"))
-    if refused is not None:
-        return refused
-
     display_name = body.get("display_name")
     if not isinstance(display_name, str) or not display_name.strip() \
             or len(display_name) > 120:
@@ -342,7 +327,7 @@ async def post_personal(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "label must be a short string"},
                             status_code=400)
     try:
-        existing = _personal_member(org)
+        existing = _personal_member()
     except Exception as e:
         return JSONResponse({"ok": False,
                              "error": f"could not read the personal identity: {e}"},
@@ -364,7 +349,7 @@ async def post_personal(request: Request) -> JSONResponse:
         with settings_ops.identity_write_context():
             settings_ops.upsert_by_key(
                 PERSONAL_IDENTITY_SET_ID, PERSONAL_IDENTITY_REVISION, label,
-                payload, org=org,
+                payload, org=None,
             )
     except Exception as e:
         return JSONResponse({"ok": False,
@@ -418,15 +403,12 @@ async def post_register_options(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         return JSONResponse({"ok": False, "error": "body must be a JSON object"},
                             status_code=400)
-    org, refused = _scoped_org(body.get("org"))
-    if refused is not None:
-        return refused
     rp_id, origin, rp_err = _rp_from_request(request)
     if rp_err is not None:
         return rp_err
 
     try:
-        personal = _personal_member(org)
+        personal = _personal_member()
     except Exception as e:
         return JSONResponse({"ok": False,
                              "error": f"could not read the personal identity: {e}"},
@@ -446,7 +428,7 @@ async def post_register_options(request: Request) -> JSONResponse:
     )
 
     try:
-        existing = _passkey_rows(org)
+        existing = _passkey_rows()
     except Exception as e:
         return JSONResponse({"ok": False,
                              "error": f"could not read enrolled passkeys: {e}"},
@@ -477,19 +459,16 @@ async def post_register_options(request: Request) -> JSONResponse:
     )
 
     _prune_pending()
-    caller = _caller_slug()
     # A new ceremony INVALIDATES prior pending ones for the same
-    # caller+RP ID (Codex finding 2): only the latest minted options can
+    # personal identity + RP ID (Codex finding 2): only the latest minted options can
     # complete. Ceremonies for other hosts are untouched — enrolling on
     # localhost and on the .ts.net name are separate, parallel flows.
-    for stale in [c for c, p in _pending.items()
-                  if p["caller"] == caller and p["rp_id"] == rp_id]:
+    for stale in [c for c, p in _pending.items() if p["rp_id"] == rp_id]:
         _pending.pop(stale, None)
     challenge_key = _b64url(options.challenge)
     _pending[challenge_key] = {
         "rp_id": rp_id,
         "origin": origin,
-        "caller": caller,
         "expires": _now() + PENDING_TTL_S,
     }
     return JSONResponse({
@@ -516,7 +495,7 @@ def _client_challenge(credential: dict) -> str | None:
 async def post_register(request: Request) -> JSONResponse:
     """Verify + store an authenticator's registration response.
 
-    Body: ``{org?, label?, credential: <RegistrationResponseJSON>}``.
+    Body: ``{label?, credential: <RegistrationResponseJSON>}``.
     The pending ceremony is looked up by the challenge inside the
     response's clientDataJSON and CONSUMED (single use — a replay of the
     same response is a tested rejection). Verification is pinned to the
@@ -536,9 +515,6 @@ async def post_register(request: Request) -> JSONResponse:
             "body must carry 'credential' — the JSON-serialized "
             "navigator.credentials.create() result"
         )}, status_code=400)
-    org, refused = _scoped_org(body.get("org"))
-    if refused is not None:
-        return refused
     label = body.get("label") or "This device"
     if not isinstance(label, str) or not label.strip() or len(label) > 120:
         return JSONResponse({"ok": False, "error": "label must be a short string"},
@@ -555,10 +531,6 @@ async def post_register(request: Request) -> JSONResponse:
             "fresh registration options and retry (challenges are single-"
             "use and expire after 10 minutes)"
         )}, status_code=400)
-    if pending["caller"] != _caller_slug():
-        return JSONResponse({"ok": False, "error": (
-            "this passkey ceremony was started by a different org context"
-        )}, status_code=403)
     # The COMPLETION request must arrive on the same host the ceremony
     # was minted for (Codex finding 1): without this, a credential could
     # be stored bound to a host the user isn't actually on — passkeys
@@ -599,7 +571,7 @@ async def post_register(request: Request) -> JSONResponse:
 
     credential_id = _b64url(verification.credential_id)
     try:
-        existing = {row.key for row in _passkey_rows(org)}
+        existing = {row.key for row in _passkey_rows()}
     except Exception as e:
         return JSONResponse({"ok": False,
                              "error": f"could not read enrolled passkeys: {e}"},
@@ -627,7 +599,7 @@ async def post_register(request: Request) -> JSONResponse:
     try:
         with settings_ops.identity_write_context():
             settings_ops.upsert_by_key(
-                PASSKEY_SET_ID, PASSKEY_REVISION, credential_id, payload, org=org,
+                PASSKEY_SET_ID, PASSKEY_REVISION, credential_id, payload, org=None,
             )
     except Exception as e:
         return JSONResponse({"ok": False,
