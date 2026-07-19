@@ -61,27 +61,96 @@
     return ttl + 's';
   }
 
-  // Session-key signing seam (C2 dependency). The sign-on ceremony installs
-  // window.AutonomyNetworkSigner = { available(): bool,
-  // signRegistryRequest(method, path, payload) -> envelope } backed by the
-  // operator's non-extractable session key. Until it lands, approving a
-  // share-link surfaces this error instead of publishing.
-  async function _signLinkDecision(req) {
+  const _LINK_DURATION_OPTIONS = [
+    { value: '3600', label: '1 hour' },
+    { value: '86400', label: '1 day' },
+    { value: '604800', label: '7 days' },
+    { value: '2592000', label: '30 days' },
+    { value: '7776000', label: '90 days' },
+    { value: 'none', label: 'No expiration' },
+  ];
+
+  function _durationOptions(current) {
+    const value = current == null ? 'none' : String(current);
+    if (_LINK_DURATION_OPTIONS.some((option) => option.value === value)) {
+      return _LINK_DURATION_OPTIONS.slice();
+    }
+    return [{ value, label: _linkTtlText(current) }, ..._LINK_DURATION_OPTIONS];
+  }
+
+  function _linkPayloadWithTtl(payload, duration) {
+    const next = JSON.parse(JSON.stringify(payload || {}));
+    const meta = Object.assign({}, next.meta || {});
+    if (duration === 'none') delete meta.ttl;
+    else meta.ttl = Number(duration);
+    if (Object.keys(meta).length) next.meta = meta;
+    else delete next.meta;
+    return next;
+  }
+
+  function _matchingApprovalAuthority(req) {
+    const session = window.AutonomyNetworkSession;
+    if (!session || typeof session.state !== 'function') return false;
+    const state = session.state();
+    const expectedOrg = req.registryRequest && req.registryRequest.payload &&
+      req.registryRequest.payload.org;
+    return !!(state && state.signedIn && state.org === expectedOrg);
+  }
+
+  // Gate 2 unlocks org authority only for the concrete action being reviewed.
+  // The passphrase and root plaintext stay inside network-signon.js; this
+  // function receives only a signed envelope back.
+  async function _signLinkDecision(self, req) {
     const rr = req.registryRequest;
     if (!rr) {
-      throw new Error('this request carried no registry request to sign — check the org binding');
+      throw new Error('This request is missing its auto.network details. Close it and try again.');
     }
+    const session = window.AutonomyNetworkSession;
     const signer = window.AutonomyNetworkSigner;
-    if (!signer || typeof signer.signRegistryRequest !== 'function' ||
-        (typeof signer.available === 'function' && !signer.available())) {
-      throw new Error('no operator session key — the auto.network sign-on ceremony (C2) has not landed yet, so share-links cannot be click-signed');
+    if (!session || typeof session.signOn !== 'function' ||
+        !signer || typeof signer.signRegistryRequest !== 'function') {
+      throw new Error('Approval is unavailable in this browser. Reload the dashboard and try again.');
     }
-    // The staged request (destination included) was frozen SERVER-SIDE at
-    // first render; the executor forwards to that snapshot only, so this
-    // decision carries just the signature over it. Nothing the client
-    // sends can move the destination.
-    const envelope = await signer.signRegistryRequest(rr.method, rr.path, rr.payload);
-    return { envelope };
+
+    let retained = _matchingApprovalAuthority(req);
+    if (!retained) {
+      if (!req.password) throw new Error('Enter your organization password to continue.');
+      try {
+        await session.signOn(req.password, { org: req.orgSlug });
+      } catch (error) {
+        const message = String((error && error.message) || error || '');
+        if (error && error.status === 404 && /org|identity|key/i.test(message)) {
+          const missing = new Error(
+            'This organization is not ready for approvals yet. Set up its signing authority and try again.');
+          missing.code = 'ORG_KEY_NOT_CONFIGURED';
+          throw missing;
+        }
+        if (/passphrase|password|decrypt|authentication/i.test(message)) {
+          throw new Error('That password did not work. Try again.');
+        }
+        throw error;
+      }
+      retained = _matchingApprovalAuthority(req);
+      if (!retained) throw new Error('The unlocked authority does not match this organization.');
+    }
+
+    const ttl = req.duration === 'none' ? null : Number(req.duration);
+    const payload = _linkPayloadWithTtl(rr.payload, req.duration);
+    try {
+      let envelope;
+      try {
+        envelope = await signer.signRegistryRequest(rr.method, rr.path, payload);
+      } catch (error) {
+        throw new Error('This approval could not be signed. Unlock it again and retry.');
+      }
+      return { envelope, ttl };
+    } finally {
+      // Unchecked is deliberately one action only. Checked retains the
+      // non-extractable authority, never the password; Lock clears this same
+      // AutonomyNetworkSession store.
+      req.password = '';
+      if (!req.allowSessionApprovals) await session.signOut();
+    }
   }
 
   async function _jsonOrError(resp) {
@@ -2027,7 +2096,7 @@
             }
           },
         },
-        // Share-link ceremony (spec §6.4): the enrichment resolved the target
+        // Share-link approval (spec §6.4): enrichment resolved the target
         // title from trusted local stores and staged the EXACT registry
         // request to sign; approve click-signs it with the operator session
         // key and rides the envelope on the decision. The server-side
@@ -2036,29 +2105,32 @@
           open(self, r) {
             const req = r.request || {};
             const title = r.target_title || req.target_uuid || '?';
-            const lines = [
-              'Share ' + (r.type_label || req.target_type || '?') +
-                ' “' + title + '” on auto.network.',
-              '',
-              'Link TTL: ' + _linkTtlText(r.ttl),
-            ];
-            if (r.label) lines.push('Label: ' + r.label);
-            if (req.org) lines.push('Org: ' + req.org);
-            if (r.registry_request) lines.push('Registry: ' + r.registry_request.registry_url);
-            if (r.target_error) lines.push('', '⚠ ' + r.target_error);
-            if (r.binding_error) lines.push('', '⚠ ' + r.binding_error);
-            if (r.binding_drift) {
-              lines.push('', '⚠ the org binding changed after this request was staged — approving will be refused; decline and re-run the publish');
-            }
-            self.approvalRequest = {
+            const acting = r.acting_identity || {};
+            const actor = r.actor_identity || {};
+            const duration = r.ttl == null ? 'none' : String(r.ttl);
+            const approval = {
               id: r.id, kind: r.kind, session: r.session,
-              title: 'Publish share-link', actionLabel: 'Approve & publish',
-              op: req.target_type || 'share', target: title,
-              bodyMarkdown: lines.join('\n'),
+              gate2: true,
+              title: 'Publish a share link', actionLabel: 'Approve & publish',
+              action: 'Publish a share link',
+              targetType: r.type_label || req.target_type || 'Item', target: title,
+              service: 'auto.network', orgSlug: req.org || '',
+              actingIdentity: acting, actorIdentity: actor,
+              duration, durationOptions: _durationOptions(r.ttl),
+              password: '', showPassword: false,
+              allowSessionApprovals: false,
+              previewOpen: false, targetPreview: r.target_preview || null,
+              blockingError: r.target_error || r.binding_error ||
+                (r.binding_drift
+                  ? 'This organization changed after the request was prepared. Close it and publish again.'
+                  : ''),
+              error: '',
               registryRequest: r.registry_request || null,
             };
+            approval.allowSessionApprovals = _matchingApprovalAuthority(approval);
+            self.approvalRequest = approval;
           },
-          decision: (self, req) => _signLinkDecision(req),
+          decision: (self, req) => _signLinkDecision(self, req),
         },
         link_revoke: {
           open(self, r) {
@@ -2232,6 +2304,7 @@
         const req = this.approvalRequest;
         if (!req || this.approvalBusy) return;
         this.approvalBusy = true;
+        req.error = '';
         try {
           const kindDef = this._approvalKinds[req.kind];
           const extra = (kindDef && kindDef.decision)
@@ -2240,16 +2313,46 @@
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ approved: true, ...extra }),
           });
-          if (!resp.ok || !(await resp.json()).ok) {
-            throw new Error('the dashboard rejected the decision');
+          const decisionResult = await resp.json().catch(() => ({}));
+          if (!resp.ok || !decisionResult.ok) {
+            throw new Error(decisionResult.error || 'This approval is no longer available.');
+          }
+          if (req.gate2) {
+            const outcomeResp = await fetch(
+              '/api/approvals/' + encodeURIComponent(req.id) + '?wait=20');
+            const outcome = await outcomeResp.json().catch(() => ({}));
+            const execution = outcome.result && outcome.result.execution;
+            if (!outcomeResp.ok || !execution || execution.ok !== true) {
+              throw new Error((execution && execution.error) || outcome.error ||
+                'auto.network did not finish publishing the link. Try again.');
+            }
           }
           this.approvalRequest = null;
-          _toast('Approved', 'success');
+          _toast(req.gate2 ? 'Share link published' : 'Approved', 'success');
         } catch (e) {
-          _toast('Could not approve: ' + (e.message || e), 'error');
+          const message = e && e.message ? e.message : String(e);
+          if (req.gate2) req.error = message;
+          else _toast('Could not approve: ' + message, 'error');
         } finally {
           this.approvalBusy = false;
         }
+      },
+
+      dismissApproval() {
+        if (!this.approvalRequest || this.approvalBusy) return;
+        this.approvalRequest = null;
+      },
+
+      closeApprovalLayer() {
+        const req = this.approvalRequest;
+        if (!req || this.approvalBusy) return;
+        if (req.gate2 && req.previewOpen) req.previewOpen = false;
+        else this.approvalRequest = null;
+      },
+
+      approvalAuthorityAvailable() {
+        return !!(this.approvalRequest && this.approvalRequest.gate2 &&
+          _matchingApprovalAuthority(this.approvalRequest));
       },
 
       // Decline is identical for every approval kind, so it lives here in the

@@ -359,7 +359,9 @@
     if (!resp.ok) {
       var detail = '';
       try { detail = (await resp.json()).error || ''; } catch (e) { /* ignore */ }
-      throw new Error(detail || ('request failed: ' + url + ' → ' + resp.status));
+      var error = new Error(detail || ('request failed: ' + url + ' → ' + resp.status));
+      error.status = resp.status;
+      throw error;
     }
     return resp.json();
   }

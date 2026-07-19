@@ -16,6 +16,7 @@ seam (no envelope → clean error, nothing published).
 
 from __future__ import annotations
 
+import copy
 import time
 
 import httpx
@@ -136,6 +137,20 @@ def _signed_envelope(session_key, session_cert, rr):
     )
 
 
+def _registry_request_with_ttl(rr, ttl):
+    adjusted = copy.deepcopy(rr)
+    meta = dict(adjusted["payload"].get("meta") or {})
+    if ttl is None:
+        meta.pop("ttl", None)
+    else:
+        meta["ttl"] = ttl
+    if meta:
+        adjusted["payload"]["meta"] = meta
+    else:
+        adjusted["payload"].pop("meta", None)
+    return adjusted
+
+
 def _decide_and_wait(client, rid, body):
     ok = client.post(f"/api/approvals/{rid}/decision", json=body)
     assert ok.status_code == 200, ok.text
@@ -211,6 +226,125 @@ def test_enrichment_renders_target_and_ttl(env, tmp_path, monkeypatch):
     assert enriched["type_label"] == "Present deck"
     assert enriched["ttl"] == 7 * 86400
     assert enriched["registry_request"]["payload"]["target_uuid"] == rev_id
+
+
+def test_note_preview_comes_from_trusted_graph_target(env):
+    from tools.graph import ops as graph_ops
+
+    note = graph_ops.create_note(
+        "Trusted note body\n\n- first\n- second",
+        title="Release checklist",
+        org=ORG,
+    )
+    r = env.post("/api/approvals", json={
+        "kind": "link_publish", "session": SESSION,
+        "request": {
+            "org": ORG,
+            "target_uuid": note["id"],
+            "target_type": "note",
+            "preview": "requester-controlled fake copy",
+        },
+    })
+    enriched = env.get(f"/api/approvals/{r.json()['id']}").json()
+    assert enriched["target_title"] == "Release checklist"
+    assert enriched["target_preview"] == {
+        "title": "Release checklist",
+        "content": "Trusted note body\n\n- first\n- second",
+    }
+    assert "requester-controlled" not in str(enriched["target_preview"])
+
+
+def test_ttl_override_is_forwarded_and_cached(env, session_key, session_cert):
+    rid = _create_publish(env, meta={"ttl": 3600, "label": "binder"})
+    rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
+    adjusted = _registry_request_with_ttl(rr, 86400)
+    envelope = _signed_envelope(session_key, session_cert, adjusted)
+    result = _decide_and_wait(env, rid, {
+        "approved": True, "envelope": envelope, "ttl": 86400,
+    })
+    assert result["execution"]["ok"] is True
+    token = result["execution"]["token"]
+    assert _cached_grants()[token]["meta"] == {"ttl": 86400, "label": "binder"}
+
+
+def test_no_expiration_removes_only_ttl(env, session_key, session_cert):
+    rid = _create_publish(env, meta={"ttl": 3600, "label": "binder"})
+    rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
+    adjusted = _registry_request_with_ttl(rr, None)
+    envelope = _signed_envelope(session_key, session_cert, adjusted)
+    result = _decide_and_wait(env, rid, {
+        "approved": True, "envelope": envelope, "ttl": None,
+    })
+    assert result["execution"]["ok"] is True
+    token = result["execution"]["token"]
+    assert _cached_grants()[token]["meta"] == {"label": "binder"}
+
+
+@pytest.mark.parametrize("ttl", [0, -1, True, "3600", 365 * 86400 + 1, {}, []])
+def test_invalid_ttl_override_is_rejected(env, session_key, session_cert, ttl):
+    rid = _create_publish(env, meta={"ttl": 3600})
+    rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
+    envelope = _signed_envelope(session_key, session_cert, rr)
+    result = _decide_and_wait(env, rid, {
+        "approved": True, "envelope": envelope, "ttl": ttl,
+    })
+    assert result["execution"]["ok"] is False
+    assert "between 1 and 365 days" in result["execution"]["error"]
+    assert _cached_grants() == {}
+
+
+def test_ttl_override_cannot_smuggle_frozen_fields(env, session_key, session_cert):
+    rid = _create_publish(env, meta={"ttl": 3600, "label": "trusted"})
+    rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
+    adjusted = _registry_request_with_ttl(rr, 86400)
+    envelope = _signed_envelope(session_key, session_cert, adjusted)
+    result = _decide_and_wait(env, rid, {
+        "approved": True,
+        "envelope": envelope,
+        "ttl": 86400,
+        "target_uuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "target_type": "file",
+        "org": "evil-org",
+        "registry_url": "https://evil.example",
+        "method": "DELETE",
+        "path": "/v1/orgs",
+        "binding": {"root_pub": "00" * 32},
+        "meta": {"label": "forged"},
+    })
+    assert result["execution"]["ok"] is True
+    token = result["execution"]["token"]
+    grant = _cached_grants()[token]
+    assert grant["target_uuid"] == TARGET
+    assert grant["target_type"] == "present"
+    assert grant["meta"] == {"ttl": 86400, "label": "trusted"}
+
+
+def test_signed_payload_must_match_ttl_only_reconstruction(
+    env, session_key, session_cert,
+):
+    rid = _create_publish(env, meta={"ttl": 3600})
+    rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
+    adjusted = _registry_request_with_ttl(rr, 86400)
+    adjusted["payload"]["target_uuid"] = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    envelope = _signed_envelope(session_key, session_cert, adjusted)
+    result = _decide_and_wait(env, rid, {
+        "approved": True, "envelope": envelope, "ttl": 86400,
+    })
+    assert result["execution"]["ok"] is False
+    assert "does not match the staged request" in result["execution"]["error"]
+    assert _cached_grants() == {}
+
+
+def test_execution_records_trusted_personal_actor(
+    env, session_key, session_cert, monkeypatch,
+):
+    actor = {"display_name": "Alex Operator", "root_pub": "ab" * 32}
+    monkeypatch.setattr(link_approvals, "_approval_identities", lambda _org: {
+        "acting_identity": {"name": "Network Org"},
+        "actor_identity": actor,
+    })
+    _, _, result = _publish(env, session_key, session_cert)
+    assert result["execution"]["actor"] == actor
 
 
 def test_decline_surfaces_to_requester(env):
