@@ -13998,7 +13998,7 @@ _CREATE_ORG_JS = r"""
         q('create-org-create-workspace').click();
         await sleep(40);
         r.workspace_row_states_limitation = ((q('create-org-create-workspace')
-            || {}).textContent || '').indexOf('Coming soon') !== -1;
+            || {}).textContent || '').indexOf('Workspace creation is coming soon') !== -1;
         r.workspace_row_did_not_navigate = !!q('create-org-success');
         CO.close();
 
