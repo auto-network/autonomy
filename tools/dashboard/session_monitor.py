@@ -69,6 +69,8 @@ from tools.dashboard.dao.dashboard_db import (
     update_todos,
     get_turn_correction,
     upsert_turn_correction,
+    correction_attempt_seen,
+    mark_correction_attempt,
     count_live,
 )
 
@@ -3212,10 +3214,20 @@ class SessionMonitor:
             target = entry.get("target_message_id")
             sha = entry.get("original_sha256")
             if not isinstance(target, str) or not target or not isinstance(sha, str) or not sha:
+                # Resolving a correction to its target turn is an expensive
+                # difflib LCS. Do it at most once per correction (whatever the
+                # outcome) and cache the attempt, so history warm-ups on every
+                # dashboard restart skip it instead of re-running the LCS.
+                correction_key = _sha256_text(
+                    f"{session_uuid}|{corrected}|{entry.get('timestamp', '')}"
+                )
+                if correction_attempt_seen(session_uuid, correction_key):
+                    continue
                 candidate, debug_payload = _resolve_candidate(
                     corrected,
                     str(entry.get("timestamp", "") or ""),
                 )
+                mark_correction_attempt(session_uuid, correction_key)
                 logger.debug(
                     "session_monitor: turn_correction resolve session=%s recent_user_count=%d corrected_preview=%r debug=%s",
                     session_uuid,
