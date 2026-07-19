@@ -146,9 +146,9 @@
       '<details class="mt-6 group/td"><summary data-testid="create-org-techdetail" ' +
       'class="text-xs text-gray-500 cursor-pointer select-none hover:text-gray-400 list-none [&::-webkit-details-marker]:hidden">' +
       '<span class="group-open/td:hidden">&#9656;</span><span class="hidden group-open/td:inline">&#9662;</span> Technical detail</summary>' +
-      '<p class="mt-2 text-xs text-gray-500 leading-relaxed">The organization is created with its own signing root, ' +
-      'made on this device and held by you. Anything you do in it is signed by you, carrying the organization&rsquo;s ' +
-      'authority. Nothing leaves this device until you invite someone or publish.</p></details>' +
+      '<p class="mt-2 text-xs text-gray-500 leading-relaxed">The organization starts as its own database on this ' +
+      'machine &mdash; creating it sends nothing anywhere. Its signing authority (used to publish and to invite ' +
+      'others) is set up separately, the first time you need it, and stays in your hands.</p></details>' +
       '<div class="mt-8 flex flex-col-reverse md:flex-row md:justify-end gap-3">' +
       '<button type="button" id="create-org-dismiss" data-testid="create-org-dismiss" ' +
       'class="px-4 py-2.5 rounded-lg text-sm text-gray-400 hover:text-gray-200 border border-gray-700">' +
@@ -318,11 +318,20 @@
   }
 
   function _dismiss() {
+    // 'Later' / 'Not now': the org was NOT created — an onboarding entry
+    // returns to the Organizations step so nothing ever blanks.
     var entry = S && S.entry;
     close();
     if (entry === 'onboarding' && window.AutonomyOnboarding) {
       window.AutonomyOnboarding.open({ step: 3 });
     }
+  }
+
+  function _finish() {
+    // 'Finish' / 'Close' on the created page: the org exists — the flow
+    // is COMPLETE. Never reopen the Organizations step, which would
+    // offer creation again (Codex attack finding 1).
+    close();
   }
 
   function _wire(overlay) {
@@ -343,9 +352,12 @@
     };
     on('create-org-dismiss', _dismiss);
     on('create-org-submit', _submit);
-    on('create-org-finish', _dismiss);
+    on('create-org-finish', _finish);
     on('create-org-goto-settings', function () { window.location.assign('/settings'); });
-    on('create-org-create-workspace', function () { window.location.assign('/settings'); });
+    on('create-org-create-workspace', function () {
+      var row = overlay.querySelector('[data-testid=create-org-create-workspace] .text-gray-500');
+      if (row) row.textContent = 'Coming soon — workspaces are configured in Settings for now.';
+    });
     on('create-org-invite', function () {
       var row = overlay.querySelector('[data-testid=create-org-invite] .text-gray-500');
       if (row) row.textContent = 'Invites are coming soon — this organization is ready for them.';
@@ -366,6 +378,8 @@
         _updatePicker();
       } else if (S.phase === 'form') {
         _dismiss();
+      } else {
+        _finish();
       }
     });
   }
