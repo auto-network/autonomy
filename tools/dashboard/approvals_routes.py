@@ -5,10 +5,11 @@ some ``kind``, the operator's browser reviews it and POSTs a decision, the
 requester consumes the result. Kind-specific behavior lives in small
 registries — server-side ``ENRICH`` below for GETs whose stored request isn't
 self-describing, and the overlay's per-kind client handlers — never in columns
-or per-kind routes. No auth, by explicit operator decision: an agent can
-currently approve its own request; the operator-identity gate on the decision
-route is a planned follow-up. (For ``commit_sign`` specifically a forged
-approval is also harmless — a GPG signature authenticates itself.)
+or per-kind routes. There is no blanket auth requirement because existing
+self-authenticating kinds such as ``commit_sign`` validate their resulting
+signature. Sensitive kinds may register a decision authorizer;
+``dashboard_access`` requires a live operator session as well as a
+personal-root signature.
 
 Nothing here polls. The operator's viewer is notified over the SSE event bus
 (``approval:pending`` / ``approval:decided``; ``pending_approval`` on the
@@ -96,12 +97,24 @@ def _enrich_commit_sign(row: dict) -> dict:
 # Share-link approval kinds (link_publish / link_revoke) live in their own
 # module; it exports plain dicts so this file stays the single registry.
 from tools.dashboard import link_approvals as _link_approvals
+from tools.dashboard import dashboard_access_approvals as _dashboard_access
+
+# Optional per-kind request preparation. A handler returns the normalized
+# request plus a server-frozen staged context. Kinds absent here retain the
+# generalized primitive's historical pass-through behavior.
+PREPARE_CREATE = {
+    **_dashboard_access.PREPARE_CREATE,
+}
+AUTHORIZE_DECISION = {
+    **_dashboard_access.AUTHORIZE_DECISION,
+}
 
 # Per-kind GET enrichment — the only kind-specific hook on the server side of
 # the primitive. A kind whose stored request is self-describing needs no entry.
 ENRICH = {
     "commit_sign": _enrich_commit_sign,
     **_link_approvals.ENRICH,
+    **_dashboard_access.ENRICH,
 }
 
 
@@ -122,6 +135,7 @@ _decision_waiters: dict[str, asyncio.Event] = {}
 # itself produces the signature) store the verdict body directly.
 EXECUTORS: dict = {
     **_link_approvals.EXECUTORS,
+    **_dashboard_access.EXECUTORS,
 }
 
 # Requests whose executor is running: the verdict is committed but the result
@@ -152,11 +166,24 @@ async def create_approval(request: Request) -> JSONResponse:
     kind = body.get("kind")
     session = body.get("session")
     req = body.get("request")
-    if not kind or not session or not isinstance(req, dict) or not req:
+    if not isinstance(kind, str) or not kind or len(kind) > 64 \
+            or not isinstance(session, str) or not session or len(session) > 256 \
+            or not isinstance(req, dict) or not req:
         return JSONResponse(
-            {"error": "kind, session, and a non-empty request object are required"},
+            {"error": (
+                "kind and session must be short non-empty strings, and request "
+                "must be a non-empty object"
+            )},
             status_code=400)
-    rid = ar.create(kind=kind, session=session, request=req, created_at=time.time())
+    staged = None
+    prepare = PREPARE_CREATE.get(kind)
+    if prepare:
+        try:
+            req, staged = prepare(session, req)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+    rid = ar.create(kind=kind, session=session, request=req, staged=staged,
+                    created_at=time.time())
     # Push-notify the operator's open viewer(s); pending_approval on the
     # session detail stays the durable fallback for a viewer that (re)connects.
     await event_bus.broadcast("approval:pending",
@@ -218,7 +245,7 @@ async def decide_approval(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         body = {}
-    if not isinstance(body.get("approved"), bool):
+    if not isinstance(body, dict) or not isinstance(body.get("approved"), bool):
         return JSONResponse({"error": "decision requires a boolean 'approved'"},
                             status_code=400)
     r = ar.get(rid)
@@ -234,6 +261,11 @@ async def decide_approval(request: Request) -> JSONResponse:
             "ok": False,
             "error": "This approval has already been completed.",
         })
+    authorize = AUTHORIZE_DECISION.get(r["kind"])
+    if authorize:
+        error = authorize(request, r, body)
+        if error:
+            return JSONResponse({"ok": False, "error": error}, status_code=401)
 
     executor = EXECUTORS.get(r["kind"])
     if body["approved"] and executor:

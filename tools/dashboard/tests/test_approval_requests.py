@@ -121,10 +121,16 @@ def test_validation_and_unknown(client):
                                                "request": {}}).status_code == 400
     assert client.post("/api/approvals", json={"kind": "k", "session": "s",
                                                "request": "not-an-object"}).status_code == 400
+    assert client.post("/api/approvals", json={"kind": ["k"], "session": "s",
+                                               "request": {"a": 1}}).status_code == 400
+    assert client.post("/api/approvals", json={"kind": "k", "session": {"s": 1},
+                                               "request": {"a": 1}}).status_code == 400
     # decision: approved must be a boolean
     rid = _create_commit_sign(client)
     assert client.post(f"/api/approvals/{rid}/decision",
                        json={"approved": "yes"}).status_code == 400
+    assert client.post(f"/api/approvals/{rid}/decision",
+                       json=["approved", True]).status_code == 400
     # unknown ids
     assert client.get("/api/approvals/nope").status_code == 404
     assert client.post("/api/approvals/nope/decision",

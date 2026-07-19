@@ -55,15 +55,18 @@ def init_db(db_path: Path | str | None = None) -> None:
 
 
 def create(*, kind: str, session: str, request: dict, created_at: float,
+           staged: dict | None = None,
            db_path: Path | str | None = None) -> str:
     """Insert a new pending request; return its id."""
     rid = uuid.uuid4().hex[:12]
     c = _conn(db_path)
     try:
         c.execute(
-            "INSERT INTO approval_requests (id, kind, session, request, result, created_at) "
-            "VALUES (?, ?, ?, ?, NULL, ?)",
-            (rid, kind, session, json.dumps(request), created_at),
+            "INSERT INTO approval_requests "
+            "(id, kind, session, request, staged, result, created_at) "
+            "VALUES (?, ?, ?, ?, ?, NULL, ?)",
+            (rid, kind, session, json.dumps(request),
+             json.dumps(staged) if staged is not None else None, created_at),
         )
         c.commit()
     finally:
