@@ -16016,9 +16016,19 @@ class _CallerOrgMiddleware:
             _graph_ops.reset_caller_org(token)
 
 
+async def _protected_setting_handler(request, exc):
+    """A generic-settings mutation tried to write a protected identity
+    set without the identity-route capability — refuse with 403 across
+    every settings route at once (the guard lives in settings_ops)."""
+    return JSONResponse({"error": str(exc)}, status_code=403)
+
+
 app = Starlette(
     routes=routes,
     lifespan=_lifespan,
+    exception_handlers={
+        settings_ops.ProtectedSettingError: _protected_setting_handler,
+    },
     middleware=[
         Middleware(_RequestDurationMiddleware),
         # Outer: bind X-Graph-Org to the ops-layer contextvar for every
