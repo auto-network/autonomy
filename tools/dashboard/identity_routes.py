@@ -191,25 +191,37 @@ def _b64url_decode(value: str) -> bytes:
 
 
 async def get_status(request: Request) -> JSONResponse:
-    """Enrollment state: drives the Get-started activation condition."""
+    """Personal identity, enrollment, and current dashboard access state.
+
+    Personal identity never follows the caller-org context. The shell stamps
+    ``X-Graph-Org`` on app data requests, and allowing that header to select
+    this read would make the same person appear to vanish between org views.
+    A literal ``org=None`` pins the read to the personal database.
+    """
     # Late import: unlock_routes imports from this module at load time.
-    from tools.dashboard.unlock_routes import gate_disabled
+    from tools.dashboard.unlock_routes import (
+        gate_disabled,
+        human_auth_enrolled,
+        session_from_request,
+    )
+    disabled = gate_disabled()
     if _mock_mode():
         # The mock dashboard has no settings DB; land deterministically
         # enrolled-enough that no onboarding overlay covers the fixtures.
         return JSONResponse({"personal_identity": None, "passkeys": [],
                              "onboarding_needed": False,
-                             "gate_disabled": gate_disabled()})
-    org, refused = _scoped_org(request.query_params.get("org"))
-    if refused is not None:
-        return refused
+                             "rp_id": None, "passkeys_for_host": 0,
+                             "signed_in": False, "method": None,
+                             "enforced": False,
+                             "gate_disabled": disabled})
     rp_id, _origin, _rp_err = _rp_from_request(request)
     try:
-        personal = _personal_member(org)
-        passkeys = _passkey_rows(org)
+        personal = _personal_member(None)
+        passkeys = _passkey_rows(None)
     except Exception as e:
         return JSONResponse({"error": f"could not read identity settings: {e}"},
                             status_code=500)
+    session = session_from_request(request)
     identity = None
     if personal is not None and personal.payload.get("armored_private_key"):
         identity = {
@@ -236,9 +248,12 @@ async def get_status(request: Request) -> JSONResponse:
         # informational today, the gate's input later.
         "rp_id": rp_id,
         "passkeys_for_host": sum(1 for r in rows if r["rp_id"] == rp_id),
+        "signed_in": session is not None,
+        "method": (session or {}).get("method"),
+        "enforced": human_auth_enrolled() and not disabled,
         # DASHBOARD_AUTH kill-switch state — the indicator renders its
         # forced-open marker from this, never from probing the gate.
-        "gate_disabled": gate_disabled(),
+        "gate_disabled": disabled,
     })
 
 

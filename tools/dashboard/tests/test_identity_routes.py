@@ -177,6 +177,10 @@ def test_status_starts_needing_onboarding(env):
     assert body["personal_identity"] is None
     assert body["passkeys"] == []
     assert body["onboarding_needed"] is True
+    assert body["signed_in"] is False
+    assert body["method"] is None
+    assert body["enforced"] is False
+    assert body["gate_disabled"] is False
 
 
 def test_status_identity_alone_still_needs_onboarding(env, root):
@@ -188,6 +192,9 @@ def test_status_identity_alone_still_needs_onboarding(env, root):
     assert body["personal_identity"]["display_name"] == "Alex"
     assert body["personal_identity"]["root_pub"] == root.public_hex
     assert body["onboarding_needed"] is True
+    assert body["signed_in"] is True
+    assert body["method"] == "bootstrap"
+    assert body["enforced"] is True
 
 
 def test_status_fully_enrolled(env, root):
@@ -206,6 +213,32 @@ def test_status_never_leaks_the_armor(env, root):
     _store_identity(env, root)
     body = env.get("/api/identity/status").json()
     assert "armored_private_key" not in json.dumps(body)
+
+
+def test_status_pins_reads_to_personal_scope(env, root, monkeypatch):
+    """The shell's org header/query must never move personal identity."""
+    _store_identity(env, root)
+    seen = []
+    real_personal = identity_routes._personal_member
+    real_passkeys = identity_routes._passkey_rows
+
+    def personal(org):
+        seen.append(("personal", org))
+        return real_personal(org)
+
+    def passkeys(org):
+        seen.append(("passkeys", org))
+        return real_passkeys(org)
+
+    monkeypatch.setattr(identity_routes, "_personal_member", personal)
+    monkeypatch.setattr(identity_routes, "_passkey_rows", passkeys)
+    response = env.get(
+        "/api/identity/status?org=someone-else",
+        headers={"X-Graph-Org": "someone-else"},
+    )
+    assert response.status_code == 200
+    assert response.json()["personal_identity"]["display_name"] == "Alex"
+    assert seen == [("personal", None), ("passkeys", None)]
 
 
 def test_status_org_identity_does_not_satisfy_personal(env, root):

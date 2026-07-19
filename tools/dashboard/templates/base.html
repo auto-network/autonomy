@@ -24,6 +24,7 @@
   <link rel="stylesheet" href="/static/css/agent-actions.css?v=__STATIC_VERSION__">
   <link rel="stylesheet" href="/static/css/surface-presence.css?v=__STATIC_VERSION__">
   <link rel="stylesheet" href="/static/css/turn-correction.css?v=__STATIC_VERSION__">
+  <link rel="stylesheet" href="/static/css/identity-indicator.css?v=__STATIC_VERSION__">
   <script src="/static/vendor/marked.min.js?v=__STATIC_VERSION__"></script>
   <script src="/static/vendor/highlightjs/highlight.min.js?v=__STATIC_VERSION__"></script>
   <link rel="stylesheet" href="/static/vendor/highlightjs/github-dark.min.css?v=__STATIC_VERSION__">
@@ -36,6 +37,7 @@
   <script src="/static/js/network-signon.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/js/network-identity.js?v=__STATIC_VERSION__" defer></script>
   <script src="/static/js/network-onboarding.js?v=__STATIC_VERSION__" defer></script>
+  <script src="/static/js/identity-indicator.js?v=__STATIC_VERSION__" defer></script>
   <!-- Installs a fetch wrapper BEFORE app.js so a locked session (401 from
        the unlock gate) navigates to /unlock instead of injecting the 401
        body into a fragment slot. Not deferred: must wrap window.fetch
@@ -103,51 +105,16 @@
       padding-top: 0.75rem;
       border-top: 1px solid #374151;
     }
-    /* auto.network sign-on chrome (C2) */
-    /* Signed-OUT is a call to action (unlock your key): a filled, centered,
-       obviously-clickable control — not the muted outline it used to be. */
-    .network-signon-btn {
-      display: flex; align-items: center; justify-content: center; gap: 0.5rem;
-      width: 100%; padding: 0.5rem 0.5rem; margin-bottom: 0.5rem;
-      border-radius: 0.375rem; font-size: 0.8125rem; font-weight: 500;
-      color: #e0e7ff; background: #4338ca; border: 1px solid #6366f1;
-      cursor: pointer; text-align: center;
-      transition: background 0.12s ease, border-color 0.12s ease;
-    }
-    .network-signon-btn:hover { background: #4f46e5; color: #fff; }
-    /* Signed-IN is a calm status chip, not a CTA. */
-    .network-signon-btn.signed-in {
-      background: #1f2937; border-color: #374151; color: #d1d5db; font-weight: 400;
-    }
-    .network-signon-btn.signed-in:hover { background: #374151; color: #e5e7eb; }
-    /* The leading dot is the state indicator: muted ring = locked/out,
-       solid green ring = signed in. */
-    .network-signon-dot {
-      width: 0.5rem; height: 0.5rem; border-radius: 9999px; flex-shrink: 0;
-      background: #c7d2fe; box-shadow: 0 0 0 2px rgba(199,210,254,0.25);
-    }
-    .network-signon-btn.signed-in .network-signon-dot {
-      background: #22c55e; box-shadow: 0 0 0 2px rgba(34,197,94,0.3);
-    }
-    .network-signon-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .network-signon-panel {
-      position: fixed; left: 1rem; bottom: 3.5rem; z-index: 60; width: 20rem;
-      max-width: calc(100vw - 2rem); background: #1f2937; border: 1px solid #4b5563;
-      border-radius: 0.5rem; padding: 0.75rem; box-shadow: 0 10px 25px rgba(0,0,0,0.5);
-      font-size: 0.8125rem; color: #d1d5db;
-    }
-    .network-signon-title { font-weight: 600; color: #a5b4fc; margin-bottom: 0.5rem; }
+    /* Shared by the legacy organization-authority ceremony until Gate 2
+       moves those controls into each concrete approval flow. */
     .network-key-row { border: 1px solid #374151; border-radius: 0.375rem; padding: 0.5rem; margin-bottom: 0.5rem; }
     .network-key-id { font-family: monospace; font-size: 0.75rem; color: #e5e7eb; }
     .network-key-meta { font-size: 0.6875rem; color: #9ca3af; margin-top: 0.25rem; }
-    .network-signon-actions { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
     .network-signon-action {
       flex: 1; padding: 0.375rem 0.5rem; border-radius: 0.375rem; font-size: 0.75rem;
       background: #4f46e5; color: white; border: none; cursor: pointer;
     }
     .network-signon-action:hover { filter: brightness(1.1); }
-    .network-signon-danger { background: #b91c1c; }
-    .network-signon-form { margin-top: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem; }
     .network-signon-input {
       width: 100%; padding: 0.375rem 0.5rem; border-radius: 0.375rem;
       background: #111827; border: 1px solid #4b5563; color: #e5e7eb; font-size: 0.75rem;
@@ -1872,7 +1839,16 @@
         <span class="nav-indicator-dot"></span> REC
       </button>
     </div>
-    <h1 class="text-lg font-bold text-indigo-400 mb-3 pl-16 md:pl-2">Autonomy</h1>
+    <div class="identity-brand-row">
+      <h1 class="identity-brand-name text-lg font-bold text-indigo-400">Autonomy</h1>
+      <div id="identity-indicator" class="identity-indicator" data-testid="identity-indicator"
+           aria-live="polite" aria-busy="true">
+        <button type="button" class="identity-trigger identity-trigger-loading"
+                aria-label="Loading identity" disabled>
+          <span class="identity-loading-dot" aria-hidden="true"></span>
+        </button>
+      </div>
+    </div>
     <div class="sidebar-main">
       <div class="space-y-1">
         <a href="/beads" class="nav-link" data-page="beads" onclick="closeSidebar()">Beads <span id="badge-beads" data-testid="badge-beads" class="nav-badge nav-badge-indigo"></span></a>
@@ -1888,8 +1864,6 @@
       <!-- Plugin sidebar slot — populated client-side from /api/plugins. -->
       <div id="sidebar-plugins" class="space-y-1"></div>
       <div class="sidebar-footer">
-        <!-- auto.network signed-in indicator (C2 sign-on ceremony) -->
-        <div id="network-signon"></div>
         <div id="harness-usage"></div>
         <div class="text-xs text-gray-500" id="stats-summary">loading...</div>
       </div>

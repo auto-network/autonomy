@@ -13034,8 +13034,6 @@ _NETWORK_SIGNON_JS = r"""
     const I = S._internals;
     const r = {};
     if (!S || !I) return JSON.stringify({fatal: 'network-signon.js not loaded'});
-    const q = (id) => document.getElementById(id);
-    const state = () => (q('network-signon-indicator') || {dataset: {}}).dataset.state || null;
     async function idbCount() {
         return await new Promise((res, rej) => {
             const rq = indexedDB.open('autonomy-network', 1);
@@ -13060,10 +13058,9 @@ _NETWORK_SIGNON_JS = r"""
     await S.ready();
     await S.signOut();
 
-    // signed-out chrome: the sign-on affordance is rendered
-    r.out_state = state();
-    r.out_affordance = !!document.querySelector('[data-testid=network-signon-affordance]');
-    r.out_text = (q('network-signon-indicator') || {}).textContent || '';
+    // The signer is headless: personal identity owns the shell chrome.
+    r.stale_chrome_absent = !document.getElementById('network-signon') &&
+        !document.querySelector('[data-testid=network-signon-indicator]');
 
     window.fetch = async function (url, opts) {
         const u = String(url);
@@ -13086,13 +13083,11 @@ _NETWORK_SIGNON_JS = r"""
         r.wrong_pass = null;
         try { await S.signOn('not the passphrase', {ttlSeconds: 3600}); }
         catch (e) { r.wrong_pass = String(e.message || e); }
-        r.wrong_pass_state = state();
+        r.wrong_pass_signed_in = S.state().signedIn;
 
         // the real ceremony
         r.signon = await S.signOn(PASS, {ttlSeconds: 3600});
-        r.in_state = state();
-        r.in_text = (q('network-signon-indicator') || {}).textContent || '';
-        r.expiry_el = !!document.querySelector('[data-testid=network-signon-expiry]');
+        r.signer_state = S.state();
         r.available = window.AutonomyNetworkSigner.available();
         r.idb_signed_in = await idbCount();
         r.keys = S.listKeys();
@@ -13121,14 +13116,14 @@ _NETWORK_SIGNON_JS = r"""
 
         // sign-out destroys key + cert locally (store CLEARED)
         await S.signOut();
-        r.after_signout = {state: state(), idb: await idbCount(),
+        r.after_signout = {signedIn: S.state().signedIn, idb: await idbCount(),
                            available: window.AutonomyNetworkSigner.available()};
 
         // revoke: fresh sign-on, then root step-up revocation
         await S.signOn(PASS, {ttlSeconds: 3600});
         r.revoke = await S.revokeCurrentKey(PASS, 'sweep revoke');
         r.revoke_posted = posted[0] || null;
-        r.after_revoke = {state: state(), idb: await idbCount(),
+        r.after_revoke = {signedIn: S.state().signedIn, idb: await idbCount(),
                           available: window.AutonomyNetworkSigner.available()};
 
         // certs outside their validity window planted straight into the
@@ -13212,28 +13207,22 @@ class TestNetworkSignOn:
         c = self._checks
         assert c and not c.get("fatal"), f"ceremony eval failed: {c}"
 
-    # ── acceptance: signed-out state shows sign-on affordance ──
+    # ── acceptance: signer survives without owning shell chrome ──
 
-    def test_signed_out_shows_affordance(self):
-        c = self._checks
-        assert c["out_state"] == "signed-out"
-        assert c["out_affordance"] is True
-        assert "Sign in" in c["out_text"]
+    def test_stale_org_signon_chrome_is_absent(self):
+        assert self._checks["stale_chrome_absent"] is True
 
     def test_wrong_passphrase_clean_error(self):
         c = self._checks
         assert "wrong passphrase" in (c["wrong_pass"] or "")
-        assert c["wrong_pass_state"] == "signed-out"
+        assert c["wrong_pass_signed_in"] is False
 
-    # ── acceptance: after sign-on the indicator flips + shows expiry ──
+    # ── acceptance: after authority unlock the signer becomes available ──
 
-    def test_sign_on_flips_indicator_with_expiry(self):
+    def test_sign_on_activates_signer_without_shell_chrome(self):
         c = self._checks
-        assert c["in_state"] == "signed-in"
-        assert c["expiry_el"] is True
-        assert "Signed in" in c["in_text"]
-        # 3600s TTL renders as minutes-or-hours remaining
-        assert "59m" in c["in_text"] or "1h" in c["in_text"], c["in_text"]
+        assert c["signer_state"]["signedIn"] is True
+        assert c["signer_state"]["notAfter"] > NOW
         assert c["available"] is True
         assert c["idb_signed_in"] == 1
         assert c["keys"] and c["keys"][0]["this_browser"] is True
@@ -13290,7 +13279,7 @@ class TestNetworkSignOn:
     def test_sign_out_destroys_key_and_cert(self):
         c = self._checks
         after = c["after_signout"]
-        assert after["state"] == "signed-out"
+        assert after["signedIn"] is False
         assert after["idb"] == 0  # IndexedDB cleared on sign-out
         assert after["available"] is False
 
@@ -13311,7 +13300,7 @@ class TestNetworkSignOn:
         assert record.revoked_key_id == revoked_cert.child_pub
         assert record.expires_at == revoked_cert.not_after  # I7 bound
         after = c["after_revoke"]
-        assert after["state"] == "signed-out"
+        assert after["signedIn"] is False
         assert after["idb"] == 0
         assert after["available"] is False
 
@@ -13499,14 +13488,14 @@ _NETWORK_IDENTITY_JS = r"""
         try { await S._internals.decryptArmor(__NONCANON__, PASS); }
         catch (e) { r.noncanon_reject = String(e.message || e); }
 
-        // 1 · getting-started entry appears in the no-key sign-on panel
-        // and opens the personal Get-started front door (onboarding);
+        // 1 · the unified personal indicator opens Get started (onboarding);
         // the C1 create-org ceremony lives behind its Organizations
         // step, so the sweep drives it directly from here on.
-        document.querySelector('[data-testid=network-signon-indicator]').click();
-        await waitFor(() => q('network-getstarted-btn'));
-        r.entry_visible = !!q('network-getstarted-btn');
-        q('network-getstarted-btn').click();
+        const identityTrigger = await waitFor(() =>
+            document.querySelector('[data-testid=identity-trigger]'));
+        r.entry_visible = !!identityTrigger &&
+            identityTrigger.dataset.state === 'bootstrap';
+        identityTrigger.click();
         await waitFor(() => q('network-onboarding'));
         r.entry_opens_onboarding = !!q('network-onboarding');
         if (window.AutonomyOnboarding) window.AutonomyOnboarding.close();
@@ -13563,9 +13552,7 @@ _NETWORK_IDENTITY_JS = r"""
         try {
             const so = await S.signOn(PASS, {ttlSeconds: 3600});
             r.signon = {sessionPub: so.sessionPub, certWire: so.certWire};
-            r.signon_state = (document.querySelector(
-                '[data-testid=network-signon-indicator]') || {dataset: {}})
-                .dataset.state || null;
+            r.signon_available = window.AutonomyNetworkSigner.available();
         } catch (e) {
             r.signon_error = String(e.message || e);
         }
@@ -13667,11 +13654,11 @@ class TestNetworkIdentityCeremony:
 
     def test_c1_armor_opens_c2_signon(self):
         """THE cross-bead contract: C2's sign-on decrypted the armor C1
-        stored, minted a session key, and flipped the chrome."""
+        stored and minted a live session key without owning shell chrome."""
         c = self._checks
         assert c.get("signon_error") is None, c.get("signon_error")
         assert c["signon"]["sessionPub"]
-        assert c["signon_state"] == "signed-in"
+        assert c["signon_available"] is True
         # And the minted cert chains to the ceremony-generated root.
         root_pub = c["captured"]["orgKeyPosts"][0]["root_pub"]
         org_uuid = c["captured"]["registerPosts"][0]["envelope"]["payload"]["org_uuid"]

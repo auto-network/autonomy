@@ -602,7 +602,6 @@
       card.appendChild(ok);
       _button(card, 'network-identity-done', 'Done', true, function () {
         close();
-        try { _I().renderIndicator(); } catch (e) { /* chrome refresh only */ }
       });
       return;
     }
