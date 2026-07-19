@@ -13993,10 +13993,21 @@ _CREATE_ORG_JS = r"""
         r.invite_copy = ((q('create-org-invite') || {}).textContent || '')
             .indexOf('Invite teammates') !== -1;
         r.finish_standalone = ((q('create-org-finish') || {}).textContent || '').trim();
+
+        // workspace row states its limitation instead of navigating away
+        q('create-org-create-workspace').click();
+        await sleep(40);
+        r.workspace_row_states_limitation = ((q('create-org-create-workspace')
+            || {}).textContent || '').indexOf('Coming soon') !== -1;
+        r.workspace_row_did_not_navigate = !!q('create-org-success');
         CO.close();
 
         // ── onboarding entry: Later returns to step 3 ─────────────
         CO.open({entry: 'onboarding'});
+        r.tech_detail_honest = overlayText().indexOf(
+            'starts as its own database on this machine') !== -1;
+        r.tech_detail_no_false_root_claim = overlayText().indexOf(
+            'created with its own signing root') === -1;
         r.dismiss_onboarding = ((q('create-org-dismiss') || {}).textContent || '').trim();
         q('create-org-dismiss').click();
         const t2 = Date.now();
@@ -14008,6 +14019,24 @@ _CREATE_ORG_JS = r"""
         r.later_returns_to_onboarding = !!ob;
         r.later_lands_on_step3 = !!ob && ob.getAttribute('data-step') === '3';
         r.create_org_closed_after_later = !document.getElementById('create-org');
+        if (window.AutonomyOnboarding) window.AutonomyOnboarding.close();
+
+        // ── onboarding entry: create + Finish COMPLETES the flow ──
+        CO.open({entry: 'onboarding'});
+        type('Finish Flow Org');
+        await sleep(60);
+        q('create-org-submit').click();
+        const t3 = Date.now();
+        while (Date.now() - t3 < 3000 && !q('create-org-success')) {
+            await sleep(40);
+        }
+        r.onboarding_create_succeeded = !!q('create-org-success');
+        r.finish_onboarding_label = ((q('create-org-finish') || {}).textContent || '').trim();
+        q('create-org-finish').click();
+        await sleep(120);
+        r.finish_closes_create_org = !document.getElementById('create-org');
+        r.finish_does_not_reopen_onboarding =
+            !document.getElementById('network-onboarding');
     } finally {
         window.fetch = origFetch;
         CO.close();
@@ -14084,6 +14113,19 @@ class TestCreateOrgScreen:
         assert c["invite_copy"] is True
         assert c["finish_standalone"] == "Close"
 
+    def test_workspace_row_states_its_limitation(self):
+        c = self._checks
+        assert c["workspace_row_states_limitation"] is True
+        assert c["workspace_row_did_not_navigate"] is True
+
+    def test_technical_detail_is_truthful(self):
+        # POST /api/orgs creates the DB + identity Setting only — no org
+        # signing key exists afterward, so the copy must not claim one
+        # (Codex attack finding 2).
+        c = self._checks
+        assert c["tech_detail_honest"] is True
+        assert c["tech_detail_no_false_root_claim"] is True
+
     def test_dismiss_labels_and_later_returns_to_onboarding(self):
         c = self._checks
         assert c["dismiss_standalone"] == "Not now"
@@ -14091,3 +14133,13 @@ class TestCreateOrgScreen:
         assert c["later_returns_to_onboarding"] is True
         assert c["later_lands_on_step3"] is True
         assert c["create_org_closed_after_later"] is True
+
+    def test_finish_after_onboarding_create_completes_the_flow(self):
+        # Finish on the created page must END onboarding, not bounce back
+        # to the Organizations step offering creation again (Codex
+        # attack finding 1).
+        c = self._checks
+        assert c["onboarding_create_succeeded"] is True
+        assert c["finish_onboarding_label"] == "Finish"
+        assert c["finish_closes_create_org"] is True
+        assert c["finish_does_not_reopen_onboarding"] is True
