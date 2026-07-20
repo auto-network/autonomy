@@ -173,6 +173,44 @@ def _approve_body(envelope, rr=None):
     return {"approved": True, "envelope": envelope}
 
 
+def test_load_binding_ignores_other_orgs_published_binding(tmp_path, monkeypatch, root):
+    """An unbound org must not inherit a binding from the peer-composed view."""
+    from tools.graph.db import GraphDB
+
+    GraphDB.close_all_pooled()
+    orgs_dir = tmp_path / "orgs"
+    GraphDB.create_org_db(ORG, root=orgs_dir).close()
+    GraphDB.create_org_db("unregorg", root=orgs_dir).close()
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    settings_ops.add_setting(
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry.test",
+        {
+            "org_uuid": ORG_UUID,
+            "root_pub": root.public_hex,
+            "registry_url": REGISTRY_URL,
+            "recovery_policy": {"mode": "none"},
+            "binding_expires_at": "2030-01-01T00:00:00Z",
+        },
+        org=ORG,
+        state="canonical",
+    )
+
+    # The generic Settings view demonstrates the old failure: unregorg has
+    # no row of its own, yet sees netorg's public binding through peers.
+    composed = settings_ops.read_set(
+        NETWORK_BINDING_SET_ID, org="unregorg",
+    ).members
+    assert len(composed) == 1
+    assert composed[0].org == ORG
+
+    binding, error = link_approvals._load_binding("unregorg")
+    assert binding is None
+    assert "has no auto.network binding" in error
+    GraphDB.close_all_pooled()
+
+
 def _publish(client, session_key, session_cert, meta=None):
     """Full happy path: create → enrich → sign → approve → executed result."""
     rid = _create_publish(client, meta=meta)

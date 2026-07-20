@@ -155,8 +155,8 @@ def _personal_member():
     fooled by key ordering. Only when no ``default`` exists (legacy rows
     predating this label) does it fall back to the first member.
     """
-    members = [m for m in settings_ops.read_set(PERSONAL_IDENTITY_SET_ID,
-                                                org=None).members
+    members = [m for m in settings_ops.read_owned_set(PERSONAL_IDENTITY_SET_ID,
+                                                      org=None).members
                if isinstance(m.payload, dict)]
     for m in members:
         if m.key == PERSONAL_CANONICAL_LABEL:
@@ -166,7 +166,7 @@ def _personal_member():
 
 def _passkey_rows():
     members = sorted(
-        settings_ops.read_set(PASSKEY_SET_ID, org=None).members,
+        settings_ops.read_owned_set(PASSKEY_SET_ID, org=None).members,
         key=lambda m: m.key,
     )
     return [m for m in members if isinstance(m.payload, dict)]

@@ -1986,6 +1986,36 @@ def read_set(
     return SetMembers(members=members, dropped=dropped)
 
 
+def read_owned_set(
+    set_id: str,
+    *,
+    org: "str | None | _CallerOrgSentinel",
+    target_revision: int | None = None,
+    min_revision: int | None = None,
+    prefix: str | None = None,
+    model: type[Any] | None = None,
+) -> SetMembers[Any]:
+    """Resolve *set_id* from its owning database only.
+
+    ``read_set`` deliberately composes the owner's rows with published and
+    canonical rows from subscribed peer orgs.  Identity, authentication, and
+    authority-binding decisions must not use that federated view: choosing
+    ``org=None`` or a concrete org selects the owning database, but does *not*
+    by itself disable peer composition.  This named reader makes the security
+    boundary explicit and prevents those call sites from silently forgetting
+    the otherwise easy-to-miss ``peers=[]`` argument.
+    """
+    return read_set(
+        set_id,
+        org=org,
+        peers=[],
+        target_revision=target_revision,
+        min_revision=min_revision,
+        prefix=prefix,
+        model=model,
+    )
+
+
 # ── Schema versioning helpers ────────────────────────────────
 
 

@@ -106,7 +106,7 @@ def _first_member(set_id: str, org: str | None):
     common case; with several, the lexically first key wins
     deterministically (v1: no selector, matching link_approvals)."""
     members = sorted(
-        settings_ops.read_set(set_id, org=org).members, key=lambda m: m.key
+        settings_ops.read_owned_set(set_id, org=org).members, key=lambda m: m.key
     )
     for m in members:
         if isinstance(m.payload, dict):
