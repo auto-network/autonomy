@@ -91,7 +91,7 @@ def _load_binding(org: str | None) -> tuple[dict | None, str | None]:
     """
     try:
         members = sorted(
-            settings_ops.read_set(NETWORK_BINDING_SET_ID, org=org).members,
+            settings_ops.read_owned_set(NETWORK_BINDING_SET_ID, org=org).members,
             key=lambda m: m.key,
         )
     except Exception as e:
