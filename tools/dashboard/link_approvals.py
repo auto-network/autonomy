@@ -299,7 +299,7 @@ def _enrich_link_revoke(row: dict) -> dict:
 
 def _cached_grant(token: str, org: str | None) -> dict | None:
     try:
-        for m in settings_ops.read_set(NETWORK_LINK_GRANT_SET_ID, org=org).members:
+        for m in settings_ops.read_owned_set(NETWORK_LINK_GRANT_SET_ID, org=org).members:
             if m.key == token and isinstance(m.payload, dict):
                 return m.payload
     except Exception:

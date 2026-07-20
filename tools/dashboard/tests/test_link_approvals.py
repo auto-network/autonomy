@@ -166,6 +166,20 @@ def _cached_grants():
             for m in settings_ops.read_set(NETWORK_LINK_GRANT_SET_ID, org=ORG)}
 
 
+def test_cached_grant_uses_owning_scope_reader(monkeypatch):
+    """A peer grant cannot spoof the revoke dialog's local cache lookup."""
+    class _Members:
+        members = []
+
+    def fail_composed(*_args, **_kwargs):
+        raise AssertionError("authority cache must not compose peer Settings")
+
+    monkeypatch.setattr(settings_ops, "read_set", fail_composed)
+    monkeypatch.setattr(settings_ops, "read_owned_set",
+                        lambda *_args, **_kwargs: _Members())
+    assert link_approvals._cached_grant("deadbeef", ORG) is None
+
+
 def _approve_body(envelope, rr=None):
     """What the browser posts: just the verdict + the signed envelope. The
     destination is frozen server-side at render; the decision cannot carry
