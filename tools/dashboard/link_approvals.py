@@ -66,6 +66,7 @@ from tools.graph.schemas.network_identity import (  # noqa: F401
     NETWORK_BINDING_SET_ID,
     NETWORK_LINK_GRANT_REVISION,
     NETWORK_LINK_GRANT_SET_ID,
+    NETWORK_ORG_KEY_SET_ID,
     TARGET_TYPES,
 )
 
@@ -98,13 +99,47 @@ def _load_binding(org: str | None) -> tuple[dict | None, str | None]:
         return None, f"could not read the org's network binding: {e}"
     if not members:
         return None, (
-            "this org has no auto.network binding — run the org identity "
-            "ceremony (C1) to register one before publishing share-links"
+            "This organization is not registered on auto.network yet."
         )
     payload = members[0].payload
     if not isinstance(payload, dict) or not payload.get("registry_url"):
         return None, "the org's network binding row is malformed"
     return payload, None
+
+
+def _org_has_key(org: str | None) -> bool:
+    """True when the org holds a stored signing key (armor present).
+
+    Owning-scope read (P2): a peer-published org-key row must never make
+    this org look keyed and offer inline registration on a key it does
+    not own — the operator's password would not open a peer's armor.
+    """
+    try:
+        members = settings_ops.read_owned_set(NETWORK_ORG_KEY_SET_ID, org=org).members
+    except Exception:
+        return False
+    return any(isinstance(m.payload, dict) and m.payload.get("armored_private_key")
+               for m in members)
+
+
+def _is_registerable_on_first_publish(org: str | None) -> bool:
+    """A keyed-but-unregistered org: it has a signing key and NO binding row
+    (missing, not merely malformed). First publish can register its EXISTING
+    key inline (browser-side, root-live window) instead of hard-failing.
+    A malformed binding row is a real error, not a registerable state."""
+    binding, _ = _load_binding(org)
+    if binding is not None:
+        return False
+    try:
+        # Owning-scope (P2): distinguish "no binding row" from "malformed
+        # row" against THIS org's own DB, matching _load_binding — a peer's
+        # row must not decide registerability.
+        members = settings_ops.read_owned_set(NETWORK_BINDING_SET_ID, org=org).members
+    except Exception:
+        return False
+    if members:               # a row exists but is malformed → genuine error
+        return False
+    return _org_has_key(org)
 
 
 def _resolve_target(target_type: str, target_uuid: str, org: str | None) -> dict:
@@ -243,6 +278,15 @@ def _enrich_link_publish(row: dict) -> dict:
             "payload": _registry_payload(req, binding),
         },
     )
+    # Graceful seam: a keyed-but-unregistered org is NOT an error. The first
+    # publish registers its existing key inline (browser-side) and then the
+    # normal freeze/execute path runs against the now-live binding. We only
+    # surface the non-blocking flag here; no staged request is frozen until a
+    # binding exists, so the confused-deputy machinery is untouched.
+    registration_required = False
+    if staged is None and binding_error and _is_registerable_on_first_publish(org):
+        registration_required = True
+        binding_error = None
     out = {
         "target_title": target["title"],
         "target_error": target["error"],
@@ -251,6 +295,7 @@ def _enrich_link_publish(row: dict) -> dict:
         "label": meta.get("label"),
         "binding_error": binding_error,
         "binding_drift": drift,
+        "registration_required": registration_required,
         **_approval_identities(org),
     }
     if target.get("preview"):

@@ -118,7 +118,10 @@ def _session_cert(root, session_key, *, ttl=86400):
 def test_org_key_404_when_unset(env):
     r = env.get(f"/api/network/org-key?org={ORG}")
     assert r.status_code == 404
-    assert "org identity ceremony" in r.json()["error"]
+    error = r.json()["error"]
+    assert "no signing key" in error
+    # No internal codename or retired-ceremony language reaches the caller.
+    assert "C1" not in error and "ceremony" not in error
 
 
 def test_org_key_serves_encrypted_armor_only(env, root):

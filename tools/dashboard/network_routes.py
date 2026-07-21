@@ -128,8 +128,7 @@ async def get_org_key(request: Request) -> JSONResponse:
                             status_code=500)
     if member is None or not member.payload.get("armored_private_key"):
         return JSONResponse({"error": (
-            "no auto.network org key is stored for this org — run the org "
-            "identity ceremony (C1) first"
+            "This organization has no signing key yet."
         )}, status_code=404)
     return JSONResponse({
         "label": member.key,
@@ -152,8 +151,7 @@ async def get_binding(request: Request) -> JSONResponse:
                             status_code=500)
     if member is None:
         return JSONResponse({"error": (
-            "this org has no auto.network binding — run the org identity "
-            "ceremony (C1) to register one"
+            "This organization is not registered on auto.network yet."
         )}, status_code=404)
     payload = member.payload
     if not payload.get("org_uuid") or not payload.get("root_pub") \
