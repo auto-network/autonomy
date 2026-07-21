@@ -338,3 +338,39 @@ class TestDesignResolvers:
         token = _token(44)
         put_grant(token, str(uuid.uuid4()), "present")
         assert serve(token) == link_serving.REFUSED
+
+
+def test_check_grant_reads_owning_scope_not_composed(monkeypatch):
+    """The serving gate reads owning scope (P2): a peer-published grant — one
+    a peer-COMPOSED read WOULD surface — must never be servable through
+    check_grant. Distinguishes the readers by RETURN VALUE (not by raising,
+    which check_grant would swallow): composed returns a VALID peer grant,
+    owning returns empty; owning scope must win. Regression for the read-scope
+    fix recovered from the retired write-guard commit."""
+    token = _token(4242)
+    peer_payload = {
+        "token": token,
+        "target_uuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "target_type": "note",
+        "meta": {},
+        "subject": {"kind": "operator", "id": "peer-op"},
+        "issued_at": _iso(time.time()),
+    }
+
+    class _Member:
+        key = token
+        payload = peer_payload
+
+    class _Composed:
+        members = [_Member()]
+
+    class _Owned:
+        members = []
+
+    monkeypatch.setattr(settings_ops, "read_set",
+                        lambda *_a, **_k: _Composed())
+    monkeypatch.setattr(settings_ops, "read_owned_set",
+                        lambda *_a, **_k: _Owned())
+    # Composed would return the valid peer grant; owning scope makes it
+    # unservable. If check_grant regressed to read_set this returns non-None.
+    assert link_serving.check_grant(token, org=ORG) is None
