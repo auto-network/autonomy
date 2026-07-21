@@ -16,6 +16,7 @@ seam (no envelope → clean error, nothing published).
 
 from __future__ import annotations
 
+import json
 import copy
 import time
 
@@ -221,7 +222,7 @@ def test_load_binding_ignores_other_orgs_published_binding(tmp_path, monkeypatch
 
     binding, error = link_approvals._load_binding("unregorg")
     assert binding is None
-    assert "has no auto.network binding" in error
+    assert "not registered on auto.network" in error
     GraphDB.close_all_pooled()
 
 
@@ -662,3 +663,89 @@ def test_revoke_end_to_end(env, session_key, session_cert, registry_app):
     # and the registry side agrees the grant is gone
     rc = TestClient(registry_app)
     assert rc.get(f"/v1/links/{token}/envelope").status_code in (404, 410)
+
+
+# ── register-on-first-publish: enrich surfaces a graceful seam, not C1 ──
+
+def _seed_org_key(org, root):
+    """Store a keyed org WITHOUT a registry binding (the D3a autonomy state)."""
+    from tools.graph.schemas.network_identity import (
+        NETWORK_ORG_KEY_SET_ID, NETWORK_ORG_KEY_REVISION)
+    from tools.network.idkit.armor import encrypt_root_key
+    settings_ops.add_setting(
+        NETWORK_ORG_KEY_SET_ID, NETWORK_ORG_KEY_REVISION, "default",
+        {"armored_private_key": encrypt_root_key(root, "org-pw-123", iterations=10_000),
+         "root_pub": root.public_hex},
+        org=org,
+    )
+
+
+def _isolated_orgs_with_peer_binding(tmp_path, monkeypatch, root, *test_orgs):
+    """Own-DB-per-org isolation + a PEER (canonical) binding published by ORG.
+
+    The peer binding is the contaminant: owning-scope reads (P2) must not
+    let *test_orgs* inherit it. Mirrors
+    ``test_load_binding_ignores_other_orgs_published_binding``.
+    """
+    from tools.graph.db import GraphDB
+
+    GraphDB.close_all_pooled()
+    orgs_dir = tmp_path / "orgs"
+    GraphDB.create_org_db(ORG, root=orgs_dir).close()
+    for o in test_orgs:
+        GraphDB.create_org_db(o, root=orgs_dir).close()
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    settings_ops.add_setting(
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry.test",
+        {
+            "org_uuid": ORG_UUID,
+            "root_pub": root.public_hex,
+            "registry_url": REGISTRY_URL,
+            "recovery_policy": {"mode": "none"},
+            "binding_expires_at": "2030-01-01T00:00:00Z",
+        },
+        org=ORG,
+        state="canonical",
+    )
+
+
+def test_keyed_unregistered_org_enrich_is_registerable_not_c1(tmp_path, monkeypatch, root):
+    """A keyed-but-unbound org: enrich flags registration_required, emits NO
+    blocking binding_error, never freezes a request (register-before-freeze),
+    and never leaks the C1 codename — even though a PEER has published a
+    binding (owning-scope read, P2)."""
+    _isolated_orgs_with_peer_binding(tmp_path, monkeypatch, root, "unregorg")
+    _seed_org_key("unregorg", root)   # unregorg owns a key, no binding of its own
+    enriched = link_approvals._enrich_link_publish({
+        "id": "r-unreg",
+        "request": {"org": "unregorg", "target_uuid": TARGET,
+                    "target_type": "present", "meta": {"ttl": 3600}},
+    })
+    assert enriched["registration_required"] is True
+    assert not enriched.get("binding_error")
+    # No staged request is frozen until a binding exists.
+    assert "registry_request" not in enriched
+    blob = json.dumps(enriched)
+    assert "C1" not in blob and "ceremony" not in blob
+    from tools.graph.db import GraphDB
+    GraphDB.close_all_pooled()
+
+
+def test_unkeyed_org_enrich_errors_cleanly_without_codename(tmp_path, monkeypatch, root):
+    """An org with no key at all is a real error — but codename-free, and NOT
+    marked registerable (that's the new-key setup path, out of scope here).
+    A peer's binding must not spoof it into looking bound (owning-scope, P2)."""
+    _isolated_orgs_with_peer_binding(tmp_path, monkeypatch, root, "nokeyorg")
+    enriched = link_approvals._enrich_link_publish({
+        "id": "r-nokey",
+        "request": {"org": "nokeyorg", "target_uuid": TARGET,
+                    "target_type": "present", "meta": {"ttl": 3600}},
+    })
+    assert enriched["registration_required"] is False
+    assert enriched.get("binding_error")            # a real error remains
+    blob = json.dumps(enriched)
+    assert "C1" not in blob and "ceremony" not in blob
+    from tools.graph.db import GraphDB
+    GraphDB.close_all_pooled()
