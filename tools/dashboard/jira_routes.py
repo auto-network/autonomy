@@ -210,7 +210,7 @@ async def run_named_query(request: Request) -> JSONResponse:
                          "jql": jql, **out})
 
 
-async def _execute_jira_write(row: dict) -> dict:
+async def _execute_jira_write(row: dict, _decision: dict) -> dict:
     """Post-approval executor for ``kind=jira_write`` (see approvals_routes:
     runs as a backend task after the operator's verdict; its return value is
     stored as ``result.execution`` and wakes the agent's held GET)."""
