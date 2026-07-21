@@ -532,7 +532,7 @@ async def _execute_link_revoke(row: dict, decision: dict) -> dict:
 
 def _drop_cached_grant(token: str, org: str | None) -> bool:
     try:
-        for m in settings_ops.read_set(NETWORK_LINK_GRANT_SET_ID, org=org).members:
+        for m in settings_ops.read_owned_set(NETWORK_LINK_GRANT_SET_ID, org=org).members:
             if m.key == token:
                 settings_ops.remove_setting(m.id, org=org)
                 return True
