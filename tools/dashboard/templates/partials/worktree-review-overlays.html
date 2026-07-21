@@ -671,7 +671,7 @@
                     :disabled="approvalBusy" @click="dismissApproval()">Cancel</button>
             <button type="button" data-testid="approval-confirm"
                     class="h-12 flex-[1.7] rounded bg-indigo-600 px-4 text-sm font-semibold text-white hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-50"
-                    :disabled="approvalBusy || approvalRequest.blockingError"
+                    :disabled="approvalBusy || (approvalRequest.blockingError && !approvalRequest.registrationRequired)"
                     @click="approveRequest()">
               <span x-show="!approvalBusy">Approve &amp; publish</span>
               <span x-show="approvalBusy" x-cloak>Publishing...</span>

@@ -5506,6 +5506,17 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
         r.desktop_attached_class = q('approval-sheet').className.indexOf('md:w-[28rem]') !== -1;
         r.mobile_bottom_class = q('approval-sheet').className.indexOf('inset-x-0') !== -1;
 
+        // Missing binding is non-blocking when the server explicitly offers
+        // register-before-freeze. Pin the rendered button condition itself:
+        // stale explanatory text must not disable inline registration.
+        data.approvalRequest.registrationRequired = true;
+        data.approvalRequest.blockingError = 'This organization is not registered yet.';
+        await tick();
+        r.inline_registration_confirm_enabled = !q('approval-confirm').disabled;
+        data.approvalRequest.registrationRequired = false;
+        data.approvalRequest.blockingError = '';
+        await tick();
+
         // Trusted preview replaces the sheet and preserves all form state.
         input('approval-password', 'preserved password');
         q('approval-session-option').click();
@@ -5634,6 +5645,9 @@ class TestApprovalRequired:
         c = self._checks
         assert c["desktop_attached_class"] is True
         assert c["mobile_bottom_class"] is True
+
+    def test_inline_registration_is_not_blocked_by_missing_binding(self):
+        assert self._checks["inline_registration_confirm_enabled"] is True
 
     def test_trusted_preview_preserves_form_and_cannot_approve(self):
         c = self._checks
