@@ -54,11 +54,20 @@
   }
 
   function _linkTtlText(ttl) {
-    if (!ttl) return 'no expiry';
-    if (ttl % 86400 === 0) return (ttl / 86400) + 'd';
-    if (ttl % 3600 === 0) return (ttl / 3600) + 'h';
-    if (ttl % 60 === 0) return (ttl / 60) + 'm';
-    return ttl + 's';
+    if (!ttl) return 'No expiration';
+    // Decompose ANY positive integer of seconds into readable components:
+    // 3600 -> "1 Hour", 604800 -> "1 Week", 10420 -> "2 Hours 53 Minutes 40 Seconds".
+    const units = [[604800, 'Week'], [86400, 'Day'], [3600, 'Hour'], [60, 'Minute'], [1, 'Second']];
+    const parts = [];
+    let rem = ttl;
+    for (const [secs, name] of units) {
+      const n = Math.floor(rem / secs);
+      if (n > 0) {
+        parts.push(n + ' ' + name + (n === 1 ? '' : 's'));
+        rem -= n * secs;
+      }
+    }
+    return parts.join(' ');
   }
 
   const _LINK_DURATION_VALUES = new Set([
@@ -165,7 +174,14 @@
     // execute path is untouched.
     if (req.registrationRequired && !rr) {
       if (!req.password) throw new Error('Enter your organization password to continue.');
-      await _registerOrgInline(req);
+      // Idempotent retry: if a prior Approve already bound the org (but the
+      // re-enrich failed before rr was set), skip registration and just
+      // re-enrich — otherwise a retry would mint a SECOND uuid and orphan the first.
+      const bq = req.orgSlug ? ('?org=' + encodeURIComponent(req.orgSlug)) : '';
+      const b = await fetch('/api/network/binding' + bq);
+      if (b.status === 404) {
+        await _registerOrgInline(req);   // not yet bound -> register the existing key inline
+      }                                  // already bound (prior attempt) -> skip, just re-enrich
       const refreshed = await (await fetch(
         '/api/approvals/' + encodeURIComponent(req.id))).json();
       rr = refreshed && refreshed.registry_request;
@@ -2180,7 +2196,7 @@
             const title = r.target_title || req.target_uuid || '?';
             const acting = r.acting_identity || {};
             const actor = r.actor_identity || {};
-            const currentDuration = r.ttl == null ? 'none' : String(r.ttl);
+            const currentDuration = r.ttl == null ? '604800' : String(r.ttl);  // default 1 week when no TTL was requested
             const customDuration = r.ttl != null && !_LINK_DURATION_VALUES.has(currentDuration);
             const duration = customDuration ? 'custom' : currentDuration;
             const approval = {
@@ -2202,6 +2218,7 @@
                   ? 'This organization changed after the request was prepared. Close it and publish again.'
                   : ''),
               error: '',
+              registrationRequired: !!r.registration_required,
               registryRequest: r.registry_request || null,
             };
             approval.allowSessionApprovals = _matchingApprovalAuthority(approval);
@@ -2415,16 +2432,27 @@
         }
       },
 
-      dismissApproval() {
+      async dismissApproval() {
         if (!this.approvalRequest || this.approvalBusy) return;
+        // Cancel must RESOLVE the server row (decline), not just hide it — else
+        // the pending request re-surfaces on every reload. Declining executes nothing.
+        const id = this.approvalRequest.id;
         this.approvalRequest = null;
+        if (id) {
+          try {
+            await fetch('/api/approvals/' + encodeURIComponent(id) + '/decision', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ approved: false }),
+            });
+          } catch (e) { /* best-effort */ }
+        }
       },
 
       closeApprovalLayer() {
         const req = this.approvalRequest;
         if (!req || this.approvalBusy) return;
         if (req.gate2 && req.previewOpen) req.previewOpen = false;
-        else this.approvalRequest = null;
+        else this.dismissApproval();  // Escape resolves the row (decline), same as Cancel
       },
 
       approvalAuthorityAvailable() {
@@ -2909,6 +2937,15 @@
       init() {
         if (this._mode === 'overlay') {
           window._worktreeReviewOverlay = this;
+          // GLOBAL approval surfacing: any pending approval foregrounds on ANY
+          // screen (not only when its requesting session is being viewed).
+          // openApprovalOverlay is idempotent, so a re-open is a no-op.
+          this._globalApprovalHandler = (d) => {
+            if (d && d.id && window.openApprovalOverlay) window.openApprovalOverlay(d.id);
+          };
+          if (typeof window.registerHandler === 'function') {
+            window.registerHandler('approval:pending', this._globalApprovalHandler);
+          }
           this.loading = false;
         } else {
           this._restoreOrg();
@@ -3022,6 +3059,10 @@
       destroy() {
         if (window._worktreeReviewOverlay === this) {
           window._worktreeReviewOverlay = null;
+        }
+        if (this._globalApprovalHandler && typeof window.unregisterHandler === 'function') {
+          window.unregisterHandler('approval:pending', this._globalApprovalHandler);
+          this._globalApprovalHandler = null;
         }
         this.disconnectCommitStickyObserver();
         this.disconnectReviewTitleObserver();
