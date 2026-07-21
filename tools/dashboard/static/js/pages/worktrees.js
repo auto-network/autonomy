@@ -2193,6 +2193,13 @@
             const session = window.AutonomyNetworkSession;
             if (session && typeof session.ready === 'function') await session.ready();
             const req = r.request || {};
+            // The API uses snake_case; keep the client-side decision state in
+            // camelCase so the approval handler can perform the
+            // register-before-freeze retry.  Reset busy state when a new
+            // approval arrives so a prior request cannot leave this button
+            // disabled globally.
+            self.approvalBusy = false;
+            const registrationRequired = !!r.registration_required;
             const title = r.target_title || req.target_uuid || '?';
             const acting = r.acting_identity || {};
             const actor = r.actor_identity || {};
@@ -2212,13 +2219,14 @@
               customDurationLabel: customDuration ? _linkTtlText(r.ttl) : '',
               password: '', showPassword: false,
               allowSessionApprovals: false,
+              registrationRequired,
               previewOpen: false, targetPreview: r.target_preview || null,
-              blockingError: r.target_error || r.binding_error ||
-                (r.binding_drift
+              blockingError: r.target_error ||
+                (registrationRequired ? '' : r.binding_error) ||
+              (r.binding_drift
                   ? 'This organization changed after the request was prepared. Close it and publish again.'
                   : ''),
               error: '',
-              registrationRequired: !!r.registration_required,
               registryRequest: r.registry_request || null,
             };
             approval.allowSessionApprovals = _matchingApprovalAuthority(approval);
