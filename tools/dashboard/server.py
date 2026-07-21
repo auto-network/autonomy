@@ -13004,6 +13004,8 @@ async def api_graph_settings_list(request):
     if err:
         return JSONResponse({"error": err}, status_code=400)
     org = _caller_org(request)
+    peers_param = request.query_params.get("peers")
+    peers = [p for p in peers_param.split(",") if p] if peers_param is not None else None
     if os.environ.get("DASHBOARD_MOCK"):
         from tools.dashboard.dao import mock as dao_mock
         return JSONResponse({
@@ -13012,7 +13014,7 @@ async def api_graph_settings_list(request):
         })
     members = graph_ops.read_set(
         set_id, target_revision=target, min_revision=minrev,
-        org=org or graph_ops.CALLER_ORG,
+        org=org or graph_ops.CALLER_ORG, peers=peers,
     )
     out = members.as_payload()
     if stored is not None:
