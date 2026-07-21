@@ -501,11 +501,11 @@ def create_app(
         t = now()
         _verify_envelope_signature(envelope, "POST", str(request.url.path), t)
 
-        existing = store.get_org(org_uuid)
-        if existing is not None and existing.expires_at >= t:
-            # First key claims the UUID; names are not authority (§4.1).
-            raise HTTPException(status_code=409, detail="org UUID is already bound")
-        store.create_org(
+        # Atomic first-claim (F1): the existence check and the INSERT happen
+        # under one held lock, so two concurrent registrations cannot both
+        # pass the check. A live binding on the UUID → 409; an expired one is
+        # atomically reclaimed. Names are not authority (§4.1).
+        outcome = store.claim_org(
             org_uuid,
             root_pub,
             policy,
@@ -513,8 +513,9 @@ def create_app(
             now=t,
             expires_at=t + ttl,
             endpoint_hints=endpoint_hints,
-            replacing_expired=existing is not None,
         )
+        if outcome == "conflict_live":
+            raise HTTPException(status_code=409, detail="org UUID is already bound")
         return {"org_uuid": org_uuid, "root_pub": root_pub, "expires_at": t + ttl}
 
     # -- §4.2 renew (heartbeat) ----------------------------------------------
@@ -583,12 +584,79 @@ def create_app(
 
         store.rebind_org(org_uuid, binding.root_pub, new_root_pub, now=t)
         if new_policy != binding.recovery_policy or new_recovery_pub != binding.recovery_pub:
-            store.update_recovery_policy(org_uuid, new_policy, new_recovery_pub)
+            # Shared monotonic counter across policy-update and rebind (F1):
+            # bump the epoch so a concurrent policy envelope's CAS fails.
+            store.update_recovery_policy(
+                org_uuid, new_policy, new_recovery_pub,
+                expected_epoch=binding.policy_epoch,
+                new_epoch=binding.policy_epoch + 1,
+            )
         return {
             "org_uuid": org_uuid,
             "root_pub": new_root_pub,
             "previous_root_pub": binding.root_pub,
             "recovery_policy": new_policy,
+        }
+
+    # -- recovery-policy update (sovereign, root-signed) ----------------------
+
+    @app.post("/v1/orgs/{org_uuid}/policy")
+    async def update_policy(org_uuid: str, request: Request):
+        """Root-signed recovery-policy update (SOVEREIGN model): the current
+        root sets / changes / REMOVES recovery freely, proven by a root-direct
+        signature — no third party constrains it. This is NOT a rebind:
+        root_pub is unchanged (rebind, which recovers to a NEW root for a lost
+        key, stays recovery-key-signed; I3). A monotonic ``policy_epoch``
+        (compare-and-swap) blocks replay/downgrade of an old policy envelope.
+        """
+        t = now()
+        binding = _require_binding(store, org_uuid, t)
+
+        envelope = _parse_envelope(await _read_json(request))
+        payload = envelope["payload"]
+        _require_fields(
+            payload,
+            allowed=frozenset({"recovery_policy", "recovery_pub", "policy_epoch"}),
+            required=frozenset({"recovery_policy", "policy_epoch"}),
+            what="policy payload",
+        )
+        # Root-direct, signed by the CURRENT bound root — not a delegate, not
+        # the recovery key. Possession of the root IS the authority.
+        if envelope.get("cert") is not None:
+            raise _forbidden("policy update is root-direct: the envelope must carry no cert")
+        if envelope["signer"] != binding.root_pub:
+            raise _forbidden("policy update must be signed by the org's current bound root")
+        _verify_envelope_signature(envelope, "POST", str(request.url.path), t)
+
+        new_policy, new_recovery_pub = _parse_recovery_policy(payload)
+
+        epoch = payload["policy_epoch"]
+        if type(epoch) is not int:
+            raise _bad_request("policy_epoch must be an integer")
+        # Strict monotonic +1: rejects replay of an old envelope and any
+        # downgrade to a stale epoch. The client reads the current epoch from
+        # the binding and submits exactly current+1.
+        if epoch != binding.policy_epoch + 1:
+            raise HTTPException(status_code=409, detail=(
+                f"stale policy_epoch: expected {binding.policy_epoch + 1}, got {epoch} "
+                "— re-read the binding and retry; an old policy envelope cannot replay"
+            ))
+
+        ok = store.update_recovery_policy(
+            org_uuid, new_policy, new_recovery_pub,
+            expected_epoch=binding.policy_epoch, new_epoch=epoch,
+        )
+        if not ok:
+            # The CAS lost a race: a concurrent policy update or rebind bumped
+            # the epoch between our read and our write.
+            raise HTTPException(status_code=409, detail=(
+                "policy update lost a concurrent race — re-read the binding and retry"
+            ))
+        return {
+            "org_uuid": org_uuid,
+            "recovery_policy": new_policy,
+            "recovery_pub": new_recovery_pub,
+            "policy_epoch": epoch,
         }
 
     # -- §4.4 links ------------------------------------------------------------

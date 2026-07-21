@@ -60,7 +60,11 @@ CREATE TABLE IF NOT EXISTS orgs (
     created_at      INTEGER NOT NULL,
     expires_at      INTEGER NOT NULL,
     renewed_at      INTEGER,
-    endpoint_hints  TEXT
+    endpoint_hints  TEXT,
+    -- Monotonic recovery-policy version. Bumped by every root-signed policy
+    -- update AND by rebind (one shared counter), compared-and-swapped so an
+    -- old policy envelope cannot be replayed (registry policy-update, F1/F2).
+    policy_epoch    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS rebinds (
@@ -259,6 +263,7 @@ class OrgBinding:
     expires_at: int
     renewed_at: Optional[int]
     endpoint_hints: Optional[list]
+    policy_epoch: int = 0
 
 
 @dataclass(frozen=True)
@@ -329,7 +334,18 @@ class RegistryStore:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Idempotent additive migrations for pre-existing registry DBs —
+        ``CREATE TABLE IF NOT EXISTS`` never adds a column to an existing
+        table. Runs once at construction, before any concurrent access."""
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(orgs)")}
+        if "policy_epoch" not in cols:
+            self._conn.execute(
+                "ALTER TABLE orgs ADD COLUMN policy_epoch INTEGER NOT NULL DEFAULT 0"
+            )
 
     @_locked
     def close(self) -> None:
@@ -351,6 +367,7 @@ class RegistryStore:
             expires_at=row["expires_at"],
             renewed_at=row["renewed_at"],
             endpoint_hints=json.loads(row["endpoint_hints"]) if row["endpoint_hints"] else None,
+            policy_epoch=row["policy_epoch"],
         )
 
     @_locked
@@ -387,8 +404,8 @@ class RegistryStore:
             self._conn.execute("DELETE FROM link_view_attributions WHERE org_uuid = ?", (org_uuid,))
         self._conn.execute(
             "INSERT INTO orgs (org_uuid, root_pub, recovery_policy, recovery_pub,"
-            " created_at, expires_at, renewed_at, endpoint_hints)"
-            " VALUES (?, ?, ?, ?, ?, ?, NULL, ?)",
+            " created_at, expires_at, renewed_at, endpoint_hints, policy_epoch)"
+            " VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 0)",
             (
                 org_uuid,
                 root_pub,
@@ -423,13 +440,57 @@ class RegistryStore:
 
     @_locked
     def update_recovery_policy(
-        self, org_uuid: str, recovery_policy: str, recovery_pub: Optional[str]
-    ) -> None:
-        self._conn.execute(
-            "UPDATE orgs SET recovery_policy = ?, recovery_pub = ? WHERE org_uuid = ?",
-            (recovery_policy, recovery_pub, org_uuid),
+        self,
+        org_uuid: str,
+        recovery_policy: str,
+        recovery_pub: Optional[str],
+        *,
+        expected_epoch: int,
+        new_epoch: int,
+    ) -> bool:
+        """Atomic compare-and-swap of the recovery policy on ``policy_epoch``
+        (F1). The write only lands if the stored epoch still equals
+        ``expected_epoch``; returns ``False`` on mismatch (a concurrent
+        update or a stale/replayed request won the race). The epoch is the
+        shared monotonic counter across policy-update and rebind, so this
+        also serializes policy-vs-rebind."""
+        cur = self._conn.execute(
+            "UPDATE orgs SET recovery_policy = ?, recovery_pub = ?, policy_epoch = ? "
+            "WHERE org_uuid = ? AND policy_epoch = ?",
+            (recovery_policy, recovery_pub, new_epoch, org_uuid, expected_epoch),
         )
         self._conn.commit()
+        return cur.rowcount > 0
+
+    @_locked
+    def claim_org(
+        self,
+        org_uuid: str,
+        root_pub: str,
+        recovery_policy: str,
+        recovery_pub: Optional[str],
+        *,
+        now: int,
+        expires_at: int,
+        endpoint_hints: Optional[list] = None,
+    ) -> str:
+        """Atomic first-claim (F1/Codex): check existence + expiry and INSERT
+        under ONE held lock, so two concurrent claims cannot both pass the
+        existence check (the register_org get-then-create TOCTOU). Returns
+        ``"conflict_live"`` (a live binding already holds the UUID — no
+        write), ``"reclaimed_expired"`` (an expired binding was atomically
+        replaced), or ``"claimed"`` (fresh). The RLock is held across the
+        whole body, so get_org/create_org here are one atomic transaction."""
+        existing = self.get_org(org_uuid)
+        if existing is not None and existing.expires_at >= now:
+            return "conflict_live"
+        replacing = existing is not None
+        self.create_org(
+            org_uuid, root_pub, recovery_policy, recovery_pub,
+            now=now, expires_at=expires_at, endpoint_hints=endpoint_hints,
+            replacing_expired=replacing,
+        )
+        return "reclaimed_expired" if replacing else "claimed"
 
     @_locked
     def rebind_history(self, org_uuid: str) -> list:

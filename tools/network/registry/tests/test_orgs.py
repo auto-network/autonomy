@@ -184,3 +184,90 @@ class TestRebindI3:
         assert signed(client, "POST", f"/v1/orgs/{ORG}/rebind", recovery,
                       {"new_root_pub": KeyPair.generate().public_hex}, clock
                       ).status_code == 403
+
+
+# -- recovery-policy update (sovereign, root-signed) --------------------------
+
+class TestPolicyUpdate:
+    """The root, in possession of its key, freely sets/changes/removes its
+    recovery policy — proof of key control IS the authority (sovereign
+    model). Monotonic policy_epoch blocks replay/downgrade."""
+
+    def _policy(self, client, clock, key, epoch, policy,
+                recovery_pub=None, org=ORG, expect=None, cert=None):
+        payload = {"recovery_policy": policy, "policy_epoch": epoch}
+        if recovery_pub is not None:
+            payload["recovery_pub"] = recovery_pub
+        return signed(client, "POST", f"/v1/orgs/{org}/policy", key, payload,
+                      clock, cert=cert, expect=expect)
+
+    def test_root_adds_recovery_to_a_none_org_reversing_none(self, client, clock, root, recovery):
+        # The whole point: 'none' registered inline is REVERSIBLE by the root.
+        register(client, clock, root, policy="none")                     # epoch 0
+        r = self._policy(client, clock, root, 1, "recovery-key", recovery.public_hex)
+        assert r.status_code == 200, r.json()
+        assert r.json()["recovery_policy"] == "recovery-key"
+        assert r.json()["policy_epoch"] == 1
+        # ...and rebind (recovery-key path) is now available — 'none' was reversed.
+        assert signed(client, "POST", f"/v1/orgs/{ORG}/rebind", recovery,
+                      {"new_root_pub": KeyPair.generate().public_hex}, clock
+                      ).status_code == 200
+
+    def test_root_removes_recovery(self, client, clock, root, recovery):
+        register(client, clock, root, policy="recovery-key",
+                 recovery_pub=recovery.public_hex)                        # epoch 0
+        assert self._policy(client, clock, root, 1, "none").status_code == 200
+        # After removal, the recovery-key rebind path is structurally gone.
+        assert signed(client, "POST", f"/v1/orgs/{ORG}/rebind", recovery,
+                      {"new_root_pub": KeyPair.generate().public_hex}, clock
+                      ).status_code == 403
+
+    def test_only_the_bound_root_can_update_policy(self, client, clock, root, recovery):
+        register(client, clock, root, policy="none")
+        imposter = KeyPair.generate()
+        self._policy(client, clock, imposter, 1, "recovery-key",
+                     recovery.public_hex, expect=403)
+
+    def test_recovery_key_cannot_update_policy(self, client, clock, root, recovery):
+        # policy update is root-signed; the recovery key is for rebind only.
+        register(client, clock, root, policy="recovery-key",
+                 recovery_pub=recovery.public_hex)
+        self._policy(client, clock, recovery, 1, "none", expect=403)
+
+    def test_delegated_cert_cannot_update_policy(self, client, clock, root, recovery):
+        register(client, clock, root, policy="none")
+        delegate = KeyPair.generate()
+        cert = issue_cert(
+            root, delegate.public_hex, scope=SESSION_SCOPE, org=ORG,
+            subject=Subject("operator", "op-1"),
+            not_before=NOW - 100, not_after=NOW + DAY,
+        )
+        self._policy(client, clock, delegate, 1, "recovery-key",
+                     recovery.public_hex, cert=cert, expect=403)
+
+    def test_stale_epoch_is_rejected_no_replay(self, client, clock, root, recovery):
+        register(client, clock, root, policy="none")                     # epoch 0
+        self._policy(client, clock, root, 1, "recovery-key",
+                     recovery.public_hex, expect=200)                     # -> epoch 1
+        # Replaying an old epoch (a captured 'set none' downgrade) is refused.
+        self._policy(client, clock, root, 1, "none", expect=409)
+        self._policy(client, clock, root, 0, "none", expect=409)
+
+    def test_epoch_must_be_exactly_plus_one(self, client, clock, root, recovery):
+        register(client, clock, root, policy="none")                     # epoch 0
+        self._policy(client, clock, root, 5, "recovery-key",
+                     recovery.public_hex, expect=409)                     # gap rejected
+
+    def test_recovery_key_policy_requires_recovery_pub(self, client, clock, root):
+        register(client, clock, root, policy="none")
+        self._policy(client, clock, root, 1, "recovery-key", expect=400)
+
+    def test_policy_update_on_expired_binding_410(self, client, clock, root, recovery):
+        register(client, clock, root, policy="none", ttl=HOUR)
+        clock.advance(HOUR + 1)
+        self._policy(client, clock, root, 1, "recovery-key",
+                     recovery.public_hex, expect=410)
+
+    def test_policy_update_unknown_org_404(self, client, clock, root):
+        self._policy(client, clock, root, 1, "none",
+                     org="44444444-4444-4444-8444-444444444444", expect=404)
