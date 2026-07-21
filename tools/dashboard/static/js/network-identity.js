@@ -180,17 +180,21 @@
 
   // ── server calls ───────────────────────────────────────────────────
 
-  async function _fetchJsonOrNull(url) {
-    var resp = await fetch(url);
+  async function _fetchJsonOrNull(url, org) {
+    // auto.network routes scope by X-Graph-Org; plain fetch carries none, so
+    // a bare ?org= is refused cross-org. Pass the org header explicitly.
+    var resp = await fetch(url, org ? { headers: { 'X-Graph-Org': org } } : undefined);
     if (resp.status === 404) return null;
     var body = await resp.json().catch(function () { return {}; });
     if (!resp.ok) throw new Error(body.error || ('request failed: ' + url));
     return body;
   }
 
-  async function _postJson(url, body) {
+  async function _postJson(url, body, org) {
+    var _h = { 'Content-Type': 'application/json' };
+    if (org) _h['X-Graph-Org'] = org;
     var resp = await fetch(url, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: _h,
       body: JSON.stringify(body),
     });
     var data = await resp.json().catch(function () { return {}; });
@@ -211,9 +215,14 @@
 
   async function open(opts) {
     opts = opts || {};
-    var orgQ = opts.org ? ('?org=' + encodeURIComponent(opts.org)) : '';
+    // Target the current shell org so the create/register calls land on the
+    // right DB (and the X-Graph-Org header matches), not the scopeless default.
+    var _org = opts.org
+      || (window.Autonomy && (window.Autonomy._activePluginOrg || window.Autonomy._activeShellOrg))
+      || null;
+    var orgQ = _org ? ('?org=' + encodeURIComponent(_org)) : '';
     W = {
-      org: opts.org || null, step: 'loading', busy: false, error: null,
+      org: _org, step: 'loading', busy: false, error: null,
       registryUrl: null, orgKey: null, binding: null,
       orgUuid: null, rootPub: null, rootKey: null, armor: null,
       armorStored: false, recovery: 'none', recoveryPub: null,
@@ -223,9 +232,9 @@
     document.addEventListener('keydown', _onKeydown);
     try {
       var results = await Promise.all([
-        _fetchJsonOrNull('/api/network/registry'),
-        _fetchJsonOrNull('/api/network/org-key' + orgQ),
-        _fetchJsonOrNull('/api/network/binding' + orgQ),
+        _fetchJsonOrNull('/api/network/registry', _org),
+        _fetchJsonOrNull('/api/network/org-key' + orgQ, _org),
+        _fetchJsonOrNull('/api/network/binding' + orgQ, _org),
       ]);
       if (!W) return;   // closed while loading
       W.registryUrl = results[0] ? results[0].registry_url : null;
@@ -276,7 +285,7 @@
     // registered but not stored dies with this tab.
     await _postJson('/api/network/org-key', {
       org: W.org, armored_private_key: W.armor, root_pub: W.rootPub,
-    });
+    }, W.org);
     W.armorStored = true;
   }
 
@@ -319,7 +328,7 @@
     var envelope = await signRegistration(W.rootKey, W.rootPub, payload);
     var result = await _postJson('/api/network/register', {
       org: W.org, envelope: envelope,
-    });
+    }, W.org);
     W.resultBinding = result.binding;
     W.rootKey = null;         // ceremony over; the armor is the survivor
     W.recoveryBlock = null;   // rendered copy is the operator's now
