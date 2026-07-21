@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Set up organization key — auto.network</title>
+<!-- Reuses the SAME armor/keygen/register code as the dashboard ceremony. -->
+<script src="/static/js/network-signon.js"></script>
+<script src="/static/js/network-identity.js"></script>
+<style>
+  body{background:#0b0f17;color:#e5e7eb;font-family:-apple-system,system-ui,sans-serif;margin:0;padding:24px;max-width:520px;margin:0 auto}
+  h1{font-size:1.25rem;margin:.2rem 0 .4rem} p{color:#9ca3af;font-size:.9rem;line-height:1.5}
+  label{display:block;font-size:.85rem;margin:1.2rem 0 .3rem;color:#d1d5db}
+  input{width:100%;box-sizing:border-box;padding:.7rem .8rem;border-radius:8px;border:1px solid #374151;background:#111827;color:#e5e7eb;font-size:1rem}
+  button{margin-top:1.4rem;width:100%;padding:.8rem;border:0;border-radius:8px;background:#4f46e5;color:#fff;font-size:1rem;font-weight:600}
+  button:disabled{opacity:.5}
+  .ok{color:#34d399} .err{color:#f87171;white-space:pre-wrap}
+  code{background:#111827;padding:.1rem .3rem;border-radius:4px;font-size:.8rem}
+  #out{margin-top:1.2rem;font-size:.85rem;line-height:1.6}
+</style></head>
+<body>
+  <h1>Set up your organization's auto.network key</h1>
+  <p>This creates a fresh signing key for <strong id="org">…</strong>, sealed with a password you
+  choose, and registers the org. Use a NEW strong password and <strong>save it</strong> — it is the
+  only thing that can unlock this key. It is separate from your personal / sign-in password.</p>
+
+  <label for="org-input">Organization slug</label>
+  <input id="org-input" value="autonomy" autocomplete="off">
+  <label for="pw1">New organization password</label>
+  <input id="pw1" type="password" autocomplete="new-password" placeholder="paste a fresh saved password">
+  <label for="pw2">Confirm password</label>
+  <input id="pw2" type="password" autocomplete="new-password">
+  <button id="go">Create key &amp; register</button>
+  <div id="out"></div>
+
+<script>
+(function () {
+  var out = document.getElementById('out');
+  var btn = document.getElementById('go');
+  var orgIn = document.getElementById('org-input');
+  document.getElementById('org').textContent = orgIn.value || 'this organization';
+  orgIn.addEventListener('input', function(){ document.getElementById('org').textContent = orgIn.value || 'this organization'; });
+
+  function say(html, cls){ out.innerHTML = '<span class="'+(cls||'')+'">'+html+'</span>'; }
+
+  btn.addEventListener('click', async function () {
+    var ORG = orgIn.value.trim();
+    var p1 = document.getElementById('pw1').value, p2 = document.getElementById('pw2').value;
+    if (!ORG) return say('Enter the organization slug.', 'err');
+    if (p1.length < 8) return say('Use a password of at least 8 characters.', 'err');
+    if (p1 !== p2) return say('The two passwords do not match.', 'err');
+    var I = window.AutonomyNetworkIdentity && window.AutonomyNetworkIdentity._internals;
+    var S = window.AutonomyNetworkSession && window.AutonomyNetworkSession._internals;
+    if (!I || !S) return say('Crypto modules failed to load — reload the page.', 'err');
+    btn.disabled = true;
+    var H = { 'X-Graph-Org': ORG, 'Content-Type': 'application/json' };
+    try {
+      say('Checking existing key…');
+      var existing = await fetch('/api/network/org-key?org=' + encodeURIComponent(ORG), { headers: { 'X-Graph-Org': ORG } });
+      if (existing.ok) { btn.disabled = false; return say('This org already has a key. Remove it first, or this would refuse to overwrite.', 'err'); }
+
+      say('Generating key + sealing with your password…');
+      var kp = await I.generateEd25519();
+      var pub = kp.pubHex;
+      var armor = await I.armorSeed(kp.seed, pub, p1, 600000);
+
+      say('Storing the encrypted key…');
+      var r1 = await fetch('/api/network/org-key', { method: 'POST', headers: H, body: JSON.stringify({ org: ORG, armored_private_key: armor }) });
+      var b1 = await r1.json().catch(function(){return {};});
+      if (!r1.ok || b1.ok === false) throw new Error('store key: ' + (b1.error || r1.status));
+
+      say('Signing registration with your key…');
+      var opened = await S.decryptArmor(armor, p1);   // proves the password decrypts what we just stored
+      var rootKey = await I.importSigningKey(opened.seed);
+      var payload = { org_uuid: crypto.randomUUID(), root_pub: opened.rootPub, recovery_policy: 'none' };
+      var envelope = await I.signRegistration(rootKey, opened.rootPub, payload);
+
+      say('Registering on auto.network…');
+      var r2 = await fetch('/api/network/register', { method: 'POST', headers: H, body: JSON.stringify({ org: ORG, envelope: envelope }) });
+      var b2 = await r2.json().catch(function(){return {};});
+      if (!r2.ok || b2.ok === false) throw new Error('register: ' + (b2.error || r2.status));
+
+      say('<strong class="ok">Done.</strong> ' + ORG + ' now has an auto.network key you control and is registered.<br>'
+        + 'root_pub <code>' + opened.rootPub.slice(0,16) + '…</code>, org_uuid <code>' + (b2.binding && b2.binding.org_uuid) + '</code>.<br>'
+        + 'Save the password you just used. You can now close this and publish a share link.', 'ok');
+    } catch (e) {
+      btn.disabled = false;
+      say('Failed: ' + (e && e.message ? e.message : String(e)), 'err');
+    }
+  });
+})();
+</script>
+</body></html>
