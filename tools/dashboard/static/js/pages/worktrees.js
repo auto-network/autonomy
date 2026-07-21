@@ -124,10 +124,11 @@
       throw new Error('Registration is unavailable in this browser. Reload and try again.');
     }
     const S = session._internals, I = identity._internals;
+    const orgHeaders = req.orgSlug ? { 'X-Graph-Org': req.orgSlug } : {};
     const orgQ = req.orgSlug ? ('?org=' + encodeURIComponent(req.orgSlug)) : '';
-    const keyResp = await fetch('/api/network/org-key' + orgQ);
+    const keyResp = await fetch('/api/network/org-key' + orgQ, { headers: orgHeaders });
     if (!keyResp.ok) {
-      throw new Error('Could not load this organization\'s signing key.');
+      throw new Error('Could not load this organization\'s signing key (' + keyResp.status + ').');
     }
     const orgKey = await keyResp.json();
     if (!orgKey.armored_private_key) {
@@ -144,12 +145,13 @@
       };
       const envelope = await I.signRegistration(rootKey, opened.rootPub, payload);
       const resp = await fetch('/api/network/register', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, orgHeaders),
         body: JSON.stringify({ org: req.orgSlug, envelope: envelope }),
       });
       const body = await resp.json().catch(function () { return {}; });
       if (!resp.ok || body.ok === false) {
-        throw new Error(body.error || 'Registration was refused. Try again.');
+        throw new Error(body.error || ('Registration was refused (' + resp.status + ').'));
       }
     } finally {
       if (opened && opened.seed) { opened.seed.fill(0); opened.seed = null; }
@@ -174,19 +176,37 @@
     // execute path is untouched.
     if (req.registrationRequired && !rr) {
       if (!req.password) throw new Error('Enter your organization password to continue.');
-      // Idempotent retry: if a prior Approve already bound the org (but the
-      // re-enrich failed before rr was set), skip registration and just
-      // re-enrich — otherwise a retry would mint a SECOND uuid and orphan the first.
+      // On-the-fly registration: register this org's EXISTING key inline in
+      // the SAME Approve, invisibly. auto.network routes scope by the
+      // X-Graph-Org header (a bare ?org= is refused cross-org without it), so
+      // every call below carries it. Only SKIP registration if the org is
+      // DEFINITIVELY already bound (a valid 200 binding from a prior half-
+      // completed Approve); ANY other response (404, a scope 403, an error)
+      // means "not confirmed bound" -> register. Never guess "bound" from a
+      // non-200 and silently skip.
+      const orgHeaders = req.orgSlug ? { 'X-Graph-Org': req.orgSlug } : {};
       const bq = req.orgSlug ? ('?org=' + encodeURIComponent(req.orgSlug)) : '';
-      const b = await fetch('/api/network/binding' + bq);
-      if (b.status === 404) {
-        await _registerOrgInline(req);   // not yet bound -> register the existing key inline
-      }                                  // already bound (prior attempt) -> skip, just re-enrich
-      const refreshed = await (await fetch(
-        '/api/approvals/' + encodeURIComponent(req.id))).json();
-      rr = refreshed && refreshed.registry_request;
+      let alreadyBound = false;
+      try {
+        const b = await fetch('/api/network/binding' + bq, { headers: orgHeaders });
+        if (b.ok) {
+          const bj = await b.json().catch(function () { return {}; });
+          alreadyBound = !!(bj && bj.org_uuid && bj.root_pub && bj.registry_url);
+        }
+      } catch (e) { /* unreachable -> treat as not bound, register */ }
+      if (!alreadyBound) await _registerOrgInline(req);
+      // Wait for the publish request to freeze against the now-live binding
+      // (covers read-after-write timing). Invisible -- it just completes; no
+      // "try again" is ever surfaced to the operator.
+      for (let attempt = 0; attempt < 15 && !rr; attempt++) {
+        const refreshed = await (await fetch(
+          '/api/approvals/' + encodeURIComponent(req.id))).json();
+        rr = refreshed && refreshed.registry_request;
+        if (!rr) await new Promise(function (resolve) { setTimeout(resolve, 200); });
+      }
       if (!rr) {
-        throw new Error('Your organization is registered. Reopen this request and publish.');
+        throw new Error('Registered your organization, but the publish request '
+          + 'did not prepare against the new binding.');
       }
       req.registryRequest = rr;
     }
