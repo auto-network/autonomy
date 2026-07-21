@@ -87,11 +87,69 @@
   // Gate 2 unlocks org authority only for the concrete action being reviewed.
   // The passphrase and root plaintext stay inside network-signon.js; this
   // function receives only a signed envelope back.
-  async function _signLinkDecision(self, req) {
-    const rr = req.registryRequest;
-    if (!rr) {
-      throw new Error('This request is missing its auto.network details. Close it and try again.');
+  // recovery_policy is 'none' (operator decision: recovery is a sovereign,
+  // root-mutable policy — the root holder can ADD recovery later via a
+  // root-signed policy update). NB the policy-update path that makes 'none'
+  // reversible is a SEPARATE registry companion (registry.auto.network +
+  // redeploy); until it deploys, 'none' is not yet reversible in the LIVE
+  // registry, so this flow must not promise "add recovery later" in the UI.
+  const INLINE_RECOVERY_POLICY = 'none';
+
+  // Inline first-publish registration (register-before-freeze). Reuses the
+  // EXISTING root-signed registration ceremony via exposed internals — no new
+  // crypto: decrypt the org armor with the operator's password, sign a
+  // root-direct registration envelope, POST it to the server route (which
+  // verifies signer==root_pub, matches the stored key, and forwards to the
+  // registry that verifies the signature and returns the binding). The root
+  // plaintext is zeroed before this returns (I1).
+  async function _registerOrgInline(req) {
+    if (!INLINE_RECOVERY_POLICY) {
+      throw new Error(
+        'First-publish registration is not enabled yet — the organization ' +
+        'recovery policy is still being decided. Register from the ' +
+        'getting-started flow for now.');
     }
+    const session = window.AutonomyNetworkSession;
+    const identity = window.AutonomyNetworkIdentity;
+    if (!session || !session._internals || !identity || !identity._internals) {
+      throw new Error('Registration is unavailable in this browser. Reload and try again.');
+    }
+    const S = session._internals, I = identity._internals;
+    const orgQ = req.orgSlug ? ('?org=' + encodeURIComponent(req.orgSlug)) : '';
+    const keyResp = await fetch('/api/network/org-key' + orgQ);
+    if (!keyResp.ok) {
+      throw new Error('Could not load this organization\'s signing key.');
+    }
+    const orgKey = await keyResp.json();
+    if (!orgKey.armored_private_key) {
+      throw new Error('This organization has no signing key to register.');
+    }
+    const opened = await S.decryptArmor(orgKey.armored_private_key, req.password);
+    let rootKey = null;
+    try {
+      rootKey = await I.importSigningKey(opened.seed);
+      const payload = {
+        org_uuid: crypto.randomUUID(),
+        root_pub: opened.rootPub,
+        recovery_policy: INLINE_RECOVERY_POLICY,
+      };
+      const envelope = await I.signRegistration(rootKey, opened.rootPub, payload);
+      const resp = await fetch('/api/network/register', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ org: req.orgSlug, envelope: envelope }),
+      });
+      const body = await resp.json().catch(function () { return {}; });
+      if (!resp.ok || body.ok === false) {
+        throw new Error(body.error || 'Registration was refused. Try again.');
+      }
+    } finally {
+      if (opened && opened.seed) { opened.seed.fill(0); opened.seed = null; }
+      rootKey = null;   // I1: drop the root; the armor is the survivor
+    }
+  }
+
+  async function _signLinkDecision(self, req) {
+    let rr = req.registryRequest;
     const session = window.AutonomyNetworkSession;
     const signer = window.AutonomyNetworkSigner;
     if (!session || typeof session.signOn !== 'function' ||
@@ -99,6 +157,26 @@
       throw new Error('Approval is unavailable in this browser. Reload the dashboard and try again.');
     }
     if (typeof session.ready === 'function') await session.ready();
+
+    // Register-before-freeze: a keyed-but-unregistered org registers its
+    // EXISTING key inline (the password just entered unlocks it), then a
+    // re-enrich freezes the publish against the now-live binding. Nothing is
+    // frozen or executed before the binding exists, so the confused-deputy
+    // execute path is untouched.
+    if (req.registrationRequired && !rr) {
+      if (!req.password) throw new Error('Enter your organization password to continue.');
+      await _registerOrgInline(req);
+      const refreshed = await (await fetch(
+        '/api/approvals/' + encodeURIComponent(req.id))).json();
+      rr = refreshed && refreshed.registry_request;
+      if (!rr) {
+        throw new Error('Your organization is registered. Reopen this request and publish.');
+      }
+      req.registryRequest = rr;
+    }
+    if (!rr) {
+      throw new Error('This request is missing its auto.network details. Close it and try again.');
+    }
 
     let retained = _matchingApprovalAuthority(req);
     if (!retained) {
