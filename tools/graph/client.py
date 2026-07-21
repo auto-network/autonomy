@@ -684,7 +684,7 @@ class HttpClient:
             return result["set_ids"]
         return result if isinstance(result, list) else []
 
-    def read_set(self, set_id, *, org, target_revision=None, min_revision=None):
+    def read_set(self, set_id, *, org, peers=None, target_revision=None, min_revision=None):
         from .settings_ops import SetMembers, ResolvedSetting, DropAccounting
         org = _resolve_client_org_arg(org)
         params: dict[str, Any] = {}
@@ -692,6 +692,8 @@ class HttpClient:
             params["as_rev"] = str(target_revision)
         if min_revision is not None:
             params["min_rev"] = str(min_revision)
+        if peers is not None:
+            params["peers"] = ",".join(peers)
         result = self._request(
             "GET", f"/api/graph/settings/{set_id}",
             params=params, headers=_settings_headers(org),

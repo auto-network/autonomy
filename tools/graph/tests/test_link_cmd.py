@@ -193,3 +193,40 @@ def test_revoke_wants_a_real_token(operator_env, capsys):
     with pytest.raises(SystemExit):
         link_cmd.cmd_link_revoke(argparse.Namespace(target="oops", org=ORG))
     assert "not a grant token" in capsys.readouterr().err
+
+
+def test_link_list_hides_peer_published_grant(tmp_path, monkeypatch, capsys):
+    """`graph link list` shows only THIS org's own grants — a peer-published
+    grant row must never appear (owning-scope read, P2). Uses real per-org
+    DBs so the peer's canonical grant IS peer-visible; owning scope must
+    still exclude it."""
+    from tools.graph.db import GraphDB
+    from tools.graph import client as graph_client
+    from tools.graph.schemas.network_identity import (
+        NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION)
+
+    GraphDB.close_all_pooled()
+    orgs_dir = tmp_path / "orgs"
+    GraphDB.create_org_db(ORG, root=orgs_dir).close()
+    GraphDB.create_org_db("peerorg", root=orgs_dir).close()
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    monkeypatch.setattr(graph_client, "_FORCE_HOST_DIRECT", True)
+
+    peer_token = "d" * 32
+    settings_ops.add_setting(
+        NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, peer_token,
+        {"token": peer_token, "target_uuid": TARGET, "target_type": "note",
+         "meta": {}, "subject": {"kind": "operator", "id": "peer"},
+         "issued_at": "2026-01-01T00:00:00Z"},
+        org="peerorg", state="canonical",
+    )
+
+    # ORG owns no grants; a composed read would surface peerorg's canonical
+    # grant, owning-scope must not.
+    link_cmd.cmd_link_list(argparse.Namespace(org=ORG))
+    out = capsys.readouterr().out
+    assert peer_token not in out
+    assert "no share-link grants cached" in out
+    GraphDB.close_all_pooled()

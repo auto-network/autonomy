@@ -213,14 +213,16 @@ def cmd_link_list(args) -> None:
 
     org = _resolve_org(args)
     client = get_client()
-    members = list(client.read_set(NETWORK_LINK_GRANT_SET_ID, org=org))
+    # Owning-scope (P2): 'graph link list' shows only THIS org's own grants
+    # and binding — a peer-published grant/binding row must never appear.
+    members = list(client.read_set(NETWORK_LINK_GRANT_SET_ID, org=org, peers=[]))
     if not members:
         print("  no share-link grants cached for this org")
         return
 
     registry_url = None
     try:
-        bindings = sorted(client.read_set(NETWORK_BINDING_SET_ID, org=org),
+        bindings = sorted(client.read_set(NETWORK_BINDING_SET_ID, org=org, peers=[]),
                           key=lambda m: m.key)
         if bindings:
             registry_url = (bindings[0].payload or {}).get("registry_url")
