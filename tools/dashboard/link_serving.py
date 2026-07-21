@@ -144,7 +144,12 @@ def check_grant(token: str, *, org: str | None = None, now: float | None = None)
     if not isinstance(token, str) or not _TOKEN_RE.match(token):
         return None
     try:
-        members = settings_ops.read_set(NETWORK_LINK_GRANT_SET_ID, org=org).members
+        # Owning-scope read (P2): the serving gate must consult only THIS
+        # org's own grant cache. A peer-published grant row must never be
+        # servable through check_grant — token->bytes authorization cannot
+        # compose across orgs. (Recovered from the retired write-guard
+        # commit, which had bundled this read-scope fix with its write wrap.)
+        members = settings_ops.read_owned_set(NETWORK_LINK_GRANT_SET_ID, org=org).members
     except Exception:
         return None  # unreadable cache → no grant → no bytes (fail closed)
     for member in members:
