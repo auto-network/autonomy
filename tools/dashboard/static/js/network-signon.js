@@ -354,8 +354,11 @@
 
   // ── ceremonies ─────────────────────────────────────────────────────
 
-  async function _fetchJson(url) {
-    var resp = await fetch(url);
+  async function _fetchJson(url, org) {
+    // auto.network routes scope by the X-Graph-Org header; a bare ?org= is
+    // refused cross-org without it. Plain fetch() carries no header, so pass
+    // the org through explicitly.
+    var resp = await fetch(url, org ? { headers: { 'X-Graph-Org': org } } : undefined);
     if (!resp.ok) {
       var detail = '';
       try { detail = (await resp.json()).error || ''; } catch (e) { /* ignore */ }
@@ -370,8 +373,8 @@
   // the OPTIONAL registry binding: unlocking a key is a local act and
   // must not require the org to have registered with any registry (the
   // sovereign model — auto.network is a broker, not part of sign-in).
-  async function _fetchJsonOrNull(url) {
-    var resp = await fetch(url);
+  async function _fetchJsonOrNull(url, org) {
+    var resp = await fetch(url, org ? { headers: { 'X-Graph-Org': org } } : undefined);
     if (resp.status === 404) return null;
     if (!resp.ok) {
       var detail = '';
@@ -395,12 +398,12 @@
     // key but not (yet) registered with any broker can still sign in. When
     // a binding is present its coordinates pin the session; when absent the
     // sovereign root itself anchors the local session.
-    var orgKey = await _fetchJson('/api/network/org-key' + orgQ);
+    var orgKey = await _fetchJson('/api/network/org-key' + orgQ, opts.org);
     if (!orgKey.armored_private_key) {
       throw new Error('no identity key is stored for this org yet — create ' +
         'one from the getting-started flow first');
     }
-    var binding = await _fetchJsonOrNull('/api/network/binding' + orgQ);
+    var binding = await _fetchJsonOrNull('/api/network/binding' + orgQ, opts.org);
     var bound = !!(binding && binding.org_uuid && binding.root_pub &&
                    binding.registry_url);
     // The root the session must match: the registry-bound root when the
@@ -487,7 +490,7 @@
       return { revoked: false, expired: true };
     }
     var orgQ = session.orgSlug ? ('?org=' + encodeURIComponent(session.orgSlug)) : '';
-    var orgKey = await _fetchJson('/api/network/org-key' + orgQ);
+    var orgKey = await _fetchJson('/api/network/org-key' + orgQ, session.orgSlug);
     if (!orgKey.armored_private_key) {
       throw new Error('no auto.network org key is stored for this org');
     }
@@ -518,8 +521,10 @@
       if (opened.seed) { opened.seed.fill(0); opened.seed = null; }
     }
 
+    var revHeaders = { 'Content-Type': 'application/json' };
+    if (session.orgSlug) revHeaders['X-Graph-Org'] = session.orgSlug;
     var resp = await fetch('/api/network/revocations', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: revHeaders,
       body: JSON.stringify({
         org: session.orgSlug, record: recordWire, revoked_cert: session.certWire,
       }),
