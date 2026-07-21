@@ -393,17 +393,33 @@ async def post_register(request: Request) -> JSONResponse:
         )}, status_code=502)
 
     reg = resp.json()
+    # Persist the registry's AUTHORITATIVE 201 claim, never the caller's
+    # echoed request: the binding the dashboard trusts must be what the
+    # registry actually bound (org_uuid + root_pub come from the response,
+    # not from payload).
+    reg_org_uuid = reg.get("org_uuid")
+    reg_root_pub = reg.get("root_pub")
     expires_at = reg.get("expires_at")
-    if type(expires_at) is not int:
+    if not isinstance(reg_org_uuid, str) or not isinstance(reg_root_pub, str) \
+            or type(expires_at) is not int:
         return JSONResponse({"ok": False, "error": (
-            "registry returned no usable binding expiry — binding not persisted"
+            "registry returned an incomplete binding (org_uuid/root_pub/expiry) "
+            "— binding not persisted"
+        )}, status_code=502)
+    # The registry must bind the SAME root the operator just proved control
+    # of. A different root_pub means the 201 is not an authoritative confirm
+    # of that key — refuse rather than persist a binding for a foreign root.
+    if reg_root_pub != payload["root_pub"]:
+        return JSONResponse({"ok": False, "error": (
+            "registry bound a different root key than the one signed — refusing "
+            "to persist a binding for a key we did not prove control of"
         )}, status_code=502)
     policy: dict = {"mode": payload.get("recovery_policy")}
     if payload.get("recovery_pub") is not None:
         policy["recovery_pub"] = payload["recovery_pub"]
     binding = {
-        "org_uuid": payload["org_uuid"],
-        "root_pub": payload["root_pub"],
+        "org_uuid": reg_org_uuid,
+        "root_pub": reg_root_pub,
         "registry_url": registry_url,
         "recovery_policy": policy,
         "binding_expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
