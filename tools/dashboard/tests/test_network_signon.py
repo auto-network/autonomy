@@ -236,3 +236,70 @@ def test_revocation_foreign_root_refused(env, root):
     })
     assert r.status_code == 502
     assert "registry refused the revocation" in r.json()["error"]
+
+
+# ── registration persists the registry's authoritative 201, not the echo ──
+
+
+class _CannedRegistry:
+    """A registry client whose 201 asserts a specific authoritative binding,
+    regardless of what the caller signed — to prove post_register persists the
+    RESPONSE, not the request echo."""
+
+    def __init__(self, org_uuid, root_pub, expires_at=1900000000):
+        self._body = {"org_uuid": org_uuid, "root_pub": root_pub,
+                      "expires_at": expires_at}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_a):
+        return False
+
+    async def post(self, _path, json=None):
+        class _Resp:
+            status_code = 201
+            _b = self._body
+
+            def json(self_inner):
+                return self_inner._b
+        return _Resp()
+
+
+def _registration_envelope(root, org_uuid):
+    return sign_request(
+        root, "POST", "/v1/orgs",
+        {"org_uuid": org_uuid, "root_pub": root.public_hex,
+         "recovery_policy": "none"},
+        ts=int(time.time()),
+    )
+
+
+def test_register_persists_registry_uuid_not_caller_echo(env, root, monkeypatch):
+    """The persisted binding's org_uuid comes from the registry's 201, not the
+    caller's signed request (registry owns the namespace / authoritative claim)."""
+    _store_org_key(root, encrypt_root_key(root, PASSPHRASE, iterations=10_000))
+    caller_uuid = "11111111-1111-4111-8111-111111111111"
+    registry_uuid = "99999999-9999-4999-8999-999999999999"
+    monkeypatch.setattr(network_routes, "_registry_client",
+                        lambda _base: _CannedRegistry(registry_uuid, root.public_hex))
+    r = env.post("/api/network/register", json={
+        "org": ORG, "envelope": _registration_envelope(root, caller_uuid)})
+    assert r.status_code == 200, r.json()
+    binding = r.json()["binding"]
+    assert binding["org_uuid"] == registry_uuid       # authoritative 201
+    assert binding["org_uuid"] != caller_uuid          # NOT the request echo
+    assert binding["root_pub"] == root.public_hex
+
+
+def test_register_refuses_registry_binding_a_foreign_root(env, root, monkeypatch):
+    """If the registry's 201 binds a DIFFERENT root than the one signed, refuse
+    — never persist a binding for a key we did not prove control of."""
+    _store_org_key(root, encrypt_root_key(root, PASSPHRASE, iterations=10_000))
+    foreign = KeyPair.generate()
+    monkeypatch.setattr(network_routes, "_registry_client",
+                        lambda _base: _CannedRegistry(ORG_UUID, foreign.public_hex))
+    r = env.post("/api/network/register", json={
+        "org": ORG, "envelope": _registration_envelope(root, ORG_UUID)})
+    assert r.status_code == 502
+    assert "different root" in r.json()["error"]
