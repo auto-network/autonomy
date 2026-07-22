@@ -107,11 +107,76 @@ def link_grant_payload() -> dict:
     }
 
 
+def _mint_serve_cert(*, scope=("tunnel:serve",), org="2d4b90cb-0000-4000-8000-000000000000",
+                     ttl=30 * 24 * 3600):
+    """A REAL root-signed delegate — the validator strict-verifies the chain,
+    so fixtures must be genuine certs, not look-alikes. Returns (root, cert)."""
+    import time
+
+    from tools.network.idkit import KeyPair, Subject, issue_cert
+    root = KeyPair.generate()
+    delegate = KeyPair.generate()
+    now = int(time.time())
+    cert = issue_cert(
+        root, delegate.public_hex, scope=scope, org=org,
+        subject=Subject("operator", "op-serve"),
+        not_before=now - 300, not_after=now + ttl,
+    )
+    return root, cert
+
+
+def serve_cert_payload() -> dict:
+    root, cert = _mint_serve_cert()
+    return {
+        "cert": cert.to_json().decode("ascii"),
+        "key_path": "/var/lib/dashboard/network/serve-2d4b90cb.key",
+        "root_pub": root.public_hex,
+        "not_after": cert.not_after,
+    }
+
+
 ALL_SET_IDS = {
     ni.NETWORK_ORG_KEY_SET_ID: (ni.NETWORK_ORG_KEY_REVISION, org_key_payload),
     ni.NETWORK_BINDING_SET_ID: (ni.NETWORK_BINDING_REVISION, binding_payload),
     ni.NETWORK_LINK_GRANT_SET_ID: (ni.NETWORK_LINK_GRANT_REVISION, link_grant_payload),
+    ni.NETWORK_SERVE_CERT_SET_ID: (ni.NETWORK_SERVE_CERT_REVISION, serve_cert_payload),
 }
+
+
+def test_serve_cert_valid_payload_validates():
+    validate_payload(ni.NETWORK_SERVE_CERT_SET_ID, 1, serve_cert_payload())
+
+
+def test_serve_cert_rejects_scope_without_tunnel_serve():
+    root, cert = _mint_serve_cert(scope=("link:publish",))
+    payload = {
+        "cert": cert.to_json().decode("ascii"), "key_path": "/k",
+        "root_pub": root.public_hex, "not_after": cert.not_after,
+    }
+    with pytest.raises(SchemaValidationError, match="tunnel:serve"):
+        validate_payload(ni.NETWORK_SERVE_CERT_SET_ID, 1, payload)
+
+
+def test_serve_cert_rejects_not_after_mismatch():
+    payload = serve_cert_payload()
+    payload["not_after"] += 5   # no longer mirrors the cert
+    with pytest.raises(SchemaValidationError, match="not_after"):
+        validate_payload(ni.NETWORK_SERVE_CERT_SET_ID, 1, payload)
+
+
+def test_serve_cert_rejects_wrong_root():
+    from tools.network.idkit import KeyPair
+    payload = serve_cert_payload()
+    payload["root_pub"] = KeyPair.generate().public_hex  # not the signer
+    with pytest.raises(SchemaValidationError, match="chain to root_pub"):
+        validate_payload(ni.NETWORK_SERVE_CERT_SET_ID, 1, payload)
+
+
+def test_serve_cert_rejects_unparseable_cert():
+    payload = serve_cert_payload()
+    payload["cert"] = "{not a real cert}"
+    with pytest.raises(SchemaValidationError, match="does not parse"):
+        validate_payload(ni.NETWORK_SERVE_CERT_SET_ID, 1, payload)
 
 
 # ── registration + happy-path validation ─────────────────────
@@ -277,6 +342,7 @@ def test_set_add_round_trips_through_storage(graph_db_env, set_id):
         ni.NETWORK_ORG_KEY_SET_ID: "default",
         ni.NETWORK_BINDING_SET_ID: "auto.network",
         ni.NETWORK_LINK_GRANT_SET_ID: payload.get("token", "k"),
+        ni.NETWORK_SERVE_CERT_SET_ID: "default",
     }[set_id]
     setting_id = ops.upsert_by_key(set_id, revision, key, payload, org=ops.CALLER_ORG)
     assert setting_id

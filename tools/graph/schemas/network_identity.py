@@ -1,6 +1,6 @@
 """auto.network identity Settings — org key, binding, link-grant cache.
 
-Three contracts back the dashboard side of the auto.network share-link
+Four contracts back the dashboard side of the auto.network share-link
 program (spec ``graph://a17c8657-939`` §4.6, §6.2, §6.6; invariants I1, I9):
 
 * ``autonomy.network.org-key#1`` — the org root private key as an armored,
@@ -15,6 +15,11 @@ program (spec ``graph://a17c8657-939`` §4.6, §6.2, §6.6; invariants I1, I9):
   dashboard serves a shared target only against a valid row here
   (invariant I9); rows carry the token, target, meta, and the issuing
   certificate's subject for attribution (invariant I6).
+* ``autonomy.network.serve-cert#1`` — the org's serving delegate: a
+  root-signed, short-lived ``tunnel:serve`` certificate plus a POINTER to
+  the on-disk (mode-0600) key file the unattended connector subprocess
+  signs with. The signing key is a filesystem credential, never
+  settings-store data, so I1's no-plaintext-key discipline holds.
 
 Vocabulary is pinned to A1 (``tools/network/idkit``): subject kinds,
 token shape, and key-id hex length are duplicated here as constants so
@@ -51,6 +56,9 @@ NETWORK_BINDING_SET_ID = "autonomy.network.binding"
 NETWORK_BINDING_REVISION = 1
 NETWORK_LINK_GRANT_SET_ID = "autonomy.network.link-grant"
 NETWORK_LINK_GRANT_REVISION = 1
+NETWORK_SERVE_CERT_SET_ID = "autonomy.network.serve-cert"
+NETWORK_SERVE_CERT_REVISION = 1
+SERVE_CERT_SCOPE = "tunnel:serve"
 
 
 # ── A1 vocabulary pins (tools/network/idkit) ─────────────────
@@ -501,3 +509,131 @@ class NetworkLinkGrantV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: subject.id must be a non-empty string"
             )
+
+
+# ── autonomy.network.serve-cert ───────────────────────────────
+
+
+@keyed_per_entity
+class NetworkServeCertV1(SettingSchema):
+    """The org's serving delegate for the auto.network tunnel (§5.1).
+
+    Key: an operator-chosen label (e.g. ``default``). Payload: a root-signed
+    ``tunnel:serve`` delegation cert AND the delegate's PRIVATE key, both at
+    rest server-side.
+
+    The delegate's private key is DELIBERATELY not stored here. This is an
+    unattended managed subprocess: it signs SERVER_HELLO for every viewer
+    channel with no human present, so its key must be usable at rest — it
+    cannot be a passphrase-sealed armor. Rather than weaken the org-key's I1
+    discipline by admitting raw key material into the settings store, the
+    serving key lives as a mode-0600 FILE on disk (the standard shape for an
+    unattended service key), and this row records only its ``key_path``. The
+    settings store thus still holds no plaintext key material of any kind; the
+    signing secret is a filesystem credential, protected by file permissions,
+    exactly like a TLS or SSH service key. It is also only a narrow delegate
+    (``tunnel:serve`` only), short-lived (30-day TTL, I7), and auto-expiring —
+    never the sovereign root, which only the operator's browser ever holds and
+    only to MINT this delegate.
+
+    The validator is a fail-closed crypto gate: the ``cert`` must be a genuine
+    root-signed ``tunnel:serve`` delegation whose chain verifies to the
+    declared root, or it does not enter the store. The key file itself is
+    verified to match ``cert.child_pub`` by the supervisor before it launches
+    the connector — the layer that actually holds the key.
+    """
+
+    set_id = NETWORK_SERVE_CERT_SET_ID
+    schema_revision = NETWORK_SERVE_CERT_REVISION
+
+    cert: str = field(
+        required=True,
+        description=(
+            "The root-signed tunnel:serve delegation certificate in canonical "
+            "idkit wire JSON (tools/network/idkit DelegationCert.to_json). "
+            "Public by nature — it is sent in the clear in every SERVER_HELLO."
+        ),
+    )
+    key_path: str = field(
+        required=True,
+        description=(
+            "Filesystem path to the mode-0600 file holding the delegate's "
+            "Ed25519 signing key. The key is a server-side filesystem "
+            "credential, never settings-store data; the supervisor verifies "
+            "it matches the cert's child_pub before launching the connector."
+        ),
+    )
+    root_pub: str = field(
+        required=True,
+        description=(
+            "The org root public key this delegate chains to (64 lowercase "
+            "hex = the key id). The chain is verified against it at write."
+        ),
+    )
+    not_after: int = field(
+        required=True,
+        description=(
+            "Epoch seconds the delegate expires — mirrors the cert's "
+            "not_after, so startup/serve paths can check expiry without "
+            "parsing the cert."
+        ),
+    )
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        super().validate(payload)
+        if not isinstance(payload, dict):
+            return
+        cert_wire = _require_str(payload, "cert", cls.__name__, max_len=16384)
+        _require_str(payload, "key_path", cls.__name__, max_len=4096)
+        root_pub = _require_hex(payload, "root_pub", cls.__name__,
+                               length=NETWORK_PUB_HEX_LEN)
+        not_after = payload.get("not_after")
+        if type(not_after) is not int or not_after <= 0:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'not_after' must be a positive epoch-seconds "
+                "integer"
+            )
+
+        # Fail-closed crypto gate. Lazy import keeps tools.graph importable
+        # without `cryptography`; unavailable verifier → no write.
+        try:
+            from tools.network.idkit import (
+                DelegationCert,
+                IdkitError,
+                verify_chain,
+            )
+        except Exception as exc:  # pragma: no cover — env without idkit deps
+            raise SchemaValidationError(
+                f"{cls.__name__}: cannot verify the serve-cert — "
+                f"tools.network.idkit is unavailable ({exc}); refusing the "
+                "write (fail-closed)"
+            ) from exc
+        try:
+            cert = DelegationCert.from_json(cert_wire)
+        except Exception as e:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'cert' does not parse as a delegation "
+                f"certificate: {e}"
+            ) from e
+        if SERVE_CERT_SCOPE not in cert.scope:
+            raise SchemaValidationError(
+                f"{cls.__name__}: cert scope must include {SERVE_CERT_SCOPE!r}, "
+                f"got {list(cert.scope)}"
+            )
+        if cert.not_after != not_after:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'not_after' ({not_after}) does not match the "
+                f"cert's not_after ({cert.not_after})"
+            )
+        # The chain must verify to the declared root with tunnel:serve, at a
+        # time inside the validity window (mid-window avoids boundary edges).
+        mid = (cert.not_before + cert.not_after) // 2
+        try:
+            verify_chain(cert, root_pub, org=cert.org, now=mid,
+                         required_scope=SERVE_CERT_SCOPE)
+        except IdkitError as e:
+            raise SchemaValidationError(
+                f"{cls.__name__}: cert does not chain to root_pub with "
+                f"{SERVE_CERT_SCOPE} scope: {e}"
+            ) from e
