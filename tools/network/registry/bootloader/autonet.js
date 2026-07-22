@@ -415,6 +415,13 @@ const autonet = (() => {
       show("download-view");
     }
     state.phase = "rendered";
+    // Clear the outer shell's "loading…" status the moment content is shown.
+    // Do this UNCONDITIONALLY on render — never wait for the artifact's
+    // cooperative autonet_title postMessage, because a plain note render never
+    // sends one, which would otherwise leave the header stuck on "loading…"
+    // while the iframe already displays the note. A title that does arrive
+    // later still overrides this via the message listener in boot().
+    setStatus(state.artifactTitle || "");
   }
 
   async function boot() {
