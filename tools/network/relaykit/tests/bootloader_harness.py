@@ -177,11 +177,22 @@ def main() -> int:
     from tools.graph import ops as graph_ops
     from tools.graph import settings_ops
     from tools.graph.schemas import network_identity as schema
+    from tools.graph.schemas.org import ORG_REVISION, ORG_SET_ID
     from tools.graph.db import GraphDB
+    from agents import workspace_settings
 
     GraphDB.close_all_pooled()
     design_db.DB_PATH = tmp / "designs.db"
     design_db._initialized = False
+    settings_ops.add_setting(
+        ORG_SET_ID, ORG_REVISION, GRAPH_ORG,
+        {
+            "name": "Rich Viewer Org", "color": "#315E81",
+            "favicon": "/static/icon-192.png", "type": "shared",
+        },
+        org=GRAPH_ORG,
+    )
+    workspace_settings.invalidate_caches()
 
     own_image = tmp / "own.png"
     own_image.write_bytes(PNG)
@@ -362,6 +373,17 @@ print('highlighted')
                 time.sleep(0.1)
             if actual_title != "Relay Rich Viewer Acceptance":
                 failures.append(f"note title bridge failed: {actual_title!r}")
+            brand = ab_eval(
+                "JSON.stringify((() => {"
+                "const el=document.getElementById('brand');const img=el.querySelector('img');"
+                "return {title:el.title,text:el.textContent,imageAlt:img?.alt,"
+                "imageLoaded:!!(img && img.complete && img.naturalWidth)};})())"
+            )
+            if brand != {
+                "title": "Rich Viewer Org", "text": "",
+                "imageAlt": "Rich Viewer Org", "imageLoaded": True,
+            }:
+                failures.append(f"authenticated org favicon failed: {brand}")
             snapshot = ab("snapshot")
             required = (
                 'heading "Relay Rich Viewer Acceptance"',
@@ -461,7 +483,8 @@ print('highlighted')
             return 1
         print(
             "PASS: rich note, own and remote images, highlighted code, sanitation, "
-            "link policy, source-authenticated bridge, frame-ancestor blocking, "
+            "link policy, authenticated org favicon, source-authenticated bridge, "
+            "frame-ancestor blocking, "
             "executable design, and truthful invalid/disconnected error states"
         )
         return 0

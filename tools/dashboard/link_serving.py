@@ -24,7 +24,7 @@ bytes behind the channel's token. The flow per request:
 Wire protocol: channel fetch v1.
 
 * ``{"op": "fetch", "v": 1}`` → one canonical-JSON header line
-  (``{v,status,kind,viewer,content?}``), a newline, then the serialized
+  (``{v,status,kind,viewer,content?,branding?}``), a newline, then the serialized
   body. Every byte range is an in-bounds ``{offset,length}`` slice.
 * ``{"op": "head", "v": 1}`` →
   ``{v:1,status:"ok",serialized_size}``, a newline, and NO body. It runs
@@ -51,8 +51,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import binascii
 import calendar
 import json
+import mimetypes
 import re
 import time
 import uuid as uuid_mod
@@ -67,8 +70,10 @@ from tools.graph.schemas.network_identity import (
 from tools.network.idkit import canonical_json
 
 AUTONET_MAX_ARTIFACT_BYTES = 48 * 1024 * 1024
+AUTONET_MAX_FAVICON_BYTES = 512 * 1024
 AUTONET_MAX_TITLE_CHARS = 500
 _NOTE_VIEWER = Path(__file__).resolve().parent / "relay_viewer" / "note-viewer.html"
+_DASHBOARD_STATIC = Path(__file__).resolve().parent / "static"
 
 _TOKEN_RE = re.compile(r"^[0-9a-f]{%d}$" % NETWORK_TOKEN_HEX_LEN)
 _ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -226,6 +231,71 @@ def _note_viewer_bytes() -> bytes:
     return _NOTE_VIEWER.read_bytes()
 
 
+def _resolve_org_brand(org: str | None) -> dict | None:
+    """Resolve authenticated org branding without exposing dashboard paths.
+
+    Local dashboard favicons and data URLs become bounded artifact bytes.
+    Public HTTPS icons remain URLs and load under the share page's no-referrer
+    policy. Any malformed or unreadable icon degrades to the org's existing
+    color/initial identity; branding must never make content unservable.
+    """
+    try:
+        from tools.dashboard.org_identity import resolve_org_identity
+
+        identity = resolve_org_identity(org)
+        name = identity.get("name")
+        color = identity.get("color")
+        initial = identity.get("initial")
+        if not isinstance(name, str) or not name:
+            return None
+        if not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+            color = "#4b5563"
+        if not isinstance(initial, str) or len(initial) != 1:
+            initial = next((ch.upper() for ch in name if ch.isalnum()), "?")
+        brand = {"name": name[:200], "color": color, "initial": initial}
+        favicon = identity.get("favicon")
+        if not isinstance(favicon, str) or not favicon:
+            return brand
+        if favicon.startswith("https://") and len(favicon) <= 2048:
+            brand["favicon_url"] = favicon
+            return brand
+
+        mime = None
+        icon_bytes = None
+        data_match = re.fullmatch(
+            r"data:(image/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\r\n]+)", favicon
+        )
+        if data_match:
+            mime = data_match.group(1).lower()
+            try:
+                encoded = "".join(data_match.group(2).split())
+                icon_bytes = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError):
+                icon_bytes = None
+        elif favicon.startswith("/static/"):
+            relative = favicon.removeprefix("/static/")
+            candidate = (_DASHBOARD_STATIC / relative).resolve()
+            static_root = _DASHBOARD_STATIC.resolve()
+            try:
+                candidate.relative_to(static_root)
+            except ValueError:
+                candidate = None
+            if candidate is not None and candidate.is_file():
+                mime = mimetypes.guess_type(candidate.name)[0]
+                with candidate.open("rb") as icon_file:
+                    icon_bytes = icon_file.read(AUTONET_MAX_FAVICON_BYTES + 1)
+
+        if (
+            isinstance(mime, str) and mime.startswith("image/")
+            and isinstance(icon_bytes, bytes)
+            and 0 < len(icon_bytes) <= AUTONET_MAX_FAVICON_BYTES
+        ):
+            brand["favicon"] = {"mime": mime, "bytes": icon_bytes}
+        return brand
+    except Exception:
+        return None
+
+
 def _resolve_note(target_uuid: str, org: str | None):
     """Build an owning-scope note payload with only current image parts."""
     from tools.graph import ops as graph_ops
@@ -316,6 +386,8 @@ def _serialize_artifact(artifact: dict) -> tuple[dict, bytes]:
     kind = artifact.get("kind")
     if kind not in ("note", "design", "present"):
         raise ValueError("unsupported artifact kind")
+    if not set(artifact).issubset({"kind", "viewer", "content", "branding"}):
+        raise ValueError("artifact carries unknown fields")
     viewer = artifact.get("viewer")
     if not isinstance(viewer, bytes) or not viewer:
         raise ValueError("viewer must be non-empty bytes")
@@ -333,48 +405,93 @@ def _serialize_artifact(artifact: dict) -> tuple[dict, bytes]:
     if kind != "note":
         if content is not None:
             raise ValueError("design and present forbid content")
-        return header, viewer
-    if not isinstance(content, dict):
-        raise ValueError("note requires content")
+    else:
+        if not isinstance(content, dict):
+            raise ValueError("note requires content")
 
-    title = content.get("title")
-    markdown = content.get("markdown")
-    parts = content.get("parts")
-    if not isinstance(title, str) or len(title) > AUTONET_MAX_TITLE_CHARS:
-        raise ValueError("invalid note title")
-    if not isinstance(markdown, str) or not isinstance(parts, list):
-        raise ValueError("invalid note content")
+        title = content.get("title")
+        markdown = content.get("markdown")
+        parts = content.get("parts")
+        if not isinstance(title, str) or len(title) > AUTONET_MAX_TITLE_CHARS:
+            raise ValueError("invalid note title")
+        if not isinstance(markdown, str) or not isinstance(parts, list):
+            raise ValueError("invalid note content")
 
-    markdown_bytes = markdown.encode("utf-8")
-    markdown_slice = {"offset": cursor, "length": len(markdown_bytes)}
-    chunks.append(markdown_bytes)
-    cursor += len(markdown_bytes)
+        markdown_bytes = markdown.encode("utf-8")
+        markdown_slice = {"offset": cursor, "length": len(markdown_bytes)}
+        chunks.append(markdown_bytes)
+        cursor += len(markdown_bytes)
 
-    part_headers = []
-    seen_refs = set()
-    for part in parts:
-        if not isinstance(part, dict):
-            raise ValueError("invalid part")
-        ref, mime, part_bytes = part.get("ref"), part.get("mime"), part.get("bytes")
+        part_headers = []
+        seen_refs = set()
+        for part in parts:
+            if not isinstance(part, dict):
+                raise ValueError("invalid part")
+            ref, mime, part_bytes = part.get("ref"), part.get("mime"), part.get("bytes")
+            if (
+                not isinstance(ref, str) or not ref or ref in seen_refs
+                or not isinstance(mime, str) or not mime
+                or not isinstance(part_bytes, bytes)
+            ):
+                raise ValueError("invalid part")
+            seen_refs.add(ref)
+            part_headers.append({
+                "ref": ref, "mime": mime,
+                "offset": cursor, "length": len(part_bytes),
+            })
+            chunks.append(part_bytes)
+            cursor += len(part_bytes)
+
+        header["content"] = {
+            "title": title,
+            "markdown": markdown_slice,
+            "parts": part_headers,
+        }
+
+    branding = artifact.get("branding")
+    if branding is not None:
+        if not isinstance(branding, dict) or not set(branding).issubset({
+            "name", "color", "initial", "favicon", "favicon_url",
+        }):
+            raise ValueError("invalid branding")
+        name, color, initial = (
+            branding.get("name"), branding.get("color"), branding.get("initial")
+        )
         if (
-            not isinstance(ref, str) or not ref or ref in seen_refs
-            or not isinstance(mime, str) or not mime
-            or not isinstance(part_bytes, bytes)
+            not isinstance(name, str) or not name or len(name) > 200
+            or not isinstance(color, str)
+            or not re.fullmatch(r"#[0-9a-fA-F]{6}", color)
+            or not isinstance(initial, str) or len(initial) != 1
         ):
-            raise ValueError("invalid part")
-        seen_refs.add(ref)
-        part_headers.append({
-            "ref": ref, "mime": mime,
-            "offset": cursor, "length": len(part_bytes),
-        })
-        chunks.append(part_bytes)
-        cursor += len(part_bytes)
-
-    header["content"] = {
-        "title": title,
-        "markdown": markdown_slice,
-        "parts": part_headers,
-    }
+            raise ValueError("invalid branding identity")
+        wire_brand = {"name": name, "color": color, "initial": initial}
+        favicon = branding.get("favicon")
+        favicon_url = branding.get("favicon_url")
+        if favicon is not None and favicon_url is not None:
+            raise ValueError("branding has two favicons")
+        if favicon is not None:
+            if not isinstance(favicon, dict) or set(favicon) != {"mime", "bytes"}:
+                raise ValueError("invalid branding favicon")
+            mime, icon_bytes = favicon.get("mime"), favicon.get("bytes")
+            if (
+                not isinstance(mime, str) or not mime.startswith("image/")
+                or not isinstance(icon_bytes, bytes) or not icon_bytes
+                or len(icon_bytes) > AUTONET_MAX_FAVICON_BYTES
+            ):
+                raise ValueError("invalid branding favicon")
+            wire_brand["favicon"] = {
+                "mime": mime, "offset": cursor, "length": len(icon_bytes),
+            }
+            chunks.append(icon_bytes)
+            cursor += len(icon_bytes)
+        elif favicon_url is not None:
+            if (
+                not isinstance(favicon_url, str) or len(favicon_url) > 2048
+                or not favicon_url.startswith("https://")
+            ):
+                raise ValueError("invalid branding favicon URL")
+            wire_brand["favicon_url"] = favicon_url
+        header["branding"] = wire_brand
     return header, b"".join(chunks)
 
 
@@ -417,6 +534,9 @@ def make_grant_handler(org: str | None = None, *, now=None):
         resolved = resolve_target(grant, org=org)
         if resolved is None:
             return REFUSED
+        branding = _resolve_org_brand(org)
+        if branding is not None:
+            resolved = {**resolved, "branding": branding}
         try:
             header, body = _serialize_artifact(resolved)
         except (TypeError, ValueError, OverflowError):

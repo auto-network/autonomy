@@ -418,7 +418,7 @@ const autonet = (() => {
     if (!(body instanceof Uint8Array) || body.length > MAX_ARTIFACT_BYTES) {
       throw new Error("invalid artifact body");
     }
-    if (!hasOnlyKeys(header, ["v", "status", "kind", "viewer", "content"])
+    if (!hasOnlyKeys(header, ["v", "status", "kind", "viewer", "content", "branding"])
         || header.v !== 1 || header.status !== "ok"
         || !["note", "design", "present"].includes(header.kind)) {
       throw new Error("invalid artifact header");
@@ -457,6 +457,47 @@ const autonet = (() => {
       throw new Error("content forbidden for design");
     }
 
+    let branding = null;
+    if (Object.prototype.hasOwnProperty.call(header, "branding")) {
+      const value = header.branding;
+      if (!hasOnlyKeys(value, ["name", "color", "initial", "favicon", "favicon_url"])
+          || typeof value.name !== "string" || !value.name
+          || codePointLength(value.name) > 200
+          || typeof value.color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(value.color)
+          || typeof value.initial !== "string" || codePointLength(value.initial) !== 1
+          || (Object.prototype.hasOwnProperty.call(value, "favicon")
+              && Object.prototype.hasOwnProperty.call(value, "favicon_url"))) {
+        throw new Error("invalid artifact branding");
+      }
+      let favicon = null;
+      if (Object.prototype.hasOwnProperty.call(value, "favicon")) {
+        if (!hasOnlyKeys(value.favicon, ["mime", "offset", "length"])
+            || typeof value.favicon.mime !== "string"
+            || !value.favicon.mime.startsWith("image/")) {
+          throw new Error("invalid artifact favicon");
+        }
+        favicon = validateSlice(
+          { offset: value.favicon.offset, length: value.favicon.length },
+          body.length, "favicon", false
+        );
+        favicon.mime = value.favicon.mime;
+        ranges.push(favicon);
+      }
+      let faviconUrl = null;
+      if (Object.prototype.hasOwnProperty.call(value, "favicon_url")) {
+        if (typeof value.favicon_url !== "string"
+            || value.favicon_url.length > 2048
+            || !value.favicon_url.startsWith("https://")) {
+          throw new Error("invalid artifact favicon URL");
+        }
+        faviconUrl = value.favicon_url;
+      }
+      branding = {
+        name: value.name, color: value.color, initial: value.initial,
+        favicon, faviconUrl,
+      };
+    }
+
     const ordered = ranges.slice().sort((a, b) => a.offset - b.offset || a.end - b.end);
     let cursor = 0;
     for (const range of ordered) {
@@ -472,6 +513,7 @@ const autonet = (() => {
       kind: header.kind,
       viewer: ranges[0],
       content,
+      branding,
     };
   }
 
@@ -493,6 +535,39 @@ const autonet = (() => {
   function setStatus(text) {
     const el = document.getElementById("status-line");
     if (el) el.textContent = text;
+  }
+
+  function renderBrand(branding, body) {
+    if (!branding) return;
+    const brand = document.getElementById("brand");
+    if (!brand) return;
+    brand.textContent = "";
+    brand.classList.add("brand-icon");
+    brand.title = branding.name;
+
+    const showInitial = () => {
+      brand.textContent = "";
+      brand.style.background = branding.color;
+      const initial = document.createElement("span");
+      initial.className = "brand-initial";
+      initial.textContent = branding.initial;
+      initial.setAttribute("aria-label", branding.name);
+      brand.appendChild(initial);
+    };
+    if (!branding.favicon && !branding.faviconUrl) {
+      showInitial();
+      return;
+    }
+    const image = document.createElement("img");
+    image.alt = branding.name;
+    image.addEventListener("error", showInitial, { once: true });
+    if (branding.favicon) {
+      const bytes = body.slice(branding.favicon.offset, branding.favicon.end);
+      image.src = URL.createObjectURL(new Blob([bytes], { type: branding.favicon.mime }));
+    } else {
+      image.src = branding.faviconUrl;
+    }
+    brand.appendChild(image);
   }
 
   const ERROR_VIEWS = {
@@ -519,6 +594,7 @@ const autonet = (() => {
   async function renderArtifact(header, body) {
     const artifact = validateArtifact(header, body);
     state.bodyLength = body.length;
+    renderBrand(artifact.branding, body);
     const frame = document.getElementById("artifact-frame");
     const capturedWindow = frame.contentWindow;
     let readySeen = false;

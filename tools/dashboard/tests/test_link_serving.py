@@ -264,6 +264,25 @@ class TestArtifactSerializer:
         intervals = sorted((d["offset"], d["offset"] + d["length"]) for d in descriptors)
         assert all(left[1] <= right[0] for left, right in zip(intervals, intervals[1:]))
 
+    def test_org_favicon_is_an_authenticated_part(self):
+        artifact = {
+            "kind": "design",
+            "viewer": b"<h1>viewer</h1>",
+            "branding": {
+                "name": "Example Org", "color": "#123456", "initial": "E",
+                "favicon": {"mime": "image/png", "bytes": b"PNG-icon"},
+            },
+        }
+        header, body = link_serving._serialize_artifact(artifact)
+        assert sliced(body, header["viewer"]) == b"<h1>viewer</h1>"
+        assert sliced(body, header["branding"]["favicon"]) == b"PNG-icon"
+        assert header["branding"] == {
+            "name": "Example Org", "color": "#123456", "initial": "E",
+            "favicon": {
+                "mime": "image/png", "offset": 15, "length": 8,
+            },
+        }
+
     @pytest.mark.parametrize("artifact", [
         {"kind": "note", "viewer": b"v"},
         {"kind": "design", "viewer": b"v", "content": {}},
@@ -279,6 +298,57 @@ class TestArtifactSerializer:
     def test_union_and_part_invariants_fail_closed(self, artifact):
         with pytest.raises((TypeError, ValueError)):
             link_serving._serialize_artifact(artifact)
+
+
+class TestOrgBrandResolver:
+    def test_local_dashboard_favicon_becomes_bounded_bytes(
+        self, env, tmp_path, monkeypatch,
+    ):
+        static = tmp_path / "static"
+        icon = static / "orgs" / "example.png"
+        icon.parent.mkdir(parents=True)
+        icon.write_bytes(b"png-bytes")
+        monkeypatch.setattr(link_serving, "_DASHBOARD_STATIC", static)
+        monkeypatch.setattr(
+            "tools.dashboard.org_identity.resolve_org_identity",
+            lambda _org: {
+                "name": "Example Org", "color": "#123456", "initial": "E",
+                "favicon": "/static/orgs/example.png",
+            },
+        )
+        assert link_serving._resolve_org_brand("example") == {
+            "name": "Example Org", "color": "#123456", "initial": "E",
+            "favicon": {"mime": "image/png", "bytes": b"png-bytes"},
+        }
+
+    def test_uploaded_data_url_becomes_favicon_bytes(self, env, monkeypatch):
+        monkeypatch.setattr(
+            "tools.dashboard.org_identity.resolve_org_identity",
+            lambda _org: {
+                "name": "Example Org", "color": "#123456", "initial": "E",
+                "favicon": "data:image/png;base64,cG5nLWJ5dGVz",
+            },
+        )
+        assert link_serving._resolve_org_brand("example") == {
+            "name": "Example Org", "color": "#123456", "initial": "E",
+            "favicon": {"mime": "image/png", "bytes": b"png-bytes"},
+        }
+
+    def test_favicon_path_cannot_escape_static_root(self, env, tmp_path, monkeypatch):
+        static = tmp_path / "static"
+        static.mkdir()
+        (tmp_path / "secret.png").write_bytes(b"secret")
+        monkeypatch.setattr(link_serving, "_DASHBOARD_STATIC", static)
+        monkeypatch.setattr(
+            "tools.dashboard.org_identity.resolve_org_identity",
+            lambda _org: {
+                "name": "Example Org", "color": "#123456", "initial": "E",
+                "favicon": "/static/../secret.png",
+            },
+        )
+        assert link_serving._resolve_org_brand("example") == {
+            "name": "Example Org", "color": "#123456", "initial": "E",
+        }
 
 
 # ── file resolver: the path allowlist ─────────────────────────

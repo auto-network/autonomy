@@ -74,6 +74,12 @@ class TestBootloaderBytes:
         assert "allow-scripts allow-popups allow-popups-to-escape-sandbox" in shell
         assert "allow-same-origin" not in shell
 
+    def test_header_brand_is_replaced_only_after_authenticated_content(self, client):
+        shell = client.get("/l/not-a-token").text
+        assert '<span id="brand" class="brand">auto.network</span>' in shell
+        script = client.get("/l-assets/autonet.js").text
+        assert "renderBrand(artifact.branding, body)" in script
+
     def test_shell_distinguishes_publicly_observable_failure_stages(self, client):
         shell = client.get("/l/not-a-token").text
         assert "Autonomy Disconnected" in shell
