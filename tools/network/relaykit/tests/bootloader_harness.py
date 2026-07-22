@@ -431,10 +431,12 @@ print('highlighted')
         offline_view = ab_eval(
             "JSON.stringify({phase:window.autonet.state.phase,"
             "kind:window.autonet.state.errorKind,"
+            "status:document.getElementById('status-line').textContent,"
             "visible:!document.getElementById('disconnected-view').hidden})"
         )
         if offline_view != {
-            "phase": "error", "kind": "disconnected", "visible": True,
+            "phase": "error", "kind": "disconnected", "status": "",
+            "visible": True,
         }:
             failures.append(f"disconnected error state failed: {offline_view}, {offline}")
 
@@ -443,11 +445,13 @@ print('highlighted')
         error = ab_eval(
             "JSON.stringify({phase:window.autonet.state.phase,"
             "kind:window.autonet.state.errorKind,"
+            "status:document.getElementById('status-line').textContent,"
             "visible:!document.getElementById('invalid-link-view').hidden,"
             "leaks:document.body.innerText.includes('00000000')})"
         )
         if error != {
-            "phase": "error", "kind": "invalid", "visible": True, "leaks": False,
+            "phase": "error", "kind": "invalid", "status": "",
+            "visible": True, "leaks": False,
         }:
             failures.append(f"invalid-link error view failed: {error}")
 

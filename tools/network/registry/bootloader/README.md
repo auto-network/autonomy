@@ -42,13 +42,13 @@ shell and script together. There is no compatibility fallback.
 
 ## Rendering & the CSP decision
 
-Artifacts load from a blob URL into an iframe with
+Artifacts load through `srcdoc` into an iframe with
 `sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"`.
 The frame has an opaque origin with no same-origin parent access, top
 navigation, or forms. External links may open in a new browsing context.
 
-Blob frames inherit the shell CSP in Chromium. `script-src` admits inline
-and blob scripts so existing Present and Design viewers remain executable.
+The embedded document inherits the shell CSP. `script-src` admits inline and
+blob scripts so existing Present and Design viewers remain executable.
 `connect-src` and `img-src` admit public-network resources. The response's
 `Referrer-Policy: no-referrer` and the viewer's meta policy prevent bearer
 URLs from being sent as Referer headers. `frame-ancestors 'none'` prevents
