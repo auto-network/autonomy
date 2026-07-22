@@ -156,9 +156,19 @@ def _publish_codex_harness_usage_setting(
 
 
 def _find_primary_jsonls(directory: Path) -> list[Path]:
-    """Find JSONL files excluding subagent traces."""
+    """Find a session's main-thread JSONL rollouts, excluding subagent traces.
+
+    Two DIFFERENT subagent representations must both be excluded, or the
+    selection can latch onto a subagent and freeze the viewer:
+      - Claude subagents live under a ``subagents/`` subdirectory (path-based).
+      - Codex forked subagents write sibling ``rollout-*.jsonl`` files in the
+        SAME directory as the parent; they're only distinguishable by their
+        ``session_meta`` header (``forked_from_id`` / ``source.subagent``) — see
+        ``_is_codex_subagent_rollout``. The path check can't catch these.
+    """
     return [f for f in directory.rglob("*.jsonl")
-            if "subagents" not in f.parts]
+            if "subagents" not in f.parts
+            and not _is_codex_subagent_rollout(f)]
 
 
 def _is_codex_subagent_rollout(jsonl_path: Path) -> bool:
@@ -1805,7 +1815,7 @@ class SessionMonitor:
             if not dp.is_dir():
                 return
             for p in sorted(dp.glob("*.jsonl")):
-                if "subagents" in p.parts:
+                if "subagents" in p.parts or _is_codex_subagent_rollout(p):
                     continue
                 self._handle_jsonl_appeared(tmux_name, p)
             for sub in sorted(dp.iterdir()):
@@ -3696,7 +3706,7 @@ class SessionMonitor:
                     if not dp.is_dir():
                         continue
                     for jsonl in sorted(dp.rglob("*.jsonl")):
-                        if "subagents" in jsonl.parts:
+                        if "subagents" in jsonl.parts or _is_codex_subagent_rollout(jsonl):
                             continue
                         if self._handle_jsonl_appeared(tmux_name, jsonl):
                             resolved += 1
