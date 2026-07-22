@@ -26,10 +26,12 @@ from starlette.testclient import TestClient
 from tools.dashboard import network_routes
 from tools.graph import settings_ops
 from tools.graph.schemas.network_identity import (
+    NETWORK_BINDING_REVISION,
     NETWORK_BINDING_SET_ID,
     NETWORK_ORG_KEY_SET_ID,
+    NETWORK_SERVE_CERT_SET_ID,
 )
-from tools.network.idkit import KeyPair
+from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.idkit.armor import decrypt_root_key, encrypt_root_key
 from tools.network.registry.app import create_app as create_registry_app
 from tools.network.registry.signing import sign_request
@@ -441,3 +443,121 @@ def test_smuggle_via_generic_settings_api_refused(test_app, tmp_path, monkeypatc
     # The forged base64 body (seed inside, encoded) must be absent too.
     for line in forged.splitlines()[1:-1]:
         assert line.encode() not in blob
+
+
+# ── serve-cert provisioning (§5.1) ────────────────────────────────────
+
+
+def _store_binding(root: KeyPair, *, org_uuid=ORG_UUID):
+    settings_ops.add_setting(
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "auto.network",
+        {"org_uuid": org_uuid, "root_pub": root.public_hex,
+         "registry_url": REGISTRY_URL, "recovery_policy": {"mode": "none"},
+         "binding_expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                             time.gmtime(int(time.time()) + 30 * 86400))},
+        org=ORG,
+    )
+
+
+def _mint_serve(root: KeyPair, *, scope=("tunnel:serve",), org_uuid=ORG_UUID):
+    delegate = KeyPair.generate()
+    now = int(time.time())
+    cert = issue_cert(
+        root, delegate.public_hex, scope=scope, org=org_uuid,
+        subject=Subject("operator", "op-serve"),
+        not_before=now - 300, not_after=now + 30 * 86400,
+    )
+    return delegate, cert
+
+
+def _serve_key_dir(monkeypatch, tmp_path):
+    d = tmp_path / "serve-keys"
+    monkeypatch.setattr(network_routes, "SERVE_KEY_DIR", d)
+    return d
+
+
+def test_provision_serve_cert_happy_path(env, root, tmp_path, monkeypatch):
+    _serve_key_dir(monkeypatch, tmp_path)
+    _store_binding(root)
+    delegate, cert = _mint_serve(root)
+
+    r = env.post("/api/network/serve-cert", json={
+        "org": ORG, "cert": cert.to_json().decode("ascii"),
+        "private_key": delegate.private_hex,
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["child_pub"] == delegate.public_hex
+
+    # Key file exists, mode 0600, holds exactly the delegate key — and the
+    # settings row points at it, never carrying the key itself.
+    import os
+    key_path = tmp_path / "serve-keys" / f"serve-{ORG_UUID}.key"
+    assert key_path.is_file()
+    assert (os.stat(key_path).st_mode & 0o777) == 0o600
+    assert key_path.read_text().strip() == delegate.private_hex
+
+    row = settings_ops.read_owned_set(NETWORK_SERVE_CERT_SET_ID, org=ORG).members[0].payload
+    assert row["key_path"] == str(key_path)
+    assert row["root_pub"] == root.public_hex
+    assert row["not_after"] == cert.not_after
+    assert "private_key" not in row  # the secret is NOT in the settings store
+
+
+def test_provision_rejects_key_not_matching_cert(env, root, tmp_path, monkeypatch):
+    _serve_key_dir(monkeypatch, tmp_path)
+    _store_binding(root)
+    _delegate, cert = _mint_serve(root)
+    r = env.post("/api/network/serve-cert", json={
+        "org": ORG, "cert": cert.to_json().decode("ascii"),
+        "private_key": KeyPair.generate().private_hex,  # wrong key
+    })
+    assert r.status_code == 400
+    assert "does not match" in r.json()["error"]
+    assert not (tmp_path / "serve-keys").exists()  # nothing written on rejection
+
+
+def test_provision_rejects_scope_without_tunnel_serve(env, root, tmp_path, monkeypatch):
+    _serve_key_dir(monkeypatch, tmp_path)
+    _store_binding(root)
+    delegate, cert = _mint_serve(root, scope=("link:publish",))
+    r = env.post("/api/network/serve-cert", json={
+        "org": ORG, "cert": cert.to_json().decode("ascii"),
+        "private_key": delegate.private_hex,
+    })
+    assert r.status_code == 400
+    assert "tunnel:serve" in r.json()["error"]
+
+
+def test_provision_rejects_cert_not_chaining_to_org_root(env, root, tmp_path, monkeypatch):
+    _serve_key_dir(monkeypatch, tmp_path)
+    _store_binding(root)
+    # A cert signed by a DIFFERENT root — must not be accepted for this org.
+    delegate, cert = _mint_serve(KeyPair.generate())
+    r = env.post("/api/network/serve-cert", json={
+        "org": ORG, "cert": cert.to_json().decode("ascii"),
+        "private_key": delegate.private_hex,
+    })
+    assert r.status_code == 400
+    assert "chain" in r.json()["error"]
+
+
+def test_provision_requires_a_binding_first(env, root, tmp_path, monkeypatch):
+    _serve_key_dir(monkeypatch, tmp_path)
+    delegate, cert = _mint_serve(root)  # no binding stored
+    r = env.post("/api/network/serve-cert", json={
+        "org": ORG, "cert": cert.to_json().decode("ascii"),
+        "private_key": delegate.private_hex,
+    })
+    assert r.status_code == 409
+    assert "not registered" in r.json()["error"]
+
+
+def test_provision_cross_org_refused(env, root, tmp_path, monkeypatch):
+    _serve_key_dir(monkeypatch, tmp_path)
+    _store_binding(root)
+    delegate, cert = _mint_serve(root)
+    r = env.post("/api/network/serve-cert", json={
+        "org": "someone-else", "cert": cert.to_json().decode("ascii"),
+        "private_key": delegate.private_hex,
+    })
+    assert r.status_code == 403
