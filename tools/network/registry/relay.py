@@ -11,7 +11,9 @@ Two WebSocket surfaces:
 - ``/v1/links/{token}/channel`` — where the bootloader connects. The
   token resolves exactly like the envelope endpoint; unknown, expired,
   revoked, dead-binding, and dashboard-offline all close with the same
-  code (4404) so a prober learns nothing (anti-enumeration, §5.3).
+  code (4404). The bootloader already learns token liveness from the envelope
+  HTTP status, so after a valid envelope this close honestly means no serving
+  tunnel is available; the UI reports the dashboard as disconnected.
 
 The relay routes opaque frames (``relaykit.frames``) between the two.
 It never parses channel payloads, holds no channel keys, and cannot
@@ -51,7 +53,7 @@ from .store import RegistryStore
 
 # WS close codes (4000-4999 = application-defined).
 CLOSE_UNAUTHENTICATED = 4403
-CLOSE_UNKNOWN_LINK = 4404  # one code for every viewer-side failure
+CLOSE_UNKNOWN_LINK = 4404  # unknown token or no serving tunnel
 CLOSE_REPLACED = 4409
 
 
@@ -201,8 +203,9 @@ async def viewer_endpoint(websocket: WebSocket, token: str, hub: TunnelHub,
     link = _resolve_live_link(store, token, int(now_fn()))
     tunnel = hub.get(link.org_uuid) if link is not None else None
     if link is None or tunnel is None:
-        # Anti-enumeration: bad token and offline dashboard are
-        # indistinguishable from out here.
+        # The WebSocket uses one close code; the bootloader has already
+        # resolved the envelope, so it can distinguish an invalid token from
+        # a valid link whose sharing dashboard is disconnected.
         await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
         return
 

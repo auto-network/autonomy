@@ -423,15 +423,33 @@ print('highlighted')
             if "design javascript ran" not in snapshot:
                 failures.append(f"design javascript did not run: {snapshot}")
 
+        connector.terminate()
+        connector.wait(timeout=5)
+        time.sleep(0.5)
+        ab("open", f"{base}/l/{note_token}")
+        offline = wait_main_phase("error")
+        offline_view = ab_eval(
+            "JSON.stringify({phase:window.autonet.state.phase,"
+            "kind:window.autonet.state.errorKind,"
+            "visible:!document.getElementById('disconnected-view').hidden})"
+        )
+        if offline_view != {
+            "phase": "error", "kind": "disconnected", "visible": True,
+        }:
+            failures.append(f"disconnected error state failed: {offline_view}, {offline}")
+
         ab("open", f"{base}/l/{'0' * 32}")
         time.sleep(0.5)
         error = ab_eval(
             "JSON.stringify({phase:window.autonet.state.phase,"
-            "visible:!document.getElementById('error-view').hidden,"
+            "kind:window.autonet.state.errorKind,"
+            "visible:!document.getElementById('invalid-link-view').hidden,"
             "leaks:document.body.innerText.includes('00000000')})"
         )
-        if error != {"phase": "error", "visible": True, "leaks": False}:
-            failures.append(f"generic error view failed: {error}")
+        if error != {
+            "phase": "error", "kind": "invalid", "visible": True, "leaks": False,
+        }:
+            failures.append(f"invalid-link error view failed: {error}")
 
         if failures:
             for failure in failures:
@@ -440,7 +458,7 @@ print('highlighted')
         print(
             "PASS: rich note, own and remote images, highlighted code, sanitation, "
             "link policy, source-authenticated bridge, frame-ancestor blocking, "
-            "executable design, and generic error view"
+            "executable design, and truthful invalid/disconnected error states"
         )
         return 0
     finally:

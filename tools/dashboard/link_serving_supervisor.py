@@ -284,6 +284,7 @@ class ServingSupervisor:
     def stop_all(self) -> None:
         """Stop the watchdog and every managed connector (dashboard shutdown)."""
         self._stop.set()
+        watchdog = self._watchdog
         with self._lock:
             for proc in self._procs.values():
                 try:
@@ -291,6 +292,10 @@ class ServingSupervisor:
                 except Exception:
                     pass
             self._procs.clear()
+            self._managed.clear()
+        if watchdog is not None and watchdog is not threading.current_thread():
+            watchdog.join(timeout=2)
+        self._watchdog = None
 
     def running_orgs(self) -> list:
         with self._lock:
@@ -315,18 +320,39 @@ def get_supervisor() -> ServingSupervisor:
     return _SINGLETON
 
 
+def _discover_startup_orgs() -> list[str | None]:
+    """Return every local Settings scope that may own serving state.
+
+    A test-pinned ``GRAPH_DB`` is one physical database, so only its resolved
+    scope is meaningful. A real dashboard owns multiple per-org databases and
+    must reconcile all of them after a reload; limiting startup to the caller
+    org strands every other org's connector outside the watchdog.
+    """
+    configured = os.environ.get("GRAPH_ORG") or None
+    if os.environ.get("GRAPH_DB"):
+        return [configured]
+
+    from tools.graph import org_ops
+
+    discovered: list[str | None] = [None]
+    discovered.extend(ref.slug for ref in org_ops.list_orgs())
+    if configured is not None and configured not in discovered:
+        discovered.append(configured)
+    return discovered
+
+
 def bootstrap(orgs=None) -> ServingSupervisor:
     """Dashboard-startup entry: reconcile serving for each org, then arm the
     watchdog. So a restart with a provisioned cert + live grants brings serving
     back up on its own, and the watchdog keeps it reconciled thereafter.
 
-    *orgs* defaults to the caller's own org (``settings_ops.CALLER_ORG`` — the
-    env-cascade sentinel that resolves to this dashboard's org). Never raises:
-    startup must not be held hostage by a serving hiccup.
+    *orgs* defaults to every local org database plus the legacy scopeless
+    database. Never raises: startup must not be held hostage by a serving
+    hiccup.
     """
     supervisor = get_supervisor()
     if orgs is None:
-        orgs = [settings_ops.CALLER_ORG]
+        orgs = _discover_startup_orgs()
     for org in orgs:
         try:
             supervisor.ensure(org)

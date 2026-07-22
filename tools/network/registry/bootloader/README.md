@@ -59,8 +59,8 @@ parts; missing parts become local placeholders. HTTP(S) links open with
 
 ## Tests
 
-- `tools/network/registry/tests/test_bootloader.py` — static shell,
-  anti-enumeration, CSP, response headers, and sandbox capabilities.
+- `tools/network/registry/tests/test_bootloader.py` — static shell bytes,
+  observable failure states, CSP, response headers, and sandbox capabilities.
 - `tools/network/registry/tests/test_bootloader_canonical.py` — canonical
   JSON parity with Python.
 - `tools/network/registry/tests/test_bootloader_artifact.py` — strict union,
@@ -70,6 +70,6 @@ parts; missing parts become local placeholders. HTTP(S) links open with
 - `tools/network/relaykit/tests/bootloader_harness.py` — full authenticated
   headless-browser acceptance for rich notes, controlled remote images,
   sanitation, link behavior, source-authenticated messaging, executable
-  designs, and the generic failure view. Opt-in:
+  designs, and truthful invalid/disconnected failure views. Opt-in:
   `AUTONET_BROWSER_TEST=1 pytest .../test_bootloader_browser.py`, or run
   the harness module directly.

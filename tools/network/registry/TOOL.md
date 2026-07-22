@@ -71,7 +71,7 @@ Two anchors sit outside the chain rule by construction:
 | `GET /v1/attestations/{subject_pub}` | none (Tier A) | live (unexpired) attestation records about a subject key, served verbatim |
 | `GET /healthz` | none | systemd/Caddy probe |
 | `WS /t/{org}` | `tunnel:serve` hello (chain to bound root) | §5.1 relay tunnel — one outbound dashboard connection per org; see `tools/network/relaykit/TOOL.md` |
-| `WS /v1/links/{token}/channel` | none (bootloader) | viewer end of the relay; every failure closes `4404` (anti-enumeration) |
+| `WS /v1/links/{token}/channel` | none (bootloader) | viewer end of the relay; `4404` after a valid envelope means the sharing dashboard is disconnected |
 | `GET /l/{token}` | none (bootloader shell) | §5.3 — one static page for every token; identical bytes, status mirrors envelope liveness; no identifiers before the channel is up; see `bootloader/README.md` |
 | `GET /l-assets/autonet.js` | none | the WebCrypto channel client (viewer side of B2's handshake) |
 

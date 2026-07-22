@@ -1,9 +1,8 @@
-"""§5.3 bootloader: served bytes carry no identifiers, one error page.
+"""§5.3 bootloader: served bytes carry no identifiers and honest states.
 
 The cryptographic path (handshake, render) is exercised end-to-end in the
 headless browser suite (``tools/network/relaykit/tests/test_bootloader_browser.py``);
-these tests pin the server-side anti-enumeration contract, which is pure
-HTTP and needs no browser.
+these tests pin the server-side static-shell and HTTP-liveness contract.
 """
 
 from __future__ import annotations
@@ -74,6 +73,13 @@ class TestBootloaderBytes:
         shell = client.get("/l/not-a-token").text
         assert "allow-scripts allow-popups allow-popups-to-escape-sandbox" in shell
         assert "allow-same-origin" not in shell
+
+    def test_shell_distinguishes_publicly_observable_failure_stages(self, client):
+        shell = client.get("/l/not-a-token").text
+        assert "Autonomy Disconnected" in shell
+        assert "currently offline" in shell
+        assert "invalid, expired, or was revoked" in shell
+        assert "Secure connection failed" in shell
 
     def test_asset_served(self, client):
         response = client.get("/l-assets/autonet.js")
