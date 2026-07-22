@@ -88,6 +88,11 @@ class TestBootloaderBytes:
         assert response.headers["cache-control"] == "no-store"
         assert b"performHandshake" in response.content
 
+    def test_asset_uses_sandboxed_srcdoc_not_blob_frame_navigation(self, client):
+        script = client.get("/l-assets/autonet.js").text
+        assert "frame.srcdoc = decoder.decode(viewerBytes)" in script
+        assert "frame.src = URL.createObjectURL" not in script
+
     def test_shell_busts_legacy_asset_cache_without_fallback(self, client):
         shell = client.get("/l/not-a-token").text
         assert 'src="/l-assets/autonet.js?v=2"' in shell

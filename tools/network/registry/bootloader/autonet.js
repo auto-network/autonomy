@@ -512,6 +512,7 @@ const autonet = (() => {
     state.phase = "error";
     state.errorKind = Object.prototype.hasOwnProperty.call(ERROR_VIEWS, kind)
       ? kind : "content";
+    setStatus("");
     show(ERROR_VIEWS[state.errorKind]);
   }
 
@@ -540,11 +541,14 @@ const autonet = (() => {
     const viewerBytes = body.slice(
       artifact.viewer.offset, artifact.viewer.offset + artifact.viewer.length
     );
-    frame.src = URL.createObjectURL(new Blob([viewerBytes], { type: "text/html" }));
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    // WebKit can reject blob: HTML navigation in an HTTPS sandboxed iframe,
+    // leaving the note viewer unable to emit its ready message. srcdoc keeps
+    // the same sandboxed opaque origin without depending on blob navigation.
+    frame.srcdoc = decoder.decode(viewerBytes);
 
     if (artifact.kind === "note") {
       await withTimeout(ready, VIEWER_READY_TIMEOUT_MS, "viewer ready");
-      const decoder = new TextDecoder("utf-8", { fatal: true });
       const md = artifact.content.markdown;
       const parts = artifact.content.parts.map((part) => {
         const bytes = body.slice(part.offset, part.end).buffer;
