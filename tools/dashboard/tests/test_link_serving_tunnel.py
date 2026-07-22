@@ -213,6 +213,9 @@ def test_tunnel_serves_only_against_local_grants(stack):
             assert json.loads(header) == {
                 "v": 1, "status": "ok", "kind": "present",
                 "viewer": {"offset": 0, "length": len(BINDER_BYTES)},
+                "branding": {
+                    "name": "netorg", "color": "#118AB2", "initial": "N",
+                },
             }
             assert len(body) == len(BINDER_BYTES)  # binder-sized, byte-exact
             assert body == BINDER_BYTES
