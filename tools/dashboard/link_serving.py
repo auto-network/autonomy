@@ -26,9 +26,18 @@ bytes behind the channel's token. The flow per request:
      symlinks can walk the resolver out of the run dirs.
 
 Wire protocol: channel fetch v1, exactly the shape of the reference
-``connector.file_handler`` — request ``{"op": "fetch", "v": 1}``,
-response one canonical-JSON header line (``{v, status, content_type}``),
-a newline, then the body bytes.
+``connector.file_handler``.
+
+* ``{"op": "fetch", "v": 1}`` → one canonical-JSON header line
+  (``{v, status, content_type}``), a newline, then the body bytes.
+* ``{"op": "head", "v": 1}`` → the SAME header line plus a
+  ``content_length`` field, a newline, and NO body. It runs the identical
+  grant gate + target resolution as ``fetch`` (so a 200 head proves the
+  whole path resolves), but never streams the artifact — a
+  hundreds-of-MB target costs one round-trip to validate, not a transfer.
+  This is what the publisher's own end-to-end liveness probe issues (the
+  final step of a link publish): the dashboard acts as its own viewer and
+  HEADs the freshly published token to confirm the tunnel actually serves.
 
 Anti-enumeration: every refusal — unknown token, expired grant, revoked
 grant, reserved ``require_auth`` grant, unresolvable target, disallowed
@@ -334,7 +343,7 @@ def make_grant_handler(org: str | None = None, *,
     roots = tuple(file_roots) if file_roots else DEFAULT_FILE_ROOTS
     clock = now or time.time
 
-    def _serve(token: str) -> bytes:
+    def _serve(token: str, head: bool = False) -> bytes:
         grant = check_grant(token, org=org, now=clock())
         if grant is None:
             return REFUSED
@@ -342,6 +351,16 @@ def make_grant_handler(org: str | None = None, *,
         if resolved is None:
             return REFUSED
         body, content_type = resolved
+        if head:
+            # Same gate + resolution as fetch, so status 200 proves the whole
+            # path resolves — but headers only, never the artifact bytes. The
+            # length is measured locally; nothing large crosses the tunnel.
+            header = canonical_json({
+                "v": 1, "status": 200,
+                "content_type": content_type,
+                "content_length": len(body),
+            })
+            return header + b"\n"
         return _response(200, content_type, body)
 
     async def handler(token: str, message: bytes) -> bytes:
@@ -349,11 +368,14 @@ def make_grant_handler(org: str | None = None, *,
             request = json.loads(message)
         except ValueError:
             return BAD_REQUEST
-        if not isinstance(request, dict) or request.get("op") != "fetch":
+        if not isinstance(request, dict):
+            return BAD_REQUEST
+        op = request.get("op")
+        if op not in ("fetch", "head"):
             return BAD_REQUEST
         # Settings + sqlite + file reads are blocking; keep them off the
         # tunnel's event loop so one slow lookup can't stall siblings.
-        return await asyncio.to_thread(_serve, token)
+        return await asyncio.to_thread(_serve, token, op == "head")
 
     return handler
 

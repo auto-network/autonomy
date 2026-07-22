@@ -43,6 +43,7 @@ ORG = "netorg"
 ISO = "%Y-%m-%dT%H:%M:%SZ"
 
 FETCH = canonical_json({"op": "fetch", "v": 1})
+HEAD = canonical_json({"op": "head", "v": 1})
 
 
 def _token(n: int) -> str:
@@ -177,6 +178,49 @@ class TestGrantGate:
         assert serve(_token(10), canonical_json({"op": "steal", "v": 1})) \
             == link_serving.BAD_REQUEST
         assert serve(_token(10), canonical_json(["fetch"])) == link_serving.BAD_REQUEST
+
+
+class TestHeadOp:
+    """The object HEAD: same gate + resolution as fetch, headers only.
+
+    A valid HEAD returns status 200 with content_type and content_length
+    but NO body (the liveness-probe shape — a large target costs no
+    transfer). Every gate failure returns the SAME refusal as fetch, so a
+    prober can neither classify the failure nor tell HEAD from fetch.
+    """
+
+    def test_head_returns_length_and_no_body(self, env, tmp_path):
+        root = tmp_path / "runs"
+        root.mkdir()
+        artifact = root / "out.bin"
+        artifact.write_bytes(b"x" * 5000)
+        token = _token(20)
+        put_grant(token, _attach(artifact), "file")
+
+        fetched = serve(token, FETCH, file_roots=[str(root)])
+        headed = serve(token, HEAD, file_roots=[str(root)])
+        fh, fbody = parse(fetched)
+        hh, hbody = parse(headed)
+
+        assert fh["status"] == 200 and len(fbody) == 5000
+        # Same status + content_type the fetch reports, plus the length…
+        assert hh["status"] == 200
+        assert hh["content_type"] == fh["content_type"]
+        assert hh["content_length"] == 5000
+        # …and NOTHING after the header newline: the artifact never streams.
+        assert hbody == b""
+
+    def test_head_refusal_matches_fetch_refusal(self, env):
+        # Unknown, revoked, expired all collapse to the one refusal for HEAD
+        # too — and it is byte-identical to the fetch refusal.
+        assert serve(_token(21), HEAD) == link_serving.REFUSED
+        assert serve(_token(21), HEAD) == serve(_token(21), FETCH)
+
+    def test_head_expired_grant_refused(self, env):
+        token = _token(22)
+        put_grant(token, str(uuid.uuid4()), "note",
+                  meta={"ttl": 60}, issued_at=_iso(time.time() - 120))
+        assert serve(token, HEAD) == link_serving.REFUSED
 
 
 # ── file resolver: the path allowlist ─────────────────────────
