@@ -52,6 +52,7 @@ Invariants enforced here:
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import re
 import time
@@ -287,6 +288,15 @@ def _enrich_link_publish(row: dict) -> dict:
     if staged is None and binding_error and _is_registerable_on_first_publish(org):
         registration_required = True
         binding_error = None
+    # Internal precondition (NOT shown in the dialog): whether the approve step
+    # must ALSO mint a serve-cert in its single root unlock. True when no usable
+    # serve-cert is provisioned. The browser reads it to decide the dual-mint;
+    # the operator sees nothing about serving.
+    try:
+        from tools.dashboard.link_serving_supervisor import serve_cert_ok
+        serve_cert_required = not serve_cert_ok(org)
+    except Exception:
+        serve_cert_required = True  # fail toward minting; a spurious mint is safe
     out = {
         "target_title": target["title"],
         "target_error": target["error"],
@@ -296,6 +306,7 @@ def _enrich_link_publish(row: dict) -> dict:
         "binding_error": binding_error,
         "binding_drift": drift,
         "registration_required": registration_required,
+        "serve_cert_required": serve_cert_required,
         **_approval_identities(org),
     }
     if target.get("preview"):
@@ -537,6 +548,17 @@ async def _execute_link_publish(row: dict, decision: dict) -> dict:
         NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION,
         token, grant, org=org,
     )
+    # Post-publish trigger: reconcile the serving connector now that a live
+    # grant exists (starts it if a serve-cert is provisioned and it isn't
+    # already running). Non-fatal and best-effort — a launch failure is not an
+    # exception into the publish; the probe below reports the real state, and
+    # the watchdog keeps reconciling. Off the event loop: it reads settings,
+    # verifies the key, and may spawn a process.
+    try:
+        from tools.dashboard.link_serving_supervisor import get_supervisor
+        await asyncio.to_thread(get_supervisor().ensure, org)
+    except Exception:
+        pass
     # Final step: prove the link actually serves before reporting success.
     # The grant is already minted (the link exists) — the probe never
     # un-publishes it; it walks the viewer's real path (relay handshake +
