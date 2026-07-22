@@ -54,11 +54,23 @@ def test_valid_note_and_design_headers_are_accepted():
     }
     unicode_title = _note_header()
     unicode_title["content"]["title"] = "😀" * 500
+    branded = _note_header()
+    branded["branding"] = {
+        "name": "Example Org", "color": "#123456", "initial": "E",
+        "favicon": {"mime": "image/png", "offset": 20, "length": 3},
+    }
+    branded_url = _note_header()
+    branded_url["branding"] = {
+        "name": "Example Org", "color": "#123456", "initial": "E",
+        "favicon_url": "https://example.test/favicon.png",
+    }
     assert _validate([
         {"header": _note_header(), "size": 20},
         {"header": unicode_title, "size": 20},
         {"header": design, "size": 20},
-    ]) == [True, True, True]
+        {"header": branded, "size": 23},
+        {"header": branded_url, "size": 20},
+    ]) == [True, True, True, True, True]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
@@ -83,6 +95,21 @@ def test_malformed_ranges_refs_and_unions_are_rejected():
     add(lambda h: h["content"].update(title="x" * 501))
     add(lambda h: h["content"].update(title="😀" * 501))
     add(lambda h: h.update(extra=True))
+
+    add(lambda h: h.update(branding={
+        "name": "Org", "color": "red", "initial": "O",
+    }))
+    add(lambda h: h.update(branding={
+        "name": "Org", "color": "#123456", "initial": "OO",
+    }))
+    add(lambda h: h.update(branding={
+        "name": "Org", "color": "#123456", "initial": "O",
+        "favicon_url": "http://example.test/icon.png",
+    }))
+    add(lambda h: h.update(branding={
+        "name": "Org", "color": "#123456", "initial": "O",
+        "favicon": {"mime": "image/png", "offset": 19, "length": 1},
+    }))
 
     missing_content = _note_header()
     del missing_content["content"]

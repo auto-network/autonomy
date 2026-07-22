@@ -34,11 +34,17 @@ shell and script together. There is no compatibility fallback.
 5. Derive keys and send `{v:1,op:"fetch"}`. The response is a JSON header
    line followed by a part-addressed body.
 6. Require `status:"ok"`, an allowed discriminated union, safe in-bounds
-   non-overlapping slices, unique part refs, a non-empty viewer, and a body
-   no larger than 48 MiB.
+   non-overlapping slices, unique part refs, a non-empty viewer, authenticated
+   bounded org branding, and a body no larger than 48 MiB.
 7. Load the viewer bytes. Notes wait for one authenticated `ready` message,
    then receive Markdown and image parts once. Designs and Present artifacts
    execute their existing HTML unchanged.
+
+The static shell remains identical for every link and shows `auto.network`
+while resolving. After an authenticated artifact validates, the header replaces
+that text with the serving org's favicon. Local dashboard icons travel as
+bounded artifact parts; HTTPS icons load under the page's no-referrer policy;
+an org without an icon uses its established color/initial identity.
 
 ## Rendering & the CSP decision
 

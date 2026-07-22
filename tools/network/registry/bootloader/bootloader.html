@@ -27,6 +27,12 @@
     align-items: baseline; flex: none;
   }
   header .brand { color: #b9b9c6; font-weight: 600; letter-spacing: .04em; }
+  header .brand-icon {
+    width: 20px; height: 20px; flex: none; display: grid; place-items: center;
+    letter-spacing: 0; border-radius: 5px; overflow: hidden;
+  }
+  header .brand-icon img { width: 100%; height: 100%; object-fit: cover; }
+  header .brand-initial { color: #fff; font-size: 11px; font-weight: 700; }
   main { flex: 1; display: flex; min-height: 0; }
   main > section { flex: 1; display: flex; min-height: 0; }
   section[hidden] { display: none; }
@@ -48,7 +54,7 @@
 </head>
 <body>
 <header>
-  <span class="brand">auto.network</span>
+  <span id="brand" class="brand">auto.network</span>
   <span id="status-line"></span>
 </header>
 <main>
