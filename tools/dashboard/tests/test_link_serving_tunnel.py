@@ -38,6 +38,7 @@ from tools.graph.schemas.network_identity import (
 )
 from tools.network.idkit import KeyPair, Subject, canonical_json, issue_cert
 from tools.network.registry.signing import sign_request
+from tools.dashboard.link_probe import probe_link
 from tools.network.relaykit.connector import TunnelConnector
 from tools.network.relaykit.viewer import ViewerChannel
 
@@ -224,5 +225,81 @@ def test_tunnel_serves_only_against_local_grants(stack):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+
+    asyncio.run(run())
+
+
+def test_probe_confirms_live_link_and_flags_dead_grant(stack):
+    """The publisher's own end-to-end probe over the real tunnel.
+
+    With the connector serving: a cached-and-valid token probes LIVE (200,
+    content_length matches the artifact) — and it never transfers the body.
+    A token the registry vouches for but the dashboard hasn't cached probes
+    NOT live with a 404 status: the tunnel is up, the grant is dead — a
+    distinct verdict from an unreachable tunnel.
+    """
+    binder_rev = design_db.create_design(
+        title="OSS Insights binder",
+        variants=[{"id": "v1", "html": BINDER_HTML}],
+    )
+    granted = publish_link(stack["port"], stack["root"], binder_rev)
+    registry_only = publish_link(stack["port"], stack["root"], binder_rev)
+    cache_grant(granted, binder_rev)
+
+    relay = f"ws://127.0.0.1:{stack['port']}"
+
+    async def run():
+        connector = stack["connector"]
+        task = asyncio.create_task(connector.run())
+        try:
+            await asyncio.wait_for(connector.connected.wait(), timeout=15)
+
+            live = await probe_link(
+                relay_url=relay, token=granted,
+                root_pub=stack["root_pub"], org_uuid=ORG_UUID,
+                total_timeout=15.0,
+            )
+            assert live["live"] is True, live
+            assert live["status"] == 200
+            assert live["content_length"] == len(BINDER_BYTES)  # headers-only
+
+            # Tunnel up (handshake succeeds), grant absent → not live, 404.
+            dead = await probe_link(
+                relay_url=relay, token=registry_only,
+                root_pub=stack["root_pub"], org_uuid=ORG_UUID,
+                total_timeout=15.0,
+            )
+            assert dead["live"] is False, dead
+            assert dead["status"] == 404
+        finally:
+            connector.stop()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    asyncio.run(run())
+
+
+def test_probe_reports_unreachable_when_no_connector(stack):
+    """No serving tunnel dialed in (connector never started) → the probe
+    reports NOT live with a None status: the honest 'dashboard offline'
+    verdict, distinct from a dead-grant 404. Bounded fast by the budget."""
+    binder_rev = design_db.create_design(
+        title="OSS Insights binder",
+        variants=[{"id": "v1", "html": BINDER_HTML}],
+    )
+    token = publish_link(stack["port"], stack["root"], binder_rev)
+    cache_grant(token, binder_rev)  # local grant is fine — the TUNNEL is down
+    relay = f"ws://127.0.0.1:{stack['port']}"
+
+    async def run():
+        # connector deliberately NOT started.
+        verdict = await probe_link(
+            relay_url=relay, token=token,
+            root_pub=stack["root_pub"], org_uuid=ORG_UUID,
+            total_timeout=4.0, connect_timeout=1.5, read_timeout=1.5,
+        )
+        assert verdict["live"] is False, verdict
+        assert verdict["status"] is None, verdict
 
     asyncio.run(run())

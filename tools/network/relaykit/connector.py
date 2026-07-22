@@ -95,13 +95,17 @@ def file_handler(path: str, content_type: str):
 
     Protocol: request is canonical JSON ``{"op": "fetch", "v": 1}``;
     response is a JSON header line (``{v, status, content_type}``), a
-    newline, then the body bytes. C4's real target resolver replaces this
-    with grant-checked (I9) per-target lookup behind the same protocol.
+    newline, then the body bytes. ``{"op": "head", "v": 1}`` returns the
+    same header plus ``content_length`` and no body — the liveness-probe
+    shape. C4's real target resolver replaces this with grant-checked (I9)
+    per-target lookup behind the same protocol.
     """
     from tools.network.idkit import canonical_json
 
     body = open(path, "rb").read()
     ok = canonical_json({"v": 1, "status": 200, "content_type": content_type}) + b"\n" + body
+    head = canonical_json({"v": 1, "status": 200, "content_type": content_type,
+                           "content_length": len(body)}) + b"\n"
     bad = canonical_json({"v": 1, "status": 400, "content_type": "text/plain"}) + b"\nbad request"
 
     async def handler(token: str, message: bytes) -> bytes:
@@ -109,9 +113,13 @@ def file_handler(path: str, content_type: str):
             request = json.loads(message)
         except ValueError:
             return bad
-        if not isinstance(request, dict) or request.get("op") != "fetch":
+        if not isinstance(request, dict):
             return bad
-        return ok
+        if request.get("op") == "fetch":
+            return ok
+        if request.get("op") == "head":
+            return head
+        return bad
 
     return handler
 

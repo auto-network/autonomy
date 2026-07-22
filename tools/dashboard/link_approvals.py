@@ -537,12 +537,38 @@ async def _execute_link_publish(row: dict, decision: dict) -> dict:
         NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION,
         token, grant, org=org,
     )
+    # Final step: prove the link actually serves before reporting success.
+    # The grant is already minted (the link exists) — the probe never
+    # un-publishes it; it walks the viewer's real path (relay handshake +
+    # object HEAD) so the result honestly says whether the tunnel is live,
+    # the grant is dead, or the tunnel is unreachable, without transferring
+    # the artifact. A down tunnel is a backend concern that self-heals; the
+    # publish reports it, it does not fail on it.
+    serving = await _probe_serving(binding, token)
     return {
         "ok": True,
         "url": url,
         "token": token,
+        "serving": serving,
         "actor": _approval_identities(org)["actor_identity"],
     }
+
+
+async def _probe_serving(binding: dict, token: str) -> dict:
+    """End-to-end liveness probe of a freshly published link. Never raises —
+    a probe that cannot run is reported as not-live, never an exception into
+    the publish result (the grant is already cached)."""
+    from tools.dashboard.link_probe import probe_link, registry_to_relay_ws
+    try:
+        return await probe_link(
+            relay_url=registry_to_relay_ws(binding["registry_url"]),
+            token=token,
+            root_pub=binding["root_pub"],
+            org_uuid=binding["org_uuid"],
+        )
+    except Exception as e:
+        return {"live": False, "status": None, "content_length": None,
+                "detail": f"serving probe could not run: {e}"}
 
 
 async def _execute_link_revoke(row: dict, decision: dict) -> dict:
