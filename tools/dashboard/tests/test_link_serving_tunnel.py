@@ -38,7 +38,15 @@ from tools.graph.schemas.network_identity import (
 )
 from tools.network.idkit import KeyPair, Subject, canonical_json, issue_cert
 from tools.network.registry.signing import sign_request
+from tools.dashboard import link_serving_supervisor as sup
 from tools.dashboard.link_probe import probe_link
+from tools.graph.schemas.network_identity import (
+    NETWORK_BINDING_REVISION,
+    NETWORK_BINDING_SET_ID,
+    NETWORK_SERVE_CERT_REVISION,
+    NETWORK_SERVE_CERT_SET_ID,
+)
+from tools.network.idkit import Subject, issue_cert
 from tools.network.relaykit.connector import TunnelConnector
 from tools.network.relaykit.viewer import ViewerChannel
 
@@ -278,6 +286,83 @@ def test_probe_confirms_live_link_and_flags_dead_grant(stack):
                 await task
 
     asyncio.run(run())
+
+
+def _provision_serve_cert(tmp_path, root, port):
+    """Mint a real root-signed tunnel:serve delegate, write its 0600 key file,
+    and store the serve-cert row + binding — what the provision endpoint will
+    do once the browser dual-mint lands."""
+    delegate = KeyPair.generate()
+    now = int(time.time())
+    cert = issue_cert(
+        root, delegate.public_hex, scope=("tunnel:serve",), org=ORG_UUID,
+        subject=Subject("operator", "op-serve"),
+        not_before=now - 300, not_after=now + 30 * 24 * 3600,
+    )
+    keydir = tmp_path / "network"
+    keydir.mkdir(exist_ok=True)
+    key_path = keydir / "serve.key"
+    key_path.write_text(delegate.private_hex)
+    os.chmod(key_path, 0o600)
+    settings_ops.add_setting(
+        NETWORK_SERVE_CERT_SET_ID, NETWORK_SERVE_CERT_REVISION, "default",
+        {"cert": cert.to_json().decode("ascii"), "key_path": str(key_path),
+         "root_pub": root.public_hex, "not_after": cert.not_after},
+        org=ORG,
+    )
+    settings_ops.add_setting(
+        NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "auto.network",
+        {"org_uuid": ORG_UUID, "root_pub": root.public_hex,
+         "registry_url": f"http://127.0.0.1:{port}",
+         "recovery_policy": {"mode": "none"},
+         "binding_expires_at": time.strftime(ISO, time.gmtime(now + 30 * 86400))},
+        org=ORG,
+    )
+
+
+def test_supervisor_brings_serving_live_end_to_end(stack, tmp_path, monkeypatch):
+    """The whole point: given a provisioned serve-cert, the supervisor spawns
+    the REAL connector subprocess and the freshly published link goes live —
+    proven by the publisher's own probe, headers-only."""
+    # The spawned connector is a SEPARATE process: it inherits GRAPH_DB (its
+    # grant cache) from the env, but the designs DB is a module attr the stack
+    # fixture only monkeypatched in-process — so point the subprocess at the
+    # same tmp designs DB via the env var design_db reads.
+    monkeypatch.setenv("EXPERIMENTS_DB", str(design_db.DB_PATH))
+    binder_rev = design_db.create_design(
+        title="OSS Insights binder",
+        variants=[{"id": "v1", "html": BINDER_HTML}],
+    )
+    token = publish_link(stack["port"], stack["root"], binder_rev)
+    cache_grant(token, binder_rev)
+    _provision_serve_cert(tmp_path, stack["root"], stack["port"])
+
+    supervisor = sup.ServingSupervisor()
+    relay = f"ws://127.0.0.1:{stack['port']}"
+    try:
+        # The post-publish trigger: reconcile → launch the connector subprocess.
+        result = supervisor.ensure(ORG)
+        assert result == {"running": True, "reason": "launched"}, result
+
+        async def run():
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 30
+            verdict = None
+            while loop.time() < deadline:
+                verdict = await probe_link(
+                    relay_url=relay, token=token, root_pub=stack["root_pub"],
+                    org_uuid=ORG_UUID, total_timeout=4.0, connect_timeout=2.0,
+                    attempts=1,
+                )
+                if verdict["live"]:
+                    break
+                await asyncio.sleep(0.5)
+            assert verdict and verdict["live"] is True, verdict
+            assert verdict["content_length"] == len(BINDER_BYTES)  # headers-only
+
+        asyncio.run(run())
+    finally:
+        supervisor.stop_all()
 
 
 def test_probe_reports_unreachable_when_no_connector(stack):
