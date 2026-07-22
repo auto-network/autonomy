@@ -30,17 +30,13 @@
   main { flex: 1; display: flex; min-height: 0; }
   main > section { flex: 1; display: flex; min-height: 0; }
   section[hidden] { display: none; }
-  #loading-view, #error-view, #download-view {
+  #loading-view, #error-view {
     align-items: center; justify-content: center; flex-direction: column;
     gap: 12px; text-align: center; padding: 24px;
   }
   #error-view h1 { font-size: 20px; margin: 0; color: #e8e8f0; }
   #error-view p { max-width: 42ch; margin: 0; color: #8a8a96; }
   #artifact-frame { flex: 1; border: 0; width: 100%; background: #fff; }
-  #text-view-pre {
-    flex: 1; margin: 0; padding: 16px; overflow: auto;
-    font: 13px/1.5 ui-monospace, monospace; white-space: pre-wrap;
-  }
   .spinner {
     width: 22px; height: 22px; border-radius: 50%;
     border: 2px solid #33333d; border-top-color: #d6d6de;
@@ -67,13 +63,10 @@
        you, ask them for a fresh link.</p>
   </section>
   <section id="frame-view" hidden>
-    <iframe id="artifact-frame" sandbox="allow-scripts" title="shared artifact"></iframe>
-  </section>
-  <section id="text-view" hidden>
-    <pre id="text-view-pre"></pre>
-  </section>
-  <section id="download-view" hidden>
-    <a id="download-link">Download the shared file</a>
+    <iframe id="artifact-frame"
+            name="artifact-frame"
+            sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
+            title="shared artifact"></iframe>
   </section>
 </main>
 <script src="/l-assets/autonet.js"></script>

@@ -91,29 +91,36 @@ async def serve_channel(key: KeyPair, cert: DelegationCert, *, org: str, token: 
 
 
 def file_handler(path: str, content_type: str):
-    """Serve one file over channel fetch protocol v1 — the C4 seam.
+    """Serve one HTML file as a design artifact for manual channel tests.
 
-    Protocol: request is canonical JSON ``{"op": "fetch", "v": 1}``;
-    response is a JSON header line (``{v, status, content_type}``), a
-    newline, then the body bytes. ``{"op": "head", "v": 1}`` returns the
-    same header plus ``content_length`` and no body — the liveness-probe
-    shape. C4's real target resolver replaces this with grant-checked (I9)
-    per-target lookup behind the same protocol.
+    This development seam implements the same part-addressed fetch protocol
+    as the grant-gated production resolver. ``content_type`` remains in the
+    CLI signature for compatibility and must identify HTML.
     """
     from tools.network.idkit import canonical_json
 
+    if content_type.split(";", 1)[0].strip().lower() != "text/html":
+        raise ValueError("serve-file mode requires text/html")
     body = open(path, "rb").read()
-    ok = canonical_json({"v": 1, "status": 200, "content_type": content_type}) + b"\n" + body
-    head = canonical_json({"v": 1, "status": 200, "content_type": content_type,
-                           "content_length": len(body)}) + b"\n"
-    bad = canonical_json({"v": 1, "status": 400, "content_type": "text/plain"}) + b"\nbad request"
+    ok = canonical_json({
+        "v": 1, "status": "ok", "kind": "design",
+        "viewer": {"offset": 0, "length": len(body)},
+    }) + b"\n" + body
+    head = canonical_json({
+        "v": 1, "status": "ok", "serialized_size": len(body),
+    }) + b"\n"
+    bad = canonical_json({"v": 1, "status": 400}) + b"\nbad request"
 
     async def handler(token: str, message: bytes) -> bytes:
         try:
             request = json.loads(message)
         except ValueError:
             return bad
-        if not isinstance(request, dict):
+        if (
+            not isinstance(request, dict)
+            or set(request) != {"v", "op"}
+            or request.get("v") != 1
+        ):
             return bad
         if request.get("op") == "fetch":
             return ok

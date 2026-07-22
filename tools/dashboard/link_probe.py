@@ -10,10 +10,10 @@ broken. So the final step of a link publish is this probe, and its result
 is the sole source of truth for "the tunnel is down / the grant is dead /
 it serves".
 
-It issues an object **HEAD** (``{"op": "head", "v": 1}``), not a fetch: the
-head runs the identical grant gate + target resolution on the serving end,
-so a 200 proves the whole path — but it returns headers only, so a
-hundreds-of-MB target costs one round-trip to validate, not a transfer.
+It issues an object **HEAD** (``{"op": "head", "v": 1}``), not a fetch. The
+head runs the identical grant gate, resolution, serialization, and size check
+on the serving end. A wire ``status:"ok"`` therefore proves the whole path,
+but the response contains only ``serialized_size`` and transfers no artifact.
 
 The probe is a *client*; it reuses the same ``ViewerChannel`` the bootloader
 reimplements in WebCrypto. It fails closed and never raises into the publish
@@ -23,9 +23,9 @@ not.
 
 Three outcomes, mapped to the honest viewer-side states:
 
-* ``live`` — handshake completed and the object HEAD returned 200. The link
-  serves.
-* not live, ``status`` is a refusal (404) — the tunnel is UP (handshake
+* ``live`` — handshake completed and the object HEAD returned ``"ok"``. The
+  public verdict retains HTTP-like ``status:200`` for dashboard callers.
+* not live, ``status`` is a refusal (404 in the public verdict) — the tunnel is UP (handshake
   succeeded) but the token resolves to nothing: not cached, revoked, or
   expired. Distinct from a dead tunnel.
 * not live, ``status`` is None — the tunnel is not reachable: the connector
@@ -63,12 +63,12 @@ def _interpret(raw: bytes) -> dict:
         meta = json.loads(header)
     except ValueError:
         meta = None
-    status = meta.get("status") if isinstance(meta, dict) else None
-    if status == 200:
+    wire_status = meta.get("status") if isinstance(meta, dict) else None
+    if wire_status == "ok" and meta.get("v") == 1:
         return {
             "live": True,
             "status": 200,
-            "content_length": meta.get("content_length") if isinstance(meta, dict) else None,
+            "content_length": meta.get("serialized_size"),
             "detail": "the link serves: handshake completed and the target resolved",
         }
     # Handshake succeeded (we got a framed response), but the serving end
@@ -76,7 +76,7 @@ def _interpret(raw: bytes) -> dict:
     # failure as an unreachable tunnel, and the viewer must not be told it is.
     return {
         "live": False,
-        "status": status,
+        "status": 404 if wire_status == "unavailable" else None,
         "content_length": None,
         "detail": (
             "the serving tunnel is up but the link resolves to nothing "

@@ -63,10 +63,17 @@ class TestBootloaderBytes:
         headers = client.get(f"/l/{token}").headers
         csp = headers["content-security-policy"]
         assert "default-src 'none'" in csp
-        assert "connect-src 'self'" in csp
+        assert "connect-src 'self' https: http: wss: ws:" in csp
+        assert "img-src blob: data: https: http:" in csp
+        assert "frame-ancestors 'none'" in csp
         assert headers["referrer-policy"] == "no-referrer"
         assert headers["x-content-type-options"] == "nosniff"
         assert headers["cache-control"] == "no-store"
+
+    def test_frame_is_null_origin_and_allows_links(self, client):
+        shell = client.get("/l/not-a-token").text
+        assert "allow-scripts allow-popups allow-popups-to-escape-sandbox" in shell
+        assert "allow-same-origin" not in shell
 
     def test_asset_served(self, client):
         response = client.get("/l-assets/autonet.js")
