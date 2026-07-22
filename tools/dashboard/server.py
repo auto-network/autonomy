@@ -15937,6 +15937,21 @@ async def _on_startup():
             "continuing without action dispatch"
         )
 
+    # auto.network serving supervisor: bring up the tunnel connector for any
+    # org whose serve-cert is provisioned and whose links are live, and arm the
+    # watchdog. So a restart re-establishes serving on its own, without waiting
+    # for the next publish. Skipped in mock mode (no real settings DB).
+    # Off-loop and best-effort — startup is never held up by a serving hiccup.
+    if not os.environ.get("DASHBOARD_MOCK"):
+        try:
+            from tools.dashboard import link_serving_supervisor
+            await asyncio.to_thread(link_serving_supervisor.bootstrap)
+        except Exception:
+            logger.exception(
+                "link_serving_supervisor.bootstrap() failed; serving recovers "
+                "on the next publish or watchdog tick"
+            )
+
 async def _on_shutdown():
     global _dispatch_watcher_task, _mock_event_watcher_task
     global _harness_usage_poller_task, _claude_credentials_refresh_task
@@ -15948,6 +15963,14 @@ async def _on_shutdown():
         _settings_ops.set_emit_hook(None)
     except Exception:
         logger.exception("settings_ops.set_emit_hook(None) failed; continuing")
+    # Stop the serving watchdog and terminate any connector subprocesses so a
+    # reload cycle doesn't leak them (a fresh process re-establishes serving in
+    # _on_startup).
+    try:
+        from tools.dashboard import link_serving_supervisor
+        link_serving_supervisor.get_supervisor().stop_all()
+    except Exception:
+        logger.exception("error stopping the serving supervisor")
     # Drain settings-mediator BEFORE cancelling the dispatcher tasks so
     # any in-flight action handler that calls back into the dashboard
     # (tmux_send / crosstalk) still has those primitives available. The

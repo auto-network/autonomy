@@ -313,3 +313,24 @@ def get_supervisor() -> ServingSupervisor:
             if _SINGLETON is None:
                 _SINGLETON = ServingSupervisor()
     return _SINGLETON
+
+
+def bootstrap(orgs=None) -> ServingSupervisor:
+    """Dashboard-startup entry: reconcile serving for each org, then arm the
+    watchdog. So a restart with a provisioned cert + live grants brings serving
+    back up on its own, and the watchdog keeps it reconciled thereafter.
+
+    *orgs* defaults to the caller's own org (``settings_ops.CALLER_ORG`` — the
+    env-cascade sentinel that resolves to this dashboard's org). Never raises:
+    startup must not be held hostage by a serving hiccup.
+    """
+    supervisor = get_supervisor()
+    if orgs is None:
+        orgs = [settings_ops.CALLER_ORG]
+    for org in orgs:
+        try:
+            supervisor.ensure(org)
+        except Exception:
+            pass
+    supervisor.start_watchdog()
+    return supervisor
