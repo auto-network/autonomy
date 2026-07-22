@@ -297,7 +297,7 @@ def test_probe_reports_unreachable_when_no_connector(stack):
         verdict = await probe_link(
             relay_url=relay, token=token,
             root_pub=stack["root_pub"], org_uuid=ORG_UUID,
-            total_timeout=4.0, connect_timeout=1.5, read_timeout=1.5,
+            total_timeout=4.0, connect_timeout=1.5,
         )
         assert verdict["live"] is False, verdict
         assert verdict["status"] is None, verdict

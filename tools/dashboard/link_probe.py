@@ -89,6 +89,38 @@ def _unreachable(detail: str) -> dict:
     return {"live": False, "status": None, "content_length": None, "detail": detail}
 
 
+async def _attempt_once(relay_url, token, root_pub, org_uuid, connect_timeout):
+    """One probe attempt with NO internal wall — the caller wraps it in a
+    single ``asyncio.wait_for`` so the whole thing is bounded.
+
+    This is deliberate: ``ViewerChannel.connect`` awaits the SERVER_HELLO
+    with no timeout of its own (``open_timeout`` only bounds the WS upgrade),
+    so a relay that accepts the socket but never completes the handshake —
+    the exact shape of a reachable registry with no serving tunnel dialed in
+    — would otherwise block forever. The outer ``wait_for`` cancels this
+    coroutine on the deadline, and ``connect``/``__aexit__`` close the socket.
+    """
+    from tools.network.relaykit.viewer import ViewerChannel
+
+    try:
+        channel = await ViewerChannel.connect(
+            relay_url, token, root_pub=root_pub, org=org_uuid,
+            open_timeout=connect_timeout,
+        )
+    except Exception as exc:  # relay refused, connector offline, DNS, TLS…
+        return _unreachable(
+            "the serving tunnel is not reachable "
+            f"(connector offline or relay refused the channel): {exc}"
+        )
+    try:
+        async with channel:
+            await channel.send_message(canonical_json({"op": "head", "v": 1}))
+            raw = await channel.recv_message()
+        return _interpret(raw)
+    except Exception as exc:
+        return _unreachable(f"the serving channel failed mid-probe: {exc}")
+
+
 async def probe_link(
     *,
     relay_url: str,
@@ -96,9 +128,8 @@ async def probe_link(
     root_pub: str,
     org_uuid: str,
     attempts: int = 2,
-    total_timeout: float = 8.0,
-    connect_timeout: float = 4.0,
-    read_timeout: float = 4.0,
+    total_timeout: float = 6.0,
+    connect_timeout: float = 3.0,
     retry_backoff: float = 0.3,
 ) -> dict:
     """Prove — or disprove — that *token* actually serves over the tunnel.
@@ -110,48 +141,39 @@ async def probe_link(
     This is a single honest snapshot of the tunnel, not a heal-wait: a down
     tunnel self-heals in the backend and the publish reports it rather than
     blocking on it. So it makes only a small, bounded number of *attempts*
-    (enough to absorb a connector that is dialing in right now), capped by a
-    hard *total_timeout* ceiling for the case where something accepts the
-    channel but never answers. Never raises: any transport or protocol
-    failure becomes an honest "not reachable" result.
+    (enough to absorb a connector that is dialing in right now). Each attempt
+    is wrapped in a hard ``asyncio.wait_for`` so a relay that accepts the
+    socket but never completes the handshake CANNOT hang the publish — the
+    whole probe is bounded by *total_timeout*. Never raises: any transport,
+    protocol, or timeout failure becomes an honest "not reachable" result.
     """
-    from tools.network.relaykit.viewer import ViewerChannel
-
     loop = asyncio.get_running_loop()
     deadline = loop.time() + total_timeout
-    result = _unreachable("the serving tunnel did not respond")
+    result = _unreachable("the serving tunnel did not respond within the probe budget")
 
     for attempt in range(max(1, attempts)):
         remaining = deadline - loop.time()
         if remaining <= 0:
             break
         try:
-            channel = await ViewerChannel.connect(
-                relay_url, token, root_pub=root_pub, org=org_uuid,
-                open_timeout=min(connect_timeout, remaining),
+            result = await asyncio.wait_for(
+                _attempt_once(relay_url, token, root_pub, org_uuid,
+                              min(connect_timeout, remaining)),
+                timeout=remaining,
             )
-        except Exception as exc:  # relay refused, connector offline, DNS, TLS…
+        except asyncio.TimeoutError:
             result = _unreachable(
-                "the serving tunnel is not reachable "
-                f"(connector offline or relay refused the channel): {exc}"
+                "the serving tunnel did not complete the probe in time "
+                "(reachable but no serving connector answered)"
             )
-        else:
-            try:
-                async with channel:
-                    await channel.send_message(canonical_json({"op": "head", "v": 1}))
-                    budget = min(read_timeout, max(deadline - loop.time(), 0.1))
-                    raw = await asyncio.wait_for(channel.recv_message(), timeout=budget)
-                return _interpret(raw)
-            except asyncio.TimeoutError:
-                result = _unreachable(
-                    "the serving tunnel accepted the channel but did not "
-                    "answer the probe in time"
-                )
-            except Exception as exc:
-                result = _unreachable(f"the serving channel failed mid-probe: {exc}")
+        except Exception as exc:
+            result = _unreachable(f"the serving probe failed: {exc}")
 
-        # A short backoff before the next attempt only to catch a connector
-        # dialing in at this instant; not a wait for the backend to heal.
+        # A definitive verdict — served (live) or refused (grant dead, 404) —
+        # ends the probe. Only an unreachable/timeout result (status None) is
+        # worth another attempt, to catch a connector dialing in right now.
+        if result["live"] or result.get("status") is not None:
+            return result
         if attempt + 1 < attempts and deadline - loop.time() > retry_backoff:
             await asyncio.sleep(retry_backoff)
 
