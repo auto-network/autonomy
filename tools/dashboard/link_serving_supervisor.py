@@ -295,3 +295,21 @@ class ServingSupervisor:
     def running_orgs(self) -> list:
         with self._lock:
             return [org for org, p in self._procs.items() if p.alive()]
+
+
+# ── process-wide singleton ────────────────────────────────────
+#
+# One supervisor per dashboard process: the startup hook, the post-publish
+# ensure, and the watchdog all reconcile the SAME set of connectors.
+
+_SINGLETON: ServingSupervisor | None = None
+_SINGLETON_LOCK = threading.Lock()
+
+
+def get_supervisor() -> ServingSupervisor:
+    global _SINGLETON
+    if _SINGLETON is None:
+        with _SINGLETON_LOCK:
+            if _SINGLETON is None:
+                _SINGLETON = ServingSupervisor()
+    return _SINGLETON
