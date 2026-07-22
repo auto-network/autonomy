@@ -28,7 +28,8 @@ viewer/bootloader ──ws──▶ registry relay ◀──ws── dashboard c
   TCP).
 - **`/v1/links/{token}/channel`** — where viewers connect. Token resolves
   with envelope-endpoint liveness rules; unknown/expired/revoked/offline
-  all close `4404` — indistinguishable (anti-enumeration, §5.3).
+  all close `4404`; after the bootloader resolves a valid envelope, this is
+  reported honestly as a disconnected sharing dashboard.
 
 ## Q1 decision — mux framing
 

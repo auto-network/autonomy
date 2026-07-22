@@ -30,12 +30,12 @@
   main { flex: 1; display: flex; min-height: 0; }
   main > section { flex: 1; display: flex; min-height: 0; }
   section[hidden] { display: none; }
-  #loading-view, #error-view {
+  #loading-view, .error-view {
     align-items: center; justify-content: center; flex-direction: column;
     gap: 12px; text-align: center; padding: 24px;
   }
-  #error-view h1 { font-size: 20px; margin: 0; color: #e8e8f0; }
-  #error-view p { max-width: 42ch; margin: 0; color: #8a8a96; }
+  .error-view h1 { font-size: 20px; margin: 0; color: #e8e8f0; }
+  .error-view p { max-width: 42ch; margin: 0; color: #8a8a96; }
   #artifact-frame { flex: 1; border: 0; width: 100%; background: #fff; }
   .spinner {
     width: 22px; height: 22px; border-radius: 50%;
@@ -56,11 +56,30 @@
     <div class="spinner" aria-hidden="true"></div>
     <div>establishing a secure channel…</div>
   </section>
-  <section id="error-view" hidden>
+  <section id="invalid-link-view" class="error-view" hidden>
     <h1>This link isn&rsquo;t available</h1>
-    <p>It may have expired, been revoked, or never existed &mdash; or the
-       service behind it is offline right now. If someone shared it with
-       you, ask them for a fresh link.</p>
+    <p>It is invalid, expired, or was revoked.</p>
+  </section>
+  <section id="disconnected-view" class="error-view" hidden>
+    <h1>Autonomy Disconnected</h1>
+    <p>The Autonomy dashboard that shared this link is currently offline.
+       Try again after it reconnects.</p>
+  </section>
+  <section id="registry-error-view" class="error-view" hidden>
+    <h1>auto.network is unavailable</h1>
+    <p>The link registry could not be reached. Try again shortly.</p>
+  </section>
+  <section id="security-error-view" class="error-view" hidden>
+    <h1>Secure connection failed</h1>
+    <p>auto.network could not verify the Autonomy dashboard serving this link.</p>
+  </section>
+  <section id="content-error-view" class="error-view" hidden>
+    <h1>Content could not be displayed</h1>
+    <p>The link is live, but its shared content is invalid or unsupported.</p>
+  </section>
+  <section id="unavailable-content-view" class="error-view" hidden>
+    <h1>This content is no longer shared</h1>
+    <p>The Autonomy dashboard is connected, but it no longer offers this content.</p>
   </section>
   <section id="frame-view" hidden>
     <iframe id="artifact-frame"

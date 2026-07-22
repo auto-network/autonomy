@@ -296,14 +296,22 @@ const autonet = (() => {
   /* Reject a promise if it does not settle within ms — the caller turns the
    * rejection into the honest offline error. clearTimeout on settle so a
    * completed handshake never trips a late timer. */
-  function withTimeout(promise, ms, label) {
+  function withTimeout(promise, ms, label, kind = null) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(
-        () => reject(new Error("timed out establishing channel: " + label)), ms);
+        () => reject(kind
+          ? typedError(kind, "timed out establishing channel: " + label)
+          : new Error("timed out establishing channel: " + label)), ms);
       promise.then(
         (value) => { clearTimeout(timer); resolve(value); },
         (err) => { clearTimeout(timer); reject(err); });
     });
+  }
+
+  function typedError(kind, message) {
+    const error = new Error(message);
+    error.autonetKind = kind;
+    return error;
   }
 
   /* WebSocket wrapped with an async binary receive queue. */
@@ -333,8 +341,14 @@ const autonet = (() => {
         if (waiters.length) waiters.shift().resolve(bytes);
         else queue.push(bytes);
       };
-      ws.onerror = () => { fail(new Error("websocket error")); reject(new Error("websocket error")); };
-      ws.onclose = (event) => fail(new Error("websocket closed (" + event.code + ")"));
+      ws.onerror = () => {
+        const error = typedError("disconnected", "websocket error");
+        fail(error);
+        reject(error);
+      };
+      ws.onclose = (event) => fail(typedError(
+        "disconnected", "websocket closed (" + event.code + ")"
+      ));
     });
   }
 
@@ -465,7 +479,8 @@ const autonet = (() => {
 
   const state = {
     phase: "init", transport: null, bodyLength: 0,
-    bodySha256: null, artifactTitle: null, artifactHeight: null, error: null,
+    bodySha256: null, artifactTitle: null, artifactHeight: null,
+    error: null, errorKind: null,
   };
 
   function show(id) {
@@ -479,12 +494,24 @@ const autonet = (() => {
     if (el) el.textContent = text;
   }
 
-  function showError() {
-    // ONE error view for every failure mode: unknown, expired, revoked,
-    // dead binding, dashboard offline, handshake refused. Indistinguishable
-    // by design (§5.3) — nothing here may depend on WHY it failed.
+  const ERROR_VIEWS = {
+    invalid: "invalid-link-view",
+    disconnected: "disconnected-view",
+    registry: "registry-error-view",
+    security: "security-error-view",
+    content: "content-error-view",
+    unavailable: "unavailable-content-view",
+  };
+
+  function showError(kind) {
+    // Report exactly the stage already observable on the public protocol.
+    // Token liveness is exposed by the envelope HTTP status; after an envelope
+    // resolves, transport, authentication, and content failures are likewise
+    // distinguishable to any holder of the capability URL.
     state.phase = "error";
-    show("error-view");
+    state.errorKind = Object.prototype.hasOwnProperty.call(ERROR_VIEWS, kind)
+      ? kind : "content";
+    show(ERROR_VIEWS[state.errorKind]);
   }
 
   async function renderArtifact(header, body) {
@@ -536,45 +563,73 @@ const autonet = (() => {
 
   async function boot() {
     const token = location.pathname.split("/").pop();
-    if (!/^[0-9a-f]{32}$/.test(token)) return showError();
+    if (!/^[0-9a-f]{32}$/.test(token)) return showError("invalid");
 
     try {
       state.phase = "envelope";
       setStatus("resolving…");
-      const response = await fetch("/v1/links/" + token + "/envelope");
-      if (!response.ok) return showError();
+      let response;
+      try {
+        response = await fetch("/v1/links/" + token + "/envelope");
+      } catch (err) {
+        state.error = String(err && err.message || err);
+        return showError("registry");
+      }
+      if (!response.ok) return showError("invalid");
       const envelope = await response.json();
 
       state.phase = "connecting";
       setStatus("connecting…");
-      let transport = await attemptEndpoints(envelope.endpoints, attemptDirectEndpoint);
-      if (transport) {
-        state.transport = "direct";
-      } else {
-        const scheme = location.protocol === "https:" ? "wss" : "ws";
-        transport = await withTimeout(openSocket(
-          scheme + "://" + location.host + "/v1/links/" + token + "/channel"),
-          CONNECT_TIMEOUT_MS, "connect");
-        state.transport = "relay";
+      let transport;
+      try {
+        transport = await attemptEndpoints(envelope.endpoints, attemptDirectEndpoint);
+        if (transport) {
+          state.transport = "direct";
+        } else {
+          const scheme = location.protocol === "https:" ? "wss" : "ws";
+          transport = await withTimeout(openSocket(
+            scheme + "://" + location.host + "/v1/links/" + token + "/channel"),
+            CONNECT_TIMEOUT_MS, "connect", "disconnected");
+          state.transport = "relay";
+        }
+      } catch (err) {
+        state.error = String(err && err.message || err);
+        return showError("disconnected");
       }
 
       state.phase = "handshake";
       setStatus("securing…");
       // Bounded: a relay that accepts the socket but never sends SERVER_HELLO
       // (no serving tunnel dialed in) resolves to the offline error, not a hang.
-      const channel = await withTimeout(performHandshake(transport, {
-        org: envelope.org, token, rootPub: envelope.root_pub,
-      }), CONNECT_TIMEOUT_MS, "handshake");
+      let channel;
+      try {
+        channel = await withTimeout(performHandshake(transport, {
+          org: envelope.org, token, rootPub: envelope.root_pub,
+        }), CONNECT_TIMEOUT_MS, "handshake", "disconnected");
+      } catch (err) {
+        state.error = String(err && err.message || err);
+        return showError(err && err.autonetKind === "disconnected"
+          ? "disconnected" : "security");
+      }
 
       state.phase = "fetching";
       setStatus("loading…");
-      const { header, body } = await fetchArtifact(channel);
-      if (header.status !== "ok") return showError();
+      let artifact;
+      try {
+        artifact = await fetchArtifact(channel);
+      } catch (err) {
+        state.error = String(err && err.message || err);
+        return showError(err && err.autonetKind === "disconnected"
+          ? "disconnected" : "content");
+      }
+      const { header, body } = artifact;
+      if (header.status !== "ok") return showError("unavailable");
       state.bodySha256 = bytesToHex(await crypto.subtle.digest("SHA-256", body));
+      state.phase = "rendering";
       await renderArtifact(header, body);
     } catch (err) {
       state.error = String(err && err.message || err);
-      showError();
+      showError("content");
     }
   }
 

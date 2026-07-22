@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -242,17 +243,31 @@ def test_serve_cert_ok_reflects_status(env):
 
 
 def test_bootstrap_ensures_and_arms_watchdog(env, monkeypatch):
-    """Startup entry: reconciles the given org and starts the watchdog once."""
+    """Startup entry discovers, reconciles, and watches the local org."""
     _provision_serve_cert(env)
     _put_grant()
     spawn = FakeSpawn()
     # bootstrap() uses the process singleton; point it at our fake-spawn one.
     s = sup.ServingSupervisor(spawn=spawn)
     monkeypatch.setattr(sup, "_SINGLETON", s)
+    monkeypatch.setattr(sup, "_discover_startup_orgs", lambda: [ORG])
 
-    out = sup.bootstrap(orgs=[ORG])
+    out = sup.bootstrap()
     assert out is s
     assert len(spawn.calls) == 1          # reconciled → launched
     assert s._watchdog is not None        # watchdog armed
     s.stop_all()
-    assert s._watchdog is not None        # (thread object persists; _stop is set)
+    assert s._watchdog is None            # can be armed again in the same process
+
+
+def test_startup_org_discovery_covers_every_local_org(env, monkeypatch):
+    monkeypatch.setenv("GRAPH_ORG", ORG)
+    # GRAPH_DB pins one physical test database regardless of org slug.
+    assert sup._discover_startup_orgs() == [ORG]
+
+    monkeypatch.delenv("GRAPH_DB")
+    monkeypatch.setattr(
+        "tools.graph.org_ops.list_orgs",
+        lambda: [SimpleNamespace(slug="autonomy"), SimpleNamespace(slug="dynbench")],
+    )
+    assert sup._discover_startup_orgs() == [None, "autonomy", "dynbench", ORG]
