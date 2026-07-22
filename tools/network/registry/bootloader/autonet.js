@@ -484,17 +484,9 @@ const autonet = (() => {
   };
 
   function show(id) {
-    let matched = false;
     for (const section of document.querySelectorAll("main > section")) {
       const selected = section.id === id;
       section.hidden = !selected;
-      matched = matched || selected;
-    }
-    // Rolling-deploy compatibility: an old shell has only `error-view`.
-    // Never turn a diagnosable failure into an empty page.
-    if (!matched) {
-      const fallback = document.getElementById("error-view");
-      if (fallback) fallback.hidden = false;
     }
   }
 

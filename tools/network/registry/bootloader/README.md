@@ -16,9 +16,8 @@ format, and renders the artifact in a sandboxed iframe.
 
 The shell and script are deployed as one protocol unit. The script response is
 `Cache-Control: no-store`, the shell carries an asset-version query to evict
-the former five-minute cache immediately, and both versions retain an
-`error-view` compatibility fallback so a rolling deploy cannot produce a blank
-page from mixed shell/script bytes.
+the former five-minute cache immediately, and deployments must activate the
+shell and script together. There is no compatibility fallback.
 
 ## Flow
 
