@@ -40,9 +40,11 @@ Write routes backing the C1 create-org-identity ceremony in
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import urllib.parse
+from pathlib import Path
 
 import httpx
 from starlette.requests import Request
@@ -57,7 +59,15 @@ from tools.graph.schemas.network_identity import (  # noqa: F401
     NETWORK_BINDING_SET_ID,
     NETWORK_ORG_KEY_REVISION,
     NETWORK_ORG_KEY_SET_ID,
+    NETWORK_SERVE_CERT_REVISION,
+    NETWORK_SERVE_CERT_SET_ID,
+    SERVE_CERT_SCOPE,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+#: where serving delegates' 0600 key files live — the same data/ dir the TLS
+#: key uses, gitignored, process-user-readable only (never the settings store).
+SERVE_KEY_DIR = REPO_ROOT / "data" / "network"
 
 DEFAULT_REGISTRY_URL = "https://registry.auto.network"
 
@@ -439,11 +449,158 @@ async def post_register(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "registry": binding_key, "binding": binding})
 
 
+def _write_serve_key(path: Path, private_key_hex: str) -> None:
+    """Write the delegate key to *path* as a mode-0600 file, atomically.
+
+    The directory is 0700 and the file 0600 — the serving key is a
+    process-user-only filesystem credential, the same trust boundary as the
+    TLS key. Atomic replace so a concurrent read never sees a partial key.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(private_key_hex.strip())
+    except BaseException:
+        try:
+            os.remove(tmp)
+        finally:
+            raise
+    os.replace(tmp, path)
+
+
+async def post_serve_cert(request: Request) -> JSONResponse:
+    """Provision the org's tunnel serving delegate (§5.1).
+
+    Body: ``{org?, cert, private_key}`` — a root-signed ``tunnel:serve``
+    delegation cert (canonical idkit wire) and the delegate's Ed25519 private
+    key hex, both minted in the operator's browser during a link-publish
+    approve, in the SAME single root unlock that signs the publish. This route
+    receives them, writes the key to its mode-0600 file, records the serve-cert
+    row (pointing at that file — never the key itself), and reconciles the
+    serving connector so the just-published link goes live.
+
+    The delegate must chain to the org's OWN bound root (authoritative, from
+    the binding — never a caller-supplied root) with ``tunnel:serve`` scope,
+    and the supplied key must match the cert's ``child_pub``, or nothing is
+    written. Registering the org must have happened first (serving needs a
+    binding's registry_url + org_uuid); otherwise 409.
+    """
+    if _mock_mode():
+        return JSONResponse({"ok": False, "error": "mock dashboard stores no serve certs"},
+                            status_code=502)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict) or not isinstance(body.get("cert"), str) \
+            or not isinstance(body.get("private_key"), str):
+        return JSONResponse({"ok": False, "error": (
+            "body must carry 'cert' (delegation cert wire) and 'private_key' "
+            "(the delegate key hex)"
+        )}, status_code=400)
+
+    # Refuse a cross-org write BEFORE processing the (foreign) payload.
+    org, refused = _scoped_org(body.get("org"))
+    if refused is not None:
+        return refused
+
+    # Serving needs the org's binding — its authoritative root (the pin the
+    # viewer handshake verifies) and the registry_url/org_uuid the connector
+    # dials. Register first; a serve-cert without a binding would strand.
+    binding_member = _first_member(NETWORK_BINDING_SET_ID, org)
+    if binding_member is None:
+        return JSONResponse({"ok": False, "error": (
+            "this org is not registered on auto.network yet — register before "
+            "provisioning a serving delegate"
+        )}, status_code=409)
+    binding = binding_member.payload
+    root_pub = binding.get("root_pub")
+    org_uuid = binding.get("org_uuid")
+    if not isinstance(root_pub, str) or not isinstance(org_uuid, str):
+        return JSONResponse({"ok": False, "error": "the org's binding row is malformed"},
+                            status_code=500)
+
+    from tools.network.idkit import (
+        DelegationCert,
+        IdkitError,
+        KeyPair,
+        verify_chain,
+    )
+    try:
+        cert = DelegationCert.from_json(body["cert"])
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"cert does not parse: {e}"},
+                            status_code=400)
+    if SERVE_CERT_SCOPE not in cert.scope:
+        return JSONResponse({"ok": False, "error": (
+            f"cert scope must include {SERVE_CERT_SCOPE!r}"
+        )}, status_code=400)
+    now = int(time.time())
+    if cert.not_after <= now:
+        return JSONResponse({"ok": False, "error": "cert is already expired"},
+                            status_code=400)
+    if cert.org != org_uuid:
+        return JSONResponse({"ok": False, "error": (
+            "cert org does not match the org's binding"
+        )}, status_code=400)
+    # The supplied key must be the one the cert delegates to.
+    try:
+        if KeyPair.from_private_hex(body["private_key"].strip()).public_hex != cert.child_pub:
+            raise ValueError("public half does not match cert child_pub")
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": (
+            f"private_key does not match the cert's delegate key: {e}"
+        )}, status_code=400)
+    # Chain to the org's OWN root (not a caller-supplied one) with tunnel:serve.
+    mid = (cert.not_before + cert.not_after) // 2
+    try:
+        verify_chain(cert, root_pub, org=org_uuid, now=mid,
+                     required_scope=SERVE_CERT_SCOPE)
+    except IdkitError as e:
+        return JSONResponse({"ok": False, "error": (
+            f"cert does not chain to this org's root with {SERVE_CERT_SCOPE} scope: {e}"
+        )}, status_code=400)
+
+    # Key filename is discriminated by the immutable org UUID (the settings
+    # 'org' is a caller sentinel, not a filesystem-safe name).
+    key_path = SERVE_KEY_DIR / f"serve-{org_uuid}.key"
+    try:
+        _write_serve_key(key_path, body["private_key"])
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"could not write the serve key file: {e}"},
+                            status_code=500)
+    try:
+        settings_ops.upsert_by_key(
+            NETWORK_SERVE_CERT_SET_ID, NETWORK_SERVE_CERT_REVISION, "default",
+            {"cert": body["cert"], "key_path": str(key_path),
+             "root_pub": root_pub, "not_after": cert.not_after},
+            org=org,
+        )
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"could not store the serve cert: {e}"},
+                            status_code=500)
+
+    # Reconcile serving now (a publish's grant may already be cached, or the
+    # publish that triggered this will cache one and re-ensure). Best-effort:
+    # a launch failure is not a provisioning failure — the watchdog retries.
+    try:
+        from tools.dashboard.link_serving_supervisor import get_supervisor
+        await asyncio.to_thread(get_supervisor().ensure, org)
+    except Exception:
+        pass
+
+    return JSONResponse({"ok": True, "child_pub": cert.child_pub,
+                         "not_after": cert.not_after})
+
+
 ROUTES = [
     Route("/api/network/org-key", get_org_key, methods=["GET"]),
     Route("/api/network/org-key", put_org_key, methods=["POST"]),
     Route("/api/network/binding", get_binding, methods=["GET"]),
     Route("/api/network/registry", get_registry, methods=["GET"]),
     Route("/api/network/register", post_register, methods=["POST"]),
+    Route("/api/network/serve-cert", post_serve_cert, methods=["POST"]),
     Route("/api/network/revocations", post_revocation, methods=["POST"]),
 ]
