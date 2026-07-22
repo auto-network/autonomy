@@ -239,3 +239,20 @@ def test_serve_cert_ok_reflects_status(env):
     assert sup.serve_cert_ok(ORG) is False
     _provision_serve_cert(env)
     assert sup.serve_cert_ok(ORG) is True
+
+
+def test_bootstrap_ensures_and_arms_watchdog(env, monkeypatch):
+    """Startup entry: reconciles the given org and starts the watchdog once."""
+    _provision_serve_cert(env)
+    _put_grant()
+    spawn = FakeSpawn()
+    # bootstrap() uses the process singleton; point it at our fake-spawn one.
+    s = sup.ServingSupervisor(spawn=spawn)
+    monkeypatch.setattr(sup, "_SINGLETON", s)
+
+    out = sup.bootstrap(orgs=[ORG])
+    assert out is s
+    assert len(spawn.calls) == 1          # reconciled → launched
+    assert s._watchdog is not None        # watchdog armed
+    s.stop_all()
+    assert s._watchdog is not None        # (thread object persists; _stop is set)
