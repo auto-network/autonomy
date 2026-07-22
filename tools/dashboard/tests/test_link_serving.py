@@ -2,8 +2,8 @@
 
 Everything here runs against real stores in a tmp GRAPH_DB /
 designs DB — the grant cache is actual ``autonomy.network.link-grant``
-Settings rows, targets are actual design revisions / notes / attachment
-rows. The tunnel itself is exercised separately in
+Settings rows, targets are actual design revisions, notes, and owning-note
+image attachments. The tunnel itself is exercised separately in
 ``test_link_serving_tunnel.py``; this file drives the handler directly.
 
 Pinned behaviors:
@@ -11,10 +11,8 @@ Pinned behaviors:
 * unknown, revoked (row removed), expired, and unresolvable tokens all
   return the SAME refusal bytes — a prober can't classify the failure;
 * ``meta.ttl`` is enforced against ``issued_at`` (boundary inclusive);
-* the file resolver only serves attachment paths that realpath-resolve
-  inside an allowed root: ``..`` traversal, absolute escapes, symlink
-  escapes, and the root dir itself are all refused;
-* a ``note`` grant serves only note sources, with content HTML-escaped;
+* file grants are uniformly unavailable in the rich-render v1 protocol;
+* a ``note`` grant serves only note sources and packages Markdown as data;
 * ``present`` follows a design to its latest revision, ``design`` serves
   the exact revision and nothing newer.
 """
@@ -100,6 +98,11 @@ def parse(response: bytes) -> tuple[dict, bytes]:
     return json.loads(header), body
 
 
+def sliced(body: bytes, descriptor: dict) -> bytes:
+    start = descriptor["offset"]
+    return body[start:start + descriptor["length"]]
+
+
 # ── the I9 gate ───────────────────────────────────────────────
 
 
@@ -113,20 +116,17 @@ class TestGrantGate:
             assert serve(bad) == link_serving.REFUSED
 
     def test_revoked_indistinguishable_from_unknown(self, env, tmp_path):
-        root = tmp_path / "runs"
-        root.mkdir()
-        artifact = root / "out.txt"
-        artifact.write_bytes(b"artifact bytes")
+        note = graph_ops.create_note("artifact bytes", title="Artifact", org=ORG)
         token = _token(3)
-        put_grant(token, _attach(artifact), "file")
+        put_grant(token, note["id"], "note")
 
-        served = serve(token, file_roots=[str(root)])
+        served = serve(token)
         header, body = parse(served)
-        assert header["status"] == 200 and body == b"artifact bytes"
+        assert header["status"] == "ok" and b"artifact bytes" in body
 
         drop_grant(token)  # what link_revoke's executor does to the cache
-        revoked = serve(token, file_roots=[str(root)])
-        assert revoked == serve(_token(4), file_roots=[str(root)])  # unknown
+        revoked = serve(token)
+        assert revoked == serve(_token(4))  # unknown
         assert revoked == link_serving.REFUSED
 
     def test_expired_grant_refused(self, env):
@@ -177,36 +177,35 @@ class TestGrantGate:
         assert serve(_token(10), b"\xff\xfe not json") == link_serving.BAD_REQUEST
         assert serve(_token(10), canonical_json({"op": "steal", "v": 1})) \
             == link_serving.BAD_REQUEST
+        assert serve(_token(10), canonical_json({"op": "fetch", "v": 2})) \
+            == link_serving.BAD_REQUEST
+        assert serve(_token(10), canonical_json({"op": "fetch", "v": 1, "extra": 1})) \
+            == link_serving.BAD_REQUEST
         assert serve(_token(10), canonical_json(["fetch"])) == link_serving.BAD_REQUEST
 
 
 class TestHeadOp:
     """The object HEAD: same gate + resolution as fetch, headers only.
 
-    A valid HEAD returns status 200 with content_type and content_length
-    but NO body (the liveness-probe shape — a large target costs no
-    transfer). Every gate failure returns the SAME refusal as fetch, so a
-    prober can neither classify the failure nor tell HEAD from fetch.
+    A valid HEAD returns wire status ``ok`` with ``serialized_size`` but no
+    body. Every gate failure returns the same refusal as fetch, so a prober
+    cannot classify the failure or tell HEAD from fetch.
     """
 
     def test_head_returns_length_and_no_body(self, env, tmp_path):
-        root = tmp_path / "runs"
-        root.mkdir()
-        artifact = root / "out.bin"
-        artifact.write_bytes(b"x" * 5000)
+        rev = design_db.create_design(
+            title="large", variants=[{"id": "v1", "html": "x" * 5000}],
+        )
         token = _token(20)
-        put_grant(token, _attach(artifact), "file")
+        put_grant(token, rev, "design")
 
-        fetched = serve(token, FETCH, file_roots=[str(root)])
-        headed = serve(token, HEAD, file_roots=[str(root)])
+        fetched = serve(token, FETCH)
+        headed = serve(token, HEAD)
         fh, fbody = parse(fetched)
         hh, hbody = parse(headed)
 
-        assert fh["status"] == 200 and len(fbody) == 5000
-        # Same status + content_type the fetch reports, plus the length…
-        assert hh["status"] == 200
-        assert hh["content_type"] == fh["content_type"]
-        assert hh["content_length"] == 5000
+        assert fh["status"] == "ok" and len(fbody) == 5000
+        assert hh == {"v": 1, "status": "ok", "serialized_size": 5000}
         # …and NOTHING after the header newline: the artifact never streams.
         assert hbody == b""
 
@@ -222,81 +221,111 @@ class TestHeadOp:
                   meta={"ttl": 60}, issued_at=_iso(time.time() - 120))
         assert serve(token, HEAD) == link_serving.REFUSED
 
+    def test_fetch_and_head_share_exact_size_boundary(self, env, monkeypatch):
+        rev = design_db.create_design(
+            title="limit", variants=[{"id": "v1", "html": "x" * 64}],
+        )
+        token = _token(23)
+        put_grant(token, rev, "design")
+        monkeypatch.setattr(link_serving, "AUTONET_MAX_ARTIFACT_BYTES", 64)
+        fh, fbody = parse(serve(token, FETCH))
+        hh, _ = parse(serve(token, HEAD))
+        assert fh["status"] == hh["status"] == "ok"
+        assert len(fbody) == hh["serialized_size"] == 64
+
+        monkeypatch.setattr(link_serving, "AUTONET_MAX_ARTIFACT_BYTES", 63)
+        assert serve(token, FETCH) == link_serving.REFUSED
+        assert serve(token, HEAD) == link_serving.REFUSED
+
+
+class TestArtifactSerializer:
+    def test_note_offsets_round_trip_and_do_not_overlap(self):
+        artifact = {
+            "kind": "note",
+            "viewer": b"VIEWER",
+            "content": {
+                "title": "Title",
+                "markdown": "snowman: ☃",
+                "parts": [
+                    {"ref": "a", "mime": "image/png", "bytes": b"AAA"},
+                    {"ref": "b", "mime": "image/webp", "bytes": b"BBBB"},
+                ],
+            },
+        }
+        header, body = link_serving._serialize_artifact(artifact)
+        descriptors = [
+            header["viewer"], header["content"]["markdown"],
+            *header["content"]["parts"],
+        ]
+        assert sliced(body, descriptors[0]) == b"VIEWER"
+        assert sliced(body, descriptors[1]).decode() == "snowman: ☃"
+        assert sliced(body, descriptors[2]) == b"AAA"
+        assert sliced(body, descriptors[3]) == b"BBBB"
+        intervals = sorted((d["offset"], d["offset"] + d["length"]) for d in descriptors)
+        assert all(left[1] <= right[0] for left, right in zip(intervals, intervals[1:]))
+
+    @pytest.mark.parametrize("artifact", [
+        {"kind": "note", "viewer": b"v"},
+        {"kind": "design", "viewer": b"v", "content": {}},
+        {"kind": "present", "viewer": b""},
+        {"kind": "file", "viewer": b"v"},
+        {"kind": "note", "viewer": b"v", "content": {
+            "title": "t", "markdown": "m", "parts": [
+                {"ref": "x", "mime": "image/png", "bytes": b"1"},
+                {"ref": "x", "mime": "image/png", "bytes": b"2"},
+            ],
+        }},
+    ])
+    def test_union_and_part_invariants_fail_closed(self, artifact):
+        with pytest.raises((TypeError, ValueError)):
+            link_serving._serialize_artifact(artifact)
+
 
 # ── file resolver: the path allowlist ─────────────────────────
 
 
-def _attach(path, *, mime: str | None = None) -> str:
+def _attach(path, *, mime: str | None = None, source_id: str | None = None) -> str:
     """Insert a raw attachment row pointing at *path*; returns its UUID."""
     from tools.graph.db import GraphDB
     from tools.graph.models import Attachment
 
     db = GraphDB(os.environ["GRAPH_DB"])
     try:
-        att = Attachment(filename=os.path.basename(str(path)),
-                         mime_type=mime, file_path=str(path))
+        att = Attachment(filename=os.path.basename(str(path)), mime_type=mime,
+                         file_path=str(path), source_id=source_id)
         db.insert_attachment(att)
     finally:
         db.close()
     return att.id
 
 
-class TestFileResolver:
-    @pytest.fixture
-    def runs_root(self, env):
-        root = env / "agent-runs"
-        (root / "run-1").mkdir(parents=True)
-        (env / "outside.txt").write_bytes(b"SECRET")
-        return root
-
-    def _served(self, target: str, root) -> bytes:
-        token = _token(20)
-        put_grant(token, target, "file")
-        try:
-            return serve(token, file_roots=[str(root)])
-        finally:
-            drop_grant(token)
-
-    def test_serves_inside_root_with_mime(self, runs_root):
-        artifact = runs_root / "run-1" / "report.html"
+class TestDeferredFileResolver:
+    def test_file_grant_is_unavailable_in_v1(self, env, tmp_path):
+        artifact = tmp_path / "report.html"
         artifact.write_bytes(b"<h1>report</h1>")
-        header, body = parse(self._served(_attach(artifact, mime="text/html"), runs_root))
-        assert header == {"v": 1, "status": 200, "content_type": "text/html"}
-        assert body == b"<h1>report</h1>"
-
-    def test_absolute_path_outside_root_refused(self, runs_root):
-        outside = runs_root.parent / "outside.txt"
-        assert self._served(_attach(outside), runs_root) == link_serving.REFUSED
-
-    def test_dotdot_traversal_refused(self, runs_root):
-        sneaky = str(runs_root / "run-1" / ".." / ".." / "outside.txt")
-        assert self._served(_attach(sneaky), runs_root) == link_serving.REFUSED
-
-    def test_symlink_escape_refused(self, runs_root):
-        link = runs_root / "run-1" / "innocent.txt"
-        link.symlink_to(runs_root.parent / "outside.txt")
-        assert self._served(_attach(link), runs_root) == link_serving.REFUSED
-
-    def test_root_itself_refused(self, runs_root):
-        assert self._served(_attach(runs_root), runs_root) == link_serving.REFUSED
-
-    def test_missing_attachment_row_refused(self, runs_root):
-        assert self._served(str(uuid.uuid4()), runs_root) == link_serving.REFUSED
-
-    def test_prefix_sibling_dir_refused(self, runs_root):
-        # /x/agent-runs-evil must not pass a /x/agent-runs allowlist.
-        evil = runs_root.parent / (runs_root.name + "-evil")
-        evil.mkdir()
-        artifact = evil / "payload.txt"
-        artifact.write_bytes(b"nope")
-        assert self._served(_attach(artifact), runs_root) == link_serving.REFUSED
+        token = _token(20)
+        put_grant(token, _attach(artifact, mime="text/html"), "file")
+        assert serve(token) == link_serving.REFUSED
+        assert serve(token, HEAD) == link_serving.REFUSED
 
 
 # ── note / design / present resolvers ─────────────────────────
 
 
 class TestNoteResolver:
-    def test_note_renders_escaped(self, env):
+    def test_note_read_explicitly_disables_peers(self, env, monkeypatch):
+        seen = {}
+
+        def fake_read(*_args, **kwargs):
+            seen.update(kwargs)
+            return None
+
+        monkeypatch.setattr(graph_ops, "read_source_full", fake_read)
+        assert link_serving._resolve_note(str(uuid.uuid4()), ORG) is None
+        assert seen["org"] == ORG
+        assert seen["peers"] == []
+
+    def test_note_is_content_data_not_server_rendered_html(self, env):
         note = graph_ops.create_note(
             "Line one\n\n<script>alert('xss')</script>",
             title="Ship <notes>", org=ORG,
@@ -304,12 +333,66 @@ class TestNoteResolver:
         token = _token(30)
         put_grant(token, note["id"], "note")
         header, body = parse(serve(token))
-        text = body.decode("utf-8")
-        assert header["status"] == 200
-        assert header["content_type"].startswith("text/html")
-        assert "<script>" not in text
-        assert "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;" in text
-        assert "Ship &lt;notes&gt;" in text
+        assert header["status"] == "ok"
+        assert header["kind"] == "note"
+        assert header["content"]["title"] == "Ship <notes>"
+        markdown = sliced(body, header["content"]["markdown"]).decode()
+        assert markdown == "Line one\n\n<script>alert('xss')</script>"
+        assert sliced(body, header["viewer"]) == link_serving._note_viewer_bytes()
+        assert b"Line one" not in sliced(body, header["viewer"])
+
+    def test_current_owned_images_only(self, env, tmp_path):
+        note = graph_ops.create_note("initial", title="Images", org=ORG)
+        current = tmp_path / "current.png"
+        old = tmp_path / "old.png"
+        current.write_bytes(b"PNG-current")
+        old.write_bytes(b"PNG-old")
+        updated = graph_ops.update_note(
+            note["id"], "![current]({1})", attachments=[str(current)], org=ORG,
+        )
+        old_ref = _attach(old, mime="image/png", source_id=note["id"])
+        current_ref = updated["attachments"][0]["id"]
+        token = _token(33)
+        put_grant(token, note["id"], "note")
+
+        header, body = parse(serve(token))
+        content = header["content"]
+        markdown = sliced(body, content["markdown"]).decode()
+        assert f"cid:{current_ref}" in markdown
+        assert old_ref not in markdown
+        assert [p["ref"] for p in content["parts"]] == [current_ref]
+        assert sliced(body, content["parts"][0]) == b"PNG-current"
+        assert b"PNG-old" not in body
+
+    def test_attachment_must_belong_to_note_and_be_image(self, env, tmp_path):
+        note = graph_ops.create_note("initial", title="Images", org=ORG)
+        other = graph_ops.create_note("other", title="Other", org=ORG)
+        path = tmp_path / "foreign.png"
+        path.write_bytes(b"FOREIGN")
+        foreign_ref = _attach(path, mime="image/png", source_id=other["id"])
+        graph_ops.update_note(
+            note["id"], f"![foreign](graph://{foreign_ref})", org=ORG,
+        )
+        token = _token(34)
+        put_grant(token, note["id"], "note")
+        header, body = parse(serve(token))
+        assert header["content"]["parts"] == []
+        assert b"FOREIGN" not in body
+        assert f"cid:{foreign_ref}" in sliced(
+            body, header["content"]["markdown"]
+        ).decode()
+
+    def test_note_embed_is_not_resolved(self, env):
+        note = graph_ops.create_note(
+            "Before ![[aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa]] after",
+            title="No embed", org=ORG,
+        )
+        token = _token(35)
+        put_grant(token, note["id"], "note")
+        header, body = parse(serve(token))
+        markdown = sliced(body, header["content"]["markdown"]).decode()
+        assert "![[aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa]]" in markdown
+        assert header["content"]["parts"] == []
 
     def test_non_note_source_refused(self, env):
         from tools.graph.db import GraphDB
@@ -329,6 +412,27 @@ class TestNoteResolver:
     def test_missing_note_refused(self, env):
         token = _token(32)
         put_grant(token, str(uuid.uuid4()), "note")
+        assert serve(token) == link_serving.REFUSED
+
+    def test_note_image_obeys_exact_serialized_size_limit(
+        self, env, tmp_path, monkeypatch
+    ):
+        image = tmp_path / "bounded.png"
+        image.write_bytes(b"IMAGE-BYTES")
+        note = graph_ops.create_note(
+            "![bounded]({1})", title="Bounded", attachments=[str(image)], org=ORG,
+        )
+        token = _token(36)
+        put_grant(token, note["id"], "note")
+        _, body = parse(serve(token))
+
+        monkeypatch.setattr(
+            link_serving, "AUTONET_MAX_ARTIFACT_BYTES", len(body)
+        )
+        assert parse(serve(token))[1] == body
+        monkeypatch.setattr(
+            link_serving, "AUTONET_MAX_ARTIFACT_BYTES", len(body) - 1
+        )
         assert serve(token) == link_serving.REFUSED
 
 
@@ -355,28 +459,31 @@ class TestDesignResolvers:
         token = _token(40)
         put_grant(token, design_id, "present")
         header, body = parse(serve(token))
-        assert header["status"] == 200
-        assert body == b"<html><body>rev two final</body></html>"
+        assert header["status"] == "ok"
+        assert header["kind"] == "present"
+        assert "content" not in header
+        assert sliced(body, header["viewer"]) == b"<html><body>rev two final</body></html>"
 
     def test_design_serves_exact_revision_only(self, deck):
         _design_id, rev1, rev2 = deck
         token = _token(41)
         put_grant(token, rev1, "design")
-        _, body = parse(serve(token))
-        assert body == b"<html><body>rev one</body></html>"
+        header, body = parse(serve(token))
+        assert header["kind"] == "design" and "content" not in header
+        assert sliced(body, header["viewer"]) == b"<html><body>rev one</body></html>"
 
         token2 = _token(42)
         put_grant(token2, rev2, "design")
-        _, body2 = parse(serve(token2))
-        assert body2 == b"<html><body>rev two final</body></html>"
+        header2, body2 = parse(serve(token2))
+        assert sliced(body2, header2["viewer"]) == b"<html><body>rev two final</body></html>"
 
     def test_selected_variant_wins(self, deck):
         _design_id, _rev1, rev2 = deck
         design_db.submit_results(rev2, [{"id": "v2a", "rank": 1}])
         token = _token(43)
         put_grant(token, rev2, "design")
-        _, body = parse(serve(token))
-        assert body == b"<html><body>rev two draft</body></html>"
+        header, body = parse(serve(token))
+        assert sliced(body, header["viewer"]) == b"<html><body>rev two draft</body></html>"
 
     def test_unknown_design_refused(self, deck):
         token = _token(44)

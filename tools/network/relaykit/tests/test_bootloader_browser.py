@@ -30,7 +30,7 @@ REPO = Path(__file__).resolve().parents[4]
     reason="set AUTONET_BROWSER_TEST=1 to run the agent-browser acceptance",
 )
 @pytest.mark.skipif(shutil.which("agent-browser") is None, reason="agent-browser not on PATH")
-def test_bootloader_renders_binder_headless():
+def test_bootloader_renders_rich_artifacts_headless():
     result = subprocess.run(
         [sys.executable, "-m", "tools.network.relaykit.tests.bootloader_harness"],
         cwd=str(REPO), env={**os.environ, "PYTHONPATH": str(REPO)},

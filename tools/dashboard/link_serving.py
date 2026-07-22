@@ -12,45 +12,39 @@ bytes behind the channel's token. The flow per request:
    registry compromise alone cannot open content — the dashboard's own
    grant record is the gate.
 2. **Target resolution.** The grant's ``(target_type, target_uuid)``
-   maps to rendered bytes:
+   maps to a typed, part-addressed artifact:
 
    * ``present`` → Present deck HTML (the deck's latest revision, same
      resolution the Present plugin uses);
    * ``design`` → the exact Design Studio revision's variant HTML;
-   * ``note`` → a self-contained rich note render (all content
-     HTML-escaped — the note body is data, never markup);
-   * ``file`` → an agent-run artifact resolved through its graph
-     attachment row, PATH-ALLOWLISTED: the attachment's ``file_path``
-     must ``realpath``-resolve inside an allowed root
-     (``data/agent-runs/`` by default), so neither ``..`` segments nor
-     symlinks can walk the resolver out of the run dirs.
+   * ``note`` → a fixed viewer plus Markdown and owning-note image parts.
 
-Wire protocol: channel fetch v1, exactly the shape of the reference
-``connector.file_handler``.
+   ``file`` remains reserved and is not served by this protocol version.
+
+Wire protocol: channel fetch v1.
 
 * ``{"op": "fetch", "v": 1}`` → one canonical-JSON header line
-  (``{v, status, content_type}``), a newline, then the body bytes.
-* ``{"op": "head", "v": 1}`` → the SAME header line plus a
-  ``content_length`` field, a newline, and NO body. It runs the identical
-  grant gate + target resolution as ``fetch`` (so a 200 head proves the
-  whole path resolves), but never streams the artifact — a
-  hundreds-of-MB target costs one round-trip to validate, not a transfer.
+  (``{v,status,kind,viewer,content?}``), a newline, then the serialized
+  body. Every byte range is an in-bounds ``{offset,length}`` slice.
+* ``{"op": "head", "v": 1}`` →
+  ``{v:1,status:"ok",serialized_size}``, a newline, and NO body. It runs
+  the identical grant gate + target resolution as ``fetch`` but never
+  transfers the artifact.
   This is what the publisher's own end-to-end liveness probe issues (the
   final step of a link publish): the dashboard acts as its own viewer and
   HEADs the freshly published token to confirm the tunnel actually serves.
 
 Anti-enumeration: every refusal — unknown token, expired grant, revoked
-grant, reserved ``require_auth`` grant, unresolvable target, disallowed
-path — returns the SAME byte string (404, empty body). A prober on an
-open channel learns nothing about which stage refused it (§5.3
-discipline applied at the serving layer).
+grant, reserved ``require_auth`` grant, unresolvable target, unsupported
+target, or oversize artifact — returns the same
+``{v:1,status:"unavailable"}`` byte string with an empty body.
 
 Runnable directly to hook the resolver into a live tunnel::
 
     python -m tools.dashboard.link_serving \
         --relay wss://auto.network --org <uuid> \
         --key-file session.hex --cert-file session.cert \
-        [--graph-org <slug>] [--file-root DIR ...]
+        [--graph-org <slug>]
 """
 
 from __future__ import annotations
@@ -58,9 +52,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import calendar
-import html
 import json
-import os
 import re
 import time
 import uuid as uuid_mod
@@ -74,25 +66,23 @@ from tools.graph.schemas.network_identity import (
 )
 from tools.network.idkit import canonical_json
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
-#: file targets may only resolve inside these directories (bead: agent-run
-#: output dirs). Overridable per-handler for tests / deployments.
-DEFAULT_FILE_ROOTS = (str(REPO_ROOT / "data" / "agent-runs"),)
+AUTONET_MAX_ARTIFACT_BYTES = 48 * 1024 * 1024
+AUTONET_MAX_TITLE_CHARS = 500
+_NOTE_VIEWER = Path(__file__).resolve().parent / "relay_viewer" / "note-viewer.html"
 
 _TOKEN_RE = re.compile(r"^[0-9a-f]{%d}$" % NETWORK_TOKEN_HEX_LEN)
 _ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
-def _response(status: int, content_type: str, body: bytes = b"") -> bytes:
-    header = canonical_json({"v": 1, "status": status, "content_type": content_type})
+def _response(status, body: bytes = b"") -> bytes:
+    header = canonical_json({"v": 1, "status": status})
     return header + b"\n" + body
 
 
 #: the ONE refusal every gate failure returns — anti-enumeration requires
 #: unknown/expired/revoked/unresolvable to be byte-indistinguishable.
-REFUSED = _response(404, "text/plain")
-BAD_REQUEST = _response(400, "text/plain", b"bad request")
+REFUSED = _response("unavailable")
+BAD_REQUEST = _response(400, b"bad request")
 
 
 # ── the I9 gate ───────────────────────────────────────────────
@@ -208,7 +198,7 @@ def _resolve_present(target_uuid: str):
     html_text = _variant_html(design)
     if not html_text:
         return None
-    return html_text.encode("utf-8"), "text/html; charset=utf-8"
+    return {"kind": "present", "viewer": html_text.encode("utf-8")}
 
 
 def _resolve_design(target_uuid: str):
@@ -222,35 +212,27 @@ def _resolve_design(target_uuid: str):
     html_text = _variant_html(design)
     if not html_text:
         return None
-    return html_text.encode("utf-8"), "text/html; charset=utf-8"
+    return {"kind": "design", "viewer": html_text.encode("utf-8")}
 
 
-_NOTE_PAGE = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
-<style>
-  body {{ margin: 0; background: #101418; color: #d8dee6;
-         font: 16px/1.6 system-ui, -apple-system, sans-serif; }}
-  article {{ max-width: 52rem; margin: 0 auto; padding: 3rem 1.5rem; }}
-  h1 {{ font-size: 1.6rem; line-height: 1.3; color: #f0f4f8; }}
-  pre {{ white-space: pre-wrap; overflow-wrap: break-word;
-        font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }}
-</style>
-</head>
-<body><article><h1>{title}</h1><pre>{body}</pre></article></body>
-</html>
-"""
+_GRAPH_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(graph://([^)]+)\)")
+
+
+class _ArtifactTooLarge(ValueError):
+    pass
+
+
+def _note_viewer_bytes() -> bytes:
+    return _NOTE_VIEWER.read_bytes()
 
 
 def _resolve_note(target_uuid: str, org: str | None):
-    """Rich note render: a self-contained page, every character escaped —
-    note content is displayed, never interpreted as markup."""
+    """Build an owning-scope note payload with only current image parts."""
     from tools.graph import ops as graph_ops
 
-    data = graph_ops.read_source_full(target_uuid, max_chars=0, org=org)
+    data = graph_ops.read_source_full(
+        target_uuid, max_chars=0, org=org, peers=[]
+    )
     if not data:
         return None
     source = data.get("source") or {}
@@ -258,57 +240,146 @@ def _resolve_note(target_uuid: str, org: str | None):
     # (a session transcript, a bead) would serve more than was approved.
     if source.get("type") != "note":
         return None
-    body = "\n\n".join(
+    markdown = "\n\n".join(
         entry.get("content") or "" for entry in data.get("entries") or []
     )
-    page = _NOTE_PAGE.format(
-        title=html.escape(source.get("title") or "Note"),
-        body=html.escape(body),
-    )
-    return page.encode("utf-8"), "text/html; charset=utf-8"
-
-
-def _path_allowed(path: str, roots: tuple[str, ...]) -> str | None:
-    """Resolve *path* and require it inside an allowed root → real path or None.
-
-    ``realpath`` first, THEN the containment check: ``..`` segments and
-    symlinks are resolved away before comparison, so a link inside a run
-    dir pointing at ``/etc/passwd`` fails exactly like a literal
-    traversal. The root itself is not servable — only entries within it.
-    """
-    if not isinstance(path, str) or not path:
+    viewer = _note_viewer_bytes()
+    serialized_size = len(viewer)
+    if serialized_size > AUTONET_MAX_ARTIFACT_BYTES:
+        raise _ArtifactTooLarge
+    source_id = source.get("id")
+    if not isinstance(source_id, str) or not source_id:
         return None
-    real = os.path.realpath(path)
-    for root in roots:
-        root_real = os.path.realpath(root)
+    parts_by_ref: dict[str, dict] = {}
+
+    def replace_image(match: re.Match) -> str:
+        nonlocal serialized_size
+        alt, requested_ref = match.group(1), match.group(2).strip()
+        cid_ref = requested_ref
         try:
-            if real != root_real and os.path.commonpath([real, root_real]) == root_real:
-                return real
-        except ValueError:
-            continue  # mixed drive/absolute forms cannot be contained
-    return None
+            attachment = graph_ops.get_attachment(
+                requested_ref, org=org, peers=[]
+            )
+            mime = attachment.get("mime_type") if attachment else None
+            if (
+                attachment
+                and attachment.get("source_id") == source_id
+                and isinstance(mime, str)
+                and mime.startswith("image/")
+            ):
+                canonical_ref = attachment.get("id") or requested_ref
+                file_path = attachment.get("file_path")
+                if isinstance(file_path, str) and canonical_ref not in parts_by_ref:
+                    remaining = AUTONET_MAX_ARTIFACT_BYTES - serialized_size
+                    with Path(file_path).open("rb") as image_file:
+                        part_bytes = image_file.read(remaining + 1)
+                    if len(part_bytes) > remaining:
+                        raise _ArtifactTooLarge
+                    parts_by_ref[canonical_ref] = {
+                        "ref": canonical_ref,
+                        "mime": mime,
+                        "bytes": part_bytes,
+                    }
+                    serialized_size += len(part_bytes)
+                if canonical_ref in parts_by_ref:
+                    cid_ref = canonical_ref
+        except _ArtifactTooLarge:
+            raise
+        except Exception:
+            # Keep a cid reference without a matching part. The viewer renders
+            # a local placeholder and continues the rest of the note.
+            pass
+        return f"![{alt}](cid:{cid_ref})"
+
+    markdown = _GRAPH_IMAGE_RE.sub(replace_image, markdown)
+    serialized_size += len(markdown.encode("utf-8"))
+    if serialized_size > AUTONET_MAX_ARTIFACT_BYTES:
+        raise _ArtifactTooLarge
+    title = source.get("title") or "Note"
+    if not isinstance(title, str):
+        title = "Note"
+    return {
+        "kind": "note",
+        "viewer": viewer,
+        "content": {
+            "title": title[:AUTONET_MAX_TITLE_CHARS],
+            "markdown": markdown,
+            "parts": list(parts_by_ref.values()),
+        },
+    }
 
 
-def _resolve_file(target_uuid: str, org: str | None, roots: tuple[str, ...]):
-    """Agent-run artifact via its graph attachment row, allowlisted."""
-    from tools.graph import ops as graph_ops
+def _serialize_artifact(artifact: dict) -> tuple[dict, bytes]:
+    """Serialize one resolved artifact into the v1 part-addressed body."""
+    if not isinstance(artifact, dict):
+        raise TypeError("artifact must be an object")
+    kind = artifact.get("kind")
+    if kind not in ("note", "design", "present"):
+        raise ValueError("unsupported artifact kind")
+    viewer = artifact.get("viewer")
+    if not isinstance(viewer, bytes) or not viewer:
+        raise ValueError("viewer must be non-empty bytes")
 
-    attachment = graph_ops.get_attachment(target_uuid, org=org)
-    if not isinstance(attachment, dict):
-        return None
-    real = _path_allowed(attachment.get("file_path"), roots)
-    if real is None or not os.path.isfile(real):
-        return None
-    try:
-        body = Path(real).read_bytes()
-    except OSError:
-        return None
-    return body, attachment.get("mime_type") or "application/octet-stream"
+    chunks = [viewer]
+    cursor = len(viewer)
+    header = {
+        "v": 1,
+        "status": "ok",
+        "kind": kind,
+        "viewer": {"offset": 0, "length": len(viewer)},
+    }
+
+    content = artifact.get("content")
+    if kind != "note":
+        if content is not None:
+            raise ValueError("design and present forbid content")
+        return header, viewer
+    if not isinstance(content, dict):
+        raise ValueError("note requires content")
+
+    title = content.get("title")
+    markdown = content.get("markdown")
+    parts = content.get("parts")
+    if not isinstance(title, str) or len(title) > AUTONET_MAX_TITLE_CHARS:
+        raise ValueError("invalid note title")
+    if not isinstance(markdown, str) or not isinstance(parts, list):
+        raise ValueError("invalid note content")
+
+    markdown_bytes = markdown.encode("utf-8")
+    markdown_slice = {"offset": cursor, "length": len(markdown_bytes)}
+    chunks.append(markdown_bytes)
+    cursor += len(markdown_bytes)
+
+    part_headers = []
+    seen_refs = set()
+    for part in parts:
+        if not isinstance(part, dict):
+            raise ValueError("invalid part")
+        ref, mime, part_bytes = part.get("ref"), part.get("mime"), part.get("bytes")
+        if (
+            not isinstance(ref, str) or not ref or ref in seen_refs
+            or not isinstance(mime, str) or not mime
+            or not isinstance(part_bytes, bytes)
+        ):
+            raise ValueError("invalid part")
+        seen_refs.add(ref)
+        part_headers.append({
+            "ref": ref, "mime": mime,
+            "offset": cursor, "length": len(part_bytes),
+        })
+        chunks.append(part_bytes)
+        cursor += len(part_bytes)
+
+    header["content"] = {
+        "title": title,
+        "markdown": markdown_slice,
+        "parts": part_headers,
+    }
+    return header, b"".join(chunks)
 
 
-def resolve_target(grant: dict, *, org: str | None = None,
-                   file_roots: tuple[str, ...] = DEFAULT_FILE_ROOTS):
-    """(target_type, target_uuid) → (body bytes, content type), or None.
+def resolve_target(grant: dict, *, org: str | None = None):
+    """(target_type, target_uuid) → typed artifact, or None.
 
     Takes a grant that already passed :func:`check_grant`; any resolution
     failure returns None so the caller emits the uniform refusal.
@@ -322,8 +393,7 @@ def resolve_target(grant: dict, *, org: str | None = None,
             return _resolve_design(target_uuid)
         if target_type == "note":
             return _resolve_note(target_uuid, org)
-        if target_type == "file":
-            return _resolve_file(target_uuid, org, file_roots)
+        # file is deliberately deferred from the rich-render v1 grammar.
     except Exception:
         return None  # resolver errors serve nothing, not stack traces
     return None
@@ -332,36 +402,32 @@ def resolve_target(grant: dict, *, org: str | None = None,
 # ── the connector handler (the C4 seam) ───────────────────────
 
 
-def make_grant_handler(org: str | None = None, *,
-                       file_roots=None, now=None):
+def make_grant_handler(org: str | None = None, *, now=None):
     """Build the ``handler(token, message)`` the B2 connector serves with.
 
-    *org* scopes the grant cache and graph lookups; *file_roots* overrides
-    the file-target allowlist; *now* (an epoch-seconds callable) is the
-    TTL clock, injectable for tests.
+    *org* scopes the grant cache and graph lookups; *now* (an epoch-seconds
+    callable) is the TTL clock, injectable for tests.
     """
-    roots = tuple(file_roots) if file_roots else DEFAULT_FILE_ROOTS
     clock = now or time.time
 
     def _serve(token: str, head: bool = False) -> bytes:
         grant = check_grant(token, org=org, now=clock())
         if grant is None:
             return REFUSED
-        resolved = resolve_target(grant, org=org, file_roots=roots)
+        resolved = resolve_target(grant, org=org)
         if resolved is None:
             return REFUSED
-        body, content_type = resolved
+        try:
+            header, body = _serialize_artifact(resolved)
+        except (TypeError, ValueError, OverflowError):
+            return REFUSED
+        if len(body) > AUTONET_MAX_ARTIFACT_BYTES:
+            return REFUSED
         if head:
-            # Same gate + resolution as fetch, so status 200 proves the whole
-            # path resolves — but headers only, never the artifact bytes. The
-            # length is measured locally; nothing large crosses the tunnel.
-            header = canonical_json({
-                "v": 1, "status": 200,
-                "content_type": content_type,
-                "content_length": len(body),
-            })
-            return header + b"\n"
-        return _response(200, content_type, body)
+            return canonical_json({
+                "v": 1, "status": "ok", "serialized_size": len(body),
+            }) + b"\n"
+        return canonical_json(header) + b"\n" + body
 
     async def handler(token: str, message: bytes) -> bytes:
         try:
@@ -369,6 +435,8 @@ def make_grant_handler(org: str | None = None, *,
         except ValueError:
             return BAD_REQUEST
         if not isinstance(request, dict):
+            return BAD_REQUEST
+        if set(request) != {"v", "op"} or request.get("v") != 1:
             return BAD_REQUEST
         op = request.get("op")
         if op not in ("fetch", "head"):
@@ -393,9 +461,6 @@ def main() -> None:
     parser.add_argument("--cert-file", required=True, help="file holding the cert wire JSON")
     parser.add_argument("--graph-org", default=None,
                         help="dashboard org slug scoping the grant cache")
-    parser.add_argument("--file-root", action="append", default=None,
-                        help="allowed root for file targets (repeatable; "
-                             "default: data/agent-runs)")
     parser.add_argument("--min-backoff", type=float, default=0.2)
     parser.add_argument("--max-backoff", type=float, default=5.0)
     args = parser.parse_args()
@@ -405,7 +470,7 @@ def main() -> None:
     with open(args.cert_file) as fh:
         cert = DelegationCert.from_json(fh.read().strip())
 
-    handler = make_grant_handler(args.graph_org, file_roots=args.file_root)
+    handler = make_grant_handler(args.graph_org)
     connector = TunnelConnector(
         args.relay, args.org, key, cert, handler,
         min_backoff=args.min_backoff, max_backoff=args.max_backoff,

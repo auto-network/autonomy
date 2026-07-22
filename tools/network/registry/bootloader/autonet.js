@@ -24,6 +24,8 @@ const autonet = (() => {
   const DIR_S2C = "s2c\x00";
   const CHUNK_SIZE = 128 * 1024;
   const MAX_MESSAGE_SIZE = 64 * 1024 * 1024;
+  const MAX_ARTIFACT_BYTES = 48 * 1024 * 1024;
+  const MAX_TITLE_CHARS = 500;
   const MAX_CHAIN_DEPTH = 16;
   const HANDSHAKE_VERSION = 1;
   // Bound establishing a live channel (connect + handshake). The relay may
@@ -33,6 +35,7 @@ const autonet = (() => {
   // instead of showing the honest offline error. The body transfer that
   // follows is NOT bounded here: a large artifact may legitimately take time.
   const CONNECT_TIMEOUT_MS = 10000;
+  const VIEWER_READY_TIMEOUT_MS = 10000;
 
   const te = new TextEncoder();
 
@@ -359,8 +362,7 @@ const autonet = (() => {
 
   // ---- channel fetch protocol v1 (the C4 seam) ------------------------------
   // request  : canonical JSON {v:1, op:"fetch"}
-  // response : JSON header line + "\n" + body bytes
-  //            header: {v:1, status, content_type}
+  // response : JSON header line + "\n" + part-addressed body bytes
 
   async function fetchArtifact(channel) {
     await channel.sendMessage(te.encode(canonicalJson({ v: 1, op: "fetch" })));
@@ -371,11 +373,99 @@ const autonet = (() => {
     return { header, body: response.slice(newline + 1) };
   }
 
+  function hasOnlyKeys(value, allowed) {
+    return value && typeof value === "object" && !Array.isArray(value)
+      && Object.keys(value).every((key) => allowed.includes(key));
+  }
+
+  function codePointLength(value) {
+    return Array.from(value).length;
+  }
+
+  function truncateCodePoints(value, limit) {
+    return Array.from(value).slice(0, limit).join("");
+  }
+
+  function validateSlice(value, bodyLength, what, allowEmpty = true) {
+    if (!hasOnlyKeys(value, ["offset", "length"])) {
+      throw new Error("invalid " + what);
+    }
+    const offset = value.offset;
+    const length = value.length;
+    if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length)
+        || offset < 0 || length < 0 || (!allowEmpty && length === 0)
+        || offset > bodyLength || length > bodyLength - offset) {
+      throw new Error("invalid " + what);
+    }
+    return { offset, length, end: offset + length, what };
+  }
+
+  function validateArtifact(header, body) {
+    if (!(body instanceof Uint8Array) || body.length > MAX_ARTIFACT_BYTES) {
+      throw new Error("invalid artifact body");
+    }
+    if (!hasOnlyKeys(header, ["v", "status", "kind", "viewer", "content"])
+        || header.v !== 1 || header.status !== "ok"
+        || !["note", "design", "present"].includes(header.kind)) {
+      throw new Error("invalid artifact header");
+    }
+
+    const ranges = [validateSlice(header.viewer, body.length, "viewer", false)];
+    let content = null;
+    if (header.kind === "note") {
+      if (!Object.prototype.hasOwnProperty.call(header, "content")
+          || !hasOnlyKeys(header.content, ["title", "markdown", "parts"])
+          || typeof header.content.title !== "string"
+          || codePointLength(header.content.title) > MAX_TITLE_CHARS
+          || !Array.isArray(header.content.parts)) {
+        throw new Error("invalid note content");
+      }
+      const markdown = validateSlice(
+        header.content.markdown, body.length, "markdown"
+      );
+      ranges.push(markdown);
+      const refs = new Set();
+      const parts = header.content.parts.map((part) => {
+        if (!hasOnlyKeys(part, ["ref", "mime", "offset", "length"])
+            || typeof part.ref !== "string" || !part.ref
+            || refs.has(part.ref) || typeof part.mime !== "string" || !part.mime) {
+          throw new Error("invalid artifact part");
+        }
+        refs.add(part.ref);
+        const range = validateSlice(
+          { offset: part.offset, length: part.length }, body.length, "part"
+        );
+        ranges.push(range);
+        return { ref: part.ref, mime: part.mime, ...range };
+      });
+      content = { title: header.content.title, markdown, parts };
+    } else if (Object.prototype.hasOwnProperty.call(header, "content")) {
+      throw new Error("content forbidden for design");
+    }
+
+    const ordered = ranges.slice().sort((a, b) => a.offset - b.offset || a.end - b.end);
+    let cursor = 0;
+    for (const range of ordered) {
+      if (range.offset !== cursor) {
+        throw new Error("artifact slices must exactly cover the body");
+      }
+      cursor = range.end;
+    }
+    if (cursor !== body.length) {
+      throw new Error("artifact slices must exactly cover the body");
+    }
+    return {
+      kind: header.kind,
+      viewer: ranges[0],
+      content,
+    };
+  }
+
   // ---- page shell -----------------------------------------------------------
 
   const state = {
-    phase: "init", transport: null, contentType: null, bodyLength: 0,
-    bodySha256: null, artifactTitle: null, error: null,
+    phase: "init", transport: null, bodyLength: 0,
+    bodySha256: null, artifactTitle: null, artifactHeight: null, error: null,
   };
 
   function show(id) {
@@ -397,42 +487,54 @@ const autonet = (() => {
     show("error-view");
   }
 
-  function render(header, body) {
-    state.contentType = header.content_type || "application/octet-stream";
+  async function renderArtifact(header, body) {
+    const artifact = validateArtifact(header, body);
     state.bodyLength = body.length;
-    const type = state.contentType.split(";")[0].trim();
-    if (type === "text/html") {
-      const frame = document.getElementById("artifact-frame");
-      frame.src = URL.createObjectURL(new Blob([body], { type: "text/html" }));
-      show("frame-view");
-    } else if (type.startsWith("text/")) {
-      document.getElementById("text-view-pre").textContent = new TextDecoder().decode(body);
-      show("text-view");
-    } else {
-      const link = document.getElementById("download-link");
-      link.href = URL.createObjectURL(new Blob([body], { type }));
-      link.download = "artifact";
-      show("download-view");
+    const frame = document.getElementById("artifact-frame");
+    const capturedWindow = frame.contentWindow;
+    let readySeen = false;
+    let resolveReady;
+    const ready = new Promise((resolve) => { resolveReady = resolve; });
+
+    window.addEventListener("message", (event) => {
+      if (event.source !== capturedWindow || !event.data || event.data.v !== 1) return;
+      if (event.data.op === "ready" && artifact.kind === "note" && !readySeen) {
+        readySeen = true;
+        resolveReady();
+      } else if (event.data.op === "title" && typeof event.data.title === "string") {
+        state.artifactTitle = truncateCodePoints(event.data.title, MAX_TITLE_CHARS);
+        setStatus(state.artifactTitle);
+      } else if (event.data.op === "height" && Number.isSafeInteger(event.data.height)) {
+        state.artifactHeight = Math.max(0, Math.min(event.data.height, 1000000));
+      }
+    });
+
+    const viewerBytes = body.slice(
+      artifact.viewer.offset, artifact.viewer.offset + artifact.viewer.length
+    );
+    frame.src = URL.createObjectURL(new Blob([viewerBytes], { type: "text/html" }));
+
+    if (artifact.kind === "note") {
+      await withTimeout(ready, VIEWER_READY_TIMEOUT_MS, "viewer ready");
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const md = artifact.content.markdown;
+      const parts = artifact.content.parts.map((part) => {
+        const bytes = body.slice(part.offset, part.end).buffer;
+        return { ref: part.ref, mime: part.mime, bytes };
+      });
+      const transfer = parts.map((part) => part.bytes);
+      capturedWindow.postMessage({
+        v: 1, op: "content", title: artifact.content.title,
+        markdown: decoder.decode(body.slice(md.offset, md.end)), parts,
+      }, "*", transfer);
     }
+
+    show("frame-view");
     state.phase = "rendered";
-    // Clear the outer shell's "loading…" status the moment content is shown.
-    // Do this UNCONDITIONALLY on render — never wait for the artifact's
-    // cooperative autonet_title postMessage, because a plain note render never
-    // sends one, which would otherwise leave the header stuck on "loading…"
-    // while the iframe already displays the note. A title that does arrive
-    // later still overrides this via the message listener in boot().
     setStatus(state.artifactTitle || "");
   }
 
   async function boot() {
-    window.addEventListener("message", (event) => {
-      // Cooperative title signaling from the sandboxed artifact.
-      if (event.data && typeof event.data.autonet_title === "string") {
-        state.artifactTitle = event.data.autonet_title;
-        setStatus(event.data.autonet_title);
-      }
-    });
-
     const token = location.pathname.split("/").pop();
     if (!/^[0-9a-f]{32}$/.test(token)) return showError();
 
@@ -467,9 +569,9 @@ const autonet = (() => {
       state.phase = "fetching";
       setStatus("loading…");
       const { header, body } = await fetchArtifact(channel);
-      if (header.status !== 200) return showError();
+      if (header.status !== "ok") return showError();
       state.bodySha256 = bytesToHex(await crypto.subtle.digest("SHA-256", body));
-      render(header, body);
+      await renderArtifact(header, body);
     } catch (err) {
       state.error = String(err && err.message || err);
       showError();
@@ -479,6 +581,7 @@ const autonet = (() => {
   return {
     state, boot, canonicalJson, verifyChain, attemptEndpoints,
     attemptDirectEndpoint, performHandshake, openSocket, fetchArtifact,
+    validateArtifact, renderArtifact,
     withTimeout,
   };
 })();

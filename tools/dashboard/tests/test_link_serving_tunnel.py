@@ -211,8 +211,8 @@ def test_tunnel_serves_only_against_local_grants(stack):
                 stack["port"], granted, stack["root_pub"])
             header, _, body = served.partition(b"\n")
             assert json.loads(header) == {
-                "v": 1, "status": 200,
-                "content_type": "text/html; charset=utf-8",
+                "v": 1, "status": "ok", "kind": "present",
+                "viewer": {"offset": 0, "length": len(BINDER_BYTES)},
             }
             assert len(body) == len(BINDER_BYTES)  # binder-sized, byte-exact
             assert body == BINDER_BYTES

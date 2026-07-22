@@ -73,21 +73,24 @@ _BOOTLOADER_DIR = Path(__file__).resolve().parent / "bootloader"
 #    it has no injection surface of its own. Its only script is the external
 #    autonet.js ('self').
 # 2. HTML artifacts (Present decks, microsites) are INTERACTIVE and must run
-#    their own scripts to render. They load into a `sandbox="allow-scripts"`
-#    iframe via a blob: URL — an OPAQUE origin with no same-origin access,
-#    no top-navigation, no forms, no popups. That sandbox, not CSP, is the
-#    isolation boundary between the untrusted artifact and this origin.
+#    their own scripts to render. They load into a sandboxed iframe via a
+#    blob: URL — an OPAQUE origin with no same-origin access, top navigation,
+#    or forms. Explicit popup capabilities let shared external links open in
+#    a separate browsing context. The sandbox, not CSP, is the isolation
+#    boundary between the untrusted artifact and this origin.
 #
 # blob: iframes inherit the embedder's CSP in Chromium, so script-src must
 # admit the artifact's inline scripts ('unsafe-inline' blob:) for decks to
 # work. Because the shell itself carries no inline script and no dynamic
-# HTML, 'unsafe-inline' opens no vector on the shell. connect-src 'self'
-# still bars the opaque-origin artifact from exfiltrating (an opaque origin
-# never matches 'self'), so an artifact renders but cannot phone home.
+# HTML, 'unsafe-inline' opens no vector on the shell. Shared designs and
+# remote note images deliberately retain ordinary public-network access;
+# the null-origin sandbox isolates them from the parent, and no-referrer
+# prevents a remote request from carrying the bearer URL.
 _BOOTLOADER_CSP = (
     "default-src 'none'; script-src 'self' 'unsafe-inline' blob:; "
-    "style-src 'unsafe-inline'; connect-src 'self'; img-src blob: data:; "
-    "frame-src blob:; base-uri 'none'; form-action 'none'"
+    "style-src 'unsafe-inline'; connect-src 'self' https: http: wss: ws:; "
+    "img-src blob: data: https: http:; frame-src blob:; base-uri 'none'; "
+    "form-action 'none'; frame-ancestors 'none'"
 )
 
 _ENVELOPE_FIELDS = frozenset({"v", "signer", "ts", "payload", "cert", "sig"})
