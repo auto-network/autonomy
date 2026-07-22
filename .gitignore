@@ -14,6 +14,21 @@ data/artifacts/
 # Dashboard session-cookie HMAC key (unlock gate) — machine-local secret
 data/dashboard-session.secret
 
+# Private key material — machine-local, MUST NEVER be committed.
+#  - data/tls.{crt,key}: the Tailscale Let's Encrypt cert + key uvicorn serves
+#    with (issued by `tailscale cert`, renewed by renew-tls-cert.sh).
+#  - data/network/: the auto.network tunnel serving delegates — the mode-0600
+#    tunnel:serve key files the connector subprocess signs SERVER_HELLO with
+#    (see autonomy.network.serve-cert). One key+cert pair per org.
+# The broad *.key/*.pem/*.crt catch-alls are a backstop so no key material
+# under data/ can ever be added by name.
+data/network/
+data/tls.crt
+data/tls.key
+data/*.key
+data/*.pem
+data/*.crt
+
 # Operator-supplied attachments/screenshots (runtime, not source)
 data/uploads/
 data/host-uploads/
