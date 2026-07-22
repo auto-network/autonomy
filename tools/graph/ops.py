@@ -3880,8 +3880,34 @@ def _query_attention(
         conditions.append("t.content LIKE ?")
         params.append(f"%{search}%")
     if session:
-        conditions.append("json_extract(s.metadata, '$.session_id') = ?")
-        params.append(session)
+        # Resolve the caller's session argument to concrete source ids in THIS
+        # db, then filter by id. The argument may be a source id (exact or
+        # prefix), a session_uuid / rollout stem, a tmux_session, or a codex
+        # container name (the tmux name for container agents lives in
+        # metadata.container_name). The old filter matched only
+        # metadata.session_id, so a tmux name like 'auto-0720-012546' silently
+        # returned nothing — the same class of gap that already made attention
+        # look empty. Mirror the get_session resolver, plus container_name.
+        # One tmux name can map to several rollout sources; span them all.
+        srows = db.conn.execute(
+            "SELECT id FROM sources WHERE type = 'session' AND ("
+            "  id = ?"
+            "  OR id LIKE ?"
+            "  OR json_extract(metadata, '$.session_id') = ?"
+            "  OR json_extract(metadata, '$.session_uuid') = ?"
+            "  OR json_extract(metadata, '$.tmux_session') = ?"
+            "  OR json_extract(metadata, '$.container_name') = ?"
+            ")",
+            (session, f"{session}%", session, session, session, session),
+        ).fetchall()
+        ids = [r[0] for r in srows]
+        if not ids:
+            # No such session in this org — nothing to contribute (correct for
+            # the cross-org union: other orgs may still resolve it).
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        conditions.append(f"s.id IN ({placeholders})")
+        params.extend(ids)
 
     where = " AND ".join(conditions)
     limit_val = last if last else 500
