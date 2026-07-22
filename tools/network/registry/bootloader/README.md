@@ -14,6 +14,12 @@ format, and renders the artifact in a sandboxed iframe.
   envelope's `root_pub`, X25519 + HKDF-SHA256 + AES-256-GCM records,
   chunk reassembly, strict artifact validation, and sandboxed rendering.
 
+The shell and script are deployed as one protocol unit. The script response is
+`Cache-Control: no-store`, the shell carries an asset-version query to evict
+the former five-minute cache immediately, and both versions retain an
+`error-view` compatibility fallback so a rolling deploy cannot produce a blank
+page from mixed shell/script bytes.
+
 ## Flow
 
 1. `GET /v1/links/{token}/envelope` → `{org, root_pub, endpoints, …}`.

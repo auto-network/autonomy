@@ -85,7 +85,14 @@ class TestBootloaderBytes:
         response = client.get("/l-assets/autonet.js")
         assert response.status_code == 200
         assert "javascript" in response.headers["content-type"]
+        assert response.headers["cache-control"] == "no-store"
         assert b"performHandshake" in response.content
+
+    def test_shell_busts_legacy_asset_cache_and_keeps_fallback(self, client):
+        shell = client.get("/l/not-a-token").text
+        assert 'src="/l-assets/autonet.js?v=2"' in shell
+        assert 'id="error-view"' in shell
+        assert "This page needs to be refreshed" in shell
 
     def test_no_org_enumeration_via_status(self, client, clock, root, recovery,
                                            session_key, session_cert):

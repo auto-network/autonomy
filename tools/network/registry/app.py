@@ -847,7 +847,10 @@ def create_app(
             content=js_bytes,
             media_type="text/javascript",
             headers={
-                "Cache-Control": "public, max-age=300",
+                # The shell and script are one protocol unit. Caching this
+                # path across a deploy can pair new HTML with old JavaScript
+                # and leave every view hidden after an error.
+                "Cache-Control": "no-store",
                 "X-Content-Type-Options": "nosniff",
             },
         )
