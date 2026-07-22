@@ -26,6 +26,13 @@ const autonet = (() => {
   const MAX_MESSAGE_SIZE = 64 * 1024 * 1024;
   const MAX_CHAIN_DEPTH = 16;
   const HANDSHAKE_VERSION = 1;
+  // Bound establishing a live channel (connect + handshake). The relay may
+  // ACCEPT a viewer socket and never send SERVER_HELLO — it holds the
+  // connection open when no serving tunnel is dialed in for the org — and
+  // recvBinary() waits forever, so without this the page hangs on a spinner
+  // instead of showing the honest offline error. The body transfer that
+  // follows is NOT bounded here: a large artifact may legitimately take time.
+  const CONNECT_TIMEOUT_MS = 10000;
 
   const te = new TextEncoder();
 
@@ -283,6 +290,19 @@ const autonet = (() => {
 
   // ---- transport -----------------------------------------------------------
 
+  /* Reject a promise if it does not settle within ms — the caller turns the
+   * rejection into the honest offline error. clearTimeout on settle so a
+   * completed handshake never trips a late timer. */
+  function withTimeout(promise, ms, label) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("timed out establishing channel: " + label)), ms);
+      promise.then(
+        (value) => { clearTimeout(timer); resolve(value); },
+        (err) => { clearTimeout(timer); reject(err); });
+    });
+  }
+
   /* WebSocket wrapped with an async binary receive queue. */
   function openSocket(url) {
     return new Promise((resolve, reject) => {
@@ -423,16 +443,19 @@ const autonet = (() => {
         state.transport = "direct";
       } else {
         const scheme = location.protocol === "https:" ? "wss" : "ws";
-        transport = await openSocket(
-          scheme + "://" + location.host + "/v1/links/" + token + "/channel");
+        transport = await withTimeout(openSocket(
+          scheme + "://" + location.host + "/v1/links/" + token + "/channel"),
+          CONNECT_TIMEOUT_MS, "connect");
         state.transport = "relay";
       }
 
       state.phase = "handshake";
       setStatus("securing…");
-      const channel = await performHandshake(transport, {
+      // Bounded: a relay that accepts the socket but never sends SERVER_HELLO
+      // (no serving tunnel dialed in) resolves to the offline error, not a hang.
+      const channel = await withTimeout(performHandshake(transport, {
         org: envelope.org, token, rootPub: envelope.root_pub,
-      });
+      }), CONNECT_TIMEOUT_MS, "handshake");
 
       state.phase = "fetching";
       setStatus("loading…");
@@ -449,6 +472,7 @@ const autonet = (() => {
   return {
     state, boot, canonicalJson, verifyChain, attemptEndpoints,
     attemptDirectEndpoint, performHandshake, openSocket, fetchArtifact,
+    withTimeout,
   };
 })();
 
