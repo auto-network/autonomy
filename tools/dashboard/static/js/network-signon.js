@@ -470,6 +470,88 @@
     };
   }
 
+  // Provision the org's tunnel SERVING delegate — a standalone step in a
+  // publish approve, fired only when the enrich precondition
+  // (serve_cert_required) says no usable serve-cert exists (the rare
+  // first-publish / post-expiry path; the common case already has one and
+  // skips this entirely).
+  //
+  // The delegate is ROOT-signed: a 30-day serving TTL cannot nest inside the
+  // 24h session cert, so a session-key sub-delegate will not do. It signs the
+  // SAME properties idkit's issue_cert does — {v, child_pub,
+  // scope:['tunnel:serve'], org, subject, not_before, not_after} over
+  // CERT_DOMAIN — with the org ROOT, decrypted from the armor with the same
+  // approve password and zeroed the instant it is imported (I1).
+  //
+  // Its key is the ONE key this system exports: unlike the session key
+  // (extractable:false, browser-only), the serving delegate's private half is
+  // exported and POSTed to /api/network/serve-cert, because the unattended
+  // connector subprocess must sign SERVER_HELLO with it. The server re-verifies
+  // the chain to the org's OWN bound root before storing the key 0600.
+  async function provisionServeCert(passphrase, opts) {
+    opts = opts || {};
+    var orgUuid = opts.orgUuid;
+    if (!orgUuid) throw new Error('serve-cert provisioning requires the org uuid');
+    var orgSlug = opts.org || null;
+    var orgHeaders = orgSlug ? { 'X-Graph-Org': orgSlug } : {};
+    var orgQ = orgSlug ? ('?org=' + encodeURIComponent(orgSlug)) : '';
+
+    var keyResp = await fetch('/api/network/org-key' + orgQ, { headers: orgHeaders });
+    if (!keyResp.ok) {
+      throw new Error('could not load the org signing key (' + keyResp.status + ')');
+    }
+    var orgKey = await keyResp.json();
+    if (!orgKey.armored_private_key) {
+      throw new Error('this org has no signing key to mint a serving delegate');
+    }
+
+    var opened = await decryptArmor(orgKey.armored_private_key, passphrase);
+    var privateKeyHex = null;
+    try {
+      var rootKey = await _importRootKey(opened.seed);
+      opened.seed.fill(0); opened.seed = null;   // I1: root seed gone at import
+
+      // The one exportable key: the server needs its private half to drive the
+      // unattended connector. extractable:true, unlike the session key.
+      var delegate = await crypto.subtle.generateKey(
+        { name: 'Ed25519' }, true, ['sign', 'verify']);
+      var childPub = bytesToHex(new Uint8Array(
+        await crypto.subtle.exportKey('raw', delegate.publicKey)));
+      var pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', delegate.privateKey));
+      privateKeyHex = bytesToHex(pkcs8.slice(16, 48));  // RFC 8410: 16B header + 32B seed
+      pkcs8.fill(0);
+
+      var now = _nowS();
+      var certPayload = {
+        v: 1,
+        child_pub: childPub,
+        scope: ['tunnel:serve'],
+        org: orgUuid,
+        subject: { kind: 'operator', id: _browserSubjectId() },
+        not_before: now - NOT_BEFORE_SKEW_S,
+        not_after: now + MAX_TTL_S,          // 30-day serving delegate
+      };
+      var sig = bytesToHex(new Uint8Array(await crypto.subtle.sign(
+        'Ed25519', rootKey, _domainBytes(CERT_DOMAIN, canonicalJson(certPayload)))));
+      rootKey = null;                        // I1: last root reference dropped
+      var certWire = canonicalJson(Object.assign({}, certPayload, { sig: sig }));
+
+      var resp = await fetch('/api/network/serve-cert', {
+        method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, orgHeaders),
+        body: JSON.stringify({ org: orgSlug, cert: certWire, private_key: privateKeyHex }),
+      });
+      var body = await resp.json().catch(function () { return {}; });
+      if (!resp.ok || body.ok === false) {
+        throw new Error(body.error || ('serve-cert provisioning was refused (' + resp.status + ')'));
+      }
+      return { childPub: childPub, notAfter: certPayload.not_after };
+    } finally {
+      if (opened && opened.seed) { opened.seed.fill(0); opened.seed = null; }
+      privateKeyHex = null;   // drop the reference (a JS string cannot be zeroed)
+    }
+  }
+
   // Sign-out destroys the key and cert locally (spec §6.3): the store is
   // CLEARED, not just the current row.
   async function signOut() {
@@ -616,6 +698,7 @@
     },
     signOn: signOn,
     signOut: signOut,
+    provisionServeCert: provisionServeCert,
     revokeCurrentKey: revokeCurrentKey,
     listKeys: listKeys,
     // Internals exposed for the L2.B sweep + cross-language vectors; the
@@ -623,6 +706,7 @@
     _internals: {
       canonicalJson: canonicalJson,
       decryptArmor: decryptArmor,
+      provisionServeCert: provisionServeCert,
       installSession: _installSession,
       loadFromStore: _loadFromStore,
       hexToBytes: hexToBytes,
