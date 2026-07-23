@@ -10,7 +10,8 @@ result. Ops carried in the request JSON:
 
 - ``{"op": "comment", "key", "body_markdown"}``
 - ``{"op": "set_field", "key", "field_name" | "field_id", "body_markdown"}``
-  (e.g. Confirm Plan; the id is discovered via editmeta at execution time)
+  (the id and schema are discovered via editmeta at execution time; rich text
+  becomes ADF and structured values are coerced to Jira's object/array shape)
 - ``{"op": "create", "fields": {...}}``
 - ``{"op": "attach", "key", "filename", "content_b64", "mime_type"?}``
 - ``{"op": "transition", "key", "transition", "fields"?}`` (fields keyed by
@@ -222,10 +223,15 @@ async def _execute_jira_write(row: dict, _decision: dict) -> dict:
         if op == "comment":
             out = api.add_comment(cfg, req["key"], req.get("body_markdown", ""))
         elif op == "set_field":
-            field_id = req.get("field_id") or api.editmeta_field_id(
-                cfg, req["key"], req.get("field_name", ""))
-            out = api.set_field(cfg, req["key"], field_id,
-                                req.get("body_markdown", ""))
+            field_reference = (
+                req.get("field_id") or req.get("field_name", "")
+            )
+            out = api.set_editable_field(
+                cfg,
+                req["key"],
+                field_reference,
+                req.get("body_markdown", ""),
+            )
         elif op == "create":
             out = api.create_issue(cfg, req.get("fields", {}))
         elif op == "transition":

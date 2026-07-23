@@ -13,7 +13,8 @@ outcome or the decline).
 - `jira-attachment ID [-o FILE]` — download an attachment (ids in `jira-read`)
 - `jira-comment KEY -f body.md` — post a comment *(operator approval)*
 - `jira-confirm-plan KEY -f plan.md` — set the Confirm Plan field *(operator approval)*
-- `jira-update KEY --field Description -f body.md` — set any rich-text field
+- `jira-update KEY --field Description -f body.md` — set rich-text or
+  structured fields (versions/options/users are schema-coerced host-side)
   by display name *(operator approval)*
 - `jira-create payload.json` — create a ticket *(operator approval)*
 - `jira-attach KEY FILE` — upload an attachment *(operator approval)*

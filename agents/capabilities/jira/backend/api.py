@@ -207,18 +207,45 @@ def createmeta(cfg: JiraConfig, project: str, issuetype: str,
     }
 
 
-def editmeta_field_id(cfg: JiraConfig, key: str, field_name: str) -> str:
-    """Discover a field id (e.g. Confirm Plan -> customfield_10153) from the
-    issue's editmeta. Ids are per-instance/project — always discovered."""
+def editmeta_field(cfg: JiraConfig, key: str,
+                   field_reference: str) -> dict[str, Any]:
+    """Return an editable field's id, display name, and schema.
+
+    ``field_reference`` may be either the Jira field id or its display name.
+    Display-name matching is case-insensitive; ids win on an exact match.
+    """
     with _client(cfg) as c:
         resp = c.get(f"/rest/api/3/issue/{key}/editmeta")
         _check(resp, f"editmeta {key}")
         fields = resp.json().get("fields", {})
+    if field_reference in fields and isinstance(fields[field_reference], dict):
+        field_id = field_reference
+        meta = fields[field_id]
+        schema = meta.get("schema") or {}
+        return {
+            "id": field_id,
+            "name": meta.get("name") or field_id,
+            "type": schema.get("type"),
+            "items": schema.get("items"),
+        }
+    wanted = field_reference.strip().casefold()
     for field_id, meta in fields.items():
-        if isinstance(meta, dict) and meta.get("name") == field_name:
-            return field_id
-    raise JiraError(f"field {field_name!r} is not editable on {key} "
+        if (isinstance(meta, dict)
+                and str(meta.get("name") or "").casefold() == wanted):
+            schema = meta.get("schema") or {}
+            return {
+                "id": field_id,
+                "name": meta.get("name") or field_id,
+                "type": schema.get("type"),
+                "items": schema.get("items"),
+            }
+    raise JiraError(f"field {field_reference!r} is not editable on {key} "
                     f"(not present in editmeta)")
+
+
+def editmeta_field_id(cfg: JiraConfig, key: str, field_name: str) -> str:
+    """Compatibility wrapper returning only an editable field's Jira id."""
+    return editmeta_field(cfg, key, field_name)["id"]
 
 
 def _transition_meta(cfg: JiraConfig, key: str) -> list[dict[str, Any]]:
@@ -447,6 +474,33 @@ def set_field(cfg: JiraConfig, key: str, field_id: str,
                      json={"fields": {field_id: _rich_body(cfg, key, body_markdown)}})
         _check(resp, f"set {field_id} on {key}")
     return {"field_id": field_id}
+
+
+def set_editable_field(cfg: JiraConfig, key: str, field_reference: str,
+                       value: str) -> dict[str, Any]:
+    """Set an existing issue field using its editmeta schema.
+
+    The existing ``jira-update`` contract treats string fields as rich text,
+    preserving Description/Confirm Plan/textarea behavior. Structured schemas
+    reuse the same coercion as transition-screen fields: version/component
+    arrays become ``[{"name": ...}]``, users resolve to ``accountId``, options
+    become ``{"value": ...}``, and numeric fields become numbers.
+    """
+    field = editmeta_field(cfg, key, field_reference)
+    if field.get("type") not in {
+        "array", "option", "user", "version", "component",
+        "priority", "resolution", "number",
+    }:
+        return set_field(cfg, key, field["id"], value)
+
+    coerced = _coerce_field_value(cfg, field, value.strip())
+    with _client(cfg) as c:
+        resp = c.put(
+            f"/rest/api/3/issue/{key}",
+            json={"fields": {field["id"]: coerced}},
+        )
+        _check(resp, f"set {field['id']} on {key}")
+    return {"field_id": field["id"]}
 
 
 def create_issue(cfg: JiraConfig, fields: dict[str, Any]) -> dict[str, Any]:
