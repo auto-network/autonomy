@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import httpx
@@ -27,6 +28,21 @@ def test_capability_ships_no_credential_surface():
         text = tool.read_text()
         for needle in ("jira_token", "JIRA_TOKEN", "JIRA_EMAIL", "atlassian.net"):
             assert needle not in text, f"{tool.name} references {needle}"
+
+
+def test_capability_manifest_exposes_every_executable_tool():
+    """A shipped jira-* command must not be mounted but missing from PATH."""
+    manifest = json.loads((CAPABILITY_DIR / "manifest.json").read_text())
+    tool_target = manifest["tool_target"]
+    tools_dir = CAPABILITY_DIR / "tools"
+    executable_tools = {
+        tool.name
+        for tool in tools_dir.iterdir()
+        if tool.name.startswith("jira-") and os.access(tool, os.X_OK)
+    }
+    assert tool_target["source"] == "agents/capabilities/jira/tools"
+    assert tool_target["target"] == "/opt/jira-tools"
+    assert set(tool_target["expose_commands"]) == executable_tools
 
 
 # ── ADF conversion ──
