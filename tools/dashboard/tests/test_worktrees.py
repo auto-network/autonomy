@@ -4240,6 +4240,97 @@ class TestRefreshOneOverBindings:
         assert snapshot["reviews"][0]["title"] == "Merged"
         assert snapshot["reviews"][0]["state"] == "merged"
 
+    def test_refresh_one_binding_path_reanchors_open_pr_after_rebase(
+        self, isolated_settings_db, monkeypatch,
+    ):
+        """Regression for auto-0629-114616 (PR #578): a cached OPEN
+        review whose checks currently show nothing running/pending
+        must still hit GitHub on every refresh — not just closed/merged
+        PRs. Previously ``_is_review_refresh_terminal`` treated
+        "no pending checks in the stale cache" as license to skip the
+        network call forever, so a rebase/force-push that moved the
+        real head never got noticed even across repeated forced
+        refreshes."""
+        from agents.capabilities.github import service as wg
+        from tools.dashboard import worktree_monitor as wm
+        from tools.graph import settings_ops
+
+        self._seed_binding()
+        # Cache pins an OPEN PR whose checks all completed — this is
+        # exactly the state a false-terminal verdict leaves behind.
+        settings_ops.add_setting(
+            "autonomy.source_control.review_state", 1,
+            "owner/repo:99",
+            {
+                "title": "Stale", "body": "B", "state": "open",
+                "head_sha": "staleSHA", "base_sha": "baseSHA",
+                "base_branch": "main", "is_draft": False, "provider": "github",
+                "etag": '"etag-old"',
+                "checks": [
+                    {"id": "build", "label": "build", "status": "pass"},
+                ],
+                "checks_stable": True,
+            },
+            org="autonomy",
+        )
+
+        seen = {"review_calls": 0}
+
+        async def fake_review(*args, **kwargs):
+            seen["review_calls"] += 1
+            # GitHub reports the PR moved to a new head (a rebase
+            # landed) with checks still in flight for the new commit.
+            return wg.WorktreeGithubExecResult(
+                operation=wg.OP_REVIEW_READ_BY_ID,
+                session_name="auto-x", repo_name="autonomy",
+                ok=True,
+                stdout=(
+                    'HTTP/2.0 200 OK\r\nETag: "etag-new"\r\n\r\n'
+                    '{"title":"Stale","body":"B","state":"open",'
+                    '"draft":false,"html_url":"https://example/pull/99",'
+                    '"head":{"sha":"freshSHA"},'
+                    '"base":{"sha":"baseSHA","ref":"main"}}'
+                ),
+            )
+
+        async def fake_checks(*args, **kwargs):
+            assert kwargs.get("head_sha") == "freshSHA"
+            return wg.WorktreeGithubExecResult(
+                operation=wg.OP_CHECK_RUNS_READ_FOR_SHA,
+                session_name="auto-x", repo_name="autonomy",
+                ok=True,
+                stdout=(
+                    '{"check_runs":['
+                    '{"id":1,"name":"build","status":"in_progress"}'
+                    ']}'
+                ),
+            )
+
+        monkeypatch.setattr(wm, "source_control_review_read_by_id_v1", fake_review)
+        monkeypatch.setattr(wm, "source_control_check_runs_read_for_sha_v1", fake_checks)
+        monkeypatch.setattr(wm, "derive_repo_slug", lambda _p: "owner/repo")
+
+        monitor = wm.WorktreeMonitor()
+        row = _row(session="auto-x", repo="autonomy", live=True)
+
+        # Three consecutive forced refreshes — mirrors the live repro
+        # (three forced /refresh calls all returned the same stale head).
+        for _ in range(3):
+            asyncio.run(monitor._refresh_one_source_control(row, [row]))
+
+        assert seen["review_calls"] == 3
+
+        cached = settings_ops.read_set(
+            "autonomy.source_control.review_state",
+            prefix="owner/repo", org="autonomy",
+        ).to_dict()
+        payload = cached["owner/repo:99"].payload
+        assert payload["head_sha"] == "freshSHA"
+        assert payload["checks"][0]["status"] == "running"
+
+        snapshot = monitor.get_source_control("auto-x", "autonomy")
+        assert snapshot["reviews"][0]["head_sha"] == "freshSHA"
+
 
 # ── Smart-cadence + nag-when-terminal (auto-bugm6) ─────────────────────
 
@@ -4516,7 +4607,7 @@ class TestFireTerminalTransitions:
         from tools.dashboard import worktree_monitor as wm
         monitor.set_nag_mode(*key, "nag_done")
 
-    def _terminal_review(self, *, number=42, head="abc", green=True):
+    def _terminal_review(self, *, number=42, head="abc", green=True, checks_stable=True):
         if green:
             checks = [
                 {"id": "build", "label": "build", "status": "pass"},
@@ -4534,6 +4625,7 @@ class TestFireTerminalTransitions:
             "review_id": str(number),
             "head_sha": head,
             "checks": checks,
+            "checks_stable": checks_stable,
         }
 
     def _ready(self, reviews):
@@ -4609,6 +4701,59 @@ class TestFireTerminalTransitions:
             ),
         )
         assert sent == []
+
+    def test_does_not_fire_when_checks_not_yet_stable(self):
+        """A terminal-looking review whose check count hasn't been
+        confirmed stable across two consecutive fetches must not fire
+        yet — this is the partial-check-set race guard (auto-0629-114616,
+        PR #578: an early poll saw 8/9 checks all passing before the
+        9th check-run even existed)."""
+        from tools.dashboard import worktree_monitor as wm
+
+        sent = []
+        async def fake(target, msg):
+            sent.append((target, msg))
+
+        monitor = wm.WorktreeMonitor()
+        monitor.set_terminal_notifier(fake)
+        self._arm(monitor)
+
+        review = self._terminal_review(checks_stable=False)
+        asyncio.run(
+            monitor._fire_terminal_transitions(
+                ("auto-x", "autonomy"), self._ready([review]),
+            ),
+        )
+        assert sent == []
+
+    def test_fires_once_checks_become_stable(self):
+        """The same PR: held back while unstable, fires on the next
+        pass once the same head_sha reports the same check count."""
+        from tools.dashboard import worktree_monitor as wm
+
+        sent = []
+        async def fake(target, msg):
+            sent.append((target, msg))
+
+        monitor = wm.WorktreeMonitor()
+        monitor.set_terminal_notifier(fake)
+        self._arm(monitor)
+
+        unstable = self._terminal_review(number=42, head="abc", checks_stable=False)
+        asyncio.run(
+            monitor._fire_terminal_transitions(
+                ("auto-x", "autonomy"), self._ready([unstable]),
+            ),
+        )
+        assert sent == []
+
+        stable = self._terminal_review(number=42, head="abc", checks_stable=True)
+        asyncio.run(
+            monitor._fire_terminal_transitions(
+                ("auto-x", "autonomy"), self._ready([stable]),
+            ),
+        )
+        assert len(sent) == 1
 
     def test_fires_only_when_mode_is_nag_done(self):
         from tools.dashboard import worktree_monitor as wm
@@ -4895,9 +5040,12 @@ class TestNagWhenTerminalEndpoint:
 class TestRefreshOneFiresOnArm:
     """The refresh-with-arm flow: when the row is armed before the
     cache write inside ``refresh_one``, the post-write transition
-    helper fires immediately for already-terminal PRs."""
+    helper fires once a terminal PR's checks are confirmed stable
+    across two consecutive fetches — never on the very first sighting
+    (auto-0629-114616: firing on first sighting is exactly how a
+    partially-registered check-run set produces a false GREEN)."""
 
-    def test_armed_row_with_terminal_pr_fires_immediately(
+    def test_armed_row_does_not_fire_on_first_sighting(
         self, isolated_settings_db, monkeypatch,
     ):
         from agents.capabilities.github import service as wg
@@ -4955,6 +5103,14 @@ class TestRefreshOneFiresOnArm:
         row = _row(session="auto-x", repo="autonomy", live=True)
         asyncio.run(monitor._refresh_one_source_control(row, [row]))
 
+        # First-ever fetch: no prior cache to compare against, so
+        # checks_stable is False even though nothing is running —
+        # must not fire yet.
+        assert sent == []
+
+        # Second fetch reports the identical head_sha + check count —
+        # now confirmed stable, fires exactly once.
+        asyncio.run(monitor._refresh_one_source_control(row, [row]))
         assert len(sent) == 1
         assert sent[0][0] == "auto-x"
         assert "PR #303 — GREEN" in sent[0][1]
