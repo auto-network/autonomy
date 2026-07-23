@@ -198,22 +198,6 @@ def _is_review_terminal(review: dict | None) -> bool:
     return True
 
 
-def _is_review_refresh_terminal(review: dict | None) -> bool:
-    """A cached review can skip remote refresh once terminal is known.
-
-    For refresh gating we treat a closed/merged PR as terminal even if
-    checks are absent, because the operator explicitly does not want a
-    terminal-bound row to keep probing GitHub. Open PRs remain governed
-    by the check-status terminal test above.
-    """
-    if not review:
-        return False
-    state = str(review.get("state") or "").lower()
-    if state in ("closed", "merged"):
-        return True
-    return _is_review_terminal(review)
-
-
 def _format_terminal_message(review: dict) -> str:
     """Compose the GREEN/RED CrossTalk body for a terminalized PR.
 
@@ -449,6 +433,7 @@ def _compose_review_payload(
             "aggregate_state": "yellow",
             "running": False,
             "checks": [],
+            "checks_stable": False,
             "commit_shas": [],
             "stale": True,
         }
@@ -484,6 +469,7 @@ def _compose_review_payload(
         "aggregate_state": aggregate_state,
         "running": running,
         "checks": checks,
+        "checks_stable": bool(cache.get("checks_stable")),
         "commit_shas": [],
     }
 
@@ -770,7 +756,14 @@ async def _refresh_bindings_via_rest(
         cached = cache_map.get(cache_key)
         cached_etag = (cached or {}).get("etag")
 
-        if _is_review_refresh_terminal(cached):
+        # Only a *closed/merged* PR is safe to skip the network for —
+        # GitHub's state field is authoritative and won't reopen under
+        # us. A merely check-terminal *open* PR must still be
+        # re-verified on every refresh: the cached checks may belong
+        # to a head_sha GitHub has since moved past (rebase/force-push),
+        # and that can only be discovered by asking GitHub again.
+        cached_state = str((cached or {}).get("state") or "").lower()
+        if cached_state in ("closed", "merged"):
             try:
                 settings_ops.upsert_by_key(
                     REVIEW_STATE_SET_ID, REVIEW_STATE_REVISION,
@@ -800,7 +793,8 @@ async def _refresh_bindings_via_rest(
                 continue
             payload = dict(cached)
             head_sha = str(cached.get("head_sha") or "")
-            checks = list(cached.get("checks") or [])
+            prev_checks = list(cached.get("checks") or [])
+            checks = prev_checks
             if head_sha:
                 checks_rest = await source_control_check_runs_read_for_sha_v1(
                     row.session_name,
@@ -813,6 +807,14 @@ async def _refresh_bindings_via_rest(
                 if checks_rest.ok:
                     checks = parse_check_runs_response(checks_rest.stdout)
             payload["checks"] = checks
+            # Debounce: only trust a "nothing pending" read once the
+            # same head_sha has reported the same check count on two
+            # consecutive fetches. GitHub does not create all of a
+            # push's check-runs atomically, so an early poll can see a
+            # handful of fast checks report success before the slower
+            # ones even exist — that reads as "0 pending" despite CI
+            # still being in flight.
+            payload["checks_stable"] = len(checks) == len(prev_checks)
             try:
                 settings_ops.upsert_by_key(
                     REVIEW_STATE_SET_ID, REVIEW_STATE_REVISION,
@@ -857,6 +859,15 @@ async def _refresh_bindings_via_rest(
                 # fails — partial freshness beats no checks at all.
                 checks = list((cached or {}).get("checks") or [])
 
+        # See the debounce note in the FAILURE_NOT_MODIFIED branch above
+        # — a head_sha change is itself a fresh commit, so it can never
+        # be considered stable on its first sighting either.
+        prev_head_sha = str((cached or {}).get("head_sha") or "")
+        prev_check_count = len((cached or {}).get("checks") or [])
+        checks_stable = (
+            head_sha == prev_head_sha and len(checks) == prev_check_count
+        )
+
         payload: dict = {
             "title": parsed["title"],
             "body": parsed["body"],
@@ -867,6 +878,7 @@ async def _refresh_bindings_via_rest(
             "is_draft": parsed["is_draft"],
             "provider": "github",
             "checks": checks,
+            "checks_stable": checks_stable,
         }
         if parsed.get("etag"):
             payload["etag"] = parsed["etag"]
@@ -1561,6 +1573,11 @@ class WorktreeMonitor:
             if not isinstance(review, dict):
                 continue
             if not _is_review_terminal(review):
+                continue
+            if not review.get("checks_stable"):
+                # Terminal-looking but not yet confirmed stable across
+                # two consecutive fetches for this exact head_sha — hold
+                # off firing until the next poll re-confirms it.
                 continue
             review_id = (
                 review.get("review_id")

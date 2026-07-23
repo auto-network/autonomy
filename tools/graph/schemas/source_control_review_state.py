@@ -164,6 +164,17 @@ class SourceControlReviewStateV1(SettingSchema):
             "detail": {"type": "string"},
         },
     )
+    checks_stable: bool = field(
+        default=False,
+        description=(
+            "True once this exact head_sha has reported an identical "
+            "check count on two consecutive fetches. GitHub does not "
+            "create all of a push's check-runs atomically, so a single "
+            "fetch showing nothing running/pending can still be an "
+            "incomplete set; the terminal-fire notifier requires this "
+            "flag before treating the review as truly done."
+        ),
+    )
 
     @classmethod
     def is_terminal_payload(cls, payload: dict) -> bool:
@@ -227,6 +238,11 @@ class SourceControlReviewStateV1(SettingSchema):
                 and not isinstance(payload["is_draft"], bool):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'is_draft' must be a bool"
+            )
+        if "checks_stable" in payload \
+                and not isinstance(payload["checks_stable"], bool):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'checks_stable' must be a bool"
             )
         for opt in ("provider_state", "etag", "url", "node_id"):
             if opt in payload and payload[opt] is not None \
