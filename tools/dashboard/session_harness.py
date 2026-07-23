@@ -27,6 +27,7 @@ _CODEX_TOOL_OUTPUT_EXIT_RE = re.compile(r"Process exited with code (-?\d+)")
 _CODEX_TOOL_OUTPUT_TIME_RE = re.compile(r"Wall time:\s*([0-9.]+)\s*seconds?")
 _CODEX_TOOL_OUTPUT_BODY_RE = re.compile(r"\nOutput:\n", re.MULTILINE)
 _CODEX_SESSION_PROGRESS_STATE: dict[str, dict[str, dict[str, str] | set[str]]] = {}
+_CODEX_EXEC_WRAPPER_CALLS: dict[str, list[dict[str, Any]]] = {}
 
 
 class SessionHarness(Protocol):
@@ -1319,17 +1320,20 @@ def postprocess_claude_entries(
     return processed
 
 
-def parse_plan_snapshot(arguments: str) -> list[dict] | None:
+def parse_plan_snapshot(arguments: str | dict) -> list[dict] | None:
     """Best-effort parser for Codex-style ``update_plan`` arguments.
 
-    Not wired into production yet; included now to anchor the shared todo
-    abstraction and to make the intended Codex primitive explicit.
+    Accept both the direct function-call JSON string and the decoded object
+    extracted from a functions.exec orchestration wrapper.
     """
 
-    try:
-        payload = json.loads(arguments)
-    except (TypeError, json.JSONDecodeError):
-        return None
+    if isinstance(arguments, dict):
+        payload = arguments
+    else:
+        try:
+            payload = json.loads(arguments)
+        except (TypeError, json.JSONDecodeError):
+            return None
     plan = payload.get("plan")
     if not isinstance(plan, list):
         return None
@@ -1898,8 +1902,223 @@ def _parse_codex_tool_output_metadata(output: str) -> dict:
     return data
 
 
+def _skip_javascript_literal(source: str, start: int) -> int:
+    """Return the first offset after a quoted JavaScript literal.
+
+    The functions.exec input is JavaScript, so nested ``tools.*`` text can
+    also occur inside shell-command strings.  A small lexical scanner is
+    enough to distinguish executable calls without taking a JavaScript parser
+    dependency in the dashboard process.
+    """
+    quote = source[start]
+    idx = start + 1
+    while idx < len(source):
+        char = source[idx]
+        if char == "\\":
+            idx += 2
+            continue
+        if char == quote:
+            return idx + 1
+        idx += 1
+    return len(source)
+
+
+def _javascript_call_end(source: str, open_paren: int) -> int | None:
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    stack = [")"]
+    idx = open_paren + 1
+    while idx < len(source):
+        char = source[idx]
+        if char in "'\"`":
+            idx = _skip_javascript_literal(source, idx)
+            continue
+        if source.startswith("//", idx):
+            newline = source.find("\n", idx + 2)
+            idx = len(source) if newline == -1 else newline + 1
+            continue
+        if source.startswith("/*", idx):
+            end = source.find("*/", idx + 2)
+            idx = len(source) if end == -1 else end + 2
+            continue
+        if char in pairs:
+            stack.append(pairs[char])
+        elif char in ")]}":
+            if not stack or char != stack[-1]:
+                return None
+            stack.pop()
+            if not stack:
+                return idx
+        idx += 1
+    return None
+
+
+def _iter_codex_exec_wrapper_calls(source: str) -> list[tuple[str, str, int]]:
+    """Extract executable ``tools.<name>(...)`` calls from functions.exec JS."""
+    calls: list[tuple[str, str, int]] = []
+    idx = 0
+    while idx < len(source):
+        char = source[idx]
+        if char in "'\"`":
+            idx = _skip_javascript_literal(source, idx)
+            continue
+        if source.startswith("//", idx):
+            newline = source.find("\n", idx + 2)
+            idx = len(source) if newline == -1 else newline + 1
+            continue
+        if source.startswith("/*", idx):
+            end = source.find("*/", idx + 2)
+            idx = len(source) if end == -1 else end + 2
+            continue
+        if source.startswith("tools.", idx):
+            match = re.match(r"tools\.([A-Za-z_][A-Za-z0-9_]*)\s*\(", source[idx:])
+            if match:
+                open_paren = idx + match.end() - 1
+                close_paren = _javascript_call_end(source, open_paren)
+                if close_paren is not None:
+                    calls.append(
+                        (match.group(1), source[open_paren + 1:close_paren].strip(), idx)
+                    )
+                    idx = close_paren + 1
+                    continue
+        idx += 1
+    return calls
+
+
+def _resolve_codex_exec_wrapper_argument(
+    expression: str,
+    source: str,
+    call_offset: int,
+) -> Any:
+    try:
+        return json.loads(expression)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    if not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", expression):
+        return expression
+    assignment = re.compile(
+        rf"(?:const|let|var)\s+{re.escape(expression)}\s*=\s*"
+        r'("(?:\\.|[^"\\])*")\s*;'
+    )
+    matches = list(assignment.finditer(source[:call_offset]))
+    if not matches:
+        return expression
+    try:
+        return json.loads(matches[-1].group(1))
+    except json.JSONDecodeError:
+        return expression
+
+
+def _build_codex_exec_wrapper_entries(
+    payload: dict,
+    timestamp: str,
+) -> list[dict] | None:
+    """Expand a functions.exec orchestration call into its nested tool calls."""
+    source = str(payload.get("input") or "")
+    outer_tool_id = str(payload.get("call_id") or "")
+    parsed_calls = _iter_codex_exec_wrapper_calls(source)
+    if not parsed_calls:
+        return None
+
+    entries: list[dict] = []
+    nested_tools: list[dict] = []
+    for index, (tool_name, expression, call_offset) in enumerate(parsed_calls, start=1):
+        argument = _resolve_codex_exec_wrapper_argument(expression, source, call_offset)
+        if isinstance(argument, dict):
+            tool_input = dict(argument)
+        else:
+            tool_input = {"input": argument}
+        normalized_name = tool_name
+        if tool_name == "exec_command":
+            tool_input.setdefault("command", tool_input.get("cmd") or "")
+            if tool_input.get("workdir") and "cwd" not in tool_input:
+                tool_input["cwd"] = tool_input["workdir"]
+        elif tool_name == "apply_patch":
+            normalized_name = "Patch"
+            tool_input = _parse_codex_patch_input(str(argument or ""))
+
+        tool_id = f"{outer_tool_id}#{index}"
+        tool_entry = {
+            "type": "tool_use",
+            "role": "assistant",
+            "tool_name": normalized_name,
+            "tool_id": tool_id,
+            "input": tool_input,
+            "timestamp": timestamp,
+            "orchestrated_by": outer_tool_id,
+        }
+        entries.append(tool_entry)
+        nested_tools.append(tool_entry)
+        if tool_name == "update_plan":
+            todos = parse_plan_snapshot(tool_input)
+            if todos:
+                entries.append(
+                    {
+                        "type": "todo_plan",
+                        "role": "assistant",
+                        "todos": todos,
+                        "timestamp": timestamp,
+                    }
+                )
+
+    if outer_tool_id:
+        _CODEX_EXEC_WRAPPER_CALLS[outer_tool_id] = nested_tools
+    return entries
+
+
+def _build_codex_exec_wrapper_results(
+    payload: dict,
+    timestamp: str,
+) -> list[dict] | None:
+    """Complete synthetic nested calls when the outer wrapper returns."""
+    outer_tool_id = str(payload.get("call_id") or "")
+    nested_tools = _CODEX_EXEC_WRAPPER_CALLS.pop(outer_tool_id, None)
+    if not nested_tools:
+        return None
+    output = _extract_codex_text_blocks(payload.get("output"))
+    metadata = _parse_codex_tool_output_metadata(output)
+    body = str(metadata.get("stdout") or output)
+    results: list[dict] = []
+    for index, tool in enumerate(nested_tools):
+        tool_name = str(tool.get("tool_name") or "")
+        content = body if index == 0 else ""
+        if tool_name == "exec_command":
+            result = {
+                "type": "tool_result",
+                "role": "tool",
+                "tool_id": tool["tool_id"],
+                "content": content,
+                "is_error": False,
+                "timestamp": timestamp,
+                "result_kind": "exec_command",
+                "status": "completed",
+                "exit_code": metadata.get("exit_code"),
+                "cwd": (tool.get("input") or {}).get("cwd") or "",
+                "command": (tool.get("input") or {}).get("command") or "",
+                "parsed_cmd": [],
+                "duration_seconds": metadata.get("duration_seconds"),
+                "stdout": content,
+                "stderr": "",
+                "process_id": "",
+            }
+            results.append(result)
+            _append_codex_exec_sidecars(results, result)
+        else:
+            results.append(
+                {
+                    "type": "tool_result",
+                    "role": "tool",
+                    "tool_id": tool["tool_id"],
+                    "content": content,
+                    "is_error": False,
+                    "timestamp": timestamp,
+                    "result_kind": "custom_tool_call_output",
+                }
+            )
+    return results
+
+
 def _parse_codex_custom_tool_output(payload: dict, timestamp: str) -> dict:
-    output_text = str(payload.get("output") or "")
+    output_text = _extract_codex_text_blocks(payload.get("output"))
     content = output_text
     is_error = False
     duration_seconds = None
@@ -2030,8 +2249,9 @@ def _append_codex_exec_sidecars(out: list[dict], progress: dict) -> None:
 
     Codex often reports short exec results as ``function_call_output`` rather
     than a later ``exec_command_end`` envelope. Keep the raw tool_result, but
-    also surface graph-share / turn-correction JSON so viewer overlays do not
-    depend on the provider choosing the final-envelope path.
+    also surface graph mutations, graph-share attachments, and turn
+    corrections so viewer overlays do not depend on the provider choosing the
+    final-envelope path (or exposing a nested tools.exec_command directly).
     """
     content = str(progress.get("stdout") or progress.get("content") or "")
     timestamp = str(progress.get("timestamp") or "")
@@ -2042,6 +2262,10 @@ def _append_codex_exec_sidecars(out: list[dict], progress: dict) -> None:
     va = _upconvert_viewer_attachment(content, timestamp, tool_id=tool_id)
     if va:
         out.append(va)
+    sem = _upconvert_graph_result(content, timestamp, tool_id=tool_id)
+    if sem:
+        _enrich_semantic_tile(sem)
+        out.append(sem)
 
 
 def _codex_command_text(payload: dict, inp: dict | None = None) -> str:
@@ -2230,6 +2454,10 @@ def parse_codex_log_line(line: str) -> dict | list[dict] | None:
 
     if item_type == "custom_tool_call":
         tool_name = payload.get("name") or "?"
+        if tool_name in {"exec", "functions.exec"}:
+            nested = _build_codex_exec_wrapper_entries(payload, timestamp)
+            if nested:
+                return nested if len(nested) > 1 else nested[0]
         tool_input = {"input": str(payload.get("input") or "")}
         normalized_tool_name = tool_name
         if tool_name == "apply_patch":
@@ -2258,6 +2486,9 @@ def parse_codex_log_line(line: str) -> dict | list[dict] | None:
         return entry
 
     if item_type == "custom_tool_call_output":
+        nested = _build_codex_exec_wrapper_results(payload, timestamp)
+        if nested:
+            return nested if len(nested) > 1 else nested[0]
         return _parse_codex_custom_tool_output(payload, timestamp)
 
     if item_type == "reasoning":
