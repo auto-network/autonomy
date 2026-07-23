@@ -14,8 +14,9 @@ outcome or the decline).
 - `jira-comment KEY -f body.md` — post a comment *(operator approval)*
 - `jira-confirm-plan KEY -f plan.md` — set the Confirm Plan field *(operator approval)*
 - `jira-update KEY --field Description -f body.md` — set rich-text or
-  structured fields (versions/options/users are schema-coerced host-side)
-  by display name *(operator approval)*
+  structured fields by display name; invalid names list all valid fields
+  *(operator approval)*
+- ENTERPRISE's “Developer” requirement is the `Assignee` field.
 - `jira-create payload.json` — create a ticket *(operator approval)*
 - `jira-attach KEY FILE` — upload an attachment *(operator approval)*
 - `jira-transition KEY 'Name' [--field 'Name=value' …]` — move through a

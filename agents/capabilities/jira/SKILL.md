@@ -1,6 +1,6 @@
 ---
 name: jira
-description: Jira issue tracker (broker-backed, no credentials in the workspace). Read and search tickets, run the workspace's named queries, download attachments; post comments, update Description/Confirm Plan and other rich-text fields (with inline images), create tickets, upload attachments — every write pauses for operator approval.
+description: Jira issue tracker (broker-backed, no credentials in the workspace). Read/search tickets; comment; update rich-text and structured fields such as Fix Version and Assignee; create tickets and upload attachments. Every write pauses for operator approval.
 ---
 
 # Jira capability — agent skill
@@ -58,7 +58,7 @@ jira-comment ENTERPRISE-8385 -f findings.md     # or: echo "..." | jira-comment 
 jira-confirm-plan ENTERPRISE-8385 -f plan.md    # sets the Confirm Plan field
 jira-update ENTERPRISE-8385 --field Description -f body.md   # rich text or structured value
 jira-update ENTERPRISE-8385 --field 'Fix versions' -f version.txt
-jira-update ENTERPRISE-8385 --field Developer -f developer.txt
+jira-update ENTERPRISE-8385 --field Assignee -f assignee.txt
 jira-create payload.json                        # create a ticket
 jira-attach ENTERPRISE-8385 repro.log           # upload an attachment (10MB cap)
 jira-transition ENTERPRISE-8385 'Code Review'   # move through a workflow transition
@@ -76,8 +76,12 @@ and user display names or emails resolve to an `accountId`. For example:
 printf '%s\n' 'Enterprise 6.2.0' |
   jira-update ENTERPRISE-8853 --field 'Fix versions'
 printf '%s\n' 'Jeremy Spilman' |
-  jira-update ENTERPRISE-8853 --field Developer
+  jira-update ENTERPRISE-8853 --field Assignee
 ```
+
+Use Jira's editable field name. Invalid names fail with the complete valid-field
+list from Jira. In ENTERPRISE, the road-to-RC “Developer” requirement is the
+`Assignee` field.
 
 `jira-confirm-plan` remains the idiomatic shortcut for Confirm Plan.
 
@@ -117,7 +121,7 @@ approval — supply values inline with repeatable `--field 'Name=value'`
 
 ```bash
 jira-transition ENTERPRISE-8385 'Pending RC' \
-  --field 'Fix versions=Enterprise 6.1.0' --field 'Developer=Jane Doe'
+  --field 'Fix versions=Enterprise 6.1.0' --field 'Assignee=Jane Doe'
 ```
 
 Some validators (e.g. "Confirm Plan must be populated") have no transition

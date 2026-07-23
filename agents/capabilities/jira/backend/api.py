@@ -239,8 +239,15 @@ def editmeta_field(cfg: JiraConfig, key: str,
                 "type": schema.get("type"),
                 "items": schema.get("items"),
             }
-    raise JiraError(f"field {field_reference!r} is not editable on {key} "
-                    f"(not present in editmeta)")
+    valid = sorted(
+        f"{meta.get('name') or field_id} ({field_id})"
+        for field_id, meta in fields.items()
+        if isinstance(meta, dict)
+    )
+    raise JiraError(
+        f"field {field_reference!r} is invalid for jira-update on {key}. "
+        f"Valid fields: {', '.join(valid) or 'none'}"
+    )
 
 
 def editmeta_field_id(cfg: JiraConfig, key: str, field_name: str) -> str:
