@@ -365,8 +365,12 @@ def test_editmeta_discovers_field_id(jira_env, monkeypatch):
     _mock(monkeypatch, handler)
     cfg = api.JiraConfig.resolve()
     assert api.editmeta_field_id(cfg, "ENT-1", "Confirm Plan") == "customfield_10153"
-    with pytest.raises(api.JiraError, match="not editable"):
+    with pytest.raises(api.JiraError) as exc:
         api.editmeta_field_id(cfg, "ENT-1", "No Such Field")
+    assert str(exc.value) == (
+        "field 'No Such Field' is invalid for jira-update on ENT-1. "
+        "Valid fields: Confirm Plan (customfield_10153), Summary (summary)"
+    )
 
 
 def test_createmeta_shaping(jira_env, monkeypatch):
