@@ -1416,6 +1416,37 @@ def test_parse_codex_functions_exec_accepts_unquoted_javascript_object_keys():
     }
 
 
+@pytest.mark.parametrize(
+    ("command_expression", "display_command"),
+    [
+        ("x[1]", "x[1]"),
+        ("`graph read ${id}`", "graph read ${id}"),
+    ],
+)
+def test_parse_codex_functions_exec_preserves_computed_command_expression(
+    command_expression,
+    display_command,
+):
+    parsed = parse_codex_log_line(json.dumps({
+        "timestamp": TS,
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "call_id": f"call_computed_{display_command}",
+            "input": (
+                "const r = await tools.exec_command("
+                f'{{cmd:{command_expression},workdir:"/workspace/repo",yield_time_ms:30000}}'
+                ");\ntext(r.output);"
+            ),
+        },
+    }))
+
+    assert parsed["input"]["command"] == display_command
+    assert parsed["input"]["command_expression"] == command_expression
+    assert parsed["input"]["cwd"] == "/workspace/repo"
+
+
 def test_parse_codex_functions_exec_enriches_nested_graph_result(
     tmp_path,
     codex_graph_db,

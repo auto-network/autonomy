@@ -2023,6 +2023,70 @@ def _quote_javascript_object_keys(source: str) -> str:
     return "".join(out)
 
 
+def _javascript_object_property(source: str, wanted: str) -> str | None:
+    """Return one top-level object property's raw JavaScript expression."""
+    text = source.strip()
+    if not text.startswith("{"):
+        return None
+    idx = 1
+    while idx < len(text):
+        while idx < len(text) and (text[idx].isspace() or text[idx] == ","):
+            idx += 1
+        key = re.match(r"[A-Za-z_$][A-Za-z0-9_$]*", text[idx:])
+        if not key:
+            return None
+        name = key.group(0)
+        idx += key.end()
+        while idx < len(text) and text[idx].isspace():
+            idx += 1
+        if idx >= len(text) or text[idx] != ":":
+            return None
+        idx += 1
+        while idx < len(text) and text[idx].isspace():
+            idx += 1
+        value_start = idx
+        stack: list[str] = []
+        while idx < len(text):
+            char = text[idx]
+            if char in "'\"`":
+                idx = _skip_javascript_literal(text, idx)
+                continue
+            if char in "([{":
+                stack.append({"(": ")", "[": "]", "{": "}"}[char])
+            elif char in ")]}":
+                if stack:
+                    if char != stack[-1]:
+                        return None
+                    stack.pop()
+                elif char == "}":
+                    break
+            elif char == "," and not stack:
+                break
+            idx += 1
+        value = text[value_start:idx].strip()
+        if name == wanted:
+            return value or None
+        if idx < len(text) and text[idx] == ",":
+            idx += 1
+            continue
+        return None
+    return None
+
+
+def _display_javascript_expression(expression: str) -> str:
+    """Return a readable, explicitly unresolved JavaScript value."""
+    value = expression.strip()
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        try:
+            decoded = json.loads(value)
+            return decoded if isinstance(decoded, str) else value
+        except json.JSONDecodeError:
+            return value
+    if len(value) >= 2 and value[0] == value[-1] == "`":
+        return value[1:-1]
+    return value
+
+
 def _resolve_codex_exec_wrapper_argument(
     expression: str,
     source: str,
@@ -2073,6 +2137,15 @@ def _build_codex_exec_wrapper_entries(
             tool_input = {"input": argument}
         normalized_name = tool_name
         if tool_name == "exec_command":
+            if not isinstance(argument, dict):
+                raw_argument = str(argument or "")
+                command_expression = _javascript_object_property(raw_argument, "cmd")
+                workdir_expression = _javascript_object_property(raw_argument, "workdir")
+                if command_expression:
+                    tool_input["cmd"] = _display_javascript_expression(command_expression)
+                    tool_input["command_expression"] = command_expression
+                if workdir_expression:
+                    tool_input["workdir"] = _display_javascript_expression(workdir_expression)
             tool_input.setdefault("command", tool_input.get("cmd") or "")
             if tool_input.get("workdir") and "cwd" not in tool_input:
                 tool_input["cwd"] = tool_input["workdir"]
