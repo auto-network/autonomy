@@ -76,6 +76,20 @@ main { max-width: 52rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; }
       const html = DOMPurify.sanitize(marked.parse(content.markdown), SECURE_CONFIG);
       const body = document.getElementById('note-body');
       body.innerHTML = html;
+      // The graph title is rendered in the viewer header. Notes commonly
+      // repeat that title as their first Markdown heading; remove only that
+      // leading exact match so the title is shown once without changing the
+      // rest of the authored document.
+      const firstHeading = body.querySelector('h1, h2, h3, h4, h5, h6');
+      if (firstHeading && firstHeading.textContent.trim() === title) {
+        let preceding = firstHeading.previousElementSibling;
+        let onlyWhitespaceBefore = true;
+        while (preceding) {
+          if (preceding.textContent.trim()) { onlyWhitespaceBefore = false; break; }
+          preceding = preceding.previousElementSibling;
+        }
+        if (onlyWhitespaceBefore) firstHeading.remove();
+      }
 
       const parts = new Map();
       for (const part of content.parts) {
