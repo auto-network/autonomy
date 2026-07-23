@@ -355,7 +355,11 @@ def _enrich_link_revoke(row: dict) -> dict:
 
 def _cached_grant(token: str, org: str | None) -> dict | None:
     try:
-        for m in settings_ops.read_owned_set(NETWORK_LINK_GRANT_SET_ID, org=org).members:
+        for m in settings_ops.read_owned_set(
+            NETWORK_LINK_GRANT_SET_ID,
+            org=org,
+            target_revision=NETWORK_LINK_GRANT_REVISION,
+        ).members:
             if m.key == token and isinstance(m.payload, dict):
                 return m.payload
     except Exception:
@@ -538,6 +542,7 @@ async def _execute_link_publish(row: dict, decision: dict) -> dict:
         return _fail("registry returned a malformed grant token — not caching it")
     grant = {
         "token": token,
+        "url": url,
         "target_uuid": req["target_uuid"],
         "target_type": req["target_type"],
         "meta": final_payload.get("meta") or {},
@@ -625,7 +630,11 @@ async def _execute_link_revoke(row: dict, decision: dict) -> dict:
 
 def _drop_cached_grant(token: str, org: str | None) -> bool:
     try:
-        for m in settings_ops.read_owned_set(NETWORK_LINK_GRANT_SET_ID, org=org).members:
+        for m in settings_ops.read_owned_set(
+            NETWORK_LINK_GRANT_SET_ID,
+            org=org,
+            target_revision=NETWORK_LINK_GRANT_REVISION,
+        ).members:
             if m.key == token:
                 settings_ops.remove_setting(m.id, org=org)
                 return True

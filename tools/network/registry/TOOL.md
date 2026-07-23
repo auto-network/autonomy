@@ -75,6 +75,10 @@ Two anchors sit outside the chain rule by construction:
 | `GET /l/{token}` | none (bootloader shell) | §5.3 — one static page for every token; identical bytes, status mirrors envelope liveness; no identifiers before the channel is up; see `bootloader/README.md` |
 | `GET /l-assets/autonet.js` | none | the WebCrypto channel client (viewer side of B2's handshake) |
 
+The registry API is addressed through `registry.auto.network`. Newly issued
+public URLs use `relay.auto.network`; a grant token is not bound to either
+hostname.
+
 `subject.kind == "persona"` on any chain → `501 rung-2` (viewer authn is
 Track E). Revocation records are retained only until the revoked key's
 natural expiry and purged lazily on every mutation (I7).

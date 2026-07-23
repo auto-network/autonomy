@@ -1,7 +1,8 @@
-# bootloader — auto.network `/l/{token}` viewer
+# bootloader — relay.auto.network `/l/{token}` viewer
 
-The browser end of an anonymous relay share. The registry serves this fixed
-shell for every `/l/{token}`. It fetches the grant envelope, opens the relay
+The browser end of an anonymous relay share. `registry.auto.network` remains
+the control endpoint; `relay.auto.network` serves this fixed shell for every
+`/l/{token}`. It fetches the grant envelope, opens the relay
 channel, authenticates the serving connector, validates the artifact wire
 format, and renders the artifact in a sandboxed iframe.
 

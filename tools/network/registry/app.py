@@ -419,7 +419,7 @@ def create_app(
     db_path: str = ":memory:",
     *,
     now_fn=None,
-    base_url: str = "https://auto.network",
+    base_url: str = "https://relay.auto.network",
     witness_key: Optional[KeyPair] = None,
     secure_cookies: bool = True,
 ) -> FastAPI:

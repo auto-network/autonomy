@@ -689,9 +689,9 @@ class HttpClient:
         org = _resolve_client_org_arg(org)
         params: dict[str, Any] = {}
         if target_revision is not None:
-            params["as_rev"] = str(target_revision)
+            params["target_revision"] = str(target_revision)
         if min_revision is not None:
-            params["min_rev"] = str(min_revision)
+            params["min_revision"] = str(min_revision)
         if peers is not None:
             params["peers"] = ",".join(peers)
         result = self._request(
@@ -707,7 +707,7 @@ class HttpClient:
         org = _resolve_client_org_arg(org)
         params: dict[str, Any] = {}
         if target_revision is not None:
-            params["as_rev"] = str(target_revision)
+            params["target_revision"] = str(target_revision)
         try:
             result = self._request(
                 "GET", f"/api/graph/setting/{setting_id}",

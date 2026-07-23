@@ -207,33 +207,29 @@ def cmd_link_list(args) -> None:
     """graph link list [--org slug] — the local grant cache (issuance-fed)."""
     from .client import get_client
     from .schemas.network_identity import (
-        NETWORK_BINDING_SET_ID,
+        NETWORK_LINK_GRANT_REVISION,
         NETWORK_LINK_GRANT_SET_ID,
     )
 
     org = _resolve_org(args)
     client = get_client()
-    # Owning-scope (P2): 'graph link list' shows only THIS org's own grants
-    # and binding — a peer-published grant/binding row must never appear.
-    members = list(client.read_set(NETWORK_LINK_GRANT_SET_ID, org=org, peers=[]))
+    # Owning-scope (P2): 'graph link list' shows only THIS org's own grants;
+    # a peer-published grant row must never appear.
+    members = list(client.read_set(
+        NETWORK_LINK_GRANT_SET_ID,
+        org=org,
+        peers=[],
+        target_revision=NETWORK_LINK_GRANT_REVISION,
+    ))
     if not members:
         print("  no share-link grants cached for this org")
         return
-
-    registry_url = None
-    try:
-        bindings = sorted(client.read_set(NETWORK_BINDING_SET_ID, org=org, peers=[]),
-                          key=lambda m: m.key)
-        if bindings:
-            registry_url = (bindings[0].payload or {}).get("registry_url")
-    except Exception:
-        pass  # listing works without a binding; URLs just aren't printable
 
     for m in sorted(members, key=lambda m: (m.payload or {}).get("issued_at", "")):
         g = m.payload or {}
         meta = g.get("meta") or {}
         subject = g.get("subject") or {}
-        url = f"{registry_url}/l/{g.get('token')}" if registry_url else g.get("token")
+        url = g["url"]
         bits = [g.get("target_type", "?"), g.get("target_uuid", "?")]
         if meta.get("label"):
             bits.append(f"“{meta['label']}”")

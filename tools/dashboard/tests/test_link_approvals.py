@@ -43,6 +43,7 @@ TARGET = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 SESSION = "auto-agent-1"
 OPERATOR_SESSION = "op-session-1"
 REGISTRY_URL = "http://registry.test"
+PUBLIC_LINK_URL = "https://relay.auto.network"
 
 SESSION_SCOPE = ("delegate:agent", "link:publish", "link:revoke",
                  "tunnel:serve", "viewer:identify")
@@ -72,7 +73,7 @@ def session_cert(root, session_key):
 @pytest.fixture
 def registry_app(root):
     """The real B1 registry with our org bound to *root*."""
-    app = create_registry_app(":memory:", base_url=REGISTRY_URL,
+    app = create_registry_app(":memory:", base_url=PUBLIC_LINK_URL,
                               secure_cookies=False)
     rc = TestClient(app)
     envelope = sign_request(
@@ -244,7 +245,7 @@ def test_publish_end_to_end(env, session_key, session_cert):
     assert execution["ok"] is True, execution
     token = execution["token"]
     assert len(token) == 32 and int(token, 16) >= 0  # opaque 128-bit hex (I2)
-    assert execution["url"] == f"{REGISTRY_URL}/l/{token}"
+    assert execution["url"] == f"{PUBLIC_LINK_URL}/l/{token}"
     # the grant cache row the serving path (I9) will read
     grants = _cached_grants()
     assert token in grants

@@ -55,7 +55,8 @@ NETWORK_ORG_KEY_REVISION = 1
 NETWORK_BINDING_SET_ID = "autonomy.network.binding"
 NETWORK_BINDING_REVISION = 1
 NETWORK_LINK_GRANT_SET_ID = "autonomy.network.link-grant"
-NETWORK_LINK_GRANT_REVISION = 1
+NETWORK_LINK_GRANT_REVISION = 2
+NETWORK_PUBLIC_LINK_BASE_URL = "https://relay.auto.network"
 NETWORK_SERVE_CERT_SET_ID = "autonomy.network.serve-cert"
 NETWORK_SERVE_CERT_REVISION = 1
 SERVE_CERT_SCOPE = "tunnel:serve"
@@ -391,7 +392,7 @@ class NetworkLinkGrantV1(SettingSchema):
     """
 
     set_id = NETWORK_LINK_GRANT_SET_ID
-    schema_revision = NETWORK_LINK_GRANT_REVISION
+    schema_revision = 1
 
     token: str = field(
         required=True,
@@ -509,6 +510,56 @@ class NetworkLinkGrantV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: subject.id must be a non-empty string"
             )
+
+
+class NetworkLinkGrantV2(NetworkLinkGrantV1):
+    """Current dashboard-side share-link grant.
+
+    ``url`` is the canonical public presentation of the hostname-independent
+    token. Consumers request this revision and always receive the complete
+    current shape from Settings, regardless of the stored revision.
+    """
+
+    set_id = NETWORK_LINK_GRANT_SET_ID
+    schema_revision = NETWORK_LINK_GRANT_REVISION
+
+    url: str = field(
+        required=True,
+        description=(
+            "Public HTTPS URL returned by the issuing registry for this "
+            "hostname-independent grant token."
+        ),
+    )
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        from urllib.parse import urlsplit
+
+        super().validate(payload)
+        if not isinstance(payload, dict):
+            return
+        url = _require_str(payload, "url", cls.__name__, max_len=512)
+        parsed = urlsplit(url)
+        expected_path = f"/l/{payload.get('token', '')}"
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.path != expected_path
+            or parsed.query
+            or parsed.fragment
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'url' must be an HTTPS /l/<token> URL "
+                "for this grant, without credentials, query, or fragment"
+            )
+
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        current = dict(payload)
+        current["url"] = f"{NETWORK_PUBLIC_LINK_BASE_URL}/l/{current['token']}"
+        return current
 
 
 # ── autonomy.network.serve-cert ───────────────────────────────

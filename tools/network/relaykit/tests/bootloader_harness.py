@@ -133,6 +133,7 @@ def cache_grant(settings_ops, schema, token: str, target_uuid: str, target_type:
         token,
         {
             "token": token,
+            "url": f"https://relay.auto.network/l/{token}",
             "target_uuid": target_uuid,
             "target_type": target_type,
             "meta": {},

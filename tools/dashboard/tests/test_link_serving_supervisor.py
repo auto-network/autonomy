@@ -124,6 +124,7 @@ def _put_grant(token="a" * 32, *, meta=None, issued_at=None):
         NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, token,
         {
             "token": token,
+            "url": f"https://relay.auto.network/l/{token}",
             "target_uuid": ORG_UUID,  # any uuid; supervisor only checks validity
             "target_type": "present",
             "meta": meta or {},

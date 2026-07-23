@@ -63,6 +63,7 @@ from pathlib import Path
 
 from tools.graph import settings_ops
 from tools.graph.schemas.network_identity import (
+    NETWORK_LINK_GRANT_REVISION,
     NETWORK_LINK_GRANT_SET_ID,
     NETWORK_TOKEN_HEX_LEN,
     TARGET_TYPES,
@@ -153,7 +154,11 @@ def check_grant(token: str, *, org: str | None = None, now: float | None = None)
         # servable through check_grant — token->bytes authorization cannot
         # compose across orgs. (Recovered from the retired write-guard
         # commit, which had bundled this read-scope fix with its write wrap.)
-        members = settings_ops.read_owned_set(NETWORK_LINK_GRANT_SET_ID, org=org).members
+        members = settings_ops.read_owned_set(
+            NETWORK_LINK_GRANT_SET_ID,
+            org=org,
+            target_revision=NETWORK_LINK_GRANT_REVISION,
+        ).members
     except Exception:
         return None  # unreadable cache → no grant → no bytes (fail closed)
     for member in members:

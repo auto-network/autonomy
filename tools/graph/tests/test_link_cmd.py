@@ -37,6 +37,7 @@ ORG = "netorg"
 ORG_UUID = "22222222-2222-4222-8222-222222222222"
 TARGET = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 REGISTRY_URL = "http://registry.test"
+PUBLIC_LINK_URL = "https://relay.auto.network"
 
 
 class OperatorFixture:
@@ -78,7 +79,7 @@ def operator_env(tmp_path, monkeypatch):
         not_before=now - 3600, not_after=now + 30 * 86400,
     )
 
-    registry_app = create_registry_app(":memory:", base_url=REGISTRY_URL,
+    registry_app = create_registry_app(":memory:", base_url=PUBLIC_LINK_URL,
                                        secure_cookies=False)
     rc = TestClient(registry_app)
     envelope = sign_request(
@@ -140,7 +141,7 @@ def _publish_args(**over):
 def test_publish_prints_url(operator_env, capsys):
     link_cmd.cmd_link_publish(_publish_args())
     out = capsys.readouterr().out
-    assert "✓ share-link published: " + REGISTRY_URL + "/l/" in out
+    assert "✓ share-link published: " + PUBLIC_LINK_URL + "/l/" in out
     assert "token: " in out
 
 
@@ -202,8 +203,7 @@ def test_link_list_hides_peer_published_grant(tmp_path, monkeypatch, capsys):
     still exclude it."""
     from tools.graph.db import GraphDB
     from tools.graph import client as graph_client
-    from tools.graph.schemas.network_identity import (
-        NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION)
+    from tools.graph.schemas.network_identity import NETWORK_LINK_GRANT_SET_ID
 
     GraphDB.close_all_pooled()
     orgs_dir = tmp_path / "orgs"
@@ -216,7 +216,7 @@ def test_link_list_hides_peer_published_grant(tmp_path, monkeypatch, capsys):
 
     peer_token = "d" * 32
     settings_ops.add_setting(
-        NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, peer_token,
+        NETWORK_LINK_GRANT_SET_ID, 1, peer_token,
         {"token": peer_token, "target_uuid": TARGET, "target_type": "note",
          "meta": {}, "subject": {"kind": "operator", "id": "peer"},
          "issued_at": "2026-01-01T00:00:00Z"},
