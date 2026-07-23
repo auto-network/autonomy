@@ -208,6 +208,69 @@ def test_set_field_sends_adf_not_plain_string(jira_env, monkeypatch):
     assert isinstance(value, dict) and value["type"] == "doc"   # ADF, not a string
 
 
+def test_set_editable_field_coerces_fix_version_array(jira_env, monkeypatch):
+    """Existing-ticket updates use editmeta to shape Fix Version correctly."""
+    posted = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            assert request.url.path == "/rest/api/3/issue/ENT-1/editmeta"
+            return httpx.Response(200, json={"fields": {
+                "fixVersions": {
+                    "name": "Fix versions",
+                    "schema": {"type": "array", "items": "version"},
+                },
+            }})
+        posted["body"] = json.loads(request.content)
+        return httpx.Response(204)
+
+    _mock(monkeypatch, handler)
+    out = api.set_editable_field(
+        api.JiraConfig.resolve(),
+        "ENT-1",
+        "Fix versions",
+        "Enterprise 6.2.0\n",
+    )
+    assert posted["body"] == {
+        "fields": {"fixVersions": [{"name": "Enterprise 6.2.0"}]},
+    }
+    assert out == {"field_id": "fixVersions"}
+
+
+def test_set_editable_field_resolves_user_account_id(jira_env, monkeypatch):
+    """User-picker updates resolve display name to Jira's accountId shape."""
+    posted = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/editmeta"):
+            return httpx.Response(200, json={"fields": {
+                "customfield_9": {
+                    "name": "Developer",
+                    "schema": {"type": "user"},
+                },
+            }})
+        if request.url.path == "/rest/api/3/user/search":
+            assert request.url.params["query"] == "Jeremy Spilman"
+            return httpx.Response(200, json=[{
+                "accountId": "jeremy-account",
+                "displayName": "Jeremy Spilman",
+            }])
+        posted["body"] = json.loads(request.content)
+        return httpx.Response(204)
+
+    _mock(monkeypatch, handler)
+    out = api.set_editable_field(
+        api.JiraConfig.resolve(),
+        "ENT-1",
+        "customfield_9",
+        "Jeremy Spilman\n",
+    )
+    assert posted["body"] == {
+        "fields": {"customfield_9": {"accountId": "jeremy-account"}},
+    }
+    assert out == {"field_id": "customfield_9"}
+
+
 def test_comment_sends_adf_and_shapes_response(jira_env, monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -847,6 +910,56 @@ def test_jira_write_set_field_discovers_id_and_sends_adf(jira_env, monkeypatch):
             assert ("PUT", "/rest/api/3/issue/ENTERPRISE-8385") in seen
 
     asyncio.run(scenario())
+
+
+def test_jira_write_set_field_coerces_structured_value(jira_env, monkeypatch):
+    """The approval executor applies schema coercion outside transitions."""
+    posted = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/editmeta"):
+            return httpx.Response(200, json={"fields": {
+                "fixVersions": {
+                    "name": "Fix versions",
+                    "schema": {"type": "array", "items": "version"},
+                },
+            }})
+        posted["body"] = json.loads(request.content)
+        return httpx.Response(204)
+
+    _mock(monkeypatch, handler)
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=_app())
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://t") as c:
+            r = await c.post("/api/approvals", json={
+                "kind": "jira_write",
+                "session": "auto-1",
+                "request": {
+                    "op": "set_field",
+                    "key": "ENTERPRISE-8853",
+                    "field_name": "Fix versions",
+                    "body_markdown": "Enterprise 6.2.0\n",
+                },
+            })
+            rid = r.json()["id"]
+            await c.post(
+                f"/api/approvals/{rid}/decision",
+                json={"approved": True},
+            )
+            result = (
+                await c.get(f"/api/approvals/{rid}?wait=10")
+            ).json()["result"]
+            assert result["execution"] == {
+                "ok": True,
+                "field_id": "fixVersions",
+            }
+
+    asyncio.run(scenario())
+    assert posted["body"] == {
+        "fields": {"fixVersions": [{"name": "Enterprise 6.2.0"}]},
+    }
 
 
 def test_attachment_download_route(jira_env, monkeypatch):

@@ -56,19 +56,30 @@ Results page by opaque token: pass a returned `next_page_token` back via
 ```bash
 jira-comment ENTERPRISE-8385 -f findings.md     # or: echo "..." | jira-comment KEY
 jira-confirm-plan ENTERPRISE-8385 -f plan.md    # sets the Confirm Plan field
-jira-update ENTERPRISE-8385 --field Description -f body.md   # set any rich-text field
+jira-update ENTERPRISE-8385 --field Description -f body.md   # rich text or structured value
+jira-update ENTERPRISE-8385 --field 'Fix versions' -f version.txt
+jira-update ENTERPRISE-8385 --field Developer -f developer.txt
 jira-create payload.json                        # create a ticket
 jira-attach ENTERPRISE-8385 repro.log           # upload an attachment (10MB cap)
 jira-transition ENTERPRISE-8385 'Code Review'   # move through a workflow transition
 ```
 
-`jira-update` sets any **rich-text** field by display name (`Description`,
-`Confirm Plan`, textarea custom fields — or a literal `customfield_NNNNN`
-id). The id is discovered from the ticket's editmeta host-side, so display
-names are portable. The body is markdown. Option/user/array fields are not
-settable here — those belong on transition screens (`jira-transition
---field`) or ticket creation. `jira-confirm-plan` remains the idiomatic
-shortcut for Confirm Plan.
+`jira-update` sets rich-text and supported structured fields by display name
+(or a literal `customfield_NNNNN` id). The field id and schema are discovered
+from the ticket's editmeta host-side, so names are portable. Rich-text bodies
+(`Description`, `Confirm Plan`, textarea custom fields) are markdown converted
+to ADF. Structured values are coerced from file/stdin text: comma-separated
+versions/components become arrays, option values become Jira option objects,
+and user display names or emails resolve to an `accountId`. For example:
+
+```bash
+printf '%s\n' 'Enterprise 6.2.0' |
+  jira-update ENTERPRISE-8853 --field 'Fix versions'
+printf '%s\n' 'Jeremy Spilman' |
+  jira-update ENTERPRISE-8853 --field Developer
+```
+
+`jira-confirm-plan` remains the idiomatic shortcut for Confirm Plan.
 
 ### Inline images
 
