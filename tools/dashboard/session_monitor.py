@@ -90,6 +90,9 @@ _TURN_CORRECTION_HISTORY_USER_LIMIT = 100
 _TURN_CORRECTION_ACCEPT_SIMILARITY = 0.55
 _TURN_CORRECTION_HISTORY_SIMILARITY = 0.85
 _TURN_CORRECTION_TOKEN_RE = re.compile(r"(\s+|\S+)")
+# Bump when target identity/resolution changes so corrections whose transient
+# miss was cached under the previous resolver get one bounded warm-up retry.
+_TURN_CORRECTION_RESOLVER_REVISION = 2
 
 # inotify — optional, falls back to polling if unavailable
 try:
@@ -3229,6 +3232,7 @@ class SessionMonitor:
                 # outcome) and cache the attempt, so history warm-ups on every
                 # dashboard restart skip it instead of re-running the LCS.
                 correction_key = _sha256_text(
+                    f"v{_TURN_CORRECTION_RESOLVER_REVISION}|"
                     f"{session_uuid}|{corrected}|{entry.get('timestamp', '')}"
                 )
                 if correction_attempt_seen(session_uuid, correction_key):

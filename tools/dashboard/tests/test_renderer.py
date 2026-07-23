@@ -203,14 +203,15 @@ class TestToolGrouping:
 
 
 class TestQueuedClaudeIdentity:
-    """Regression coverage for the real queued Claude turn-correction miss.
+    """Regression coverage for queued Claude turn-correction identity.
 
     Raw fixture captured from auto-0503-173500. The queue-operation enqueue
-    arrives first, then the real uuid-bearing user line later. Dedup keeps the
-    queued copy for ordering, so it must inherit the real line's identity.
+    arrives first, then the real uuid-bearing user line later. The queued copy
+    keeps its deterministic identity even when an echo exists, matching the
+    live path where a correction may arrive before that echo.
     """
 
-    def test_real_claude_fixture_keeps_user_uuid_on_deduped_queue_entry(self):
+    def test_real_claude_fixture_keeps_stable_queue_identity_after_dedup(self):
         fixture = (
             Path(__file__).resolve().parent
             / "fixtures"
@@ -223,7 +224,7 @@ class TestQueuedClaudeIdentity:
             and "events being admitted" in (e.get("content") or "")
         )
         assert target.get("queued") is True
-        assert target.get("message_id") == "99532a6a-0f77-4826-a831-6db4d011c278"
+        assert target.get("message_id") == "claude-queued-user:ce0541e72c161a4c"
         assert target.get("parent_uuid") == "af86f586-c1d7-44f6-908f-116cf5e0d630"
 
 

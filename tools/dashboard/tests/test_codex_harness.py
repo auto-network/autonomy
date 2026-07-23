@@ -856,6 +856,8 @@ def test_postprocess_codex_turn_correction_from_running_function_output(tmp_path
                     "Original token count: 42\n"
                     "Output:\n"
                     f"{tc_json}\n"
+                    "✓ Label set: Debug missing turn correction\n"
+                    "✓ Role set: researcher\n"
                 ),
             },
         },

@@ -103,6 +103,26 @@ def test_seed_populates_from_codex_event_messages(tmp_path: Path) -> None:
     assert seeded[0]["content"] == "Ok so what’s current state and next stros"
 
 
+def test_seed_populates_from_uuid_less_claude_queue_operation(tmp_path: Path) -> None:
+    """Mid-turn user input remains correctable even without a later user echo."""
+    jsonl = tmp_path / "session.jsonl"
+    raw = "There’s absolutely no need to rebuild anything. The images are on Dr. hub."
+    _write_jsonl(jsonl, [{
+        "type": "queue-operation",
+        "operation": "enqueue",
+        "content": raw,
+        "timestamp": "2026-07-23T19:04:29.105Z",
+    }])
+
+    ts = _TailState()
+    _seed_recent_user_turns_from_jsonl(ts, str(jsonl))
+
+    seeded = list(ts.recent_user_turns)
+    assert len(seeded) == 1
+    assert seeded[0]["message_id"].startswith("claude-queued-user:")
+    assert seeded[0]["content"] == raw
+
+
 def test_seed_skips_user_entry_with_no_uuid(tmp_path: Path) -> None:
     """Defensive: a malformed user entry with no uuid is skipped, not crashed."""
     jsonl = tmp_path / "session.jsonl"

@@ -562,16 +562,29 @@ def _upconvert_turn_correction(content: str, timestamp: str, tool_id: str = "") 
     if not isinstance(content, str):
         return None
     stripped = content.strip()
-    if not stripped or stripped[0] != "{":
+    if not stripped:
         return None
     # Cheap discriminator gate so we don't try to JSON-decode every Bash line.
     if "turn_correction" not in stripped:
         return None
-    try:
-        payload = json.loads(stripped)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    return _build_turn_correction_entry(payload, timestamp, tool_id=tool_id)
+    # Prefer the canonical contract (one JSON object on stdout), but tolerate
+    # wrappers and a later command writing status lines around it. This matters
+    # for stdin-based suggestions: their corrected text cannot be recovered
+    # from the command argv when stdout is no longer a pristine JSON document.
+    candidates = [stripped]
+    if "\n" in stripped:
+        candidates.extend(line.strip() for line in stripped.splitlines())
+    for candidate in candidates:
+        if not candidate.startswith("{") or "turn_correction" not in candidate:
+            continue
+        try:
+            payload = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        entry = _build_turn_correction_entry(payload, timestamp, tool_id=tool_id)
+        if entry:
+            return entry
+    return None
 
 
 def _build_turn_correction_entry(
@@ -1007,7 +1020,14 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
                     "timestamp": timestamp,
                     "queued": True,
                 }
-            return {"type": "user", "content": content, "timestamp": timestamp, "queued": True}
+            message_id = claude_queue_message_id(raw, content, timestamp)
+            return {
+                "type": "user",
+                "content": content,
+                "timestamp": timestamp,
+                "queued": True,
+                **({"message_id": message_id} if message_id else {}),
+            }
         return None
 
     if entry_type in ("progress", "system") or is_sidechain:
@@ -1742,6 +1762,27 @@ def codex_message_id(payload: dict, role: str, text: str) -> str | None:
         digest = hashlib.sha1(f"{role}\n{text}".encode("utf-8")).hexdigest()[:16]
         return f"codex-{role}:{digest}"
     return None
+
+
+def claude_queue_message_id(payload: dict, text: str, timestamp: str) -> str | None:
+    """Return the stable identity for a Claude ``queue-operation`` user turn.
+
+    Queue rows normally have no UUID and do not always receive a later
+    UUID-bearing user echo. The live correction overlay still needs an
+    identity, as does graph ingest when an accepted correction is persisted.
+    Prefer an explicit UUID when a provider supplies one; otherwise include
+    the event timestamp in a content hash so two identical queued messages in
+    one session remain distinct.
+    """
+    raw_uuid = payload.get("uuid") or payload.get("message_id")
+    if isinstance(raw_uuid, str) and raw_uuid:
+        return raw_uuid
+    if not text:
+        return None
+    digest = hashlib.sha1(
+        f"{timestamp}\n{text}".encode("utf-8")
+    ).hexdigest()[:16]
+    return f"claude-queued-user:{digest}"
 
 
 def _codex_event_message_identity(payload: dict, role: str, text: str) -> dict[str, str]:
