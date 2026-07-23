@@ -1716,11 +1716,10 @@
       width: 100% !important;
       height: 100% !important;
     }
-    /* iOS touch-scroll: xterm wires wheel but not touch, so finger-drag
-       on the viewport has no effect without these hints. overflow-y:auto
-       makes the div a native scroll container, touch-action:pan-y tells
-       iOS to treat vertical drags as scroll (not text selection), and
-       -webkit-overflow-scrolling:touch enables momentum on older iOS. */
+    /* Mobile terminal scroll: keep xterm's viewport natively scrollable as
+       a supplement to terminal-mount.js's touch-to-wheel bridge. The JS
+       bridge is required when an interactive TUI enables mouse reporting,
+       because xterm disables its own touch handler in that mode. */
     .sv-terminal .xterm .xterm-viewport {
       overflow-y: auto !important;
       touch-action: pan-y;

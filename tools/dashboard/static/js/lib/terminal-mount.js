@@ -20,6 +20,99 @@
  *     sent (the /terminal page uses it to refresh the pill bar).
  */
 (function () {
+  function installTouchScrollBridge(container, term) {
+    var lastTouchY = null;
+    var pixelRemainder = 0;
+
+    function resetTouch() {
+      lastTouchY = null;
+      pixelRemainder = 0;
+    }
+
+    function rowHeight() {
+      var screen = term.element && term.element.querySelector('.xterm-screen');
+      var rect = screen && screen.getBoundingClientRect();
+      if (rect && rect.height > 0 && term.rows > 0) {
+        return rect.height / term.rows;
+      }
+      return 17; // xterm's approximate row height at the configured 14px font.
+    }
+
+    function dispatchWheel(touch, direction, pixels) {
+      var init = {
+        bubbles: true,
+        cancelable: true,
+        deltaMode: 0, // WheelEvent.DOM_DELTA_PIXEL
+        deltaY: direction * pixels,
+        clientX: touch.clientX,
+        clientY: touch.clientY,
+      };
+      var wheel;
+      try {
+        wheel = new WheelEvent('wheel', init);
+      } catch (e) {
+        // Older WebKit builds do not expose the WheelEvent constructor.
+        wheel = document.createEvent('Event');
+        wheel.initEvent('wheel', true, true);
+        Object.keys(init).forEach(function (key) {
+          try { Object.defineProperty(wheel, key, { value: init[key] }); } catch (err) {}
+        });
+      }
+      term.element.dispatchEvent(wheel);
+    }
+
+    function onTouchStart(e) {
+      if (e.touches.length !== 1) {
+        resetTouch();
+        return;
+      }
+      lastTouchY = e.touches[0].clientY;
+      pixelRemainder = 0;
+    }
+
+    function onTouchMove(e) {
+      if (e.touches.length !== 1 || lastTouchY === null || !term.element) return;
+
+      var touch = e.touches[0];
+      pixelRemainder += lastTouchY - touch.clientY;
+      lastTouchY = touch.clientY;
+
+      // Own the single-finger vertical gesture before xterm sees it. xterm
+      // suppresses its built-in touch scrolling while a TUI has enabled mouse
+      // reporting, even though wheel events still work in that mode.
+      if (e.cancelable) e.preventDefault();
+      e.stopPropagation();
+
+      var pixels = rowHeight();
+      var lines = pixelRemainder > 0
+        ? Math.floor(pixelRemainder / pixels)
+        : Math.ceil(pixelRemainder / pixels);
+      if (lines === 0) return;
+
+      pixelRemainder -= lines * pixels;
+      var direction = lines > 0 ? 1 : -1;
+      for (var i = 0; i < Math.abs(lines); i++) {
+        // Reuse xterm's wheel path: it scrolls xterm scrollback normally and
+        // forwards mouse-wheel reports to interactive TUIs such as Codex.
+        dispatchWheel(touch, direction, pixels);
+      }
+    }
+
+    var startOptions = { capture: true, passive: true };
+    var moveOptions = { capture: true, passive: false };
+    container.addEventListener('touchstart', onTouchStart, startOptions);
+    container.addEventListener('touchmove', onTouchMove, moveOptions);
+    container.addEventListener('touchend', resetTouch, startOptions);
+    container.addEventListener('touchcancel', resetTouch, startOptions);
+
+    return function () {
+      container.removeEventListener('touchstart', onTouchStart, startOptions);
+      container.removeEventListener('touchmove', onTouchMove, moveOptions);
+      container.removeEventListener('touchend', resetTouch, startOptions);
+      container.removeEventListener('touchcancel', resetTouch, startOptions);
+    };
+  }
+
   window.mountTerminal = function (container, tmuxName, options) {
     options = options || {};
     var onStatus = options.onStatus || function () {};
@@ -48,6 +141,7 @@
     }
     term.open(container);
     try { fitAddon.fit(); } catch (e) {}
+    var removeTouchScrollBridge = installTouchScrollBridge(container, term);
 
     var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     var wsUrl = proto + '//' + location.host + '/ws/terminal?attach=' + encodeURIComponent(tmuxName);
@@ -149,6 +243,7 @@
       ws: ws,
       fitAddon: fitAddon,
       dispose: function () {
+        try { removeTouchScrollBridge(); } catch (e) {}
         try { if (resizeObs) resizeObs.disconnect(); } catch (e) {}
         try { ws.close(); } catch (e) {}
         try { term.dispose(); } catch (e) {}
