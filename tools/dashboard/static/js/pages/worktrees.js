@@ -2154,6 +2154,14 @@
         jira_write: {
           open(self, r) {
             const req = r.request || {};
+            const createFields = req.op === 'create'
+              ? { ...(req.fields || {}) }
+              : null;
+            let createDescription = '';
+            if (createFields && typeof createFields.description === 'string') {
+              createDescription = createFields.description;
+              delete createFields.description;
+            }
             const ops = {
               comment: { title: 'Jira comment', action: 'Post comment' },
               set_field: {
@@ -2184,8 +2192,9 @@
               title: op.title, actionLabel: op.action, op: req.op,
               target: req.key ||
                 ((req.fields || {}).project ? (req.fields.project.key || '') : ''),
-              bodyMarkdown: req.body_markdown || attachNote || transitionNote,
-              fields: req.op === 'create' ? (req.fields || {}) : null,
+              bodyMarkdown:
+                req.body_markdown || createDescription || attachNote || transitionNote,
+              fields: createFields,
             };
             if (req.op === 'transition' && req.key) {
               // Enrich with TRUSTED context so the operator sees what they
