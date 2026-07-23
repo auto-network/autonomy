@@ -1388,6 +1388,34 @@ def test_parse_codex_functions_exec_preserves_nested_command_detail(tmp_path):
     assert tool_result["content"] == "tools/dashboard/session_harness.py:1322"
 
 
+def test_parse_codex_functions_exec_accepts_unquoted_javascript_object_keys():
+    """Regression from auto-0722-175959: its wrapper args are JS, not JSON."""
+    parsed = parse_codex_log_line(json.dumps({
+        "timestamp": TS,
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "call_id": "call_unquoted_keys",
+            "input": (
+                'const r = await tools.exec_command({cmd:"rg -n -i \\\"password\\\" '
+                'tools/dashboard",workdir:"/workspace/repo",yield_time_ms:10000,'
+                'max_output_tokens:24000});\ntext(r.output);'
+            ),
+        },
+    }))
+
+    assert parsed["tool_name"] == "exec_command"
+    assert parsed["input"] == {
+        "cmd": 'rg -n -i "password" tools/dashboard',
+        "command": 'rg -n -i "password" tools/dashboard',
+        "workdir": "/workspace/repo",
+        "cwd": "/workspace/repo",
+        "yield_time_ms": 10000,
+        "max_output_tokens": 24000,
+    }
+
+
 def test_parse_codex_functions_exec_enriches_nested_graph_result(
     tmp_path,
     codex_graph_db,

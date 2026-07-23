@@ -1984,6 +1984,45 @@ def _iter_codex_exec_wrapper_calls(source: str) -> list[tuple[str, str, int]]:
     return calls
 
 
+def _quote_javascript_object_keys(source: str) -> str:
+    """Convert unquoted JavaScript object keys to JSON-compatible keys.
+
+    Some Codex functions.exec transcripts serialize nested tool arguments as
+    ``{cmd:"...",workdir:"..."}`` instead of strict JSON. Only identifiers
+    immediately followed by a colon after ``{`` or ``,`` are rewritten;
+    quoted command content is copied byte-for-byte.
+    """
+    out: list[str] = []
+    idx = 0
+    while idx < len(source):
+        char = source[idx]
+        if char in "'\"`":
+            end = _skip_javascript_literal(source, idx)
+            out.append(source[idx:end])
+            idx = end
+            continue
+        out.append(char)
+        idx += 1
+        if char not in "{,":
+            continue
+        while idx < len(source) and source[idx].isspace():
+            out.append(source[idx])
+            idx += 1
+        key = re.match(r"[A-Za-z_$][A-Za-z0-9_$]*", source[idx:])
+        if not key:
+            continue
+        key_end = idx + key.end()
+        colon = key_end
+        while colon < len(source) and source[colon].isspace():
+            colon += 1
+        if colon >= len(source) or source[colon] != ":":
+            continue
+        out.append(json.dumps(key.group(0)))
+        out.append(source[key_end:colon + 1])
+        idx = colon + 1
+    return "".join(out)
+
+
 def _resolve_codex_exec_wrapper_argument(
     expression: str,
     source: str,
@@ -1993,6 +2032,11 @@ def _resolve_codex_exec_wrapper_argument(
         return json.loads(expression)
     except (json.JSONDecodeError, TypeError):
         pass
+    if expression.startswith("{"):
+        try:
+            return json.loads(_quote_javascript_object_keys(expression))
+        except json.JSONDecodeError:
+            pass
     if not re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", expression):
         return expression
     assignment = re.compile(
