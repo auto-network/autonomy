@@ -5506,6 +5506,18 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
         r.desktop_attached_class = q('approval-sheet').className.indexOf('md:w-[28rem]') !== -1;
         r.mobile_bottom_class = q('approval-sheet').className.indexOf('inset-x-0') !== -1;
 
+        // An already-unlocked matching authority does not need a password.
+        // The dialog must remove the password controls entirely and leave
+        // the approve action immediately usable.
+        data.dismissApproval(); await tick();
+        authority = true;
+        data._approvalKinds.link_publish.open(data, row('no-password')); await tick();
+        r.no_password_field_hidden = !q('approval-password');
+        r.no_password_message_hidden = textOf(q('approval-sheet')).indexOf('Password not required') === -1;
+        r.no_password_approve_enabled = !q('approval-confirm').disabled;
+        data.dismissApproval(); await tick();
+        authority = false;
+
         // Register-before-freeze is actionable when enrichment reports no
         // blocker.  Registration must never suppress an independent target
         // resolution failure: approving an unresolved target would be blind.
@@ -5648,6 +5660,12 @@ class TestApprovalRequired:
         c = self._checks
         assert c["desktop_attached_class"] is True
         assert c["mobile_bottom_class"] is True
+
+    def test_password_free_approval_hides_password_controls(self):
+        c = self._checks
+        assert c["no_password_field_hidden"] is True
+        assert c["no_password_message_hidden"] is True
+        assert c["no_password_approve_enabled"] is True
 
     def test_inline_registration_is_not_blocked_by_missing_binding(self):
         assert self._checks["inline_registration_confirm_enabled"] is True

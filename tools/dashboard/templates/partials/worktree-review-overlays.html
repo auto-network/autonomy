@@ -632,6 +632,7 @@
             </div>
           </section>
 
+          <template x-if="!approvalAuthorityAvailable()">
           <div class="mt-5">
             <label for="approval-password" class="text-sm font-medium text-slate-200">Organization password</label>
             <div class="mt-2 flex overflow-hidden rounded border bg-gray-950"
@@ -647,9 +648,6 @@
                       @click="approvalRequest.showPassword = !approvalRequest.showPassword"
                       x-text="approvalRequest.showPassword ? 'Hide' : 'Show'"></button>
             </div>
-            <p x-show="approvalAuthorityAvailable()" x-cloak class="mt-2 text-xs leading-5 text-emerald-300">
-              Password not required for this approval.
-            </p>
             <p x-show="approvalRequest.error" x-cloak data-testid="approval-error"
                class="mt-2 text-xs leading-5 text-red-300" x-text="approvalRequest.error"></p>
             <p x-show="approvalRequest.blockingError" x-cloak data-testid="approval-blocking-error"
@@ -661,6 +659,7 @@
               <span>Allow approvals this session without asking for my password again.</span>
             </label>
           </div>
+          </template>
         </div>
 
         <footer class="shrink-0 px-5 py-4 md:px-7"

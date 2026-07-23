@@ -23,6 +23,7 @@ import ssl
 import sys
 import urllib.error
 import urllib.request
+import uuid
 
 from .duration import parse_duration
 
@@ -106,6 +107,49 @@ def _resolve_design_target(target_id: str, target_type: str) -> str:
     return resolved
 
 
+def _resolve_uuid_target(target_id: str, target_type: str) -> str:
+    """Expand a note or attachment UUID prefix through the dashboard.
+
+    Registry envelopes intentionally require full UUIDs. The graph CLI accepts
+    the same unique-prefix ergonomics as other graph commands, so resolve the
+    prefix before creating the approval request. Full UUIDs take the existing
+    zero-round-trip path.
+    """
+    try:
+        uuid.UUID(target_id)
+        return target_id
+    except (ValueError, AttributeError):
+        pass
+    if not _UUIDISH_RE.match(target_id):
+        _fail(f"'{target_id}' does not look like a {target_type} id")
+
+    endpoint = (
+        f"/api/graph/source/{target_id}"
+        if target_type == "note"
+        else f"/api/graph/{target_id}"
+    )
+    try:
+        resolved = _api_request("GET", endpoint)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            _fail(f"could not resolve {target_type.lower()} '{target_id}'")
+        _fail(f"could not resolve {target_type.lower()} '{target_id}': HTTP {e.code}")
+    except urllib.error.URLError as e:
+        _fail(f"cannot reach the dashboard at {_dash_base()}: {e.reason}")
+
+    if not isinstance(resolved, dict):
+        _fail(f"could not resolve {target_type.lower()} '{target_id}'")
+    if target_type == "note":
+        if resolved.get("type") not in (None, "note"):
+            _fail(f"'{target_id}' resolves to {resolved.get('type')}, not a note")
+    elif resolved.get("type") != "attachment":
+        _fail(f"'{target_id}' resolves to {resolved.get('type', 'unknown')}, not a file")
+    full_id = resolved.get("id")
+    if not isinstance(full_id, str) or not _UUIDISH_RE.match(full_id):
+        _fail(f"dashboard returned no full UUID for {target_type.lower()} '{target_id}'")
+    return full_id
+
+
 def _await_decision(approval_id: str, verb: str) -> dict:
     """Block on the held GET until the operator decides; return the result.
 
@@ -175,9 +219,7 @@ def cmd_link_publish(args) -> None:
     if target_type in ("present", "design"):
         target_uuid = _resolve_design_target(target_id, target_type)
     else:
-        if not _UUIDISH_RE.match(target_id):
-            _fail(f"'{target_id}' does not look like a {target_type} id")
-        target_uuid = target_id
+        target_uuid = _resolve_uuid_target(target_id, target_type)
 
     request = {"org": org, "target_uuid": target_uuid,
                "target_type": target_type, "meta": meta}

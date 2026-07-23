@@ -38,6 +38,7 @@ ORG_UUID = "22222222-2222-4222-8222-222222222222"
 TARGET = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 REGISTRY_URL = "http://registry.test"
 PUBLIC_LINK_URL = "https://relay.auto.network"
+NOTE_TARGET = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
 class OperatorFixture:
@@ -136,6 +137,35 @@ def _publish_args(**over):
                 label="binder", org=ORG)
     base.update(over)
     return argparse.Namespace(**base)
+
+
+def test_uuid_prefix_expands_note(monkeypatch):
+    calls = []
+
+    def fake_api(method, path, **kwargs):
+        calls.append((method, path))
+        return {"id": NOTE_TARGET, "type": "note"}
+
+    monkeypatch.setattr(link_cmd, "_api_request", fake_api)
+    assert link_cmd._resolve_uuid_target(NOTE_TARGET[:12], "note") == NOTE_TARGET
+    assert calls == [("GET", "/api/graph/source/" + NOTE_TARGET[:12])]
+
+
+def test_uuid_prefix_expands_file(monkeypatch):
+    calls = []
+
+    def fake_api(method, path, **kwargs):
+        calls.append((method, path))
+        return {"id": NOTE_TARGET, "type": "attachment"}
+
+    monkeypatch.setattr(link_cmd, "_api_request", fake_api)
+    assert link_cmd._resolve_uuid_target(NOTE_TARGET[:12], "file") == NOTE_TARGET
+    assert calls == [("GET", "/api/graph/" + NOTE_TARGET[:12])]
+
+
+def test_full_uuid_does_not_require_graph_lookup(monkeypatch):
+    monkeypatch.setattr(link_cmd, "_api_request", lambda *a, **k: pytest.fail("unexpected lookup"))
+    assert link_cmd._resolve_uuid_target(NOTE_TARGET, "note") == NOTE_TARGET
 
 
 def test_publish_prints_url(operator_env, capsys):
