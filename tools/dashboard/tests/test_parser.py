@@ -690,6 +690,27 @@ class TestTurnCorrectionUpconversion:
         assert "reason" not in tc
         assert "confidence" not in tc
 
+    def test_payload_survives_status_lines_from_chained_commands(self):
+        """A valid JSON line is enough even when a later command writes stdout."""
+        fixture = {
+            "type": "tool_result",
+            "toolUseId": "toolu_tc_chained",
+            "message": {
+                "role": "user",
+                "content": (
+                    f"{_TC_SHORT_JSON}\n"
+                    "✓ Label set: Debug missing turn correction\n"
+                    "✓ Role set: researcher"
+                ),
+            },
+            "timestamp": TS,
+        }
+        result = _parse_jsonl_entry(_line(fixture))
+        entries = result if isinstance(result, list) else [result]
+        tc = next((e for e in entries if e.get("type") == "turn_correction"), None)
+        assert tc is not None
+        assert tc["corrected_text"] == "JSON encoded message"
+
     def test_codex_exec_end_payload_emits_typed_event(self):
         """Codex exec_command_end envelopes must upconvert too."""
         result = _parse_codex_line(_line(FIXTURE_CODEX_EXEC_END_TURN_CORRECTION))
@@ -1163,6 +1184,32 @@ class TestMessageIdentity:
     `parent_uuid` so the correction overlay can target tiles by stable identity
     rather than position.
     """
+
+    def test_queued_user_without_uuid_gets_stable_synthetic_message_id(self):
+        fixture = {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "content": "All of the images are already on Dr. hub.",
+            "timestamp": TS,
+        }
+        first = _parse_jsonl_entry(_line(fixture))
+        second = _parse_jsonl_entry(_line(fixture))
+        assert first["type"] == "user"
+        assert first["queued"] is True
+        assert first["message_id"].startswith("claude-queued-user:")
+        assert second["message_id"] == first["message_id"]
+
+    def test_identical_queued_users_at_different_times_get_distinct_ids(self):
+        fixture = {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "content": "Same message",
+            "timestamp": TS,
+        }
+        first = _parse_jsonl_entry(_line(fixture))
+        fixture["timestamp"] = "2026-04-18T12:35:57.123Z"
+        second = _parse_jsonl_entry(_line(fixture))
+        assert first["message_id"] != second["message_id"]
 
     def test_user_string_emits_message_id(self):
         """User string content → message_id is preserved from raw uuid."""

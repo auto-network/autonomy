@@ -491,12 +491,14 @@ class ClaudeTurnExtractor:
                 # Skip task notifications and command outputs
                 if qcontent.startswith(("<task-notification", "<local-command", "<command-name")):
                     return None
+                from tools.dashboard.session_harness import claude_queue_message_id
+
                 s["turn_number"] += 1
                 return {
                     "turn_number": s["turn_number"],
                     "role": "user",
                     "content": qcontent,
-                    "message_id": entry.get("uuid"),
+                    "message_id": claude_queue_message_id(entry, qcontent, ts),
                     "parent_uuid": entry.get("parentUuid"),
                     "timestamp": ts,
                     "queued": True,

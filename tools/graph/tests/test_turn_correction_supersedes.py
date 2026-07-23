@@ -421,6 +421,47 @@ def test_codex_no_uuid_event_msg_resolves_via_shared_id_rule(
     ]
 
 
+def test_claude_uuid_less_queue_resolves_via_shared_id_rule(
+    graph_db_env, tmp_path,
+):
+    """Claude queue-operation identities align across viewer and graph ingest."""
+    raw_text = "All of the images are already on Dr. hub."
+    timestamp = "2026-07-23T19:04:29.105Z"
+    session = tmp_path / "claude-queue-session.jsonl"
+    payload = {
+        "type": "queue-operation",
+        "operation": "enqueue",
+        "content": raw_text,
+        "timestamp": timestamp,
+    }
+    session.write_text(json.dumps(payload) + "\n")
+
+    result = ingest_session_file(graph_db_env, session)
+    assert result["status"] == "ingested"
+    source_id = result["source_id"]
+
+    from tools.dashboard.session_harness import claude_queue_message_id
+
+    live_id = claude_queue_message_id(payload, raw_text, timestamp)
+    assert live_id is not None
+    assert live_id.startswith("claude-queued-user:")
+    row = graph_db_env.conn.execute(
+        "SELECT message_id FROM thoughts WHERE source_id = ?",
+        (source_id,),
+    ).fetchone()
+    assert row["message_id"] == live_id
+
+    persisted = ops.persist_corrected_thought(
+        org=None,
+        session_uuid=session.stem,
+        target_message_id=live_id,
+        original_sha256=_sha(raw_text),
+        corrected_text="All of the images are already on Docker Hub.",
+    )
+    assert persisted is not None
+    assert persisted["message_id"] == f"supersedes:{live_id}"
+
+
 # ── Extra metadata pass-through ───────────────────────────────
 
 

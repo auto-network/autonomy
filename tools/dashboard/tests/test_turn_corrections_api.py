@@ -1112,6 +1112,50 @@ def test_session_monitor_persists_codex_event_message_correction_without_raw_uui
     assert stored["corrected_text"] == "JSON encoded"
 
 
+def test_session_monitor_persists_uuid_less_claude_queue_correction(
+    test_app,
+    tmp_path: Path,
+):
+    """Regression: the screenshot turn has only a queue-operation row."""
+    from tools.dashboard.session_harness import CLAUDE_HARNESS
+    from tools.dashboard.session_monitor import SessionMonitor, _TailState
+
+    raw = "There’s absolutely no need to rebuild anything. All of the images are already on Dr. hub."
+    corrected = (
+        "There's absolutely no need to rebuild anything. "
+        "All of the images are already on Docker Hub."
+    )
+    jsonl = tmp_path / "claude-session.jsonl"
+    jsonl.write_text(json.dumps({
+        "type": "queue-operation",
+        "operation": "enqueue",
+        "content": raw,
+        "timestamp": "2026-07-23T19:04:29.105Z",
+    }) + "\n")
+    parsed = CLAUDE_HARNESS.parse_line(jsonl.read_text().strip())
+    assert parsed["message_id"].startswith("claude-queued-user:")
+
+    row = {
+        "session_uuid": SESSION_UUID,
+        "tmux_name": TMUX_NAME,
+        "jsonl_path": str(jsonl),
+    }
+    ts = _TailState()
+    SessionMonitor._persist_turn_corrections(row, ts, [parsed])
+    SessionMonitor._persist_turn_corrections(row, ts, [{
+        "type": "turn_correction",
+        "corrected_text": corrected,
+        "timestamp": "2026-07-23T19:04:41.766Z",
+    }])
+
+    stored = dashboard_db.get_turn_correction(
+        SESSION_UUID, parsed["message_id"],
+    )
+    assert stored is not None
+    assert stored["original_sha256"] == _sha(raw)
+    assert stored["corrected_text"] == corrected
+
+
 def test_session_monitor_replay_does_not_mutate_terminal(test_app):
     """Replaying a history correction over an already-accepted row leaves it alone."""
     from tools.dashboard.session_monitor import SessionMonitor, _TailState
