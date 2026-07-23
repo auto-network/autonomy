@@ -123,6 +123,28 @@ def test_create_note_with_attachment_dedup(orgs_root, tmp_path):
     assert r2["attachments"][0]["id"] == atts[0]["id"]
 
 
+def test_create_note_leaves_attachment_tokens_in_markdown_code(
+    orgs_root, tmp_path,
+):
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"PNG-DATA")
+    result = ops.create_note(
+        "![diagram]({1})\n\n"
+        "Inline: `{1}/NULLIF({90},0)`\n\n"
+        "```text\n"
+        "{1} and {77} are documented tokens\n"
+        "```\n",
+        attachments=[str(image)],
+    )
+
+    attachment_id = result["attachments"][0]["id"]
+    assert f"![diagram](graph://{attachment_id[:12]})" in result["content"]
+    assert "`{1}/NULLIF({90},0)`" in result["content"]
+    assert "{1} and {77} are documented tokens" in result["content"]
+
+
 def test_create_note_with_provenance_edge(orgs_root):
     GraphDB.create_org_db("personal", type_="personal").close()
 
@@ -253,7 +275,13 @@ def test_update_note_legacy_slots_require_one_explicit_rebind(
     finally:
         conn.close()
 
-    revised = "Legacy edit keeps ![second]({2}) before ![first]({1})"
+    revised = (
+        "Legacy edit keeps ![second]({2}) before ![first]({1}).\n\n"
+        "Expression guide: `Q1 / Q90` becomes `{1}/NULLIF({90},0)`.\n\n"
+        "```text\n"
+        "Other documented tokens stay literal: {1}, {77}\n"
+        "```"
+    )
     with pytest.raises(ValueError, match="no stable slot order"):
         ops.update_note(created["id"], revised)
 
@@ -266,13 +294,17 @@ def test_update_note_legacy_slots_require_one_explicit_rebind(
         first_id,
         second_id,
     ]
+    assert "`{1}/NULLIF({90},0)`" in rebound["content"]
+    assert "{1}, {77}" in rebound["content"]
 
     updated = ops.update_note(
         created["id"],
-        "Next text-only edit keeps ![first]({1}) and ![second]({2})",
+        "Next text-only edit keeps ![first]({1}) and ![second]({2}). "
+        "The guide still says `{1}/NULLIF({90},0)`.",
     )
     assert f"graph://{first_id[:12]}" in updated["content"]
     assert f"graph://{second_id[:12]}" in updated["content"]
+    assert "`{1}/NULLIF({90},0)`" in updated["content"]
 
     conn = sqlite3.connect(str(orgs_root / "personal.db"))
     try:

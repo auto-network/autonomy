@@ -29,7 +29,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .db import GraphDB, resolve_caller_db_path
 from .duration import parse_duration as _shared_parse_duration
@@ -2544,6 +2544,7 @@ def _store_attachment_db(
 
 _NOTE_ATTACHMENT_SLOTS_KEY = "attachment_slots"
 _NOTE_ATTACHMENT_PLACEHOLDER_RE = re.compile(r"\{([1-9][0-9]*)\}")
+_MARKDOWN_FENCE_OPEN_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})")
 
 
 def _note_attachment_slots(
@@ -2558,14 +2559,101 @@ def _note_attachment_slots(
     return []
 
 
-def _bind_attachment_slots(content: str, attachment_ids: list[str]) -> str:
-    """Rewrite ``{N}`` note placeholders using a stable ordered ID list."""
-    for slot, attachment_id in enumerate(attachment_ids, 1):
-        content = content.replace(
-            "{" + str(slot) + "}",
-            f"graph://{attachment_id[:12]}",
+def _transform_inline_markdown_text(
+    line: str,
+    transform: Callable[[str], str],
+) -> str:
+    """Apply ``transform`` outside backtick code spans on one line."""
+    output: list[str] = []
+    cursor = 0
+    while cursor < len(line):
+        opener = re.search(r"`+", line[cursor:])
+        if opener is None:
+            output.append(transform(line[cursor:]))
+            break
+
+        open_start = cursor + opener.start()
+        open_end = cursor + opener.end()
+        ticks = opener.group(0)
+        output.append(transform(line[cursor:open_start]))
+
+        closer = re.search(
+            rf"(?<!`){re.escape(ticks)}(?!`)",
+            line[open_end:],
         )
-    return content
+        if closer is None:
+            # An unmatched backtick run is literal Markdown text.
+            output.append(transform(line[open_start:]))
+            break
+
+        close_end = open_end + closer.end()
+        output.append(line[open_start:close_end])
+        cursor = close_end
+    return "".join(output)
+
+
+def _transform_note_attachment_placeholders(
+    content: str,
+    transform: Callable[[str], str],
+) -> str:
+    """Apply ``transform`` only to prose, preserving Markdown code verbatim."""
+    output: list[str] = []
+    fence_char: str | None = None
+    fence_size = 0
+
+    for line in content.splitlines(keepends=True):
+        if fence_char is not None:
+            output.append(line)
+            closing = re.match(
+                rf"^[ ]{{0,3}}{re.escape(fence_char)}"
+                rf"{{{fence_size},}}[ \t]*(?:\r?\n)?$",
+                line,
+            )
+            if closing is not None:
+                fence_char = None
+                fence_size = 0
+            continue
+
+        opening = _MARKDOWN_FENCE_OPEN_RE.match(line)
+        if opening is not None:
+            marker = opening.group(1)
+            fence_char = marker[0]
+            fence_size = len(marker)
+            output.append(line)
+            continue
+
+        output.append(_transform_inline_markdown_text(line, transform))
+
+    return "".join(output)
+
+
+def _attachment_placeholder_slots(content: str) -> set[int]:
+    """Collect attachment slot numbers outside Markdown code."""
+    slots: set[int] = set()
+
+    def collect(text: str) -> str:
+        slots.update(
+            int(match)
+            for match in _NOTE_ATTACHMENT_PLACEHOLDER_RE.findall(text)
+        )
+        return text
+
+    _transform_note_attachment_placeholders(content, collect)
+    return slots
+
+
+def _bind_attachment_slots(content: str, attachment_ids: list[str]) -> str:
+    """Rewrite prose ``{N}`` placeholders, leaving Markdown code literal."""
+    def bind(text: str) -> str:
+        def replace(match: re.Match[str]) -> str:
+            slot = int(match.group(1))
+            if slot > len(attachment_ids):
+                return match.group(0)
+            return f"graph://{attachment_ids[slot - 1][:12]}"
+
+        return _NOTE_ATTACHMENT_PLACEHOLDER_RE.sub(replace, text)
+
+    return _transform_note_attachment_placeholders(content, bind)
 
 
 _NOTE_PROVENANCE_STOPWORDS = {
@@ -2972,10 +3060,7 @@ def update_note(
 
         if has_body_change:
             metadata_changed = False
-            placeholder_slots = {
-                int(match)
-                for match in _NOTE_ATTACHMENT_PLACEHOLDER_RE.findall(content)
-            }
+            placeholder_slots = _attachment_placeholder_slots(content)
             if attachments:
                 missing_slots = sorted(
                     slot
