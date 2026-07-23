@@ -12,6 +12,7 @@ import hashlib
 import importlib
 import json
 from pathlib import Path
+import sqlite3
 from unittest.mock import AsyncMock
 
 import pytest
@@ -31,6 +32,38 @@ TS = "2026-04-23T00:51:42.056Z"
 
 def _line(obj: dict) -> str:
     return json.dumps(obj)
+
+
+@pytest.fixture
+def codex_graph_db(tmp_path, monkeypatch):
+    """Minimal graph store used to prove Codex result-side enrichment."""
+    db_path = tmp_path / "graph.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE sources (id TEXT PRIMARY KEY, title TEXT, metadata TEXT)")
+    conn.execute(
+        "CREATE TABLE thoughts (id TEXT, source_id TEXT, content TEXT, turn_number INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO sources VALUES (?, ?, ?)",
+        (
+            "a1b2c3d4-0001",
+            "# Codex Tile Enrichment",
+            json.dumps({"tags": ["codex", "viewer"]}),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO thoughts VALUES (?, ?, ?, ?)",
+        (
+            "thought-1",
+            "a1b2c3d4-0001",
+            "# Codex Tile Enrichment\n\nGraph metadata reaches the session viewer.",
+            1,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("GRAPH_DB", str(db_path))
+    return db_path
 
 
 def test_resolve_codex_harness_from_rollout_path():
@@ -1221,3 +1254,178 @@ def test_parse_codex_log_line_parses_update_plan_and_function_call_output():
     assert result is not None
     assert result["type"] == "tool_result"
     assert result["tool_id"] == "call_exec_1"
+
+
+def test_parse_codex_functions_exec_expands_nested_update_plan():
+    parsed = parse_codex_log_line(json.dumps({
+        "timestamp": TS,
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "call_id": "call_wrapper_plan",
+            "input": (
+                'const r = await tools.update_plan({"plan":['
+                '{"step":"Trace wrapper","status":"completed"},'
+                '{"step":"Expose nested tools","status":"in_progress"}'
+                ']});\ntext(r);'
+            ),
+        },
+    }))
+
+    assert isinstance(parsed, list)
+    assert parsed[0]["type"] == "tool_use"
+    assert parsed[0]["tool_name"] == "update_plan"
+    assert parsed[0]["tool_id"] == "call_wrapper_plan#1"
+    assert parsed[1] == {
+        "type": "todo_plan",
+        "role": "assistant",
+        "todos": [
+            {"subject": "Trace wrapper", "status": "completed"},
+            {"subject": "Expose nested tools", "status": "in_progress"},
+        ],
+        "timestamp": TS,
+    }
+    completed = parse_codex_log_line(json.dumps({
+        "timestamp": TS,
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call_output",
+            "call_id": "call_wrapper_plan",
+            "output": [{"type": "input_text", "text": "Script completed\nOutput:\n{}"}],
+        },
+    }))
+    assert completed["type"] == "tool_result"
+    assert completed["tool_id"] == "call_wrapper_plan#1"
+
+
+def test_parse_codex_functions_exec_expands_parallel_nested_tools(tmp_path):
+    parsed = parse_codex_log_line(json.dumps({
+        "timestamp": TS,
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "call_id": "call_wrapper_parallel",
+            "input": (
+                "const results = await Promise.all(["
+                'tools.exec_command({"cmd":"git status --short","workdir":"/workspace/repo"}),'
+                'tools.exec_command({"cmd":"git diff --check","workdir":"/workspace/repo"})'
+                "]);\nfor (const result of results) text(result.output);"
+            ),
+        },
+    }))
+    assert isinstance(parsed, list)
+    assert [entry["tool_id"] for entry in parsed] == [
+        "call_wrapper_parallel#1",
+        "call_wrapper_parallel#2",
+    ]
+    assert [entry["input"]["command"] for entry in parsed] == [
+        "git status --short",
+        "git diff --check",
+    ]
+
+    parsed_output = parse_codex_log_line(json.dumps({
+        "timestamp": TS,
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call_output",
+            "call_id": "call_wrapper_parallel",
+            "output": [{"type": "input_text", "text": "Script completed\nOutput:\nclean"}],
+        },
+    }))
+    raw_entries = [*parsed, *parsed_output]
+    entries = CODEX_HARNESS.postprocess_entries(raw_entries, session_dir=tmp_path)
+    assert [entry["tool_name"] for entry in entries if entry["type"] == "tool_use"] == [
+        "Bash",
+        "Bash",
+    ]
+    assert [entry["tool_id"] for entry in entries if entry["type"] == "tool_result"] == [
+        "call_wrapper_parallel#1",
+        "call_wrapper_parallel#2",
+    ]
+
+
+def test_parse_codex_functions_exec_preserves_nested_command_detail(tmp_path):
+    call = parse_codex_log_line(json.dumps({
+        "timestamp": TS,
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "call_id": "call_wrapper_exec",
+            "input": (
+                'const r = await tools.exec_command({"cmd":"rg -n \\\"tools.update_plan(\\\" '
+                'tools/dashboard","workdir":"/workspace/repo","yield_time_ms":10000});'
+                '\ntext(r.output);'
+            ),
+        },
+    }))
+    result = parse_codex_log_line(json.dumps({
+        "timestamp": TS,
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call_output",
+            "call_id": "call_wrapper_exec",
+            "output": [
+                {"type": "input_text", "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"},
+                {"type": "input_text", "text": "tools/dashboard/session_harness.py:1322\n"},
+            ],
+        },
+    }))
+
+    entries = CODEX_HARNESS.postprocess_entries([call, result], session_dir=tmp_path)
+
+    uses = [entry for entry in entries if entry["type"] == "tool_use"]
+    assert len(uses) == 1
+    assert uses[0]["tool_name"] == "Bash"
+    assert uses[0]["tool_id"] == "call_wrapper_exec#1"
+    assert uses[0]["input"]["command"].startswith("rg -n")
+    assert uses[0]["input"]["cwd"] == "/workspace/repo"
+    tool_result = next(entry for entry in entries if entry["type"] == "tool_result")
+    assert tool_result["tool_id"] == "call_wrapper_exec#1"
+    assert tool_result["status"] == "completed"
+    assert tool_result["content"] == "tools/dashboard/session_harness.py:1322"
+
+
+def test_parse_codex_functions_exec_enriches_nested_graph_result(
+    tmp_path,
+    codex_graph_db,
+):
+    call = parse_codex_log_line(json.dumps({
+        "timestamp": TS,
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "call_id": "call_wrapper_note",
+            "input": (
+                'const r = await tools.exec_command({"cmd":"graph note test",'
+                '"workdir":"/workspace/repo"});\ntext(r.output);'
+            ),
+        },
+    }))
+    parsed_output = parse_codex_log_line(json.dumps({
+        "timestamp": TS,
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call_output",
+            "call_id": "call_wrapper_note",
+            "output": [
+                {"type": "input_text", "text": "Script completed\nWall time 0.2 seconds\nOutput:\n"},
+                {"type": "input_text", "text": "✓ Note saved (src:a1b2c3d4-0001)\n"},
+            ],
+        },
+    }))
+    raw_entries = [call]
+    raw_entries.extend(parsed_output if isinstance(parsed_output, list) else [parsed_output])
+
+    entries = CODEX_HARNESS.postprocess_entries(raw_entries, session_dir=tmp_path)
+
+    semantic = next(entry for entry in entries if entry["type"] == "semantic_bash")
+    assert semantic["tool_id"] == "call_wrapper_note#1"
+    assert semantic["semantic_type"] == "note-created"
+    assert semantic["source_id"] == "a1b2c3d4-0001"
+    assert semantic["title"] == "Codex Tile Enrichment"
+    assert semantic["preview"] == "Graph metadata reaches the session viewer."
+    assert semantic["tags"] == ["codex", "viewer"]
