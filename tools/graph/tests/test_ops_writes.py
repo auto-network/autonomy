@@ -182,6 +182,113 @@ def test_update_note_bumps_version(orgs_root):
         conn.close()
 
 
+def test_update_note_body_only_reuses_attachment_slots(orgs_root, tmp_path):
+    """A text-only edit keeps positional image placeholders bound."""
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    first.write_bytes(b"FIRST-PNG")
+    second.write_bytes(b"SECOND-PNG")
+
+    created = ops.create_note(
+        "![first]({1})\n\n![second]({2})",
+        attachments=[str(first), str(second)],
+    )
+    first_id, second_id = [att["id"] for att in created["attachments"]]
+
+    updated = ops.update_note(
+        created["id"],
+        "# Revised\n\n![second]({2})\n\n![first]({1})",
+    )
+
+    assert f"graph://{second_id[:12]}" in updated["content"]
+    assert f"graph://{first_id[:12]}" in updated["content"]
+    assert "{1}" not in updated["content"]
+    assert "{2}" not in updated["content"]
+
+    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    try:
+        row = conn.execute(
+            "SELECT metadata FROM sources WHERE id = ?",
+            (created["id"],),
+        ).fetchone()
+        assert json.loads(row[0])["attachment_slots"] == [first_id, second_id]
+        assert conn.execute(
+            "SELECT COUNT(*) FROM attachments WHERE source_id = ?",
+            (created["id"],),
+        ).fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
+def test_update_note_legacy_slots_require_one_explicit_rebind(
+    orgs_root, tmp_path,
+):
+    """Pre-slot notes fail safe, then persist one explicit ordered rebind."""
+    GraphDB.create_org_db("personal", type_="personal").close()
+
+    first = tmp_path / "legacy-first.png"
+    second = tmp_path / "legacy-second.png"
+    first.write_bytes(b"LEGACY-FIRST")
+    second.write_bytes(b"LEGACY-SECOND")
+    created = ops.create_note(
+        "![first]({1})\n\n![second]({2})",
+        attachments=[str(first), str(second)],
+    )
+    first_id, second_id = [att["id"] for att in created["attachments"]]
+
+    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    try:
+        metadata = json.loads(conn.execute(
+            "SELECT metadata FROM sources WHERE id = ?",
+            (created["id"],),
+        ).fetchone()[0])
+        metadata.pop("attachment_slots")
+        conn.execute(
+            "UPDATE sources SET metadata = ? WHERE id = ?",
+            (json.dumps(metadata), created["id"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    revised = "Legacy edit keeps ![second]({2}) before ![first]({1})"
+    with pytest.raises(ValueError, match="no stable slot order"):
+        ops.update_note(created["id"], revised)
+
+    rebound = ops.update_note(
+        created["id"],
+        revised,
+        attachments=[str(first), str(second)],
+    )
+    assert [att["id"] for att in rebound["attachments"]] == [
+        first_id,
+        second_id,
+    ]
+
+    updated = ops.update_note(
+        created["id"],
+        "Next text-only edit keeps ![first]({1}) and ![second]({2})",
+    )
+    assert f"graph://{first_id[:12]}" in updated["content"]
+    assert f"graph://{second_id[:12]}" in updated["content"]
+
+    conn = sqlite3.connect(str(orgs_root / "personal.db"))
+    try:
+        metadata = json.loads(conn.execute(
+            "SELECT metadata FROM sources WHERE id = ?",
+            (created["id"],),
+        ).fetchone()[0])
+        assert metadata["attachment_slots"] == [first_id, second_id]
+        assert conn.execute(
+            "SELECT COUNT(*) FROM attachments WHERE source_id = ?",
+            (created["id"],),
+        ).fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
 def test_update_note_explicit_title_overrides(orgs_root):
     """Passing ``title=`` rewrites the title column. Body unchanged."""
     GraphDB.create_org_db("personal", type_="personal").close()

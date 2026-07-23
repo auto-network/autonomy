@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -2541,6 +2542,32 @@ def _store_attachment_db(
     return att
 
 
+_NOTE_ATTACHMENT_SLOTS_KEY = "attachment_slots"
+_NOTE_ATTACHMENT_PLACEHOLDER_RE = re.compile(r"\{([1-9][0-9]*)\}")
+
+
+def _note_attachment_slots(
+    metadata: dict,
+) -> list[str]:
+    """Return a note's persisted positional attachment slots, if valid."""
+    raw_slots = metadata.get(_NOTE_ATTACHMENT_SLOTS_KEY)
+    if isinstance(raw_slots, list):
+        slots = [slot for slot in raw_slots if isinstance(slot, str) and slot]
+        if len(slots) == len(raw_slots):
+            return slots
+    return []
+
+
+def _bind_attachment_slots(content: str, attachment_ids: list[str]) -> str:
+    """Rewrite ``{N}`` note placeholders using a stable ordered ID list."""
+    for slot, attachment_id in enumerate(attachment_ids, 1):
+        content = content.replace(
+            "{" + str(slot) + "}",
+            f"graph://{attachment_id[:12]}",
+        )
+    return content
+
+
 _NOTE_PROVENANCE_STOPWORDS = {
     "the", "a", "an", "is", "in", "on", "at", "to", "for", "of",
     "and", "or", "with", "from", "by", "not", "no",
@@ -2685,10 +2712,12 @@ def create_note(
                     "id": att.id, "filename": att.filename,
                     "kind": "file", "source_id": source.id,
                 })
-            for i, att_id in enumerate(att_ids, 1):
-                content = content.replace(
-                    '{' + str(i) + '}', f'graph://{att_id[:12]}',
-                )
+            content = _bind_attachment_slots(content, att_ids)
+            meta[_NOTE_ATTACHMENT_SLOTS_KEY] = att_ids
+            db.conn.execute(
+                "UPDATE sources SET metadata = ? WHERE id = ?",
+                (json.dumps(meta), source.id),
+            )
 
         thought = Thought(
             source_id=source.id,
@@ -2798,6 +2827,13 @@ def update_note(
     Rich-content notes (``metadata.rich_content == True``) require
     ``html_path`` whenever ``content`` is provided; the dual
     HTML/markdown update keeps the version pair consistent.
+
+    File attachment positions are stable across body-only edits.  Passing
+    ``attachments`` replaces the note's positional ``{1}``, ``{2}``, ...
+    slot map; omitting it reuses the stored map.  Legacy notes that have
+    attachments but no persisted slot order fail safe when a body uses
+    placeholders: the caller must re-pass the complete ordered attachment
+    list once rather than risk silently binding an image to the wrong slot.
     """
     from .ingest import extract_entities
 
@@ -2935,7 +2971,24 @@ def update_note(
         thought = thoughts[0]
 
         if has_body_change:
+            metadata_changed = False
+            placeholder_slots = {
+                int(match)
+                for match in _NOTE_ATTACHMENT_PLACEHOLDER_RE.findall(content)
+            }
             if attachments:
+                missing_slots = sorted(
+                    slot
+                    for slot in placeholder_slots
+                    if slot > len(attachments)
+                )
+                if missing_slots:
+                    raise ValueError(
+                        "attachment placeholder slot(s) "
+                        + ", ".join(str(slot) for slot in missing_slots)
+                        + " have no binding; provide the complete ordered "
+                        "--attach list"
+                    )
                 att_ids = []
                 for fp in attachments:
                     att = _store_attachment_db(db, fp, source_id=src_id)
@@ -2944,10 +2997,36 @@ def update_note(
                         "id": att.id, "filename": att.filename,
                         "kind": "file", "source_id": src_id,
                     })
-                for i, att_id in enumerate(att_ids, 1):
-                    content = content.replace(
-                        '{' + str(i) + '}', f'graph://{att_id[:12]}',
+                meta[_NOTE_ATTACHMENT_SLOTS_KEY] = att_ids
+                metadata_changed = True
+            else:
+                att_ids = _note_attachment_slots(meta)
+                if placeholder_slots and not att_ids:
+                    existing_attachment = db.conn.execute(
+                        "SELECT 1 FROM attachments "
+                        "WHERE source_id = ? LIMIT 1",
+                        (src_id,),
+                    ).fetchone()
+                    if existing_attachment is not None:
+                        raise ValueError(
+                            "this legacy note has attachments but no stable "
+                            "slot order; re-pass the complete ordered "
+                            "--attach list once"
+                        )
+
+            if att_ids and placeholder_slots:
+                missing_slots = sorted(
+                    slot for slot in placeholder_slots if slot > len(att_ids)
+                )
+                if missing_slots:
+                    raise ValueError(
+                        "attachment placeholder slot(s) "
+                        + ", ".join(str(slot) for slot in missing_slots)
+                        + " have no binding; provide the complete ordered "
+                        "--attach list"
                     )
+
+            content = _bind_attachment_slots(content, att_ids)
 
             current_max = db.get_max_note_version(src_id)
             if current_max == 0:
@@ -2968,11 +3047,14 @@ def update_note(
                 })
                 if not is_rich:
                     meta["rich_content"] = True
-                    db.conn.execute(
-                        "UPDATE sources SET metadata = ? WHERE id = ?",
-                        (json.dumps(meta), src_id),
-                    )
+                    metadata_changed = True
                     is_rich = True
+
+            if metadata_changed:
+                db.conn.execute(
+                    "UPDATE sources SET metadata = ? WHERE id = ?",
+                    (json.dumps(meta), src_id),
+                )
 
             db.update_thought_content(thought["id"], content)
 

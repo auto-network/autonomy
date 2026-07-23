@@ -5303,7 +5303,7 @@ def main():
     p_note.add_argument("--author", help="Who wrote this (default: current session's tmux name, e.g. auto-0322-153000)")
     p_note.add_argument("--force", action="store_true", help="Bypass single-line length check")
     p_note.add_argument("--integrate", dest="integrate_ids", action="append", default=[], help="Comment ID to mark as integrated (repeatable)")
-    p_note.add_argument("--attach", action="append", default=[], help="Attach file to note (repeatable). Use {1}, {2} in text for inline placement. For images use markdown syntax: ![alt]({1}). Unplaced attachments appear as downloads")
+    p_note.add_argument("--attach", action="append", default=[], help="Attach file to note (repeatable). Use {1}, {2} in text for inline placement. For images use markdown syntax: ![alt]({1}). Body-only updates reuse the note's existing numbered slots. Unplaced attachments appear as downloads")
     p_note.add_argument("--html", help="HTML file for rich-content note (creates version-paired attachment)")
     p_note.add_argument("--title", dest="title",
                         help="Set the note's title directly (first-class metadata, never derived from body). On create: preferred over body-derive. On update: required to change the title — body edits do not touch the title column.")
