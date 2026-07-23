@@ -5397,6 +5397,44 @@ WORKTREES_REBASE_STATUS_CHECKS = """(async () => {
 })()"""
 
 
+JIRA_CREATE_APPROVAL_CHECKS = """(async () => {
+    var r = {};
+    var q = function(id) { return document.querySelector('[data-testid="' + id + '"]'); };
+    var data = window._worktreeReviewOverlay;
+    if (!data) { r.error = 'no review-overlay component'; return JSON.stringify(r); }
+
+    var description = '## Summary\\n\\nFirst line.\\n\\nSecond line.';
+    var fields = {
+        project: {key: 'ENTERPRISE'},
+        issuetype: {name: 'Bug'},
+        summary: 'Readable approval preview',
+        description: description,
+    };
+    data._approvalKinds.jira_write.open(data, {
+        id: 'apr-jira-create-1',
+        kind: 'jira_write',
+        session: 'auto-agent-1',
+        result: null,
+        request: {op: 'create', org: 'autonomy', fields: fields},
+    });
+    await Alpine.nextTick();
+
+    var body = q('approval-body');
+    var fieldPreview = q('approval-fields');
+    r.body_text = body ? body.textContent : null;
+    r.body_has_real_newlines = !!body && body.textContent.indexOf('\\n\\n') !== -1;
+    r.description_removed_from_fields =
+        !Object.prototype.hasOwnProperty.call(data.approvalRequest.fields, 'description');
+    r.remaining_fields_text = fieldPreview ? fieldPreview.textContent : '';
+    r.input_was_not_mutated = fields.description === description;
+    r.target = data.approvalRequest.target;
+
+    data.approvalRequest = null;
+    await Alpine.nextTick();
+    return JSON.stringify(r);
+})()"""
+
+
 LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
     var r = {};
     var sleep = function(ms) { return new Promise(resolve => setTimeout(resolve, ms)); };
@@ -5723,6 +5761,30 @@ class TestApprovalRequired:
         assert c["stale_stays_open"] is True
         assert "already been completed" in c["stale_error"]
         assert c["stale_can_cancel"] is True
+
+
+class TestJiraCreateApprovalPreview:
+    """Creation descriptions render as readable text, outside the fields JSON."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        request.cls._checks = _navigate_and_eval_async(
+            "/worktrees", JIRA_CREATE_APPROVAL_CHECKS, wait_ms=1200)
+
+    def test_description_uses_readable_body_with_real_newlines(self):
+        c = self._checks
+        assert c.get("body_text") == "## Summary\n\nFirst line.\n\nSecond line.", c
+        assert c["body_has_real_newlines"] is True
+
+    def test_remaining_fields_stay_visible_without_duplicate_description(self):
+        c = self._checks
+        assert c["description_removed_from_fields"] is True
+        assert '"summary": "Readable approval preview"' in c["remaining_fields_text"]
+        assert '"description"' not in c["remaining_fields_text"]
+        assert c["target"] == "ENTERPRISE"
+
+    def test_preview_derivation_does_not_mutate_staged_request(self):
+        assert self._checks["input_was_not_mutated"] is True
 
 
 class TestWorktreesRebaseStatusBehavior:
