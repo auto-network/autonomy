@@ -97,10 +97,10 @@ def test_existing_terminal_page_still_works(test_client):
 
 
 def test_xterm_viewport_touch_scroll_css_present(test_client):
-    """base.html must set overflow-y:auto + touch-action:pan-y on
-    .sv-terminal .xterm-viewport so iPhone finger-drag reaches scrollback
-    (auto-bvob2). Without these hints xterm's viewport renders non-scrollable
-    on iOS even though wheel events work on desktop.
+    """The native-scroll CSS remains as a supplement to the JS touch bridge.
+
+    Native scrolling alone is insufficient while an interactive TUI enables
+    xterm mouse reporting, but these hints still cover ordinary scrollback.
     """
     resp = test_client.get("/")
     assert resp.status_code == 200
@@ -111,3 +111,16 @@ def test_xterm_viewport_touch_scroll_css_present(test_client):
     # inside the rule doesn't break it.
     assert 'overflow-y: auto' in html
     assert 'touch-action: pan-y' in html
+
+
+def test_terminal_mount_bridges_touch_drag_to_wheel(test_client):
+    """Touch drag must use xterm's wheel path, which works with mouse-reporting
+    TUIs as well as ordinary xterm scrollback.
+    """
+    resp = test_client.get("/static/js/lib/terminal-mount.js")
+    assert resp.status_code == 200
+    js = resp.text
+    assert "installTouchScrollBridge" in js
+    assert "new WheelEvent('wheel'" in js
+    assert "passive: false" in js
+    assert "removeTouchScrollBridge()" in js
