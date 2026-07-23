@@ -60,3 +60,28 @@ def test_get_client_returns_ops_when_force_host_set_even_with_graph_api(monkeypa
     monkeypatch.setenv("GRAPH_API", "https://other.example:9443")
     client = get_client()
     assert client is ops
+
+
+def test_http_settings_read_requests_current_revision(monkeypatch):
+    """The client uses the dashboard API's canonical revision parameter names."""
+    seen = {}
+    client = HttpClient("https://dashboard.test")
+
+    def request(method, path, **kwargs):
+        seen.update(method=method, path=path, **kwargs)
+        return {"members": [], "dropped": {}}
+
+    monkeypatch.setattr(client, "_request", request)
+    client.read_set(
+        "autonomy.network.link-grant",
+        org="autonomy",
+        peers=[],
+        target_revision=2,
+        min_revision=1,
+    )
+
+    assert seen["params"] == {
+        "target_revision": "2",
+        "min_revision": "1",
+        "peers": "",
+    }

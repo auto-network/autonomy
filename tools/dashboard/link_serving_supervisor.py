@@ -46,6 +46,7 @@ from tools.dashboard.link_approvals import _load_binding
 from tools.dashboard.link_probe import registry_to_relay_ws
 from tools.graph import settings_ops
 from tools.graph.schemas.network_identity import (
+    NETWORK_LINK_GRANT_REVISION,
     NETWORK_LINK_GRANT_SET_ID,
     NETWORK_SERVE_CERT_SET_ID,
     SERVE_CERT_SCOPE,
@@ -105,7 +106,11 @@ def _has_live_grant(org: str | None, now: float) -> bool:
     """Any non-expired grant in the org's own cache — the 'links are live'
     half of the run condition (reuses the I9 validity check)."""
     try:
-        members = settings_ops.read_owned_set(NETWORK_LINK_GRANT_SET_ID, org=org).members
+        members = settings_ops.read_owned_set(
+            NETWORK_LINK_GRANT_SET_ID,
+            org=org,
+            target_revision=NETWORK_LINK_GRANT_REVISION,
+        ).members
     except Exception:
         return False
     for m in members:

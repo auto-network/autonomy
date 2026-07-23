@@ -99,6 +99,7 @@ def binding_payload() -> dict:
 def link_grant_payload() -> dict:
     return {
         "token": TOKEN,
+        "url": f"{ni.NETWORK_PUBLIC_LINK_BASE_URL}/l/{TOKEN}",
         "target_uuid": TARGET_UUID,
         "target_type": "present",
         "meta": {"ttl": 3600, "label": "OSS Insights binder", "require_auth": False},
@@ -265,6 +266,9 @@ def test_binding_rejects_malformed_payloads(mutate, match):
     "mutate, match",
     [
         (lambda p: p.update(token="abc123"), "32 lowercase hex"),
+        (lambda p: p.pop("url"), "url"),
+        (lambda p: p.update(url="http://relay.auto.network/l/" + TOKEN), "url"),
+        (lambda p: p.update(url=ni.NETWORK_PUBLIC_LINK_BASE_URL + "/l/" + "f" * 32), "url"),
         (lambda p: p.update(token=TOKEN.upper()), "32 lowercase hex|non-empty"),
         (lambda p: p.update(token=TOKEN + "00"), "32|non-empty"),
         (lambda p: p.update(target_uuid="deck-9110a85b"), "UUID"),
@@ -286,14 +290,22 @@ def test_link_grant_rejects_malformed_payloads(mutate, match):
     payload = link_grant_payload()
     mutate(payload)
     with pytest.raises(SchemaValidationError, match=match):
-        validate_payload(ni.NETWORK_LINK_GRANT_SET_ID, 1, payload)
+        validate_payload(
+            ni.NETWORK_LINK_GRANT_SET_ID,
+            ni.NETWORK_LINK_GRANT_REVISION,
+            payload,
+        )
 
 
 def test_link_grant_require_auth_true_is_reserved_rung_2():
     payload = link_grant_payload()
     payload["meta"]["require_auth"] = True
     with pytest.raises(SchemaValidationError, match="rung 2"):
-        validate_payload(ni.NETWORK_LINK_GRANT_SET_ID, 1, payload)
+        validate_payload(
+            ni.NETWORK_LINK_GRANT_SET_ID,
+            ni.NETWORK_LINK_GRANT_REVISION,
+            payload,
+        )
 
 
 def test_link_grant_persona_subject_is_reserved_rung_2():
@@ -302,7 +314,11 @@ def test_link_grant_persona_subject_is_reserved_rung_2():
     payload = link_grant_payload()
     payload["subject"] = {"kind": "persona", "id": "p-1"}
     with pytest.raises(SchemaValidationError, match="persona.*RESERVED|RESERVED.*rung 2"):
-        validate_payload(ni.NETWORK_LINK_GRANT_SET_ID, 1, payload)
+        validate_payload(
+            ni.NETWORK_LINK_GRANT_SET_ID,
+            ni.NETWORK_LINK_GRANT_REVISION,
+            payload,
+        )
 
 
 # ── graph set schema / example / add round-trips ─────────────
@@ -350,12 +366,37 @@ def test_set_add_round_trips_through_storage(graph_db_env, set_id):
     assert members[key].payload == payload
 
 
+def test_link_grant_current_shape_is_returned_from_stored_v1(graph_db_env):
+    """Consumers request the current contract and do not handle revisions."""
+    payload = link_grant_payload()
+    payload.pop("url")
+    ops.add_setting(
+        ni.NETWORK_LINK_GRANT_SET_ID,
+        1,
+        TOKEN,
+        payload,
+        org=ops.CALLER_ORG,
+    )
+
+    current = ops.read_set(
+        ni.NETWORK_LINK_GRANT_SET_ID,
+        org=ops.CALLER_ORG,
+        target_revision=ni.NETWORK_LINK_GRANT_REVISION,
+    ).members[0]
+
+    assert current.payload["url"] == f"{ni.NETWORK_PUBLIC_LINK_BASE_URL}/l/{TOKEN}"
+
+
 def test_set_add_rejects_invalid_payload_at_the_boundary(graph_db_env):
     bad = link_grant_payload()
     bad["meta"]["require_auth"] = True
     with pytest.raises(SchemaValidationError, match="rung 2"):
         ops.upsert_by_key(
-            ni.NETWORK_LINK_GRANT_SET_ID, 1, bad["token"], bad, org=ops.CALLER_ORG,
+            ni.NETWORK_LINK_GRANT_SET_ID,
+            ni.NETWORK_LINK_GRANT_REVISION,
+            bad["token"],
+            bad,
+            org=ops.CALLER_ORG,
         )
 
 

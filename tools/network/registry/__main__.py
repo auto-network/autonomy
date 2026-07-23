@@ -16,7 +16,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8477)
     parser.add_argument(
         "--base-url",
-        default="https://auto.network",
+        default="https://relay.auto.network",
         help="public URL prefix for issued share links",
     )
     args = parser.parse_args()

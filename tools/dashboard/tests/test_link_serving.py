@@ -72,6 +72,7 @@ def put_grant(token: str, target_uuid: str, target_type: str, *,
         NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION, token,
         {
             "token": token,
+            "url": f"https://relay.auto.network/l/{token}",
             "target_uuid": target_uuid,
             "target_type": target_type,
             "meta": meta or {},
