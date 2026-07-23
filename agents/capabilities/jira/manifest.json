@@ -7,6 +7,23 @@
     "delivery_mode": "mounted_tools",
     "package_root": "agents/capabilities/jira",
     "tool_paths": ["agents/capabilities/jira/tools"],
+    "tool_target": {
+        "source": "agents/capabilities/jira/tools",
+        "target": "/opt/jira-tools",
+        "expose_commands": [
+            "jira-read",
+            "jira-createmeta",
+            "jira-attachment",
+            "jira-search",
+            "jira-query",
+            "jira-transition",
+            "jira-comment",
+            "jira-confirm-plan",
+            "jira-update",
+            "jira-create",
+            "jira-attach"
+        ]
+    },
     "skill_path": "agents/capabilities/jira/SKILL.md",
     "primer_path": "agents/capabilities/jira/primer.md",
     "probe": {
