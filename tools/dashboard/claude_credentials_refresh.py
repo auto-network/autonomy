@@ -88,7 +88,10 @@ def _now_iso() -> str:
 
 
 def _credentials_org() -> str:
-    return os.environ.get("GRAPH_ORG") or "autonomy"
+    # Host-local, per-instance credentials live in personal.db, read with
+    # peers=[] (never shared across orgs). Pinned to personal so the refresh
+    # poller, launcher, usage poller, and CLI all converge on the same rows.
+    return "personal"
 
 
 # ── HTTP shim ────────────────────────────────────────────────
@@ -338,7 +341,7 @@ def refresh_all_credentials() -> dict[str, int]:
     }
     try:
         members = graph_ops.read_set(
-            CLAUDE_CREDENTIALS_SET_ID, org=org,
+            CLAUDE_CREDENTIALS_SET_ID, org=org, peers=[],
         )
     except Exception:
         logger.exception(

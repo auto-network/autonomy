@@ -787,7 +787,9 @@ function freshHarnessUsageSettings(members) {
 
 async function refreshHarnessUsageFromSettings() {
   if (!_harnessUsageSchema) return 0;
-  const members = await _harnessUsageSchema.all();
+  // Claude credential/usage rows are host-local — always read from personal.db,
+  // independent of the dashboard shell's org, matching the poller/launcher.
+  const members = await _harnessUsageSchema.all({ headers: { 'X-Graph-Org': 'personal' } });
   const items = freshHarnessUsageSettings(members);
   if (items.length) {
     _harnessUsageMode = 'settings';

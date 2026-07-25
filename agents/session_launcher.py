@@ -357,13 +357,16 @@ def _capability_env(capabilities) -> dict[str, str]:
 
 
 def _credentials_org() -> str:
-    """Return the substrate org slug used to read Claude credential rows.
+    """Return the substrate org for Claude credential/usage rows: ``personal``.
 
-    Matches the resolution used by the OAuth refresh poller and
-    ``graph claude install`` so all three paths converge on the same
-    rows.
+    These are host-local, per-instance secrets — never shared across orgs
+    (each autonomy install has its own accounts). They live in ``personal.db``
+    and are read with ``peers=[]`` (see the callers) so no other org DB is
+    consulted. Pinned to ``personal`` regardless of ambient ``GRAPH_ORG`` so the
+    launcher, refresh poller, usage poller, UI, and ``graph claude`` CLI all
+    converge on the same local rows.
     """
-    return os.environ.get("GRAPH_ORG") or "autonomy"
+    return "personal"
 
 
 def _setup_token_rows() -> list[Any]:
@@ -382,7 +385,7 @@ def _setup_token_rows() -> list[Any]:
 
     try:
         members = _ops.read_set(
-            CLAUDE_SETUP_TOKENS_SET_ID, org=_credentials_org(),
+            CLAUDE_SETUP_TOKENS_SET_ID, org=_credentials_org(), peers=[],
         )
     except Exception:
         logger.exception("session_launcher: read_set(claude.setup_tokens) failed")
@@ -415,7 +418,7 @@ def _credentials_rows() -> list[Any]:
 
     try:
         members = _ops.read_set(
-            CLAUDE_CREDENTIALS_SET_ID, org=_credentials_org(),
+            CLAUDE_CREDENTIALS_SET_ID, org=_credentials_org(), peers=[],
         )
     except Exception:
         logger.exception("session_launcher: read_set(claude.credentials) failed")
@@ -437,7 +440,7 @@ def _claude_usage_rows() -> list[dict]:
         return []
     try:
         members = settings_ops.read_set(
-            hus.HARNESS_USAGE_SET_ID, org=settings_ops.CALLER_ORG,
+            hus.HARNESS_USAGE_SET_ID, org=_credentials_org(), peers=[],
         )
     except Exception:
         return []
@@ -493,6 +496,31 @@ def _is_usage_stale(payload: dict, *, now: datetime) -> bool:
     except (TypeError, ValueError):
         return True
     return (now - ts) > HARNESS_USAGE_CACHE_TTL
+
+
+def _is_usage_usable(payload: dict) -> bool:
+    """``True`` only when the row carries real, usable headroom telemetry.
+
+    A *failed* usage poll still writes a fresh row (``status='unavailable'``,
+    empty ``windows``, the error in ``note``) so the dashboard can show the
+    account as degraded instead of dropping it. For token selection that state
+    is **usage-unknown**, not **zero-headroom**: counting it as fresh telemetry
+    lets its 0 score lose the max-min comparison every time and silently
+    starves the account. Excluding it makes the "all tokens have fresh usage"
+    gate fail, so an unknown-usage account falls through to the random branch
+    and is still selected with real probability.
+    """
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("status") not in (None, "ok"):
+        return False
+    windows = payload.get("windows")
+    if not isinstance(windows, dict) or not windows:
+        return False
+    return any(
+        isinstance(w, dict) and isinstance(w.get("used_percent"), (int, float))
+        for w in windows.values()
+    )
 
 
 def _credentials_alias_for_org(creds_rows: list[Any], org_uuid: str) -> str | None:
@@ -583,6 +611,13 @@ def _resolve_credentials_via_substrate(
             if not isinstance(account_id, str) or not account_id:
                 continue
             if _is_usage_stale(payload, now=now):
+                continue
+            if not _is_usage_usable(payload):
+                # Fresh-but-failed telemetry (429 / status=unavailable / empty
+                # windows) is usage-UNKNOWN, not zero headroom. Leaving it out
+                # drops the "all tokens fresh" gate → random branch → the
+                # account is still selected with real probability instead of
+                # being silently starved by a losing 0 score.
                 continue
             usage_by_org[account_id] = payload
 
