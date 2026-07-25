@@ -11056,7 +11056,11 @@ def _dashboard_default_org() -> str:
 
 
 def _harness_usage_org() -> str:
-    return _dashboard_default_org()
+    # Claude credential/usage rows are host-local, per-instance secrets —
+    # pinned to personal.db (read with peers=[]), independent of the dashboard
+    # shell's default org, so the poller write, launcher, refresh, and CLI all
+    # converge on the same rows. (Do NOT route these through the shell org.)
+    return "personal"
 
 
 def _should_run_harness_usage_poller() -> bool:
@@ -11326,7 +11330,7 @@ def _collect_claude_usage_payloads(
     payloads: dict[str, dict[str, Any]] = {}
     org = _harness_usage_org()
     try:
-        members = graph_ops_local.read_set(CLAUDE_CREDENTIALS_SET_ID, org=org)
+        members = graph_ops_local.read_set(CLAUDE_CREDENTIALS_SET_ID, org=org, peers=[])
     except Exception:
         logger.exception(
             "claude harness usage: read_set(%s) failed; tick aborted",
