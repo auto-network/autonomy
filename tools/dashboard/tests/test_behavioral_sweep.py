@@ -5763,6 +5763,147 @@ class TestApprovalRequired:
         assert c["stale_can_cancel"] is True
 
 
+ORG_JOIN_APPROVAL_CHECKS = """(async () => {
+    var r = {};
+    var sleep = function(ms) { return new Promise(resolve => setTimeout(resolve, ms)); };
+    var tick = async function() { await Alpine.nextTick(); await sleep(80); };
+    var q = function(id) { return document.querySelector('[data-testid="' + id + '"]'); };
+    var data = window._worktreeReviewOverlay;
+    if (!data) return JSON.stringify({error: 'no review-overlay component'});
+
+    var expiry = 1900000000123;
+    var payload = {
+        org: '11111111-1111-4111-8111-111111111111',
+        target_uuid: '11111111-1111-4111-8111-111111111111',
+        target_type: 'org:join',
+        invite_ref: 'ef'.repeat(32),
+        expires_at: expiry,
+        meta: {label: 'Member invitation'},
+    };
+    var approval = {
+        id: 'apr-org-join', kind: 'link_publish', session: 'auto-agent-1',
+        request: {
+            org: 'netorg',
+            target_uuid: payload.target_uuid,
+            target_type: payload.target_type,
+            invite_ref: payload.invite_ref,
+            expires_at: expiry,
+            meta: payload.meta,
+        },
+        target_title: 'Invitation to member',
+        type_label: 'Invitation',
+        absolute_expiry: expiry,
+        acting_identity: {slug: 'netorg', name: 'Network Org'},
+        actor_identity: {display_name: 'Alex Operator', root_pub: 'aa'.repeat(32)},
+        registry_request: {
+            method: 'POST', path: '/v1/links',
+            registry_url: 'https://registry.test', payload: payload,
+        },
+    };
+    var authority = false, signed = [], posted = [];
+    var origFetch = window.fetch;
+    var origSigner = window.AutonomyNetworkSigner;
+    var origSession = window.AutonomyNetworkSession;
+    var origToast = window.showToast;
+    try {
+        window.showToast = function() {};
+        window.AutonomyNetworkSession = {
+            state: function() {
+                return authority
+                    ? {signedIn: true, org: payload.org,
+                       subject: {kind: 'operator', id: 'browser-test'}}
+                    : {signedIn: false};
+            },
+            signOn: async function(password) {
+                if (password !== 'correct password') throw new Error('wrong passphrase');
+                authority = true;
+            },
+            signOut: async function() { authority = false; },
+        };
+        window.AutonomyNetworkSigner = {
+            available: function() { return authority; },
+            signRegistryRequest: async function(method, path, exactPayload) {
+                signed.push({method: method, path: path, payload: exactPayload});
+                return {
+                    v: 1, signer: 'ab', ts: 123, payload: exactPayload,
+                    sig: 'cd', cert: '{"stub":true}',
+                };
+            },
+        };
+        window.fetch = async function(url, opts) {
+            var u = String(url);
+            if (u.indexOf('/decision') !== -1) {
+                posted.push(JSON.parse((opts || {}).body || '{}'));
+                return {ok: true, json: async function() { return {ok: true}; }};
+            }
+            if (u.indexOf('?wait=20') !== -1) {
+                return {ok: true, json: async function() {
+                    return {result: {execution: {ok: true, token: 'registry-token'}}};
+                }};
+            }
+            return origFetch.call(this, url, opts);
+        };
+
+        await data._approvalKinds.link_publish.open(data, approval);
+        await tick();
+        var sheet = q('approval-sheet');
+        var duration = sheet.querySelector('[data-testid="approval-duration"]');
+        r.fixed_expiry = data.approvalRequest.fixedExpiry;
+        r.duration_hidden = !!duration &&
+            getComputedStyle(duration.parentElement).display === 'none';
+        r.expiry_visible = (sheet.textContent || '')
+            .indexOf(new Date(expiry).toLocaleString()) !== -1;
+        var password = sheet.querySelector('[data-testid="approval-password"]');
+        password.value = 'correct password';
+        password.dispatchEvent(new Event('input', {bubbles: true}));
+        await data.approveRequest();
+        await tick();
+        r.signed = signed[0];
+        r.decision = posted[0];
+    } catch (err) {
+        r.error = String(err && err.stack ? err.stack : err);
+    } finally {
+        window.fetch = origFetch;
+        window.AutonomyNetworkSigner = origSigner;
+        window.AutonomyNetworkSession = origSession;
+        if (origToast) window.showToast = origToast; else delete window.showToast;
+        data.approvalRequest = null;
+    }
+    return JSON.stringify(r);
+})()"""
+
+
+def test_org_join_approval_signs_fixed_absolute_expiry(browser):
+    checks = _navigate_and_eval_async(
+        "/worktrees", ORG_JOIN_APPROVAL_CHECKS, wait_ms=1200)
+    assert not checks.get("error"), checks.get("error")
+    assert checks["fixed_expiry"] is True, checks
+    assert checks["duration_hidden"] is True, checks
+    assert checks["expiry_visible"] is True
+    expected_payload = {
+        "org": "11111111-1111-4111-8111-111111111111",
+        "target_uuid": "11111111-1111-4111-8111-111111111111",
+        "target_type": "org:join",
+        "invite_ref": "ef" * 32,
+        "expires_at": 1900000000123,
+        "meta": {"label": "Member invitation"},
+    }
+    assert checks["signed"] == {
+        "method": "POST", "path": "/v1/links", "payload": expected_payload,
+    }
+    assert checks["decision"] == {
+        "approved": True,
+        "envelope": {
+            "v": 1,
+            "signer": "ab",
+            "ts": 123,
+            "payload": expected_payload,
+            "sig": "cd",
+            "cert": '{"stub":true}',
+        },
+    }
+
+
 class TestJiraCreateApprovalPreview:
     """Creation descriptions render as readable text, outside the fields JSON."""
 

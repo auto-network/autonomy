@@ -56,6 +56,7 @@ import asyncio
 import copy
 import re
 import time
+import uuid
 
 import httpx
 
@@ -79,6 +80,7 @@ _TYPE_LABELS = {
     "design": "Design",
     "note": "Note",
     "file": "File",
+    "org:join": "Invitation",
 }
 
 
@@ -143,7 +145,92 @@ def _is_registerable_on_first_publish(org: str | None) -> bool:
     return _org_has_key(org)
 
 
-def _resolve_target(target_type: str, target_uuid: str, org: str | None) -> dict:
+def _org_join_request(request: dict) -> dict:
+    """Validate an org:join mint against the org's own invitation ledger."""
+    from tools.network.ledger import INVITE_LIVE, LedgerStore, org_ledger_db_path
+
+    allowed = {
+        "org",
+        "target_uuid",
+        "target_type",
+        "invite_ref",
+        "expires_at",
+        "meta",
+    }
+    unknown = set(request) - allowed
+    if unknown:
+        raise ValueError(
+            f"org:join publish carries unknown fields: {sorted(unknown)}"
+        )
+    org = request.get("org")
+    invite_ref = request.get("invite_ref")
+    target_uuid = request.get("target_uuid")
+    expires_at = request.get("expires_at")
+    meta = request.get("meta") or {}
+    if not isinstance(org, str) or not org:
+        raise ValueError("org:join publish requires the local org slug")
+    if (
+        not isinstance(invite_ref, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", invite_ref)
+    ):
+        raise ValueError("org:join publish requires a lowercase invite_ref")
+    try:
+        uuid.UUID(str(target_uuid))
+    except (ValueError, AttributeError):
+        raise ValueError("org:join target_uuid must be the organization UUID")
+    if type(expires_at) is not int or expires_at < 0:
+        raise ValueError("org:join expires_at must be a unix-ms integer")
+    if not isinstance(meta, dict) or "ttl" in meta:
+        raise ValueError(
+            "org:join lifetime is fixed to the invite; meta.ttl is forbidden"
+        )
+    if set(meta) - {"label"}:
+        raise ValueError("org:join meta may carry only label")
+
+    path = org_ledger_db_path(org)
+    if not path.exists():
+        raise ValueError("organization authority ledger is not founded")
+    try:
+        with LedgerStore(path) as store:
+            invite = store.get(invite_ref)
+            if invite.type != "invite":
+                raise ValueError("invite_ref does not name an invitation")
+            state = store.fold(now=int(time.time() * 1000))
+            if state.invites.get(invite_ref) != INVITE_LIVE:
+                raise ValueError("the invitation is no longer live")
+            org_uuid = store.get(store.ledger.genesis_id).payload["org"]
+            if target_uuid != org_uuid:
+                raise ValueError(
+                    "org:join target_uuid does not match the founded organization"
+                )
+            if expires_at != invite.payload["expiry"]:
+                raise ValueError(
+                    "org:join expires_at must equal the invitation expiry"
+                )
+            if "token_hash" not in invite.payload:
+                raise ValueError("org:join links require a bearer invitation")
+            return {
+                "title": f"Invitation to {invite.payload['granted_role']}",
+                "expiry": expires_at,
+                "org_uuid": org_uuid,
+            }
+    except KeyError:
+        raise ValueError("invite_ref is not in the organization ledger")
+
+
+def prepare_create(_session: str, request: dict) -> tuple[dict, None]:
+    """Fail closed before persisting an invalid org:join publish request."""
+    if request.get("target_type") == "org:join":
+        _org_join_request(request)
+    return copy.deepcopy(request), None
+
+
+def _resolve_target(
+    target_type: str,
+    target_uuid: str,
+    org: str | None,
+    request: dict | None = None,
+) -> dict:
     """Resolve what is being shared from TRUSTED local stores.
 
     Returns ``{"title": str | None, "error": str | None}``. The title is
@@ -151,6 +238,12 @@ def _resolve_target(target_type: str, target_uuid: str, org: str | None) -> dict
     too — the operator can still decline, but never approves blind.
     """
     try:
+        if target_type == "org:join":
+            details = _org_join_request(request or {})
+            return {
+                "title": details["title"],
+                "error": None,
+            }
         if target_type in ("present", "design"):
             from agents.design_db import get_design
             design = get_design(target_uuid)
@@ -227,6 +320,9 @@ def _registry_payload(req: dict, binding: dict) -> dict:
     meta = req.get("meta") or {}
     if meta:
         payload["meta"] = meta
+    if req.get("target_type") == "org:join":
+        payload["invite_ref"] = req["invite_ref"]
+        payload["expires_at"] = req["expires_at"]
     return payload
 
 
@@ -269,7 +365,12 @@ def _enrich_link_publish(row: dict) -> dict:
     req = row["request"]
     org = req.get("org")
     meta = req.get("meta") or {}
-    target = _resolve_target(req.get("target_type", ""), req.get("target_uuid", ""), org)
+    target = _resolve_target(
+        req.get("target_type", ""),
+        req.get("target_uuid", ""),
+        org,
+        req,
+    )
     staged, binding_error, drift = _staged_registry_request(
         row,
         lambda binding: {
@@ -303,6 +404,7 @@ def _enrich_link_publish(row: dict) -> dict:
         "type_label": _TYPE_LABELS.get(req.get("target_type", ""), req.get("target_type")),
         "ttl": meta.get("ttl"),
         "label": meta.get("label"),
+        "absolute_expiry": req.get("expires_at"),
         "binding_error": binding_error,
         "binding_drift": drift,
         "registration_required": registration_required,
@@ -524,6 +626,11 @@ def _registry_error(resp: httpx.Response) -> str:
 async def _execute_link_publish(row: dict, decision: dict) -> dict:
     req = row["request"]
     org = req.get("org")
+    if req.get("target_type") == "org:join":
+        try:
+            _org_join_request(req)
+        except ValueError as exc:
+            return _fail(str(exc))
     envelope, subject, err = _envelope_and_subject(decision)
     if err:
         return _fail(err)
@@ -560,6 +667,14 @@ async def _execute_link_publish(row: dict, decision: dict) -> dict:
     if not isinstance(token, str) or not _TOKEN_RE.match(token):
         # I2 tripwire: only a CSPRNG-shaped opaque token enters the cache.
         return _fail("registry returned a malformed grant token — not caching it")
+    if (
+        req.get("target_type") == "org:join"
+        and body.get("expires_at") != req.get("expires_at")
+    ):
+        return _fail(
+            "registry did not preserve the invitation-aligned expiry — "
+            "not caching the link"
+        )
     grant = {
         "token": token,
         "url": url,
@@ -569,6 +684,8 @@ async def _execute_link_publish(row: dict, decision: dict) -> dict:
         "subject": subject,  # I6: the issuing cert's subject
         "issued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if req.get("target_type") == "org:join":
+        grant["invite_ref"] = req["invite_ref"]
     settings_ops.upsert_by_key(
         NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION,
         token, grant, org=org,

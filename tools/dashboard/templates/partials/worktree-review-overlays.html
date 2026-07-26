@@ -611,7 +611,8 @@
                         @click="approvalRequest.previewOpen = true">View note</button>
               </div>
             </div>
-            <div class="grid grid-cols-[6.5rem_minmax(0,1fr)] items-center gap-3 border-b border-slate-800 py-3 text-sm">
+            <div x-show="!approvalRequest.fixedExpiry"
+                 class="grid grid-cols-[6.5rem_minmax(0,1fr)] items-center gap-3 border-b border-slate-800 py-3 text-sm">
               <label for="approval-duration" class="text-slate-500">Duration</label>
               <select id="approval-duration"
                       @change="approvalRequest.duration = $event.target.value"
@@ -625,6 +626,12 @@
                 <option value="31536000" :selected="approvalRequest.duration === $el.value">1 Year</option>
                 <option value="none" :selected="approvalRequest.duration === $el.value">No expiration</option>
               </select>
+            </div>
+            <div x-show="approvalRequest.fixedExpiry"
+                 class="grid grid-cols-[6.5rem_minmax(0,1fr)] items-center gap-3 border-b border-slate-800 py-3 text-sm">
+              <span class="text-slate-500">Expires</span>
+              <span class="text-slate-200"
+                    x-text="approvalRequest.fixedExpiryLabel"></span>
             </div>
             <div class="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-3 py-3 text-sm">
               <span class="text-slate-500">Service</span>
