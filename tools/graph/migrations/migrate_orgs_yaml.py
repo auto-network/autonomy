@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -35,6 +34,7 @@ from typing import Any
 
 import yaml
 
+from tools.data_paths import resolve_orgs_root
 from tools.graph import org_ops, schemas
 from tools.graph.db import GraphDB
 from tools.graph.org_ops import uuid7
@@ -346,10 +346,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    orgs_dir = args.orgs_dir
-    if orgs_dir is None:
-        env = os.environ.get("AUTONOMY_ORGS_DIR")
-        orgs_dir = Path(env) if env else DEFAULT_ORGS_DIR
+    orgs_dir = resolve_orgs_root(args.orgs_dir, default=DEFAULT_ORGS_DIR)
 
     try:
         report = build_plan(args.projects_yaml, orgs_dir)

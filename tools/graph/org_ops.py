@@ -26,6 +26,8 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any
 
+from tools.data_paths import resolve_orgs_root
+
 from .db import GraphDB
 from . import schemas
 from .schemas.registry import SchemaValidationError
@@ -165,12 +167,7 @@ def _now_iso() -> str:
 
 
 def _orgs_dir(root: Path | str | None = None) -> Path:
-    if root is not None:
-        return Path(root)
-    env = os.environ.get("AUTONOMY_ORGS_DIR")
-    if env:
-        return Path(env)
-    return DEFAULT_ORGS_DIR
+    return resolve_orgs_root(root, default=DEFAULT_ORGS_DIR)
 
 
 def _slug_db_path(slug: str, root: Path | str | None = None) -> Path:

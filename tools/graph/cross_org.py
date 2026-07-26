@@ -32,6 +32,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
 
+from tools.data_paths import resolve_orgs_root
+
 from .db import GraphDB, resolve_caller_db_path
 
 
@@ -54,10 +56,7 @@ OWN_ORG_BOOST = 1.5
 def _orgs_root() -> Path:
     """Return ``data/orgs/`` honouring ``AUTONOMY_ORGS_DIR`` override."""
     from .db import DEFAULT_ORGS_DIR  # avoid circular at import time
-    env = os.environ.get("AUTONOMY_ORGS_DIR")
-    if env:
-        return Path(env)
-    return DEFAULT_ORGS_DIR
+    return resolve_orgs_root(None, default=DEFAULT_ORGS_DIR)
 
 
 def list_org_slugs(*, root: Path | str | None = None) -> list[str]:

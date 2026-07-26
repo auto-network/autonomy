@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -55,6 +54,7 @@ from typing import Any
 
 import yaml
 
+from tools.data_paths import resolve_orgs_root
 from tools.graph import org_ops, schemas
 from tools.graph.db import GraphDB
 from tools.graph.org_ops import uuid7
@@ -262,10 +262,7 @@ def build_plan(
 
 
 def _resolve_orgs_dir(orgs_root: Path | str | None) -> Path:
-    if orgs_root is not None:
-        return Path(orgs_root)
-    env = os.environ.get("AUTONOMY_ORGS_DIR")
-    return Path(env) if env else DEFAULT_ORGS_DIR
+    return resolve_orgs_root(orgs_root, default=DEFAULT_ORGS_DIR)
 
 
 # ── Plan → DB ───────────────────────────────────────────────
