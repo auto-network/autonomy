@@ -254,6 +254,7 @@ class FoldState:
         self.invites: Dict[str, str] = folder.invite_statuses(ctx)
         self.checkpoints: tuple = folder.checkpoints_at(ctx)
         self.loss_heads: tuple = folder.loss_heads_at(ctx)
+        self.delegation_parents: Dict[str, tuple] = folder.delegation_parents_at(ctx)
 
     # -- queries ---------------------------------------------------------------
 
@@ -1123,6 +1124,17 @@ class _Folder:
 
     def checkpoints_at(self, ctx: frozenset) -> tuple:
         return tuple(sorted(cid for cid in self.checkpoint_ids if cid in ctx and self.valid[cid]))
+
+    def delegation_parents_at(self, ctx: frozenset) -> Dict[str, tuple]:
+        """Delegation edges the authority fixpoint admits: each grant child
+        key -> the sorted authors of its issuance-valid, usable grants at
+        *ctx*. Read-only view for chain resolution (storage acceptance
+        resolves a delegated actor key upward to a member persona)."""
+        parents: Dict[str, set] = {}
+        for gid, g in self.grants.items():
+            if gid in ctx and self.valid[gid] and self._grant_usable(g, ctx, frozenset(), self.now):
+                parents.setdefault(g.child, set()).add(g.author)
+        return {child: tuple(sorted(authors)) for child, authors in parents.items()}
 
     def loss_heads_at(self, ctx: frozenset) -> tuple:
         """The maximal valid access contractions in *ctx* (RequiredLossHeads).
