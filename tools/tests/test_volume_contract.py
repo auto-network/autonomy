@@ -85,6 +85,20 @@ def test_resolver_precedence_is_env_then_root():
         os.environ.pop(store.env, None)
 
 
+def test_serving_key_store_has_portable_env_root_and_historical_default(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.delenv("AUTONOMY_NETWORK_KEY_DIR", raising=False)
+    monkeypatch.delenv(REFUSE_REAL_DATA_FALLBACK_ENV, raising=False)
+    assert resolve_store("serving_keys") == DEFAULT_DATA_ROOT / "network"
+    assert resolve_store("serving_keys", root=tmp_path) == tmp_path / "network"
+
+    override = tmp_path / "elsewhere" / "keys"
+    monkeypatch.setenv("AUTONOMY_NETWORK_KEY_DIR", str(override))
+    assert resolve_store("serving_keys", root=tmp_path) == override
+
+
 def test_unrooted_resolution_raises_under_the_guard(monkeypatch):
     monkeypatch.setenv(REFUSE_REAL_DATA_FALLBACK_ENV, "1")
     for store in STORE_MANIFEST:

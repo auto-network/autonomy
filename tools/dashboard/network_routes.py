@@ -52,6 +52,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from tools.data_paths import resolve_store
 from tools.graph import settings_ops
 # Importing registers the autonomy.network.* Setting schemas (they
 # self-register on import).
@@ -64,11 +65,6 @@ from tools.graph.schemas.network_identity import (  # noqa: F401
     NETWORK_SERVE_CERT_SET_ID,
     SERVE_CERT_SCOPE,
 )
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-#: where serving delegates' 0600 key files live — the same data/ dir the TLS
-#: key uses, gitignored, process-user-readable only (never the settings store).
-SERVE_KEY_DIR = REPO_ROOT / "data" / "network"
 
 DEFAULT_REGISTRY_URL = "https://registry.auto.network"
 
@@ -1139,7 +1135,11 @@ async def post_serve_cert(request: Request) -> JSONResponse:
 
     # Key filename is discriminated by the immutable org UUID (the settings
     # 'org' is a caller sentinel, not a filesystem-safe name).
-    key_path = SERVE_KEY_DIR / f"serve-{org_uuid}.key"
+    # Persist only the portable basename in Settings. The current node's
+    # manifest-rooted serving-key directory is resolved at every read, so a
+    # restored volume does not retain the source node's absolute path.
+    key_file = f"serve-{org_uuid}.key"
+    key_path = resolve_store("serving_keys") / key_file
     try:
         _write_serve_key(key_path, body["private_key"])
     except Exception as e:
@@ -1148,7 +1148,7 @@ async def post_serve_cert(request: Request) -> JSONResponse:
     try:
         settings_ops.upsert_by_key(
             NETWORK_SERVE_CERT_SET_ID, NETWORK_SERVE_CERT_REVISION, "default",
-            {"cert": body["cert"], "key_path": str(key_path),
+            {"cert": body["cert"], "key_path": key_file,
              "root_pub": root_pub, "not_after": cert.not_after},
             org=org,
         )

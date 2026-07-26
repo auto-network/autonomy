@@ -196,6 +196,7 @@ persistent state:
 | `commit_workflow.db` | `COMMIT_WORKFLOW_DB` | commit-workflow store |
 | `dashboard_identity_sessions.db` | `DASHBOARD_IDENTITY_SESSION_DB` | identity unlock-session store |
 | `pending_joins.db` | `AUTONOMY_PENDING_JOINS_DB` | restart-safe invite-join progress (identifiers and counts only) |
+| `network`/ | `AUTONOMY_NETWORK_KEY_DIR` | mode-0600 auto.network tunnel-serving delegate keys |
 | `tls.crt` | `AUTONOMY_TLS_CERT` | TLS certificate (self-signed by default) |
 | `tls.key` | `AUTONOMY_TLS_KEY` | TLS private key |
 | `agent-runs`/ | `DASHBOARD_AGENT_RUNS_DIR` | session artifacts |

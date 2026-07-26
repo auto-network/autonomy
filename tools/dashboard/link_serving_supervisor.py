@@ -40,7 +40,9 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
+from tools.data_paths import resolve_store
 from tools.dashboard import link_serving
 from tools.dashboard.link_approvals import _load_binding
 from tools.dashboard.link_probe import registry_to_relay_ws
@@ -56,6 +58,38 @@ from tools.graph.schemas.network_identity import (
 # ── provisioning state (also the enrich precondition) ─────────
 
 
+def _resolve_key_path(stored: object) -> tuple[str | None, str | None]:
+    """Resolve a portable key basename, preserving legacy absolute rows.
+
+    New rows contain exactly one filename and move with the node volume.
+    Existing absolute rows remain valid in place. Any other relative shape is
+    rejected before filesystem access so ``..`` or a nested path cannot
+    escape the manifest-rooted serving-key directory.
+    """
+    if not isinstance(stored, str) or not stored:
+        return None, "serve-cert key_path is missing"
+    path = Path(stored)
+    if path.is_absolute():
+        return str(path), None
+    if (
+        path.name != stored
+        or stored in {".", ".."}
+        or "/" in stored
+        or "\\" in stored
+    ):
+        return None, "serve-cert key_path must be a bare filename"
+    try:
+        root = resolve_store("serving_keys").resolve()
+        resolved = (root / stored).resolve()
+        resolved.relative_to(root)
+    except Exception:
+        return (
+            None,
+            "serve-cert key_path does not resolve inside the serving-key store",
+        )
+    return str(resolved), None
+
+
 def serve_cert_state(org: str | None, *, now: float | None = None) -> dict:
     """The org's serve-cert provisioning state → ``{status, ...}``.
 
@@ -66,6 +100,8 @@ def serve_cert_state(org: str | None, *, now: float | None = None) -> dict:
       NOT mint; the connector CAN run);
     * ``missing`` — no serve-cert row at all;
     * ``expired`` — a row whose delegate has passed ``not_after``;
+    * ``key-invalid`` — a relative key locator is not a safe basename or its
+      manifest root cannot be resolved;
     * ``key-missing`` — a row whose ``key_path`` file is gone.
 
     This doubles as the publish-time precondition: the approve step mints a
@@ -85,8 +121,10 @@ def serve_cert_state(org: str | None, *, now: float | None = None) -> dict:
     not_after = row.get("not_after")
     if not isinstance(not_after, int) or now >= not_after:
         return {"status": "expired", "row": row}
-    key_path = row.get("key_path")
-    if not isinstance(key_path, str) or not key_path or not os.path.isfile(key_path):
+    key_path, key_error = _resolve_key_path(row.get("key_path"))
+    if key_error is not None:
+        return {"status": "key-invalid", "row": row, "error": key_error}
+    if not os.path.isfile(key_path):
         return {"status": "key-missing", "row": row}
     return {
         "status": "ok",
