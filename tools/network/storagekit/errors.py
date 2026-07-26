@@ -27,3 +27,19 @@ class SuiteError(StorageError):
 
 class CommitmentError(StorageError):
     """A secret does not match the commitment a record carries."""
+
+
+class ContentHashMismatchError(StorageError):
+    """A body's bytes do not hash to the header's content address."""
+
+
+class RevisionExistsError(StorageError):
+    """A committed (object, revision) cannot be overwritten with new bytes."""
+
+
+class ObjectNotFoundError(StorageError):
+    """No object row for the requested (object, revision)."""
+
+
+class BodyNotFoundError(StorageError):
+    """The referenced body row or blob file is absent."""
