@@ -6,6 +6,7 @@ import {
   decryptArmor,
   importEd25519RootSigningKey,
 } from './ceremony/primitives.js';
+import { createBrowserStorage } from './ceremony/storage.js';
 
 var CryptoKeyConstructor = globalThis.CryptoKey;
 if (
@@ -592,6 +593,14 @@ var signRegistryRequestCore;
   if (typeof window !== 'undefined') {
     window.AutonomyNetworkSigner = networkSigner;
     window.AutonomyNetworkSession = networkSession;
+    configure({
+      storage: createBrowserStorage(),
+      transport: {
+        fetch: function (url, options) {
+          return window.fetch(url, options);
+        },
+      },
+    });
   }
 })();
 
