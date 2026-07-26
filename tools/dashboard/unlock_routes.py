@@ -326,14 +326,10 @@ def human_auth_enrolled() -> bool:
                         and bool(personal.payload.get("armored_private_key")))
         enrolled = has_identity or bool(_passkey_rows())
     except Exception:
-        # No fresh answer. A dashboard that has ever resolved state keeps
-        # its last known posture (a transient read error must not swing a
-        # locked dashboard open); one that never has fails OPEN — that is
-        # the bootstrap case by definition. Stamp ``at`` so a persistent
-        # read outage doesn't turn every gated request into a fresh failed
-        # read on the event loop (amortize the failure like a success).
-        _enforce_cache["at"] = now
-        return bool(_enforce_cache["value"])
+        # Storage unreadable means enrollment is unverifiable, so enforce.
+        # A fresh install reads empty and never reaches this branch;
+        # DASHBOARD_AUTH remains the recovery path for a wedged store.
+        return True
     _enforce_cache["value"] = enrolled
     _enforce_cache["at"] = now
     return enrolled

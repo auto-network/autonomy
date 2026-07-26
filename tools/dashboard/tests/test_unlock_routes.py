@@ -469,6 +469,59 @@ def test_kill_switch_beats_wedged_enrollment_read(env, root, monkeypatch):
     assert env.get("/beads").status_code == 200
 
 
+class TestGateFailsClosedOnReadError:
+    def test_enrolled_cold_cache_fails_closed(self, env, root, monkeypatch):
+        _store_identity(env, root)
+        unlock_routes._enforce_cache.update({"at": 0.0, "value": None})
+
+        def unavailable():
+            raise RuntimeError("settings DB unavailable")
+
+        monkeypatch.setattr(unlock_routes, "_personal_member", unavailable)
+
+        assert unlock_routes.human_auth_enrolled() is True
+        # A failure is not cached, so recovery is observed on the next call.
+        assert unlock_routes._enforce_cache == {"at": 0.0, "value": None}
+
+    def test_fresh_missing_store_reads_empty_and_stays_open(
+            self, env, tmp_path):
+        personal_db = tmp_path / "graph.db"
+        assert not personal_db.exists()
+
+        assert unlock_routes.human_auth_enrolled() is False
+        assert personal_db.exists()
+
+    def test_dashboard_auth_off_bypasses_unreadable_store(
+            self, env, monkeypatch):
+        reads = 0
+
+        def unavailable():
+            nonlocal reads
+            reads += 1
+            raise RuntimeError("settings DB unavailable")
+
+        monkeypatch.setattr(unlock_routes, "_personal_member", unavailable)
+        unlock_routes._enforce_cache.update({"at": 0.0, "value": None})
+        monkeypatch.setenv("DASHBOARD_AUTH", "off")
+
+        assert env.get("/beads").status_code == 200
+        assert reads == 0
+
+    @pytest.mark.parametrize("cached", [False, True])
+    def test_warm_cache_is_returned_without_read(
+            self, env, monkeypatch, cached):
+        now = 10_000.0
+        unlock_routes._enforce_cache.update({"at": now, "value": cached})
+        monkeypatch.setattr(unlock_routes, "_now", lambda: now + 1.0)
+
+        def unavailable():
+            raise AssertionError("warm cache must avoid enrollment read")
+
+        monkeypatch.setattr(unlock_routes, "_personal_member", unavailable)
+
+        assert unlock_routes.human_auth_enrolled() is cached
+
+
 def test_store_failure_is_closed_when_enrolled_but_kill_switch_escapes(
         env, root, monkeypatch):
     _store_identity(env, root)
