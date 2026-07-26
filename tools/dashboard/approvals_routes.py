@@ -103,6 +103,7 @@ from tools.dashboard import dashboard_access_approvals as _dashboard_access
 # request plus a server-frozen staged context. Kinds absent here retain the
 # generalized primitive's historical pass-through behavior.
 PREPARE_CREATE = {
+    "link_publish": _link_approvals.prepare_create,
     **_dashboard_access.PREPARE_CREATE,
 }
 AUTHORIZE_DECISION = {

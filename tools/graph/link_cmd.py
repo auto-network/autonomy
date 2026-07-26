@@ -16,20 +16,24 @@ a clean message, not an error dump.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import ssl
 import sys
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
 from .duration import parse_duration
 
-LINK_TARGET_TYPES = ("present", "design", "note", "file")
+LINK_TARGET_TYPES = ("present", "design", "note", "file", "org:join")
 
 _TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+_EVENT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _UUIDISH_RE = re.compile(r"^[0-9a-fA-F-]{8,36}$")
 
 # One held GET per iteration; the server caps the hold at 60s.
@@ -150,6 +154,80 @@ def _resolve_uuid_target(target_id: str, target_type: str) -> str:
     return full_id
 
 
+def _org_join_invite(org: str, invite_ref: str) -> dict:
+    """Resolve the invitation from the org's verified local ledger."""
+    from tools.network.ledger import INVITE_LIVE, LedgerStore, org_ledger_db_path
+
+    if not isinstance(invite_ref, str) or not _EVENT_ID_RE.fullmatch(invite_ref):
+        _fail("org:join target must be a 64-char lowercase invite event id")
+    path = org_ledger_db_path(org)
+    if not path.exists():
+        _fail(f"organization {org!r} has no founded authority ledger")
+    try:
+        with LedgerStore(path) as store:
+            invite = store.get(invite_ref)
+            if invite.type != "invite":
+                _fail(f"{invite_ref} is not an invitation event")
+            state = store.fold(now=int(time.time() * 1000))
+            if state.invites.get(invite_ref) != INVITE_LIVE:
+                _fail("that invitation is no longer live")
+            genesis = store.get(store.ledger.genesis_id)
+            return {
+                "org_uuid": genesis.payload["org"],
+                "invite_ref": invite_ref,
+                "expiry": invite.payload["expiry"],
+                "token_hash": invite.payload.get("token_hash"),
+            }
+    except KeyError:
+        _fail(f"invitation {invite_ref} is not in {org!r}'s authority ledger")
+
+
+def _invite_token(args, expected_hash: str | None) -> str:
+    """Read the fragment bearer without ever placing it in an HTTP request."""
+    fd = getattr(args, "invite_token_fd", None)
+    if fd is not None:
+        try:
+            token = os.read(fd, 4096).decode("utf-8").rstrip("\r\n")
+        except (OSError, UnicodeError):
+            _fail("could not read the invitation bearer from --invite-token-fd")
+    else:
+        token = os.environ.get("AUTONOMY_INVITE_TOKEN", "")
+    if not token:
+        _fail(
+            "org:join requires the invitation bearer through "
+            "--invite-token-fd or AUTONOMY_INVITE_TOKEN"
+        )
+    if len(token) > 128:
+        _fail("the invitation bearer is malformed")
+    if (
+        not isinstance(expected_hash, str)
+        or hashlib.sha256(token.encode("utf-8")).hexdigest() != expected_hash
+    ):
+        _fail("the supplied invitation bearer does not match that invite")
+    return token
+
+
+def _join_url(grant_url: str, invite_token: str) -> str:
+    if not isinstance(grant_url, str):
+        _fail("the registry returned no invitation grant URL")
+    parsed = urllib.parse.urlsplit(grant_url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        _fail("the registry returned a malformed invitation grant URL")
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, "", "t=" + urllib.parse.quote(
+            invite_token,
+            safe="",
+        ))
+    )
+
+
 def _await_decision(approval_id: str, verb: str) -> dict:
     """Block on the held GET until the operator decides; return the result.
 
@@ -206,6 +284,11 @@ def cmd_link_publish(args) -> None:
 
     meta: dict = {}
     if getattr(args, "ttl", None):
+        if target_type == "org:join":
+            _fail(
+                "org:join lifetime is fixed to the invitation expiry; "
+                "do not pass --ttl"
+            )
         try:
             ttl = int(parse_duration(args.ttl))
         except (ValueError, TypeError):
@@ -216,17 +299,32 @@ def cmd_link_publish(args) -> None:
     if getattr(args, "label", None):
         meta["label"] = args.label
 
-    if target_type in ("present", "design"):
+    invite_token = None
+    invite_ref = None
+    expires_at = None
+    if target_type == "org:join":
+        invite = _org_join_invite(org, target_id)
+        invite_token = _invite_token(args, invite["token_hash"])
+        target_uuid = invite["org_uuid"]
+        invite_ref = invite["invite_ref"]
+        expires_at = invite["expiry"]
+    elif target_type in ("present", "design"):
         target_uuid = _resolve_design_target(target_id, target_type)
     else:
         target_uuid = _resolve_uuid_target(target_id, target_type)
 
     request = {"org": org, "target_uuid": target_uuid,
                "target_type": target_type, "meta": meta}
+    if target_type == "org:join":
+        request["invite_ref"] = invite_ref
+        request["expires_at"] = expires_at
     approval_id = _post_approval("link_publish", request)
     print(f"⧗ share-link approval requested ({approval_id}) — waiting for the operator…")
     execution = _await_decision(approval_id, "share-link publish")
-    print(f"✓ share-link published: {execution.get('url')}")
+    url = execution.get("url")
+    if target_type == "org:join":
+        url = _join_url(url, invite_token)
+    print(f"✓ share-link published: {url}")
     print(f"  token: {execution.get('token')}")
 
 

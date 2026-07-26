@@ -260,9 +260,26 @@
       }
     }
 
-    const ttl = req.duration === 'none' ? null
-      : (req.duration === 'custom' ? req.customDurationSeconds : Number(req.duration));
-    const payload = _linkPayloadWithTtl(rr.payload, ttl);
+    const isOrgJoin = rr.payload && rr.payload.target_type === 'org:join';
+    let ttl = null;
+    let payload;
+    if (isOrgJoin) {
+      const invitation = await import('../ceremony/invitation.js');
+      payload = invitation.buildOrgJoinGrantPayload({
+        orgUuid: rr.payload.org,
+        inviteId: rr.payload.invite_ref,
+        inviteExpiry: rr.payload.expires_at,
+      });
+      if (rr.payload.meta && Object.keys(rr.payload.meta).length) {
+        payload.meta = JSON.parse(JSON.stringify(rr.payload.meta));
+      }
+    } else {
+      ttl = req.duration === 'none' ? null
+        : (req.duration === 'custom'
+          ? req.customDurationSeconds
+          : Number(req.duration));
+      payload = _linkPayloadWithTtl(rr.payload, ttl);
+    }
     try {
       let envelope;
       try {
@@ -270,7 +287,7 @@
       } catch (error) {
         throw new Error('This approval could not be signed. Unlock it again and retry.');
       }
-      return { envelope, ttl };
+      return isOrgJoin ? { envelope } : { envelope, ttl };
     } finally {
       // Unchecked is deliberately one action only. Checked retains the
       // non-extractable authority, never the password; Lock clears this same
@@ -2255,6 +2272,7 @@
             const currentDuration = r.ttl == null ? '604800' : String(r.ttl);  // default 1 week when no TTL was requested
             const customDuration = r.ttl != null && !_LINK_DURATION_VALUES.has(currentDuration);
             const duration = customDuration ? 'custom' : currentDuration;
+            const fixedExpiry = req.target_type === 'org:join';
             const approval = {
               id: r.id, kind: r.kind, session: r.session,
               gate2: true,
@@ -2264,6 +2282,12 @@
               service: 'auto.network', orgSlug: req.org || '',
               actingIdentity: acting, actorIdentity: actor,
               duration,
+              fixedExpiry,
+              fixedExpiryLabel: fixedExpiry && Number.isSafeInteger(
+                r.absolute_expiry,
+              )
+                ? new Date(r.absolute_expiry).toLocaleString()
+                : '',
               customDurationSeconds: customDuration ? r.ttl : null,
               customDurationLabel: customDuration ? _linkTtlText(r.ttl) : '',
               password: '', showPassword: false,
