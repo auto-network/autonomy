@@ -269,6 +269,15 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
     }
     assert result["expiredStatus"] == {"status": "absent"}
 
+    token_self_position = {
+        "parents": result["tokenSelfClaim"]["event"]["parents"],
+        "hlc": result["tokenSelfClaim"]["event"]["hlc"],
+    }
+    initial_position = {
+        "parents": result["initial"]["event"]["parents"],
+        "hlc": result["initial"]["event"]["hlc"],
+    }
+
     # Bearer safety overrides a role's otherwise self-admitting policy.
     assert result["tokenSelfSubmit"] == {
         "status": "pending",
@@ -280,6 +289,7 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         "have": 0,
         "need": 1,
         "approvals": [],
+        "position": token_self_position,
     }
 
     # Key binding + self policy admits immediately.
@@ -296,6 +306,7 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         "have": 0,
         "need": 2,
         "approvals": [],
+        "position": initial_position,
     }
     assert result["headsAfterPending"] == result["bearerHeads"]
     assert result["badSignatureApproval"] == {
@@ -317,6 +328,7 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         "status": "pending",
         "have": 1,
         "need": 2,
+        "position": initial_position,
     }
     assert result["headsAfterFirstApproval"] == result["bearerHeads"]
     assert result["secondApproval"] == {
@@ -327,6 +339,7 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         "admitting": sorted(
             [founder.public_hex, root.public_hex]
         ),
+        "position": initial_position,
     }
     assert result["readyApproval"] == {
         "status": "ready",
@@ -340,6 +353,7 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
                 extra_approver.public_hex,
             ]
         )[:2],
+        "position": initial_position,
     }
     assert "admitted" not in result["firstApproval"]
     assert "admitted" not in result["secondApproval"]
@@ -353,6 +367,22 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         for entry in result["readyStatus"]["approvals"]
         if entry["key"] in result["readyApproval"]["admitting"]
     ]
+    assert (
+        result["shiftedFinalizeHeads"]
+        != result["readyApproval"]["position"]["parents"]
+    )
+    assert result["finalClaim"]["event"]["parents"] == initial_position["parents"]
+    assert result["finalClaim"]["event"]["hlc"] == initial_position["hlc"]
+    assert (
+        result["finalClaim"]["kemCredential"]["authority_heads"]
+        == initial_position["parents"]
+    )
+    assert (
+        result["finalClaim"]["kemCredential"]["created_hlc"]
+        == initial_position["hlc"]
+    )
+    assert result["mismatchedCredentialHlcRejected"] is True
+    assert result["mismatchedSubmitPositionRejected"] is True
 
     # Only the invitee's re-signed final submit appends and clears staging.
     assert result["admitted"] == {
@@ -498,6 +528,10 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         "have": 0,
         "need": 1,
         "approvals": [],
+        "position": {
+            "parents": list(sponsor_claim.parents),
+            "hlc": sponsor_claim.hlc.to_list(),
+        },
     }
     founder_entry = sign_approval(founder, "member.claim", claim_payload)
     assert claim_service.countersign(
@@ -511,4 +545,172 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         "need": 1,
         "kem_credential": None,
         "admitting": [founder.public_hex],
+        "position": {
+            "parents": list(sponsor_claim.parents),
+            "hlc": sponsor_claim.hlc.to_list(),
+        },
     }
+
+    # Staging TTL and pre-migration rows are terminal service outcomes, not
+    # retryable pending states and not countersignature merge targets.
+    with LedgerStore(path) as store:
+        sponsor_key = store.claim_key(
+            invite_event.event_id,
+            sponsor_persona.public_hex,
+        )
+        legacy_key = store.claim_key(
+            self_invite_ref,
+            result["tokenSelfClaim"]["personaPub"],
+        )
+        with store.db:
+            store.db.execute(
+                "UPDATE ledger_pending_claims SET staged_at = 0 "
+                "WHERE claim_key = ?",
+                (sponsor_key,),
+            )
+            store.db.execute(
+                "UPDATE ledger_pending_claims SET parents = NULL "
+                "WHERE claim_key = ?",
+                (legacy_key,),
+            )
+    assert claim_service.status(
+        slug,
+        invite_event.event_id,
+        sponsor_persona.public_hex,
+    ) == {"status": "rejected", "reason": "claim-expired"}
+    sponsor_final, _ = mint_member_claim(
+        sponsor_seed,
+        founded.genesis_id,
+        invite_ref=invite_event.event_id,
+        heads=sponsor_claim.parents,
+        hlc=sponsor_claim.hlc,
+        token=sponsor_token,
+        approvals=[founder_entry],
+    )
+    assert claim_service.submit(slug, sponsor_final.to_json()) == {
+        "status": "rejected",
+        "reason": "claim-expired",
+    }
+    assert claim_service.countersign(
+        slug,
+        invite_event.event_id,
+        sponsor_persona.public_hex,
+        founder_entry,
+    ) == {"status": "rejected", "reason": "claim-expired"}
+    assert claim_service.status(
+        slug,
+        self_invite_ref,
+        result["tokenSelfClaim"]["personaPub"],
+    ) == {"status": "rejected", "reason": "legacy-staging"}
+
+    # cz4fb: a claim staged before invite expiry can finalize after both the
+    # wall clock and current DAG frontier pass expiry, but only at its exact
+    # server-stored position. A current-frontier event keeps both gates.
+    delayed_token = "f6" * 32
+    delayed_seed = bytes(range(1, 33))
+    delayed_expiry = wall_now + 60_000
+    with LedgerStore(path) as store:
+        max_hlc = max(store.get(head).hlc for head in store.heads())
+        delayed_invite = make_event(
+            founder,
+            {
+                "type": "invite",
+                "granted_role": "self-member",
+                "expiry": delayed_expiry,
+                "sponsor": founder.public_hex,
+                "token_hash": hashlib.sha256(
+                    delayed_token.encode("utf-8")
+                ).hexdigest(),
+            },
+            store.heads(),
+            max_hlc.tick(max_hlc.ts),
+        )
+        store.append(delayed_invite)
+        delayed_claim, _ = mint_member_claim(
+            delayed_seed,
+            founded.genesis_id,
+            invite_ref=delayed_invite.event_id,
+            heads=store.heads(),
+            hlc=delayed_invite.hlc.tick(delayed_invite.hlc.ts),
+            token=delayed_token,
+        )
+    assert claim_service.submit(slug, delayed_claim.to_json()) == {
+        "status": "pending",
+        "have": 0,
+        "need": 1,
+    }
+    delayed_persona = derive_persona(delayed_seed, founded.genesis_id)
+    with LedgerStore(path) as store:
+        delayed_key = store.claim_key(
+            delayed_invite.event_id,
+            delayed_persona.public_hex,
+        )
+        staged_at = store.get_pending_claim(delayed_key)["staged_at"]
+    assert claim_service.submit(slug, delayed_claim.to_json()) == {
+        "status": "pending",
+        "have": 0,
+        "need": 1,
+    }
+    with LedgerStore(path) as store:
+        assert store.get_pending_claim(delayed_key)["staged_at"] == staged_at
+
+    delayed_approval = sign_approval(
+        founder,
+        "member.claim",
+        delayed_claim.payload,
+    )
+    delayed_ready = claim_service.countersign(
+        slug,
+        delayed_invite.event_id,
+        delayed_persona.public_hex,
+        delayed_approval,
+    )
+    assert delayed_ready["status"] == "ready"
+    assert delayed_ready["position"] == {
+        "parents": list(delayed_claim.parents),
+        "hlc": delayed_claim.hlc.to_list(),
+    }
+
+    with LedgerStore(path) as store:
+        store.append(make_event(
+            root,
+            {
+                "type": "delegate",
+                "child_pub": KeyPair.generate().public_hex,
+                "scope": ["link:publish"],
+                "can_redelegate": False,
+            },
+            store.heads(),
+            HLC(delayed_expiry + 1_000),
+        ))
+        current_frontier, _ = mint_member_claim(
+            delayed_seed,
+            founded.genesis_id,
+            invite_ref=delayed_invite.event_id,
+            heads=store.heads(),
+            hlc=HLC(delayed_expiry + 2_000),
+            token=delayed_token,
+            approvals=[delayed_approval],
+        )
+    position = delayed_ready["position"]
+    pinned, _ = mint_member_claim(
+        delayed_seed,
+        founded.genesis_id,
+        invite_ref=delayed_invite.event_id,
+        heads=position["parents"],
+        hlc=HLC.from_value(position["hlc"]),
+        token=delayed_token,
+        approvals=[delayed_approval],
+    )
+    monkeypatch.setattr(
+        claim_service.time,
+        "time",
+        lambda: (delayed_expiry + 1_000) / 1_000,
+    )
+    assert claim_service.submit(slug, current_frontier.to_json()) == {
+        "status": "rejected",
+        "reason": "invite-expired",
+    }
+    assert claim_service.submit(slug, pinned.to_json())["status"] == "admitted"
+    with LedgerStore(path) as store:
+        assert delayed_persona.public_hex in store.fold().members

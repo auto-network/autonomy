@@ -44,14 +44,14 @@ function requireHash(value, name) {
   return value;
 }
 
-function normalizeHeads(heads) {
+function normalizeHeads(heads, name = 'context.heads') {
   if (!Array.isArray(heads)) {
-    throw new Error('context.heads must be an array');
+    throw new Error(`${name} must be an array`);
   }
-  const normalized = heads.map((head) => requireHash(head, 'authority head'));
+  const normalized = heads.map((head) => requireHash(head, `${name} entry`));
   const unique = Array.from(new Set(normalized)).sort();
   if (JSON.stringify(unique) !== JSON.stringify(normalized)) {
-    throw new Error('context.heads must be sorted and duplicate-free');
+    throw new Error(`${name} must be sorted and duplicate-free`);
   }
   return unique;
 }
@@ -67,6 +67,21 @@ function normalizeHlc(hlc, name = 'hlc') {
     throw new Error(`${name} must be two non-negative safe integers`);
   }
   return [hlc[0], hlc[1]];
+}
+
+function normalizePosition(position) {
+  if (
+    !position
+    || typeof position !== 'object'
+    || Array.isArray(position)
+    || Object.keys(position).sort().join(',') !== 'hlc,parents'
+  ) {
+    throw new Error('position must be exactly {parents, hlc}');
+  }
+  return {
+    parents: normalizeHeads(position.parents, 'position.parents'),
+    hlc: normalizeHlc(position.hlc, 'position.hlc'),
+  };
 }
 
 function normalizeApprovals(approvals) {
@@ -158,6 +173,7 @@ async function mintMemberClaim({
   kemSeed,
   nowMs = Date.now(),
   credentialHlc = null,
+  position = null,
 }) {
   const resolved = requireContext(context);
   requireHash(inviteRef, 'inviteRef');
@@ -168,10 +184,23 @@ async function mintMemberClaim({
     throw new Error('profile must be an object');
   }
   canonicalJson(profile);
-  const eventHlc = tickHlc(resolved.maxHlc, nowMs);
-  const createdHlc = credentialHlc === null
+  const eventPosition = position === null
+    ? {
+      parents: resolved.heads,
+      hlc: tickHlc(resolved.maxHlc, nowMs),
+    }
+    : normalizePosition(position);
+  const eventHlc = eventPosition.hlc;
+  const requestedCredentialHlc = credentialHlc === null
     ? eventHlc
     : normalizeHlc(credentialHlc, 'credentialHlc');
+  if (
+    position !== null
+    && JSON.stringify(requestedCredentialHlc) !== JSON.stringify(eventHlc)
+  ) {
+    throw new Error('credentialHlc must equal position.hlc when finalizing');
+  }
+  const createdHlc = position === null ? requestedCredentialHlc : eventHlc;
   const seed = new Uint8Array(personalRootSeed);
   const encapsulationSeed = new Uint8Array(kemSeed);
   if (seed.length !== 32) {
@@ -191,7 +220,7 @@ async function mintMemberClaim({
       persona,
       genesisId: resolved.genesisId,
       kemSeed: encapsulationSeed,
-      authorityHeads: resolved.heads,
+      authorityHeads: eventPosition.parents,
       createdHlc,
     }));
   } finally {
@@ -210,7 +239,7 @@ async function mintMemberClaim({
   if (token !== null) payload.token = token;
   const event = await signEvent(buildEvent({
     authorKey: persona.publicHex,
-    parents: resolved.heads,
+    parents: eventPosition.parents,
     hlc: eventHlc,
     payload,
   }), persona.signingKey);
@@ -354,14 +383,27 @@ function requestHeaders(context, json = false) {
   return headers;
 }
 
-async function submitClaim({ context, event }) {
+async function submitClaim({ context, event, position = null }) {
   const resolved = requireContext(context);
+  const expected = position === null
+    ? { parents: resolved.heads, hlc: null }
+    : normalizePosition(position);
   if (
     !event
     || typeof event !== 'object'
-    || JSON.stringify(event.parents) !== JSON.stringify(resolved.heads)
+    || JSON.stringify(event.parents) !== JSON.stringify(expected.parents)
   ) {
-    throw new Error('claim event parents must equal context.heads');
+    throw new Error(
+      position === null
+        ? 'claim event parents must equal context.heads'
+        : 'claim event parents must equal position.parents',
+    );
+  }
+  if (
+    expected.hlc !== null
+    && JSON.stringify(event.hlc) !== JSON.stringify(expected.hlc)
+  ) {
+    throw new Error('claim event hlc must equal position.hlc');
   }
   return fetchJson(
     resolved,

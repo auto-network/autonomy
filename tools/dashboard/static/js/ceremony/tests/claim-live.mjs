@@ -230,8 +230,16 @@ const finalApprovals = admittingApprovals(
   readyStatus.approvals,
   readyApproval.admitting,
 );
+// Simulate a freshly-discovered current frontier that moved while approval
+// was pending. The server-supplied position must override it for both the
+// event and its KEM credential.
+const shiftedFinalizeContext = {
+  ...bearerContext,
+  heads: [fixture.wrong_invite_ref],
+  maxHlc: [readyApproval.position.hlc[0] + 1_000_000, 0],
+};
 const finalClaim = await mintMemberClaim({
-  context: bearerContext,
+  context: shiftedFinalizeContext,
   personalRootSeed: hexToBytes(fixture.personal_seed_hex),
   inviteRef: fixture.invite_ref,
   token: fixture.token,
@@ -239,10 +247,47 @@ const finalClaim = await mintMemberClaim({
   approvals: finalApprovals,
   kemSeed: hexToBytes(fixture.kem_seed_hex),
   nowMs: fixture.lagging_now_ms,
+  position: readyApproval.position,
 });
+let mismatchedCredentialHlcRejected = false;
+try {
+  await mintMemberClaim({
+    context: shiftedFinalizeContext,
+    personalRootSeed: hexToBytes(fixture.personal_seed_hex),
+    inviteRef: fixture.invite_ref,
+    token: fixture.token,
+    profile: fixture.profile,
+    approvals: finalApprovals,
+    kemSeed: hexToBytes(fixture.kem_seed_hex),
+    position: readyApproval.position,
+    credentialHlc: [
+      readyApproval.position.hlc[0],
+      readyApproval.position.hlc[1] + 1,
+    ],
+  });
+} catch {
+  mismatchedCredentialHlcRejected = true;
+}
+let mismatchedSubmitPositionRejected = false;
+try {
+  await submitClaim({
+    context: shiftedFinalizeContext,
+    event: finalClaim.event,
+    position: {
+      parents: readyApproval.position.parents,
+      hlc: [
+        readyApproval.position.hlc[0],
+        readyApproval.position.hlc[1] + 1,
+      ],
+    },
+  });
+} catch {
+  mismatchedSubmitPositionRejected = true;
+}
 const admitted = await submitClaim({
-  context: bearerContext,
+  context: shiftedFinalizeContext,
   event: finalClaim.event,
+  position: readyApproval.position,
 });
 const admittedStatus = await getClaimStatus({
   context: bearerContext,
@@ -316,7 +361,10 @@ process.stdout.write(JSON.stringify({
   finalApprovals,
   headsAfterReadyApproval,
   readyStatus,
+  shiftedFinalizeHeads: shiftedFinalizeContext.heads,
   finalClaim,
+  mismatchedCredentialHlcRejected,
+  mismatchedSubmitPositionRejected,
   admitted,
   admittedStatus,
   expiredStaleSubmit,
