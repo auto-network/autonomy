@@ -1,0 +1,61 @@
+name: Multi-node production-path harness
+
+on:
+  workflow_dispatch:
+    inputs:
+      nodes:
+        description: Number of concurrently available node siblings
+        required: false
+        default: "3"
+        type: string
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  real-docker-ladder:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install host-side harness dependencies
+        run: python3 -m pip install -r deploy/requirements.txt pytest
+
+      - name: Require the real Docker runtime
+        run: |
+          docker version
+          docker compose version
+
+      - name: Validate harness contracts without substituting for Docker
+        run: |
+          set -o pipefail
+          python3 -m pytest deploy/tests/test_multi_node_harness.py -x \
+            2>&1 | tee /tmp/test-results.txt
+
+      - name: Run found-to-restored-C production ladder
+        env:
+          HARNESS_NODES: ${{ inputs.nodes || '3' }}
+        run: |
+          set -o pipefail
+          python3 -m deploy.harness \
+            --project "autonomy-harness-ci-${GITHUB_RUN_ID}" \
+            --nodes "$HARNESS_NODES" \
+            2>&1 | tee /tmp/harness-results.txt
+
+      - name: Preserve harness diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multi-node-harness-${{ github.run_id }}
+          path: |
+            /tmp/test-results.txt
+            /tmp/harness-results.txt
+            harness-artifacts/
+          if-no-files-found: warn
