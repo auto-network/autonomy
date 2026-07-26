@@ -45,10 +45,50 @@ def stub_org_schema():
     return OrgV1
 
 
+#: Creating an org IS the founding ceremony (auto-nixfv): the route
+#: requires the owner's personal-identity password, which authorizes
+#: founding and seals the org key. These tests enroll a throwaway
+#: identity and pass its password, exercising the real ceremony.
+PERSONAL_PASSWORD = "api-orgs-test-password"
+
+
+def create_org_body(slug: str, **extra) -> dict:
+    return {"slug": slug, "personal_password": PERSONAL_PASSWORD, **extra}
+
+
 @pytest.fixture
 def orgs_root(tmp_path, monkeypatch):
     root = tmp_path / "data" / "orgs"
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
+    root.mkdir(parents=True, exist_ok=True)
+
+    # personal.db must exist BEFORE the identity write: settings_ops with
+    # org=None resolves to <orgs>/personal.db only when the file is there,
+    # and the app's startup bootstrap creates it later — so without this
+    # the write and the route's read land in different databases.
+    from tools.graph.db import GraphDB
+
+    GraphDB.create_org_db("personal", type_="personal", root=root).close()
+
+    from tools.graph import settings_ops
+    from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
+    from tools.network.idkit import KeyPair
+    from tools.network.idkit.armor import encrypt_root_key
+
+    owner = KeyPair.generate()
+    with settings_ops.identity_write_context():
+        settings_ops.upsert_by_key(
+            PERSONAL_IDENTITY_SET_ID, 1, "default",
+            {
+                "armored_private_key": encrypt_root_key(
+                    owner, PERSONAL_PASSWORD, iterations=10_000
+                ),
+                "root_pub": owner.public_hex,
+                "display_name": "API Orgs Test",
+                "created_at": "2026-07-26T00:00:00Z",
+            },
+            org=None,
+        )
     return root
 
 
@@ -109,11 +149,13 @@ def test_orgs_show_returns_bootstrap_and_identity(
 
 
 def test_orgs_create(orgs_root, client):
-    r = client.post("/api/orgs", json={"slug": "anchore"})
+    r = client.post("/api/orgs", json=create_org_body("anchore"))
     assert r.status_code == 201
     body = r.json()
-    assert body["slug"] == "anchore"
-    assert body["type"] == "shared"
+    assert body["org"]["slug"] == "anchore"
+    assert body["org"]["type"] == "shared"
+    # The ceremony founded the ledger in the same act.
+    assert len(body["identity"]["event_ids"]) == 4
     assert (orgs_root / "anchore.db").exists()
 
 
@@ -124,24 +166,22 @@ def test_orgs_create_missing_slug(orgs_root, client):
 
 
 def test_orgs_create_existing_returns_409(orgs_root, client):
-    client.post("/api/orgs", json={"slug": "anchore"})
-    r = client.post("/api/orgs", json={"slug": "anchore"})
+    client.post("/api/orgs", json=create_org_body("anchore"))
+    r = client.post("/api/orgs", json=create_org_body("anchore"))
     assert r.status_code == 409
 
 
 def test_orgs_create_invalid_slug_400(orgs_root, client):
-    r = client.post("/api/orgs", json={"slug": "bad/slug"})
+    r = client.post("/api/orgs", json=create_org_body("bad/slug"))
     assert r.status_code == 400
 
 
 def test_orgs_create_with_identity(orgs_root, stub_org_schema, client):
-    r = client.post("/api/orgs", json={
-        "slug": "anchore",
-        "type": "shared",
-        "identity": {
-            "name": "Anchore", "color": "#2D7DD2", "type": "shared",
-        },
-    })
+    r = client.post("/api/orgs", json=create_org_body(
+        "anchore",
+        type="shared",
+        identity={"name": "Anchore", "color": "#2D7DD2", "type": "shared"},
+    ))
     assert r.status_code == 201
     detail = client.get("/api/orgs/anchore").json()
     assert detail["identity"]["payload"]["name"] == "Anchore"
@@ -151,7 +191,7 @@ def test_orgs_create_with_identity(orgs_root, stub_org_schema, client):
 
 
 def test_orgs_delete(orgs_root, stub_org_schema, client):
-    client.post("/api/orgs", json={"slug": "anchore"})
+    client.post("/api/orgs", json=create_org_body("anchore"))
     r = client.delete("/api/orgs/anchore")
     assert r.status_code == 200
     assert r.json()["removed"] is True
@@ -166,8 +206,8 @@ def test_orgs_delete_missing(orgs_root, client):
 def test_orgs_delete_refuses_with_references(
     orgs_root, stub_org_schema, client,
 ):
-    client.post("/api/orgs", json={"slug": "anchore"})
-    client.post("/api/orgs", json={"slug": "personal", "type": "personal"})
+    client.post("/api/orgs", json=create_org_body("anchore"))
+    client.post("/api/orgs", json=create_org_body("personal", type="personal"))
     # Insert a reference in personal.db keyed by 'anchore'.
     conn = sqlite3.connect(str(orgs_root / "personal.db"))
     conn.execute(
@@ -188,8 +228,8 @@ def test_orgs_delete_refuses_with_references(
 
 
 def test_orgs_delete_force(orgs_root, stub_org_schema, client):
-    client.post("/api/orgs", json={"slug": "anchore"})
-    client.post("/api/orgs", json={"slug": "personal", "type": "personal"})
+    client.post("/api/orgs", json=create_org_body("anchore"))
+    client.post("/api/orgs", json=create_org_body("personal", type="personal"))
     conn = sqlite3.connect(str(orgs_root / "personal.db"))
     conn.execute(
         "INSERT INTO settings(id, set_id, schema_revision, key, payload, "
