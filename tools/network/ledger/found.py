@@ -35,9 +35,20 @@ from typing import Optional
 
 from tools.network.idkit import KeyPair, derive_persona
 
+from .errors import LedgerError
 from .events import make_event
 from .hlc import HLC
 from .store import LedgerStore
+
+
+class FoundingMismatchError(LedgerError):
+    """An existing partial founding does not match the supplied identity.
+
+    Completion is refused rather than appended onto an unknown-provenance
+    genesis — genesis is the identity anchor (personas derive from
+    ``genesis_id``), so completing is only legitimate when the committed
+    events are exactly what this identity's founding would have minted.
+    """
 
 
 @dataclass(frozen=True)
@@ -133,4 +144,157 @@ def found_org_ledger(
         founder_claim_id=founder_claim_id,
         kem_credential=credential,
         kem_private_key=kem_private,
+    )
+
+
+def resume_org_founding(
+    store: LedgerStore,
+    *,
+    org_id: str,
+    org_root: KeyPair,
+    personal_root_seed: bytes,
+) -> FoundedLedger:
+    """Complete an interrupted founding onto its existing genesis.
+
+    A committed genesis cannot be re-minted without changing the org
+    identity (personas derive from ``genesis_id``), so completion is the
+    only identity-preserving recovery — and it is GUARDED: every already-
+    committed founding event must be exactly what this identity's
+    founding would have minted (org label, org root, founder persona,
+    prefix order); anything else raises :class:`FoundingMismatchError`
+    and appends nothing. Idempotent on a complete founding.
+
+    Resumed events keep the LOGICAL clock at the founding instant
+    (``HLC(prev.ts, prev.count + 1)``): the founding invitation is spent
+    at its own mint instant (``expiry == its ts``), so a wall-clock-timed
+    completion would fold ``R_INVITE_EXPIRED`` — causality is carried by
+    parent hashes, and the HLC is an ordering hint (see ``hlc.py``).
+    """
+    genesis = store.ledger.genesis  # GenesisError when nothing to resume
+    if genesis.payload["org"] != org_id:
+        raise FoundingMismatchError(
+            "existing genesis carries a different org label"
+        )
+    if genesis.payload["root_pub"] != org_root.public_hex:
+        raise FoundingMismatchError(
+            "existing genesis was minted under a different org root"
+        )
+    genesis_id = genesis.event_id
+    founder = derive_persona(personal_root_seed, genesis_id)
+
+    events = store.events()
+    define = next(
+        (
+            e
+            for e in events
+            if e.type == "role.define" and e.payload.get("name") == "owner"
+        ),
+        None,
+    )
+    invite = next(
+        (
+            e
+            for e in events
+            if e.type == "invite" and e.payload.get("granted_role") == "owner"
+        ),
+        None,
+    )
+    claim = next((e for e in events if e.type == "member.claim"), None)
+
+    if define is not None and (
+        define.author_key != org_root.public_hex
+        or define.payload["scope_set"] != ["*"]
+        or define.payload["claim_requires"] != "self"
+    ):
+        raise FoundingMismatchError("existing owner role has unknown provenance")
+    if invite is not None:
+        if define is None:
+            raise FoundingMismatchError("founding events are not a prefix")
+        if (
+            invite.author_key != org_root.public_hex
+            or invite.payload["sponsor"] != org_root.public_hex
+            or invite.payload.get("invite_pub") != founder.public_hex
+        ):
+            raise FoundingMismatchError(
+                "existing founding invitation has unknown provenance"
+            )
+    if claim is not None:
+        if invite is None:
+            raise FoundingMismatchError("founding events are not a prefix")
+        if (
+            claim.author_key != founder.public_hex
+            or claim.payload["persona_pub"] != founder.public_hex
+            or claim.payload["invite_ref"] != invite.event_id
+        ):
+            raise FoundingMismatchError(
+                "existing founding claim has unknown provenance"
+            )
+
+    prev = claim or invite or define or genesis
+    hlc = prev.hlc
+
+    def next_hlc() -> HLC:
+        nonlocal hlc
+        hlc = HLC(hlc.ts, hlc.count + 1)
+        return hlc
+
+    if define is None:
+        role_define_id = store.append(
+            make_event(
+                org_root,
+                {
+                    "type": "role.define",
+                    "name": "owner",
+                    "scope_set": ["*"],
+                    "claim_requires": "self",
+                    "version": 1,
+                },
+                [genesis_id],
+                next_hlc(),
+            )
+        )
+    else:
+        role_define_id = define.event_id
+    if invite is None:
+        founding_invite_id = store.append(
+            make_event(
+                org_root,
+                {
+                    "type": "invite",
+                    "granted_role": "owner",
+                    "expiry": hlc.ts,  # spent at the founding instant
+                    "sponsor": org_root.public_hex,
+                    "invite_pub": founder.public_hex,
+                },
+                [role_define_id],
+                next_hlc(),
+            )
+        )
+    else:
+        founding_invite_id = invite.event_id
+    if claim is None:
+        founder_claim_id = store.append(
+            make_event(
+                founder,
+                {
+                    "type": "member.claim",
+                    "invite_ref": founding_invite_id,
+                    "persona_pub": founder.public_hex,
+                    "profile": {},
+                    "approvals": [],
+                },
+                [founding_invite_id],
+                next_hlc(),
+            )
+        )
+    else:
+        founder_claim_id = claim.event_id
+    return FoundedLedger(
+        genesis_id=genesis_id,
+        founder_persona_pub=founder.public_hex,
+        role_define_id=role_define_id,
+        founding_invite_id=founding_invite_id,
+        founder_claim_id=founder_claim_id,
+        kem_credential=None,
+        kem_private_key=None,
     )

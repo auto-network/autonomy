@@ -517,16 +517,8 @@ def create_org_with_identity(
     """
     from tools.network.idkit import KeyPair
     from tools.network.idkit.armor import decrypt_root_key
-    from tools.network.idkit.sealing import derive_encapsulation_keypair, seal
     from tools.network.ledger import LedgerStore, org_ledger_db_path
     from tools.network.ledger.found import found_org_ledger
-
-    from . import settings_ops
-    from .schemas.network_identity import (
-        NETWORK_ORG_KEY_REVISION_2,
-        NETWORK_ORG_KEY_SET_ID,
-        ORG_ROOT_ARMOR_PURPOSE,
-    )
 
     member = _personal_identity_member()
     if member is None or not member.payload.get("armored_private_key"):
@@ -558,25 +550,7 @@ def create_org_with_identity(
             )
         finally:
             store.close()
-        _, recipient_pub = derive_encapsulation_keypair(
-            personal_seed, ORG_ROOT_ARMOR_PURPOSE
-        )
-        sealed = seal(
-            bytes.fromhex(org_root.private_hex), recipient_pub, ORG_ROOT_ARMOR_PURPOSE
-        )
-        settings_ops.add_setting(
-            NETWORK_ORG_KEY_SET_ID,
-            NETWORK_ORG_KEY_REVISION_2,
-            "default",
-            {
-                "root_pub": org_root.public_hex,
-                "sealed_root_key": sealed.hex(),
-                "owner_kem_pub": recipient_pub,
-                "seal_purpose": ORG_ROOT_ARMOR_PURPOSE,
-            },
-            org=slug,
-            state="canonical",
-        )
+        _seal_org_root_setting(slug, org_root, personal_seed)
         return OrgCeremonyResult(
             org=ref,
             root_pub=org_root.public_hex,
@@ -597,6 +571,170 @@ def create_org_with_identity(
         except Exception:
             pass
         raise
+
+
+def _seal_org_root_setting(slug: str, org_root, personal_seed: bytes) -> None:
+    """Seal *org_root*'s seed to the owner's derived X25519 key and persist
+    the org-key revision-2 Setting (B4 Option B) — shared by the creation
+    ceremony and the retrofit's keyless path."""
+    from tools.network.idkit.sealing import derive_encapsulation_keypair, seal
+
+    from . import settings_ops
+    from .schemas.network_identity import (
+        NETWORK_ORG_KEY_REVISION_2,
+        NETWORK_ORG_KEY_SET_ID,
+        ORG_ROOT_ARMOR_PURPOSE,
+    )
+
+    _, recipient_pub = derive_encapsulation_keypair(
+        personal_seed, ORG_ROOT_ARMOR_PURPOSE
+    )
+    sealed = seal(
+        bytes.fromhex(org_root.private_hex), recipient_pub, ORG_ROOT_ARMOR_PURPOSE
+    )
+    settings_ops.add_setting(
+        NETWORK_ORG_KEY_SET_ID,
+        NETWORK_ORG_KEY_REVISION_2,
+        "default",
+        {
+            "root_pub": org_root.public_hex,
+            "sealed_root_key": sealed.hex(),
+            "owner_kem_pub": recipient_pub,
+            "seal_purpose": ORG_ROOT_ARMOR_PURPOSE,
+        },
+        org=slug,
+        state="canonical",
+    )
+
+
+@dataclass
+class RetrofitReport:
+    """Per-org outcomes of :func:`retrofit_found_ledgers`."""
+
+    outcomes: list = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {"outcomes": list(self.outcomes)}
+
+
+def _resolve_org_root_for_retrofit(slug: str, personal_password: str, personal_seed: bytes):
+    """The org's signing root from its stored key Setting, or a fresh mint.
+
+    Returns ``(org_root, minted)``. Revision-1 legacy armor opens with the
+    personal password; revision-2 opens with the owner's derived recipient
+    key; no Setting at all mints a fresh independent root (persisted,
+    sealed, by the caller). A key that will not open aborts THIS org.
+    """
+    from tools.network.idkit import KeyPair
+    from tools.network.idkit.armor import decrypt_root_key
+    from tools.network.idkit.sealing import derive_encapsulation_keypair
+    from tools.network.idkit.sealing import open as seal_open
+
+    from . import settings_ops
+    from .schemas.network_identity import (
+        NETWORK_ORG_KEY_SET_ID,
+        ORG_ROOT_ARMOR_PURPOSE,
+    )
+
+    members = [
+        m
+        for m in settings_ops.read_owned_set(NETWORK_ORG_KEY_SET_ID, org=slug).members
+        if isinstance(m.payload, dict)
+    ]
+    if not members:
+        return KeyPair.generate(), True
+    payload = members[0].payload
+    if payload.get("sealed_root_key"):
+        recipient_priv, _ = derive_encapsulation_keypair(
+            personal_seed, ORG_ROOT_ARMOR_PURPOSE
+        )
+        seed = seal_open(
+            bytes.fromhex(payload["sealed_root_key"]),
+            recipient_priv,
+            payload.get("seal_purpose", ORG_ROOT_ARMOR_PURPOSE),
+        )
+        return KeyPair.from_private_hex(seed.hex()), False
+    return decrypt_root_key(payload["armored_private_key"], personal_password), False
+
+
+def retrofit_found_ledgers(
+    personal_password: str,
+    *,
+    root: Path | str | None = None,
+    now: int | None = None,
+) -> RetrofitReport:
+    """Found the authority ledger for every existing organization.
+
+    One-time, idempotent (auto-6l3f8): the personal password unlocks the
+    owner's root ONCE, up front — a wrong password aborts before any
+    organization is touched. Per org: a founded ledger is skipped; a
+    keyed org founds under its stored root (legacy password armor or the
+    revision-2 seal); a keyless org first mints an independent root
+    sealed to the owner (Option B) and then founds identically; a
+    partial founding is COMPLETED onto its existing genesis through the
+    guarded resume (the only identity-preserving recovery). An org whose
+    key will not open is recorded and left unfounded; the run continues.
+    """
+    from tools.network.idkit.armor import decrypt_root_key
+    from tools.network.ledger import LedgerStore, org_ledger_db_path
+    from tools.network.ledger.found import found_org_ledger, resume_org_founding
+
+    member = _personal_identity_member()
+    if member is None or not member.payload.get("armored_private_key"):
+        raise OrgError(
+            "no personal identity is enrolled; the retrofit founds ledgers "
+            "under your personal key"
+        )
+    personal_kp = decrypt_root_key(
+        member.payload["armored_private_key"], personal_password
+    )  # wrong password raises HERE, before any org is touched
+    personal_seed = bytes.fromhex(personal_kp.private_hex)
+    now_ms = int(time.time() * 1000) if now is None else now
+
+    report = RetrofitReport()
+    for org in list_orgs(root=root):
+        if org.slug == "personal":
+            continue
+        entry = {"slug": org.slug, "outcome": None, "genesis_id": None}
+        report.outcomes.append(entry)
+        try:
+            store = LedgerStore(org_ledger_db_path(org.slug, root))
+            try:
+                state = store.fold() if store.ledger.genesis_id else None
+                if state is not None and any(
+                    "owner" in m.roles for m in state.members.values()
+                ):
+                    entry["outcome"] = "skipped_already_founded"
+                    entry["genesis_id"] = state.genesis_id
+                    continue
+                org_root, minted = _resolve_org_root_for_retrofit(
+                    org.slug, personal_password, personal_seed
+                )
+                if minted:
+                    _seal_org_root_setting(org.slug, org_root, personal_seed)
+                if store.ledger.genesis_id is None:
+                    founded = found_org_ledger(
+                        store,
+                        org_id=org.id,
+                        org_root=org_root,
+                        personal_root_seed=personal_seed,
+                        now=now_ms,
+                    )
+                else:  # interrupted prior run: guarded, identity-preserving
+                    founded = resume_org_founding(
+                        store,
+                        org_id=org.id,
+                        org_root=org_root,
+                        personal_root_seed=personal_seed,
+                    )
+                store.refresh_projections()
+                entry["outcome"] = "keyed_and_founded" if minted else "founded"
+                entry["genesis_id"] = founded.genesis_id
+            finally:
+                store.close()
+        except Exception as e:  # abort THIS org, name it, continue the run
+            entry["outcome"] = f"error: {e}"
+    return report
 
 
 def _seed_identity_setting(

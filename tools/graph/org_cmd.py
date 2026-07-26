@@ -162,6 +162,34 @@ def cmd_org_create(args) -> None:
     )
 
 
+def cmd_org_retrofit_ledgers(args) -> None:
+    password = _read_personal_password(args)
+    if not password:
+        print(
+            "Error: the personal-identity password is required — pass "
+            "--password-stdin, --password-fd <n>, or set "
+            "AUTONOMY_PERSONAL_PASSWORD",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    from tools.network.idkit.armor import ArmorPassphraseError
+
+    try:
+        report = org_ops.retrofit_found_ledgers(password)
+    except ArmorPassphraseError:
+        print(
+            "Error: the personal password is incorrect; nothing was founded",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    except OrgError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
+    for entry in report.outcomes:
+        genesis = f"  genesis={entry['genesis_id'][:12]}" if entry["genesis_id"] else ""
+        print(f"  {entry['slug']}: {entry['outcome']}{genesis}")
+
+
 def cmd_org_rename(args) -> None:
     try:
         report = org_ops.rename_org(args.slug, args.new_slug)
@@ -264,6 +292,22 @@ def attach_org_subparser(sub) -> None:
         help="Read the personal-identity password from this file descriptor.",
     )
     p_create.set_defaults(func=cmd_org_create)
+
+    # retrofit-ledgers
+    p_retrofit = org_sub.add_parser(
+        "retrofit-ledgers",
+        help="Found the authority ledger for every org that lacks one "
+             "(one-time, idempotent; keyless orgs get a sealed root first)",
+    )
+    p_retrofit.add_argument(
+        "--password-stdin", action="store_true",
+        help="Read the personal-identity password from stdin (first line).",
+    )
+    p_retrofit.add_argument(
+        "--password-fd", type=int, default=None,
+        help="Read the personal-identity password from this file descriptor.",
+    )
+    p_retrofit.set_defaults(func=cmd_org_retrofit_ledgers)
 
     # rename
     p_rename = org_sub.add_parser(
