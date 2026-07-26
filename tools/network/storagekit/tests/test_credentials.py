@@ -102,7 +102,11 @@ class TestValidate:
             (dataclasses.replace(credential, created_hlc=(-1, 0)), MalformedRecordError),
             (
                 dataclasses.replace(
-                    credential, kem_key_id="0" + credential.kem_key_id[1:]
+                    # Flip to a char that DIFFERS: a fixed "0" is a no-op
+                    # whenever the id already starts with one (~1 run in 16).
+                    credential,
+                    kem_key_id=("1" if credential.kem_key_id[0] == "0" else "0")
+                    + credential.kem_key_id[1:],
                 ),
                 MalformedRecordError,
             ),
