@@ -1,0 +1,65 @@
+name: Build and publish Autonomy images
+
+on:
+  workflow_dispatch:
+    inputs:
+      registry:
+        description: Registry host (operator chosen, for example ghcr.io)
+        required: true
+        type: string
+      namespace:
+        description: Registry namespace/project
+        required: true
+        type: string
+      release_tag:
+        description: Immutable release label (the output contract uses digests)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    # Session images consume operator-installed bd/dolt/Claude binaries through
+    # agents/build.sh. Signing is deliberately absent: an operator signs the
+    # emitted digest lock later with their password-armored project key.
+    runs-on: [self-hosted, linux, autonomy-release]
+    env:
+      AUTONOMY_REGISTRY: ${{ inputs.registry }}
+      AUTONOMY_IMAGE_NAMESPACE: ${{ inputs.namespace }}
+      AUTONOMY_RELEASE_TAG: ${{ inputs.release_tag }}
+      AUTONOMY_IMAGE_LOCK: ${{ runner.temp }}/image-lock.env
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require release tools
+        run: |
+          docker version
+
+      - name: Prove digest publishing and fail-closed verification contracts
+        run: |
+          python3 -m pytest \
+            deploy/tests/test_image_release.py \
+            tools/dashboard/tests/test_no_cdn_dependencies.py \
+            tools/graph/tests/test_no_hardcoded_host_paths.py \
+            -x
+
+      - name: Authenticate to the operator-selected registry
+        env:
+          REGISTRY_USERNAME: ${{ secrets.AUTONOMY_REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.AUTONOMY_REGISTRY_PASSWORD }}
+        run: |
+          printf '%s' "$REGISTRY_PASSWORD" |
+            docker login "$AUTONOMY_REGISTRY" \
+              --username "$REGISTRY_USERNAME" --password-stdin
+
+      - name: Build, publish, and record exact digests
+        run: deploy/publish-images.sh
+
+      - name: Upload immutable digest lock
+        uses: actions/upload-artifact@v4
+        with:
+          name: autonomy-image-lock-${{ inputs.release_tag }}
+          path: ${{ runner.temp }}/image-lock.env
+          if-no-files-found: error
