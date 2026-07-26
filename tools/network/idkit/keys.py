@@ -7,6 +7,8 @@ directly usable as a signature-verification key.
 
 from __future__ import annotations
 
+import re
+
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
@@ -20,12 +22,14 @@ SIGNATURE_HEX_LEN = 128  # 64 raw bytes
 
 
 def _decode_hex(value: str, expected_len: int, what: str) -> bytes:
-    if not isinstance(value, str) or len(value) != expected_len or value != value.lower():
+    # Full-match, not fromhex: bytes.fromhex skips ASCII whitespace, and
+    # string-anchored derivations (derive_persona) must never accept a
+    # padded variant as a distinct valid input.
+    if not isinstance(value, str) or not re.fullmatch(
+        "[0-9a-f]{%d}" % expected_len, value
+    ):
         raise MalformedError(f"{what} must be {expected_len} lowercase hex chars")
-    try:
-        return bytes.fromhex(value)
-    except ValueError as exc:
-        raise MalformedError(f"{what} is not valid hex") from exc
+    return bytes.fromhex(value)
 
 
 class KeyPair:
