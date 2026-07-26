@@ -150,6 +150,22 @@ digest in Compose. The explicit `--insecure-ignore-tlog` means “the tracked
 project key is the trust root; do not require Rekor,” not “skip signature or
 digest validation.”
 
+For a paced, screen-capture-ready run of the real multi-node ladder, use:
+
+```bash
+python3 -m deploy.demo \
+  --image registry.example/autonomy/autonomy-node@sha256:<digest> \
+  --cosign-public-key deploy/cosign.pub
+```
+
+This presentation path refuses source builds and verifies the exact digest
+before starting any container. It opens the HTTPS dashboards, real relay note,
+graph, and Design Studio surfaces between narratable pauses, and produces a
+timestamped transcript and URL manifest. The HTTPS certificates are local
+self-signed node certificates pinned by the driver; they are not represented
+as public-CA endorsements. The operator records the live run separately—the
+command never manufactures a screen-capture artifact.
+
 ```bash
 AUTONOMY_IMAGE='registry.example/autonomy/autonomy-node@sha256:<digest>' \
   docker compose pull dashboard

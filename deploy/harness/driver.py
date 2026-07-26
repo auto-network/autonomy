@@ -8,6 +8,7 @@ import json
 import os
 import secrets
 import shutil
+import ssl
 import subprocess
 import sys
 import time
@@ -43,6 +44,9 @@ class HarnessConfig:
     artifacts_dir: Path = Path("harness-artifacts")
     build: bool = True
     timeout: float = 120.0
+    secure_dashboard: bool = False
+    docker_command: tuple[str, ...] = ("docker",)
+    compose_command: tuple[str, ...] = ("docker", "compose")
 
     @property
     def relay_http(self) -> str:
@@ -53,7 +57,8 @@ class HarnessConfig:
         return f"ws://127.0.0.1:{self.relay_port}"
 
     def node_http(self, index: int) -> str:
-        return f"http://127.0.0.1:{self.node_port_base + index}"
+        scheme = "https" if self.secure_dashboard else "http"
+        return f"{scheme}://127.0.0.1:{self.node_port_base + index}"
 
 
 @dataclass
@@ -148,6 +153,7 @@ class Harness:
             node_port_base=config.node_port_base,
             image=config.image,
             from_source=config.build,
+            secure_dashboard=config.secure_dashboard,
         )
         self.topology.validate()
         self.run_dir = config.artifacts_dir.resolve() / config.project
@@ -161,14 +167,30 @@ class Harness:
         self._pending: dict = {}
         self._invitation: Invitation | None = None
         self._torn_down = False
+        self._node_ssl_contexts: dict[int, ssl.SSLContext] = {}
 
     @property
     def compose(self) -> list[str]:
         return [
-            "docker", "compose",
+            *self.config.compose_command,
             "--project-name", self.config.project,
             "--file", str(self.compose_file),
         ]
+
+    @property
+    def content_source_id(self) -> str:
+        content_id = self._found.get("content_id")
+        if not isinstance(content_id, str) or not content_id:
+            raise HarnessError("found phase has not exposed its content source")
+        return content_id
+
+    @property
+    def relay_content_url(self) -> str:
+        if not self._found:
+            raise HarnessError("found phase has not published relay content")
+        return (
+            f"{self.config.relay_http}/l/{self._content_channel_token}"
+        )
 
     def _phase(self, index: int, phase: Phase) -> None:
         self.announce(
@@ -205,12 +227,61 @@ class Harness:
             raise HarnessError(f"{service} fixture {command} returned a non-object")
         return value
 
+    def _ssl_context_for(self, url: str) -> ssl.SSLContext | None:
+        if not url.startswith("https://"):
+            return None
+        port = urllib.parse.urlsplit(url).port
+        if port is None:
+            return None
+        return self._node_ssl_contexts.get(port - self.config.node_port_base)
+
+    @staticmethod
+    def _pinned_ssl_context(cert_path: Path) -> ssl.SSLContext:
+        """Trust only the node's captured self-signed certificate."""
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = True
+        context.verify_mode = ssl.CERT_REQUIRED
+        context.load_verify_locations(cafile=str(cert_path))
+        return context
+
+    def _capture_node_certificate(self, index: int, service: str) -> None:
+        if not self.config.secure_dashboard:
+            return
+        deadline = time.monotonic() + self.config.timeout
+        certificate = ""
+        while time.monotonic() < deadline:
+            result = self._compose(
+                "exec", "-T", service, "cat", "/app/data/tls.crt",
+                check=False,
+            )
+            if (
+                result.returncode == 0
+                and "-----BEGIN CERTIFICATE-----" in result.stdout
+                and "-----END CERTIFICATE-----" in result.stdout
+            ):
+                certificate = result.stdout
+                break
+            time.sleep(0.5)
+        if not certificate:
+            raise HarnessError(
+                f"timed out capturing {service}'s generated TLS certificate"
+            )
+        cert_dir = self.run_dir / "tls"
+        cert_dir.mkdir(parents=True, exist_ok=True)
+        cert_path = cert_dir / f"{service}.crt"
+        cert_path.write_text(certificate, encoding="ascii")
+        self._node_ssl_contexts[index] = self._pinned_ssl_context(cert_path)
+
     def _wait_http(self, url: str, *, description: str) -> None:
         deadline = time.monotonic() + self.config.timeout
         last = ""
         while time.monotonic() < deadline:
             try:
-                with urllib.request.urlopen(url, timeout=2) as response:
+                with urllib.request.urlopen(
+                    url,
+                    timeout=2,
+                    context=self._ssl_context_for(url),
+                ) as response:
                     if 200 <= response.status < 300:
                         return
             except (OSError, urllib.error.URLError) as exc:
@@ -249,7 +320,11 @@ class Harness:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=10) as response:
+            with urllib.request.urlopen(
+                request,
+                timeout=10,
+                context=self._ssl_context_for(url),
+            ) as response:
                 value = json.loads(response.read())
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")
@@ -277,10 +352,12 @@ class Harness:
         self._wait_http(
             f"{self.config.relay_http}/healthz", description="real relay"
         )
+        self._capture_node_certificate(0, "node-a")
         self._wait_http(
             f"{self.config.node_http(0)}/api/ping", description="node A"
         )
         for index in range(3, self.config.nodes + 1):
+            self._capture_node_certificate(index - 1, f"node-{index}")
             self._wait_http(
                 f"{self.config.node_http(index - 1)}/api/ping",
                 description=f"node {index}",
@@ -370,6 +447,7 @@ class Harness:
         env = dict(os.environ)
         env["AUTONOMY_HARNESS_INVITE_B"] = encode_invitation(self._invitation)
         self._compose("up", "-d", "node-b", env=env)
+        self._capture_node_certificate(1, "node-b")
         self._wait_http(
             f"{self.config.node_http(1)}/api/ping", description="joining node B"
         )
@@ -443,6 +521,7 @@ class Harness:
             "restore", "/artifacts/node-a.tar.gz", "/app/data",
         )
         self._compose("up", "-d", "node-c")
+        self._capture_node_certificate(self.config.nodes, "node-c")
         self._wait_http(
             f"{self.config.node_http(self.config.nodes)}/api/ping",
             description="restored node C",
@@ -533,9 +612,15 @@ class Harness:
         )
         filters = ["label=com.docker.compose.project=" + self.config.project]
         checks = (
-            ["docker", "ps", "-aq", "--filter", filters[0]],
-            ["docker", "volume", "ls", "-q", "--filter", filters[0]],
-            ["docker", "network", "ls", "-q", "--filter", filters[0]],
+            [*self.config.docker_command, "ps", "-aq", "--filter", filters[0]],
+            [
+                *self.config.docker_command,
+                "volume", "ls", "-q", "--filter", filters[0],
+            ],
+            [
+                *self.config.docker_command,
+                "network", "ls", "-q", "--filter", filters[0],
+            ],
         )
         leftovers = []
         for command in checks:
@@ -550,7 +635,7 @@ class Harness:
             )
 
     def run(self) -> None:
-        if shutil.which("docker") is None:
+        if shutil.which(self.config.docker_command[0]) is None:
             raise HarnessError(
                 "Docker is required for the real multi-node ladder; run this "
                 "command on a Linux Docker host or in the required CI job"
