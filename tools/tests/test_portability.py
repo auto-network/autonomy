@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import tarfile
+import time
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,13 @@ import pytest
 from tools.data_paths import STORE_MANIFEST
 from tools.graph.db import GraphDB
 from tools.graph.models import Source
-from tools.network.idkit import KeyPair, derive_persona, verify_signature
+from tools.network.idkit import (
+    KeyPair,
+    Subject,
+    derive_persona,
+    issue_cert,
+    verify_signature,
+)
 from tools.network.idkit.armor import decrypt_root_key, encrypt_root_key
 from tools.network.ledger.found import found_org_ledger
 from tools.network.ledger.store import LedgerStore
@@ -30,6 +37,7 @@ from tools.portability import (
 
 PERSONAL_PASSPHRASE = "portable-personal-password"
 ORG_PASSPHRASE = "portable-organization-password"
+PORTABLE_ORG_UUID = "018f6b2a-7c4d-7e11-8a3b-9d5c1e2f4a6b"
 
 
 @pytest.fixture(autouse=True)
@@ -93,7 +101,7 @@ def _seed_node(volume: Path) -> dict:
     with LedgerStore(volume / "orgs" / "autonomy.db") as store:
         founded = found_org_ledger(
             store,
-            org_id="018f-portable-org",
+            org_id=PORTABLE_ORG_UUID,
             org_root=org_root,
             personal_root_seed=personal_seed,
             now=1_720_000_000_000,
@@ -120,6 +128,46 @@ def _seed_node(volume: Path) -> dict:
                 1,
                 "default",
                 org_key_payload,
+                "2026-07-26T00:00:00Z",
+                "2026-07-26T00:00:00Z",
+            ),
+        )
+
+    # The tunnel delegate is a filesystem secret plus an inline public cert.
+    # Only the portable basename enters Settings.
+    delegate = KeyPair.generate()
+    now = int(time.time())
+    cert = issue_cert(
+        org_root,
+        delegate.public_hex,
+        scope=("tunnel:serve",),
+        org=PORTABLE_ORG_UUID,
+        subject=Subject("operator", "portable-node"),
+        not_before=now - 60,
+        not_after=now + 86_400,
+    )
+    key_file = f"serve-{PORTABLE_ORG_UUID}.key"
+    key_path = volume / "network" / key_file
+    key_path.parent.mkdir(mode=0o700)
+    key_path.write_text(delegate.private_hex, encoding="ascii")
+    key_path.chmod(0o600)
+    serve_payload = json.dumps({
+        "cert": cert.to_json().decode("ascii"),
+        "key_path": key_file,
+        "root_pub": org_root.public_hex,
+        "not_after": cert.not_after,
+    }, sort_keys=True)
+    with sqlite3.connect(org_db) as conn:
+        conn.execute(
+            "INSERT INTO settings("
+            "id,set_id,schema_revision,key,payload,created_at,updated_at"
+            ") VALUES(?,?,?,?,?,?,?)",
+            (
+                "portable-serving-key",
+                "autonomy.network.serve-cert",
+                1,
+                "default",
+                serve_payload,
                 "2026-07-26T00:00:00Z",
                 "2026-07-26T00:00:00Z",
             ),
@@ -161,6 +209,8 @@ def _seed_node(volume: Path) -> dict:
         "org_key_payload": org_key_payload,
         "founder": founded.founder_persona_pub,
         "genesis": founded.genesis_id,
+        "serve_key_file": key_file,
+        "serve_key_bytes": delegate.private_hex.encode("ascii"),
     }
 
 
@@ -217,10 +267,14 @@ def _assert_same_node(volume: Path, expected: dict) -> None:
     assert row == ("ENDED",)
     assert (volume / "tls.key").read_bytes() == b"same-private-tls-key"
     assert (volume / "tls.crt").read_bytes() == b"same-public-tls-cert"
+    restored_serve_key = volume / "network" / expected["serve_key_file"]
+    assert restored_serve_key.read_bytes() == expected["serve_key_bytes"]
+    assert (restored_serve_key.stat().st_mode & 0o777) == 0o600
 
 
 def test_snapshot_restore_to_fresh_node_preserves_identity_membership_and_data(
     tmp_path,
+    monkeypatch,
 ):
     node_a = tmp_path / "node-a"
     expected = _seed_node(node_a)
@@ -248,6 +302,28 @@ def test_snapshot_restore_to_fresh_node_preserves_identity_membership_and_data(
     assert report["from_version"] == report["to_version"] == VOLUME_SCHEMA_VERSION
     assert (node_b / VOLUME_STAMP).read_bytes() == stamp_before
     _assert_same_node(node_b, expected)
+
+    # The row resolves under C, not A, and its inline cert still matches the
+    # byte-identical restored delegate key.
+    from tools.dashboard import link_serving_supervisor as supervisor
+
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(node_b / "orgs"))
+    monkeypatch.setenv("AUTONOMY_NETWORK_KEY_DIR", str(node_b / "network"))
+    GraphDB.close_all_pooled()
+    state = supervisor.serve_cert_state("autonomy")
+    assert state["status"] == "ok"
+    assert state["key_path"] == str(
+        node_b / "network" / expected["serve_key_file"]
+    )
+    assert not state["key_path"].startswith(str(node_a))
+    assert supervisor._verify_key_matches(
+        state["cert"], state["key_path"]
+    ) == (True, "ok")
+    materialized_cert = Path(supervisor._materialize_cert(
+        state["key_path"], state["cert"]
+    ))
+    assert materialized_cert.parent == node_b / "network"
+    assert materialized_cert.read_text() == state["cert"]
 
 
 def test_snapshot_requires_explicit_quiescence_and_never_emits_partial_artifact(
@@ -391,11 +467,19 @@ def _seed_expected_from_volume(volume: Path) -> dict:
         org_key_payload = conn.execute(
             "SELECT payload FROM settings WHERE id='portable-org-key'"
         ).fetchone()[0]
+        serve_payload = json.loads(conn.execute(
+            "SELECT payload FROM settings WHERE id='portable-serving-key'"
+        ).fetchone()[0])
+    serve_key_file = serve_payload["key_path"]
     return {
         "identity_payload": identity_payload,
         "org_key_payload": org_key_payload,
         "founder": founder,
         "genesis": genesis,
+        "serve_key_file": serve_key_file,
+        "serve_key_bytes": (
+            volume / "network" / serve_key_file
+        ).read_bytes(),
     }
 
 

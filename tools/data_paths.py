@@ -83,6 +83,8 @@ STORE_MANIFEST: tuple = (
           "identity unlock-session store"),
     Store("pending_joins", "pending_joins.db", "AUTONOMY_PENDING_JOINS_DB", "db",
           "restart-safe invite-join progress (identifiers and counts only)"),
+    Store("serving_keys", "network", "AUTONOMY_NETWORK_KEY_DIR", "dir",
+          "mode-0600 auto.network tunnel-serving delegate keys"),
     Store("tls_cert", "tls.crt", "AUTONOMY_TLS_CERT", "file",
           "TLS certificate (self-signed by default)"),
     Store("tls_key", "tls.key", "AUTONOMY_TLS_KEY", "file",

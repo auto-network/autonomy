@@ -697,7 +697,9 @@ class NetworkServeCertV1(SettingSchema):
     cannot be a passphrase-sealed armor. Rather than weaken the org-key's I1
     discipline by admitting raw key material into the settings store, the
     serving key lives as a mode-0600 FILE on disk (the standard shape for an
-    unattended service key), and this row records only its ``key_path``. The
+    unattended service key), and this row records only its ``key_path``. New
+    rows store a portable basename resolved against the manifest-rooted
+    serving-key directory; legacy absolute rows remain readable in place. The
     settings store thus still holds no plaintext key material of any kind; the
     signing secret is a filesystem credential, protected by file permissions,
     exactly like a TLS or SSH service key. It is also only a narrow delegate
@@ -726,10 +728,12 @@ class NetworkServeCertV1(SettingSchema):
     key_path: str = field(
         required=True,
         description=(
-            "Filesystem path to the mode-0600 file holding the delegate's "
-            "Ed25519 signing key. The key is a server-side filesystem "
-            "credential, never settings-store data; the supervisor verifies "
-            "it matches the cert's child_pub before launching the connector."
+            "Portable basename of the mode-0600 file holding the delegate's "
+            "Ed25519 signing key (legacy absolute paths remain readable). The "
+            "key is a server-side filesystem credential, never settings-store "
+            "data; the supervisor resolves it within the manifest-rooted key "
+            "directory and verifies it matches the cert's child_pub before "
+            "launching the connector."
         ),
     )
     root_pub: str = field(

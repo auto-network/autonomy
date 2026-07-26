@@ -135,6 +135,21 @@ def _put_grant(token="a" * 32, *, meta=None, issued_at=None):
     )
 
 
+def _replace_key_path(provisioned: dict, key_path: str) -> None:
+    settings_ops.upsert_by_key(
+        NETWORK_SERVE_CERT_SET_ID,
+        NETWORK_SERVE_CERT_REVISION,
+        "default",
+        {
+            "cert": provisioned["cert"].to_json().decode("ascii"),
+            "key_path": key_path,
+            "root_pub": provisioned["root"].public_hex,
+            "not_after": provisioned["cert"].not_after,
+        },
+        org=ORG,
+    )
+
+
 def _drop_grant(token="a" * 32):
     for m in settings_ops.read_owned_set(NETWORK_LINK_GRANT_SET_ID, org=ORG).members:
         if m.key == token:
@@ -241,6 +256,57 @@ def test_serve_cert_ok_reflects_status(env):
     assert sup.serve_cert_ok(ORG) is False
     _provision_serve_cert(env)
     assert sup.serve_cert_ok(ORG) is True
+
+
+def test_portable_basename_resolves_inside_current_serving_key_store(
+    env,
+    monkeypatch,
+):
+    provisioned = _provision_serve_cert(env)
+    monkeypatch.setenv("AUTONOMY_NETWORK_KEY_DIR", str(env / "network"))
+    _replace_key_path(provisioned, provisioned["key_path"].name)
+
+    state = sup.serve_cert_state(ORG)
+    assert state["status"] == "ok"
+    assert state["key_path"] == str(provisioned["key_path"])
+
+
+def test_legacy_absolute_key_path_remains_valid_in_place(env):
+    provisioned = _provision_serve_cert(env)
+    state = sup.serve_cert_state(ORG)
+    assert state["status"] == "ok"
+    assert state["key_path"] == str(provisioned["key_path"])
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        "../serve.key",
+        "nested/serve.key",
+        r"nested\serve.key",
+        ".",
+        "..",
+    ],
+)
+def test_relative_key_path_traversal_and_nesting_fail_closed(
+    env,
+    monkeypatch,
+    stored,
+):
+    provisioned = _provision_serve_cert(env)
+    monkeypatch.setenv("AUTONOMY_NETWORK_KEY_DIR", str(env / "network"))
+    _replace_key_path(provisioned, stored)
+
+    state = sup.serve_cert_state(ORG)
+    assert state["status"] == "key-invalid"
+    assert "bare filename" in state["error"]
+    _put_grant()
+    spawn = FakeSpawn()
+    assert sup.ServingSupervisor(spawn=spawn).ensure(ORG) == {
+        "running": False,
+        "reason": "key-invalid",
+    }
+    assert spawn.calls == []
 
 
 def test_bootstrap_ensures_and_arms_watchdog(env, monkeypatch):

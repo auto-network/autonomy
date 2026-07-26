@@ -472,7 +472,7 @@ def _mint_serve(root: KeyPair, *, scope=("tunnel:serve",), org_uuid=ORG_UUID):
 
 def _serve_key_dir(monkeypatch, tmp_path):
     d = tmp_path / "serve-keys"
-    monkeypatch.setattr(network_routes, "SERVE_KEY_DIR", d)
+    monkeypatch.setenv("AUTONOMY_NETWORK_KEY_DIR", str(d))
     return d
 
 
@@ -497,7 +497,7 @@ def test_provision_serve_cert_happy_path(env, root, tmp_path, monkeypatch):
     assert key_path.read_text().strip() == delegate.private_hex
 
     row = settings_ops.read_owned_set(NETWORK_SERVE_CERT_SET_ID, org=ORG).members[0].payload
-    assert row["key_path"] == str(key_path)
+    assert row["key_path"] == key_path.name
     assert row["root_pub"] == root.public_hex
     assert row["not_after"] == cert.not_after
     assert "private_key" not in row  # the secret is NOT in the settings store
