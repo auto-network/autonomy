@@ -213,6 +213,10 @@ class TestRepairDb:
         claude_id = _make_source(db, platform="claude-code", title="claude sess")
         _thought(db, claude_id, turn=1, message_id="dup")
         _thought(db, claude_id, turn=2, message_id="dup")
+        # This case relies on the reopen-time migration (not repair_db's
+        # codex-scoped loop); a genuine pre-fix DB carries an older schema
+        # stamp, so reset it past the fast-path guard.
+        db.conn.execute("PRAGMA user_version = 0")
         db.commit()
         db.close()
 

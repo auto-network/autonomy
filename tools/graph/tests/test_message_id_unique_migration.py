@@ -117,6 +117,9 @@ class TestMigrationRepairsExistingViolationsThenIndexes:
         source_id = _make_source(setup)
         setup.insert_thought(Thought(source_id=source_id, content="renumbered copy", turn_number=5, message_id="dup"))
         setup.insert_thought(Thought(source_id=source_id, content="original", turn_number=1, message_id="dup"))
+        # A genuine pre-fix DB carries an older schema stamp; reset it so
+        # the reopen does not take the already-current fast path.
+        setup.conn.execute("PRAGMA user_version = 0")
         setup.conn.commit()
         setup.close()
 

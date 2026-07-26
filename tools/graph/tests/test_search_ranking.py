@@ -253,6 +253,9 @@ def test_keywords_migration_idempotent_on_legacy_db(tmp_path):
         conn.execute(f"DROP TRIGGER IF EXISTS {trg}")
     conn.execute("DROP TABLE IF EXISTS sources_fts")
     conn.execute("ALTER TABLE sources DROP COLUMN keywords")
+    # A genuine legacy DB carries an older schema stamp; reset it so the
+    # reopen does not take the already-current fast path.
+    conn.execute("PRAGMA user_version = 0")
     conn.commit()
     conn.close()
 

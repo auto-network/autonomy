@@ -44,6 +44,9 @@ def test_existing_db_gains_orgs_table_on_reopen(tmp_path):
     db_path = tmp_path / "legacy.db"
     db = GraphDB(db_path)
     db.conn.execute("DROP TABLE IF EXISTS orgs")
+    # A genuine pre-migration DB carries an older schema stamp; reset it
+    # so the reopen does not take the already-current fast path.
+    db.conn.execute("PRAGMA user_version = 0")
     db.conn.commit()
     # Insert a fixture row in another table so we can verify it survives.
     db.conn.execute(
