@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from tools.network.idkit.errors import MalformedError
+from tools.network.idkit.keys import KeyPair
 from tools.network.idkit.sealing import (
     SUITE_X25519_HKDF_SHA256_CHACHA20POLY1305,
     SealingError,
@@ -71,9 +72,32 @@ class TestSealing:
 
     def test_seal_rejects_unrecognized_suite(self, keypair):
         _, public_hex = keypair
-        for bad_suite in (0, 2, 255, -1, 4096, True, None, "1"):
+        for bad_suite in (0, 2, 255):
             with pytest.raises(SealingError):
                 seal(SECRET, public_hex, PURPOSE, bad_suite)
+
+    def test_seal_rejects_mistyped_suite_id(self, keypair):
+        # Not a wire byte at all — a caller type error, not a sealing failure.
+        _, public_hex = keypair
+        for bad_suite in (-1, 256, 4096, True, None, "1"):
+            with pytest.raises(MalformedError):
+                seal(SECRET, public_hex, PURPOSE, bad_suite)
+
+    def test_retagged_record_with_known_suite_fails(self, keypair, monkeypatch):
+        # The registry check alone would pass a second registered id; the
+        # suite id bound into the HPKE info is what must reject the retag.
+        from tools.network.idkit import sealing
+
+        private_hex, public_hex = keypair
+        monkeypatch.setitem(
+            sealing._SUITES, 2, sealing._SUITES[SUITE_X25519_HKDF_SHA256_CHACHA20POLY1305]
+        )
+        record = seal(SECRET, public_hex, PURPOSE)
+        retagged = bytes([2]) + record[1:]
+        with pytest.raises(SealingError):
+            seal_open(retagged, private_hex, PURPOSE)
+        # Sanity: the same bytes under their true id still open.
+        assert seal_open(record, private_hex, PURPOSE) == SECRET
 
     def test_tampered_record_does_not_open(self, keypair):
         private_hex, public_hex = keypair
@@ -147,6 +171,75 @@ class TestSealing:
             seal(SECRET, bad_key, PURPOSE)
         with pytest.raises(MalformedError):
             seal_open(seal(SECRET, public_hex, PURPOSE), bad_key, PURPOSE)
+
+    def test_degenerate_recipient_key_fails_closed(self):
+        # Low-order X25519 points are structurally valid 32-byte strings but
+        # have no usable shared secret; recipient keys arrive off the wire,
+        # so they must fail in the taxonomy, not as builtins.ValueError.
+        low_order = (
+            "00" * 32,  # neutral element
+            "01" + "00" * 31,  # order-1 point
+            "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",  # order-8
+        )
+        for bad_pub in low_order:
+            with pytest.raises(SealingError):
+                seal(SECRET, bad_pub, PURPOSE)
+
+    def test_degenerate_enc_point_in_record_fails_closed(self, keypair):
+        private_hex, public_hex = keypair
+        record = seal(SECRET, public_hex, PURPOSE)
+        for bad_enc in (bytes(32), b"\x01" + bytes(31)):
+            doctored = record[:1] + bad_enc + record[33:]
+            with pytest.raises(SealingError):
+                seal_open(doctored, private_hex, PURPOSE)
+
+    def test_signing_key_is_not_an_encapsulation_key(self):
+        # HAZARD, pinned deliberately: an Ed25519 signing public key is
+        # indistinguishable from an X25519 key as 64 hex chars, seal()
+        # accepts it, and the record is PERMANENTLY unopenable — not even
+        # the signing-key holder's seed recovers it. The usage-direction
+        # rule (seal only to encapsulation keys) is enforced by callers;
+        # this test keeps the failure mode visible.
+        signer = KeyPair.generate()
+        record = seal(SECRET, signer.public_hex, PURPOSE)
+        with pytest.raises(SealingError):
+            seal_open(record, signer.private_hex, PURPOSE)
+
+    def test_frozen_derivation_vector(self):
+        # Known-answer vector, independently computed by the cross-model
+        # reviewer (c497640b-da0): locks the HKDF construction and the
+        # derivation info label. Also the JS interop anchor (auto-o7g5j).
+        private_hex, public_hex = derive_encapsulation_keypair(
+            bytes(range(32)), "org-armor.v1"
+        )
+        assert private_hex == (
+            "ed263bb19169879052ba27865490eebe5563ea3e80c23d02c1a899476d398082"
+        )
+        assert public_hex == (
+            "c226869fb52445e3344f86e8f503302b8517e9762912d2947aa54edc6d08296d"
+        )
+
+    def test_frozen_sealed_record_opens(self):
+        # A pinned wire record sealed to the frozen keypair above: locks the
+        # record layout (suite byte || enc || ct) and the seal info label.
+        record = bytes.fromhex(
+            "0181aa3f6acacbebc6c6fa8ad55c7009817816088242367315eafe7228b288c4"
+            "022107b1d55e674f6a700afe5d4cfbb83bfcff4a5ada5990b8ccce6b541fd6c6"
+            "a24cb54d834c91b495fad40a9ed78660e9"
+        )
+        private_hex = "ed263bb19169879052ba27865490eebe5563ea3e80c23d02c1a899476d398082"
+        assert seal_open(record, private_hex, "org-armor.v1") == (
+            b"the org root armor key material."
+        )
+
+    def test_package_exports(self):
+        import tools.network.idkit as idkit
+
+        assert idkit.seal is seal
+        assert idkit.seal_open is seal_open
+        assert idkit.derive_encapsulation_keypair is derive_encapsulation_keypair
+        assert idkit.SealingError is SealingError
+        assert issubclass(idkit.SealingError, idkit.IdkitError)
 
     def test_malformed_plaintext_record_and_seed_are_rejected(self, keypair):
         private_hex, public_hex = keypair

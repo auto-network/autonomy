@@ -58,3 +58,12 @@ class RevocationError(IdkitError):
 
 class RevocationAuthorityError(RevocationError):
     """The revocation issuer lacks authority over the revoked key."""
+
+
+class SealingError(IdkitError):
+    """A sealed record could not be produced or opened.
+
+    Wrong key, mismatched purpose, tampered record, unknown suite
+    identifier, and a degenerate (low-order) recipient key all land here —
+    deliberately indistinguishable: the record does not seal/open, full stop.
+    """

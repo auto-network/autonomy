@@ -13,16 +13,23 @@ Wire record::
     suite_id (1 byte) || enc (KEM encapsulated key) || ciphertext
 
 The suite identifier is validated on open and an unrecognized value
-fails closed; a standardized hybrid KEM suite can later be admitted by
-registering a new identifier without a structural change. The
-``purpose`` label is bound into the HPKE encryption context alongside
-the suite identifier, so a record sealed for one purpose (or re-tagged
-with a different known suite) never opens under another.
+fails closed. The *record format* admits a future suite by registering a
+new identifier — no structural change to the wire layout — but the code
+paths here (64-hex keys, ``from_public_bytes``) are X25519-specific and
+would need their own handling for a suite with different key or enc
+sizes. The ``purpose`` label is bound into the HPKE encryption context
+alongside the suite identifier, so a record sealed for one purpose (or
+re-tagged with a different known suite) never opens under another.
 
-The recipient key is a distinct X25519 encapsulation keypair, never the
-Ed25519 signing key. Callers that must mint one deterministically use
-:func:`derive_encapsulation_keypair`, which derives an independent
-keypair from a seed under a purpose label via HKDF-SHA-256.
+WARNING — usage direction: the recipient key MUST be an X25519
+encapsulation public key, never an Ed25519 signing key. Both render as
+64 lowercase hex and no structural check can tell them apart, but a
+record sealed to a signing key is PERMANENTLY UNOPENABLE — nobody holds
+the matching X25519 private key. Callers that must mint an encapsulation
+keypair use :func:`derive_encapsulation_keypair`, which derives an
+independent X25519 keypair from a seed under a purpose label via
+HKDF-SHA-256; the signing key is never reinterpreted as an encapsulation
+key, in either direction.
 
 Multi-recipient delivery is one :func:`seal` per recipient public key —
 no shared secret, no helper here.
@@ -38,7 +45,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 )
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from .errors import IdkitError, MalformedError
+from .errors import MalformedError, SealingError
 from .keys import _decode_hex
 
 __all__ = [
@@ -62,15 +69,6 @@ _SEAL_INFO_PREFIX = "autonomy.idkit.seal.v"
 _DERIVE_INFO_PREFIX = b"autonomy.idkit.encap-key.v1\n"
 
 _MIN_SEED_LEN = 32
-
-
-class SealingError(IdkitError):
-    """A sealed record could not be produced or opened.
-
-    Wrong key, mismatched purpose, tampered record, and unknown suite
-    identifier all land here — deliberately indistinguishable, like GCM
-    authentication failure: the record does not open, full stop.
-    """
 
 
 def _validate_purpose(purpose: str) -> bytes:
@@ -107,21 +105,27 @@ def seal(
     """Encrypt *plaintext* to the recipient's encapsulation public key.
 
     *recipient_public_key* is the 64-lowercase-hex raw X25519 public key
-    (as produced by :func:`derive_encapsulation_keypair`). Returns the
+    (as produced by :func:`derive_encapsulation_keypair`) — NEVER an
+    Ed25519 signing key: the two are indistinguishable as hex, and a
+    record sealed to a signing key is permanently unopenable. Returns the
     suite-tagged wire record.
     """
     if not isinstance(plaintext, (bytes, bytearray)):
         raise MalformedError("plaintext must be bytes")
     label = _validate_purpose(purpose)
     if not isinstance(suite_id, int) or isinstance(suite_id, bool) or not 0 <= suite_id <= 255:
-        raise SealingError(f"unrecognized sealing suite identifier: {suite_id!r}")
+        raise MalformedError("suite_id must be an int in [0, 255]")
     suite = _lookup_suite(suite_id)
     raw = _decode_hex(recipient_public_key, 64, "recipient public key")
     try:
         pub = X25519PublicKey.from_public_bytes(raw)
+        sealed = suite.encrypt(bytes(plaintext), pub, info=_seal_info(suite_id, label))
     except ValueError as exc:
-        raise MalformedError("recipient public key is not a valid X25519 key") from exc
-    return bytes([suite_id]) + suite.encrypt(bytes(plaintext), pub, info=_seal_info(suite_id, label))
+        # Low-order / degenerate points pass from_public_bytes and fail in
+        # the KEM; recipient keys arrive off the wire, so fail closed in
+        # the taxonomy instead of leaking builtins.ValueError.
+        raise SealingError("recipient public key cannot be sealed to") from exc
+    return bytes([suite_id]) + sealed
 
 
 def open(record: bytes, recipient_private_key: str, purpose: str) -> bytes:  # noqa: A001
@@ -144,7 +148,9 @@ def open(record: bytes, recipient_private_key: str, purpose: str) -> bytes:  # n
     suite = _lookup_suite(suite_id)
     try:
         return suite.decrypt(bytes(record[1:]), priv, info=_seal_info(suite_id, label))
-    except InvalidTag as exc:
+    except (InvalidTag, ValueError) as exc:
+        # ValueError guards degenerate attacker-controlled enc points, which
+        # must be indistinguishable from any other failed open.
         raise SealingError("sealed record does not open with that key and purpose") from exc
 
 
