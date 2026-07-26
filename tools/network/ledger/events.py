@@ -264,13 +264,43 @@ def _v_revoke(p: dict) -> None:
 
 
 def _v_role_define(p: dict) -> None:
-    _require_fields(p, "role.define", frozenset({"name", "scope_set", "claim_requires", "version"}))
+    _require_fields(
+        p,
+        "role.define",
+        frozenset({"name", "scope_set", "claim_requires", "version"}),
+        frozenset({"approver_threshold"}),
+    )
     _require_role_name(p["name"], "role.define.name")
     validate_scope_list(p["scope_set"], "role.define.scope_set", allow_empty=True)
     if p["claim_requires"] not in CLAIM_REQUIRES:
         raise SchemaError(f"role.define.claim_requires must be one of {list(CLAIM_REQUIRES)}")
     if type(p["version"]) is not int or p["version"] < 1 or p["version"] > 2**31:
         raise SchemaError("role.define.version must be a positive integer")
+    if "approver_threshold" in p:
+        # Register D16: a TAGGED value, mirroring the recovery-quorum rule —
+        # the static integer is v1; future forms arrive as new kinds with
+        # their own validation, never by reinterpreting an integer.
+        if p["claim_requires"] != "admin-ack":
+            raise SchemaError(
+                "role.define.approver_threshold requires claim_requires == 'admin-ack'"
+            )
+        value = p["approver_threshold"]
+        if not isinstance(value, dict) or set(value) != {"kind", "count"}:
+            raise SchemaError(
+                "role.define.approver_threshold must be a tagged object with "
+                "exactly {kind, count}"
+            )
+        if value["kind"] != "static":
+            raise SchemaError(
+                f"role.define.approver_threshold.kind {value['kind']!r} is not "
+                "recognized (v1 defines 'static' only; unknown kinds fail closed)"
+            )
+        count = value["count"]
+        if type(count) is not int or count < 1 or count > MAX_APPROVALS:
+            raise SchemaError(
+                "role.define.approver_threshold.count must be an integer in "
+                f"[1, {MAX_APPROVALS}]"
+            )
 
 
 def _v_role_grant(p: dict) -> None:

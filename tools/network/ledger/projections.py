@@ -103,6 +103,42 @@ def build_projections(state: FoldState) -> dict:
     }
 
 
+def unassemblable_thresholds(state: FoldState) -> tuple:
+    """Admin-ack roles whose approver threshold exceeds the members who
+    hold admission authority over them — a WARNING surface, never a
+    validity rule (an unassemblable threshold stays legal and dormant
+    until the org grows into it, mirroring the recovery-quorum rule).
+
+    Root is not counted: it is the cold constitutional key, not a member
+    approver in routine admission.
+    """
+    from .fold import scope_role_grant
+    from .scopes import set_covers
+
+    candidates = {m.current_key for m in state.members.values()}
+    candidates.update(state.bare_roles)
+    candidates.discard(state.root)
+    warnings = []
+    for name in sorted(state.role_defs):
+        role_def = state.role_defs[name]
+        if role_def.claim_requires != "admin-ack":
+            continue
+        holders = sorted(
+            key
+            for key in candidates
+            if set_covers(state.authority(key), scope_role_grant(name))
+        )
+        if role_def.approver_threshold > len(holders):
+            warnings.append(
+                {
+                    "role": name,
+                    "approver_threshold": role_def.approver_threshold,
+                    "admission_authority_holders": holders,
+                }
+            )
+    return tuple(warnings)
+
+
 def organization_content_domain_id(genesis_id: str) -> str:
     """The version-one organization-content storage-domain identifier.
 

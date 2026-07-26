@@ -272,3 +272,99 @@ class TestInviteCascadeAndRaces:
         state = fold(sim.ledger)
         assert state.valid[claim] is False
         assert state.invites[invite] == INVITE_REVOKED
+
+
+class TestApproverThreshold:
+    """N-of-M distinct admin approvers on member.claim (register D16)."""
+
+    def test_threshold_folds_and_defaults_to_one(self):
+        sim = Sim()
+        sim.role_define(sim.root, "member", requires="admin-ack", approver_threshold=1)
+        sim.role_define(sim.root, "guest", requires="admin-ack")
+        state = sim.fold()
+        assert state.role_defs["member"].approver_threshold == 1
+        assert state.role_defs["guest"].approver_threshold == 1
+
+    def test_fingerprint_commits_to_the_threshold(self):
+        from tools.network.ledger import HLC, Ledger, fold, make_event
+
+        from .conftest import ORG, T0
+
+        root = KeyPair.generate()
+
+        def build(count):
+            ledger = Ledger()
+            gid = ledger.add(
+                make_event(
+                    root,
+                    {"type": "genesis", "org": ORG, "root_pub": root.public_hex},
+                    [],
+                    HLC(T0),
+                )
+            )
+            ledger.add(
+                make_event(
+                    root,
+                    {
+                        "type": "role.define",
+                        "name": "member",
+                        "scope_set": [],
+                        "claim_requires": "admin-ack",
+                        "version": 1,
+                        "approver_threshold": {"kind": "static", "count": count},
+                    },
+                    [gid],
+                    HLC(T0 + 1_000),
+                )
+            )
+            return fold(ledger).fingerprint()
+
+        assert build(2) != build(3)
+
+    def test_two_of_m_requires_two_distinct_authorized_approvers(self):
+        from tools.network.ledger.fold import R_APPROVAL_MISSING
+
+        sim = Sim()
+        sim.role_define(sim.root, "member", requires="admin-ack", approver_threshold=2)
+        admin1, admin2 = KeyPair.generate(), KeyPair.generate()
+        sim.delegate(sim.root, admin1, ["role:grant:member"])
+        sim.delegate(sim.root, admin2, ["role:grant:member"])
+
+        invite_key, persona = KeyPair.generate(), KeyPair.generate()
+        iid = sim.invite(sim.root, "member", invite_key=invite_key)
+        under = sim.claim(iid, invite_key, persona, approvers=[admin1])
+        state = sim.fold()
+        assert state.valid[under] is False
+        assert state.reasons[under] == R_APPROVAL_MISSING
+        assert persona.public_hex not in state.members
+
+        invite_key2, persona2 = KeyPair.generate(), KeyPair.generate()
+        iid2 = sim.invite(sim.root, "member", invite_key=invite_key2)
+        met = sim.claim(iid2, invite_key2, persona2, approvers=[admin1, admin2])
+        state = sim.fold()
+        assert state.valid[met] is True
+        assert persona2.public_hex in state.members
+
+    def test_sponsor_vouch_counts_as_one(self):
+        from tools.network.ledger.fold import R_APPROVAL_MISSING
+
+        sim = Sim()
+        sim.role_define(sim.root, "member", requires="admin-ack", approver_threshold=2)
+        sponsor, admin = KeyPair.generate(), KeyPair.generate()
+        sim.delegate(sim.root, sponsor, ["invite:member"])
+        sim.delegate(sim.root, admin, ["role:grant:member"])
+
+        invite_key, persona = KeyPair.generate(), KeyPair.generate()
+        iid = sim.invite(sponsor, "member", invite_key=invite_key)
+        met = sim.claim(iid, invite_key, persona, approvers=[sponsor, admin])
+        state = sim.fold()
+        assert state.valid[met] is True  # sponsor vouch + one admin = two
+
+        # One admin plus a signer with no admission authority: below the bar.
+        rando = KeyPair.generate()
+        invite_key2, persona2 = KeyPair.generate(), KeyPair.generate()
+        iid2 = sim.invite(sponsor, "member", invite_key=invite_key2)
+        under = sim.claim(iid2, invite_key2, persona2, approvers=[admin, rando])
+        state = sim.fold()
+        assert state.valid[under] is False
+        assert state.reasons[under] == R_APPROVAL_MISSING

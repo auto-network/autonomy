@@ -291,3 +291,73 @@ class TestWireForm:
         other = KeyPair.generate()
         e2 = make_event(other, payload, [PARENT], HLC(T0))
         assert e1.event_id != e2.event_id
+
+
+class TestApproverThreshold:
+    """role.define approver_threshold: a D16 tagged value, admin-ack only."""
+
+    def _role(self, **over):
+        payload = {
+            "type": "role.define",
+            "name": "member",
+            "scope_set": ["link:publish"],
+            "claim_requires": "admin-ack",
+            "version": 1,
+            "approver_threshold": {"kind": "static", "count": 2},
+        }
+        payload.update(over)
+        return payload
+
+    def test_static_bounds_accepted(self):
+        for count in (1, 16):
+            validate_payload(
+                self._role(approver_threshold={"kind": "static", "count": count})
+            )
+
+    def test_omitting_the_field_validates(self):
+        payload = self._role()
+        del payload["approver_threshold"]
+        validate_payload(payload)
+
+    @pytest.mark.parametrize("count", [0, -1, True, 17, "2"])
+    def test_bad_counts_rejected(self, count):
+        with pytest.raises(SchemaError):
+            validate_payload(
+                self._role(approver_threshold={"kind": "static", "count": count})
+            )
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            3,  # bare integer: the tag is the extension point, never an int
+            {"kind": "percent", "count": 2},  # unknown kind fails closed
+            {"kind": "static"},  # missing count
+            {"count": 2},  # missing kind
+            {"kind": "static", "count": 2, "extra": 1},
+            None,
+            "static:2",
+        ],
+    )
+    def test_untagged_or_unknown_forms_rejected(self, value):
+        with pytest.raises(SchemaError):
+            validate_payload(self._role(approver_threshold=value))
+
+    @pytest.mark.parametrize("requires", ["self", "sponsor"])
+    def test_requires_admin_ack(self, requires):
+        with pytest.raises(SchemaError):
+            validate_payload(self._role(claim_requires=requires))
+
+    def test_duplicate_approver_key_rejected(self):
+        with pytest.raises(SchemaError):
+            validate_payload(
+                {
+                    "type": "member.claim",
+                    "invite_ref": "11" * 32,
+                    "persona_pub": KP.public_hex,
+                    "profile": {},
+                    "approvals": [
+                        {"key": KP.public_hex, "sig": "ab" * 64},
+                        {"key": KP.public_hex, "sig": "ab" * 64},
+                    ],
+                }
+            )
