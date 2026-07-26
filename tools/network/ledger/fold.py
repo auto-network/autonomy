@@ -253,6 +253,7 @@ class FoldState:
         }
         self.invites: Dict[str, str] = folder.invite_statuses(ctx)
         self.checkpoints: tuple = folder.checkpoints_at(ctx)
+        self.loss_heads: tuple = folder.loss_heads_at(ctx)
 
     # -- queries ---------------------------------------------------------------
 
@@ -1122,6 +1123,38 @@ class _Folder:
 
     def checkpoints_at(self, ctx: frozenset) -> tuple:
         return tuple(sorted(cid for cid in self.checkpoint_ids if cid in ctx and self.valid[cid]))
+
+    def loss_heads_at(self, ctx: frozenset) -> tuple:
+        """The maximal valid access contractions in *ctx* (RequiredLossHeads).
+
+        Candidates: every valid ``revoke`` (event- and key-target),
+        ``role.revoke``, ``member.rekey``, and ``key.rotate``, plus each
+        valid higher-version ``role.define`` that drops at least one scope
+        of the effective prior definition of the same name — decided by
+        the coverage order (``attenuates``), not raw set difference, so a
+        redefinition to a covering pattern is not a contraction. Version
+        one has a single org-wide domain, so no per-domain filter applies.
+        Maximality is over the causal-ancestry map: a candidate ancestral
+        to another candidate is dominated. Sorted by event id.
+        """
+        candidates = set()
+        for group in (self.revokes, self.role_revokes, self.rekeys, self.rotations):
+            candidates.update(eid for eid in group if eid in ctx and self.valid[eid])
+        for d in self.role_defs:
+            if d.id not in ctx or not self.valid[d.id]:
+                continue
+            prior = self.role_defs_at(self.anc[d.id]).get(d.name)
+            if prior is None or d.version <= prior.version:
+                continue  # first definition, or does not supersede
+            if not attenuates(prior.scope_set, d.scope_set):
+                candidates.add(d.id)
+        return tuple(
+            sorted(
+                c
+                for c in candidates
+                if not any(c in self.anc[o] for o in candidates if o != c)
+            )
+        )
 
 
 def _neg_id(event_id: str) -> tuple:
