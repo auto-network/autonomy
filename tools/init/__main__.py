@@ -12,6 +12,7 @@ Exit code 0 on success (including the already-initialized no-op case).
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import sys
 
@@ -35,6 +36,11 @@ def main(argv: list[str] | None = None) -> int:
         help="display name of the first org (default: title-cased slug)",
     )
     parser.add_argument(
+        "--invite", metavar="CODE",
+        help="join an EXISTING org with this invitation code "
+             "(default: $AUTONOMY_INVITE); mutually exclusive with --org",
+    )
+    parser.add_argument(
         "--root", metavar="PATH",
         help="deployment root (default: this checkout)",
     )
@@ -55,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         args.root,
         first_org=args.org,
         first_org_name=args.org_name,
+        invite=args.invite or os.environ.get("AUTONOMY_INVITE"),
         tls=not args.no_tls,
         tls_domain=args.tls_domain,
     )

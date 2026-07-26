@@ -1,0 +1,81 @@
+"""First-run's JOIN branch: AUTONOMY_INVITE as a peer of AUTONOMY_FIRST_ORG."""
+
+from __future__ import annotations
+
+import pytest
+
+from tools.data_paths import REFUSE_REAL_DATA_FALLBACK_ENV, STORE_MANIFEST
+from tools.init.first_run import CREATED, FAILED, PENDING, InitConflict, initialize
+from tools.network.invitation import Invitation, InvitationError, encode_invitation
+
+ORG = "018f6b2a-7c4d-7e11-8a3b-9d5c1e2f4a6b"
+ROOT_PUB = "ab" * 32
+INVITE_REF = "cd" * 32
+TOKEN = "ef" * 32
+
+
+def code() -> str:
+    return encode_invitation(
+        Invitation(org=ORG, root_pub=ROOT_PUB, invite_ref=INVITE_REF, token=TOKEN)
+    )
+
+
+@pytest.fixture
+def volume(tmp_path, monkeypatch):
+    """A fresh volume, rooted per the B1 contract with the guard armed so a
+    store we forgot to root raises rather than touching real data/."""
+    monkeypatch.setenv(REFUSE_REAL_DATA_FALLBACK_ENV, "1")
+    for store in STORE_MANIFEST:
+        if store.env:
+            monkeypatch.setenv(store.env, str(tmp_path / "data" / store.relative))
+    monkeypatch.delenv("AUTONOMY_FIRST_ORG", raising=False)
+    monkeypatch.delenv("AUTONOMY_INVITE", raising=False)
+    return tmp_path
+
+
+def _step(report, name):
+    return next((s for s in report.steps if s.name == name), None)
+
+
+def test_invite_branch_founds_no_shared_org(volume):
+    """Joining means membership arrives from the INVITING org's ledger —
+    a node that also founded its own would have two identities."""
+    report = initialize(volume, invite=code(), tls=False)
+    orgs = {p.stem for p in (volume / "data" / "orgs").glob("*.db")}
+    assert orgs == {"personal"}, f"join path created a shared org: {orgs}"
+    assert _step(report, "org:personal").action == CREATED
+    join = _step(report, "join")
+    assert join.action == PENDING
+
+
+def test_create_branch_still_founds(volume):
+    report = initialize(volume, first_org="acme", tls=False)
+    orgs = {p.stem for p in (volume / "data" / "orgs").glob("*.db")}
+    assert orgs == {"acme", "personal"}
+    assert _step(report, "join") is None
+
+
+def test_found_and_join_together_is_a_hard_error(volume):
+    """Silently preferring one would strand state under the other."""
+    with pytest.raises(InitConflict):
+        initialize(volume, first_org="acme", invite=code(), tls=False)
+
+
+def test_a_bad_code_fails_first_run_before_any_network_call(volume):
+    with pytest.raises(InvitationError):
+        initialize(volume, invite="not-an-invitation", tls=False)
+
+
+def test_the_report_never_carries_the_bearer(volume):
+    """The report is printed to container logs and emitted as JSON."""
+    report = initialize(volume, invite=code(), tls=False)
+    rendered = repr(report) + str(_step(report, "join").detail)
+    assert TOKEN not in rendered
+    assert ORG in rendered  # the org IS identified: redaction, not obscurity
+
+
+def test_join_branch_writes_only_inside_the_volume(volume):
+    """The B1 contract holds on the join path too."""
+    initialize(volume, invite=code(), tls=False)
+    assert (volume / "data" / "orgs" / "personal.db").exists()
+    assert (volume / "data" / "graph.db").exists()

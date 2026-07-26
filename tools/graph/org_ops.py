@@ -940,8 +940,14 @@ def ensure_bootstrap_orgs(
     root: Path | str | None = None,
     first_org: str | None = None,
     first_org_name: str | None = None,
+    personal_only: bool = False,
 ) -> list[OrgRef]:
     """Ensure the first shared org and ``personal.db`` exist under ``data/orgs/``.
+
+    ``personal_only`` creates just the operator's own store and founds no
+    shared org — the invite-join path (auto-8v5ri), where membership
+    arrives from the INVITING org's ledger rather than from a local
+    creation.
 
     The first org defaults to ``autonomy`` (this host's historical
     behavior) but a fresh deployment names its own: pass ``first_org``
@@ -959,6 +965,8 @@ def ensure_bootstrap_orgs(
 
     Returns the list of orgs after bootstrap.
     """
+    if personal_only:
+        return [_ensure_org("personal", "personal", _PERSONAL_SEED_PAYLOAD, root=root)]
     slug = first_org or os.environ.get(FIRST_ORG_ENV)
     if slug is None:
         shared = [o for o in list_orgs(root=root) if o.type == "shared"]

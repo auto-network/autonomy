@@ -56,6 +56,12 @@ ALLOWLIST_YAML = (
 CREATED = "created"
 EXISTS = "exists"
 SKIPPED = "skipped"
+PENDING = "pending"   # accepted, awaiting work outside first-run (a join)
+FAILED = "failed"
+
+
+class InitConflict(ValueError):
+    """Mutually exclusive first-run options were supplied together."""
 
 
 @dataclass
@@ -96,6 +102,7 @@ def initialize(
     *,
     first_org: str | None = None,
     first_org_name: str | None = None,
+    invite: str | None = None,
     tls: bool = True,
     tls_domain: str | None = None,
 ) -> InitReport:
@@ -105,14 +112,29 @@ def initialize(
     ``exists`` instead of touching it. ``first_org`` names the first
     shared org (falls back to ``AUTONOMY_FIRST_ORG`` env, then
     ``autonomy``); ``first_org_name`` sets its display name.
+
+    ``invite`` (``AUTONOMY_INVITE``) selects the JOIN path instead: the
+    node founds no org of its own and instead claims membership in the
+    inviting one (auto-8v5ri). A node either founds or joins — passing
+    both is a configuration error rather than a silent precedence,
+    because the two produce different identities and quietly picking one
+    would strand state under the other.
     """
+    if invite and first_org:
+        raise InitConflict(
+            "a node either founds its own org or joins an existing one: "
+            "AUTONOMY_FIRST_ORG and AUTONOMY_INVITE cannot both be set"
+        )
     root = Path(root).resolve() if root is not None else REPO_ROOT
     report = InitReport(root=str(root))
     data = root / "data"
 
     _init_data_dirs(data, report)
     _init_graph_db(data, report)
-    _init_orgs(data, report, first_org=first_org, first_org_name=first_org_name)
+    if invite:
+        _init_join(data, report, invite=invite)
+    else:
+        _init_orgs(data, report, first_org=first_org, first_org_name=first_org_name)
     _init_operational_dbs(data, report)
     _seed_bootstrap_allowlist(data, report)
     if tls:
@@ -175,6 +197,37 @@ def _init_orgs(
         )
     org_ops.ensure_bootstrap_orgs(
         root=orgs_root, first_org=slug, first_org_name=first_org_name,
+    )
+
+
+def _init_join(data: Path, report: InitReport, *, invite: str) -> None:
+    """Prepare the JOIN path: personal identity store + a validated code.
+
+    The invitation is decoded and fully validated HERE — before any
+    network call — so a mistyped code fails at first-run with a clear
+    report instead of a half-formed request. The org side is not created
+    locally: membership arrives from the inviting org's ledger.
+    """
+    from tools.graph import org_ops
+    from tools.network.invitation import InvitationError, decode_invitation
+
+    orgs_root = resolve_store("orgs", root=data)
+    existed = (orgs_root / "personal.db").exists()
+    org_ops.ensure_bootstrap_orgs(root=orgs_root, first_org=None, personal_only=True)
+    report.add(
+        "org:personal", EXISTS if existed else CREATED, str(orgs_root / "personal.db")
+    )
+    try:
+        invitation = decode_invitation(invite)
+    except InvitationError as exc:
+        report.add("join", FAILED, str(exc))
+        raise
+    # Never the token: the report is printed and logged.
+    report.add(
+        "join",
+        PENDING,
+        f"org {invitation.org} invite {invitation.invite_ref[:12]}… "
+        f"root {invitation.root_pub[:12]}…",
     )
 
 
