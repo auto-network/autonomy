@@ -49,6 +49,7 @@ from tools.network.idkit import canonical_json, verify_signature
 from tools.network.idkit.errors import IdkitError
 
 from .events import (
+    KEM_CREDENTIAL_DOMAIN,
     approval_signing_input,
     rotate_continuity_input,
 )
@@ -74,6 +75,7 @@ R_INVITE_EXPIRED = "invite-expired"
 R_INVITE_ALREADY_CLAIMED = "invite-already-claimed"
 R_CLAIM_WRONG_KEY = "claim-wrong-key"
 R_CLAIM_BAD_TOKEN = "claim-bad-token"
+R_CLAIM_BAD_CREDENTIAL = "claim-bad-credential"
 R_PERSONA_EXISTS = "persona-exists"
 R_APPROVAL_BAD = "bad-approval"
 R_APPROVAL_MISSING = "approval-missing"
@@ -169,6 +171,7 @@ class _Claim:
     invite_ref: str
     persona_pub: str
     hlc_ts: int
+    kem_credential: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -207,6 +210,9 @@ class MemberView:
     sponsor: str
     claim_id: str
     invite_id: str
+    #: The claim-carried KEM credential; None when absent or implicitly
+    #: retired by a rekey (validity follows the current signing key, §5).
+    kem_credential: Optional[dict] = None
 
 
 class FoldState:
@@ -245,6 +251,7 @@ class FoldState:
                 sponsor=invite.author,
                 claim_id=claim.id,
                 invite_id=invite.id,
+                kem_credential=claim.kem_credential if current_key == pid else None,
             )
         self._bare_roles = {
             pid: tuple(sorted(roles))
@@ -618,6 +625,30 @@ class _Folder:
         if p["persona_pub"] in taken:
             return R_PERSONA_EXISTS
 
+        # Embedded KEM credential (contract §5): no admitted claim carries
+        # a credential the fold could not verify with idkit alone.
+        credential = p.get("kem_credential")
+        if credential is not None:
+            binding = {
+                k: v for k, v in credential.items() if k not in ("kem_key_id", "signature")
+            }
+            if (
+                hashlib.sha256(canonical_json(binding)).hexdigest()
+                != credential["kem_key_id"]
+            ):
+                return R_CLAIM_BAD_CREDENTIAL
+            signed = {**binding, "kem_key_id": credential["kem_key_id"]}
+            try:
+                verify_signature(
+                    p["persona_pub"],
+                    credential["signature"],
+                    KEM_CREDENTIAL_DOMAIN + canonical_json(signed),
+                )
+            except IdkitError:
+                return R_CLAIM_BAD_CREDENTIAL
+            if credential["genesis_id"] != self.genesis_id:
+                return R_CLAIM_BAD_CREDENTIAL
+
         reason = self._check_approvals(event, ctx, invite)
         if reason is not None:
             return reason
@@ -627,6 +658,7 @@ class _Folder:
             invite_ref=invite_id,
             persona_pub=p["persona_pub"],
             hlc_ts=event.hlc.ts,
+            kem_credential=credential,
         )
         return None
 
