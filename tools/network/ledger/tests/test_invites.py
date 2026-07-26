@@ -54,15 +54,33 @@ class TestLifecycle:
         assert state.holds(persona.public_hex, "link:publish")
 
     def test_token_invite_flow(self):
+        """Bearer safety (auto-g6q9d, register B6): a token-bound claim
+        never self-completes — the old immediate-admit behavior of this
+        test is now exactly what the invariant forbids; with one sponsor
+        countersignature the same claim admits (the original intent:
+        a correct token joins the member — now via countersigned staging).
+        """
+        from tools.network.ledger.fold import R_APPROVAL_MISSING
+
         sim, sponsor = org_with_member_role()
         token = generate_token()
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         persona = KeyPair.generate()
         invite = sim.invite(sponsor, "member", token_hash=token_hash)
-        claim = sim.claim(invite, persona, persona, token=token)
+        bare = sim.claim(invite, persona, persona, token=token)
         state = fold(sim.ledger)
-        assert state.valid[claim] is True
-        assert persona.public_hex in state.members
+        assert state.valid[bare] is False
+        assert state.reasons[bare] == R_APPROVAL_MISSING
+        assert persona.public_hex not in state.members
+
+        # The sponsor's countersignature completes it.
+        persona2 = KeyPair.generate()
+        invite2 = sim.invite(sponsor, "member", token_hash=token_hash)
+        signed = sim.claim(invite2, persona2, persona2, token=token,
+                           approvers=[sponsor])
+        state = fold(sim.ledger)
+        assert state.valid[signed] is True
+        assert persona2.public_hex in state.members
 
     def test_wrong_token_rejected(self):
         sim, sponsor = org_with_member_role()

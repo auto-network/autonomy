@@ -40,13 +40,17 @@ the named checkpoint verifies — a tampered history cannot cold-join.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
-from .errors import LedgerError, SchemaError
-from .events import EVENT_TYPES, Event
+from tools.network.idkit import canonical_json, verify_signature
+from tools.network.idkit.errors import IdkitError
+
+from .errors import LedgerError, SchemaError, SignatureError
+from .events import EVENT_TYPES, Event, approval_signing_input
 from .fold import FoldState, fold
 from .ledger import Ledger
 from .projections import build_projections, projection_bytes
@@ -112,6 +116,15 @@ CREATE TABLE IF NOT EXISTS ledger_projections (
     name        TEXT PRIMARY KEY,
     fingerprint TEXT NOT NULL,
     body        BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ledger_pending_claims (
+    claim_key   TEXT PRIMARY KEY,
+    invite_ref  TEXT NOT NULL,
+    persona_pub TEXT NOT NULL,
+    body        BLOB NOT NULL,
+    approvals   BLOB NOT NULL,
+    author_key  TEXT NOT NULL,
+    hlc_ts      INTEGER NOT NULL
 );
 """
 
@@ -227,6 +240,113 @@ class LedgerStore:
                 )
             pending = deferred
         return added
+
+    # -- pending claims (staging rows, NEVER events rows — auto-g6q9d) -----------------
+
+    def evaluate_claim(self, event: Event) -> Optional[str]:
+        """Trial-fold a ``member.claim`` against the current DAG.
+
+        Nothing is persisted: the candidate is verified and folded in a
+        scratch ledger. Returns ``None`` (folds clean — append it),
+        ``"approval-missing"`` (stage it pending), or the hard rejection
+        reason. Structural/signature defects raise exactly as ``append``
+        would.
+        """
+        if not isinstance(event, Event) or event.type != "member.claim":
+            raise SchemaError("evaluate_claim takes a member.claim event")
+        scratch = Ledger()
+        scratch.ingest(self.ledger.events())
+        scratch.add(event)  # full structural + signature verification
+        state = fold(scratch)
+        if state.valid[event.event_id]:
+            return None
+        return state.reasons[event.event_id]
+
+    @staticmethod
+    def claim_key(invite_ref: str, persona_pub: str) -> str:
+        return hashlib.sha256((invite_ref + persona_pub).encode("ascii")).hexdigest()
+
+    def stage_pending_claim(self, event: Event) -> str:
+        """Hold an under-approved claim for countersignatures.
+
+        A staging row only — the event tables, content-address hydrate,
+        and L8 CHECK are untouched. Idempotent per (invite, persona).
+        """
+        if not isinstance(event, Event) or event.type != "member.claim":
+            raise SchemaError("stage_pending_claim takes a member.claim event")
+        p = event.payload
+        key = self.claim_key(p["invite_ref"], p["persona_pub"])
+        with self.db:
+            self.db.execute(
+                "INSERT OR REPLACE INTO ledger_pending_claims VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    key,
+                    p["invite_ref"],
+                    p["persona_pub"],
+                    canonical_json(p),
+                    canonical_json(list(p["approvals"])),
+                    event.author_key,
+                    event.hlc.ts,
+                ),
+            )
+        return key
+
+    def get_pending_claim(self, claim_key: str) -> Optional[dict]:
+        row = self.db.execute(
+            "SELECT invite_ref, persona_pub, body, approvals, author_key, hlc_ts "
+            "FROM ledger_pending_claims WHERE claim_key = ?",
+            (claim_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "claim_key": claim_key,
+            "invite_ref": row[0],
+            "persona_pub": row[1],
+            "body": json.loads(bytes(row[2])),
+            "approvals": json.loads(bytes(row[3])),
+            "author_key": row[4],
+            "hlc_ts": row[5],
+        }
+
+    def add_pending_approval(self, claim_key: str, entry: dict) -> list:
+        """Merge one verified ``{key, sig}`` countersignature.
+
+        The store verifies the SIGNATURE over the staged body (fail
+        closed — an unverifiable entry never lands); whether the signer
+        holds admission AUTHORITY is the caller's fold-side check.
+        Returns the merged, key-sorted, duplicate-free approvals list.
+        """
+        record = self.get_pending_claim(claim_key)
+        if record is None:
+            raise StoreError(f"no pending claim {claim_key[:12]}")
+        if not isinstance(entry, dict) or set(entry) != {"key", "sig"}:
+            raise SchemaError("approval entry must be exactly {key, sig}")
+        try:
+            verify_signature(
+                entry["key"],
+                entry["sig"],
+                approval_signing_input("member.claim", record["body"]),
+            )
+        except IdkitError as exc:
+            raise SignatureError(
+                "countersignature does not verify over the staged claim"
+            ) from exc
+        merged = {e["key"]: e for e in record["approvals"]}
+        merged[entry["key"]] = {"key": entry["key"], "sig": entry["sig"]}
+        approvals = [merged[k] for k in sorted(merged)]
+        with self.db:
+            self.db.execute(
+                "UPDATE ledger_pending_claims SET approvals = ? WHERE claim_key = ?",
+                (canonical_json(approvals), claim_key),
+            )
+        return approvals
+
+    def drop_pending_claim(self, claim_key: str) -> None:
+        with self.db:
+            self.db.execute(
+                "DELETE FROM ledger_pending_claims WHERE claim_key = ?", (claim_key,)
+            )
 
     # -- read side --------------------------------------------------------------------
 
