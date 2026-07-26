@@ -126,9 +126,16 @@ invite expiry / delegation TTLs, omit it for a time-independent state.
 
 ## Storage & projections (F2)
 
-`store.py` — **LedgerStore**, the per-org SQLite replica
-(`data/orgs/<slug>.ledger.db`, `org_ledger_db_path()` respects
-`AUTONOMY_ORGS_DIR`). Every open hydrates the full event set through the
+`store.py` — **LedgerStore**, the SQLite replica co-located inside the
+org's own database (`data/orgs/<slug>.db`, `org_ledger_db_path()`
+respects `AUTONOMY_ORGS_DIR`): the ledger tables live under a `ledger_`
+name prefix beside the graph tables, on the store's own WAL-mode
+connection, so one organization is one database file. The ledger keeps
+its own `ledger_meta` schema-version row; the graph schema keeps
+`PRAGMA user_version`. Legacy separate `<slug>.ledger.db` files migrate
+via `relocate_ledger_to_org_db(slug)` — every event re-verified, fold
+fingerprint and projections asserted byte-identical, the legacy file
+renamed `.migrated`. Every open hydrates the full event set through the
 anti-malleable parser and verifies each row's content address
 (sha256(wire) == event_id) plus the heads table — silent DB tampering
 raises `TamperError` at open. Every append runs full F1 structural
@@ -137,7 +144,8 @@ verification before the row persists.
 **L8 is enforced three times**: the event parser (unknown types cannot be
 minted or parsed), an independent whitelist check in `LedgerStore.append`
 (catches hand-constructed Event objects), and a SQL
-`CHECK (event_type IN (...))` on the events table (catches raw INSERTs).
+`CHECK (event_type IN (...))` on the `ledger_events` table (catches raw
+INSERTs).
 
 `projections.py` — fold-derived read models: `roster` (member rows with
 sponsor provenance), `roles` (role matrix with holders), `live-keys`

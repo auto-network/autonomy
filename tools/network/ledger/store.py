@@ -1,26 +1,32 @@
-"""LedgerStore — the per-org SQLite replica of the authority ledger.
+"""LedgerStore — the org-DB-co-located SQLite replica of the ledger.
 
-One SQLite file per org, alongside the org's graph DB
-(``data/orgs/<slug>.ledger.db``). The store is a durability layer over
-the F1 in-memory :class:`~.ledger.Ledger`: every open hydrates the full
-event set (content-address-verified, anti-malleable parse) and every
-append runs the complete structural verification before the row is
-persisted — the disk never holds an event the in-memory ledger would
-reject.
+One organization is one database file: the ledger tables live inside
+the org's own ``data/orgs/<slug>.db`` under a ``ledger_`` name prefix,
+beside the graph tables (which track their schema via ``PRAGMA
+user_version``; the ledger keeps its own ``ledger_meta`` version row).
+The store opens its own WAL-mode connection, so it coexists with the
+graph connection on the same file, and stays dependency-light — it
+never imports tools.graph. The store is a durability layer over the F1
+in-memory :class:`~.ledger.Ledger`: every open hydrates the full event
+set (content-address-verified, anti-malleable parse) and every append
+runs the complete structural verification before the row is persisted —
+the disk never holds an event the in-memory ledger would reject.
+Pre-co-location ``<slug>.ledger.db`` files migrate through
+:func:`relocate_ledger_to_org_db`.
 
-**Content addressing.** ``events.event_id`` must equal the SHA-256 of the
-stored wire bytes; verified on every hydrate, so silent DB tampering is
-detected at open (``TamperError``).
+**Content addressing.** ``ledger_events.event_id`` must equal the
+SHA-256 of the stored wire bytes; verified on every hydrate, so silent
+DB tampering is detected at open (``TamperError``).
 
 **L8, layer two.** Layer one is the event schema
 (:func:`~.events.validate_payload` — unknown types cannot be parsed or
 minted). The store re-checks the type whitelist *independently* in
 :meth:`append` (catching hand-constructed Event objects that bypassed the
-parser) and pins it a third time in SQL: the ``events`` table carries a
-``CHECK (event_type IN (...))`` constraint, so even raw INSERTs cannot
-smuggle a content-access row into the replica.
+parser) and pins it a third time in SQL: the ``ledger_events`` table
+carries a ``CHECK (event_type IN (...))`` constraint, so even raw
+INSERTs cannot smuggle a content-access row into the replica.
 
-**Projections** are cache rows (``projections`` table), never the source
+**Projections** are cache rows (``ledger_projections``), never the source
 of truth: :meth:`rebuild_projections` drops and refolds them from the
 event store, byte-identically (canonical JSON).
 
@@ -59,29 +65,33 @@ class TamperError(StoreError):
     """Stored bytes do not match their content address / checkpoint."""
 
 
+def _orgs_dir(root=None) -> Path:
+    if root is not None:
+        return Path(root)
+    env = os.environ.get("AUTONOMY_ORGS_DIR")
+    return Path(env) if env else _REPO_ROOT / "data" / "orgs"
+
+
 def org_ledger_db_path(slug: str, root=None) -> Path:
-    """``<orgs_dir>/<slug>.ledger.db`` — alongside the org's graph DB.
+    """``<orgs_dir>/<slug>.db`` — the org's OWN database; the ledger
+    tables live inside it under the ``ledger_`` prefix.
 
     Mirrors ``tools/graph/db.py`` resolution (``AUTONOMY_ORGS_DIR`` env
     override, default ``data/orgs/``) without importing tools.graph — the
-    network library stays dependency-light.
+    network library stays dependency-light. The legacy separate file is
+    ``<slug>{LEDGER_DB_SUFFIX}``; see :func:`relocate_ledger_to_org_db`.
     """
-    if root is not None:
-        base = Path(root)
-    else:
-        env = os.environ.get("AUTONOMY_ORGS_DIR")
-        base = Path(env) if env else _REPO_ROOT / "data" / "orgs"
-    return base / f"{slug}{LEDGER_DB_SUFFIX}"
+    return _orgs_dir(root) / f"{slug}.db"
 
 
 _TYPE_LIST = ", ".join(f"'{t}'" for t in sorted(EVENT_TYPES))
 
 _SCHEMA = f"""
-CREATE TABLE IF NOT EXISTS meta (
+CREATE TABLE IF NOT EXISTS ledger_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS events (
+CREATE TABLE IF NOT EXISTS ledger_events (
     event_id   TEXT PRIMARY KEY,
     event_type TEXT NOT NULL CHECK (event_type IN ({_TYPE_LIST})),
     author_key TEXT NOT NULL,
@@ -89,16 +99,16 @@ CREATE TABLE IF NOT EXISTS events (
     hlc_count  INTEGER NOT NULL,
     wire       BLOB NOT NULL
 );
-CREATE TABLE IF NOT EXISTS parents (
-    event_id  TEXT NOT NULL REFERENCES events(event_id),
-    parent_id TEXT NOT NULL REFERENCES events(event_id),
+CREATE TABLE IF NOT EXISTS ledger_parents (
+    event_id  TEXT NOT NULL REFERENCES ledger_events(event_id),
+    parent_id TEXT NOT NULL REFERENCES ledger_events(event_id),
     PRIMARY KEY (event_id, parent_id)
 );
-CREATE INDEX IF NOT EXISTS idx_parents_parent ON parents(parent_id);
-CREATE TABLE IF NOT EXISTS heads (
-    event_id TEXT PRIMARY KEY REFERENCES events(event_id)
+CREATE INDEX IF NOT EXISTS idx_ledger_parents_parent ON ledger_parents(parent_id);
+CREATE TABLE IF NOT EXISTS ledger_heads (
+    event_id TEXT PRIMARY KEY REFERENCES ledger_events(event_id)
 );
-CREATE TABLE IF NOT EXISTS projections (
+CREATE TABLE IF NOT EXISTS ledger_projections (
     name        TEXT PRIMARY KEY,
     fingerprint TEXT NOT NULL,
     body        BLOB NOT NULL
@@ -120,7 +130,7 @@ class LedgerStore:
         with self.db:
             self.db.executescript(_SCHEMA)
             self.db.execute(
-                "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
+                "INSERT OR IGNORE INTO ledger_meta(key, value) VALUES ('schema_version', ?)",
                 (str(LEDGER_SCHEMA_VERSION),),
             )
         self.ledger = Ledger()
@@ -138,7 +148,7 @@ class LedgerStore:
         self.close()
 
     def _hydrate(self) -> None:
-        rows = self.db.execute("SELECT event_id, wire FROM events").fetchall()
+        rows = self.db.execute("SELECT event_id, wire FROM ledger_events").fetchall()
         events = []
         for event_id, wire in rows:
             if hashlib.sha256(wire).hexdigest() != event_id:
@@ -148,7 +158,7 @@ class LedgerStore:
             events.append(Event.from_json(bytes(wire)))  # anti-malleable parse
         if events:
             self.ledger.ingest(events)
-        stored_heads = {r[0] for r in self.db.execute("SELECT event_id FROM heads")}
+        stored_heads = {r[0] for r in self.db.execute("SELECT event_id FROM ledger_heads")}
         if stored_heads != set(self.ledger.heads()):
             raise TamperError("stored heads table does not match the event DAG")
 
@@ -169,7 +179,7 @@ class LedgerStore:
             return event.event_id
         with self.db:
             self.db.execute(
-                "INSERT INTO events(event_id, event_type, author_key, hlc_ts, hlc_count, wire)"
+                "INSERT INTO ledger_events(event_id, event_type, author_key, hlc_ts, hlc_count, wire)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     event.event_id,
@@ -181,13 +191,13 @@ class LedgerStore:
                 ),
             )
             self.db.executemany(
-                "INSERT INTO parents(event_id, parent_id) VALUES (?, ?)",
+                "INSERT INTO ledger_parents(event_id, parent_id) VALUES (?, ?)",
                 [(event.event_id, p) for p in event.parents],
             )
             self.db.executemany(
-                "DELETE FROM heads WHERE event_id = ?", [(p,) for p in event.parents]
+                "DELETE FROM ledger_heads WHERE event_id = ?", [(p,) for p in event.parents]
             )
-            self.db.execute("INSERT INTO heads(event_id) VALUES (?)", (event.event_id,))
+            self.db.execute("INSERT INTO ledger_heads(event_id) VALUES (?)", (event.event_id,))
         return event.event_id
 
     def append_wire(self, raw) -> str:
@@ -248,9 +258,9 @@ class LedgerStore:
         }
         fingerprint = state.fingerprint()
         with self.db:
-            self.db.execute("DELETE FROM projections")
+            self.db.execute("DELETE FROM ledger_projections")
             self.db.executemany(
-                "INSERT INTO projections(name, fingerprint, body) VALUES (?, ?, ?)",
+                "INSERT INTO ledger_projections(name, fingerprint, body) VALUES (?, ?, ?)",
                 [(name, fingerprint, body) for name, body in rendered.items()],
             )
         return rendered
@@ -258,13 +268,13 @@ class LedgerStore:
     def load_projections(self) -> Dict[str, bytes]:
         return {
             name: bytes(body)
-            for name, body in self.db.execute("SELECT name, body FROM projections")
+            for name, body in self.db.execute("SELECT name, body FROM ledger_projections")
         }
 
     def rebuild_projections(self, now: Optional[int] = None) -> Dict[str, bytes]:
         """Drop every cached read model and refold from the event store."""
         with self.db:
-            self.db.execute("DELETE FROM projections")
+            self.db.execute("DELETE FROM ledger_projections")
         return self.refresh_projections(now=now)
 
     # -- checkpoints ---------------------------------------------------------------------
@@ -315,3 +325,61 @@ def checkpoint_state_hash(ledger: Ledger, parents: Iterable[str]) -> str:
     own hash in the state it signs.
     """
     return fold(ledger, heads=list(parents)).fingerprint()
+
+
+def relocate_ledger_to_org_db(slug: str, *, root=None) -> bool:
+    """Move a legacy ``<slug>.ledger.db`` into the co-located org DB.
+
+    Every relocated event is read from a legacy connection, re-passes
+    content-address verification here and full structural verification
+    in :meth:`LedgerStore.append`, and the migrated store's fold
+    fingerprint and every rendered projection must equal the legacy
+    store's byte-for-byte before the legacy file is renamed to
+    ``<slug>.ledger.db.migrated``. Idempotent: an absent or empty legacy
+    file returns ``False`` and changes nothing.
+    """
+    legacy_path = _orgs_dir(root) / f"{slug}{LEDGER_DB_SUFFIX}"
+    if not legacy_path.is_file():
+        return False
+    legacy_db = sqlite3.connect(legacy_path)
+    try:
+        try:
+            rows = legacy_db.execute("SELECT event_id, wire FROM events").fetchall()
+        except sqlite3.OperationalError:
+            rows = []  # no events table: nothing to relocate
+    finally:
+        legacy_db.close()
+    if not rows:
+        return False
+
+    events = []
+    for event_id, wire in rows:
+        if hashlib.sha256(wire).hexdigest() != event_id:
+            raise TamperError(
+                f"legacy event {event_id[:12]} does not match its content address"
+            )
+        events.append(Event.from_json(bytes(wire)))
+    legacy_ledger = Ledger()
+    legacy_ledger.ingest(events)
+    legacy_state = fold(legacy_ledger)
+    legacy_rendered = {
+        name: projection_bytes(p)
+        for name, p in build_projections(legacy_state).items()
+    }
+
+    store = LedgerStore(org_ledger_db_path(slug, root))
+    try:
+        store.append_bundle(events)  # full re-verification per event
+        rendered = store.refresh_projections()
+        if store.fold().fingerprint() != legacy_state.fingerprint():
+            raise StoreError(
+                f"relocated fold fingerprint diverges for {slug!r}; migration aborted"
+            )
+        if rendered != legacy_rendered:
+            raise StoreError(
+                f"relocated projections diverge for {slug!r}; migration aborted"
+            )
+    finally:
+        store.close()
+    legacy_path.rename(Path(str(legacy_path) + ".migrated"))
+    return True
