@@ -34,6 +34,7 @@ from .errors import (
     WrongOrgError,
 )
 from .keys import KeyPair, load_public_key, verify_signature
+from .persona import PERSONA_SALT, PERSONA_SEED_LEN, derive_persona
 from .revocation import (
     REVOCATION_DOMAIN,
     REVOCATION_VERSION,
@@ -62,6 +63,10 @@ __all__ = [
     "verify_chain",
     "walk_chain",
     "ChainVerifyResult",
+    # persona
+    "derive_persona",
+    "PERSONA_SALT",
+    "PERSONA_SEED_LEN",
     # tokens
     "generate_token",
     "TOKEN_BITS",
