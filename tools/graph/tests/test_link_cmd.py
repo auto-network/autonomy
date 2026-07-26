@@ -30,6 +30,8 @@ from tools.graph.schemas.network_identity import (
     NETWORK_BINDING_REVISION,
 )
 from tools.network.idkit import KeyPair, Subject, issue_cert
+from tools.network.ledger import LedgerStore, org_ledger_db_path
+from tools.network.ledger.found import found_org_ledger
 from tools.network.registry.app import create_app as create_registry_app
 from tools.network.registry.signing import sign_request
 
@@ -44,10 +46,13 @@ NOTE_TARGET = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 class OperatorFixture:
     """Auto-resolves approvals the way the operator's browser would."""
 
-    def __init__(self, client, session_key, session_cert, approve=True):
+    def __init__(
+        self, client, session_key, session_cert, persona_pub, approve=True,
+    ):
         self.client = client
         self.session_key = session_key
         self.session_cert = session_cert
+        self.persona_pub = persona_pub
         self.approve = approve
 
     def decide(self, rid: str) -> None:
@@ -71,12 +76,28 @@ def operator_env(tmp_path, monkeypatch):
     from tools.graph.db import GraphDB
 
     root = KeyPair.generate()
+    personal_root = KeyPair.generate()
+    orgs_dir = tmp_path / "orgs"
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    GraphDB.create_org_db(
+        ORG, root=orgs_dir, org_id=ORG_UUID,
+    ).close()
+    with LedgerStore(org_ledger_db_path(ORG)) as store:
+        founded = found_org_ledger(
+            store,
+            org_id=ORG_UUID,
+            org_root=root,
+            personal_root_seed=bytes.fromhex(personal_root.private_hex),
+            now=int(time.time() * 1000),
+        )
+
     session_key = KeyPair.generate()
     now = int(time.time())
     session_cert = issue_cert(
         root, session_key.public_hex,
         scope=("link:publish", "link:revoke", "viewer:identify"),
-        org=ORG_UUID, subject=Subject("operator", "op-session-9"),
+        org=ORG_UUID,
+        subject=Subject("operator", founded.founder_persona_pub),
         not_before=now - 3600, not_after=now + 30 * 86400,
     )
 
@@ -115,7 +136,12 @@ def operator_env(tmp_path, monkeypatch):
     monkeypatch.setattr(graph_client, "_FORCE_HOST_DIRECT", True)
 
     with TestClient(Starlette(routes=approvals_routes.ROUTES)) as client:
-        operator = OperatorFixture(client, session_key, session_cert)
+        operator = OperatorFixture(
+            client,
+            session_key,
+            session_cert,
+            founded.founder_persona_pub,
+        )
 
         def fake_api(method, path, *, body=None, timeout=None):
             resp = client.request(method, path, json=body)
@@ -183,7 +209,7 @@ def test_publish_then_list_then_revoke(operator_env, capsys):
     link_cmd.cmd_link_list(argparse.Namespace(org=ORG))
     listed = capsys.readouterr().out
     assert token in listed and "binder" in listed and "ttl=3600s" in listed
-    assert "operator:op-session-9" in listed          # I6 visible to the agent
+    assert f"operator:{operator_env.persona_pub}" in listed  # I6 visible
 
     link_cmd.cmd_link_revoke(argparse.Namespace(target=token, org=ORG))
     assert "✓ share-link revoked" in capsys.readouterr().out
