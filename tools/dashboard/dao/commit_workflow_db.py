@@ -12,11 +12,13 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from tools.data_paths import resolve_store
 from typing import Iterable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DB_PATH = Path(os.environ.get("COMMIT_WORKFLOW_DB", str(REPO_ROOT / "data" / "commit_workflow.db")))
+DB_PATH = resolve_store("commit_workflow")
 MIN_SQLITE_VERSION = (3, 31, 0)
 
 NON_TERMINAL_STATUSES = frozenset({

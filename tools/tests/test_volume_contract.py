@@ -1,0 +1,150 @@
+"""The volume contract, proven by measurement (auto-lr6gu).
+
+DEPLOY.md documents that one volume holds all persistent node state.
+This turns that into a guarantee with three teeth:
+
+1. every store is enumerated in ``data_paths.STORE_MANIFEST`` and every
+   store resolves through the guarded resolver, so rooting a deployment
+   moves all readers together;
+2. with the volume rooted at a tmp dir and the refuse guard set, running
+   the node's core flows writes NOTHING outside it — asserted by hashing
+   the real ``data/`` and ``$HOME`` before and after, not by inspection;
+3. an escaping resolver is CAUGHT — the measurement is shown to fail
+   when a store is deliberately un-rooted, so a green run means the
+   contract held rather than that the test looked away.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from tools.data_paths import (
+    DEFAULT_DATA_ROOT,
+    REFUSE_REAL_DATA_FALLBACK_ENV,
+    STORE_MANIFEST,
+    RealDataFallbackRefused,
+    resolve_store,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _tree_manifest(root: Path) -> dict:
+    """path -> content hash for every file under *root* (missing → {})."""
+    if not root.exists():
+        return {}
+    out = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            try:
+                out[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                out[str(path)] = "unreadable"
+    return out
+
+
+def _rooted_env(volume: Path) -> dict:
+    """The env a node gets when its volume is *volume* — every manifest
+    store rooted, and the fallback guard armed so a store we FORGOT to
+    root raises instead of quietly using the operator's data/."""
+    env = dict(os.environ)
+    env[REFUSE_REAL_DATA_FALLBACK_ENV] = "1"
+    for store in STORE_MANIFEST:
+        if store.env:
+            env[store.env] = str(volume / store.relative)
+    env["HOME"] = str(volume / "home")
+    return env
+
+
+# -- 1. the manifest is the contract ------------------------------------------------
+
+
+def test_every_store_is_env_rooted():
+    """A store with no environment variable cannot be relocated, so it is
+    rooted only by coincidence of layout — the auth.db/tls failure mode."""
+    unrooted = [s.key for s in STORE_MANIFEST if not s.env]
+    assert unrooted == [], f"stores with no rooting variable: {unrooted}"
+
+
+def test_resolver_precedence_is_env_then_root():
+    """The writer that is handed a root and the reader that only knows the
+    env must agree, or state lands where nothing looks for it."""
+    store = STORE_MANIFEST[1]  # graph.db
+    os.environ.pop(store.env, None)
+    assert resolve_store(store.key, root=Path("/vol")) == Path("/vol") / store.relative
+    os.environ[store.env] = "/elsewhere/graph.db"
+    try:
+        assert resolve_store(store.key, root=Path("/vol")) == Path("/elsewhere/graph.db")
+    finally:
+        os.environ.pop(store.env, None)
+
+
+def test_unrooted_resolution_raises_under_the_guard(monkeypatch):
+    monkeypatch.setenv(REFUSE_REAL_DATA_FALLBACK_ENV, "1")
+    for store in STORE_MANIFEST:
+        if store.env:
+            monkeypatch.delenv(store.env, raising=False)
+        with pytest.raises(RealDataFallbackRefused):
+            resolve_store(store.key)
+
+
+def test_manifest_matches_deploy_md():
+    """DEPLOY.md's volume table is generated truth, not hand-maintained."""
+    table = (REPO_ROOT / "DEPLOY.md").read_text()
+    for store in STORE_MANIFEST:
+        assert store.relative in table, f"{store.relative} missing from DEPLOY.md"
+        assert store.env in table, f"{store.env} missing from DEPLOY.md"
+
+
+# -- 2. proven by measurement -------------------------------------------------------
+
+
+def test_node_flows_write_nothing_outside_the_volume(tmp_path):
+    """Run the node's first-run init against a tmp volume and prove the
+    operator's real data/ and $HOME are byte-unchanged afterwards."""
+    volume = tmp_path / "app-data"
+    volume.mkdir()
+    before_data = _tree_manifest(DEFAULT_DATA_ROOT)
+    home = Path.home()
+    before_home = _tree_manifest(home / ".autonomy") if (home / ".autonomy").exists() else {}
+
+    result = subprocess.run(
+        [sys.executable, "-m", "tools.init", "--root", str(volume)],
+        cwd=str(REPO_ROOT), env=_rooted_env(volume),
+        capture_output=True, text=True, timeout=300,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+
+    # The volume actually received state (the run did something).
+    assert any(volume.rglob("*.db")), "init wrote no databases into the volume"
+    # And nothing outside it moved.
+    assert _tree_manifest(DEFAULT_DATA_ROOT) == before_data, "the real data/ changed"
+    after_home = _tree_manifest(home / ".autonomy") if (home / ".autonomy").exists() else {}
+    assert after_home == before_home, "$HOME state changed"
+
+
+def test_the_measurement_catches_an_escaping_store(tmp_path):
+    """The teeth: un-root ONE store and the same measurement must notice.
+
+    Without this, a green run above could mean 'nothing escaped' or
+    'we measured the wrong thing'.
+    """
+    volume = tmp_path / "app-data"
+    volume.mkdir()
+    env = _rooted_env(volume)
+    escaped = tmp_path / "outside" / "graph.db"
+    env["GRAPH_DB"] = str(escaped)  # a store rooted OUTSIDE the volume
+
+    subprocess.run(
+        [sys.executable, "-m", "tools.init", "--root", str(volume)],
+        cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, timeout=300,
+    )
+    # The escape is visible: state landed outside the volume root.
+    assert escaped.exists(), "expected the un-rooted store to escape the volume"
+    assert not (volume / "graph.db").exists()

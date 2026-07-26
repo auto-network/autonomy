@@ -14,7 +14,12 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = Path(__file__).parents[3] / "data" / "auth.db"
+from tools.data_paths import resolve_store
+
+#: Volume-contract rooted (auto-lr6gu): AUTH_DB, else the volume
+#: default. Previously repo-relative here AND in graph/cli.py — a
+#: split resolver that rooting could move only halfway.
+_DB_PATH = resolve_store("auth")
 _conn: sqlite3.Connection | None = None
 
 _SCHEMA = """\

@@ -18,8 +18,8 @@ fi
 python3 -m tools.init $INIT_ARGS
 
 SSL_ARGS=""
-if [ -f /app/data/tls.crt ] && [ -f /app/data/tls.key ] && [ "${DASHBOARD_TLS:-}" != "off" ]; then
-    SSL_ARGS="--ssl-certfile /app/data/tls.crt --ssl-keyfile /app/data/tls.key"
+if [ -f ${AUTONOMY_TLS_CERT:-/app/data/tls.crt} ] && [ -f ${AUTONOMY_TLS_KEY:-/app/data/tls.key} ] && [ "${DASHBOARD_TLS:-}" != "off" ]; then
+    SSL_ARGS="--ssl-certfile ${AUTONOMY_TLS_CERT:-/app/data/tls.crt} --ssl-keyfile ${AUTONOMY_TLS_KEY:-/app/data/tls.key}"
 fi
 
 exec python3 -m uvicorn tools.dashboard.server:app \

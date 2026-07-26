@@ -14,11 +14,13 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+
+from tools.data_paths import resolve_store
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = Path(os.environ.get("DASHBOARD_DB", str(Path(__file__).parents[3] / "data" / "dashboard.db")))
+_DB_PATH = resolve_store("dashboard")
 _conn: sqlite3.Connection | None = None
 # Thread that created ``_conn`` (init_db). A sqlite3 connection must not be
 # driven by two threads concurrently — check_same_thread=False only disables
@@ -136,7 +138,7 @@ def _backfill_new_columns(conn: sqlite3.Connection) -> None:
     if not rows:
         return
 
-    agent_runs = Path(__file__).resolve().parents[3] / "data" / "agent-runs"
+    agent_runs = resolve_store("agent_runs")  # was repo-relative
     updated = 0
     for row in rows:
         tmux_name = row[0]

@@ -4741,7 +4741,9 @@ def cmd_crosstalk(args):
     import urllib.parse
     import urllib.request
 
-    auth_db_path = Path(__file__).resolve().parents[2] / "data" / "auth.db"
+    from tools.data_paths import resolve_store
+
+    auth_db_path = resolve_store("auth")
     messages = None
     use_api = bool(os.environ.get("CROSSTALK_TOKEN")) or not auth_db_path.exists()
     if use_api:
