@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import socket
+import sqlite3
 import subprocess
 import threading
 import time
@@ -71,6 +72,22 @@ def _create_org(orgs_dir: Path, slug: str, org_id: str) -> None:
     database.close()
 
 
+def _org_metadata(path: Path) -> dict:
+    """Snapshot non-ledger identity/content rows and the graph schema stamp."""
+    with sqlite3.connect(path) as database:
+        return {
+            "user_version": database.execute(
+                "PRAGMA user_version"
+            ).fetchone()[0],
+            "orgs": database.execute(
+                "SELECT * FROM orgs ORDER BY slug"
+            ).fetchall(),
+            "sources": database.execute(
+                "SELECT * FROM sources ORDER BY id"
+            ).fetchall(),
+        }
+
+
 def _run_node(tmp_path: Path, **fixture) -> dict:
     fixture_path = tmp_path / f"{fixture['org']}-founding.json"
     fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
@@ -100,6 +117,8 @@ def test_node_founding_posts_atomic_batch_and_folds_owner(
     slug = "node-founded"
     org_id = "019c0000-0000-7000-8000-000000000001"
     _create_org(orgs_dir, slug, org_id)
+    store_path = org_ledger_db_path(slug)
+    metadata_before_founding = _org_metadata(store_path)
     monkeypatch.setenv("GRAPH_ORG", slug)
 
     with _live_server(app, port) as server_url:
@@ -142,7 +161,6 @@ def test_node_founding_posts_atomic_batch_and_folds_owner(
                 for event_id in reference_ids
             ]
 
-        store_path = org_ledger_db_path(slug)
         with LedgerStore(store_path) as store:
             assert len(store) == 4
             events = [store.get(event_id) for event_id in founded["eventIds"]]
@@ -169,6 +187,15 @@ def test_node_founding_posts_atomic_batch_and_folds_owner(
             assert founder.roles == ("owner",)
             assert state.authority(founded["founderPersonaPub"]) == frozenset({"*"})
             assert state.holds(founded["founderPersonaPub"], "link:publish")
+        assert _org_metadata(store_path) == metadata_before_founding
+        reopened = GraphDB.open_org_db(slug, root=orgs_dir, mode="ro")
+        try:
+            org_row = reopened.conn.execute(
+                "SELECT id, slug FROM orgs"
+            ).fetchone()
+            assert tuple(org_row) == (org_id, slug)
+        finally:
+            reopened.close()
 
         repeated = httpx.post(
             f"{server_url}/api/network/ledger/found",
@@ -176,10 +203,13 @@ def test_node_founding_posts_atomic_batch_and_folds_owner(
             timeout=10,
         )
         assert repeated.status_code == 409
+        assert _org_metadata(store_path) == metadata_before_founding
 
         tampered_slug = "tampered-founding"
         tampered_org_id = "019c0000-0000-7000-8000-000000000002"
         _create_org(orgs_dir, tampered_slug, tampered_org_id)
+        tampered_path = org_ledger_db_path(tampered_slug)
+        tampered_metadata = _org_metadata(tampered_path)
         monkeypatch.setenv("GRAPH_ORG", tampered_slug)
         tampered = _run_node(
             tmp_path,
@@ -204,7 +234,7 @@ def test_node_founding_posts_atomic_batch_and_folds_owner(
             timeout=10,
         )
         assert refused.status_code == 400
-        tampered_path = org_ledger_db_path(tampered_slug)
+        assert _org_metadata(tampered_path) == tampered_metadata
         if tampered_path.exists():
             with LedgerStore(tampered_path) as untouched:
                 assert len(untouched) == 0
