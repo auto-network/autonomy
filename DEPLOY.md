@@ -348,6 +348,21 @@ a lost identity or passkey. `DASHBOARD_AUTH=off` remains the recovery path if
 the session database is unavailable during rollout; remove the override after
 the store is writable.
 
+## Multi-node production-path acceptance
+
+On a Linux Docker host, the one-command container acceptance is:
+
+```bash
+python3 -m deploy.harness
+```
+
+It drives a real registry/relay and isolated node containers through founding,
+invite/join, two-party admission, quiesced snapshot/restore, restored tunnel
+reconnect, and a content fetch from the restored node. See
+[`deploy/harness/README.md`](deploy/harness/README.md) for the phase contract,
+security boundary, configurable node count, and the deliberately-unimplemented
+sync/partition extension points.
+
 ## Clean-clone smoke
 
 To verify a checkout is portable, clone to a path that is neither the operator
