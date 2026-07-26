@@ -59,13 +59,33 @@ for plain HTTP behind your own proxy).
 One named volume, `autonomy-data`, mounted at `/app/data`, holds **all**
 persistent state:
 
-| Path in volume | What it is |
-|---|---|
-| `orgs/<slug>.db` | per-org graph DBs — identity Settings and credential rows (**the secret store**; `orgs/personal.db` is the per-operator DB) |
-| `graph.db` | main knowledge-graph DB |
-| `dashboard.db`, `auth.db`, `dispatch.db`, `approval_requests.db`, `commit_workflow.db` | operational stores |
-| `tls.crt`, `tls.key` | TLS keypair (self-signed by default) |
-| `agent-runs/`, `session-traces/` | session artifacts |
+| Path in volume | Roots via | What it is |
+|---|---|---|
+| `orgs`/ | `AUTONOMY_ORGS_DIR` | per-org graph DBs — identity Settings and credential rows (**the secret store**; `orgs/personal.db` is the per-operator DB) |
+| `graph.db` | `GRAPH_DB` | main knowledge-graph DB |
+| `dashboard.db` | `DASHBOARD_DB` | dashboard operational store |
+| `auth.db` | `AUTH_DB` | dashboard auth store |
+| `dispatch.db` | `DISPATCH_DB` | dispatch operational store |
+| `approval_requests.db` | `APPROVAL_REQUESTS_DB` | approval-request store |
+| `commit_workflow.db` | `COMMIT_WORKFLOW_DB` | commit-workflow store |
+| `dashboard_identity_sessions.db` | `DASHBOARD_IDENTITY_SESSION_DB` | identity unlock-session store |
+| `tls.crt` | `AUTONOMY_TLS_CERT` | TLS certificate (self-signed by default) |
+| `tls.key` | `AUTONOMY_TLS_KEY` | TLS private key |
+| `agent-runs`/ | `DASHBOARD_AGENT_RUNS_DIR` | session artifacts |
+| `session-traces`/ | `DASHBOARD_TRACE_DIR` | session traces |
+
+Every row is generated from `tools/data_paths.py::STORE_MANIFEST`, which is
+also what the resolvers and the contract test read — so this table cannot
+drift from the code. Each store resolves **environment variable first**,
+then the volume root, then the repository-local default; setting a
+variable therefore moves that store for *every* reader at once. With
+`AUTONOMY_REFUSE_REAL_DATA_FALLBACK=1` an unrooted store raises instead of
+silently falling back to the operator's live `data/` tree.
+
+Verified by `tools/tests/test_volume_contract.py`, which roots a volume at
+a temporary directory, runs first-run init, and asserts the operator's real
+`data/` and `$HOME` are byte-unchanged — and that deliberately un-rooting a
+store is caught.
 
 Backing up the deployment = backing up that volume (stop the stack or use
 sqlite-consistent tooling — `tools/graph/backup-*.sh` — for hot backups).

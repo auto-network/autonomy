@@ -10,8 +10,10 @@ import os
 import sqlite3
 from pathlib import Path
 
+from tools.data_paths import resolve_store
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-DB_PATH = Path(os.environ.get("DISPATCH_DB", str(_REPO_ROOT / "data" / "dispatch.db")))
+DB_PATH = resolve_store("dispatch")
 
 
 def _get_conn() -> sqlite3.Connection:

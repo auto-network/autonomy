@@ -141,7 +141,7 @@ setsid bash -c "
     >> \"$LOG_FILE\" 2>&1 &
   SSL_ARGS=\"\"
   if [[ -f \"$REPO_ROOT/data/tls.crt\" && -f \"$REPO_ROOT/data/tls.key\" ]]; then
-    SSL_ARGS=\"--ssl-certfile $REPO_ROOT/data/tls.crt --ssl-keyfile $REPO_ROOT/data/tls.key\"
+    SSL_ARGS=\"--ssl-certfile ${AUTONOMY_TLS_CERT:-$REPO_ROOT/data/tls.crt} --ssl-keyfile ${AUTONOMY_TLS_KEY:-$REPO_ROOT/data/tls.key}\"
   fi
   AUTHBIND=()
   if (( $PORT < 1024 )) && command -v authbind >/dev/null 2>&1; then
@@ -170,7 +170,7 @@ echo "$PGID" > "$PID_FILE"
 sleep 2
 if kill -0 "-$PGID" 2>/dev/null || kill -0 "$PGID" 2>/dev/null; then
     echo "dashboard started: PGID $PGID"
-    if [[ -f "$REPO_ROOT/data/tls.crt" ]]; then
+    if [[ -f "${AUTONOMY_TLS_CERT:-$REPO_ROOT/data/tls.crt}" ]]; then
         echo "  URL: https://$HOST:$PORT (TLS enabled)"
     else
         echo "  URL: http://$HOST:$PORT"

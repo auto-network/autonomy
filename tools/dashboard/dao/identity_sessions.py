@@ -14,6 +14,8 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from pathlib import Path
+
+from tools.data_paths import resolve_store
 from typing import Any
 
 
@@ -87,9 +89,7 @@ _connections: dict[str, tuple[sqlite3.Connection, threading.RLock]] = {}
 
 
 def db_path() -> Path:
-    return Path(os.environ.get(
-        "DASHBOARD_IDENTITY_SESSION_DB", str(DEFAULT_DB_PATH)
-    ))
+    return resolve_store("identity_sessions")
 
 
 def _open_pooled(path: Path) -> tuple[sqlite3.Connection, threading.RLock]:

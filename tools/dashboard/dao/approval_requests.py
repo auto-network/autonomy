@@ -18,8 +18,10 @@ import sqlite3
 import uuid
 from pathlib import Path
 
+from tools.data_paths import resolve_store
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DB_PATH = Path(os.environ.get("APPROVAL_REQUESTS_DB", str(REPO_ROOT / "data" / "approval_requests.db")))
+DB_PATH = resolve_store("approval_requests")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS approval_requests (

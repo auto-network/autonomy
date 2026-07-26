@@ -20,8 +20,8 @@ exec >>"$LOG" 2>&1
 echo "=== $(date -Is) renewing TLS cert for $DOMAIN ==="
 
 if /usr/bin/tailscale cert \
-      --cert-file "$REPO_ROOT/data/tls.crt" \
-      --key-file  "$REPO_ROOT/data/tls.key" \
+      --cert-file "${AUTONOMY_TLS_CERT:-$REPO_ROOT/data/tls.crt}" \
+      --key-file  "${AUTONOMY_TLS_KEY:-$REPO_ROOT/data/tls.key}" \
       "$DOMAIN"; then
     echo "cert written; restarting dashboard to load it"
     "$REPO_ROOT/tools/dashboard/start-dashboard.sh" --restart

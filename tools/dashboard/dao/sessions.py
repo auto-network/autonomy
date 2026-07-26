@@ -10,6 +10,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tools.data_paths import resolve_store
+
 from tools.dashboard.session_lifecycle_worker import derive_lifecycle_state
 from tools.dashboard.dao.dashboard_db import get_live_sessions as _db_live_sessions
 from tools.dashboard.dao.dashboard_db import find_live_session as _db_find_live
@@ -20,7 +22,7 @@ from tools.graph.duration import parse_duration
 
 logger = logging.getLogger(__name__)
 
-_GRAPH_DB = Path(__file__).parents[3] / "data" / "graph.db"
+_GRAPH_DB = resolve_store("graph")   # was repo-relative: ignored GRAPH_DB
 
 # Dropdown values → seconds. `all` disables the filter. Keys match the
 # `recent_sessions?since=` query param and the `graph sessions --status --since`
@@ -28,7 +30,7 @@ _GRAPH_DB = Path(__file__).parents[3] / "data" / "graph.db"
 _SINCE_WINDOWS = {"6h": "6h", "1d": "1d", "1w": "1w"}
 _VALID_RECENT_SORTS = {"lastActivity", "created", "turns", "ctx", "duration"}
 
-_DISPATCH_DB = Path(__file__).parents[3] / "data" / "dispatch.db"
+_DISPATCH_DB = resolve_store("dispatch")  # was repo-relative: ignored DISPATCH_DB
 
 # Session-type → group mapping. The DAO emits 'interactive', 'dispatch',
 # or 'librarian' from _derive_session_type, but extra values are routed

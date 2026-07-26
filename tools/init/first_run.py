@@ -38,6 +38,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tools.data_paths import resolve_store
+
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -143,7 +145,7 @@ def _init_graph_db(data: Path, report: InitReport) -> None:
     """
     from tools.graph.db import GraphDB
 
-    path = data / "graph.db"
+    path = resolve_store("graph", root=data)
     existed = path.exists()
     GraphDB(path).close()
     report.add(
@@ -162,7 +164,7 @@ def _init_orgs(
 ) -> None:
     from tools.graph import org_ops
 
-    orgs_root = data / "orgs"
+    orgs_root = resolve_store("orgs", root=data)
     slug = org_ops.resolve_first_org_slug(first_org)
     for org_slug in (slug, "personal"):
         existed = (orgs_root / f"{org_slug}.db").exists()
@@ -186,15 +188,19 @@ def _init_operational_dbs(data: Path, report: InitReport) -> None:
         dashboard_db,
     )
 
+    # Manifest keys, not bare filenames: init must lay each store down
+    # where its readers resolve it (env first), or rooting a deployment
+    # splits the writer from every reader (auto-lr6gu).
     stores = (
-        ("dashboard.db", dashboard_db.init_db),
-        ("auth.db", auth_db.init_db),
-        ("dispatch.db", dispatch_db.init_db),
-        ("approval_requests.db", approval_requests.init_db),
-        ("commit_workflow.db", commit_workflow_db.init_db),
+        ("dashboard", dashboard_db.init_db),
+        ("auth", auth_db.init_db),
+        ("dispatch", dispatch_db.init_db),
+        ("approval_requests", approval_requests.init_db),
+        ("commit_workflow", commit_workflow_db.init_db),
     )
-    for filename, init_fn in stores:
-        path = data / filename
+    for key, init_fn in stores:
+        path = resolve_store(key, root=data)
+        filename = path.name
         existed = path.exists()
         init_fn(path)
         report.add(filename, EXISTS if existed else CREATED, str(path))
@@ -234,7 +240,7 @@ def _seed_bootstrap_allowlist(data: Path, report: InitReport) -> None:
     }
     schemas.validate_payload(SET_ID, SCHEMA_REVISION, payload)
 
-    personal = data / "orgs" / "personal.db"
+    personal = resolve_store("orgs", root=data) / "personal.db"
     if not personal.exists():
         report.add(name, SKIPPED, f"personal org DB missing: {personal}")
         return
@@ -273,7 +279,11 @@ def _init_tls(data: Path, report: InitReport, *, domain: str | None) -> None:
     alone for the operator to resolve. Missing/failing ``openssl``
     degrades to ``skipped`` — the dashboard then serves plain HTTP.
     """
-    crt, key = data / "tls.crt", data / "tls.key"
+    # Volume-contract rooted (auto-lr6gu): AUTONOMY_TLS_CERT/_KEY when
+    # set, else under this init's data root. Previously derivable only
+    # from init's own argument, so nothing else could relocate them.
+    crt = resolve_store("tls_cert", root=data)
+    key = resolve_store("tls_key", root=data)
     if crt.exists() and key.exists():
         report.add("tls", EXISTS, f"{crt} + {key}")
         return
