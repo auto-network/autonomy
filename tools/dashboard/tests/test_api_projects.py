@@ -17,13 +17,25 @@ def test_api_projects_lists_all_workspaces(shipped_settings_orgs, test_app):
     assert set(by_id) == {"autonomy", "enterprise-v5", "enterprise-ng"}
 
     for entry in body["projects"]:
-        assert set(entry) >= {"id", "name", "description", "graph_project", "dind", "org"}
+        assert set(entry) >= {
+            "id",
+            "name",
+            "description",
+            "graph_project",
+            "dind",
+            "needs_nested_docker",
+            "session_runtime",
+            "org",
+        }
 
     assert by_id["autonomy"]["dind"] is False
+    assert by_id["autonomy"]["session_runtime"] == "standard"
     assert by_id["autonomy"]["graph_project"] == "autonomy"
     assert by_id["enterprise-v5"]["dind"] is True
+    assert by_id["enterprise-v5"]["session_runtime"] == "privileged"
     assert by_id["enterprise-v5"]["graph_project"] == "anchore"
     assert by_id["enterprise-ng"]["dind"] is True
+    assert by_id["enterprise-ng"]["session_runtime"] == "privileged"
     assert by_id["enterprise-ng"]["graph_project"] == "anchore"
 
 

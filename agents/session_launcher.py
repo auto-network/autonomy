@@ -830,7 +830,8 @@ def launch_session(
     model: str | None = None,
     global_claude_md: Path | str | None = None,
     resume_uuid: str | None = None,
-    privileged: bool = False,
+    needs_nested_docker: bool = False,
+    runtime: str | None = None,
     startup_script: str | Path | None = None,
     network_host: bool = True,
     capabilities: tuple = (),
@@ -869,9 +870,13 @@ def launch_session(
                     be provided (reuses existing session directory), session
                     meta creation is skipped, and --resume is appended to the
                     entrypoint command.
-        privileged: If True, pass ``--privileged`` to docker run. Required for
-                    images that run a nested docker daemon (Dockerfile.dind
-                    and its descendants). Combine with ``startup_script``.
+        needs_nested_docker: Preserve the image's nested-daemon entrypoint
+                    (Dockerfile.dind and descendants). This controls image
+                    behavior only; it does not select container isolation.
+        runtime: Isolation selector. ``privileged`` adds ``--privileged``;
+                    ``sysbox`` adds ``--runtime=sysbox-runc``; ``standard``
+                    adds neither. When omitted, nested-Docker sessions default
+                    to ``privileged`` and all other sessions to ``standard``.
         startup_script: Host path to a shell script to mount read-only at
                     ``/startup.sh`` inside the container. The dind entrypoint
                     wrapper picks it up and runs it in the background before
@@ -903,6 +908,27 @@ def launch_session(
             file=sys.stderr,
         )
         return None
+    resolved_runtime = runtime or (
+        "privileged" if needs_nested_docker else "standard"
+    )
+    if not isinstance(resolved_runtime, str) or not re.fullmatch(
+        r"[A-Za-z0-9_.-]+", resolved_runtime
+    ):
+        print(
+            f"  ERROR: invalid session runtime {resolved_runtime!r} for '{name}'",
+            file=sys.stderr,
+        )
+        return None
+    runtime_args: list[str]
+    if resolved_runtime == "standard":
+        runtime_args = []
+    elif resolved_runtime == "privileged":
+        runtime_args = ["--privileged"]
+    else:
+        docker_runtime = (
+            "sysbox-runc" if resolved_runtime == "sysbox" else resolved_runtime
+        )
+        runtime_args = [f"--runtime={docker_runtime}"]
     resolved_model = model or (DEFAULT_OPUS_MODEL if harness == "claude" else None)
 
     # Per-step launch timing. launch_session was opaquely eating ~12-15s of
@@ -977,6 +1003,8 @@ def launch_session(
             "container_name": name,
             "launched_at": datetime.now(timezone.utc).isoformat(),
             "harness": harness,
+            "needs_nested_docker": needs_nested_docker,
+            "session_runtime": resolved_runtime,
         }
         if creds is not None and creds.get("harness_token"):
             # Operator-facing credential pointer for triage. The dashboard
@@ -1068,6 +1096,20 @@ def launch_session(
         ):
             continue
         default_mounts[host_path] = container_spec
+
+    # The node may hold the host Docker socket to spawn sessions, but no
+    # session receives that socket under any isolation runtime. Refuse both a
+    # source and a target reference so an accidental read-only mount cannot
+    # weaken the boundary.
+    host_socket = "/var/run/docker.sock"
+    for host_path, container_spec in default_mounts.items():
+        container_path = container_spec.split(":", 1)[0]
+        if str(host_path).rstrip("/") == host_socket or container_path.rstrip("/") == host_socket:
+            print(
+                f"  ERROR: refusing host Docker socket mount for session '{name}'",
+                file=sys.stderr,
+            )
+            return None
 
     _lap("mounts_assembled")
 
@@ -1176,8 +1218,7 @@ def launch_session(
 
     cmd.extend(["-w", working_dir])
 
-    if privileged:
-        cmd.insert(2, "--privileged")
+    cmd[2:2] = runtime_args
 
     # Mode flags: -d for detached, -it --rm for interactive
     if detach:
@@ -1189,8 +1230,7 @@ def launch_session(
     # Entrypoint, image, and arguments.
     # Base images have ENTRYPOINT=["claude", "--dangerously-skip-permissions"];
     # dind-based images have a shell wrapper that does `exec "$@"` so the
-    # caller must pass the full command starting with `claude`. `privileged`
-    # is the proxy for dind here.
+    # caller must pass the full command starting with `claude`.
     # Write prompt to file instead of passing on command line — avoids the
     # prompt text appearing in /proc/cmdline where pkill -f can match it.
     if prompt is not None:
@@ -1231,14 +1271,14 @@ def launch_session(
             if resolved_model:
                 codex_cmd[3:3] = ["--model", resolved_model]
             shell_cmd = prompt_pipe + shlex.join(codex_cmd)
-        if privileged:
+        if needs_nested_docker:
             # Keep the dind wrapper entrypoint so /startup.sh still runs.
             cmd += [image, "sh", "-c", shell_cmd]
         else:
             cmd += ["--entrypoint", "sh", image, "-c", shell_cmd]
     else:
         if harness == "claude":
-            if privileged:
+            if needs_nested_docker:
                 cmd += [
                     image,
                     "claude",
@@ -1272,7 +1312,7 @@ def launch_session(
                     resume_uuid,
                 )
                 codex_args += ["resume", m.group(1) if m else resume_uuid]
-            if privileged:
+            if needs_nested_docker:
                 cmd += [image, *codex_args]
             else:
                 cmd += ["--entrypoint", "codex", image, *codex_args[1:]]

@@ -9,7 +9,8 @@
 # no model strings or CLI args are hardcoded here.
 #
 # Build:  docker build -f agents/Dockerfile.dind -t autonomy-agent:dind agents/
-# Run:    project images FROM this one; invoked via launch_session(privileged=True).
+# Run:    project images FROM this one; invoked via
+#         launch_session(needs_nested_docker=True, runtime="privileged").
 
 FROM autonomy-agent
 

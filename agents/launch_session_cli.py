@@ -76,6 +76,19 @@ def _workspace_model(workspace_id: str) -> str | None:
         return None
 
 
+def _workspace_runtime(workspace_id: str) -> tuple[bool, str]:
+    """Return independent nested-Docker and isolation-runtime settings."""
+    if not workspace_id:
+        return False, "standard"
+    try:
+        ws = load_workspaces().get(workspace_id)
+        if ws is not None:
+            return ws.needs_nested_docker, ws.session_runtime
+    except Exception:
+        pass
+    return False, "standard"
+
+
 def _bead_title(bead_id: str) -> str | None:
     """Best-effort Dolt lookup of a bead's title, done once at dispatch.
 
@@ -170,6 +183,7 @@ def main() -> int:
     output_dir = args.output_dir if args.output_dir else None
 
     workspace_model = _workspace_model(args.workspace_id)
+    needs_nested_docker, session_runtime = _workspace_runtime(args.workspace_id)
 
     if args.detach:
         container_id = launch_session(
@@ -183,6 +197,8 @@ def main() -> int:
             output_dir=output_dir,
             harness=args.harness,
             model=args.model or workspace_model or None,
+            needs_nested_docker=needs_nested_docker,
+            runtime=session_runtime,
         )
         if not container_id:
             return 1
@@ -264,6 +280,14 @@ def main() -> int:
             mounts[args.worktree] = "/workspace/repo"
         if args.git_dir:
             mounts[args.git_dir] = args.git_dir
+        host_socket = "/var/run/docker.sock"
+        if any(
+            str(host).rstrip("/") == host_socket
+            or spec.split(":", 1)[0].rstrip("/") == host_socket
+            for host, spec in mounts.items()
+        ):
+            print("ERROR: refusing host Docker socket mount", file=sys.stderr)
+            return 1
 
         cmd: list[str] = [
             "docker", "run",
@@ -275,6 +299,15 @@ def main() -> int:
             "-e", "CODEX_HOME=/home/agent/.codex",
             *auth_args,
         ]
+        if session_runtime == "privileged":
+            cmd.insert(2, "--privileged")
+        elif session_runtime != "standard":
+            docker_runtime = (
+                "sysbox-runc"
+                if session_runtime == "sysbox"
+                else session_runtime
+            )
+            cmd.insert(2, f"--runtime={docker_runtime}")
         # GRAPH_ORG selects the org DB (data/orgs/<org>.db) every ops.*
         # write and search/list read in this container lands in — this is
         # the fix for the personal.db-misfiling bug (auto-nuupw): this
@@ -311,7 +344,10 @@ def main() -> int:
                     f"claude --dangerously-skip-permissions --model "
                     f"{shlex.quote(resolved_model)} -p"
                 )
-                cmd += ["--entrypoint", "sh", args.image, "-c", shell_cmd]
+                if needs_nested_docker:
+                    cmd += [args.image, "sh", "-c", shell_cmd]
+                else:
+                    cmd += ["--entrypoint", "sh", args.image, "-c", shell_cmd]
             else:
                 codex_cmd = [
                     "codex",
@@ -322,13 +358,43 @@ def main() -> int:
                     codex_cmd += ["--model", resolved_model]
                 codex_cmd += ["-"]
                 shell_cmd = "cat /workspace/output/.prompt.md | " + shlex.join(codex_cmd)
-                cmd += ["--entrypoint", "sh", args.image, "-c", shell_cmd]
+                if needs_nested_docker:
+                    cmd += [args.image, "sh", "-c", shell_cmd]
+                else:
+                    cmd += ["--entrypoint", "sh", args.image, "-c", shell_cmd]
         else:
             if args.harness == "claude":
-                cmd += [args.image, "--dangerously-skip-permissions", "--model", resolved_model]
+                if needs_nested_docker:
+                    cmd += [
+                        args.image,
+                        "claude",
+                        "--dangerously-skip-permissions",
+                        "--model",
+                        resolved_model,
+                    ]
+                else:
+                    cmd += [
+                        args.image,
+                        "--dangerously-skip-permissions",
+                        "--model",
+                        resolved_model,
+                    ]
             else:
-                cmd += ["--entrypoint", "codex", args.image,
-                        "--no-alt-screen", "--dangerously-bypass-approvals-and-sandbox"]
+                if needs_nested_docker:
+                    cmd += [
+                        args.image,
+                        "codex",
+                        "--no-alt-screen",
+                        "--dangerously-bypass-approvals-and-sandbox",
+                    ]
+                else:
+                    cmd += [
+                        "--entrypoint",
+                        "codex",
+                        args.image,
+                        "--no-alt-screen",
+                        "--dangerously-bypass-approvals-and-sandbox",
+                    ]
                 if resolved_model:
                     cmd += ["--model", resolved_model]
 

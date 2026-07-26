@@ -2740,8 +2740,9 @@ async def api_projects(request):
 
     Each entry carries the fields the frontend needs for grouping, display,
     and routing: ``id``, ``name``, ``description``, ``graph_project`` (the
-    org the workspace belongs to), and ``dind`` (whether Docker-in-Docker
-    is enabled — drives the UI badge).
+    org the workspace belongs to), ``needs_nested_docker`` and
+    ``session_runtime``. The deprecated ``dind`` alias remains for older
+    dashboard clients.
     """
     try:
         projects = workspace_settings.load_workspaces()
@@ -2760,7 +2761,9 @@ async def api_projects(request):
             "description": p.description,
             "graph_project": slug,
             "org": org_cache[slug],
-            "dind": p.dind,
+            "needs_nested_docker": p.needs_nested_docker,
+            "session_runtime": p.session_runtime,
+            "dind": p.needs_nested_docker,
         })
     return JSONResponse({"projects": entries})
 
@@ -6035,7 +6038,8 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             output_dir=str(run_dir),
             global_claude_md=primer_path,
             startup_script=startup_script,
-            privileged=proj.dind,
+            needs_nested_docker=proj.needs_nested_docker,
+            runtime=proj.session_runtime,
             working_dir=working_dir,
             network_host=proj.network_host,
             capabilities=proj.capabilities,
@@ -6280,7 +6284,8 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 extra_env=extra_env or None,
                 global_claude_md=primer_path,
                 startup_script=startup_script,
-                privileged=proj.dind,
+                needs_nested_docker=proj.needs_nested_docker,
+                runtime=proj.session_runtime,
                 working_dir=proj.working_dir or "/workspace/repo",
                 output_dir=str(run_dir),
                 model=cfg.get("model"),
@@ -14555,7 +14560,8 @@ async def api_agent_action_dispatch(request):
             "extra_env": extra_env or None,
             "global_claude_md": primer_path,
             "startup_script": (_REPO_ROOT / workspace.startup) if workspace.startup else None,
-            "privileged": workspace.dind,
+            "needs_nested_docker": workspace.needs_nested_docker,
+            "runtime": workspace.session_runtime,
             "network_host": workspace.network_host,
             "capabilities": workspace.capabilities,
         })

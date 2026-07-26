@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Launch an agent container to work on a bead.
 #
-# Usage: ./agents/launch.sh <bead-id> [--dry-run] [--image=autonomy-agent:TAG] [--detach] [--harness=claude|codex] [--org=SLUG]
+# Usage: ./agents/launch.sh <bead-id> [--dry-run] [--image=autonomy-agent:TAG] [--detach] [--harness=claude|codex] [--org=SLUG] [--workspace-id=ID]
 #
 # Lifecycle (foreground mode — default):
 # 1. Creates a git worktree on a bead-specific branch
@@ -30,6 +30,7 @@ HARNESS="claude"
 ORG=""
 GRAPH_PROJECT=""
 GRAPH_TAGS=""
+WORKSPACE_ID=""
 for arg in "$@"; do
     case $arg in
         --dry-run) DRY_RUN=true ;;
@@ -39,6 +40,7 @@ for arg in "$@"; do
         --org=*) ORG="${arg#*=}" ;;
         --graph-project=*) GRAPH_PROJECT="${arg#*=}" ;;  # deprecated alias, use --org
         --graph-tags=*) GRAPH_TAGS="${arg#*=}" ;;
+        --workspace-id=*) WORKSPACE_ID="${arg#*=}" ;;
     esac
 done
 
@@ -161,6 +163,9 @@ elif [[ -n "$GRAPH_PROJECT" ]]; then
 fi
 if [[ -n "$GRAPH_TAGS" ]]; then
     SCOPE_ARGS+=("--graph-tags" "$GRAPH_TAGS")
+fi
+if [[ -n "$WORKSPACE_ID" ]]; then
+    SCOPE_ARGS+=("--workspace-id" "$WORKSPACE_ID")
 fi
 
 if $DETACH; then

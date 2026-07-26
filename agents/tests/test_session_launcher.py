@@ -1,7 +1,7 @@
 """Tests for launch_session docker-run argv assembly.
 
-Exercises the new ``privileged`` and ``startup_script`` params plus the
-graph_project / graph_tags metadata → env passthrough. We capture the
+Exercises independent nested-Docker and isolation-runtime settings plus the
+startup script and graph_project / graph_tags metadata → env passthrough. We capture the
 docker argv by stubbing subprocess.run and asserting on the call list —
 the container is never actually started.
 """
@@ -80,19 +80,110 @@ def _run(**kw):
     return session_launcher.launch_session(**defaults)
 
 
-# ── privileged flag ──────────────────────────────────────────────────
+# ── nested Docker and isolation runtime ──────────────────────────────
 
-def test_privileged_inserts_flag(tmp_path, fake_creds, fake_crosstalk, captured_run):
-    _run(privileged=True, output_dir=str(tmp_path / "run"))
+def test_nested_docker_defaults_to_privileged_runtime(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    run_dir = tmp_path / "run"
+    _run(needs_nested_docker=True, output_dir=str(run_dir))
     assert len(captured_run) == 1
     cmd = captured_run[0]
     assert "--privileged" in cmd
+    assert not any(arg.startswith("--runtime=") for arg in cmd)
+    # DinD keeps its wrapper entrypoint and receives the full harness argv.
+    image_index = cmd.index("autonomy-agent:enterprise")
+    assert cmd[image_index + 1] == "claude"
+    assert "--entrypoint" not in cmd
+    assert "/var/run/docker.sock" not in " ".join(cmd)
+    meta = json.loads((run_dir / "sessions" / ".session_meta.json").read_text())
+    assert meta["needs_nested_docker"] is True
+    assert meta["session_runtime"] == "privileged"
 
 
-def test_default_is_not_privileged(tmp_path, fake_creds, fake_crosstalk, captured_run):
+def test_standard_session_is_not_privileged(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
     _run(output_dir=str(tmp_path / "run"))
     cmd = captured_run[0]
     assert "--privileged" not in cmd
+    assert not any(arg.startswith("--runtime=") for arg in cmd)
+    assert "--entrypoint" not in cmd
+    assert "/var/run/docker.sock" not in " ".join(cmd)
+
+
+@pytest.mark.parametrize(
+    ("runtime", "expected_arg"),
+    [
+        ("standard", None),
+        ("sysbox", "--runtime=sysbox-runc"),
+        ("runsc", "--runtime=runsc"),
+    ],
+)
+def test_nested_docker_honors_configured_runtime_without_privileged(
+    tmp_path, fake_creds, fake_crosstalk, captured_run, runtime, expected_arg,
+):
+    _run(
+        needs_nested_docker=True,
+        runtime=runtime,
+        output_dir=str(tmp_path / "run"),
+    )
+    cmd = captured_run[0]
+    if expected_arg is None:
+        assert not any(arg.startswith("--runtime=") for arg in cmd)
+    else:
+        assert expected_arg in cmd
+    assert "--privileged" not in cmd
+    image_index = cmd.index("autonomy-agent:enterprise")
+    assert cmd[image_index + 1] == "claude"
+    assert "/var/run/docker.sock" not in " ".join(cmd)
+
+
+def test_runtime_is_independent_of_nested_docker_entrypoint(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    _run(
+        needs_nested_docker=False,
+        runtime="privileged",
+        prompt="hello",
+        output_dir=str(tmp_path / "run"),
+    )
+    cmd = captured_run[0]
+    assert "--privileged" in cmd
+    # Isolation alone must not make a base image behave like DinD.
+    assert "--entrypoint" in cmd
+    assert cmd[cmd.index("--entrypoint") + 1] == "sh"
+
+
+@pytest.mark.parametrize(
+    "mounts",
+    [
+        {"/var/run/docker.sock": "/tmp/nested.sock"},
+        {"/tmp/not-a-socket": "/var/run/docker.sock"},
+    ],
+)
+@pytest.mark.parametrize("runtime", ["standard", "privileged", "sysbox"])
+def test_host_docker_socket_is_refused_under_every_runtime(
+    tmp_path, fake_creds, fake_crosstalk, captured_run, mounts, runtime,
+):
+    result = _run(
+        mounts=mounts,
+        runtime=runtime,
+        output_dir=str(tmp_path / f"run-{runtime}"),
+    )
+    assert result is None
+    assert captured_run == []
+
+
+def test_invalid_runtime_fails_before_docker(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    result = _run(
+        runtime="sysbox;touch-pwned",
+        output_dir=str(tmp_path / "run"),
+    )
+    assert result is None
+    assert captured_run == []
 
 
 # ── startup_script mount ─────────────────────────────────────────────
@@ -1129,7 +1220,7 @@ class TestSubstrateCredentialsPicker:
         # itself does the filtering, so let it run unmocked.
         from types import SimpleNamespace
 
-        def _fake_read_set(set_id, org=None):
+        def _fake_read_set(set_id, org=None, peers=None):
             return SimpleNamespace(members=[fresh, old])
 
         import tools.graph.ops as _ops

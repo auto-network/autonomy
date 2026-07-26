@@ -20,7 +20,8 @@
 #                                 false -> the managed clone is mounted read-only.
 #   working_dir       Container CWD (usually one of the repo mounts).
 #   startup           Per-project startup script path (relative to repo root).
-#   dind              true -> run with --privileged for Docker-in-Docker.
+#   dind              deprecated alias for a nested daemon; defaults to the
+#                     privileged isolation runtime but never mounts the host socket.
 #   graph_project     Hard graph boundary — passed as GRAPH_SCOPE env var.
 #                     Required.
 #   default_tags      Soft graph scoping tags — passed as GRAPH_TAGS env var.

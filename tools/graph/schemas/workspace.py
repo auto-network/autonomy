@@ -22,6 +22,7 @@ Notes on shape:
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .registry import SettingSchema, SchemaValidationError
@@ -114,6 +115,8 @@ class WorkspaceV1(SettingSchema):
         "working_dir": str,
         "startup": str,
         "dind": bool,
+        "needs_nested_docker": bool,
+        "session_runtime": str,
         "network_host": bool,
         "repos": list,
         "env": dict,
@@ -160,8 +163,27 @@ class WorkspaceV1(SettingSchema):
         },
         "dind": {
             "type": "boolean",
-            "description": "Mount host docker socket (Docker-in-Docker)",
+            "description": (
+                "Deprecated alias for needs_nested_docker. Runs a nested "
+                "daemon; it never mounts the host Docker socket."
+            ),
             "default": False,
+        },
+        "needs_nested_docker": {
+            "type": "boolean",
+            "description": (
+                "Preserve the image entrypoint that starts its own nested "
+                "Docker daemon. Independent of session_runtime."
+            ),
+            "default": False,
+        },
+        "session_runtime": {
+            "type": "string",
+            "description": (
+                "Docker isolation selector: standard, privileged, sysbox, "
+                "or an installed OCI runtime name. Nested-Docker workspaces "
+                "default to privileged when this is omitted."
+            ),
         },
         "network_host": {
             "type": "boolean",
@@ -266,4 +288,16 @@ class WorkspaceV1(SettingSchema):
                 raise SchemaValidationError(
                     f"{cls.__name__}: 'harness' must be one of "
                     f"{sorted(_VALID_HARNESSES)}, got {harness!r}"
+                )
+        if "dind" in payload and "needs_nested_docker" in payload:
+            if payload["dind"] != payload["needs_nested_docker"]:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: 'dind' and 'needs_nested_docker' conflict"
+                )
+        if "session_runtime" in payload:
+            runtime = payload["session_runtime"]
+            if not runtime or re.fullmatch(r"[A-Za-z0-9_.-]+", runtime) is None:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: 'session_runtime' must be a non-empty "
+                    "OCI runtime selector"
                 )
