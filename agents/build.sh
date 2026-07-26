@@ -2,7 +2,7 @@
 # Build the autonomy-agent container images (base + dashboard).
 # Stages tool binaries into a temp dir, then builds.
 #
-# Usage: ./agents/build.sh [--no-cache]
+# Usage: ./agents/build.sh [--no-cache] [--pull] [--core-only]
 #
 # Always builds both autonomy-agent:latest (base) and autonomy-agent:dashboard
 # (base + Python deps). Docker layer cache makes repeat builds near-instant
@@ -15,9 +15,13 @@ BUILD_DIR="$SCRIPT_DIR/.build"
 
 # Parse flags
 NO_CACHE=""
+PULL=""
+BUILD_PROJECTS=1
 for arg in "$@"; do
     case "$arg" in
         --no-cache) NO_CACHE="--no-cache" ;;
+        --pull) PULL="--pull" ;;
+        --core-only) BUILD_PROJECTS=0 ;;
         *) echo "Unknown flag: $arg"; exit 1 ;;
     esac
 done
@@ -68,7 +72,7 @@ cp "$SCRIPT_DIR/Dockerfile" context/
 cp "$SCRIPT_DIR/dind-entrypoint.sh" context/
 cp "$SCRIPT_DIR/commit_sign_shim.sh" context/
 
-docker build $NO_CACHE -t autonomy-agent context/
+docker build $NO_CACHE $PULL -t autonomy-agent context/
 echo "==> Done. Image: autonomy-agent:latest"
 docker images autonomy-agent:latest --format "  Size: {{.Size}}"
 
@@ -78,7 +82,7 @@ docker images autonomy-agent:latest --format "  Size: {{.Size}}"
 # no-op; otherwise it's one thin pip-install layer on top of the base.
 echo ""
 echo "==> Building dashboard variant (Python deps layered on base)..."
-docker build $NO_CACHE -f "$SCRIPT_DIR/Dockerfile.dashboard" -t autonomy-agent:dashboard context/
+docker build $NO_CACHE $PULL -f "$SCRIPT_DIR/Dockerfile.dashboard" -t autonomy-agent:dashboard context/
 echo "==> Done. Image: autonomy-agent:dashboard"
 docker images autonomy-agent:dashboard --format "  Size: {{.Size}}"
 
@@ -87,7 +91,7 @@ docker images autonomy-agent:dashboard --format "  Size: {{.Size}}"
 # that need Docker-in-Docker (enterprise, enterprise-ng) extend this.
 echo ""
 echo "==> Building dind variant (Docker CE + entrypoint wrapper)..."
-docker build $NO_CACHE -f "$SCRIPT_DIR/Dockerfile.dind" -t autonomy-agent:dind context/
+docker build $NO_CACHE $PULL -f "$SCRIPT_DIR/Dockerfile.dind" -t autonomy-agent:dind context/
 echo "==> Done. Image: autonomy-agent:dind"
 docker images autonomy-agent:dind --format "  Size: {{.Size}}"
 
@@ -99,7 +103,9 @@ docker images autonomy-agent:dind --format "  Size: {{.Size}}"
 echo ""
 echo "==> Building per-project images..."
 PROJECTS_DIR="$SCRIPT_DIR/projects"
-if [[ -d "$PROJECTS_DIR" ]]; then
+if (( BUILD_PROJECTS == 0 )); then
+    echo "  (--core-only: skipping per-project images)"
+elif [[ -d "$PROJECTS_DIR" ]]; then
     # Make agents/projects/ visible inside the shared build context so
     # per-project COPY lines and sibling files (startup.sh, CLAUDE.md)
     # resolve from the same context root.
@@ -111,7 +117,7 @@ if [[ -d "$PROJECTS_DIR" ]]; then
         image_tag="autonomy-agent:$project_name"
         echo ""
         echo "==> Building $image_tag (from $dockerfile)..."
-        docker build $NO_CACHE \
+        docker build $NO_CACHE $PULL \
             -f "context/projects/$project_name/Dockerfile" \
             -t "$image_tag" \
             context/

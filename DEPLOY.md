@@ -54,6 +54,107 @@ tools.init` (idempotent, honors `AUTONOMY_FIRST_ORG`) and then uvicorn,
 serving HTTPS when the init-generated keypair is present (`DASHBOARD_TLS=off`
 for plain HTTP behind your own proxy).
 
+### Verified published images
+
+Building from your checkout remains the default Compose path above. A release
+operator may additionally publish the node and session image family to any
+OCI registry they choose. The registry is distribution only: trust comes from
+the project-controlled cosign key and the immutable digest.
+
+Production signing-key provisioning is intentionally outside the repository
+and outside CI:
+
+1. The project operator generates a cosign keypair on a controlled machine.
+2. The password-armored `cosign.key` stays with the operator. It is never
+   committed, copied to a runner, or stored as a CI secret.
+3. Only the public key is committed as `deploy/cosign.pub`. Until that public
+   key is provisioned, operator signing and downstream verification fail
+   closed; no placeholder or worker-generated production key is accepted.
+4. Registry credentials are stored as `AUTONOMY_REGISTRY_USERNAME` and
+   `AUTONOMY_REGISTRY_PASSWORD`.
+
+On that controlled machine, the provisioning command is
+`cosign generate-key-pair --output-key-prefix cosign`; move only
+`cosign.pub` into `deploy/`. `deploy/cosign.key` is gitignored as a final
+tripwire, but the recommended location is outside the checkout.
+
+The manual **Build and publish Autonomy images** workflow takes a registry host,
+namespace, and release label. Its self-hosted `autonomy-release` runner uses
+the existing source builds (`deploy/Dockerfile` and `agents/build.sh`) to
+publish the node plus base/dashboard/DinD session images. Every pushed tag is
+resolved to `image@sha256:...`. The workflow has no signing key and cannot
+authorize a release; it emits an **unsigned** `image-lock.env` artifact:
+
+```dotenv
+AUTONOMY_IMAGE_LOCK_VERSION=1
+AUTONOMY_RELEASE_TAG=v1.2.3
+AUTONOMY_NODE_IMAGE=registry.example/autonomy/autonomy-node@sha256:...
+AUTONOMY_SESSION_IMAGE=registry.example/autonomy/autonomy-session@sha256:...
+AUTONOMY_SESSION_DASHBOARD_IMAGE=registry.example/autonomy/autonomy-session-dashboard@sha256:...
+AUTONOMY_SESSION_DIND_IMAGE=registry.example/autonomy/autonomy-session-dind@sha256:...
+```
+
+After inspecting that lock, the operator performs the release-signing act on
+their controlled machine:
+
+```bash
+AUTONOMY_COSIGN_PRIVATE_KEY=/secure/path/cosign.key \
+  ./deploy/sign-image-lock.sh image-lock.env
+```
+
+The command displays every exact digest and requires an explicit release-tag
+confirmation before cosign prompts to unlock the armored key. It refuses
+environment-backed keys and `COSIGN_PASSWORD`, signs only `image@sha256`
+references, disables transparency-log upload, and verifies every published
+signature immediately against `deploy/cosign.pub`. Thus Fulcio, Rekor, GitHub
+OIDC, and a hot CI signing secret are not part of the trust path.
+
+Before installing or swapping an image, verify the exact lock entry:
+
+```bash
+./deploy/verify-image.sh \
+  registry.example/autonomy/autonomy-node@sha256:<64-lowercase-hex>
+# Equivalent direct contract:
+cosign verify --insecure-ignore-tlog --key deploy/cosign.pub \
+  registry.example/autonomy/autonomy-node@sha256:<64-lowercase-hex>
+```
+
+The helper rejects tags such as `:latest` or `:v1.2.3`; verification is never
+authorization to follow a mutable tag. After verification, use the same
+digest in Compose. The explicit `--insecure-ignore-tlog` means “the tracked
+project key is the trust root; do not require Rekor,” not “skip signature or
+digest validation.”
+
+```bash
+AUTONOMY_IMAGE='registry.example/autonomy/autonomy-node@sha256:<digest>' \
+  docker compose pull dashboard
+AUTONOMY_IMAGE='registry.example/autonomy/autonomy-node@sha256:<digest>' \
+  docker compose up -d --no-build dashboard
+```
+
+This is an additional verified-published path. It does not replace the
+no-login checkout build and does not add a runtime CDN or phone-home.
+
+#### Base-image CVE republishing
+
+Release engineering reviews the node and session base images at least weekly
+and on every upstream critical/high CVE notice. A patch release is a complete
+rebuild with `--pull`, never an in-place package update:
+
+1. update deliberately pinned base/tool versions when required;
+2. run the build/publish workflow with a new release label;
+3. retain the prior `image-lock.env` for rollback;
+4. inspect the new digest lock and invoke `deploy/sign-image-lock.sh` with the
+   operator-held armored key;
+5. publish the signed lock artifact and its release notes, including which base
+   CVEs motivated the rebuild;
+6. verify every new digest before recommending a swap.
+
+Old tags may remain for rollback, but a digest is never overwritten and an
+old signature is never treated as authorization for a rebuilt artifact.
+Session containers are not updated in place; newly launched sessions use the
+new verified session-image digests.
+
 ### Volume layout & backup
 
 One named volume, `autonomy-data`, mounted at `/app/data`, holds **all**

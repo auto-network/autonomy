@@ -28,6 +28,9 @@ data/tls.key
 data/*.key
 data/*.pem
 data/*.crt
+# Project image-signing private key (public half is tracked at deploy/cosign.pub
+# after operator provisioning; the encrypted private half is CI-secret only).
+deploy/cosign.key
 
 # Operator-supplied attachments/screenshots (runtime, not source)
 data/uploads/
