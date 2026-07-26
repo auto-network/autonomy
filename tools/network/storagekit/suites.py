@@ -53,6 +53,11 @@ BODY_SUITES = frozenset({BODY_SUITE_DEFAULT, BODY_SUITE_LARGE})
 
 
 def require_suite(suite_id, recognized) -> None:
-    """Fail closed unless *suite_id* is in the *recognized* set."""
-    if suite_id not in recognized:
+    """Fail closed unless *suite_id* is in the *recognized* set.
+
+    Type-strict: ``True == 1`` and ``1.0 == 1``, so plain membership
+    would let a coerced JSON wire value slip into the int-keyed seal
+    position. Only an exact-type match passes.
+    """
+    if not any(type(suite_id) is type(r) and suite_id == r for r in recognized):
         raise SuiteError(f"unrecognized suite identifier: {suite_id!r}")

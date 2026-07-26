@@ -57,6 +57,17 @@ def test_reserved_chunked_identifier_fails_closed_everywhere(recognized):
         require_suite(BODY_SUITE_CHUNKED_RESERVED, recognized)
 
 
+def test_suite_check_is_type_strict():
+    # True == 1 and 1.0 == 1 in Python; a JSON-coerced bool/float/str must
+    # never satisfy the int-keyed seal position (or any other).
+    for bad in (True, False, 1.0, "1"):
+        with pytest.raises(SuiteError):
+            require_suite(bad, SEAL_SUITES)
+    for bad in (True, 1.0):
+        with pytest.raises(SuiteError):
+            require_suite(bad, WRAP_SUITES)
+
+
 def test_seal_suite_matches_idkit_wire_tag():
     # The record-level identifier is the same value the sealed wire record
     # is tagged with — and its type (int, a wire byte) is deliberately
