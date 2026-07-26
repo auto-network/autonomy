@@ -56,6 +56,7 @@ import hmac
 import json
 import os
 import secrets
+import sqlite3
 import time
 import urllib.parse
 from pathlib import Path
@@ -65,6 +66,7 @@ from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 from tools.graph import settings_ops
+from tools.graph.db import GraphDBNotReady
 from tools.dashboard.dao import identity_sessions
 from tools.dashboard.dashboard_access_approvals import (
     GRANT_SIGNING_DOMAIN as APPROVAL_GRANT_SIGNING_DOMAIN,
@@ -296,6 +298,7 @@ def session_from_request(request: Request) -> dict | None:
 #: Enrollment state is read at most once per TTL; identity_routes busts
 #: the cache on writes so enforcement flips the moment enrollment lands.
 _ENFORCE_TTL_S = 3.0
+_ENROLLMENT_READ_RETRY_S = 0.1
 _enforce_cache: dict = {"at": 0.0, "value": None}
 
 
@@ -321,10 +324,19 @@ def human_auth_enrolled() -> bool:
             and now - _enforce_cache["at"] < _ENFORCE_TTL_S:
         return _enforce_cache["value"]
     try:
-        personal = _personal_member()
-        has_identity = (personal is not None
-                        and bool(personal.payload.get("armored_private_key")))
-        enrolled = has_identity or bool(_passkey_rows())
+        for attempt in range(2):
+            try:
+                personal = _personal_member()
+                has_identity = (
+                    personal is not None
+                    and bool(personal.payload.get("armored_private_key"))
+                )
+                enrolled = has_identity or bool(_passkey_rows())
+                break
+            except (GraphDBNotReady, sqlite3.OperationalError):
+                if attempt:
+                    raise
+                time.sleep(_ENROLLMENT_READ_RETRY_S)
     except Exception:
         # Storage unreadable means enrollment is unverifiable, so enforce.
         # A fresh install reads empty and never reaches this branch;
