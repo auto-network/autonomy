@@ -14,6 +14,7 @@ from tools.init.join import (
     STAGED,
     AnchorMismatch,
     JoinError,
+    ViewerJoinTransport,
     join_org,
     read_personal_password,
     verify_anchor,
@@ -24,13 +25,20 @@ ORG = "018f6b2a-7c4d-7e11-8a3b-9d5c1e2f4a6b"
 OTHER_ORG = "018f6b2a-7c4d-7e11-8a3b-000000000000"
 ROOT_PUB = "ab" * 32
 INVITE_REF = "cd" * 32
-TOKEN = "ef" * 32
+GRANT_TOKEN = "12" * 16
+CLAIM_TOKEN = "ef" * 32
 GENESIS = "9f" * 32
 PASSWORD = "mounted-secret-passphrase"
 
 
 def invitation() -> Invitation:
-    return Invitation(org=ORG, root_pub=ROOT_PUB, invite_ref=INVITE_REF, token=TOKEN)
+    return Invitation(
+        org=ORG,
+        root_pub=ROOT_PUB,
+        invite_ref=INVITE_REF,
+        channel_token=GRANT_TOKEN,
+        claim_token=CLAIM_TOKEN,
+    )
 
 
 class FakeOrg:
@@ -182,7 +190,8 @@ def test_with_a_password_mints_locally_and_claims(volume):
 
     # The claim actually carried the bearer to the ORG (over the channel).
     submit = [r for r in org.requests if r["op"] == "submit"][0]
-    assert TOKEN in submit["event"]
+    assert CLAIM_TOKEN in submit["event"]
+    assert GRANT_TOKEN not in submit["event"]
 
 
 def test_admission_is_reported(volume):
@@ -199,5 +208,78 @@ def test_a_rejected_claim_raises_rather_than_reporting_success(volume):
 def test_outcome_never_carries_the_bearer_or_the_password(volume):
     outcome = join_org(invitation(), FakeOrg(), password=PASSWORD)
     rendered = repr(outcome)
-    assert TOKEN not in rendered
+    assert GRANT_TOKEN not in rendered
+    assert CLAIM_TOKEN not in rendered
     assert PASSWORD not in rendered
+
+
+def test_production_transport_pins_the_invitation_and_redacts_the_bearer(
+    monkeypatch,
+):
+    """The production seam is the real ViewerChannel, pinned from the code."""
+    from tools.network.idkit import canonical_json
+    from tools.network.relaykit import viewer
+
+    seen = {}
+
+    class Channel:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        async def send_message(self, payload):
+            seen["payload"] = payload
+
+        async def recv_message(self):
+            return b'{"v":1,"status":"absent"}'
+
+    async def connect(relay_url, token, **kwargs):
+        seen.update(relay_url=relay_url, token=token, kwargs=kwargs)
+        return Channel()
+
+    monkeypatch.setattr(viewer.ViewerChannel, "connect", connect)
+    transport = ViewerJoinTransport(
+        invitation(), relay_url="wss://relay.example", timeout=1
+    )
+    assert transport.request(
+        {"v": 1, "op": "status", "persona_pub": "12" * 32}
+    ) == {"v": 1, "status": "absent"}
+    assert seen == {
+        "relay_url": "wss://relay.example",
+        "token": GRANT_TOKEN,
+        "kwargs": {
+            "root_pub": ROOT_PUB,
+            "org": ORG,
+            "open_timeout": 1,
+        },
+        "payload": canonical_json(
+            {"v": 1, "op": "status", "persona_pub": "12" * 32}
+        ),
+    }
+    assert CLAIM_TOKEN not in repr(seen)
+    assert GRANT_TOKEN not in repr(transport)
+    assert CLAIM_TOKEN not in repr(transport)
+
+
+def test_production_transport_does_not_leak_a_token_bearing_failure(monkeypatch):
+    from tools.network.relaykit import viewer
+
+    async def connect(*_args, **_kwargs):
+        raise OSError(
+            f"could not open /v1/links/{GRANT_TOKEN}/channel "
+            f"with accidental bearer {CLAIM_TOKEN}"
+        )
+
+    monkeypatch.setattr(viewer.ViewerChannel, "connect", connect)
+    transport = ViewerJoinTransport(
+        invitation(), relay_url="wss://relay.example", timeout=1
+    )
+    with pytest.raises(JoinError) as caught:
+        transport.request({"v": 1, "op": "context"})
+    assert GRANT_TOKEN not in str(caught.value)
+    assert CLAIM_TOKEN not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is not None
+    assert caught.value.__suppress_context__

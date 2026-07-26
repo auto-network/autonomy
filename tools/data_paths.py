@@ -81,6 +81,8 @@ STORE_MANIFEST: tuple = (
     Store("identity_sessions", "dashboard_identity_sessions.db",
           "DASHBOARD_IDENTITY_SESSION_DB", "db",
           "identity unlock-session store"),
+    Store("pending_joins", "pending_joins.db", "AUTONOMY_PENDING_JOINS_DB", "db",
+          "restart-safe invite-join progress (identifiers and counts only)"),
     Store("tls_cert", "tls.crt", "AUTONOMY_TLS_CERT", "file",
           "TLS certificate (self-signed by default)"),
     Store("tls_key", "tls.key", "AUTONOMY_TLS_KEY", "file",

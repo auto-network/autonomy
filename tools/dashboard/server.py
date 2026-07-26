@@ -116,6 +116,7 @@ from tools.dashboard.dao import auth_db, dashboard_db
 from tools.dashboard import approvals_routes
 from tools.dashboard import jira_routes
 from tools.dashboard import identity_routes
+from tools.dashboard import join_routes
 from tools.dashboard import unlock_routes
 from tools.dashboard import network_routes
 if os.environ.get("DASHBOARD_MOCK"):
@@ -15651,6 +15652,7 @@ routes = [
 
     # Personal identity + passkey enrollment (Get started onboarding)
     *identity_routes.ROUTES,
+    *join_routes.ROUTES,
 
     # Human unlock gate: passkey assert + password fallback + session
     Route("/unlock", page_unlock),

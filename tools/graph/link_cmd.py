@@ -179,6 +179,7 @@ def _org_join_invite(org: str, invite_ref: str) -> dict:
             genesis = store.get(store.ledger.genesis_id)
             return {
                 "org_uuid": genesis.payload["org"],
+                "root_pub": genesis.payload["root_pub"],
                 "invite_ref": invite_ref,
                 "expiry": invite.payload["expiry"],
                 "token_hash": invite.payload.get("token_hash"),
@@ -331,6 +332,19 @@ def cmd_link_publish(args) -> None:
         url = _join_url(url, invite_token)
     print(f"✓ share-link published: {url}")
     print(f"  token: {execution.get('token')}")
+    if target_type == "org:join":
+        from tools.network.invitation import (
+            encode_invitation,
+            invitation_from_join_url,
+        )
+
+        invitation = invitation_from_join_url(
+            org=invite["org_uuid"],
+            root_pub=invite["root_pub"],
+            invite_ref=invite["invite_ref"],
+            join_url=url,
+        )
+        print(f"  AUTONOMY_INVITE: {encode_invitation(invitation)}")
 
 
 def cmd_link_revoke(args) -> None:

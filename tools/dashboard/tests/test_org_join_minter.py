@@ -26,6 +26,7 @@ from tools.graph.schemas.network_identity import (
     NETWORK_LINK_GRANT_SET_ID,
 )
 from tools.network.idkit import KeyPair, Subject, derive_persona, issue_cert
+from tools.network.invitation import decode_invitation
 from tools.network.ledger import HLC, LedgerStore, make_event, org_ledger_db_path
 from tools.network.ledger.found import found_org_ledger
 from tools.network.registry.app import create_app as create_registry_app
@@ -279,6 +280,17 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
             "t": [INVITE_TOKEN]
         }
         grant_token = parsed.path.rsplit("/", 1)[-1]
+        invite_code_line = next(
+            line for line in output.splitlines()
+            if line.startswith("  AUTONOMY_INVITE: ")
+        )
+        invitation = decode_invitation(invite_code_line.split(": ", 1)[1])
+        assert invitation.org == ORG_UUID
+        assert invitation.root_pub == root.public_hex
+        assert invitation.invite_ref == invite.event_id
+        assert invitation.channel_token == grant_token
+        assert invitation.claim_token == INVITE_TOKEN
+        assert invitation.channel_token != invitation.claim_token
         stored = registry.state.store.get_link(grant_token)
         assert stored.target_type == "org:join"
         assert stored.target_uuid == ORG_UUID

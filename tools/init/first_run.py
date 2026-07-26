@@ -145,6 +145,8 @@ def initialize_data_root(
     *,
     first_org: str | None = None,
     first_org_name: str | None = None,
+    invite: str | None = None,
+    join_transport=None,
     tls: bool = True,
     tls_domain: str | None = None,
 ) -> InitReport:
@@ -153,14 +155,20 @@ def initialize_data_root(
     Unlike :func:`initialize`, *data* is the volume itself rather than a
     checkout/deployment root whose ``data/`` child is the volume.
     """
+    if invite and (first_org or os.environ.get("AUTONOMY_FIRST_ORG")):
+        raise InitConflict(
+            "a node either founds its own org or joins an existing one: "
+            "AUTONOMY_FIRST_ORG and AUTONOMY_INVITE cannot both be set"
+        )
     data = Path(data).resolve()
     return _initialize_data_root(
         data,
         report_root=data,
         first_org=first_org,
         first_org_name=first_org_name,
-        invite=None,
-        join_transport=None,
+        invite=invite,
+        join_transport=join_transport,
+        production_join_transport=True,
         tls=tls,
         tls_domain=tls_domain,
     )
@@ -174,6 +182,7 @@ def _initialize_data_root(
     first_org_name: str | None,
     invite: str | None,
     join_transport,
+    production_join_transport: bool = False,
     tls: bool,
     tls_domain: str | None,
 ) -> InitReport:
@@ -195,6 +204,10 @@ def _initialize_data_root(
         # The ceremony runs last: it writes the personal identity into
         # stores the steps above just created, and it reaches the network.
         _run_join(report, invitation, join_transport)
+    elif invite and production_join_transport:
+        from tools.init.join import production_transport
+
+        _run_join(report, invitation, production_transport(invitation))
     return report
 
 
@@ -205,12 +218,31 @@ def _run_join(report: InitReport, invitation, transport) -> None:
     stays testable in-process and the production channel client (B4b /
     the B6 harness) is chosen by the caller.
     """
-    from tools.init.join import JoinError, join_org, read_personal_password
+    from tools.init.join import (
+        JoinError,
+        join_existing_identity,
+        join_org,
+        persist_outcome,
+        personal_identity_exists,
+        read_personal_password,
+    )
 
     try:
-        outcome = join_org(
-            invitation, transport, password=read_personal_password()
-        )
+        password = read_personal_password()
+        if personal_identity_exists():
+            if password is None:
+                raise JoinError(
+                    "a personal identity exists but no mounted/stdin password "
+                    "was available to resume the join"
+                )
+            outcome = join_existing_identity(
+                invitation, transport, password=password
+            )
+        else:
+            outcome = join_org(
+                invitation, transport, password=password
+            )
+        persist_outcome(outcome)
     except JoinError as exc:
         report.add("join", FAILED, str(exc))
         raise
@@ -333,6 +365,7 @@ def _init_operational_dbs(data: Path, report: InitReport) -> None:
         commit_workflow_db,
         dashboard_db,
         identity_sessions,
+        pending_joins,
     )
 
     # Manifest keys, not bare filenames: init must lay each store down
@@ -345,6 +378,7 @@ def _init_operational_dbs(data: Path, report: InitReport) -> None:
         ("approval_requests", approval_requests.init_db),
         ("commit_workflow", commit_workflow_db.init_db),
         ("identity_sessions", identity_sessions.init_db),
+        ("pending_joins", pending_joins.init_db),
     )
     for key, init_fn in stores:
         path = resolve_store(key, root=data)

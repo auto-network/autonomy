@@ -203,11 +203,22 @@ def status(org: str, invite_ref: str, persona_pub: str) -> dict:
             terminal = _terminal_pending(readiness)
             if terminal is not None:
                 return terminal
+            invite = store.get(invite_ref)
             return {
                 "status": "pending",
+                # Resume bootstrap. These are derived from the staged claim
+                # and its ledger, not accepted from the client. A restart can
+                # therefore finalize after wall expiry without weakening the
+                # fresh-join context() TTL gate.
+                "genesis_id": store.ledger.genesis_id,
+                "granted_role": invite.payload["granted_role"],
                 "have": readiness["have"],
                 "need": readiness["need"],
                 "approvals": pending["approvals"],
+                # The verdict-computed, need-sized subset. Resume clients
+                # finalize with exactly these keys rather than reimplementing
+                # the fold's authority decision after a restart.
+                "admitting": readiness["admitting"],
                 "position": readiness["position"],
             }
         member = store.fold().members.get(persona_pub)
