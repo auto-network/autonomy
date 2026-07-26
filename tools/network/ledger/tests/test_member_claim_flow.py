@@ -314,12 +314,16 @@ def test_readiness_tracks_the_fold_verdict():
     assert claim_key == org.store.claim_key(org.invite_id, org.persona.public_hex)
 
     status = org.store.evaluate_pending_claim(claim_key)
-    assert status == {"ready": False, "have": 0, "need": 2, "reason": R_APPROVAL_MISSING}
+    assert status == {
+        "ready": False, "have": 0, "need": 2,
+        "reason": R_APPROVAL_MISSING, "admitting": [],
+    }
 
     body = org.store.get_pending_claim(claim_key)["body"]
     org.store.add_pending_approval(claim_key, sign_approval(org.admin, "member.claim", body))
     status = org.store.evaluate_pending_claim(claim_key)
     assert (status["ready"], status["have"], status["need"]) == (False, 1, 2)
+    assert status["admitting"] == [org.admin.public_hex]
 
     # Unauthorized-but-well-signed merges at the store yet moves nothing —
     # the store/fold split surfaced through the readiness seam.
@@ -333,7 +337,10 @@ def test_readiness_tracks_the_fold_verdict():
         claim_key, sign_approval(admin2, "member.claim", body)
     )
     status = org.store.evaluate_pending_claim(claim_key)
-    assert status == {"ready": True, "have": 2, "need": 2, "reason": None}
+    assert status == {
+        "ready": True, "have": 2, "need": 2, "reason": None,
+        "admitting": sorted([org.admin.public_hex, admin2.public_hex]),
+    }
 
     # The readiness verdict matches the fold's: finalize and admit.
     final, _ = mint_member_claim(
@@ -354,7 +361,9 @@ def test_readiness_sponsor_and_token_self_shapes():
     sponsor_org.store.add_pending_approval(
         key, sign_approval(sponsor_org.root, "member.claim", body)
     )
-    assert sponsor_org.store.evaluate_pending_claim(key)["ready"] is True
+    status = sponsor_org.store.evaluate_pending_claim(key)
+    assert status["ready"] is True
+    assert status["admitting"] == [sponsor_org.root.public_hex]
 
     token_self = Org(requires="self", token=True)  # bearer safety: need 1
     key2 = token_self.store.stage_pending_claim(token_self.mint_claim())
@@ -382,3 +391,42 @@ def test_readiness_revalidates_staged_signatures_fail_closed():
         org.store.evaluate_pending_claim(claim_key)
     with pytest.raises(StoreError):
         org.store.evaluate_pending_claim("00" * 32)
+
+
+def test_admitting_is_a_need_sized_deterministic_subset():
+    """MAX_APPROVALS bounding: however many authorized approvers sign,
+    finalization re-mints with EXACTLY the need-sized admitting subset."""
+    org = Org(requires="admin-ack", threshold=1, token=True)
+    admin2 = KeyPair.generate()
+    org._emit(
+        org.root,
+        {
+            "type": "delegate",
+            "child_pub": admin2.public_hex,
+            "scope": ["role:grant:member"],
+            "can_redelegate": False,
+        },
+    )
+    claim_key = org.store.stage_pending_claim(org.mint_claim())
+    body = org.store.get_pending_claim(claim_key)["body"]
+    merged = org.store.add_pending_approval(
+        claim_key, sign_approval(org.admin, "member.claim", body)
+    )
+    merged = org.store.add_pending_approval(
+        claim_key, sign_approval(admin2, "member.claim", body)
+    )
+    status = org.store.evaluate_pending_claim(claim_key)
+    assert (status["ready"], status["have"], status["need"]) == (True, 2, 1)
+    expected = sorted([org.admin.public_hex, admin2.public_hex])[:1]
+    assert status["admitting"] == expected  # deterministic first-need subset
+
+    # Finalize with ONLY the admitting subset: folds admitted.
+    subset = [e for e in merged if e["key"] in status["admitting"]]
+    final, _ = mint_member_claim(
+        org.seed, org.genesis_id, invite_ref=org.invite_id,
+        heads=org.store.heads(), hlc=org.next_hlc(),
+        token=org.token, approvals=subset,
+    )
+    assert org.store.evaluate_claim(final) is None
+    org.store.append(final)
+    assert org.persona.public_hex in org.store.fold().members
