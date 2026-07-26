@@ -41,12 +41,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sqlite3
 import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
+from tools.data_paths import resolve_orgs_root
 from tools.network.idkit import canonical_json, verify_signature
 from tools.network.idkit.errors import IdkitError
 
@@ -85,10 +85,7 @@ class TamperError(StoreError):
 
 
 def _orgs_dir(root=None) -> Path:
-    if root is not None:
-        return Path(root)
-    env = os.environ.get("AUTONOMY_ORGS_DIR")
-    return Path(env) if env else _REPO_ROOT / "data" / "orgs"
+    return resolve_orgs_root(root, default=_REPO_ROOT / "data" / "orgs")
 
 
 def org_ledger_db_path(slug: str, root=None) -> Path:

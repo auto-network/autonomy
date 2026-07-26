@@ -11,6 +11,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from tools.data_paths import (
+    RealDataFallbackRefused,
+    refuse_real_data_fallback_enabled,
+    resolve_orgs_root,
+)
+
 from .models import Source, Thought, Derivation, Entity, Claim, Edge, Node, Attachment, new_id
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -46,12 +52,7 @@ class GraphDBNotReady(RuntimeError):
 
 def _orgs_dir(root: Path | str | None = None) -> Path:
     """Resolve ``data/orgs/`` location, respecting ``AUTONOMY_ORGS_DIR`` env."""
-    if root is not None:
-        return Path(root)
-    env = os.environ.get("AUTONOMY_ORGS_DIR")
-    if env:
-        return Path(env)
-    return DEFAULT_ORGS_DIR
+    return resolve_orgs_root(root, default=DEFAULT_ORGS_DIR)
 
 
 def _org_db_path(slug: str, root: Path | str | None = None) -> Path:
@@ -111,6 +112,11 @@ def resolve_caller_db_path(
     org_path = _org_db_path(slug, root)
     if org_path.exists():
         return org_path
+    if refuse_real_data_fallback_enabled():
+        raise RealDataFallbackRefused(
+            f"refusing legacy graph DB fallback for missing org {slug!r}: "
+            f"initialize {org_path} or set GRAPH_DB"
+        )
     # Pre-migration fallback: legacy single DB when no per-org file yet.
     return DEFAULT_DB
 

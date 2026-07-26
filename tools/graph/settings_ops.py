@@ -37,7 +37,7 @@ from functools import wraps
 from typing import Any, Callable, Generic, Iterator, TypeVar
 from uuid import uuid4
 
-from .db import GraphDB, resolve_caller_db_path
+from .db import GraphDB, _org_db_path, resolve_caller_db_path
 from . import schemas
 
 
@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 VALID_STATES = ("raw", "curated", "published", "canonical")
 PRECEDENCE = {"canonical": 0, "published": 1, "curated": 2, "raw": 3}
 PEER_VISIBLE_STATES = ("published", "canonical")
+_personal_db_init_lock = threading.Lock()
 
 
 # ── protected identity sets (dashboard-access credentials) ───
@@ -791,13 +792,33 @@ def _db_path(org: str | None) -> str | None:
     """Resolve Settings DB path for a literal ``org`` value.
 
     ``org`` is the post-:func:`_resolve_org_arg` value: a slug (route to
-    that org's DB) or ``None`` (scopeless default). No env-cascade here —
+    that org's DB) or ``None`` (the personal DB). No env-cascade here —
     public callers pre-resolve via :data:`CALLER_ORG` if they want it.
     ``GRAPH_DB`` env pins the path regardless (test override).
+
+    ``None`` is deliberately special-cased instead of flowing through
+    :func:`resolve_caller_db_path`: that general resolver retains a legacy
+    ``data/graph.db`` fallback, but Settings stored without an org include
+    the operator's personal identity. Their destination must not depend on
+    whether dashboard startup happened to materialize ``personal.db`` yet.
     """
     env_db = os.environ.get("GRAPH_DB")
     if env_db:
         return env_db
+    if org is None:
+        personal_path = _org_db_path("personal")
+        with _personal_db_init_lock:
+            if not personal_path.exists():
+                try:
+                    GraphDB.create_org_db(
+                        "personal",
+                        type_="personal",
+                        path=personal_path,
+                    ).close()
+                except FileExistsError:
+                    # Another process won the guarded first-open race.
+                    pass
+        return str(personal_path)
     return str(resolve_caller_db_path(org))
 
 
