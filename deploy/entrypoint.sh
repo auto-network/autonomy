@@ -3,6 +3,9 @@
 #
 # Environment (all optional — see DEPLOY.md):
 #   AUTONOMY_FIRST_ORG / AUTONOMY_FIRST_ORG_NAME  first org naming (read by tools.init)
+#   AUTONOMY_INVITE                               join an EXISTING org instead of
+#                                                 founding one (read by tools.init;
+#                                                 mutually exclusive with FIRST_ORG)
 #   DASHBOARD_HOST / DASHBOARD_PORT               bind address (default 0.0.0.0:8080)
 #   DASHBOARD_TLS=off                             skip TLS keypair + serve plain HTTP
 #   DASHBOARD_DOMAIN                              CN/SAN for the self-signed cert
