@@ -393,6 +393,162 @@ async def post_ledger_found(request: Request) -> JSONResponse:
     )
 
 
+async def get_ledger_heads(request: Request) -> JSONResponse:
+    """Return the founded ledger's identity and current signing frontier."""
+    if _mock_mode():
+        return JSONResponse(
+            {"ok": False, "error": "mock dashboard has no authority ledger"},
+            status_code=502,
+        )
+    requested_org = request.query_params.get("org")
+    if not isinstance(requested_org, str) or not requested_org:
+        return JSONResponse(
+            {"ok": False, "error": "query must carry the local org slug"},
+            status_code=400,
+        )
+    _org, refused = _scoped_org(requested_org)
+    if refused is not None:
+        return refused
+
+    from tools.network.ledger import LedgerError, LedgerStore, org_ledger_db_path
+
+    store_path = org_ledger_db_path(requested_org)
+    if not store_path.exists():
+        return JSONResponse(
+            {"ok": False, "error": "organization ledger is not founded"},
+            status_code=404,
+        )
+    try:
+        with LedgerStore(store_path) as store:
+            genesis_id = store.ledger.genesis_id
+            if genesis_id is None:
+                return JSONResponse(
+                    {"ok": False, "error": "organization ledger is not founded"},
+                    status_code=409,
+                )
+            return JSONResponse(
+                {
+                    "genesis_id": genesis_id,
+                    "heads": list(store.heads()),
+                }
+            )
+    except (LedgerError, OSError) as exc:
+        return JSONResponse(
+            {"ok": False, "error": f"could not read authority ledger: {exc}"},
+            status_code=500,
+        )
+
+
+async def post_ledger_invite(request: Request) -> JSONResponse:
+    """Authorize and append one client-signed routine invitation."""
+    if _mock_mode():
+        return JSONResponse(
+            {"ok": False, "error": "mock dashboard has no authority ledger"},
+            status_code=502,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"ok": False, "error": "body must be JSON"},
+            status_code=400,
+        )
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"ok": False, "error": "body must be a JSON object"},
+            status_code=400,
+        )
+    requested_org = body.get("org")
+    if not isinstance(requested_org, str) or not requested_org:
+        return JSONResponse(
+            {"ok": False, "error": "body must carry the local org slug"},
+            status_code=400,
+        )
+    _org, refused = _scoped_org(requested_org)
+    if refused is not None:
+        return refused
+    wire = body.get("event")
+    if not isinstance(wire, str):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "body must carry an event canonical wire string",
+            },
+            status_code=400,
+        )
+
+    from tools.dashboard.org_authority import authorize
+    from tools.network.ledger import (
+        Event,
+        LedgerError,
+        LedgerStore,
+        org_ledger_db_path,
+        scope_invite,
+    )
+
+    try:
+        event = Event.from_json(wire)
+        if event.type != "invite":
+            raise ValueError("event type must be invite")
+        if event.payload["sponsor"] != event.author_key:
+            raise ValueError("invite sponsor must equal its author")
+        event.verify_sig()
+    except (LedgerError, ValueError, TypeError) as exc:
+        return JSONResponse(
+            {"ok": False, "error": f"invitation rejected: {exc}"},
+            status_code=400,
+        )
+
+    store_path = org_ledger_db_path(requested_org)
+    if not store_path.exists():
+        return JSONResponse(
+            {"ok": False, "error": "organization ledger is not founded"},
+            status_code=404,
+        )
+    try:
+        with LedgerStore(store_path) as store:
+            current_heads = store.heads()
+            if event.parents != current_heads:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "authority ledger advanced; refresh and retry",
+                    },
+                    status_code=409,
+                )
+            state = store.fold(heads=current_heads)
+            if event.payload["granted_role"] not in state.role_defs:
+                return JSONResponse(
+                    {"ok": False, "error": "invitation role is not defined"},
+                    status_code=400,
+                )
+            try:
+                permitted = authorize(
+                    requested_org,
+                    event.author_key,
+                    scope_invite(event.payload["granted_role"]),
+                    at_head=current_heads,
+                )
+            except Exception:
+                permitted = False
+            if not permitted:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "sponsor lacks authority to issue this invitation",
+                    },
+                    status_code=403,
+                )
+            invite_id = store.append(event)
+            store.refresh_projections()
+    except (LedgerError, OSError) as exc:
+        return JSONResponse(
+            {"ok": False, "error": f"could not append invitation: {exc}"},
+            status_code=400,
+        )
+    return JSONResponse({"ok": True, "invite_id": invite_id})
+
+
 async def put_org_key(request: Request) -> JSONResponse:
     """Store the org root key's passphrase-encrypted armor (C1 step 2).
 
@@ -751,6 +907,8 @@ ROUTES = [
     Route("/api/network/binding", get_binding, methods=["GET"]),
     Route("/api/network/registry", get_registry, methods=["GET"]),
     Route("/api/network/ledger/found", post_ledger_found, methods=["POST"]),
+    Route("/api/network/ledger/heads", get_ledger_heads, methods=["GET"]),
+    Route("/api/network/ledger/invite", post_ledger_invite, methods=["POST"]),
     Route("/api/network/register", post_register, methods=["POST"]),
     Route("/api/network/serve-cert", post_serve_cert, methods=["POST"]),
     Route("/api/network/revocations", post_revocation, methods=["POST"]),
