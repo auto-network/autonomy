@@ -51,7 +51,13 @@ from tools.network.idkit.errors import IdkitError
 
 from .errors import LedgerError, SchemaError, SignatureError
 from .events import EVENT_TYPES, Event, approval_signing_input
-from .fold import FoldState, fold
+from .fold import (
+    R_APPROVAL_MISSING,
+    R_ROLE_UNDEFINED,
+    FoldState,
+    claim_requirement_status,
+    fold,
+)
 from .ledger import Ledger
 from .projections import build_projections, projection_bytes
 
@@ -347,6 +353,57 @@ class LedgerStore:
             self.db.execute(
                 "DELETE FROM ledger_pending_claims WHERE claim_key = ?", (claim_key,)
             )
+
+    def evaluate_pending_claim(self, claim_key: str) -> dict:
+        """Readiness of a staged claim: ``{ready, have, need, reason}``.
+
+        No invitee-signed event exists for the merged-approvals state
+        (merging changes the payload the invitee signed), so readiness is
+        computed WITHOUT one: every merged countersignature is
+        RE-VALIDATED over the staged body (fail closed), the invite and
+        role resolve through the current fold (authority judged at the
+        stored claim ts, matching what ``_check_approvals`` will apply),
+        and ``have``/``need`` come from the SAME acceptance core the fold
+        uses — route-side status cannot drift from the fold's verdict.
+        ``need`` is the total required count (the "N of M" view). The
+        final append remains authoritative: finalization re-mints under
+        the invitee's key and runs the full fold.
+        """
+        record = self.get_pending_claim(claim_key)
+        if record is None:
+            raise StoreError(f"no pending claim {claim_key[:12]}")
+        body = record["body"]
+        signing_input = approval_signing_input("member.claim", body)
+        for entry in record["approvals"]:
+            try:
+                verify_signature(entry["key"], entry["sig"], signing_input)
+            except IdkitError as exc:
+                raise SignatureError(
+                    "a staged countersignature no longer verifies"
+                ) from exc
+        invite_event = self.get(record["invite_ref"])
+        role = invite_event.payload["granted_role"]
+        state = self.fold(now=record["hlc_ts"])
+        view = state.role_defs.get(role)
+        if view is None:
+            return {"ready": False, "have": 0, "need": 0, "reason": R_ROLE_UNDEFINED}
+        have, need = claim_requirement_status(
+            requires=view.claim_requires,
+            key_bound="invite_pub" in invite_event.payload,
+            approver_keys=[e["key"] for e in record["approvals"]],
+            threshold=view.approver_threshold,
+            root=state.root,
+            sponsor=invite_event.payload["sponsor"],
+            role=role,
+            holds=state.holds,
+        )
+        ready = have >= need
+        return {
+            "ready": ready,
+            "have": have,
+            "need": need,
+            "reason": None if ready else R_APPROVAL_MISSING,
+        }
 
     # -- read side --------------------------------------------------------------------
 

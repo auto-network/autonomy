@@ -292,3 +292,93 @@ def test_tampered_credential_is_a_hard_rejection():
     credential["signature"] = KeyPair.generate().sign_hex(b"unrelated")
     bad = org.mint_claim(approvers=[org.root], kem_credential=credential)
     assert org.store.evaluate_claim(bad) == R_CLAIM_BAD_CREDENTIAL  # never staged
+
+
+# -- the readiness seam (pre-merge addition; consumer: the sibling's routes) -----------
+
+
+def test_readiness_tracks_the_fold_verdict():
+    org = Org(requires="admin-ack", threshold=2, token=True)
+    admin2 = KeyPair.generate()
+    org._emit(
+        org.root,
+        {
+            "type": "delegate",
+            "child_pub": admin2.public_hex,
+            "scope": ["role:grant:member"],
+            "can_redelegate": False,
+        },
+    )
+    bare = org.mint_claim()
+    claim_key = org.store.stage_pending_claim(bare)
+    assert claim_key == org.store.claim_key(org.invite_id, org.persona.public_hex)
+
+    status = org.store.evaluate_pending_claim(claim_key)
+    assert status == {"ready": False, "have": 0, "need": 2, "reason": R_APPROVAL_MISSING}
+
+    body = org.store.get_pending_claim(claim_key)["body"]
+    org.store.add_pending_approval(claim_key, sign_approval(org.admin, "member.claim", body))
+    status = org.store.evaluate_pending_claim(claim_key)
+    assert (status["ready"], status["have"], status["need"]) == (False, 1, 2)
+
+    # Unauthorized-but-well-signed merges at the store yet moves nothing —
+    # the store/fold split surfaced through the readiness seam.
+    org.store.add_pending_approval(
+        claim_key, sign_approval(KeyPair.generate(), "member.claim", body)
+    )
+    status = org.store.evaluate_pending_claim(claim_key)
+    assert (status["ready"], status["have"]) == (False, 1)
+
+    merged = org.store.add_pending_approval(
+        claim_key, sign_approval(admin2, "member.claim", body)
+    )
+    status = org.store.evaluate_pending_claim(claim_key)
+    assert status == {"ready": True, "have": 2, "need": 2, "reason": None}
+
+    # The readiness verdict matches the fold's: finalize and admit.
+    final, _ = mint_member_claim(
+        org.seed, org.genesis_id, invite_ref=org.invite_id,
+        heads=org.store.heads(), hlc=org.next_hlc(),
+        token=org.token, approvals=merged,
+    )
+    assert org.store.evaluate_claim(final) is None
+    org.store.append(final)
+    assert org.persona.public_hex in org.store.fold().members
+
+
+def test_readiness_sponsor_and_token_self_shapes():
+    sponsor_org = Org(requires="sponsor", token=True)
+    key = sponsor_org.store.stage_pending_claim(sponsor_org.mint_claim())
+    assert sponsor_org.store.evaluate_pending_claim(key)["need"] == 1
+    body = sponsor_org.store.get_pending_claim(key)["body"]
+    sponsor_org.store.add_pending_approval(
+        key, sign_approval(sponsor_org.root, "member.claim", body)
+    )
+    assert sponsor_org.store.evaluate_pending_claim(key)["ready"] is True
+
+    token_self = Org(requires="self", token=True)  # bearer safety: need 1
+    key2 = token_self.store.stage_pending_claim(token_self.mint_claim())
+    status = token_self.store.evaluate_pending_claim(key2)
+    assert (status["ready"], status["need"]) == (False, 1)
+
+
+def test_readiness_revalidates_staged_signatures_fail_closed():
+    org = Org(requires="admin-ack", token=True)
+    claim_key = org.store.stage_pending_claim(org.mint_claim())
+    body = org.store.get_pending_claim(claim_key)["body"]
+    org.store.add_pending_approval(
+        claim_key, sign_approval(org.admin, "member.claim", body)
+    )
+    # Tamper the staged approvals blob directly in the DB.
+    import json as _json
+
+    doctored = [{"key": org.admin.public_hex, "sig": "ab" * 64}]
+    with org.store.db:
+        org.store.db.execute(
+            "UPDATE ledger_pending_claims SET approvals = ? WHERE claim_key = ?",
+            (_json.dumps(doctored).encode(), claim_key),
+        )
+    with pytest.raises(SignatureError):
+        org.store.evaluate_pending_claim(claim_key)
+    with pytest.raises(StoreError):
+        org.store.evaluate_pending_claim("00" * 32)
