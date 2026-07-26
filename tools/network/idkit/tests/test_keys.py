@@ -56,6 +56,8 @@ def test_private_hex_roundtrip_restores_identity():
         "ab" * 33,  # too long
         "AB" * 32,  # uppercase
         "zz" * 32,  # not hex
+        "  " + "ab" * 31,  # right length, but bytes.fromhex would skip whitespace
+        "ab" * 31 + "\n\t",  # trailing whitespace
         None,
         1234,
     ],

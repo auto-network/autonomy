@@ -1129,10 +1129,15 @@ class _Folder:
 
         Candidates: every valid ``revoke`` (event- and key-target),
         ``role.revoke``, ``member.rekey``, and ``key.rotate``, plus each
-        valid higher-version ``role.define`` that drops at least one scope
-        of the effective prior definition of the same name — decided by
+        valid ``role.define`` that drops at least one scope relative to
+        ANY same-name definition in *ctx* it outranks in the LWW order
+        ``(version, lower-hash-wins)`` — judged against the frontier, not
+        the candidate's own ancestry, so a narrowing that only becomes
+        effective at a merge (concurrent branches, equal-version
+        tie-breaks) is still a contraction. Scope removal is decided by
         the coverage order (``attenuates``), not raw set difference, so a
-        redefinition to a covering pattern is not a contraction. Version
+        redefinition to a covering pattern is not a contraction.
+        Deliberately over-inclusive in the safe direction (§6). Version
         one has a single org-wide domain, so no per-domain filter applies.
         Maximality is over the causal-ancestry map: a candidate ancestral
         to another candidate is dominated. Sorted by event id.
@@ -1140,13 +1145,16 @@ class _Folder:
         candidates = set()
         for group in (self.revokes, self.role_revokes, self.rekeys, self.rotations):
             candidates.update(eid for eid in group if eid in ctx and self.valid[eid])
-        for d in self.role_defs:
-            if d.id not in ctx or not self.valid[d.id]:
-                continue
-            prior = self.role_defs_at(self.anc[d.id]).get(d.name)
-            if prior is None or d.version <= prior.version:
-                continue  # first definition, or does not supersede
-            if not attenuates(prior.scope_set, d.scope_set):
+        defs_in_ctx = [d for d in self.role_defs if d.id in ctx and self.valid[d.id]]
+        for d in defs_in_ctx:
+            d_rank = (d.version, _neg_id(d.id))
+            if any(
+                p.name == d.name
+                and p.id != d.id
+                and (p.version, _neg_id(p.id)) < d_rank
+                and not attenuates(p.scope_set, d.scope_set)
+                for p in defs_in_ctx
+            ):
                 candidates.add(d.id)
         return tuple(
             sorted(

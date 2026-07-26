@@ -24,10 +24,12 @@ cross-pin test keeps the two from drifting.
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Dict, Optional
 
 from tools.network.idkit import canonical_json
 
+from .errors import MalformedEventError
 from .fold import FoldState
 
 PROJECTION_NAMES = ("live-keys", "roles", "roster")
@@ -108,6 +110,8 @@ def organization_content_domain_id(genesis_id: str) -> str:
     "organization-content")`` (contract §4) — anchored to the genesis
     event id, so it is invariant across a ``key.rotate``.
     """
+    if not isinstance(genesis_id, str) or not re.fullmatch("[0-9a-f]{64}", genesis_id):
+        raise MalformedEventError("genesis_id must be 64 lowercase hex chars")
     return hashlib.sha256(
         b"autonomy/storage-domain/v1"
         + genesis_id.encode("ascii")

@@ -70,6 +70,11 @@ def test_rejects_malformed_seed(bad_seed):
         "ab" * 33,  # too long
         "AB" * 32,  # uppercase
         "zz" * 32,  # not hex
+        # Whitespace-padded 64-char forms: bytes.fromhex would accept them,
+        # and the derivation anchors on the STRING — a padded variant must
+        # never mint a distinct persona.
+        "  " + "1f" * 31,
+        "1f" * 31 + " \n",
         None,
         1234,
     ],
