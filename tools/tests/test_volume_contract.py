@@ -148,3 +148,50 @@ def test_the_measurement_catches_an_escaping_store(tmp_path):
     # The escape is visible: state landed outside the volume root.
     assert escaped.exists(), "expected the un-rooted store to escape the volume"
     assert not (volume / "graph.db").exists()
+
+
+# -- one precedence rule across every store, orgs included (auto-sthm3) -------------
+
+
+def test_orgs_root_follows_the_same_precedence_as_every_other_store(monkeypatch, tmp_path):
+    """orgs is the identity/secret store: a writer handed a deployment root
+    and a reader that knows only the variable must converge, or credential
+    rows land where readers do not look."""
+    from tools.data_paths import resolve_orgs_root
+
+    default = tmp_path / "default-orgs"
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "env-orgs"))
+    # env outranks a passed deployment root — the unified rule.
+    assert resolve_orgs_root(tmp_path / "root-orgs", default=default) == (
+        tmp_path / "env-orgs"
+    )
+    monkeypatch.delenv("AUTONOMY_ORGS_DIR")
+    assert resolve_orgs_root(tmp_path / "root-orgs", default=default) == (
+        tmp_path / "root-orgs"
+    )
+    assert resolve_orgs_root(None, default=default) == default
+
+
+def test_orgs_guard_behaviour_is_unchanged(monkeypatch, tmp_path):
+    """qhtq7's fail-closed guard must survive the reordering untouched."""
+    from tools.data_paths import resolve_orgs_root
+
+    monkeypatch.setenv(REFUSE_REAL_DATA_FALLBACK_ENV, "1")
+    monkeypatch.delenv("AUTONOMY_ORGS_DIR", raising=False)
+    with pytest.raises(RealDataFallbackRefused):
+        resolve_orgs_root(None, default=tmp_path / "default-orgs")
+    # An explicit root still satisfies the guard (it is not unrooted).
+    assert resolve_orgs_root(tmp_path / "r", default=tmp_path / "d") == tmp_path / "r"
+
+
+def test_writer_and_reader_converge_on_the_orgs_store(monkeypatch, tmp_path):
+    """The bug this closes, end to end: init handed a --root while the
+    environment names somewhere else must write where readers read."""
+    from tools.graph.db import _org_db_path
+    from tools.network.ledger.store import org_ledger_db_path
+
+    env_orgs = tmp_path / "volume" / "orgs"
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(env_orgs))
+    writer_root = tmp_path / "somewhere-else"
+    assert _org_db_path("acme", writer_root).parent == env_orgs
+    assert org_ledger_db_path("acme", writer_root).parent == env_orgs

@@ -346,7 +346,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    orgs_dir = resolve_orgs_root(args.orgs_dir, default=DEFAULT_ORGS_DIR)
+    # An explicitly-named --orgs-dir is the operator being specific;
+    # the environment must not silently override a flag.
+    orgs_dir = (
+        Path(args.orgs_dir) if args.orgs_dir
+        else resolve_orgs_root(None, default=DEFAULT_ORGS_DIR)
+    )
 
     try:
         report = build_plan(args.projects_yaml, orgs_dir)

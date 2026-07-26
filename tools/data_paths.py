@@ -119,9 +119,8 @@ def resolve_store(key: str, *, root: Path | str | None = None) -> Path:
     The environment variable deliberately outranks *root*: a writer that
     is handed a volume root and a reader that only knows the environment
     must agree on one path, or the writer lays state down where the
-    reader will not look. (This differs from :func:`resolve_orgs_root`,
-    whose explicit-root-wins order predates the manifest and is kept for
-    its existing callers.)
+    reader will not look. :func:`resolve_orgs_root` follows the same
+    order, so there is one precedence rule across every store.
 
     Every reader of a store MUST resolve through here, so that rooting a
     deployment moves all of its readers together (no split resolvers).
@@ -146,12 +145,28 @@ def resolve_orgs_root(
     *,
     default: Path,
 ) -> Path:
-    """Resolve an organization DB root without silently escaping isolation."""
-    if root is not None:
-        return Path(root)
+    """Resolve the organization DB root — the identity and secret store.
+
+    Same precedence as every other store (:func:`resolve_store`):
+    ``AUTONOMY_ORGS_DIR`` → *root* (the deployment root a caller is
+    operating on) → the repository-local default. The variable outranks
+    *root* so a writer handed a deployment root and a reader that knows
+    only the variable converge on one path; for the orgs store that
+    disagreement would put identity and credential rows where readers do
+    not look, which is the worst version of the bug.
+
+    An operator naming this directory EXPLICITLY (a ``--orgs-dir`` flag)
+    should not be overridden by the environment — those call sites use
+    their flag directly and reach here only when it is absent.
+
+    The refuse-fallback guard is unchanged: an unrooted resolution still
+    raises rather than touching the operator's live tree.
+    """
     env = os.environ.get("AUTONOMY_ORGS_DIR")
     if env:
         return Path(env)
+    if root is not None:
+        return Path(root)
     if refuse_real_data_fallback_enabled():
         raise _refuse("data/orgs", "AUTONOMY_ORGS_DIR")
     return default

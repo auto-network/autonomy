@@ -262,7 +262,10 @@ def build_plan(
 
 
 def _resolve_orgs_dir(orgs_root: Path | str | None) -> Path:
-    return resolve_orgs_root(orgs_root, default=DEFAULT_ORGS_DIR)
+    # An explicit caller-supplied path wins over the environment.
+    if orgs_root is not None:
+        return Path(orgs_root)
+    return resolve_orgs_root(None, default=DEFAULT_ORGS_DIR)
 
 
 # ── Plan → DB ───────────────────────────────────────────────
