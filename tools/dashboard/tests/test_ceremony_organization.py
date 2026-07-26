@@ -21,9 +21,16 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from tools.dashboard import network_routes
+from tools.graph.db import GraphDB
 from tools.network.idkit import KeyPair
-from tools.network.idkit.armor import decrypt_root_key, parse_armor
+from tools.network.idkit.armor import (
+    decrypt_root_key,
+    encrypt_root_key,
+    parse_armor,
+)
 from tools.network.idkit.keys import verify_signature
+from tools.network.ledger.store import LedgerStore, org_ledger_db_path
 from tools.network.registry.signing import request_signing_input
 
 REPO = Path(__file__).resolve().parents[3]
@@ -36,13 +43,18 @@ COMMAND = (
     / "ceremony" / "node" / "org-commands.mjs"
 )
 ORG_PASSPHRASE = "node org identity armor passphrase"
+PERSONAL_PASSPHRASE = "node personal identity armor passphrase"
 
 
 def _node_environment() -> dict[str, str]:
     return {
         key: value
         for key, value in os.environ.items()
-        if key != "AUTONOMY_ORG_PASSPHRASE"
+        if key not in {
+            "AUTONOMY_ORG_PASSPHRASE",
+            "AUTONOMY_PERSONAL_PASSPHRASE",
+            "AUTONOMY_REGISTRY_URL",
+        }
     }
 
 
@@ -70,6 +82,42 @@ def _run_with_passphrase(arguments: list[str], passphrase: str) -> subprocess.Co
         )
     finally:
         os.close(read_fd)
+
+
+def _run_with_two_passphrases(
+    arguments: list[str],
+    org_passphrase: str,
+    personal_passphrase: str,
+) -> subprocess.CompletedProcess:
+    org_read_fd, org_write_fd = os.pipe()
+    personal_read_fd, personal_write_fd = os.pipe()
+    try:
+        os.write(org_write_fd, f"{org_passphrase}\n".encode())
+        os.write(personal_write_fd, f"{personal_passphrase}\n".encode())
+    finally:
+        os.close(org_write_fd)
+        os.close(personal_write_fd)
+    try:
+        return subprocess.run(
+            [
+                "node",
+                str(COMMAND),
+                *arguments,
+                "--passphrase-fd",
+                str(org_read_fd),
+                "--personal-passphrase-fd",
+                str(personal_read_fd),
+            ],
+            cwd=REPO,
+            env=_node_environment(),
+            pass_fds=(org_read_fd, personal_read_fd),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        os.close(org_read_fd)
+        os.close(personal_read_fd)
 
 
 def _free_port() -> int:
@@ -155,6 +203,23 @@ def _d21_registry(posts: list[dict]) -> Starlette:
     ])
 
 
+def _dashboard_founding_app(expected_headers: list[str]) -> Starlette:
+    async def get_org(request: Request):
+        slug = request.path_params["slug"]
+        expected_headers.append(request.headers.get("x-graph-org"))
+        from tools.graph import org_ops
+
+        org = org_ops.get_org(slug)
+        if org is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse({"org": org.to_dict(), "identity": None})
+
+    return Starlette(routes=[
+        Route("/api/orgs/{slug}", get_org, methods=["GET"]),
+        *network_routes.ROUTES,
+    ])
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
 def test_organization_core_matches_python_idkit():
     result = subprocess.run(
@@ -195,7 +260,19 @@ def test_organization_core_matches_python_idkit():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-def test_node_commands_write_armor_and_register_on_live_d21_contract(tmp_path):
+def test_node_commands_found_locally_and_optionally_register(
+    tmp_path,
+    monkeypatch,
+):
+    orgs_dir = tmp_path / "orgs"
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    slug = "headless-created"
+    org_id = "019c0000-0000-7000-8000-000000000101"
+    org_db = GraphDB.create_org_db(slug, root=orgs_dir, org_id=org_id)
+    org_db.close()
+    monkeypatch.setenv("GRAPH_ORG", slug)
+
     armor_path = tmp_path / "org-root.armor"
     created = _run_with_passphrase(
         [
@@ -212,21 +289,46 @@ def test_node_commands_write_armor_and_register_on_live_d21_contract(tmp_path):
     assert decrypt_root_key(armor, ORG_PASSPHRASE).public_hex == identity["root_pub"]
     assert armor_path.stat().st_mode & 0o777 == 0o600
 
+    personal = KeyPair.from_private_hex(bytes(reversed(range(32))).hex())
+    personal_armor_path = tmp_path / "personal-root.armor"
+    personal_armor_path.write_text(
+        encrypt_root_key(
+            personal,
+            PERSONAL_PASSPHRASE,
+            iterations=10_000,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
     posts: list[dict] = []
+    preflight_headers: list[str] = []
     registry = _d21_registry(posts)
-    port = _free_port()
-    with _live_server(registry, port) as registry_url:
-        registered = _run_with_passphrase(
+    dashboard = _dashboard_founding_app(preflight_headers)
+    registry_port = _free_port()
+    dashboard_port = _free_port()
+    with (
+        _live_server(registry, registry_port) as registry_url,
+        _live_server(dashboard, dashboard_port) as dashboard_url,
+    ):
+        registered = _run_with_two_passphrases(
             [
                 "create-organization",
                 "--org-armor",
                 str(armor_path),
+                "--personal-armor",
+                str(personal_armor_path),
+                "--server",
+                dashboard_url,
+                "--org",
+                slug,
                 "--registry",
                 registry_url,
                 "--recovery",
                 "recovery-key",
             ],
             ORG_PASSPHRASE,
+            PERSONAL_PASSPHRASE,
         )
         assert registered.returncode == 0, (
             registered.stdout + "\n" + registered.stderr
@@ -236,10 +338,10 @@ def test_node_commands_write_armor_and_register_on_live_d21_contract(tmp_path):
         assert first["binding"]["root_pub"] == identity["root_pub"]
         assert first["binding"]["org_uuid"]
         assert first["binding"]["expires_at"] > int(time.time())
-        assert first["founding"] == {
-            "status": "blocked",
-            "blocked_on": "auto-5dh9a",
-        }
+        assert first["founding"]["ok"] is True
+        assert first["founding"]["genesis_id"]
+        assert first["founding"]["founder_persona_pub"]
+        assert len(first["founding"]["event_ids"]) == 4
         assert first["production_registry_wiring"] == {
             "status": "blocked",
             "blocked_on": "N24",
@@ -247,38 +349,84 @@ def test_node_commands_write_armor_and_register_on_live_d21_contract(tmp_path):
         assert "AUTONOMY NETWORK RECOVERY KEY" in first["recovery_block"]
         assert first["binding"]["org_uuid"] in first["recovery_block"]
         assert "org_uuid" not in first["envelope"]["payload"]
+        assert preflight_headers == [slug]
 
-        repeated = _run_with_passphrase(
-            [
-                "create-organization",
-                "--org-armor",
-                str(armor_path),
-                "--registry",
-                registry_url,
-            ],
-            ORG_PASSPHRASE,
+        with LedgerStore(org_ledger_db_path(slug)) as store:
+            assert len(store) == 4
+            state = store.fold()
+            founder = first["founding"]["founder_persona_pub"]
+            assert state.authority(founder) == frozenset({"*"})
+
+        repeated = httpx.post(
+            f"{registry_url}/v1/orgs",
+            json=first["envelope"],
+            timeout=10,
         )
-        assert repeated.returncode == 0, (
-            repeated.stdout + "\n" + repeated.stderr
-        )
-        second = json.loads(repeated.stdout)
-        assert second["status"] == 200
-        assert second["binding"] == first["binding"]
+        assert repeated.status_code == 200
+        assert repeated.json() == first["binding"]
 
         posts_before_wrong_passphrase = len(posts)
-        wrong = _run_with_passphrase(
+        wrong_slug = "wrong-passphrase-org"
+        wrong_org_id = "019c0000-0000-7000-8000-000000000102"
+        wrong_db = GraphDB.create_org_db(
+            wrong_slug,
+            root=orgs_dir,
+            org_id=wrong_org_id,
+        )
+        wrong_db.close()
+        monkeypatch.setenv("GRAPH_ORG", wrong_slug)
+        wrong = _run_with_two_passphrases(
             [
                 "create-organization",
                 "--org-armor",
                 str(armor_path),
+                "--personal-armor",
+                str(personal_armor_path),
+                "--server",
+                dashboard_url,
+                "--org",
+                wrong_slug,
                 "--registry",
                 registry_url,
             ],
             "wrong org passphrase",
+            PERSONAL_PASSPHRASE,
         )
         assert wrong.returncode != 0
         assert "wrong passphrase" in wrong.stderr
         assert len(posts) == posts_before_wrong_passphrase
+        assert not org_ledger_db_path(wrong_slug).exists()
+
+        wrong_personal_slug = "wrong-personal-passphrase-org"
+        wrong_personal_org_id = "019c0000-0000-7000-8000-000000000104"
+        wrong_personal_db = GraphDB.create_org_db(
+            wrong_personal_slug,
+            root=orgs_dir,
+            org_id=wrong_personal_org_id,
+        )
+        wrong_personal_db.close()
+        monkeypatch.setenv("GRAPH_ORG", wrong_personal_slug)
+        wrong_personal = _run_with_two_passphrases(
+            [
+                "create-organization",
+                "--org-armor",
+                str(armor_path),
+                "--personal-armor",
+                str(personal_armor_path),
+                "--server",
+                dashboard_url,
+                "--org",
+                wrong_personal_slug,
+                "--registry",
+                registry_url,
+            ],
+            ORG_PASSPHRASE,
+            "wrong personal passphrase",
+        )
+        assert wrong_personal.returncode != 0
+        assert "wrong passphrase" in wrong_personal.stderr
+        assert len(posts) == posts_before_wrong_passphrase
+        assert not org_ledger_db_path(wrong_personal_slug).exists()
 
         forged = dict(first["envelope"])
         forged["signer"] = KeyPair.generate().public_hex
@@ -288,3 +436,48 @@ def test_node_commands_write_armor_and_register_on_live_d21_contract(tmp_path):
             timeout=10,
         )
         assert refused.status_code == 403
+        posts_before_local_founding = len(posts)
+
+        local_slug = "local-only"
+        local_org_id = "019c0000-0000-7000-8000-000000000103"
+        local_db = GraphDB.create_org_db(
+            local_slug,
+            root=orgs_dir,
+            org_id=local_org_id,
+        )
+        local_db.close()
+        monkeypatch.setenv("GRAPH_ORG", local_slug)
+        local_armor_path = tmp_path / "local-org-root.armor"
+        local_identity = _run_with_passphrase(
+            [
+                "create-org-identity",
+                "--armor-output",
+                str(local_armor_path),
+            ],
+            ORG_PASSPHRASE,
+        )
+        assert local_identity.returncode == 0, (
+            local_identity.stdout + "\n" + local_identity.stderr
+        )
+        local = _run_with_two_passphrases(
+            [
+                "create-organization",
+                "--org-armor",
+                str(local_armor_path),
+                "--personal-armor",
+                str(personal_armor_path),
+                "--server",
+                dashboard_url,
+                "--org",
+                local_slug,
+            ],
+            ORG_PASSPHRASE,
+            PERSONAL_PASSPHRASE,
+        )
+        assert local.returncode == 0, local.stdout + "\n" + local.stderr
+        local_result = json.loads(local.stdout)
+        assert local_result["registration"] is None
+        assert local_result["founding"]["ok"] is True
+        assert len(posts) == posts_before_local_founding
+        with LedgerStore(org_ledger_db_path(local_slug)) as local_store:
+            assert len(local_store) == 4

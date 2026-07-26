@@ -12,13 +12,13 @@ import {
   generateOrgRootKey,
   importEd25519RootSigningKey,
 } from '../organization.js';
+import { foundOrganization } from '../founding.js';
 import { decryptArmor } from '../primitives.js';
 
 if (!globalThis.crypto) {
   globalThis.crypto = webcrypto;
 }
 
-const FOUNDING_BLOCKER = 'auto-5dh9a';
 const REGISTRY_WIRING_BLOCKER = 'N24';
 
 function requiredValue(argv, index, option) {
@@ -41,8 +41,12 @@ function parseArguments(argv) {
     armorOutput: null,
     orgArmor: null,
     passphraseFd: null,
+    personalArmor: null,
+    personalPassphraseFd: null,
     recoveryPolicy: 'none',
     registryUrl: null,
+    serverUrl: null,
+    org: null,
   };
   for (let index = 1; index < argv.length; index += 1) {
     const option = argv[index];
@@ -59,11 +63,29 @@ function parseArguments(argv) {
       }
       options.passphraseFd = Number(value);
       index += 1;
+    } else if (option === '--personal-armor') {
+      options.personalArmor = requiredValue(argv, index, option);
+      index += 1;
+    } else if (option === '--personal-passphrase-fd') {
+      const value = requiredValue(argv, index, option);
+      if (!/^[0-9]+$/.test(value)) {
+        throw new Error(
+          '--personal-passphrase-fd must be a non-negative integer',
+        );
+      }
+      options.personalPassphraseFd = Number(value);
+      index += 1;
     } else if (option === '--recovery') {
       options.recoveryPolicy = requiredValue(argv, index, option);
       index += 1;
     } else if (option === '--registry') {
       options.registryUrl = requiredValue(argv, index, option);
+      index += 1;
+    } else if (option === '--server') {
+      options.serverUrl = requiredValue(argv, index, option);
+      index += 1;
+    } else if (option === '--org') {
+      options.org = requiredValue(argv, index, option);
       index += 1;
     } else {
       throw new Error(`unknown argument: ${option}`);
@@ -82,6 +104,22 @@ function readOrgPassphrase(options) {
   throw new Error(
     'missing org passphrase source: use --passphrase-fd or '
     + 'AUTONOMY_ORG_PASSPHRASE',
+  );
+}
+
+function readPersonalPassphrase(options) {
+  if (options.personalPassphraseFd !== null) {
+    return fs.readFileSync(
+      options.personalPassphraseFd,
+      'utf8',
+    ).replace(/\r?\n$/, '');
+  }
+  if (Object.hasOwn(process.env, 'AUTONOMY_PERSONAL_PASSPHRASE')) {
+    return process.env.AUTONOMY_PERSONAL_PASSPHRASE;
+  }
+  throw new Error(
+    'missing personal passphrase source: use --personal-passphrase-fd or '
+    + 'AUTONOMY_PERSONAL_PASSPHRASE',
   );
 }
 
@@ -136,6 +174,10 @@ async function createOrgIdentity({
 async function createOrganization({
   orgArmorPath,
   passphrase,
+  personalArmorPath,
+  personalPassphrase,
+  serverUrl,
+  org,
   registryUrl,
   recoveryPolicy = 'none',
   fetchImpl = globalThis.fetch,
@@ -145,20 +187,72 @@ async function createOrganization({
       'create-organization requires --org-armor from create-org-identity',
     );
   }
-  if (!registryUrl) {
+  if (!personalArmorPath) {
     throw new Error(
-      'create-organization requires --registry or AUTONOMY_REGISTRY_URL',
+      'create-organization requires --personal-armor for founder authority',
     );
+  }
+  if (!serverUrl) {
+    throw new Error('create-organization requires --server');
+  }
+  if (!org) {
+    throw new Error('create-organization requires --org');
   }
   if (recoveryPolicy !== 'none' && recoveryPolicy !== 'recovery-key') {
     throw new Error('--recovery must be none or recovery-key');
   }
+  if (recoveryPolicy === 'recovery-key' && !registryUrl) {
+    throw new Error('--recovery recovery-key requires --registry');
+  }
+  if (typeof fetchImpl !== 'function') {
+    throw new Error('create-organization requires a fetch implementation');
+  }
+
+  const dashboard = new URL(serverUrl);
+  if (dashboard.protocol !== 'http:' && dashboard.protocol !== 'https:') {
+    throw new Error('server URL must use http or https');
+  }
+  const orgResponse = await fetchImpl(
+    new URL(`/api/orgs/${encodeURIComponent(org)}`, dashboard),
+    { headers: { 'X-Graph-Org': org } },
+  );
+  const orgResult = await responseBody(orgResponse);
+  if (
+    !orgResponse.ok
+    || !orgResult
+    || typeof orgResult.org?.id !== 'string'
+    || orgResult.org.slug !== org
+  ) {
+    throw new Error(
+      'create-organization requires an existing local org database '
+      + `(preflight ${orgResponse.status}: `
+      + `${typeof orgResult === 'string'
+        ? orgResult
+        : JSON.stringify(orgResult)})`,
+    );
+  }
 
   const armor = fs.readFileSync(orgArmorPath, 'utf8');
+  const personalArmor = fs.readFileSync(personalArmorPath, 'utf8');
   const opened = await decryptArmor(armor, passphrase);
-  let rootSigningKey;
+  let personalOpened;
+  try {
+    personalOpened = await decryptArmor(
+      personalArmor,
+      personalPassphrase,
+    );
+  } catch (error) {
+    opened.seed.fill(0);
+    opened.seed = null;
+    throw error;
+  }
+  let rootSigningKey = null;
   try {
     rootSigningKey = await importEd25519RootSigningKey(opened.seed);
+  } catch (error) {
+    personalOpened.seed.fill(0);
+    personalOpened.seed = null;
+    throw error;
   } finally {
     opened.seed.fill(0);
     opened.seed = null;
@@ -167,6 +261,43 @@ async function createOrganization({
   let recoveryPair = null;
   let recoverySeedHex = null;
   try {
+    const founded = await foundOrganization({
+      org,
+      orgId: orgResult.org.id,
+      rootPub: opened.rootPub,
+      rootSigningKey,
+      personalRootSeed: personalOpened.seed,
+      now: Date.now(),
+      transport: {
+        fetch(route, options = {}) {
+          return fetchImpl(
+            new URL(route, dashboard),
+            {
+              ...options,
+              headers: {
+                ...(options.headers || {}),
+                'X-Graph-Org': org,
+              },
+            },
+          );
+        },
+      },
+    });
+    const founding = {
+      ok: true,
+      genesis_id: founded.genesisId,
+      founder_persona_pub: founded.founderPersonaPub,
+      event_ids: founded.eventIds,
+    };
+
+    if (!registryUrl) {
+      return {
+        root_pub: opened.rootPub,
+        founding,
+        registration: null,
+      };
+    }
+
     const payload = {
       root_pub: opened.rootPub,
       recovery_policy: recoveryPolicy,
@@ -224,10 +355,7 @@ async function createOrganization({
           recoverySeedHex,
         )
         : null,
-      founding: {
-        status: 'blocked',
-        blocked_on: FOUNDING_BLOCKER,
-      },
+      founding,
       production_registry_wiring: {
         status: 'blocked',
         blocked_on: REGISTRY_WIRING_BLOCKER,
@@ -240,6 +368,8 @@ async function createOrganization({
     }
     recoverySeedHex = null;
     rootSigningKey = null;
+    personalOpened.seed.fill(0);
+    personalOpened.seed = null;
   }
 }
 
@@ -253,12 +383,17 @@ async function main(argv) {
       armorOutput: options.armorOutput,
     });
   } else {
+    const personalPassphrase = readPersonalPassphrase(options);
     const registryUrl = options.registryUrl
       || process.env.AUTONOMY_REGISTRY_URL
       || null;
     output = await createOrganization({
       orgArmorPath: options.orgArmor,
       passphrase,
+      personalArmorPath: options.personalArmor,
+      personalPassphrase,
+      serverUrl: options.serverUrl,
+      org: options.org,
       registryUrl,
       recoveryPolicy: options.recoveryPolicy,
     });
