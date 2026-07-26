@@ -14,6 +14,13 @@ canonical signed-record helpers every record module reuses.
 Pure library: depends on ``idkit`` and the standard library only.
 """
 
+from .acceptance import (
+    accept_grant,
+    accept_object,
+    accept_state,
+    scope_storage_advance,
+    scope_storage_grant,
+)
 from .credentials import domain_member_keys, select_current_credential
 from .errors import (
     CommitmentError,
@@ -40,6 +47,12 @@ from .suites import (
 )
 
 __all__ = [
+    # acceptance
+    "accept_state",
+    "accept_grant",
+    "accept_object",
+    "scope_storage_advance",
+    "scope_storage_grant",
     # credentials
     "domain_member_keys",
     "select_current_credential",
