@@ -8,9 +8,8 @@
  */
 "use strict";
 
-const fs = require("fs");
 const path = require("path");
-const vm = require("vm");
+const url = require("url");
 
 globalThis.crypto = require("crypto").webcrypto;
 globalThis.window = {};
@@ -33,17 +32,14 @@ globalThis.fetch = async (url, opts) => {
   return { ok: false, status: 404, json: async () => ({}) };
 };
 
-const src = fs.readFileSync(
-  path.join(__dirname, "..", "static", "js", "network-signon.js"), "utf8");
-vm.runInThisContext(src);
-
-const session = globalThis.window.AutonomyNetworkSession;
-if (!session || typeof session.provisionServeCert !== "function") {
-  console.error("network-signon.js did not expose provisionServeCert");
-  process.exit(2);
-}
-
 (async () => {
+  await import(url.pathToFileURL(
+    path.join(__dirname, "..", "static", "js", "network-signon.js")).href);
+  const session = globalThis.window.AutonomyNetworkSession;
+  if (!session || typeof session.provisionServeCert !== "function") {
+    console.error("network-signon.js did not expose provisionServeCert");
+    process.exit(2);
+  }
   await session.provisionServeCert(PW, { org: null, orgUuid: ORG_UUID });
   if (!captured) {
     console.error("provisionServeCert did not POST a serve-cert");
