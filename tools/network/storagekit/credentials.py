@@ -143,6 +143,10 @@ def build(
 
     Returns ``(credential, kem_private_hex)`` — the private key goes to
     the caller's device store, never into the record.
+
+    Seed hygiene (caller contract): the KEM keypair is a function of
+    ``(kem_seed, genesis_id)`` only — two personas sharing a seed in one
+    org share a keypair. Give each persona its own seed.
     """
     _require_hex(genesis_id, _ID_HEX_LEN, "genesis_id")
     kem_private, kem_public = derive_encapsulation_keypair(
