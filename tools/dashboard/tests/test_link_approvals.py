@@ -34,6 +34,8 @@ from tools.graph.schemas.network_identity import (
     NETWORK_LINK_GRANT_SET_ID,
 )
 from tools.network.idkit import KeyPair, Subject, issue_cert
+from tools.network.ledger import HLC, LedgerStore, make_event, org_ledger_db_path
+from tools.network.ledger.found import found_org_ledger
 from tools.network.registry.app import create_app as create_registry_app
 from tools.network.registry.signing import sign_request
 
@@ -41,7 +43,6 @@ ORG = "netorg"  # dashboard-side org slug (Settings scope)
 ORG_UUID = "11111111-1111-4111-8111-111111111111"
 TARGET = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 SESSION = "auto-agent-1"
-OPERATOR_SESSION = "op-session-1"
 REGISTRY_URL = "http://registry.test"
 PUBLIC_LINK_URL = "https://relay.auto.network"
 
@@ -60,13 +61,45 @@ def session_key():
 
 
 @pytest.fixture
-def session_cert(root, session_key):
-    """Operator sign-on cert (what C2 mints): root -> session key."""
+def founded_org(tmp_path, monkeypatch, root):
+    """Found the real authority ledger used by the approval executor."""
+    from tools.graph.db import GraphDB
+
+    orgs_dir = tmp_path / "orgs"
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    GraphDB.create_org_db(ORG, root=orgs_dir).close()
+    with LedgerStore(org_ledger_db_path(ORG)) as store:
+        return found_org_ledger(
+            store,
+            org_id=ORG_UUID,
+            org_root=root,
+            personal_root_seed=b"\x91" * 32,
+            now=int(time.time() * 1000),
+        )
+
+
+def _persona_cert(
+    root, session_key, persona_pub, scope=SESSION_SCOPE, *, kind="operator",
+):
+    """Session cert naming the acting persona in ``subject.id``.
+
+    The current HTTP registry transport still accepts operator subjects only.
+    D19 replaces it with an org-authenticated tunnel, at which point the
+    persona remains local and no certificate subject crosses that boundary.
+    """
     now = int(time.time())
     return issue_cert(
-        root, session_key.public_hex, scope=SESSION_SCOPE, org=ORG_UUID,
-        subject=Subject("operator", OPERATOR_SESSION),
+        root, session_key.public_hex, scope=scope, org=ORG_UUID,
+        subject=Subject(kind, persona_pub),
         not_before=now - 3600, not_after=now + 30 * 86400,
+    )
+
+
+@pytest.fixture
+def session_cert(root, session_key, founded_org):
+    """Root-delegated session key attributed to the founder persona."""
+    return _persona_cert(
+        root, session_key, founded_org.founder_persona_pub,
     )
 
 
@@ -88,13 +121,13 @@ def registry_app(root):
 
 
 @pytest.fixture
-def env(tmp_path, monkeypatch, registry_app, root):
+def env(tmp_path, monkeypatch, registry_app, root, founded_org):
     """Approvals app + tmp Settings DB + registry routed through ASGI."""
     from tools.graph.db import GraphDB
 
     monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approvals.db")
     GraphDB.close_all_pooled()
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
 
     settings_ops.add_setting(
@@ -166,6 +199,43 @@ def _decide_and_wait(client, rid, body):
 def _cached_grants():
     return {m.key: m.payload
             for m in settings_ops.read_set(NETWORK_LINK_GRANT_SET_ID, org=ORG)}
+
+
+def _append_role(root, persona_pub, role, scopes):
+    """Grant a scoped role through the production ledger vocabulary."""
+    with LedgerStore(org_ledger_db_path(ORG)) as store:
+        head = store.heads()[0]
+        last_hlc = store.get(head).hlc
+        defined = store.append(make_event(
+            root,
+            {
+                "type": "role.define",
+                "name": role,
+                "scope_set": list(scopes),
+                "claim_requires": "self",
+                "version": 1,
+            },
+            [head],
+            HLC(last_hlc.ts, last_hlc.count + 1),
+        ))
+        store.append(make_event(
+            root,
+            {"type": "role.grant", "persona": persona_pub, "role": role},
+            [defined],
+            HLC(last_hlc.ts, last_hlc.count + 2),
+        ))
+
+
+def _revoke_role(root, persona_pub, role):
+    with LedgerStore(org_ledger_db_path(ORG)) as store:
+        head = store.heads()[0]
+        last_hlc = store.get(head).hlc
+        store.append(make_event(
+            root,
+            {"type": "role.revoke", "persona": persona_pub, "role": role},
+            [head],
+            HLC(last_hlc.ts, last_hlc.count + 1),
+        ))
 
 
 def test_cached_grant_uses_owning_scope_reader(monkeypatch):
@@ -256,9 +326,10 @@ def test_publish_end_to_end(env, session_key, session_cert):
 def test_grant_records_issuing_subject_i6(env, session_key, session_cert):
     _, _, result = _publish(env, session_key, session_cert)
     token = result["execution"]["token"]
-    # I6: the stored grant is attributable to the operator session that signed
+    # I6: the stored grant is attributable to the acting persona. The
+    # operator kind is the current HTTP transport shape; D19 retires it.
     assert _cached_grants()[token]["subject"] == {
-        "kind": "operator", "id": OPERATOR_SESSION}
+        "kind": "operator", "id": session_cert.subject.id}
 
 
 def test_enrichment_renders_target_and_ttl(env, tmp_path, monkeypatch):
@@ -605,12 +676,14 @@ def test_rerender_shows_frozen_destination_and_drift(env, session_key,
     assert second["binding_drift"] is True
 
 
-def test_registry_rejection_propagates(env, session_key, root):
+def test_registry_rejection_propagates(
+    env, session_key, root, founded_org,
+):
     """A cert without link:publish scope: registry 403 comes back readable."""
     now = int(time.time())
     weak_cert = issue_cert(
         root, session_key.public_hex, scope=("viewer:identify",), org=ORG_UUID,
-        subject=Subject("operator", OPERATOR_SESSION),
+        subject=Subject("operator", founded_org.founder_persona_pub),
         not_before=now - 3600, not_after=now + 86400,
     )
     rid = _create_publish(env)
@@ -664,6 +737,182 @@ def test_revoke_end_to_end(env, session_key, session_cert, registry_app):
     # and the registry side agrees the grant is gone
     rc = TestClient(registry_app)
     assert rc.get(f"/v1/links/{token}/envelope").status_code in (404, 410)
+
+
+def test_publish_refused_without_link_publish_scope(
+    env, root, session_key, monkeypatch,
+):
+    outsider = KeyPair.generate()
+    cert = _persona_cert(
+        root, session_key, outsider.public_hex, kind="persona",
+    )
+    rid = _create_publish(env)
+    rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
+    envelope = _signed_envelope(session_key, cert, rr)
+
+    forwarded = []
+
+    async def forbidden_forward(*args):
+        forwarded.append(args)
+        raise AssertionError("denied publish reached the registry")
+
+    monkeypatch.setattr(
+        link_approvals, "_forward_to_registry", forbidden_forward,
+    )
+    upserts = []
+
+    def forbidden_upsert(*args, **kwargs):
+        upserts.append((args, kwargs))
+        raise AssertionError("denied publish reached the grant cache")
+
+    monkeypatch.setattr(settings_ops, "upsert_by_key", forbidden_upsert)
+    result = _decide_and_wait(env, rid, _approve_body(envelope, rr))
+
+    assert result["execution"] == {
+        "ok": False,
+        "error": (
+            f"{outsider.public_hex} is not authorized to publish "
+            f"share links in {ORG}"
+        ),
+    }
+    assert forwarded == []
+    assert upserts == []
+
+
+def test_malformed_persona_key_fails_closed(
+    env, root, session_key, monkeypatch,
+):
+    malformed = "not-a-valid-ed25519-public-key"
+    cert = _persona_cert(
+        root, session_key, malformed, kind="persona",
+    )
+    rid = _create_publish(env)
+    rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
+    envelope = _signed_envelope(session_key, cert, rr)
+    forwarded = []
+
+    async def forbidden_forward(*args):
+        forwarded.append(args)
+        raise AssertionError("malformed persona reached the registry")
+
+    monkeypatch.setattr(
+        link_approvals, "_forward_to_registry", forbidden_forward,
+    )
+    result = _decide_and_wait(env, rid, _approve_body(envelope, rr))
+
+    assert result["execution"]["ok"] is False
+    assert malformed in result["execution"]["error"]
+    assert forwarded == []
+    assert _cached_grants() == {}
+
+
+def test_authority_store_error_fails_closed(
+    env, session_key, session_cert, monkeypatch,
+):
+    from tools.dashboard import org_authority
+
+    rid = _create_publish(env)
+    rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
+    envelope = _signed_envelope(session_key, session_cert, rr)
+    forwarded = []
+
+    def unavailable(*args, **kwargs):
+        raise OSError("authority ledger is unavailable")
+
+    async def forbidden_forward(*args):
+        forwarded.append(args)
+        raise AssertionError("authority exception reached the registry")
+
+    monkeypatch.setattr(org_authority, "authorize", unavailable)
+    monkeypatch.setattr(
+        link_approvals, "_forward_to_registry", forbidden_forward,
+    )
+    result = _decide_and_wait(env, rid, _approve_body(envelope, rr))
+
+    assert result["execution"]["ok"] is False
+    assert "is not authorized to publish share links" in result["execution"]["error"]
+    assert forwarded == []
+    assert _cached_grants() == {}
+
+
+def test_publish_allowed_with_link_publish_scope(
+    env, root, session_key,
+):
+    publisher = KeyPair.generate()
+    _append_role(root, publisher.public_hex, "publisher", ["link:publish"])
+    cert = _persona_cert(root, session_key, publisher.public_hex)
+
+    _, _, result = _publish(env, session_key, cert)
+
+    assert result["execution"]["ok"] is True
+    token = result["execution"]["token"]
+    assert _cached_grants()[token]["subject"] == {
+        "kind": "operator",
+        "id": publisher.public_hex,
+    }
+
+
+def test_revoke_requires_link_revoke_scope(
+    env, root, session_key, session_cert, monkeypatch,
+):
+    _, _, published = _publish(env, session_key, session_cert)
+    token = published["execution"]["token"]
+    publisher = KeyPair.generate()
+    _append_role(root, publisher.public_hex, "publisher", ["link:publish"])
+    publisher_cert = _persona_cert(
+        root, session_key, publisher.public_hex, kind="persona",
+    )
+
+    created = env.post("/api/approvals", json={
+        "kind": "link_revoke",
+        "session": SESSION,
+        "request": {"org": ORG, "token": token},
+    })
+    rid = created.json()["id"]
+    rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
+    envelope = _signed_envelope(session_key, publisher_cert, rr)
+    forwarded = []
+
+    async def forbidden_forward(*args):
+        forwarded.append(args)
+        raise AssertionError("denied revoke reached the registry")
+
+    monkeypatch.setattr(
+        link_approvals, "_forward_to_registry", forbidden_forward,
+    )
+    result = _decide_and_wait(env, rid, _approve_body(envelope, rr))
+
+    assert result["execution"]["ok"] is False
+    assert "is not authorized to revoke share links" in result["execution"]["error"]
+    assert forwarded == []
+    assert token in _cached_grants()
+
+
+def test_revocation_between_publishes_blocks_second(
+    env, root, session_key, session_cert, founded_org, monkeypatch,
+):
+    _, _, first = _publish(env, session_key, session_cert)
+    assert first["execution"]["ok"] is True
+    _revoke_role(root, founded_org.founder_persona_pub, "owner")
+
+    rid = _create_publish(env)
+    rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
+    envelope = _signed_envelope(session_key, session_cert, rr)
+    forwarded = []
+
+    async def forbidden_forward(*args):
+        forwarded.append(args)
+        raise AssertionError("revoked persona reached the registry")
+
+    monkeypatch.setattr(
+        link_approvals, "_forward_to_registry", forbidden_forward,
+    )
+    second = _decide_and_wait(env, rid, _approve_body(envelope, rr))
+
+    assert second["execution"]["ok"] is False
+    assert "is not authorized to publish share links" in second["execution"]["error"]
+    assert forwarded == []
+    assert len(_cached_grants()) == 1
 
 
 # ── register-on-first-publish: enrich surfaces a graceful seam, not C1 ──

@@ -481,12 +481,24 @@ def _envelope_and_subject(decision: dict) -> tuple[dict | None, dict | None, str
     except Exception as e:
         return None, None, f"envelope cert does not parse: {e}"
     subject = {"kind": cert.subject.kind, "id": cert.subject.id}
-    if subject["kind"] not in ("operator", "agent"):
+    if subject["kind"] not in ("operator", "agent", "persona"):
         return None, None, (
             f"cert subject kind {subject['kind']!r} cannot issue grants "
-            "(operator or agent subjects only)"
+            "(operator, agent, or persona subjects only)"
         )
     return envelope, subject, None
+
+
+def _authorized_at_current_head(
+    org: str, persona_pub: str, required_scope: str,
+) -> bool:
+    """Ask the authority ledger, failing closed on every read/fold error."""
+    try:
+        from tools.dashboard.org_authority import authorize
+
+        return authorize(org, persona_pub, required_scope, at_head=None)
+    except Exception:
+        return False
 
 
 async def _forward_to_registry(staged: dict, envelope: dict) -> tuple[httpx.Response | None, str | None]:
@@ -515,6 +527,14 @@ async def _execute_link_publish(row: dict, decision: dict) -> dict:
     envelope, subject, err = _envelope_and_subject(decision)
     if err:
         return _fail(err)
+    acting_persona_pub = subject["id"]
+    if not _authorized_at_current_head(
+        org, acting_persona_pub, "link:publish",
+    ):
+        return _fail(
+            f"{acting_persona_pub} is not authorized to publish "
+            f"share links in {org}"
+        )
     staged, err = _frozen_staged(row)
     if err:
         return _fail(err)
@@ -602,9 +622,17 @@ async def _execute_link_revoke(row: dict, decision: dict) -> dict:
     req = row["request"]
     org = req.get("org")
     token = req.get("token", "")
-    envelope, _subject, err = _envelope_and_subject(decision)
+    envelope, subject, err = _envelope_and_subject(decision)
     if err:
         return _fail(err)
+    acting_persona_pub = subject["id"]
+    if not _authorized_at_current_head(
+        org, acting_persona_pub, "link:revoke",
+    ):
+        return _fail(
+            f"{acting_persona_pub} is not authorized to revoke "
+            f"share links in {org}"
+        )
     staged, err = _frozen_staged(row)
     if err:
         return _fail(err)
