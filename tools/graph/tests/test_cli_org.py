@@ -55,6 +55,30 @@ def orgs_root(tmp_path, monkeypatch):
     root = tmp_path / "data" / "orgs"
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
     monkeypatch.delenv("GRAPH_API", raising=False)
+    # Creation IS the founding ceremony (auto-nixfv): enroll a throwaway
+    # personal identity and supply its password through the env source so
+    # every `org create` below founds its ledger transparently.
+    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
+    monkeypatch.setenv("AUTONOMY_PERSONAL_PASSWORD", "cli-test-password")
+    from tools.graph import settings_ops
+    from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
+    from tools.network.idkit import KeyPair
+    from tools.network.idkit.armor import encrypt_root_key
+
+    owner = KeyPair.generate()
+    with settings_ops.identity_write_context():
+        settings_ops.upsert_by_key(
+            PERSONAL_IDENTITY_SET_ID, 1, "default",
+            {
+                "armored_private_key": encrypt_root_key(
+                    owner, "cli-test-password", iterations=10_000
+                ),
+                "root_pub": owner.public_hex,
+                "display_name": "CLI Test",
+                "created_at": "2026-07-26T00:00:00Z",
+            },
+            org=None,
+        )
     return root
 
 

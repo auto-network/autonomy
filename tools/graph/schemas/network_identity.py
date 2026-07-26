@@ -52,6 +52,13 @@ from .registry import (
 
 NETWORK_ORG_KEY_SET_ID = "autonomy.network.org-key"
 NETWORK_ORG_KEY_REVISION = 1
+NETWORK_ORG_KEY_REVISION_2 = 2
+#: The sealing purpose label binding an org-root seal to the owner's
+#: personal-root-derived X25519 recipient key (register B4, Option B).
+ORG_ROOT_ARMOR_PURPOSE = "autonomy/org-root-armor/v1"
+#: Hex length of a 32-byte seed sealed under idkit sealing suite 1:
+#: 1 suite byte + 32 enc + 32 ct + 16 tag.
+_SEALED_ROOT_KEY_HEX_LEN = 2 * (1 + 32 + 32 + 16)
 NETWORK_BINDING_SET_ID = "autonomy.network.binding"
 NETWORK_BINDING_REVISION = 1
 NETWORK_LINK_GRANT_SET_ID = "autonomy.network.link-grant"
@@ -250,6 +257,74 @@ class NetworkOrgKeyV1(SettingSchema):
                     f"{cls.__name__}: 'root_pub' does not match the armor's "
                     "enclosed public key"
                 )
+
+
+@keyed_per_entity
+class NetworkOrgKeyV2(SettingSchema):
+    """Revision 2 — the org root seed SEALED to the owner's key (B4/Option B).
+
+    The seed is hybrid-public-key-encrypted (idkit sealing, auto-x9etu)
+    to an X25519 recipient key derived from the owner's PERSONAL root
+    under :data:`ORG_ROOT_ARMOR_PURPOSE` — one personal password unlocks
+    every owned org, and re-sealing to another party's recipient key
+    transfers or shares ownership without exposing the seed. Parallel to
+    revision 1 (legacy passphrase-PBKDF2 armor, readable until the
+    retrofit re-seals); no upconvert chain exists between them by design.
+    I1 holds: only the sealed record is stored, never plaintext.
+    """
+
+    set_id = NETWORK_ORG_KEY_SET_ID
+    schema_revision = NETWORK_ORG_KEY_REVISION_2
+
+    root_pub: str = field(
+        required=True,
+        description="Hex org root public key (64 lowercase hex chars = key id).",
+    )
+    sealed_root_key: str = field(
+        required=True,
+        description=(
+            "Hex of the idkit sealing wire record over the 32-byte org root "
+            "seed, sealed to owner_kem_pub under seal_purpose. Opens only "
+            "with the recipient key derived from the owner's personal root."
+        ),
+    )
+    owner_kem_pub: str = field(
+        required=True,
+        description=(
+            "The owner's X25519 recipient public key (64 lowercase hex), "
+            "derived from the personal root under seal_purpose — re-derivable "
+            "from the personal seed, stored for tooling and transfer flows."
+        ),
+    )
+    seal_purpose: str = field(
+        required=True,
+        description=f"Must be exactly {ORG_ROOT_ARMOR_PURPOSE!r}.",
+    )
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        super().validate(payload)
+        if not isinstance(payload, dict):
+            return
+        _require_hex(payload, "root_pub", cls.__name__, length=NETWORK_PUB_HEX_LEN)
+        _require_hex(payload, "owner_kem_pub", cls.__name__, length=NETWORK_PUB_HEX_LEN)
+        sealed = _require_str(
+            payload, "sealed_root_key", cls.__name__, max_len=1024
+        )
+        # I1 tripwire: 64 hex chars is a raw Ed25519 seed, and nothing but
+        # the fixed-size sealed record shape is storable at all.
+        if len(sealed) != _SEALED_ROOT_KEY_HEX_LEN or not _HEX_RE.match(sealed):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'sealed_root_key' must be the "
+                f"{_SEALED_ROOT_KEY_HEX_LEN}-char lowercase-hex idkit sealed "
+                "record — plaintext or foreign formats are refused (I1)"
+            )
+        if payload.get("seal_purpose") != ORG_ROOT_ARMOR_PURPOSE:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'seal_purpose' must be exactly "
+                f"{ORG_ROOT_ARMOR_PURPOSE!r} — the purpose label is part of "
+                "the sealing context and is not caller-chosen"
+            )
 
 
 # ── autonomy.network.binding ──────────────────────────────────

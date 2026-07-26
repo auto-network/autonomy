@@ -453,6 +453,152 @@ def create_org(
     )
 
 
+@dataclass(frozen=True)
+class OrgCeremonyResult:
+    """What the create-organization ceremony minted (auto-nixfv)."""
+
+    org: OrgRef
+    root_pub: str
+    genesis_id: str
+    founder_persona_pub: str
+    event_ids: tuple  # the four founding events, in append order
+
+    def to_dict(self) -> dict:
+        return {
+            "org": self.org.to_dict(),
+            "identity": {
+                "root_pub": self.root_pub,
+                "genesis_id": self.genesis_id,
+                "founder_persona_pub": self.founder_persona_pub,
+                "event_ids": list(self.event_ids),
+            },
+        }
+
+
+def _personal_identity_member():
+    """The enrolled personal identity Setting — canonical ``default`` label
+    first, first member as the legacy fallback (mirrors identity_routes)."""
+    from . import settings_ops
+    from .schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
+
+    members = [
+        m
+        for m in settings_ops.read_owned_set(PERSONAL_IDENTITY_SET_ID, org=None).members
+        if isinstance(m.payload, dict)
+    ]
+    for m in members:
+        if m.key == "default":
+            return m
+    return members[0] if members else None
+
+
+def create_org_with_identity(
+    slug: str,
+    personal_password: str,
+    *,
+    type_: str = "shared",
+    identity_payload: dict | None = None,
+    root: Path | str | None = None,
+    now: int | None = None,
+) -> OrgCeremonyResult:
+    """Create an organization as one atomic founding ceremony (auto-nixfv).
+
+    Unlock the personal root (wrong password fails HERE, before any
+    filesystem effect) → create the org DB (mints the stable ``orgs.id``)
+    → mint an independent org signing root → found the ledger (genesis,
+    ``owner`` role, key-bound founding invite, founder claim — D-01/D20;
+    ``genesis.org`` carries the stable ``orgs.id`` UUID label, never the
+    slug and never a registry identifier, D21) → seal the org-root seed
+    to the owner's personal-root-derived X25519 key (B4 Option B) and
+    persist it as org-key revision 2. On any failure after DB creation,
+    the org is deleted and the exception re-raised: an organization is
+    observable only fully founded and key-sealed. No registration and no
+    registry identifier at creation.
+    """
+    from tools.network.idkit import KeyPair
+    from tools.network.idkit.armor import decrypt_root_key
+    from tools.network.idkit.sealing import derive_encapsulation_keypair, seal
+    from tools.network.ledger import LedgerStore, org_ledger_db_path
+    from tools.network.ledger.found import found_org_ledger
+
+    from . import settings_ops
+    from .schemas.network_identity import (
+        NETWORK_ORG_KEY_REVISION_2,
+        NETWORK_ORG_KEY_SET_ID,
+        ORG_ROOT_ARMOR_PURPOSE,
+    )
+
+    member = _personal_identity_member()
+    if member is None or not member.payload.get("armored_private_key"):
+        raise OrgError(
+            "no personal identity is enrolled; enroll one before creating "
+            "an organization (creation founds the ledger under your key)"
+        )
+    # Step 1 — unlock first: a wrong password raises ArmorPassphraseError
+    # here, before anything exists on disk.
+    personal_kp = decrypt_root_key(
+        member.payload["armored_private_key"], personal_password
+    )
+    personal_seed = bytes.fromhex(personal_kp.private_hex)
+
+    ref = create_org(
+        slug, type_=type_, identity_payload=identity_payload, root=root
+    )
+    try:
+        org_root = KeyPair.generate()  # independent of the personal root
+        now_ms = int(time.time() * 1000) if now is None else now
+        store = LedgerStore(org_ledger_db_path(slug, root))
+        try:
+            founded = found_org_ledger(
+                store,
+                org_id=ref.id,  # the stable orgs.id UUID label (D21)
+                org_root=org_root,
+                personal_root_seed=personal_seed,
+                now=now_ms,
+            )
+        finally:
+            store.close()
+        _, recipient_pub = derive_encapsulation_keypair(
+            personal_seed, ORG_ROOT_ARMOR_PURPOSE
+        )
+        sealed = seal(
+            bytes.fromhex(org_root.private_hex), recipient_pub, ORG_ROOT_ARMOR_PURPOSE
+        )
+        settings_ops.add_setting(
+            NETWORK_ORG_KEY_SET_ID,
+            NETWORK_ORG_KEY_REVISION_2,
+            "default",
+            {
+                "root_pub": org_root.public_hex,
+                "sealed_root_key": sealed.hex(),
+                "owner_kem_pub": recipient_pub,
+                "seal_purpose": ORG_ROOT_ARMOR_PURPOSE,
+            },
+            org=slug,
+            state="canonical",
+        )
+        return OrgCeremonyResult(
+            org=ref,
+            root_pub=org_root.public_hex,
+            genesis_id=founded.genesis_id,
+            founder_persona_pub=founded.founder_persona_pub,
+            event_ids=(
+                founded.genesis_id,
+                founded.role_define_id,
+                founded.founding_invite_id,
+                founded.founder_claim_id,
+            ),
+        )
+    except BaseException:
+        # Atomic boundary: a half-run leaves nothing observable.
+        try:
+            GraphDB.close_all_pooled()
+            remove_org(slug, force=True, root=root)
+        except Exception:
+            pass
+        raise
+
+
 def _seed_identity_setting(
     db: GraphDB,
     slug: str,

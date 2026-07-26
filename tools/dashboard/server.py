@@ -14644,23 +14644,43 @@ async def api_orgs_show(request):
 
 
 async def api_orgs_create(request):
-    """POST /api/orgs — body: {slug, type?, identity?}."""
+    """POST /api/orgs — body: {slug, type?, identity?, personal_password}.
+
+    Creation is the full founding ceremony (auto-nixfv): the personal
+    password authorizes founding and seals the org key. Wrong password →
+    403, nothing created; missing password → 400 naming the field.
+    """
     from tools.graph import org_ops
     body = await request.json()
     slug = body.get("slug")
     if not slug:
         return JSONResponse({"error": "slug required"}, status_code=400)
+    personal_password = body.get("personal_password")
+    if not isinstance(personal_password, str) or not personal_password:
+        return JSONResponse(
+            {"error": "personal_password required — creating an organization "
+                      "founds its ledger and seals its key under your "
+                      "personal identity"},
+            status_code=400,
+        )
     type_ = body.get("type", "shared")
     identity_payload = body.get("identity")
+    from tools.network.idkit.armor import ArmorPassphraseError
     try:
-        ref = org_ops.create_org(
-            slug, type_=type_, identity_payload=identity_payload,
+        result = org_ops.create_org_with_identity(
+            slug, personal_password,
+            type_=type_, identity_payload=identity_payload,
+        )
+    except ArmorPassphraseError:
+        return JSONResponse(
+            {"error": "the personal password is incorrect; nothing was created"},
+            status_code=403,
         )
     except org_ops.OrgExistsError as e:
         return JSONResponse({"error": str(e)}, status_code=409)
     except org_ops.OrgError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    return JSONResponse(ref.to_dict(), status_code=201)
+    return JSONResponse(result.to_dict(), status_code=201)
 
 
 async def api_orgs_delete(request):
