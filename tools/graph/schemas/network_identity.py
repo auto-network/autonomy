@@ -62,7 +62,7 @@ _SEALED_ROOT_KEY_HEX_LEN = 2 * (1 + 32 + 32 + 16)
 NETWORK_BINDING_SET_ID = "autonomy.network.binding"
 NETWORK_BINDING_REVISION = 1
 NETWORK_LINK_GRANT_SET_ID = "autonomy.network.link-grant"
-NETWORK_LINK_GRANT_REVISION = 2
+NETWORK_LINK_GRANT_REVISION = 3
 NETWORK_PUBLIC_LINK_BASE_URL = "https://relay.auto.network"
 NETWORK_SERVE_CERT_SET_ID = "autonomy.network.serve-cert"
 NETWORK_SERVE_CERT_REVISION = 1
@@ -79,7 +79,13 @@ RESERVED_SUBJECT_KINDS = ("persona",)  # rung 2: session linking (Track E)
 NETWORK_TOKEN_HEX_LEN = 32  # 128-bit CSPRNG token, lowercase hex (I2)
 NETWORK_PUB_HEX_LEN = 64  # raw Ed25519 public key, lowercase hex (= key id)
 
-TARGET_TYPES = ("design", "file", "note", "present")  # §6.1 artifact resolver
+TARGET_TYPES = (
+    "design",
+    "file",
+    "note",
+    "present",
+    "org:join",
+)  # §6.1 artifact + membership resolvers
 
 RECOVERY_MODES = ("none", "recovery-key", "org-vouch", "blindhash-escrow")
 RESERVED_RECOVERY_MODES = ("org-vouch", "blindhash-escrow")  # companion ledger spec
@@ -596,7 +602,7 @@ class NetworkLinkGrantV2(NetworkLinkGrantV1):
     """
 
     set_id = NETWORK_LINK_GRANT_SET_ID
-    schema_revision = NETWORK_LINK_GRANT_REVISION
+    schema_revision = 2
 
     url: str = field(
         required=True,
@@ -635,6 +641,43 @@ class NetworkLinkGrantV2(NetworkLinkGrantV1):
         current = dict(payload)
         current["url"] = f"{NETWORK_PUBLIC_LINK_BASE_URL}/l/{current['token']}"
         return current
+
+
+class NetworkLinkGrantV3(NetworkLinkGrantV2):
+    """Current share-link grant, including invitation join context."""
+
+    set_id = NETWORK_LINK_GRANT_SET_ID
+    schema_revision = NETWORK_LINK_GRANT_REVISION
+
+    invite_ref: str = field(
+        required=False,
+        description=(
+            "The 64-hex event id of the invite admitted by an org:join "
+            "link. Present only when target_type is org:join."
+        ),
+    )
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        super().validate(payload)
+        if not isinstance(payload, dict):
+            return
+        if payload.get("target_type") == "org:join":
+            _require_hex(
+                payload,
+                "invite_ref",
+                cls.__name__,
+                length=NETWORK_PUB_HEX_LEN,
+            )
+        elif "invite_ref" in payload:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'invite_ref' is only valid for "
+                "target_type='org:join'"
+            )
+
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        return dict(payload)
 
 
 # ── autonomy.network.serve-cert ───────────────────────────────

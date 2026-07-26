@@ -27,6 +27,108 @@ class TestTokensI2:
         assert first != second
 
 
+# -- membership invitation transport -------------------------------------------
+
+class TestOrganizationJoin:
+    INVITE_REF = "bc" * 32
+
+    def test_join_link_resolves_public_context_without_bearer_secret(
+        self,
+        client,
+        clock,
+        bound_org,
+        root,
+        session_key,
+        session_cert,
+    ):
+        join_key = KeyPair.generate()
+        join_cert = issue_cert(
+            session_key,
+            join_key.public_hex,
+            scope=("link:publish",),
+            org=ORG,
+            subject=Subject("agent", "invite-linker"),
+            target_types=("org:join",),
+            not_before=NOW - 10,
+            not_after=NOW + DAY,
+            parent_cert=session_cert,
+        )
+        payload = {
+            "org": ORG,
+            "target_uuid": ORG,
+            "target_type": "org:join",
+            "invite_ref": self.INVITE_REF,
+        }
+        response = signed(
+            client,
+            "POST",
+            "/v1/links",
+            join_key,
+            payload,
+            clock,
+            cert=join_cert,
+        )
+        assert response.status_code == 201, response.json()
+        grant_token = response.json()["token"]
+
+        stored = client.app.state.store.get_link(grant_token)
+        assert stored is not None
+        assert stored.invite_ref == self.INVITE_REF
+        assert stored.org_uuid == ORG
+
+        envelope = client.get(f"/v1/links/{grant_token}/envelope")
+        assert envelope.status_code == 200
+        assert envelope.json() == {
+            "org": ORG,
+            "target_uuid": ORG,
+            "target_type": "org:join",
+            "invite_ref": self.INVITE_REF,
+            "meta": {},
+            "root_pub": root.public_hex,
+            "endpoints": [],
+        }
+        assert "token" not in envelope.json()
+
+    def test_join_requires_invite_ref_and_other_targets_refuse_it(
+        self,
+        client,
+        clock,
+        bound_org,
+        session_key,
+        session_cert,
+    ):
+        missing = {
+            "org": ORG,
+            "target_uuid": ORG,
+            "target_type": "org:join",
+        }
+        assert signed(
+            client,
+            "POST",
+            "/v1/links",
+            session_key,
+            missing,
+            clock,
+            cert=session_cert,
+        ).status_code == 400
+
+        stray = {
+            "org": ORG,
+            "target_uuid": TARGET,
+            "target_type": "present",
+            "invite_ref": self.INVITE_REF,
+        }
+        assert signed(
+            client,
+            "POST",
+            "/v1/links",
+            session_key,
+            stray,
+            clock,
+            cert=session_cert,
+        ).status_code == 400
+
+
 # -- I4: every mutation verifies a chain ----------------------------------------
 
 class TestChainGateI4:
@@ -161,6 +263,7 @@ class TestEnvelope:
             "org": ORG,
             "target_uuid": TARGET,
             "target_type": "present",
+            "invite_ref": None,
             "meta": {"label": "OSS briefing"},
             "root_pub": root.public_hex,
             "endpoints": [],  # §5.4 direct-connect seam: empty in v1
