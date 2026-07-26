@@ -43,6 +43,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
@@ -64,6 +65,13 @@ from .projections import build_projections, projection_bytes
 
 LEDGER_SCHEMA_VERSION = 1
 LEDGER_DB_SUFFIX = ".ledger.db"
+
+#: How long a staged claim stays finalizable, measured from STAGING
+#: (auto-cz4fb). Pinned-position finalize means the invite's own expiry
+#: no longer bounds when an admission can land, so the staging row needs
+#: its own bound or an admission could be resurrected indefinitely from
+#: stale staging state. Server wall clock, not the client's HLC.
+PENDING_CLAIM_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -131,7 +139,16 @@ CREATE TABLE IF NOT EXISTS ledger_pending_claims (
     body        BLOB NOT NULL,
     approvals   BLOB NOT NULL,
     author_key  TEXT NOT NULL,
-    hlc_ts      INTEGER NOT NULL
+    hlc_ts      INTEGER NOT NULL,
+    -- The claim's FIXED causal position (auto-cz4fb): finalization
+    -- re-mints here, not at the current frontier, so a claim that
+    -- entered before the invite expired stays admittable however long
+    -- approval takes. hlc_count is as load-bearing as hlc_ts.
+    parents     BLOB,
+    hlc_count   INTEGER,
+    -- Server wall clock at staging: the pending-claim TTL's origin
+    -- (the client-supplied hlc is not a trustworthy clock).
+    staged_at   INTEGER
 );
 """
 
@@ -153,6 +170,7 @@ class LedgerStore:
                 "INSERT OR IGNORE INTO ledger_meta(key, value) VALUES ('schema_version', ?)",
                 (str(LEDGER_SCHEMA_VERSION),),
             )
+        self._migrate_pending_claim_position()
         self.ledger = Ledger()
         self._hydrate()
 
@@ -166,6 +184,29 @@ class LedgerStore:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+    def _migrate_pending_claim_position(self) -> None:
+        """Add the fixed-position columns to a pre-cz4fb staging table.
+
+        Idempotent. A row staged before this migration carries no
+        parents/hlc_count and therefore cannot be pinned-finalized — it
+        surfaces as ``legacy-staging`` so the invitee re-submits, rather
+        than silently finalizing at the wrong causal position.
+        """
+        existing = {
+            row[1]
+            for row in self.db.execute("PRAGMA table_info(ledger_pending_claims)")
+        }
+        with self.db:
+            for column, decl in (
+                ("parents", "BLOB"),
+                ("hlc_count", "INTEGER"),
+                ("staged_at", "INTEGER"),
+            ):
+                if column not in existing:
+                    self.db.execute(
+                        f"ALTER TABLE ledger_pending_claims ADD COLUMN {column} {decl}"
+                    )
 
     def _hydrate(self) -> None:
         rows = self.db.execute("SELECT event_id, wire FROM ledger_events").fetchall()
@@ -273,7 +314,7 @@ class LedgerStore:
     def claim_key(invite_ref: str, persona_pub: str) -> str:
         return hashlib.sha256((invite_ref + persona_pub).encode("ascii")).hexdigest()
 
-    def stage_pending_claim(self, event: Event) -> str:
+    def stage_pending_claim(self, event: Event, *, now: Optional[int] = None) -> str:
         """Hold an under-approved claim for countersignatures.
 
         A staging row only — the event tables, content-address hydrate,
@@ -283,9 +324,11 @@ class LedgerStore:
             raise SchemaError("stage_pending_claim takes a member.claim event")
         p = event.payload
         key = self.claim_key(p["invite_ref"], p["persona_pub"])
+        staged_at = int(time.time() * 1000) if now is None else int(now)
         with self.db:
             self.db.execute(
-                "INSERT OR REPLACE INTO ledger_pending_claims VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO ledger_pending_claims VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     key,
                     p["invite_ref"],
@@ -294,13 +337,18 @@ class LedgerStore:
                     canonical_json(list(p["approvals"])),
                     event.author_key,
                     event.hlc.ts,
+                    # The fixed causal position finalization re-mints at.
+                    canonical_json(list(event.parents)),
+                    event.hlc.count,
+                    staged_at,
                 ),
             )
         return key
 
     def get_pending_claim(self, claim_key: str) -> Optional[dict]:
         row = self.db.execute(
-            "SELECT invite_ref, persona_pub, body, approvals, author_key, hlc_ts "
+            "SELECT invite_ref, persona_pub, body, approvals, author_key, hlc_ts, "
+            "parents, hlc_count, staged_at "
             "FROM ledger_pending_claims WHERE claim_key = ?",
             (claim_key,),
         ).fetchone()
@@ -314,6 +362,13 @@ class LedgerStore:
             "approvals": json.loads(bytes(row[3])),
             "author_key": row[4],
             "hlc_ts": row[5],
+            # The fixed causal position (auto-cz4fb). None on a row staged
+            # before the migration: it cannot be pinned-finalized, so the
+            # readiness seam reports legacy-staging and the invitee
+            # re-submits rather than finalizing at the wrong position.
+            "parents": json.loads(bytes(row[6])) if row[6] is not None else None,
+            "hlc_count": row[7],
+            "staged_at": row[8],
         }
 
     def add_pending_approval(self, claim_key: str, entry: dict) -> list:
@@ -355,7 +410,7 @@ class LedgerStore:
                 "DELETE FROM ledger_pending_claims WHERE claim_key = ?", (claim_key,)
             )
 
-    def evaluate_pending_claim(self, claim_key: str) -> dict:
+    def evaluate_pending_claim(self, claim_key: str, *, now: Optional[int] = None) -> dict:
         """Readiness of a staged claim: ``{ready, have, need, reason}``.
 
         No invitee-signed event exists for the merged-approvals state
@@ -391,7 +446,7 @@ class LedgerStore:
         if view is None:
             return {
                 "ready": False, "have": 0, "need": 0,
-                "reason": R_ROLE_UNDEFINED, "admitting": [],
+                "reason": R_ROLE_UNDEFINED, "admitting": [], "position": None,
             }
         have, need = claim_requirement_status(
             requires=view.claim_requires,
@@ -403,6 +458,25 @@ class LedgerStore:
             role=role,
             holds=state.holds,
         )
+        expired = (
+            record["staged_at"] is not None
+            and (int(time.time() * 1000) if now is None else int(now))
+            > record["staged_at"] + PENDING_CLAIM_TTL_MS
+        )
+        if expired:
+            # The claim entered validly but its staging window closed: a
+            # distinct terminal state, never a silent pending.
+            return {
+                "ready": False, "have": have, "need": need,
+                "reason": "claim-expired", "admitting": [],
+                "position": None,
+            }
+        if record["parents"] is None:
+            # Pre-migration staging row: no causal position to re-mint at.
+            return {
+                "ready": False, "have": have, "need": need,
+                "reason": "legacy-staging", "admitting": [], "position": None,
+            }
         ready = have >= need
         # ``admitting``: a deterministic NEED-sized subset of the approvers
         # that count (sorted-by-key first ``need``) — finalization re-mints
@@ -426,6 +500,13 @@ class LedgerStore:
             "need": need,
             "reason": None if ready else R_APPROVAL_MISSING,
             "admitting": admitting,
+            # Where finalization must re-mint (auto-cz4fb): the claim's
+            # ORIGINAL causal position, so a pre-expiry claim stays
+            # admittable however long approval took.
+            "position": {
+                "parents": list(record["parents"]),
+                "hlc": [record["hlc_ts"], record["hlc_count"]],
+            },
         }
 
     # -- read side --------------------------------------------------------------------
