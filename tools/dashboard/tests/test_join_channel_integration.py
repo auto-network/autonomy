@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 import json
 import os
 
@@ -44,7 +45,8 @@ FAR = T0 + 10**9
 class World:
     """A founded org with a bearer invite and a live org:join grant."""
 
-    def __init__(self, tmp_path):
+    def __init__(self, tmp_path, *, base_ts=T0, expiry=FAR):
+        self.expiry = expiry
         from tools.graph.db import GraphDB
 
         GraphDB.create_org_db(ORG, root=tmp_path).close()
@@ -53,9 +55,9 @@ class World:
         self.owner_seed = os.urandom(32)
         self.founded = found_org_ledger(
             self.store, org_id=ORG_ID, org_root=self.root,
-            personal_root_seed=self.owner_seed, now=T0,
+            personal_root_seed=self.owner_seed, now=base_ts,
         )
-        self._ts = T0 + 10_000
+        self._ts = base_ts + 10_000
         # An admin-ack role with threshold 1, and a delegated approver.
         self._emit(self.root, {
             "type": "role.define", "name": "member", "scope_set": ["link:publish"],
@@ -68,7 +70,7 @@ class World:
         })
         self.token = generate_token()
         self.invite_ref = self._emit(self.root, {
-            "type": "invite", "granted_role": "member", "expiry": FAR,
+            "type": "invite", "granted_role": "member", "expiry": self.expiry,
             "sponsor": self.root.public_hex,
             "token_hash": hashlib.sha256(self.token.encode()).hexdigest(),
         })
@@ -325,3 +327,86 @@ def test_bearer_claim_cannot_admit_without_a_countersignature(world):
         verdict = world.channel({"v": 1, "op": "submit", "event": wire})
         assert verdict["status"] == "pending"
     assert world.persona.public_hex not in world.members()
+
+
+# -- cz4fb: approval latency crossing the invite expiry ----------------------------
+
+
+def test_finalize_after_the_invite_expires(tmp_path, monkeypatch):
+    """The auto-cz4fb crux, end to end: a claim staged BEFORE expiry
+    finalizes AFTER it, with the server wall clock genuinely past the
+    invite's expiry AND the frontier drifted — the two conditions that
+    each independently refuse a non-pinned submit.
+    """
+    from tools.graph.db import GraphDB
+
+    # Isolation FIRST: without AUTONOMY_ORGS_DIR the org paths resolve to
+    # the operator's real data/orgs/ (this test builds its own World
+    # rather than taking the `world` fixture, so it must set the env
+    # itself).
+    GraphDB.close_all_pooled()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    GraphDB.create_org_db("personal", type_="personal", root=tmp_path).close()
+
+    # Align the org's logical clock with real wall time so the invite can
+    # expire for real between the initial submit and the finalize.
+    real_now = int(time.time() * 1000)
+    world = World(tmp_path, base_ts=real_now - 300_000, expiry=real_now + 60_000)
+
+    context = world.channel({"v": 1, "op": "context"})
+    claim = world.mint(context)
+    assert claim.hlc.ts <= world.expiry  # entered while the invite was live
+    assert world.channel({
+        "v": 1, "op": "submit", "event": claim.to_json().decode("utf-8"),
+    })["status"] == "pending"
+
+    with LedgerStore(org_ledger_db_path(ORG)) as store:
+        claim_key = store.claim_key(world.invite_ref, world.persona.public_hex)
+        body = store.get_pending_claim(claim_key)["body"]
+    assert claim_service.countersign(
+        ORG, world.invite_ref, world.persona.public_hex,
+        sign_approval(world.admin, "member.claim", body),
+    )["status"] == "ready"
+
+    # Approval took an hour: the frontier drifts AND the invite expires.
+    with LedgerStore(org_ledger_db_path(ORG)) as store:
+        position = store.evaluate_pending_claim(claim_key)["position"]
+        store.append(make_event(
+            world.root,
+            {"type": "delegate", "child_pub": KeyPair.generate().public_hex,
+             "scope": ["link:publish"], "can_redelegate": False},
+            sorted(store.heads()), HLC(real_now + 120_000),
+        ))
+        approvals = store.get_pending_claim(claim_key)["approvals"]
+    monkeypatch.setattr(
+        claim_service.time, "time", lambda: (real_now + 3_600_000) / 1000
+    )
+
+    # A NON-pinned finalize is refused — both gates are genuinely armed.
+    with LedgerStore(org_ledger_db_path(ORG)) as store:
+        current_heads = sorted(store.heads())
+    stale, _ = mint_member_claim(
+        world.invitee_seed, world.founded.genesis_id,
+        invite_ref=world.invite_ref, heads=current_heads,
+        hlc=HLC(real_now + 3_650_000), token=world.token, approvals=approvals,
+    )
+    assert world.channel({
+        "v": 1, "op": "submit", "event": stale.to_json().decode("utf-8"),
+    })["status"] == "rejected"
+
+    # The PINNED finalize admits, past expiry and past the drift.
+    final, _ = mint_member_claim(
+        world.invitee_seed, world.founded.genesis_id,
+        invite_ref=world.invite_ref, heads=position["parents"],
+        hlc=HLC(*position["hlc"]), token=world.token, approvals=approvals,
+    )
+    verdict = world.channel({
+        "v": 1, "op": "submit", "event": final.to_json().decode("utf-8"),
+    })
+    assert verdict["status"] == "admitted", verdict
+    member = world.members()[world.persona.public_hex]
+    assert member.roles == ("member",)
+    with LedgerStore(org_ledger_db_path(ORG)) as store:
+        assert store.get_pending_claim(claim_key) is None  # staging cleared
+    GraphDB.close_all_pooled()
