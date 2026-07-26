@@ -103,6 +103,7 @@ def initialize(
     first_org: str | None = None,
     first_org_name: str | None = None,
     invite: str | None = None,
+    join_transport=None,
     tls: bool = True,
     tls_domain: str | None = None,
 ) -> InitReport:
@@ -132,7 +133,7 @@ def initialize(
     _init_data_dirs(data, report)
     _init_graph_db(data, report)
     if invite:
-        _init_join(data, report, invite=invite)
+        invitation = _init_join(data, report, invite=invite)
     else:
         _init_orgs(data, report, first_org=first_org, first_org_name=first_org_name)
     _init_operational_dbs(data, report)
@@ -141,7 +142,30 @@ def initialize(
         _init_tls(data, report, domain=tls_domain)
     else:
         report.add("tls", SKIPPED, "disabled by caller (--no-tls)")
+    if invite and join_transport is not None:
+        # The ceremony runs last: it writes the personal identity into
+        # stores the steps above just created, and it reaches the network.
+        _run_join(report, invitation, join_transport)
     return report
+
+
+def _run_join(report: InitReport, invitation, transport) -> None:
+    """Run the join ceremony and fold its outcome into the report.
+
+    A transport is injected rather than constructed here so first-run
+    stays testable in-process and the production channel client (B4b /
+    the B6 harness) is chosen by the caller.
+    """
+    from tools.init.join import JoinError, join_org, read_personal_password
+
+    try:
+        outcome = join_org(
+            invitation, transport, password=read_personal_password()
+        )
+    except JoinError as exc:
+        report.add("join", FAILED, str(exc))
+        raise
+    report.add(f"join:{outcome.state}", CREATED, outcome.detail)
 
 
 # ── Steps ────────────────────────────────────────────────────
@@ -229,6 +253,7 @@ def _init_join(data: Path, report: InitReport, *, invite: str) -> None:
         f"org {invitation.org} invite {invitation.invite_ref[:12]}… "
         f"root {invitation.root_pub[:12]}…",
     )
+    return invitation
 
 
 def _init_operational_dbs(data: Path, report: InitReport) -> None:

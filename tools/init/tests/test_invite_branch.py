@@ -79,3 +79,24 @@ def test_join_branch_writes_only_inside_the_volume(volume):
     initialize(volume, invite=code(), tls=False)
     assert (volume / "data" / "orgs" / "personal.db").exists()
     assert (volume / "data" / "graph.db").exists()
+
+
+def test_first_run_runs_the_join_ceremony_when_a_transport_is_given(volume, tmp_path):
+    """End of the B4a path: AUTONOMY_INVITE on a fresh volume boots into
+    the ceremony and reports its outcome, with no password source so it
+    stages (ruling (c)) rather than minting."""
+    from tools.init.first_run import initialize
+
+    class FakeOrg:
+        def request(self, payload):
+            assert payload["op"] == "context"
+            return {
+                "status": "ok", "genesis_id": "9f" * 32, "heads": ["7e" * 32],
+                "max_hlc": [1_800_000_000_000, 0], "granted_role": "member",
+                "binding": "token",
+            }
+
+    report = initialize(volume, invite=code(), tls=False, join_transport=FakeOrg())
+    staged = _step(report, "join:staged")
+    assert staged is not None, [s.name for s in report.steps]
+    assert TOKEN not in repr(report)
