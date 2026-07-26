@@ -34,7 +34,7 @@ def _cfg(**overrides) -> WorkspaceV1:
         repos=(),
         working_dir="/workspace/repo",
         startup=None,
-        dind=False,
+        needs_nested_docker=False,
         default_tags=(),
         dispatch_labels=(),
         env={},
@@ -144,13 +144,13 @@ def test_background_setup_section_omitted_when_no_startup():
 # ── DinD ─────────────────────────────────────────────────────────────
 
 def test_dind_section_when_enabled():
-    out = render_workspace_primer(_cfg(dind=True))
+    out = render_workspace_primer(_cfg(needs_nested_docker=True))
     assert "## Docker-in-Docker" in out
     assert "docker compose" in out
 
 
 def test_dind_section_omitted_when_disabled():
-    out = render_workspace_primer(_cfg(dind=False))
+    out = render_workspace_primer(_cfg(needs_nested_docker=False))
     assert "## Docker-in-Docker" not in out
 
 
@@ -268,7 +268,7 @@ def test_enterprise_commit_policy_does_not_report_false_issue_tracker_error(
 def test_no_unrendered_template_syntax():
     """No `{{ }}`, `{%`, or other Jinja syntax should leak into the output."""
     out = render_workspace_primer(_cfg(
-        startup="x", dind=True,
+        startup="x", needs_nested_docker=True,
         default_tags=("a", "b"),
         repos=(
             RepoMount(url="u", mount="/workspace/a", writable=True),

@@ -321,7 +321,8 @@ class WorkspaceV1:
     repos: tuple[RepoMount, ...] = ()
     working_dir: str | None = None
     startup: str | None = None
-    dind: bool = False
+    needs_nested_docker: bool = False
+    session_runtime: str | None = None
     network_host: bool = True
     default_tags: tuple[str, ...] = ()
     dispatch_labels: tuple[str, ...] = ()
@@ -330,6 +331,19 @@ class WorkspaceV1:
     artifacts: tuple[ArtifactSpec, ...] = ()
     mounts: dict[str, ResolvedSetting] = field(default_factory=dict)
     capabilities: tuple[MaterializedCapability, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.session_runtime is None:
+            object.__setattr__(
+                self,
+                "session_runtime",
+                "privileged" if self.needs_nested_docker else "standard",
+            )
+
+    @property
+    def dind(self) -> bool:
+        """Deprecated compatibility alias for ``needs_nested_docker``."""
+        return self.needs_nested_docker
 
 
 # ── Setting payload → typed model helpers ──────────────────
@@ -401,6 +415,18 @@ def _workspace_from_setting(
         )
     model_raw = setting_payload.get("model")
     model = model_raw if isinstance(model_raw, str) and model_raw else None
+    needs_nested_docker = bool(
+        setting_payload.get(
+            "needs_nested_docker",
+            setting_payload.get("dind", False),
+        )
+    )
+    runtime_raw = setting_payload.get("session_runtime")
+    session_runtime = (
+        str(runtime_raw)
+        if runtime_raw
+        else ("privileged" if needs_nested_docker else "standard")
+    )
     return WorkspaceV1(
         id=workspace_id,
         name=str(setting_payload.get("name") or workspace_id),
@@ -412,7 +438,8 @@ def _workspace_from_setting(
         repos=repos,
         working_dir=(setting_payload.get("working_dir") or None),
         startup=(setting_payload.get("startup") or None),
-        dind=bool(setting_payload.get("dind", False)),
+        needs_nested_docker=needs_nested_docker,
+        session_runtime=session_runtime,
         network_host=bool(setting_payload.get("network_host", True)),
         default_tags=tuple(str(t) for t in (setting_payload.get("tags") or ())),
         dispatch_labels=tuple(

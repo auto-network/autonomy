@@ -34,7 +34,8 @@ def _project():
         image="autonomy-agent:dashboard",
         harness="claude",
         model=None,
-        dind=False,
+        needs_nested_docker=False,
+        session_runtime="standard",
         network_host=False,
         capabilities=("capability-one",),
     )

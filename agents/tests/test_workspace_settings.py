@@ -55,6 +55,53 @@ def test_workspace_from_setting_reads_codex_harness():
     assert workspace.harness == "codex"
 
 
+def test_legacy_dind_defaults_to_privileged_nested_docker():
+    workspace = _workspace_from_setting(
+        {
+            "name": "Legacy DinD",
+            "image": "autonomy-agent:dind",
+            "dind": True,
+        },
+        workspace_id="legacy-dind",
+        graph_project="autonomy",
+        artifacts=(),
+        mounts={},
+    )
+    assert workspace.needs_nested_docker is True
+    assert workspace.session_runtime == "privileged"
+    assert workspace.dind is True
+
+
+def test_nested_docker_runtime_is_independently_configurable():
+    workspace = _workspace_from_setting(
+        {
+            "name": "Sysbox DinD",
+            "image": "autonomy-agent:dind",
+            "needs_nested_docker": True,
+            "session_runtime": "sysbox",
+        },
+        workspace_id="sysbox-dind",
+        graph_project="autonomy",
+        artifacts=(),
+        mounts={},
+    )
+    assert workspace.needs_nested_docker is True
+    assert workspace.session_runtime == "sysbox"
+
+
+def test_direct_nested_docker_model_defaults_to_privileged():
+    from agents.workspace_settings import WorkspaceV1
+    workspace = WorkspaceV1(
+        id="direct",
+        name="Direct",
+        description="",
+        image="autonomy-agent:dind",
+        graph_project="autonomy",
+        needs_nested_docker=True,
+    )
+    assert workspace.session_runtime == "privileged"
+
+
 # ── RepoMount parsing (auto-4sfe9) ───────────────────────────────
 
 

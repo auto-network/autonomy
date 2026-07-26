@@ -86,7 +86,7 @@ fi
 If setup failed, read the log and halt — don't try to work around a broken
 environment.
 {% endif %}
-{% if config.dind %}
+{% if config.needs_nested_docker %}
 
 ## Docker-in-Docker
 

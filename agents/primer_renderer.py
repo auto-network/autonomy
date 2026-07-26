@@ -2,7 +2,7 @@
 
 The primer is layer 1 of the workspace context stack: the shared Autonomy
 runtime (graph, bd, agent-browser, CrossTalk, session identity) plus the
-per-workspace conditional sections (writable repos, DinD, background
+    per-workspace conditional sections (writable repos, nested Docker, background
 startup, graph scoping) driven by the workspace config flags.
 
 This replaces the static per-workspace CLAUDE.md stubs in

@@ -570,7 +570,8 @@ def test_dispatch_explicit_workspace_materializes_workspace_settings(
     assert call["startup_script"] == (
         Path("/workspace/repo") / "scripts/bootstrap.sh"
     )
-    assert call["privileged"] is True
+    assert call["needs_nested_docker"] is True
+    assert call["runtime"] == "privileged"
     assert call["network_host"] is False
     assert call["metadata"]["graph_project"] == "autonomy"
     assert call["metadata"]["graph_org"] == "autonomy"

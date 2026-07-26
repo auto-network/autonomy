@@ -122,6 +122,7 @@ class TestStartAgentForwardsScope:
             harness="codex",
             graph_project="autonomy",
             graph_tags=("dashboard", "ui"),
+            workspace_id="autonomy-codex",
         )
         assert agent is not None
 
@@ -133,6 +134,7 @@ class TestStartAgentForwardsScope:
         assert "--detach" in argv
         assert "--graph-project=autonomy" in argv
         assert "--graph-tags=dashboard,ui" in argv
+        assert "--workspace-id=autonomy-codex" in argv
 
     @patch("agents.dispatcher.subprocess.run")
     def test_launch_argv_omits_scope_flags_when_unset(self, mock_run):
@@ -283,6 +285,25 @@ class TestLaunchSessionCliMetadata:
         captured = self._invoke_cli(tmp_path, argv_extra=["--org", "autonomy"], harness="codex")
         assert captured["harness"] == "codex"
         assert captured["model"] is None
+
+    def test_workspace_runtime_reaches_launch_session(self, tmp_path):
+        workspace = SimpleNamespace(
+            graph_project="autonomy",
+            model=None,
+            needs_nested_docker=True,
+            session_runtime="sysbox",
+        )
+        with patch.object(
+            launch_session_cli,
+            "load_workspaces",
+            return_value={"anchore": workspace},
+        ):
+            captured = self._invoke_cli(
+                tmp_path,
+                argv_extra=["--workspace-id", "anchore"],
+            )
+        assert captured["needs_nested_docker"] is True
+        assert captured["runtime"] == "sysbox"
 
 
 class TestLaunchSessionMetaAndEnv:

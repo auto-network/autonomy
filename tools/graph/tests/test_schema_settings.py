@@ -151,3 +151,32 @@ def test_workspace_repo_rejects_non_string_base_source():
     from tools.graph.schemas.workspace import WorkspaceV1
     with pytest.raises(SchemaValidationError, match="base_source"):
         WorkspaceV1.validate(_ws_payload(base_source=123))
+
+
+def test_workspace_accepts_independent_nested_docker_runtime():
+    from tools.graph.schemas.workspace import WorkspaceV1
+    payload = _ws_payload()
+    payload.update({
+        "needs_nested_docker": True,
+        "session_runtime": "sysbox",
+    })
+    WorkspaceV1.validate(payload)
+
+
+def test_workspace_rejects_conflicting_legacy_dind_alias():
+    from tools.graph.schemas.registry import SchemaValidationError
+    from tools.graph.schemas.workspace import WorkspaceV1
+    payload = _ws_payload()
+    payload.update({"dind": True, "needs_nested_docker": False})
+    with pytest.raises(SchemaValidationError, match="conflict"):
+        WorkspaceV1.validate(payload)
+
+
+@pytest.mark.parametrize("runtime", ["", "sysbox;touch-pwned", "has space"])
+def test_workspace_rejects_unsafe_runtime_selector(runtime):
+    from tools.graph.schemas.registry import SchemaValidationError
+    from tools.graph.schemas.workspace import WorkspaceV1
+    payload = _ws_payload()
+    payload["session_runtime"] = runtime
+    with pytest.raises(SchemaValidationError, match="session_runtime"):
+        WorkspaceV1.validate(payload)
