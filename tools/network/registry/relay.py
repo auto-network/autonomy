@@ -187,7 +187,7 @@ def _resolve_live_link(store: RegistryStore, token: str, now: int):
     if (
         link is None
         or link.revoked_at is not None
-        or (link.expires_at is not None and link.expires_at < now)
+        or link.is_expired_at(now)
     ):
         return None
     binding = store.get_org(link.org_uuid)
