@@ -15,8 +15,9 @@ from tools.network.ledger.fold import (
     R_APPROVAL_MISSING,
     R_CLAIM_BAD_CREDENTIAL,
     R_CLAIM_BAD_TOKEN,
+    R_INVITE_EXPIRED,
 )
-from tools.network.ledger.store import StoreError
+from tools.network.ledger.store import PENDING_CLAIM_TTL_MS, StoreError
 
 ORG_ID = "018f6b2a-7c4d-7e11-8a3b-9d5c1e2f4a6b"
 T0 = 1_800_000_000_000
@@ -314,10 +315,8 @@ def test_readiness_tracks_the_fold_verdict():
     assert claim_key == org.store.claim_key(org.invite_id, org.persona.public_hex)
 
     status = org.store.evaluate_pending_claim(claim_key)
-    assert status == {
-        "ready": False, "have": 0, "need": 2,
-        "reason": R_APPROVAL_MISSING, "admitting": [],
-    }
+    assert (status["ready"], status["have"], status["need"]) == (False, 0, 2)
+    assert (status["reason"], status["admitting"]) == (R_APPROVAL_MISSING, [])
 
     body = org.store.get_pending_claim(claim_key)["body"]
     org.store.add_pending_approval(claim_key, sign_approval(org.admin, "member.claim", body))
@@ -337,10 +336,12 @@ def test_readiness_tracks_the_fold_verdict():
         claim_key, sign_approval(admin2, "member.claim", body)
     )
     status = org.store.evaluate_pending_claim(claim_key)
-    assert status == {
-        "ready": True, "have": 2, "need": 2, "reason": None,
-        "admitting": sorted([org.admin.public_hex, admin2.public_hex]),
-    }
+    assert (status["ready"], status["have"], status["need"]) == (True, 2, 2)
+    assert status["reason"] is None
+    assert status["admitting"] == sorted([org.admin.public_hex, admin2.public_hex])
+    # The fixed causal position finalization must re-mint at (auto-cz4fb).
+    assert status["position"]["parents"] == sorted(bare.parents)
+    assert status["position"]["hlc"] == [bare.hlc.ts, bare.hlc.count]
 
     # The readiness verdict matches the fold's: finalize and admit.
     final, _ = mint_member_claim(
@@ -430,3 +431,115 @@ def test_admitting_is_a_need_sized_deterministic_subset():
     assert org.store.evaluate_claim(final) is None
     org.store.append(final)
     assert org.persona.public_hex in org.store.fold().members
+
+
+# -- cz4fb: the claim must survive approval latency past the invite expiry ----------
+
+
+def test_finalize_survives_approval_outlasting_the_invite():
+    """A claim that entered BEFORE expiry stays admittable however long
+    approval takes — by re-minting at its stored causal position, which
+    is the only L1-compatible way to record 'redeemed before expiry'
+    (the pending row is off-ledger state the fold cannot see)."""
+    org = Org(requires="admin-ack", token=True)
+    expiry = org.store.get(org.invite_id).payload["expiry"]
+
+    # Submit while the invite is live; it stages.
+    claim = org.mint_claim()
+    assert claim.hlc.ts < expiry
+    assert org.store.evaluate_claim(claim) == R_APPROVAL_MISSING
+    claim_key = org.store.stage_pending_claim(claim)
+
+    # Org activity pushes the heads well past the invite's expiry.
+    for i in range(3):
+        org._ts = expiry + 600_000 * (i + 1)
+        org._emit(
+            org.root,
+            {
+                "type": "delegate",
+                "child_pub": KeyPair.generate().public_hex,
+                "scope": ["link:publish"],
+                "can_redelegate": False,
+            },
+        )
+    record = org.store.get_pending_claim(claim_key)
+    merged = org.store.add_pending_approval(
+        claim_key, sign_approval(org.admin, "member.claim", record["body"])
+    )
+    status = org.store.evaluate_pending_claim(claim_key)
+    assert status["ready"] is True
+
+    # Finalizing at the CURRENT frontier is refused — the gap this fixes.
+    stale, _ = mint_member_claim(
+        org.seed, org.genesis_id, invite_ref=org.invite_id,
+        heads=org.store.heads(), hlc=org.next_hlc(),
+        token=org.token, approvals=merged,
+    )
+    assert org.store.evaluate_claim(stale) == R_INVITE_EXPIRED
+
+    # Finalizing at the STORED position admits.
+    position = status["position"]
+    pinned, _ = mint_member_claim(
+        org.seed, org.genesis_id, invite_ref=org.invite_id,
+        heads=position["parents"], hlc=HLC(*position["hlc"]),
+        token=org.token, approvals=merged,
+    )
+    assert org.store.evaluate_claim(pinned) is None
+    org.store.append(pinned)
+    assert org.persona.public_hex in org.store.fold().members
+
+
+def test_a_first_submission_after_expiry_is_still_refused():
+    """Pinning must not weaken the gate for a genuinely late claim."""
+    org = Org(requires="admin-ack", token=True)
+    expiry = org.store.get(org.invite_id).payload["expiry"]
+    org._ts = expiry + 60_000
+    late, _ = mint_member_claim(
+        org.seed, org.genesis_id, invite_ref=org.invite_id,
+        heads=org.store.heads(), hlc=HLC(expiry + 120_000),
+        token=org.token,
+    )
+    assert org.store.evaluate_claim(late) == R_INVITE_EXPIRED
+
+
+def test_pending_claim_ttl_is_a_distinct_terminal_state():
+    org = Org(requires="admin-ack", token=True)
+    staged_at = 1_800_000_000_000
+    claim_key = org.store.stage_pending_claim(org.mint_claim(), now=staged_at)
+    within = org.store.evaluate_pending_claim(
+        claim_key, now=staged_at + PENDING_CLAIM_TTL_MS - 1
+    )
+    assert within["reason"] == R_APPROVAL_MISSING  # still ordinary pending
+    beyond = org.store.evaluate_pending_claim(
+        claim_key, now=staged_at + PENDING_CLAIM_TTL_MS + 1
+    )
+    assert (beyond["ready"], beyond["reason"]) == (False, "claim-expired")
+    assert beyond["position"] is None  # nothing to finalize at
+
+
+def test_legacy_staging_row_reports_itself():
+    """A row staged before the migration has no causal position; it must
+    say so rather than let a client finalize at the wrong one."""
+    org = Org(requires="admin-ack", token=True)
+    claim_key = org.store.stage_pending_claim(org.mint_claim())
+    with org.store.db:
+        org.store.db.execute(
+            "UPDATE ledger_pending_claims SET parents = NULL WHERE claim_key = ?",
+            (claim_key,),
+        )
+    verdict = org.store.evaluate_pending_claim(claim_key)
+    assert (verdict["ready"], verdict["reason"]) == (False, "legacy-staging")
+    assert verdict["position"] is None
+
+
+def test_position_survives_reopen(tmp_path):
+    db = tmp_path / "org.db"
+    org = Org(path=db, requires="admin-ack", token=True)
+    claim = org.mint_claim()
+    claim_key = org.store.stage_pending_claim(claim)
+    org.store.close()
+    with LedgerStore(db) as reopened:
+        record = reopened.get_pending_claim(claim_key)
+        assert record["parents"] == sorted(claim.parents)
+        assert record["hlc_count"] == claim.hlc.count
+        assert record["staged_at"] is not None
