@@ -49,10 +49,35 @@ install works offline. Pinned by
 `git clone` / tarball / an image you push to a registry *you* choose —
 never a mandated one.
 
-The container entrypoint (`deploy/entrypoint.sh`) runs `python -m
-tools.init` (idempotent, honors `AUTONOMY_FIRST_ORG`) and then uvicorn,
-serving HTTPS when the init-generated keypair is present (`DASHBOARD_TLS=off`
-for plain HTTP behind your own proxy).
+The container entrypoint (`deploy/entrypoint.sh`) runs the idempotent
+migrate-on-mount initializer and then uvicorn, serving HTTPS when the
+init-generated keypair is present (`DASHBOARD_TLS=off` for plain HTTP behind
+your own proxy). `AUTONOMY_FIRST_ORG` founds a new organization. Supplying
+`AUTONOMY_INVITE` instead joins the existing organization named by that
+user-carried invitation; the two settings are mutually exclusive. For an
+`org:join` link, `graph link publish` prints the version-2 invitation code.
+It keeps the registry's URL-path channel token distinct from the
+fragment-carried ledger claim token; version-1 one-token codes are refused.
+
+A headless join unlocks or creates the node's personal identity only from a
+mounted password file:
+
+```bash
+docker run \
+  -e AUTONOMY_INVITE="$INVITATION" \
+  -e AUTONOMY_PERSONAL_PASSWORD_FILE=/run/secrets/personal-password \
+  --mount type=bind,src=/secure/personal-password,dst=/run/secrets/personal-password,readonly \
+  --mount source=autonomy-data,destination=/app/data \
+  autonomy-dashboard:local
+```
+
+A bearer join that needs approval persists only public resume coordinates in
+`pending_joins.db`; restarting with the same invitation resumes and finalizes
+at the server-recorded claim position after approval. The bearer, password,
+root seed, and armor are never written to that store. An already-identified
+running node can accept the same invitation at `POST /api/identity/join` from
+loopback only, with body `{"invite":"..."}`. This endpoint never accepts a
+password in HTTP; the mounted `AUTONOMY_PERSONAL_PASSWORD_FILE` is required.
 
 ### Verified published images
 
@@ -170,6 +195,7 @@ persistent state:
 | `approval_requests.db` | `APPROVAL_REQUESTS_DB` | approval-request store |
 | `commit_workflow.db` | `COMMIT_WORKFLOW_DB` | commit-workflow store |
 | `dashboard_identity_sessions.db` | `DASHBOARD_IDENTITY_SESSION_DB` | identity unlock-session store |
+| `pending_joins.db` | `AUTONOMY_PENDING_JOINS_DB` | restart-safe invite-join progress (identifiers and counts only) |
 | `tls.crt` | `AUTONOMY_TLS_CERT` | TLS certificate (self-signed by default) |
 | `tls.key` | `AUTONOMY_TLS_KEY` | TLS private key |
 | `agent-runs`/ | `DASHBOARD_AGENT_RUNS_DIR` | session artifacts |

@@ -286,9 +286,12 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
     }
     assert result["tokenSelfStatus"] == {
         "status": "pending",
+        "genesis_id": founded.genesis_id,
+        "granted_role": "self-member",
         "have": 0,
         "need": 1,
         "approvals": [],
+        "admitting": [],
         "position": token_self_position,
     }
 
@@ -303,9 +306,12 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
     assert result["pending"] == {"status": "pending", "have": 0, "need": 2}
     assert result["pendingStatus"] == {
         "status": "pending",
+        "genesis_id": founded.genesis_id,
+        "granted_role": "member",
         "have": 0,
         "need": 2,
         "approvals": [],
+        "admitting": [],
         "position": initial_position,
     }
     assert result["headsAfterPending"] == result["bearerHeads"]
@@ -525,9 +531,12 @@ def test_live_claim_pending_countersign_and_invitee_finalize(
         sponsor_persona.public_hex,
     ) == {
         "status": "pending",
+        "genesis_id": founded.genesis_id,
+        "granted_role": "sponsor-only",
         "have": 0,
         "need": 1,
         "approvals": [],
+        "admitting": [],
         "position": {
             "parents": list(sponsor_claim.parents),
             "hlc": sponsor_claim.hlc.to_list(),

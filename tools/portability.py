@@ -643,6 +643,7 @@ def migrate_on_mount(
     *,
     supported_version: int = VOLUME_SCHEMA_VERSION,
     tls: bool = True,
+    join_transport=None,
 ) -> dict:
     """Fail on newer volumes, then run every existing forward initializer."""
     root = Path(volume_root).resolve()
@@ -659,7 +660,12 @@ def migrate_on_mount(
     from tools.init.first_run import initialize_data_root
 
     with _root_volume_stores(root):
-        report = initialize_data_root(root, tls=tls)
+        report = initialize_data_root(
+            root,
+            invite=os.environ.get("AUTONOMY_INVITE"),
+            join_transport=join_transport,
+            tls=tls,
+        )
 
     if current != supported_version:
         stamp = {

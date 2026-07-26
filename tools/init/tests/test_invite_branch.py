@@ -11,12 +11,19 @@ from tools.network.invitation import Invitation, InvitationError, encode_invitat
 ORG = "018f6b2a-7c4d-7e11-8a3b-9d5c1e2f4a6b"
 ROOT_PUB = "ab" * 32
 INVITE_REF = "cd" * 32
-TOKEN = "ef" * 32
+GRANT_TOKEN = "12" * 16
+CLAIM_TOKEN = "ef" * 32
 
 
 def code() -> str:
     return encode_invitation(
-        Invitation(org=ORG, root_pub=ROOT_PUB, invite_ref=INVITE_REF, token=TOKEN)
+        Invitation(
+            org=ORG,
+            root_pub=ROOT_PUB,
+            invite_ref=INVITE_REF,
+            channel_token=GRANT_TOKEN,
+            claim_token=CLAIM_TOKEN,
+        )
     )
 
 
@@ -70,7 +77,8 @@ def test_the_report_never_carries_the_bearer(volume):
     """The report is printed to container logs and emitted as JSON."""
     report = initialize(volume, invite=code(), tls=False)
     rendered = repr(report) + str(_step(report, "join").detail)
-    assert TOKEN not in rendered
+    assert GRANT_TOKEN not in rendered
+    assert CLAIM_TOKEN not in rendered
     assert ORG in rendered  # the org IS identified: redaction, not obscurity
 
 
@@ -99,4 +107,5 @@ def test_first_run_runs_the_join_ceremony_when_a_transport_is_given(volume, tmp_
     report = initialize(volume, invite=code(), tls=False, join_transport=FakeOrg())
     staged = _step(report, "join:staged")
     assert staged is not None, [s.name for s in report.steps]
-    assert TOKEN not in repr(report)
+    assert GRANT_TOKEN not in repr(report)
+    assert CLAIM_TOKEN not in repr(report)
