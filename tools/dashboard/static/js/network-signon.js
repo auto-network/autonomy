@@ -1,3 +1,24 @@
+import {
+  canonicalJson,
+  hexToBytes,
+  bytesToHex,
+  domainBytes,
+  decryptArmor,
+  importEd25519RootSigningKey,
+} from './ceremony/primitives.js';
+
+var CryptoKeyConstructor = globalThis.CryptoKey;
+if (
+  !CryptoKeyConstructor
+  && typeof process !== 'undefined'
+  && process.versions && process.versions.node
+) {
+  ({ CryptoKey: CryptoKeyConstructor } = (await import('node:crypto')).webcrypto);
+}
+if (!CryptoKeyConstructor) {
+  throw new Error('network sign-on requires WebCrypto CryptoKey support');
+}
+
 /* auto.network sign-on ceremony — the C2 session-key surface (spec §6.3).
  *
  * Signing on decrypts the org root key ONCE (passphrase → PBKDF2 →
@@ -32,15 +53,19 @@
  *   I7 — the cert validity window is enforced on load: an expired or
  *        not-yet-valid cert reads as signed-out and the store is purged.
  */
+var configureCore;
+var signOnCore;
+var signRegistryRequestCore;
+
 (function () {
   'use strict';
+
+  var _domainBytes = domainBytes;
+  var _importRootKey = importEd25519RootSigningKey;
 
   var CERT_DOMAIN = 'autonomy.idkit.cert.v1\n';
   var REQUEST_DOMAIN = 'autonomy.network.registry.request.v1\n';
   var REVOCATION_DOMAIN = 'autonomy.idkit.revocation.v1\n';
-  var ARMOR_AAD_PREFIX = 'autonomy.idkit.armor.v1\n';
-  var ARMOR_BEGIN = '-----BEGIN AUTONOMY NETWORK ROOT KEY-----';
-  var ARMOR_END = '-----END AUTONOMY NETWORK ROOT KEY-----';
 
   var DEFAULT_TTL_S = 24 * 3600;          // spec §6.3 default
   var MIN_TTL_S = 60;
@@ -54,198 +79,6 @@
   var DB_NAME = 'autonomy-network';
   var DB_STORE = 'session';
   var DB_KEY = 'current';
-
-  // Raw 32-byte Ed25519 seed → PKCS#8 (RFC 8410) for WebCrypto import.
-  var PKCS8_ED25519_PREFIX = [
-    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
-    0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
-  ];
-
-  // ── canonical JSON (mirror of tools/network/idkit/canonical.py) ────
-
-  var _SHORT_ESCAPES = {
-    8: '\\b', 9: '\\t', 10: '\\n', 12: '\\f', 13: '\\r',
-    34: '\\"', 92: '\\\\',
-  };
-
-  function _escapeString(s) {
-    var out = '"';
-    for (var i = 0; i < s.length; i++) {
-      var c = s.charCodeAt(i);   // UTF-16 code units — Python's ensure_ascii
-      if (_SHORT_ESCAPES[c]) {   // emits the same surrogate-pair escapes
-        out += _SHORT_ESCAPES[c];
-      } else if (c < 0x20 || c > 0x7e) {
-        out += '\\u' + ('000' + c.toString(16)).slice(-4);
-      } else {
-        out += s[i];
-      }
-    }
-    return out + '"';
-  }
-
-  function _codePoints(s) {
-    return Array.from(s).map(function (ch) { return ch.codePointAt(0); });
-  }
-
-  // Python sorts str keys by code POINT; JS '<' compares UTF-16 code
-  // units, which disagrees once astral-plane keys are involved.
-  function _comparePy(a, b) {
-    var pa = _codePoints(a), pb = _codePoints(b);
-    var n = Math.min(pa.length, pb.length);
-    for (var i = 0; i < n; i++) {
-      if (pa[i] !== pb[i]) return pa[i] - pb[i];
-    }
-    return pa.length - pb.length;
-  }
-
-  function canonicalJson(value) {
-    if (value === null) return 'null';
-    var t = typeof value;
-    if (t === 'boolean') return value ? 'true' : 'false';
-    if (t === 'number') {
-      if (!Number.isSafeInteger(value)) {
-        throw new Error('canonical JSON allows integers only, got ' + value);
-      }
-      return String(value);
-    }
-    if (t === 'string') return _escapeString(value);
-    if (Array.isArray(value)) {
-      return '[' + value.map(canonicalJson).join(',') + ']';
-    }
-    if (t === 'object') {
-      var keys = Object.keys(value).sort(_comparePy);
-      var parts = [];
-      for (var i = 0; i < keys.length; i++) {
-        var v = value[keys[i]];
-        if (v === undefined) continue;
-        parts.push(_escapeString(keys[i]) + ':' + canonicalJson(v));
-      }
-      return '{' + parts.join(',') + '}';
-    }
-    throw new Error('type ' + t + ' is not allowed in canonical JSON');
-  }
-
-  // ── byte helpers ───────────────────────────────────────────────────
-
-  var _te = new TextEncoder();
-
-  function hexToBytes(hex) {
-    if (typeof hex !== 'string' || hex.length % 2 !== 0 || /[^0-9a-f]/.test(hex)) {
-      throw new Error('expected lowercase hex');
-    }
-    var out = new Uint8Array(hex.length / 2);
-    for (var i = 0; i < out.length; i++) {
-      out[i] = parseInt(hex.substr(i * 2, 2), 16);
-    }
-    return out;
-  }
-
-  function bytesToHex(bytes) {
-    var b = new Uint8Array(bytes);
-    var out = '';
-    for (var i = 0; i < b.length; i++) out += ('0' + b[i].toString(16)).slice(-2);
-    return out;
-  }
-
-  function b64ToBytes(b64) {
-    var bin = atob(b64);
-    var out = new Uint8Array(bin.length);
-    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
-  }
-
-  function _domainBytes(domain, canonicalStr) {
-    var d = _te.encode(domain);
-    var c = _te.encode(canonicalStr);
-    var out = new Uint8Array(d.length + c.length);
-    out.set(d, 0);
-    out.set(c, d.length);
-    return out;
-  }
-
-  // ── armor decrypt (mirror of tools/network/idkit/armor.py) ─────────
-
-  async function decryptArmor(armorText, passphrase) {
-    if (typeof armorText !== 'string') throw new Error('armor must be text');
-    var lines = armorText.split('\n').map(function (l) { return l.trim(); })
-      .filter(function (l) { return l.length > 0; });
-    if (lines.length < 3 || lines[0] !== ARMOR_BEGIN || lines[lines.length - 1] !== ARMOR_END) {
-      throw new Error('this is not an auto.network root key armor');
-    }
-    var data;
-    try {
-      data = JSON.parse(new TextDecoder().decode(b64ToBytes(lines.slice(1, -1).join(''))));
-    } catch (e) {
-      throw new Error('armor body does not decode');
-    }
-    // STRICT shape check mirroring armor.py's parse_armor: exact key
-    // sets, formats, and decoded lengths. Fail closed on ANY unknown
-    // field — a tolerated extra field is a smuggling channel for
-    // plaintext key material inside an otherwise-valid armor (I1).
-    function sameKeys(obj, keys) {
-      return obj && typeof obj === 'object' && !Array.isArray(obj) &&
-        Object.keys(obj).sort().join(',') === keys.slice().sort().join(',');
-    }
-    // Decoded length ONLY if the string is canonical base64 — decode,
-    // re-encode, compare exactly, mirroring armor.py. atob() tolerates
-    // nonzero pad bits (and other lax forms) that Python REJECTS; the
-    // two sides must accept one identical byte form or a blob could be
-    // valid on one side of the C1/C2 contract and refused on the other.
-    function b64CanonLen(s) {
-      if (typeof s !== 'string') return -1;
-      var bytes;
-      try { bytes = b64ToBytes(s); } catch (e) { return -1; }
-      var bin = '';
-      for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-      if (btoa(bin) !== s) return -1;
-      return bytes.length;
-    }
-    if (!sameKeys(data, ['v', 'kdf', 'cipher', 'root_pub', 'ct']) ||
-        data.v !== 1 ||
-        !sameKeys(data.kdf, ['name', 'hash', 'iterations', 'salt']) ||
-        data.kdf.name !== 'PBKDF2' || data.kdf.hash !== 'SHA-256' ||
-        !Number.isSafeInteger(data.kdf.iterations) ||
-        data.kdf.iterations < 10000 || data.kdf.iterations > 100000000 ||
-        !sameKeys(data.cipher, ['name', 'iv']) ||
-        data.cipher.name !== 'AES-256-GCM' ||
-        typeof data.root_pub !== 'string' || !/^[0-9a-f]{64}$/.test(data.root_pub) ||
-        b64CanonLen(data.kdf.salt) !== 16 ||
-        b64CanonLen(data.cipher.iv) !== 12 ||
-        b64CanonLen(data.ct) !== 48) {
-      throw new Error('unsupported or non-canonical armor format');
-    }
-    var material = await crypto.subtle.importKey(
-      'raw', _te.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
-    var aesKey = await crypto.subtle.deriveKey(
-      { name: 'PBKDF2', salt: b64ToBytes(data.kdf.salt),
-        iterations: data.kdf.iterations, hash: 'SHA-256' },
-      material, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
-    var seed;
-    try {
-      seed = new Uint8Array(await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: b64ToBytes(data.cipher.iv),
-          additionalData: _te.encode(ARMOR_AAD_PREFIX + data.root_pub) },
-        aesKey, b64ToBytes(data.ct)));
-    } catch (e) {
-      throw new Error('wrong passphrase (the key blob did not open)');
-    }
-    if (seed.length !== 32) throw new Error('armor plaintext is not an Ed25519 seed');
-    return { seed: seed, rootPub: data.root_pub };
-  }
-
-  async function _importRootKey(seed) {
-    var pkcs8 = new Uint8Array(PKCS8_ED25519_PREFIX.length + seed.length);
-    pkcs8.set(PKCS8_ED25519_PREFIX, 0);
-    pkcs8.set(seed, PKCS8_ED25519_PREFIX.length);
-    try {
-      // Non-extractable even for the transient root import: the plaintext
-      // seed is zeroed by the caller right after this returns (I1).
-      return await crypto.subtle.importKey(
-        'pkcs8', pkcs8, { name: 'Ed25519' }, false, ['sign']);
-    } finally {
-      pkcs8.fill(0);
-    }
-  }
 
   // ── IndexedDB session store ────────────────────────────────────────
 
@@ -335,7 +168,8 @@
       throw new Error('refusing to install a session key that is not a ' +
         'non-extractable WebCrypto key');
     }
-    if (!(record.key instanceof CryptoKey) || record.key.type !== 'private') {
+    if (!(record.key instanceof CryptoKeyConstructor) ||
+        record.key.type !== 'private') {
       throw new Error('session key must be a private CryptoKey');
     }
     var cert = JSON.parse(record.certWire);
@@ -705,20 +539,22 @@
   // Expiry watchdog: an expired delegation is destroyed locally. This
   // module no longer owns shell chrome; authority is acquired on demand by
   // the action-specific Gate 2 flow.
-  setInterval(function () {
-    if (_state.session && !_sessionLive(_state.session)) {
-      signOut();
-    }
-  }, 30000);
+  if (typeof window !== 'undefined') {
+    setInterval(function () {
+      if (_state.session && !_sessionLive(_state.session)) {
+        signOut();
+      }
+    }, 30000);
+  }
 
   // ── init + exports ─────────────────────────────────────────────────
 
-  window.AutonomyNetworkSigner = {
+  var networkSigner = {
     available: available,
     signRegistryRequest: signRegistryRequest,
   };
 
-  window.AutonomyNetworkSession = {
+  var networkSession = {
     configure: configure,
     ready: function () { return _ready; },
     state: function () {
@@ -748,4 +584,19 @@
       },
     },
   };
+
+  configureCore = configure;
+  signOnCore = signOn;
+  signRegistryRequestCore = signRegistryRequest;
+
+  if (typeof window !== 'undefined') {
+    window.AutonomyNetworkSigner = networkSigner;
+    window.AutonomyNetworkSession = networkSession;
+  }
 })();
+
+export {
+  configureCore as configure,
+  signOnCore as signOn,
+  signRegistryRequestCore as signRegistryRequest,
+};
