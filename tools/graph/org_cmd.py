@@ -7,6 +7,7 @@ The argparse setup is wired into ``cli.py`` via :func:`attach_org_subparser`.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -104,35 +105,60 @@ def cmd_org_show(args) -> None:
     print(json.dumps(detail, indent=2))
 
 
+def _read_personal_password(args) -> str | None:
+    """``--password-stdin`` / ``--password-fd`` / AUTONOMY_PERSONAL_PASSWORD."""
+    if getattr(args, "password_stdin", False):
+        return sys.stdin.readline().rstrip("\n")
+    fd = getattr(args, "password_fd", None)
+    if fd is not None:
+        with os.fdopen(int(fd), "r", closefd=True) as handle:
+            return handle.readline().rstrip("\n")
+    return os.environ.get("AUTONOMY_PERSONAL_PASSWORD")
+
+
 def cmd_org_create(args) -> None:
     identity_payload = None
     if args.identity:
         identity_payload = _read_payload_file(args.identity)
+    password = _read_personal_password(args)
+    if not password:
+        # Creation IS the founding ceremony (auto-nixfv): the personal
+        # password authorizes founding and seals the org key. There is no
+        # unfounded creation path from the CLI.
+        print(
+            "Error: the personal-identity password is required — pass "
+            "--password-stdin, --password-fd <n>, or set "
+            "AUTONOMY_PERSONAL_PASSWORD (creation founds the ledger and "
+            "seals the org key)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    from tools.network.idkit.armor import ArmorPassphraseError
+
     try:
-        ref = org_ops.create_org(
+        result = org_ops.create_org_with_identity(
             args.slug,
+            password,
             type_=args.type,
             identity_payload=identity_payload,
         )
+    except ArmorPassphraseError:
+        print(
+            "Error: the personal password is incorrect; nothing was created",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     except OrgExistsError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     except OrgError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(2)
-    seeded = ""
-    if identity_payload is not None:
-        # Best-effort seed; surface a hint when the schema isn't registered.
-        from . import schemas
-        from .schemas.registry import SchemaValidationError
-        try:
-            schemas.validate_payload("autonomy.org", 1, identity_payload)
-            seeded = "  (identity seeded)"
-        except SchemaValidationError:
-            seeded = "  (identity skipped: autonomy.org#1 schema unregistered)"
+    print(json.dumps(result.to_dict(), indent=2))
+    ref = result.org
     print(
-        f"  ✓ Org: {ref.slug}  type={ref.type}  id={ref.id[:11]}  "
-        f"{ref.db_path}{seeded}"
+        f"  ✓ Org founded: {ref.slug}  id={ref.id[:11]}  "
+        f"genesis={result.genesis_id[:12]}  root={result.root_pub[:12]}"
     )
 
 
@@ -226,6 +252,16 @@ def attach_org_subparser(sub) -> None:
     p_create.add_argument(
         "--identity",
         help="Optional path to JSON/YAML payload to seed autonomy.org#1",
+    )
+    p_create.add_argument(
+        "--password-stdin", action="store_true",
+        help="Read the personal-identity password from stdin (first line). "
+             "Creation is the founding ceremony; the password is required "
+             "(or --password-fd / AUTONOMY_PERSONAL_PASSWORD).",
+    )
+    p_create.add_argument(
+        "--password-fd", type=int, default=None,
+        help="Read the personal-identity password from this file descriptor.",
     )
     p_create.set_defaults(func=cmd_org_create)
 
