@@ -23,6 +23,7 @@ cross-pin test keeps the two from drifting.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Dict, Optional
 
 from tools.network.idkit import canonical_json
@@ -97,6 +98,38 @@ def build_projections(state: FoldState) -> dict:
             "body": bodies[name],
         }
         for name in PROJECTION_NAMES
+    }
+
+
+def organization_content_domain_id(genesis_id: str) -> str:
+    """The version-one organization-content storage-domain identifier.
+
+    ``SHA-256("autonomy/storage-domain/v1" || genesis_id ||
+    "organization-content")`` (contract §4) — anchored to the genesis
+    event id, so it is invariant across a ``key.rotate``.
+    """
+    return hashlib.sha256(
+        b"autonomy/storage-domain/v1"
+        + genesis_id.encode("ascii")
+        + b"organization-content"
+    ).hexdigest()
+
+
+def build_loss_heads(state: FoldState) -> dict:
+    """The access-loss read model: the maximal contraction events a
+    writer's frontier must cover (contract §6), with the same derivation
+    provenance as the other projections. Standalone — not added to
+    ``PROJECTION_NAMES``, so the dashboard read-model schema is unaffected.
+    """
+    return {
+        "projection": "loss-heads",
+        "org": state.org,
+        "heads": list(state.heads),
+        "fingerprint": state.fingerprint(),
+        "body": {
+            "domain_id": organization_content_domain_id(state.genesis_id),
+            "loss_heads": list(state.loss_heads),
+        },
     }
 
 
