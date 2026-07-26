@@ -136,6 +136,8 @@ class _RoleDef:
     version: int
     scope_set: FrozenSet[str]
     claim_requires: str
+    #: Resolved static approver count (D16 tagged value; v1 = static only).
+    approver_threshold: int = 1
 
 
 @dataclass(frozen=True)
@@ -200,6 +202,7 @@ class RoleDefView:
     scope_set: tuple
     claim_requires: str
     event_id: str
+    approver_threshold: int = 1
 
 
 @dataclass(frozen=True)
@@ -237,6 +240,7 @@ class FoldState:
                 scope_set=tuple(sorted(d.scope_set)),
                 claim_requires=d.claim_requires,
                 event_id=d.id,
+                approver_threshold=d.approver_threshold,
             )
             for name, d in folder.role_defs_at(ctx).items()
         }
@@ -310,6 +314,12 @@ class FoldState:
                     "scope_set": list(d.scope_set),
                     "claim_requires": d.claim_requires,
                     "event_id": d.event_id,
+                    # Committed in the full TAGGED form so a future kind
+                    # changes the state hash by construction (L1).
+                    "approver_threshold": {
+                        "kind": "static",
+                        "count": d.approver_threshold,
+                    },
                 }
                 for name, d in sorted(self.role_defs.items())
             },
@@ -526,6 +536,9 @@ class _Folder:
                 version=p["version"],
                 scope_set=frozenset(p["scope_set"]),
                 claim_requires=p["claim_requires"],
+                approver_threshold=p.get(
+                    "approver_threshold", {"kind": "static", "count": 1}
+                )["count"],
             )
         )
         return None
@@ -671,7 +684,8 @@ class _Folder:
                 )
             except IdkitError:
                 return R_APPROVAL_BAD
-        requires = self.role_defs_at(ctx)[invite.role].claim_requires
+        role_def = self.role_defs_at(ctx)[invite.role]
+        requires = role_def.claim_requires
         if requires == "self":
             return None
         approver_keys = [entry["key"] for entry in p["approvals"]]
@@ -679,12 +693,22 @@ class _Folder:
             if invite.author in approver_keys:
                 return None
             return R_APPROVAL_MISSING
-        # admin-ack: any approver who is root or holds role:grant:<role>.
+        # admin-ack: at least approver_threshold DISTINCT approvers, each
+        # being root, the invite's sponsor (whose vouch counts as one —
+        # register D16; issuing the invite already spent invite:<role>
+        # authority), or a role:grant:<role> holder. approver_keys is
+        # duplicate-free at validation; the set makes distinctness explicit.
         held, _ = self.authority(ctx, ref_ts=event.hlc.ts)
         root = self.root_at(ctx)
-        for key in approver_keys:
-            if key == root or set_covers(held.get(key, frozenset()), scope_role_grant(invite.role)):
-                return None
+        admitting = {
+            key
+            for key in approver_keys
+            if key == root
+            or key == invite.author
+            or set_covers(held.get(key, frozenset()), scope_role_grant(invite.role))
+        }
+        if len(admitting) >= role_def.approver_threshold:
+            return None
         return R_APPROVAL_MISSING
 
     def _h_member_rekey(self, event, ctx) -> Optional[str]:

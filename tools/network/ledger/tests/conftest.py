@@ -87,18 +87,22 @@ class Sim:
             author, {"type": "revoke", "target_key": key(target)}, parents=parents
         )
 
-    def role_define(self, author, name, scope_set=(), requires="self", version=1, parents=None):
-        return self.emit(
-            author,
-            {
-                "type": "role.define",
-                "name": name,
-                "scope_set": sorted(set(scope_set)),
-                "claim_requires": requires,
-                "version": version,
-            },
-            parents=parents,
-        )
+    def role_define(
+        self, author, name, scope_set=(), requires="self", version=1, parents=None,
+        approver_threshold=None,
+    ):
+        payload = {
+            "type": "role.define",
+            "name": name,
+            "scope_set": sorted(set(scope_set)),
+            "claim_requires": requires,
+            "version": version,
+        }
+        if approver_threshold is not None:
+            payload["approver_threshold"] = {
+                "kind": "static", "count": approver_threshold,
+            }
+        return self.emit(author, payload, parents=parents)
 
     def role_grant(self, author, persona, role, parents=None):
         return self.emit(
