@@ -162,3 +162,136 @@ def test_genesis_must_be_self_signed():
     )
     with pytest.raises((GenesisError, SignatureError)):
         store.append(forged)
+
+
+class TestResumeFounding:
+    """Guarded completion onto an existing genesis (identity-preserving)."""
+
+    def _fresh(self):
+        return LedgerStore(), KeyPair.generate(), os.urandom(32)
+
+    def _found_reference(self):
+        """A complete founding to copy prefixes from."""
+        store, root, seed = self._fresh()
+        result = found_org_ledger(
+            store, org_id=ORG_ID, org_root=root, personal_root_seed=seed, now=T0
+        )
+        return store, root, seed, result
+
+    def _prefix_store(self, source: LedgerStore, event_ids) -> LedgerStore:
+        replica = LedgerStore()
+        for event_id in event_ids:
+            replica.append(source.get(event_id))
+        return replica
+
+    def test_resume_from_genesis_only(self):
+        from tools.network.ledger.found import resume_org_founding
+
+        store, root, seed, original = self._found_reference()
+        partial = self._prefix_store(store, [original.genesis_id])
+        resumed = resume_org_founding(
+            partial, org_id=ORG_ID, org_root=root, personal_root_seed=seed
+        )
+        assert len(partial) == 4
+        # Deterministic completion: the resumed events ARE the original
+        # events (same payloads, parents, HLC chain, deterministic sigs).
+        assert resumed == original
+        state = partial.fold()
+        member = state.members[resumed.founder_persona_pub]
+        assert member.roles == ("owner",)
+
+    def test_resume_from_three_event_prefix(self):
+        from tools.network.ledger.found import resume_org_founding
+
+        store, root, seed, original = self._found_reference()
+        partial = self._prefix_store(
+            store,
+            [original.genesis_id, original.role_define_id, original.founding_invite_id],
+        )
+        resumed = resume_org_founding(
+            partial, org_id=ORG_ID, org_root=root, personal_root_seed=seed
+        )
+        assert resumed.founder_claim_id == original.founder_claim_id
+        assert len(partial) == 4
+        # The resumed claim folds VALID: the logical clock stayed at the
+        # founding instant, so the spent-at-mint invite is not expired.
+        state = partial.fold()
+        assert state.valid[resumed.founder_claim_id] is True
+        assert resumed.founder_persona_pub in state.members
+
+    def test_resume_is_idempotent_on_a_complete_founding(self):
+        from tools.network.ledger.found import resume_org_founding
+
+        store, root, seed, original = self._found_reference()
+        resumed = resume_org_founding(
+            store, org_id=ORG_ID, org_root=root, personal_root_seed=seed
+        )
+        assert len(store) == 4
+        assert resumed.founder_claim_id == original.founder_claim_id
+
+    def test_resume_guards_fail_closed(self):
+        from tools.network.ledger.found import (
+            FoundingMismatchError,
+            resume_org_founding,
+        )
+
+        store, root, seed, original = self._found_reference()
+        partial = self._prefix_store(store, [original.genesis_id])
+        with pytest.raises(FoundingMismatchError):  # foreign org root
+            resume_org_founding(
+                partial, org_id=ORG_ID, org_root=KeyPair.generate(),
+                personal_root_seed=seed,
+            )
+        with pytest.raises(FoundingMismatchError):  # wrong org label
+            resume_org_founding(
+                partial, org_id="0" * 36, org_root=root, personal_root_seed=seed
+            )
+        assert len(partial) == 1  # nothing appended by refused completions
+
+        # A different personal seed re-derives a different founder: the
+        # committed invitation's key binding no longer matches.
+        three = self._prefix_store(
+            store,
+            [original.genesis_id, original.role_define_id, original.founding_invite_id],
+        )
+        with pytest.raises(FoundingMismatchError):
+            resume_org_founding(
+                three, org_id=ORG_ID, org_root=root,
+                personal_root_seed=os.urandom(32),
+            )
+        assert len(three) == 3
+
+    def test_resume_refuses_a_non_prefix(self):
+        from tools.network.ledger.found import (
+            FoundingMismatchError,
+            resume_org_founding,
+        )
+
+        store, root, seed = self._fresh()
+        genesis_id = store.append(
+            make_event(
+                root,
+                {"type": "genesis", "org": ORG_ID, "root_pub": root.public_hex},
+                [],
+                HLC(T0, 0),
+            )
+        )
+        founder = KeyPair.generate()
+        store.append(  # an invite with NO owner role definition beneath it
+            make_event(
+                root,
+                {
+                    "type": "invite",
+                    "granted_role": "owner",
+                    "expiry": T0,
+                    "sponsor": root.public_hex,
+                    "invite_pub": founder.public_hex,
+                },
+                [genesis_id],
+                HLC(T0, 1),
+            )
+        )
+        with pytest.raises(FoundingMismatchError):
+            resume_org_founding(
+                store, org_id=ORG_ID, org_root=root, personal_root_seed=os.urandom(32)
+            )
