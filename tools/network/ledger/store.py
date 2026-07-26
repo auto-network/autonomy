@@ -55,6 +55,7 @@ from .fold import (
     R_APPROVAL_MISSING,
     R_ROLE_UNDEFINED,
     FoldState,
+    admitting_approvers,
     claim_requirement_status,
     fold,
 )
@@ -383,26 +384,48 @@ class LedgerStore:
                 ) from exc
         invite_event = self.get(record["invite_ref"])
         role = invite_event.payload["granted_role"]
+        sponsor = invite_event.payload["sponsor"]
+        approver_keys = [e["key"] for e in record["approvals"]]
         state = self.fold(now=record["hlc_ts"])
         view = state.role_defs.get(role)
         if view is None:
-            return {"ready": False, "have": 0, "need": 0, "reason": R_ROLE_UNDEFINED}
+            return {
+                "ready": False, "have": 0, "need": 0,
+                "reason": R_ROLE_UNDEFINED, "admitting": [],
+            }
         have, need = claim_requirement_status(
             requires=view.claim_requires,
             key_bound="invite_pub" in invite_event.payload,
-            approver_keys=[e["key"] for e in record["approvals"]],
+            approver_keys=approver_keys,
             threshold=view.approver_threshold,
             root=state.root,
-            sponsor=invite_event.payload["sponsor"],
+            sponsor=sponsor,
             role=role,
             holds=state.holds,
         )
         ready = have >= need
+        # ``admitting``: a deterministic NEED-sized subset of the approvers
+        # that count (sorted-by-key first ``need``) — finalization re-mints
+        # with EXACTLY this subset, so the final payload stays within
+        # MAX_APPROVALS no matter how many authorized approvers signed.
+        # The verdict above is claim_requirement_status's alone; this only
+        # exposes the set it consulted.
+        if need == 0:
+            admitting: list = []
+        elif view.claim_requires == "sponsor":
+            admitting = [sponsor] if sponsor in approver_keys else []
+        else:
+            counted = admitting_approvers(
+                approver_keys,
+                root=state.root, sponsor=sponsor, role=role, holds=state.holds,
+            )
+            admitting = sorted(counted)[:need]
         return {
             "ready": ready,
             "have": have,
             "need": need,
             "reason": None if ready else R_APPROVAL_MISSING,
+            "admitting": admitting,
         }
 
     # -- read side --------------------------------------------------------------------
