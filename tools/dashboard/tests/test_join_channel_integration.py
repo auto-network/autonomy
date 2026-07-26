@@ -109,16 +109,36 @@ class World:
             return raw
         return json.loads(raw.split(b"\n", 1)[0])
 
-    def mint(self, context: dict, approvals=()):
-        """Mint as claim.js does: tick past the org's max head HLC (A3)."""
-        ts, count = context["max_hlc"]
+    def mint(self, context: dict, approvals=(), position=None):
+        """Mint as claim.js does, optionally at the staged fixed position."""
+        if position is None:
+            heads = context["heads"]
+            ts, count = context["max_hlc"]
+            hlc = HLC(ts + 1_000, 0) if count is not None else HLC(ts + 1_000)
+        else:
+            heads = position["parents"]
+            hlc = HLC.from_value(position["hlc"])
         event, _ = mint_member_claim(
             self.invitee_seed, context["genesis_id"],
-            invite_ref=self.invite_ref, heads=context["heads"],
-            hlc=HLC(ts + 1_000, 0) if count is not None else HLC(ts + 1_000),
+            invite_ref=self.invite_ref, heads=heads, hlc=hlc,
             token=self.token, approvals=approvals,
         )
         return event
+
+    def advance_heads_past_invite_expiry(self):
+        """Make current-frontier finalization late without expiring wall time."""
+        with LedgerStore(org_ledger_db_path(ORG)) as store:
+            store.append(make_event(
+                self.root,
+                {
+                    "type": "delegate",
+                    "child_pub": KeyPair.generate().public_hex,
+                    "scope": ["link:publish"],
+                    "can_redelegate": False,
+                },
+                store.heads(),
+                HLC(FAR + 1_000),
+            ))
 
     def members(self):
         with LedgerStore(org_ledger_db_path(ORG)) as store:
@@ -181,13 +201,30 @@ def test_full_claim_flow_over_the_join_channel(world):
     assert (ready["have"], ready["need"]) == (1, 1)
     assert ready["admitting"] == [world.admin.public_hex]
 
-    # 5. finalize — re-mint with EXACTLY the admitting subset, submit again.
+    # Approval latency advances the org beyond the invite's causal expiry.
+    # A current-frontier re-mint remains rejected; the server-supplied
+    # position is the only valid finalize position.
+    world.advance_heads_past_invite_expiry()
+    current_context = world.channel({"v": 1, "op": "context"})
+
+    # 5. finalize — re-mint with EXACTLY the admitting subset at the
+    # server-supplied staging position, then submit again.
     with LedgerStore(org_ledger_db_path(ORG)) as store:
         approvals = [
             e for e in store.get_pending_claim(claim_key)["approvals"]
             if e["key"] in ready["admitting"]
         ]
-    final = world.mint(world.channel({"v": 1, "op": "context"}), approvals=approvals)
+    current_frontier = world.mint(current_context, approvals=approvals)
+    assert world.channel({
+        "v": 1, "op": "submit",
+        "event": current_frontier.to_json().decode("utf-8"),
+    }) == {"v": 1, "status": "rejected", "reason": "invite-expired"}
+
+    final = world.mint(
+        current_context,
+        approvals=approvals,
+        position=ready["position"],
+    )
     admitted = world.channel({
         "v": 1, "op": "submit", "event": final.to_json().decode("utf-8"),
     })
