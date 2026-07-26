@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 import time
 import urllib.parse
 from pathlib import Path
@@ -241,6 +242,155 @@ async def post_revocation(request: Request) -> JSONResponse:
 async def get_registry(request: Request) -> JSONResponse:
     """The server-configured registry destination for the C1 ceremony."""
     return JSONResponse({"registry_url": _registry_url()})
+
+
+async def post_ledger_found(request: Request) -> JSONResponse:
+    """Atomically install one client-signed organization founding batch.
+
+    The client supplies four canonical wire events; this route contributes
+    no signatures and sees no root plaintext. The complete batch is verified
+    in an isolated LedgerStore before a temporary durable store is atomically
+    promoted into place, so a bad later event cannot strand a partial genesis.
+    """
+    if _mock_mode():
+        return JSONResponse(
+            {"ok": False, "error": "mock dashboard has no authority ledger"},
+            status_code=502,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"ok": False, "error": "body must be JSON"},
+            status_code=400,
+        )
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"ok": False, "error": "body must be a JSON object"},
+            status_code=400,
+        )
+    requested_org = body.get("org")
+    if not isinstance(requested_org, str) or not requested_org:
+        return JSONResponse(
+            {"ok": False, "error": "body must carry the local org slug"},
+            status_code=400,
+        )
+    _org, refused = _scoped_org(requested_org)
+    if refused is not None:
+        return refused
+    wires = body.get("events")
+    if (
+        not isinstance(wires, list)
+        or len(wires) != 4
+        or any(not isinstance(wire, str) for wire in wires)
+    ):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "events must be exactly four canonical wire strings",
+            },
+            status_code=400,
+        )
+
+    from tools.graph import org_ops
+    from tools.network.ledger import LedgerError
+    from tools.network.ledger.events import Event
+    from tools.network.ledger.store import LedgerStore, org_ledger_db_path
+
+    org_ref = org_ops.get_org(requested_org)
+    if org_ref is None:
+        return JSONResponse(
+            {"ok": False, "error": "local organization does not exist"},
+            status_code=404,
+        )
+    store_path = org_ledger_db_path(requested_org)
+    if store_path.exists():
+        try:
+            with LedgerStore(store_path) as existing:
+                if len(existing) > 0:
+                    return JSONResponse(
+                        {
+                            "ok": False,
+                            "error": "organization ledger is already founded",
+                        },
+                        status_code=409,
+                    )
+        except LedgerError as exc:
+            return JSONResponse(
+                {"ok": False, "error": f"could not open ledger: {exc}"},
+                status_code=500,
+            )
+
+    try:
+        events = [Event.from_json(wire) for wire in wires]
+        expected_types = [
+            "genesis",
+            "role.define",
+            "invite",
+            "member.claim",
+        ]
+        if [event.type for event in events] != expected_types:
+            raise ValueError(
+                "founding events must be genesis, role.define, invite, "
+                "member.claim in that order"
+            )
+        if events[0].payload.get("org") != org_ref.id:
+            raise ValueError(
+                "genesis org must equal the local organization's stable id"
+            )
+        if events[0].parents:
+            raise ValueError("genesis must have no parents")
+        for previous, event in zip(events, events[1:]):
+            if event.parents != (previous.event_id,):
+                raise ValueError(
+                    "each founding event must name only its predecessor"
+                )
+        with LedgerStore() as candidate:
+            for event in events:
+                candidate.append(event)
+            candidate.refresh_projections(now=events[-1].hlc.ts)
+    except (LedgerError, ValueError, TypeError) as exc:
+        return JSONResponse(
+            {"ok": False, "error": f"founding batch rejected: {exc}"},
+            status_code=400,
+        )
+
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{requested_org}-found-",
+        suffix=".ledger.db",
+        dir=store_path.parent,
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        with LedgerStore(temporary_path) as durable:
+            event_ids = [durable.append(event) for event in events]
+            durable.refresh_projections(now=events[-1].hlc.ts)
+        os.replace(temporary_path, store_path)
+    except (LedgerError, OSError) as exc:
+        return JSONResponse(
+            {"ok": False, "error": f"could not persist founding batch: {exc}"},
+            status_code=500,
+        )
+    finally:
+        for candidate_path in (
+            temporary_path,
+            Path(f"{temporary_path}-wal"),
+            Path(f"{temporary_path}-shm"),
+        ):
+            try:
+                candidate_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "genesis_id": event_ids[0],
+            "event_ids": event_ids,
+        }
+    )
 
 
 async def put_org_key(request: Request) -> JSONResponse:
@@ -600,6 +750,7 @@ ROUTES = [
     Route("/api/network/org-key", put_org_key, methods=["POST"]),
     Route("/api/network/binding", get_binding, methods=["GET"]),
     Route("/api/network/registry", get_registry, methods=["GET"]),
+    Route("/api/network/ledger/found", post_ledger_found, methods=["POST"]),
     Route("/api/network/register", post_register, methods=["POST"]),
     Route("/api/network/serve-cert", post_serve_cert, methods=["POST"]),
     Route("/api/network/revocations", post_revocation, methods=["POST"]),
