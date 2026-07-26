@@ -11,7 +11,7 @@ deployment, from nothing:
   public-surface allowlist (``autonomy.org.bootstrap-allowlist#1``,
   seeded from the committed curation YAML; ties to bead auto-mu1n1),
 * dashboard-side operational DBs (dashboard / auth / dispatch /
-  approval-requests / commit-workflow),
+  approval-requests / commit-workflow / identity sessions),
 * a TLS keypair at ``data/tls.crt`` + ``data/tls.key`` (self-signed;
   ``start-dashboard.sh`` picks the pair up automatically). For a
   browser-trusted cert use Tailscale (``renew-tls-cert.sh``) or
@@ -127,15 +127,64 @@ def initialize(
             "AUTONOMY_FIRST_ORG and AUTONOMY_INVITE cannot both be set"
         )
     root = Path(root).resolve() if root is not None else REPO_ROOT
-    report = InitReport(root=str(root))
     data = root / "data"
+    return _initialize_data_root(
+        data,
+        report_root=root,
+        first_org=first_org,
+        first_org_name=first_org_name,
+        invite=invite,
+        join_transport=join_transport,
+        tls=tls,
+        tls_domain=tls_domain,
+    )
 
+
+def initialize_data_root(
+    data: Path | str,
+    *,
+    first_org: str | None = None,
+    first_org_name: str | None = None,
+    tls: bool = True,
+    tls_domain: str | None = None,
+) -> InitReport:
+    """Initialize/migrate an already-mounted node data volume directly.
+
+    Unlike :func:`initialize`, *data* is the volume itself rather than a
+    checkout/deployment root whose ``data/`` child is the volume.
+    """
+    data = Path(data).resolve()
+    return _initialize_data_root(
+        data,
+        report_root=data,
+        first_org=first_org,
+        first_org_name=first_org_name,
+        invite=None,
+        join_transport=None,
+        tls=tls,
+        tls_domain=tls_domain,
+    )
+
+
+def _initialize_data_root(
+    data: Path,
+    *,
+    report_root: Path,
+    first_org: str | None,
+    first_org_name: str | None,
+    invite: str | None,
+    join_transport,
+    tls: bool,
+    tls_domain: str | None,
+) -> InitReport:
+    report = InitReport(root=str(report_root))
     _init_data_dirs(data, report)
     _init_graph_db(data, report)
     if invite:
         invitation = _init_join(data, report, invite=invite)
     else:
         _init_orgs(data, report, first_org=first_org, first_org_name=first_org_name)
+    _migrate_all_org_dbs(data)
     _init_operational_dbs(data, report)
     _seed_bootstrap_allowlist(data, report)
     if tls:
@@ -256,6 +305,25 @@ def _init_join(data: Path, report: InitReport, *, invite: str) -> None:
     return invitation
 
 
+def _migrate_all_org_dbs(data: Path) -> None:
+    """Run graph and co-located-ledger migrations for every existing org."""
+    import sqlite3
+
+    from tools.graph.db import GraphDB
+    from tools.network.ledger.store import LedgerStore
+
+    orgs_root = resolve_store("orgs", root=data)
+    for path in sorted(orgs_root.glob("*.db")):
+        GraphDB(path).close()
+        with sqlite3.connect(path) as conn:
+            has_ledger = conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='ledger_meta'"
+            ).fetchone() is not None
+        if has_ledger:
+            LedgerStore(path).close()
+
+
 def _init_operational_dbs(data: Path, report: InitReport) -> None:
     """Dashboard-side sqlite stores, each via its own idempotent init_db."""
     from agents import dispatch_db
@@ -264,6 +332,7 @@ def _init_operational_dbs(data: Path, report: InitReport) -> None:
         auth_db,
         commit_workflow_db,
         dashboard_db,
+        identity_sessions,
     )
 
     # Manifest keys, not bare filenames: init must lay each store down
@@ -275,6 +344,7 @@ def _init_operational_dbs(data: Path, report: InitReport) -> None:
         ("dispatch", dispatch_db.init_db),
         ("approval_requests", approval_requests.init_db),
         ("commit_workflow", commit_workflow_db.init_db),
+        ("identity_sessions", identity_sessions.init_db),
     )
     for key, init_fn in stores:
         path = resolve_store(key, root=data)

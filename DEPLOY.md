@@ -191,9 +191,66 @@ a temporary directory, runs first-run init, and asserts the operator's real
 `data/` and `$HOME` are byte-unchanged — and that deliberately un-rooting a
 store is caught.
 
-Backing up the deployment = backing up that volume (stop the stack or use
-sqlite-consistent tooling — `tools/graph/backup-*.sh` — for hot backups).
-The image is disposable; the volume is not.
+Backing up the deployment = backing up that volume. The image is disposable;
+the volume is not.
+
+#### Portable snapshot and restore
+
+`python -m tools.portability` turns the complete manifest-rooted node volume
+into one validated artifact. Version 1 is intentionally **quiesced-only**:
+SQLite can make each database internally consistent while it is live, but no
+cross-store writer barrier currently makes several databases plus TLS/key
+files share one coherent hot point. Stop the dashboard before acknowledging
+`--quiesced`; the tool refuses to create an artifact without that explicit
+acknowledgement.
+
+With the dashboard stopped, run the tool in a one-shot container that mounts
+the same volume:
+
+```bash
+docker compose stop dashboard
+docker compose run --rm --no-deps --entrypoint python3 \
+  -v "$PWD:/backup" dashboard \
+  -m tools.portability snapshot /app/data /backup/node-snapshot.tar.gz \
+  --quiesced
+```
+
+Every SQLite store (including every `orgs/*.db`) is copied through SQLite's
+backup API; WAL sidecars are never copied. Every resulting file is recorded
+with its size, mode, and SHA-256 digest in the artifact manifest. Restore
+accepts only regular, traversal-free members, verifies the manifest identity,
+all file hashes, the exact `STORE_MANIFEST` shape, and SQLite integrity, then
+materializes into an **absent fresh** volume path:
+
+```bash
+python -m tools.portability restore \
+  node-snapshot.tar.gz /path/to/fresh-node-data
+```
+
+A torn, altered, structurally incomplete, or newer-format artifact is refused;
+restore never overlays an existing volume.
+
+The optional Dolt/beads backend lives in the separate `dolt-data` volume and
+is therefore not silently claimed as part of `/app/data`. When beads is in
+use, export a consistent `beads.sql` while Dolt is also quiesced and pass
+`--beads-present --beads-dump beads.sql` to snapshot. Declaring beads without
+the dump fails closed. Restoring such an artifact requires
+`--beads-output /fresh/path/beads.sql`, ready for import into a fresh Dolt
+volume; omitting it is also refused.
+
+Each mounted volume carries `.autonomy-volume.json`. Container startup runs
+`migrate-on-mount` before the dashboard: legacy/unversioned volumes migrate
+forward through the existing idempotent store initializers, while a volume
+written by a newer node is rejected before any mutation. Restoring preserves
+the personal/org root material, ledgers, memberships, configuration, and TLS
+keys byte-for-byte. On a new machine, use the existing personal password or
+recovery path when a machine-bound passkey factor is unavailable; plaintext
+roots still never leave the client. Relay re-announcement is a serving-layer
+startup concern and is exercised by the multi-node harness.
+
+The older `tools/graph/backup-*.sh` jobs remain useful rolling/offsite
+single-store backups. They are not a claim of cross-store coherent
+portability; use the quiesced artifact above for a node move.
 
 ### Optional beads (issue tracker) backend
 
