@@ -278,6 +278,8 @@
     session: null,     // {key: CryptoKey, certWire, cert, org, registryUrl,
                        //  rootPub, orgSlug, createdAt}
   };
+  var _storage = null;
+  var _transport = null;
 
   function _nowS() { return Math.floor(Date.now() / 1000); }
 
@@ -306,7 +308,7 @@
   async function _loadFromStore() {
     var rec = null;
     try {
-      rec = await _idbOp('readonly', function (s) { return s.get(DB_KEY); });
+      rec = await _storage.getSession();
     } catch (e) {
       return null;
     }
@@ -322,7 +324,7 @@
     // cert outside its validity window (expired OR not yet valid), must
     // not come back to life on load.
     if (rec.key.extractable !== false || !_sessionLive(session)) {
-      try { await _idbOp('readwrite', function (s) { return s.clear(); }); } catch (e) { /* ignore */ }
+      try { await _storage.clearSession(); } catch (e) { /* ignore */ }
       return null;
     }
     return session;
@@ -343,7 +345,7 @@
       throw new Error('refusing to install a session certificate outside its ' +
         'validity window (expired or not yet valid)');
     }
-    await _idbOp('readwrite', function (s) { return s.put(record, DB_KEY); });
+    await _storage.putSession(record);
     _state.session = {
       key: record.key, certWire: record.certWire, cert: cert, org: record.org,
       registryUrl: record.registryUrl, rootPub: record.rootPub,
@@ -358,7 +360,8 @@
     // auto.network routes scope by the X-Graph-Org header; a bare ?org= is
     // refused cross-org without it. Plain fetch() carries no header, so pass
     // the org through explicitly.
-    var resp = await fetch(url, org ? { headers: { 'X-Graph-Org': org } } : undefined);
+    var resp = await _transport.fetch(
+      url, org ? { headers: { 'X-Graph-Org': org } } : undefined);
     if (!resp.ok) {
       var detail = '';
       try { detail = (await resp.json()).error || ''; } catch (e) { /* ignore */ }
@@ -374,7 +377,8 @@
   // must not require the org to have registered with any registry (the
   // sovereign model — auto.network is a broker, not part of sign-in).
   async function _fetchJsonOrNull(url, org) {
-    var resp = await fetch(url, org ? { headers: { 'X-Graph-Org': org } } : undefined);
+    var resp = await _transport.fetch(
+      url, org ? { headers: { 'X-Graph-Org': org } } : undefined);
     if (resp.status === 404) return null;
     if (!resp.ok) {
       var detail = '';
@@ -430,13 +434,20 @@
       var sessionPub = bytesToHex(
         await crypto.subtle.exportKey('raw', sessionKeys.publicKey));
 
+      var subjectId = await _storage.getSubjectId();
+      if (!subjectId) {
+        subjectId = 'browser-' +
+          bytesToHex(crypto.getRandomValues(new Uint8Array(4)));
+        await _storage.setSubjectId(subjectId);
+      }
+
       var now = _nowS();
       var certPayload = {
         v: 1,
         child_pub: sessionPub,
         scope: SESSION_SCOPES.slice(),
         org: orgId,
-        subject: { kind: 'operator', id: _browserSubjectId() },
+        subject: { kind: 'operator', id: subjectId },
         not_before: now - NOT_BEFORE_SKEW_S,
         not_after: now + ttl,
       };
@@ -636,6 +647,31 @@
 
   var _ready = null;
 
+  function configure(adapters) {
+    var storage = adapters && adapters.storage;
+    var storageMethods = [
+      'getSession', 'putSession', 'clearSession', 'getSubjectId', 'setSubjectId',
+    ];
+    for (var i = 0; i < storageMethods.length; i++) {
+      var method = storageMethods[i];
+      if (!storage || typeof storage[method] !== 'function') {
+        throw new Error('storage adapter is missing method ' + method);
+      }
+    }
+    var transport = adapters && adapters.transport;
+    if (!transport || typeof transport.fetch !== 'function') {
+      throw new Error('transport adapter is missing method fetch');
+    }
+
+    _storage = storage;
+    _transport = transport;
+    _ready = _loadFromStore().then(function (session) {
+      _state.session = session;
+      return session;
+    }).catch(function () { return null; });
+    return _ready;
+  }
+
   function available() {
     return _sessionLive(_state.session);
   }
@@ -677,17 +713,13 @@
 
   // ── init + exports ─────────────────────────────────────────────────
 
-  _ready = _loadFromStore().then(function (session) {
-    _state.session = session;
-    return session;
-  }).catch(function () { return null; });
-
   window.AutonomyNetworkSigner = {
     available: available,
     signRegistryRequest: signRegistryRequest,
   };
 
   window.AutonomyNetworkSession = {
+    configure: configure,
     ready: function () { return _ready; },
     state: function () {
       var s = _state.session;

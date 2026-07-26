@@ -13264,18 +13264,22 @@ _NETWORK_SIGNON_JS = r"""
     const I = S._internals;
     const r = {};
     if (!S || !I) return JSON.stringify({fatal: 'network-signon.js not loaded'});
-    async function idbCount() {
+    async function idbOp(mode, operation) {
         return await new Promise((res, rej) => {
             const rq = indexedDB.open('autonomy-network', 1);
             rq.onupgradeneeded = () => rq.result.createObjectStore('session');
             rq.onsuccess = () => {
                 const db = rq.result;
-                const c = db.transaction('session', 'readonly').objectStore('session').count();
-                c.onsuccess = () => { db.close(); res(c.result); };
-                c.onerror = () => { db.close(); rej(c.error); };
+                const request = operation(
+                    db.transaction('session', mode).objectStore('session'));
+                request.onsuccess = () => { db.close(); res(request.result); };
+                request.onerror = () => { db.close(); rej(request.error); };
             };
             rq.onerror = () => rej(rq.error);
         });
+    }
+    async function idbCount() {
+        return await idbOp('readonly', store => store.count());
     }
 
     const BINDING = __BINDING__;
@@ -13285,7 +13289,64 @@ _NETWORK_SIGNON_JS = r"""
     const posted = [];
     const origFetch = window.fetch;
 
-    await S.ready();
+    // Configuration fails closed: every adapter method is required and
+    // validation must happen before getSession can perform a load.
+    r.preconfigure_sign_error = null;
+    try {
+        await window.AutonomyNetworkSigner.signRegistryRequest(
+            'POST', '/v1/links', {});
+    } catch (e) { r.preconfigure_sign_error = String(e.message || e); }
+
+    let invalidLoadAttempts = 0;
+    const probeStorage = {
+        getSession: async () => { invalidLoadAttempts += 1; return null; },
+        putSession: async () => {},
+        clearSession: async () => {},
+        getSubjectId: async () => null,
+        setSubjectId: async () => {},
+    };
+    r.configure_errors = {};
+    for (const method of [
+        'getSession', 'putSession', 'clearSession', 'getSubjectId', 'setSubjectId',
+    ]) {
+        const badStorage = Object.assign({}, probeStorage);
+        delete badStorage[method];
+        try { S.configure({storage: badStorage, transport: {fetch: async () => {}}}); }
+        catch (e) { r.configure_errors[method] = String(e.message || e); }
+    }
+    try { S.configure({storage: probeStorage, transport: {}}); }
+    catch (e) { r.configure_errors.fetch = String(e.message || e); }
+    r.invalid_configure_load_attempts = invalidLoadAttempts;
+
+    const browserStorage = {
+        getSession: async () => {
+            const value = await idbOp('readonly', store => store.get('current'));
+            return value === undefined ? null : value;
+        },
+        putSession: async record => {
+            await idbOp('readwrite', store => store.put(record, 'current'));
+        },
+        clearSession: async () => {
+            await idbOp('readwrite', store => store.clear());
+        },
+        getSubjectId: async () => {
+            try { return localStorage.getItem('autonomy.network.browser-id'); }
+            catch (e) { return null; }
+        },
+        setSubjectId: async id => {
+            try { localStorage.setItem('autonomy.network.browser-id', id); }
+            catch (e) {}
+        },
+    };
+    S.configure({
+        storage: browserStorage,
+        transport: {
+            // Resolve the global at call time so the sweep's monkeypatch is
+            // the same seam used by the production browser transport.
+            fetch: (url, options) => window.fetch(url, options),
+        },
+    });
+    r.ready_after_configure_null = (await S.ready()) === null;
     await S.signOut();
 
     // The signer is headless: personal identity owns the shell chrome.
@@ -13436,6 +13497,47 @@ class TestNetworkSignOn:
     def test_ceremony_ran(self):
         c = self._checks
         assert c and not c.get("fatal"), f"ceremony eval failed: {c}"
+
+    def test_signing_before_configuration_rejects(self):
+        assert "no live operator session key" in (
+            self._checks["preconfigure_sign_error"] or ""
+        )
+
+    def test_configure_requires_every_adapter_method_before_loading(self):
+        c = self._checks
+        for method in (
+            "getSession", "putSession", "clearSession",
+            "getSubjectId", "setSubjectId", "fetch",
+        ):
+            assert method in (c["configure_errors"].get(method) or "")
+        assert c["invalid_configure_load_attempts"] == 0
+        assert c["ready_after_configure_null"] is True
+
+    @pytest.mark.parametrize(
+        ("function_start", "function_end"),
+        (
+            ("async function _loadFromStore()", "async function _installSession("),
+            ("async function _installSession(record)", "// ── ceremonies"),
+            ("async function signOn(passphrase, opts)", "// Provision the org's"),
+            ("async function signRegistryRequest(method, path, payload)",
+             "// Expiry watchdog:"),
+        ),
+    )
+    def test_core_ceremony_functions_use_only_injected_adapters(
+        self, function_start, function_end,
+    ):
+        source = (
+            Path(__file__).parents[1]
+            / "static" / "js" / "network-signon.js"
+        ).read_text()
+        body = source.split(function_start, 1)[1].split(function_end, 1)[0]
+        forbidden = re.compile(
+            r"\b(?:indexedDB|localStorage)\b|_idbOp|"
+            r"_browserSubjectId\s*\(|(?<![\w.])fetch\s*\("
+        )
+        assert not forbidden.search(body), (
+            f"{function_start} bypasses the injected adapter seam"
+        )
 
     # ── acceptance: signer survives without owning shell chrome ──
 
