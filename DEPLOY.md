@@ -175,9 +175,12 @@ persistent state:
 | `agent-runs`/ | `DASHBOARD_AGENT_RUNS_DIR` | session artifacts |
 | `session-traces`/ | `DASHBOARD_TRACE_DIR` | session traces |
 
-Every row is generated from `tools/data_paths.py::STORE_MANIFEST`, which is
-also what the resolvers and the contract test read — so this table cannot
-drift from the code. Each store resolves **environment variable first**,
+Every row is **test-coupled** to `tools/data_paths.py::STORE_MANIFEST`,
+which is also what the resolvers read: `test_volume_contract.py` fails if a
+manifest store is missing from this table, so a store can never be added to
+the contract and silently omitted here. (The coupling catches omissions, not
+a stale description or a hand-added row with no manifest entry — those need
+a real generator, which this table does not yet have.) Each store resolves **environment variable first**,
 then the volume root, then the repository-local default; setting a
 variable therefore moves that store for *every* reader at once. With
 `AUTONOMY_REFUSE_REAL_DATA_FALLBACK=1` an unrooted store raises instead of
