@@ -102,6 +102,42 @@ def scope_role_grant(role: str) -> str:
     return f"role:grant:{role}"
 
 
+def admitting_approvers(approver_keys, *, root, sponsor, role, holds) -> frozenset:
+    """The distinct approvers that count toward admitting a claim: root,
+    the invite's sponsor (vouch counts as one — D16), or a holder of
+    ``role:grant:<role>`` per the *holds(key, scope)* callable."""
+    return frozenset(
+        key
+        for key in approver_keys
+        if key == root or key == sponsor or holds(key, scope_role_grant(role))
+    )
+
+
+def claim_requirement_status(
+    *, requires, key_bound, approver_keys, threshold, root, sponsor, role, holds
+) -> tuple:
+    """``(have, need)`` under the claim-acceptance rule; admitted when
+    ``have >= need``.
+
+    THE single source of the acceptance core (B6 bearer safety, sponsor,
+    admin-ack, D16 threshold counting): ``_check_approvals`` applies it
+    at fold time and ``LedgerStore.evaluate_pending_claim`` applies it
+    to a staged body with merged approvals, so route-side readiness can
+    never drift from the fold's verdict. ``need`` is the TOTAL required
+    count (the "N of M" view); a key-bound ``self`` claim needs zero.
+    """
+    if requires == "self" and key_bound:
+        return (0, 0)  # a key binding establishes the redeemer (B6)
+    if requires == "sponsor":
+        return (1 if sponsor in approver_keys else 0, 1)
+    # admin-ack, and any TOKEN-bound claim (bearer safety): threshold
+    # distinct approvers from {root, sponsor, role:grant holders}.
+    admitting = admitting_approvers(
+        approver_keys, root=root, sponsor=sponsor, role=role, holds=holds
+    )
+    return (len(admitting), threshold)
+
+
 def scope_invite(role: str) -> str:
     return f"invite:{role}"
 
@@ -684,35 +720,33 @@ class _Folder:
                 )
             except IdkitError:
                 return R_APPROVAL_BAD
-        role_def = self.role_defs_at(ctx)[invite.role]
-        requires = role_def.claim_requires
-        if requires == "self" and invite.invite_pub is not None:
-            return None  # a key binding establishes the redeemer (B6)
-        approver_keys = [entry["key"] for entry in p["approvals"]]
-        if requires == "sponsor":
-            if invite.author in approver_keys:
-                return None
-            return R_APPROVAL_MISSING
-        # Reached for admin-ack, AND for any TOKEN-bound claim (the bearer
-        # safety invariant, register B6, enforced HERE because the fold is
-        # the only layer a headless client cannot bypass): the fold cannot
+        # The acceptance core is claim_requirement_status — shared with
+        # the pending-claim readiness seam so the two can never diverge.
+        # Bearer safety (register B6) is enforced HERE because the fold is
+        # the one layer a headless client cannot bypass: the fold cannot
         # distinguish an email-delivered token from a raw bearer token, so
-        # a token-bound claim never self-completes — it needs at least
-        # approver_threshold DISTINCT approvers, each being root, the
-        # invite's sponsor (whose vouch counts as one — register D16;
-        # issuing already spent invite:<role> authority), or a
-        # role:grant:<role> holder. approver_keys is duplicate-free at
-        # validation; the set makes distinctness explicit.
-        held, _ = self.authority(ctx, ref_ts=event.hlc.ts)
-        root = self.root_at(ctx)
-        admitting = {
-            key
-            for key in approver_keys
-            if key == root
-            or key == invite.author
-            or set_covers(held.get(key, frozenset()), scope_role_grant(invite.role))
-        }
-        if len(admitting) >= role_def.approver_threshold:
+        # a token-bound claim never self-completes regardless of the
+        # role's claim_requires. approver_keys is duplicate-free at
+        # validation; authority is evaluated lazily at the claim's ts.
+        role_def = self.role_defs_at(ctx)[invite.role]
+        held_cache: list = []
+
+        def holds(key: str, scope: str) -> bool:
+            if not held_cache:
+                held_cache.append(self.authority(ctx, ref_ts=event.hlc.ts)[0])
+            return set_covers(held_cache[0].get(key, frozenset()), scope)
+
+        have, need = claim_requirement_status(
+            requires=role_def.claim_requires,
+            key_bound=invite.invite_pub is not None,
+            approver_keys=[entry["key"] for entry in p["approvals"]],
+            threshold=role_def.approver_threshold,
+            root=self.root_at(ctx),
+            sponsor=invite.author,
+            role=invite.role,
+            holds=holds,
+        )
+        if have >= need:
             return None
         return R_APPROVAL_MISSING
 
