@@ -31,7 +31,17 @@ _SCHEMA_USER_VERSION = 1
 DEFAULT_DB = REPO_ROOT / "data" / "graph.db"
 DEFAULT_ORGS_DIR = REPO_ROOT / "data" / "orgs"
 
+# Keep SQLite's existing default lock wait explicit so contention tests can
+# shorten it without changing production behavior.  An rw open gets three
+# additional attempts after the first failure.
+_SQLITE_CONNECT_TIMEOUT_S = 5.0
+_RW_OPEN_BACKOFF_S = (0.05, 0.1, 0.2)
+
 VALID_ORG_TYPES = ("shared", "personal")
+
+
+class GraphDBNotReady(RuntimeError):
+    """The database exists but cannot serve schema-backed reads yet."""
 
 
 def _orgs_dir(root: Path | str | None = None) -> Path:
@@ -198,16 +208,65 @@ class GraphDB:
         if mode == "ro":
             self._open_ro()
             return
-        try:
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            self.conn = sqlite3.connect(str(self.db_path))
-            self.conn.row_factory = sqlite3.Row
-            self.conn.execute("PRAGMA journal_mode = WAL")
-            self.conn.execute("PRAGMA foreign_keys = ON")
-            self._init_schema()
-        except (sqlite3.OperationalError, OSError):
-            # Read-only mount — try mode=ro first (WAL-visible), fall back to immutable
+
+        last_error: sqlite3.OperationalError | OSError | None = None
+        for delay_s in (0.0, *_RW_OPEN_BACKOFF_S):
+            if delay_s:
+                time.sleep(delay_s)
+            try:
+                self._open_rw_once()
+                return
+            except (sqlite3.OperationalError, OSError) as exc:
+                self._discard_failed_connection()
+                last_error = exc
+
+        assert last_error is not None
+        if self._rw_path_is_read_only(last_error):
             self._open_ro()
+            return
+        raise last_error
+
+    def _open_rw_once(self) -> None:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(
+            str(self.db_path),
+            timeout=_SQLITE_CONNECT_TIMEOUT_S,
+        )
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode = WAL")
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        self._init_schema()
+
+    def _discard_failed_connection(self) -> None:
+        conn = getattr(self, "conn", None)
+        if conn is None:
+            return
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+        del self.conn
+
+    def _rw_path_is_read_only(
+        self,
+        error: sqlite3.OperationalError | OSError,
+    ) -> bool:
+        """True only when falling back from rw to ro is justified."""
+        parent_writable = os.access(self.db_path.parent, os.W_OK)
+        file_writable = (
+            not self.db_path.exists()
+            or os.access(self.db_path, os.W_OK)
+        )
+        message = str(error).lower()
+        sqlite_reported_read_only = (
+            self.db_path.exists()
+            and ("readonly" in message or "read-only" in message)
+        )
+        return (
+            not parent_writable
+            or not file_writable
+            or sqlite_reported_read_only
+        )
 
     def _open_ro(self):
         """Open the DB read-only. Used when the filesystem is ro-mounted
@@ -222,15 +281,31 @@ class GraphDB:
         follow-up bead."""
         try:
             self.conn = sqlite3.connect(
-                f"file:{self.db_path}?mode=ro", uri=True, check_same_thread=False,
+                f"file:{self.db_path}?mode=ro",
+                uri=True,
+                check_same_thread=False,
+                timeout=_SQLITE_CONNECT_TIMEOUT_S,
             )
             self.conn.row_factory = sqlite3.Row
         except (sqlite3.OperationalError, OSError):
             self.conn = sqlite3.connect(
-                f"file:{self.db_path}?immutable=1", uri=True, check_same_thread=False,
+                f"file:{self.db_path}?immutable=1",
+                uri=True,
+                check_same_thread=False,
+                timeout=_SQLITE_CONNECT_TIMEOUT_S,
             )
             self.conn.row_factory = sqlite3.Row
             self._immutable = True
+        user_version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        has_settings = self.conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'settings'"
+        ).fetchone()
+        if user_version == 0 and has_settings is None:
+            self.conn.close()
+            raise GraphDBNotReady(
+                f"database schema is not initialized yet: {self.db_path}"
+            )
         self.read_only = True
 
     def _init_schema(self):

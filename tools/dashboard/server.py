@@ -15779,6 +15779,14 @@ def _build_settings_mediator_services():
         crosstalk=CrosstalkService(send_fn=tmux_send),
     )
 
+
+def _warm_personal_settings_store() -> None:
+    """Finish personal-store schema/WAL setup before the gate can read it."""
+    from tools.graph.db import GraphDB, resolve_caller_db_path
+
+    GraphDB(resolve_caller_db_path(None)).close()
+
+
 async def _on_startup():
     global _dispatch_watcher_task, _mock_event_watcher_task, _harness_usage_poller_task
     global _claude_credentials_refresh_task, _event_loop_watchdog_task
@@ -15850,6 +15858,12 @@ async def _on_startup():
         org_ops.ensure_bootstrap_orgs()
     except Exception:
         logger.exception("ensure_bootstrap_orgs() failed; continuing startup")
+    try:
+        await asyncio.to_thread(_warm_personal_settings_store)
+    except Exception:
+        logger.exception(
+            "personal settings store warm-open failed; continuing startup"
+        )
     try:
         from tools.graph.commit_policy import seed_default_workspace_policies
         seed_default_workspace_policies(workspace_settings.load_workspaces())

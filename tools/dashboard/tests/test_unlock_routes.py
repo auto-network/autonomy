@@ -507,6 +507,72 @@ class TestGateFailsClosedOnReadError:
         assert env.get("/beads").status_code == 200
         assert reads == 0
 
+    def test_short_write_lock_recovers_without_gate_flip(
+            self, env, root, tmp_path, monkeypatch):
+        import sqlite3
+        import threading
+        from tools.graph import db as graph_db
+
+        _store_identity(env, root)
+        personal_db = tmp_path / "graph.db"
+        with sqlite3.connect(personal_db) as conn:
+            conn.execute("PRAGMA user_version = 0")
+
+        holder = sqlite3.connect(personal_db, check_same_thread=False)
+        holder.execute("BEGIN IMMEDIATE")
+        release = threading.Timer(0.15, holder.rollback)
+        release.start()
+        monkeypatch.setattr(
+            graph_db, "_SQLITE_CONNECT_TIMEOUT_S", 0.01
+        )
+        unlock_routes._enforce_cache.update({"at": 0.0, "value": None})
+
+        try:
+            assert unlock_routes.human_auth_enrolled() is True
+            # A cached value proves the read recovered rather than taking
+            # the uncached fail-closed branch.
+            assert unlock_routes._enforce_cache["value"] is True
+        finally:
+            release.join(timeout=1)
+            if holder.in_transaction:
+                holder.rollback()
+            holder.close()
+
+    def test_long_write_lock_fails_closed_then_recovers(
+            self, env, tmp_path, monkeypatch):
+        import sqlite3
+        from tools.graph import db as graph_db
+        from tools.graph.db import GraphDB
+
+        personal_db = tmp_path / "graph.db"
+        GraphDB(personal_db).close()
+        with sqlite3.connect(personal_db) as conn:
+            conn.execute("PRAGMA user_version = 0")
+
+        holder = sqlite3.connect(personal_db)
+        holder.execute("BEGIN IMMEDIATE")
+        monkeypatch.setattr(graph_db, "_SQLITE_CONNECT_TIMEOUT_S", 0.0)
+        monkeypatch.setattr(
+            graph_db, "_RW_OPEN_BACKOFF_S", (0.001, 0.001, 0.001)
+        )
+        monkeypatch.setattr(
+            unlock_routes, "_ENROLLMENT_READ_RETRY_S", 0.001
+        )
+        unlock_routes._enforce_cache.update({"at": 0.0, "value": None})
+
+        try:
+            assert unlock_routes.human_auth_enrolled() is True
+            assert unlock_routes._enforce_cache == {
+                "at": 0.0,
+                "value": None,
+            }
+        finally:
+            holder.rollback()
+            holder.close()
+
+        assert unlock_routes.human_auth_enrolled() is False
+        assert unlock_routes._enforce_cache["value"] is False
+
     @pytest.mark.parametrize("cached", [False, True])
     def test_warm_cache_is_returned_without_read(
             self, env, monkeypatch, cached):
@@ -520,6 +586,31 @@ class TestGateFailsClosedOnReadError:
         monkeypatch.setattr(unlock_routes, "_personal_member", unavailable)
 
         assert unlock_routes.human_auth_enrolled() is cached
+
+
+def test_server_startup_warm_open_prepares_first_gate_read(
+        env, tmp_path, monkeypatch):
+    import sqlite3
+    from tools.dashboard import server
+    from tools.graph import db as graph_db
+    from tools.graph.db import GraphDB
+
+    personal_db = tmp_path / "graph.db"
+    assert not personal_db.exists()
+
+    server._warm_personal_settings_store()
+
+    with sqlite3.connect(personal_db) as conn:
+        assert conn.execute(
+            "PRAGMA user_version"
+        ).fetchone()[0] == graph_db._SCHEMA_USER_VERSION
+
+    def unexpected_schema_init(_self):
+        raise AssertionError("first gate read must use the warmed schema")
+
+    monkeypatch.setattr(GraphDB, "_migrate_settings", unexpected_schema_init)
+    unlock_routes._enforce_cache.update({"at": 0.0, "value": None})
+    assert unlock_routes.human_auth_enrolled() is False
 
 
 def test_store_failure_is_closed_when_enrolled_but_kill_switch_escapes(
