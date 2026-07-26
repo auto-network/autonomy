@@ -395,7 +395,11 @@ def test_node_commands_found_locally_and_optionally_register(
         assert wrong.returncode != 0
         assert "wrong passphrase" in wrong.stderr
         assert len(posts) == posts_before_wrong_passphrase
-        assert not org_ledger_db_path(wrong_slug).exists()
+        # The authority ledger is co-located with the pre-existing org
+        # database. A bad passphrase must leave it unfounded, not delete
+        # the organization's metadata database.
+        with LedgerStore(org_ledger_db_path(wrong_slug)) as store:
+            assert len(store) == 0
 
         wrong_personal_slug = "wrong-personal-passphrase-org"
         wrong_personal_org_id = "019c0000-0000-7000-8000-000000000104"
@@ -426,7 +430,8 @@ def test_node_commands_found_locally_and_optionally_register(
         assert wrong_personal.returncode != 0
         assert "wrong passphrase" in wrong_personal.stderr
         assert len(posts) == posts_before_wrong_passphrase
-        assert not org_ledger_db_path(wrong_personal_slug).exists()
+        with LedgerStore(org_ledger_db_path(wrong_personal_slug)) as store:
+            assert len(store) == 0
 
         forged = dict(first["envelope"])
         forged["signer"] = KeyPair.generate().public_hex
