@@ -51,12 +51,17 @@ class StubService:
 
 @pytest.fixture
 def service(monkeypatch):
+    """Patch the _claim_service() seam, NOT sys.modules: once the real
+    module exists and has been imported, ``from tools.dashboard import
+    claim_service`` resolves the package attribute and would bypass a
+    sys.modules injection — making these tests pass alone but fail after
+    any test that imports the real service."""
     stub = StubService()
     module = types.ModuleType("tools.dashboard.claim_service")
     module.context = stub.context
     module.submit = stub.submit
     module.status = stub.status
-    monkeypatch.setitem(sys.modules, "tools.dashboard.claim_service", module)
+    monkeypatch.setattr(link_serving, "_claim_service", lambda: module)
     return stub
 
 
@@ -175,9 +180,7 @@ def test_service_fault_serves_the_refusal(service, grants, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("service exploded")
 
-    monkeypatch.setattr(
-        sys.modules["tools.dashboard.claim_service"], "context", boom
-    )
+    monkeypatch.setattr(link_serving._claim_service(), "context", boom)
     assert call(TOKEN, {"v": 1, "op": "context"}) == link_serving.REFUSED
 
 
