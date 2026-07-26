@@ -43,6 +43,13 @@ from .revocation import (
     issue_revocation,
     verify_revocation,
 )
+from .sealing import (
+    SUITE_X25519_HKDF_SHA256_CHACHA20POLY1305,
+    SealingError,
+    derive_encapsulation_keypair,
+    seal,
+)
+from .sealing import open as seal_open  # package alias: don't shadow builtins.open
 from .tokens import TOKEN_BITS, TOKEN_HEX_LEN, generate_token
 from .verify import ChainVerifyResult, verify_chain, walk_chain
 
@@ -67,6 +74,12 @@ __all__ = [
     "derive_persona",
     "PERSONA_SALT",
     "PERSONA_SEED_LEN",
+    # sealing
+    "seal",
+    "seal_open",
+    "derive_encapsulation_keypair",
+    "SealingError",
+    "SUITE_X25519_HKDF_SHA256_CHACHA20POLY1305",
     # tokens
     "generate_token",
     "TOKEN_BITS",
