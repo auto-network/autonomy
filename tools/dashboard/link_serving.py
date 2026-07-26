@@ -524,6 +524,70 @@ def resolve_target(grant: dict, *, org: str | None = None):
 # ── the connector handler (the C4 seam) ───────────────────────
 
 
+#: Ops an ``org:join`` grant serves (auto-4d6qm) — the membership claim
+#: protocol over the same E2E viewer channel every share link uses. The
+#: relay routes opaque frames; the claim (persona, profile, credential,
+#: and the BEARER TOKEN) is channel ciphertext end-to-end to this node.
+JOIN_OPS = ("context", "submit", "status")
+
+
+def _claim_service():
+    """The transport-agnostic claim service (auto-v3db2), imported lazily.
+
+    Lazy so this dispatch lands before the service does: until then a
+    join channel simply serves the uniform refusal, exactly as an
+    unresolvable target would.
+    """
+    from tools.dashboard import claim_service
+
+    return claim_service
+
+
+def _serve_join(grant: dict, org: str | None, request: dict) -> bytes:
+    """One ``org:join`` channel request → the claim_service envelope.
+
+    The grant's ``invite_ref`` is the invite locator (a join channel is
+    scoped to exactly one invitation), so a client cannot steer this
+    channel at another invite: a submitted event naming a different
+    ``invite_ref`` is refused here as defence in depth — the fold is
+    authoritative regardless.
+    """
+    invite_ref = grant.get("invite_ref")
+    if not isinstance(invite_ref, str):
+        return REFUSED  # schema guarantees it on org:join; re-checked (I9)
+    try:
+        service = _claim_service()
+    except Exception:
+        return REFUSED  # service not present yet / import fault: serve nothing
+    op = request["op"]
+    try:
+        if op == "context":
+            result = service.context(org, invite_ref)
+        elif op == "submit":
+            wire = request.get("event")
+            if not isinstance(wire, str) or not wire:
+                return BAD_REQUEST
+            raw = wire.encode("utf-8")
+            try:
+                payload_ref = json.loads(raw)["payload"]["invite_ref"]
+            except (ValueError, KeyError, TypeError):
+                return BAD_REQUEST
+            if payload_ref != invite_ref:
+                return REFUSED  # channel is scoped to its own invitation
+            result = service.submit(org, raw)
+        else:  # status
+            persona_pub = request.get("persona_pub")
+            if not isinstance(persona_pub, str) or not persona_pub:
+                return BAD_REQUEST
+            result = service.status(org, invite_ref, persona_pub)
+    except Exception:
+        return REFUSED  # service faults serve nothing, not stack traces
+    try:
+        return canonical_json({"v": 1, **result}) + b"\n"
+    except Exception:
+        return REFUSED
+
+
 def make_grant_handler(org: str | None = None, *, now=None):
     """Build the ``handler(token, message)`` the B2 connector serves with.
 
@@ -554,6 +618,12 @@ def make_grant_handler(org: str | None = None, *, now=None):
             }) + b"\n"
         return canonical_json(header) + b"\n" + body
 
+    def _join(token: str, request: dict) -> bytes:
+        grant = check_grant(token, org=org, now=clock())
+        if grant is None or grant["target_type"] != "org:join":
+            return REFUSED  # a content token never serves the join protocol
+        return _serve_join(grant, org, request)
+
     async def handler(token: str, message: bytes) -> bytes:
         try:
             request = json.loads(message)
@@ -561,13 +631,15 @@ def make_grant_handler(org: str | None = None, *, now=None):
             return BAD_REQUEST
         if not isinstance(request, dict):
             return BAD_REQUEST
-        if set(request) != {"v", "op"} or request.get("v") != 1:
+        if request.get("v") != 1:
             return BAD_REQUEST
         op = request.get("op")
-        if op not in ("fetch", "head"):
-            return BAD_REQUEST
         # Settings + sqlite + file reads are blocking; keep them off the
         # tunnel's event loop so one slow lookup can't stall siblings.
+        if op in JOIN_OPS:
+            return await asyncio.to_thread(_join, token, request)
+        if op not in ("fetch", "head") or set(request) != {"v", "op"}:
+            return BAD_REQUEST
         return await asyncio.to_thread(_serve, token, op == "head")
 
     return handler
