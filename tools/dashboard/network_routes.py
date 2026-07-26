@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import tempfile
 import time
 import urllib.parse
 from pathlib import Path
@@ -355,34 +354,28 @@ async def post_ledger_found(request: Request) -> JSONResponse:
             status_code=400,
         )
 
-    store_path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{requested_org}-found-",
-        suffix=".ledger.db",
-        dir=store_path.parent,
-    )
-    os.close(descriptor)
-    temporary_path = Path(temporary_name)
     try:
-        with LedgerStore(temporary_path) as durable:
+        # The ledger tables are co-located inside the existing organization
+        # database. Never replace that file: doing so would erase the orgs
+        # row, graph content, and schema stamp. The complete batch has already
+        # passed isolated validation above, so only verified events reach this
+        # durable append path.
+        with LedgerStore(store_path) as durable:
+            if len(durable) > 0:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "organization ledger is already founded",
+                    },
+                    status_code=409,
+                )
             event_ids = [durable.append(event) for event in events]
             durable.refresh_projections(now=events[-1].hlc.ts)
-        os.replace(temporary_path, store_path)
     except (LedgerError, OSError) as exc:
         return JSONResponse(
             {"ok": False, "error": f"could not persist founding batch: {exc}"},
             status_code=500,
         )
-    finally:
-        for candidate_path in (
-            temporary_path,
-            Path(f"{temporary_path}-wal"),
-            Path(f"{temporary_path}-shm"),
-        ):
-            try:
-                candidate_path.unlink()
-            except FileNotFoundError:
-                pass
 
     return JSONResponse(
         {
