@@ -61,6 +61,7 @@ def graph_db_env(tmp_path, monkeypatch):
 ROOT_PUB = "ab" * 32
 TOKEN = "00112233445566778899aabbccddeeff"
 TARGET_UUID = "9110a85b-0000-4000-8000-000000000000"
+INVITE_REF = "bc" * 32
 
 
 def _org_key_material():
@@ -314,6 +315,47 @@ def test_link_grant_persona_subject_is_reserved_rung_2():
     payload = link_grant_payload()
     payload["subject"] = {"kind": "persona", "id": "p-1"}
     with pytest.raises(SchemaValidationError, match="persona.*RESERVED|RESERVED.*rung 2"):
+        validate_payload(
+            ni.NETWORK_LINK_GRANT_SET_ID,
+            ni.NETWORK_LINK_GRANT_REVISION,
+            payload,
+        )
+
+
+def test_link_grant_org_join_requires_exact_invite_reference():
+    assert "org:join" in ni.TARGET_TYPES
+    payload = link_grant_payload()
+    payload["target_type"] = "org:join"
+    payload["invite_ref"] = INVITE_REF
+    validate_payload(
+        ni.NETWORK_LINK_GRANT_SET_ID,
+        ni.NETWORK_LINK_GRANT_REVISION,
+        payload,
+    )
+
+    missing = dict(payload)
+    missing.pop("invite_ref")
+    with pytest.raises(SchemaValidationError, match="invite_ref"):
+        validate_payload(
+            ni.NETWORK_LINK_GRANT_SET_ID,
+            ni.NETWORK_LINK_GRANT_REVISION,
+            missing,
+        )
+
+    malformed = dict(payload)
+    malformed["invite_ref"] = "BC" * 32
+    with pytest.raises(SchemaValidationError, match="invite_ref"):
+        validate_payload(
+            ni.NETWORK_LINK_GRANT_SET_ID,
+            ni.NETWORK_LINK_GRANT_REVISION,
+            malformed,
+        )
+
+
+def test_link_grant_non_join_refuses_invite_reference():
+    payload = link_grant_payload()
+    payload["invite_ref"] = INVITE_REF
+    with pytest.raises(SchemaValidationError, match="only valid.*org:join"):
         validate_payload(
             ni.NETWORK_LINK_GRANT_SET_ID,
             ni.NETWORK_LINK_GRANT_REVISION,

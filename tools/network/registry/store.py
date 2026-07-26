@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS links (
     org_uuid     TEXT NOT NULL,
     target_uuid  TEXT NOT NULL,
     target_type  TEXT NOT NULL,
+    invite_ref   TEXT,
     meta         TEXT NOT NULL,
     created_at   INTEGER NOT NULL,
     expires_at   INTEGER,
@@ -279,6 +280,7 @@ class LinkGrant:
     signer_pub: str
     subject_kind: str
     subject_id: str
+    invite_ref: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -346,6 +348,11 @@ class RegistryStore:
             self._conn.execute(
                 "ALTER TABLE orgs ADD COLUMN policy_epoch INTEGER NOT NULL DEFAULT 0"
             )
+        link_cols = {
+            r["name"] for r in self._conn.execute("PRAGMA table_info(links)")
+        }
+        if "invite_ref" not in link_cols:
+            self._conn.execute("ALTER TABLE links ADD COLUMN invite_ref TEXT")
 
     @_locked
     def close(self) -> None:
@@ -520,19 +527,21 @@ class RegistryStore:
             signer_pub=row["signer_pub"],
             subject_kind=row["subject_kind"],
             subject_id=row["subject_id"],
+            invite_ref=row["invite_ref"],
         )
 
     @_locked
     def create_link(self, grant: LinkGrant) -> None:
         self._conn.execute(
-            "INSERT INTO links (token, org_uuid, target_uuid, target_type, meta,"
+            "INSERT INTO links (token, org_uuid, target_uuid, target_type, invite_ref, meta,"
             " created_at, expires_at, revoked_at, signer_pub, subject_kind, subject_id)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
             (
                 grant.token,
                 grant.org_uuid,
                 grant.target_uuid,
                 grant.target_type,
+                grant.invite_ref,
                 json.dumps(grant.meta),
                 grant.created_at,
                 grant.expires_at,

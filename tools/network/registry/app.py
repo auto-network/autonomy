@@ -670,7 +670,9 @@ def create_app(
         payload = envelope["payload"]
         _require_fields(
             payload,
-            allowed=frozenset({"org", "target_uuid", "target_type", "meta"}),
+            allowed=frozenset(
+                {"org", "target_uuid", "target_type", "invite_ref", "meta"}
+            ),
             required=frozenset({"org", "target_uuid", "target_type"}),
             what="link payload",
         )
@@ -679,6 +681,21 @@ def create_app(
         target_type = payload["target_type"]
         if not isinstance(target_type, str) or not target_type:
             raise _bad_request("target_type must be a non-empty string")
+        invite_ref = payload.get("invite_ref")
+        if target_type == "org:join":
+            if (
+                not isinstance(invite_ref, str)
+                or not _HASH_RE.fullmatch(invite_ref)
+            ):
+                raise _bad_request(
+                    "org:join invite_ref must be a 64-char lowercase hex event id"
+                )
+            if target_uuid != org_uuid:
+                raise _bad_request(
+                    "org:join target_uuid must equal the organization UUID"
+                )
+        elif invite_ref is not None:
+            raise _bad_request("invite_ref is only valid for target_type org:join")
         meta = payload.get("meta", {})
         if not isinstance(meta, dict):
             raise _bad_request("meta must be a JSON object")
@@ -705,6 +722,7 @@ def create_app(
                 org_uuid=org_uuid,
                 target_uuid=target_uuid,
                 target_type=target_type,
+                invite_ref=invite_ref,
                 meta=meta,
                 created_at=t,
                 expires_at=t + link_ttl if link_ttl is not None else None,
@@ -808,6 +826,7 @@ def create_app(
             "org": link.org_uuid,
             "target_uuid": link.target_uuid,
             "target_type": link.target_type,
+            "invite_ref": link.invite_ref,
             "meta": link.meta,
             "root_pub": binding.root_pub,
             # Direct-connect upgrade seam (§5.4): empty in v1; the

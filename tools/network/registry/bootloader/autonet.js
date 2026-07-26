@@ -642,6 +642,37 @@ const autonet = (() => {
     setStatus(state.artifactTitle || "");
   }
 
+  function assembleJoinContext(envelope, fragmentToken) {
+    if (!envelope || typeof envelope !== "object" ||
+        typeof envelope.org !== "string" || !envelope.org ||
+        typeof envelope.root_pub !== "string" ||
+        !/^[0-9a-f]{64}$/.test(envelope.root_pub) ||
+        typeof envelope.invite_ref !== "string" ||
+        !/^[0-9a-f]{64}$/.test(envelope.invite_ref) ||
+        typeof fragmentToken !== "string" || fragmentToken.length === 0 ||
+        fragmentToken.length > 128) {
+      throw new Error("invalid organization invitation context");
+    }
+    return {
+      org: envelope.org,
+      rootPub: envelope.root_pub,
+      inviteRef: envelope.invite_ref,
+      token: fragmentToken,
+    };
+  }
+
+  function deliverJoinContext(context) {
+    const query = new URLSearchParams({
+      org: context.org,
+      root_pub: context.rootPub,
+      invite_ref: context.inviteRef,
+    });
+    const destination = "/network/join?" + query.toString() +
+      "#t=" + encodeURIComponent(context.token);
+    location.assign(destination);
+    return destination;
+  }
+
   async function boot() {
     const token = location.pathname.split("/").pop();
     if (!/^[0-9a-f]{32}$/.test(token)) return showError("invalid");
@@ -658,6 +689,21 @@ const autonet = (() => {
       }
       if (!response.ok) return showError("invalid");
       const envelope = await response.json();
+
+      if (envelope.target_type === "org:join") {
+        try {
+          const fragmentToken = decodeURIComponent(
+            location.hash.replace(/^#/, "")
+          );
+          const context = assembleJoinContext(envelope, fragmentToken);
+          state.phase = "join";
+          deliverJoinContext(context);
+          return;
+        } catch (err) {
+          state.error = String(err && err.message || err);
+          return showError("invalid");
+        }
+      }
 
       state.phase = "connecting";
       setStatus("connecting…");
@@ -718,6 +764,7 @@ const autonet = (() => {
     state, boot, canonicalJson, verifyChain, attemptEndpoints,
     attemptDirectEndpoint, performHandshake, openSocket, fetchArtifact,
     validateArtifact, renderArtifact,
+    assembleJoinContext, deliverJoinContext,
     withTimeout,
   };
 })();
