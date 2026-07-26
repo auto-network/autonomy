@@ -41,6 +41,7 @@ Write routes backing the C1 create-org-identity ceremony in
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import time
 import urllib.parse
@@ -430,6 +431,219 @@ async def get_ledger_heads(request: Request) -> JSONResponse:
             {"ok": False, "error": f"could not read authority ledger: {exc}"},
             status_code=500,
         )
+
+
+def _claim_http_response(envelope: dict) -> JSONResponse:
+    """Map one claim-service outcome to HTTP without changing its body."""
+    discriminator = envelope.get("status")
+    if discriminator in {"ok", "admitted", "pending", "ready", "absent"}:
+        code = 200
+    elif discriminator == "gone":
+        code = {
+            "invite-expired": 410,
+            "invite-already-claimed": 409,
+        }.get(envelope.get("reason"), 404)
+    elif discriminator == "rejected":
+        reason = envelope.get("reason")
+        if reason in {
+            "claim-bad-token",
+            "claim-wrong-key",
+            "approver-not-authorized",
+        }:
+            code = 403
+        elif reason in {
+            "invite-already-claimed",
+            "persona-exists",
+            "stale-heads",
+        }:
+            code = 409
+        else:
+            code = 400
+    else:
+        code = 500
+    return JSONResponse(envelope, status_code=code)
+
+
+def _claim_http_fault(exc: Exception) -> JSONResponse:
+    """Malformed/internal exceptions are outside normal protocol outcomes."""
+    from tools.network.ledger import LedgerError
+
+    if isinstance(exc, FileNotFoundError):
+        return JSONResponse(
+            {"status": "gone", "reason": "unknown-org"},
+            status_code=404,
+        )
+    if isinstance(exc, (LedgerError, TypeError, ValueError)):
+        return JSONResponse(
+            {
+                "status": "rejected",
+                "reason": "malformed-input",
+                "detail": str(exc),
+            },
+            status_code=400,
+        )
+    return JSONResponse(
+        {"status": "rejected", "reason": "internal-error"},
+        status_code=500,
+    )
+
+
+def _claim_key_matches(
+    claim_key: str,
+    invite_ref: object,
+    persona_pub: object,
+) -> bool:
+    if not isinstance(invite_ref, str) or not isinstance(persona_pub, str):
+        return False
+    try:
+        material = (invite_ref + persona_pub).encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return hashlib.sha256(material).hexdigest() == claim_key
+
+
+async def post_ledger_claim(request: Request) -> JSONResponse:
+    """Thin HTTP adapter for transport-neutral claim submit/finalize."""
+    if _mock_mode():
+        return JSONResponse(
+            {"ok": False, "error": "mock dashboard has no authority ledger"},
+            status_code=502,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+    requested_org = body.get("org")
+    if not isinstance(requested_org, str) or not requested_org:
+        return JSONResponse(
+            {"error": "body must carry the local org slug"},
+            status_code=400,
+        )
+    _org, refused = _scoped_org(requested_org)
+    if refused is not None:
+        return refused
+    wire = body.get("event")
+    if not isinstance(wire, str):
+        return JSONResponse(
+            {"error": "body must carry an event canonical wire string"},
+            status_code=400,
+        )
+    from tools.dashboard import claim_service
+    try:
+        return _claim_http_response(claim_service.submit(requested_org, wire))
+    except Exception as exc:
+        return _claim_http_fault(exc)
+
+
+async def get_ledger_claim_context(request: Request) -> JSONResponse:
+    """Thin HTTP adapter for public invite/authority minting context."""
+    if _mock_mode():
+        return JSONResponse(
+            {"error": "mock dashboard has no authority ledger"},
+            status_code=502,
+        )
+    requested_org = request.query_params.get("org")
+    invite_ref = request.query_params.get("invite_ref")
+    if not isinstance(requested_org, str) or not requested_org:
+        return JSONResponse(
+            {"error": "query must carry the local org slug"},
+            status_code=400,
+        )
+    _org, refused = _scoped_org(requested_org)
+    if refused is not None:
+        return refused
+    from tools.dashboard import claim_service
+    try:
+        return _claim_http_response(
+            claim_service.context(requested_org, invite_ref)
+        )
+    except Exception as exc:
+        return _claim_http_fault(exc)
+
+
+async def get_ledger_claim(request: Request) -> JSONResponse:
+    """Thin HTTP adapter for pending/admitted/absent claim status."""
+    if _mock_mode():
+        return JSONResponse(
+            {"error": "mock dashboard has no authority ledger"},
+            status_code=502,
+        )
+    claim_key = request.path_params["claim_key"]
+    requested_org = request.query_params.get("org")
+    invite_ref = request.query_params.get("invite_ref")
+    persona_pub = request.query_params.get("persona_pub")
+    if not isinstance(requested_org, str) or not requested_org:
+        return JSONResponse(
+            {"error": "query must carry the local org slug"},
+            status_code=400,
+        )
+    _org, refused = _scoped_org(requested_org)
+    if refused is not None:
+        return refused
+    if not _claim_key_matches(claim_key, invite_ref, persona_pub):
+        return JSONResponse(
+            {"status": "rejected", "reason": "claim-key-mismatch"},
+            status_code=400,
+        )
+    from tools.dashboard import claim_service
+    try:
+        return _claim_http_response(
+            claim_service.status(requested_org, invite_ref, persona_pub)
+        )
+    except Exception as exc:
+        return _claim_http_fault(exc)
+
+
+async def post_ledger_claim_approval(request: Request) -> JSONResponse:
+    """Thin HTTP adapter for signature-verified countersignature merge."""
+    if _mock_mode():
+        return JSONResponse(
+            {"error": "mock dashboard has no authority ledger"},
+            status_code=502,
+        )
+    claim_key = request.path_params["claim_key"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "body must be JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+    requested_org = body.get("org")
+    if not isinstance(requested_org, str) or not requested_org:
+        return JSONResponse(
+            {"error": "body must carry the local org slug"},
+            status_code=400,
+        )
+    _org, refused = _scoped_org(requested_org)
+    if refused is not None:
+        return refused
+    invite_ref = body.get("invite_ref")
+    persona_pub = body.get("persona_pub")
+    if not _claim_key_matches(claim_key, invite_ref, persona_pub):
+        return JSONResponse(
+            {"status": "rejected", "reason": "claim-key-mismatch"},
+            status_code=400,
+        )
+    entry = body.get("approval")
+    if not isinstance(entry, dict):
+        return JSONResponse(
+            {"error": "body must carry one approval object"},
+            status_code=400,
+        )
+    from tools.dashboard import claim_service
+    try:
+        return _claim_http_response(
+            claim_service.countersign(
+                requested_org,
+                invite_ref,
+                persona_pub,
+                entry,
+            )
+        )
+    except Exception as exc:
+        return _claim_http_fault(exc)
 
 
 async def post_ledger_invite(request: Request) -> JSONResponse:
@@ -902,6 +1116,18 @@ ROUTES = [
     Route("/api/network/ledger/found", post_ledger_found, methods=["POST"]),
     Route("/api/network/ledger/heads", get_ledger_heads, methods=["GET"]),
     Route("/api/network/ledger/invite", post_ledger_invite, methods=["POST"]),
+    Route("/api/network/ledger/claim", post_ledger_claim, methods=["POST"]),
+    Route(
+        "/api/network/ledger/claim/context",
+        get_ledger_claim_context,
+        methods=["GET"],
+    ),
+    Route("/api/network/ledger/claim/{claim_key}", get_ledger_claim, methods=["GET"]),
+    Route(
+        "/api/network/ledger/claim/{claim_key}/approval",
+        post_ledger_claim_approval,
+        methods=["POST"],
+    ),
     Route("/api/network/register", post_register, methods=["POST"]),
     Route("/api/network/serve-cert", post_serve_cert, methods=["POST"]),
     Route("/api/network/revocations", post_revocation, methods=["POST"]),
