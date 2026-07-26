@@ -14,6 +14,7 @@ canonical signed-record helpers every record module reuses.
 Pure library: depends on ``idkit`` and the standard library only.
 """
 
+from .credentials import domain_member_keys, select_current_credential
 from .errors import (
     CommitmentError,
     MalformedRecordError,
@@ -39,6 +40,9 @@ from .suites import (
 )
 
 __all__ = [
+    # credentials
+    "domain_member_keys",
+    "select_current_credential",
     # errors
     "StorageError",
     "MalformedRecordError",
