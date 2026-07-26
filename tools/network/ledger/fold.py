@@ -686,18 +686,23 @@ class _Folder:
                 return R_APPROVAL_BAD
         role_def = self.role_defs_at(ctx)[invite.role]
         requires = role_def.claim_requires
-        if requires == "self":
-            return None
+        if requires == "self" and invite.invite_pub is not None:
+            return None  # a key binding establishes the redeemer (B6)
         approver_keys = [entry["key"] for entry in p["approvals"]]
         if requires == "sponsor":
             if invite.author in approver_keys:
                 return None
             return R_APPROVAL_MISSING
-        # admin-ack: at least approver_threshold DISTINCT approvers, each
-        # being root, the invite's sponsor (whose vouch counts as one —
-        # register D16; issuing the invite already spent invite:<role>
-        # authority), or a role:grant:<role> holder. approver_keys is
-        # duplicate-free at validation; the set makes distinctness explicit.
+        # Reached for admin-ack, AND for any TOKEN-bound claim (the bearer
+        # safety invariant, register B6, enforced HERE because the fold is
+        # the only layer a headless client cannot bypass): the fold cannot
+        # distinguish an email-delivered token from a raw bearer token, so
+        # a token-bound claim never self-completes — it needs at least
+        # approver_threshold DISTINCT approvers, each being root, the
+        # invite's sponsor (whose vouch counts as one — register D16;
+        # issuing already spent invite:<role> authority), or a
+        # role:grant:<role> holder. approver_keys is duplicate-free at
+        # validation; the set makes distinctness explicit.
         held, _ = self.authority(ctx, ref_ts=event.hlc.ts)
         root = self.root_at(ctx)
         admitting = {
