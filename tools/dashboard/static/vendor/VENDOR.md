@@ -20,6 +20,7 @@ pin matches what the previously used unversioned CDN URL actually served):
 | `alpine.min.js` | alpinejs | 3.15.12 | https://cdn.jsdelivr.net/npm/alpinejs@3.15.12/dist/cdn.min.js |
 | `html2canvas.min.js` | html2canvas | 1.4.1 | https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js |
 | `tailwind-browser.min.js` | @tailwindcss/browser | 4.3.3 | https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.3 |
+| `hpke-x25519-chacha20poly1305-1.8.0.mjs` | @hpke/core + @hpke/dhkem-x25519 + @hpke/chacha20poly1305 + @hpke/common | 1.9.0 / 1.8.0 / 1.8.0 / 1.10.1 | https://www.npmjs.com/package/@hpke/core/v/1.9.0 |
 
 ```
 sha256:
@@ -32,6 +33,7 @@ c45ba939765574f96cbf35ee9b6d89f73756a17921814425e74b82f7c54603ce  purify.min.js
 57b37d7cae9a27d965fdae4adcc844245dfdc407e655aee85dcfff3a08036a3f  alpine.min.js
 e87e550794322e574a1fda0c1549a3c70dae5a93d9113417a429016838eab8cb  html2canvas.min.js
 6d8c473ef2f8ad63feafc0bd76502dda31501a6c135dc4c6173f6268cde595be  tailwind-browser.min.js
+621ad61d026f526711ad0842b03ab92d735a96c1f173a62005f196bb4ecac37d  hpke-x25519-chacha20poly1305-1.8.0.mjs
 ```
 
 To update: download the new pinned URL into this directory, refresh the

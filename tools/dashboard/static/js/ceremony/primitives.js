@@ -289,3 +289,10 @@ export {
   decryptArmor,
   importEd25519RootSigningKey,
 };
+
+export {
+  SUITE_X25519_HKDF_SHA256_CHACHA20POLY1305,
+  deriveEncapsulationKeypair,
+  openSealedArmor,
+  sealToEncapsulationKey,
+} from './sealing.js';
