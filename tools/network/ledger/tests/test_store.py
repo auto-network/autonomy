@@ -150,9 +150,9 @@ class TestPersistence:
 
     def test_org_ledger_db_path(self, tmp_path, monkeypatch):
         monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path))
-        assert org_ledger_db_path("autonomy") == tmp_path / "autonomy.ledger.db"
+        assert org_ledger_db_path("autonomy") == tmp_path / "autonomy.db"
         monkeypatch.delenv("AUTONOMY_ORGS_DIR")
-        assert org_ledger_db_path("autonomy").name == "autonomy.ledger.db"
+        assert org_ledger_db_path("autonomy").name == "autonomy.db"
         assert org_ledger_db_path("autonomy", root=tmp_path).parent == tmp_path
 
 
@@ -163,7 +163,7 @@ class TestRebuildFromZero:
         first = store.refresh_projections()
         # wipe the derived views entirely, then refold from the event store
         with store.db:
-            store.db.execute("DELETE FROM projections")
+            store.db.execute("DELETE FROM ledger_projections")
         assert store.load_projections() == {}
         rebuilt = store.rebuild_projections()
         assert rebuilt == first
@@ -230,7 +230,7 @@ class TestL8TwoLayer:
         with pytest.raises(sqlite3.IntegrityError):
             with store.db:
                 store.db.execute(
-                    "INSERT INTO events(event_id, event_type, author_key, hlc_ts,"
+                    "INSERT INTO ledger_events(event_id, event_type, author_key, hlc_ts,"
                     " hlc_count, wire) VALUES (?, 'content.view', ?, 1, 0, X'00')",
                     ("ff" * 32, sim.root.public_hex),
                 )
@@ -244,10 +244,10 @@ class TestTamperDetection:
 
         raw = sqlite3.connect(db)
         (victim,) = raw.execute(
-            "SELECT event_id FROM events WHERE event_type='delegate' LIMIT 1"
+            "SELECT event_id FROM ledger_events WHERE event_type='delegate' LIMIT 1"
         ).fetchone()
         wire = raw.execute(
-            "SELECT wire FROM events WHERE event_id=?", (victim,)
+            "SELECT wire FROM ledger_events WHERE event_id=?", (victim,)
         ).fetchone()[0]
         tampered = bytes(wire).replace(b'"can_redelegate":true', b'"can_redelegate":false')
         if tampered == bytes(wire):
@@ -255,7 +255,7 @@ class TestTamperDetection:
                 b'"can_redelegate":false', b'"can_redelegate":true'
             )
         with raw:
-            raw.execute("UPDATE events SET wire=? WHERE event_id=?", (tampered, victim))
+            raw.execute("UPDATE ledger_events SET wire=? WHERE event_id=?", (tampered, victim))
         raw.close()
 
         with pytest.raises(TamperError):
@@ -267,10 +267,10 @@ class TestTamperDetection:
         store_from(sim, db).close()
         raw = sqlite3.connect(db)
         with raw:
-            raw.execute("DELETE FROM heads")
+            raw.execute("DELETE FROM ledger_heads")
             # genesis always has children here, so it is never a real head
             raw.execute(
-                "INSERT INTO heads(event_id) SELECT event_id FROM events"
+                "INSERT INTO ledger_heads(event_id) SELECT event_id FROM ledger_events"
                 " WHERE event_type='genesis'"
             )
         raw.close()
