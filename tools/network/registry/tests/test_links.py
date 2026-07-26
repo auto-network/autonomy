@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.registry.signing import sign_request
+from tools.network.registry.store import RegistryStore
 
 from .conftest import DAY, HOUR, NOW, ORG, TARGET, publish_link, signed
 
@@ -111,7 +114,6 @@ class TestOrganizationJoin:
             clock,
             cert=session_cert,
         ).status_code == 400
-
         stray = {
             "org": ORG,
             "target_uuid": TARGET,
@@ -127,6 +129,115 @@ class TestOrganizationJoin:
             clock,
             cert=session_cert,
         ).status_code == 400
+
+    def test_join_absolute_expiry_is_stored_exactly_and_enforced(
+        self,
+        client,
+        clock,
+        bound_org,
+        session_key,
+        session_cert,
+    ):
+        invite_expiry = (NOW + HOUR) * 1000 + 500
+        payload = {
+            "org": ORG,
+            "target_uuid": ORG,
+            "target_type": "org:join",
+            "invite_ref": self.INVITE_REF,
+            "expires_at": invite_expiry,
+        }
+        response = signed(
+            client,
+            "POST",
+            "/v1/links",
+            session_key,
+            payload,
+            clock,
+            cert=session_cert,
+        )
+        assert response.status_code == 201, response.json()
+        assert response.json()["expires_at"] == invite_expiry
+        token = response.json()["token"]
+        stored = client.app.state.store.get_link(token)
+        assert stored.expires_at is None
+        assert stored.expires_at_ms == invite_expiry
+
+        clock.advance(HOUR)
+        assert client.get(f"/v1/links/{token}/envelope").status_code == 200
+        clock.advance(1)
+        assert client.get(f"/v1/links/{token}/envelope").status_code == 404
+
+    def test_absolute_expiry_is_join_only_and_excludes_relative_ttl(
+        self,
+        client,
+        clock,
+        bound_org,
+        session_key,
+        session_cert,
+    ):
+        assert signed(
+            client,
+            "POST",
+            "/v1/links",
+            session_key,
+            {
+                "org": ORG,
+                "target_uuid": TARGET,
+                "target_type": "present",
+                "expires_at": (NOW + HOUR) * 1000,
+            },
+            clock,
+            cert=session_cert,
+        ).status_code == 400
+        assert signed(
+            client,
+            "POST",
+            "/v1/links",
+            session_key,
+            {
+                "org": ORG,
+                "target_uuid": ORG,
+                "target_type": "org:join",
+                "invite_ref": self.INVITE_REF,
+                "expires_at": (NOW + HOUR) * 1000,
+                "meta": {"ttl": HOUR},
+            },
+            clock,
+            cert=session_cert,
+        ).status_code == 400
+
+
+def test_absolute_expiry_column_migrates_existing_registry(tmp_path):
+    path = tmp_path / "registry.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """
+        CREATE TABLE links (
+            token TEXT PRIMARY KEY,
+            org_uuid TEXT NOT NULL,
+            target_uuid TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            invite_ref TEXT,
+            meta TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER,
+            revoked_at INTEGER,
+            signer_pub TEXT NOT NULL,
+            subject_kind TEXT NOT NULL,
+            subject_id TEXT NOT NULL
+        )
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    store = RegistryStore(str(path))
+    columns = {
+        row["name"]
+        for row in store._conn.execute("PRAGMA table_info(links)")
+    }
+    assert "expires_at_ms" in columns
+    store.close()
 
 
 # -- I4: every mutation verifies a chain ----------------------------------------

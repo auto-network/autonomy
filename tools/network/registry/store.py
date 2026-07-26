@@ -34,8 +34,9 @@ Tables:
   T1-blind like the broker tables — hashes, a publisher pubkey, and a
   timestamp only; it composes with L6 because it never needs a plaintext.
 
-All timestamps are unix seconds, passed in by the caller — the store
-never reads the wall clock, which is what makes TTL behavior testable.
+Timestamps are unix seconds unless explicitly named ``*_ms``. They are passed
+in by the caller — the store never reads the wall clock, which is what makes
+TTL behavior testable.
 """
 
 from __future__ import annotations
@@ -83,6 +84,10 @@ CREATE TABLE IF NOT EXISTS links (
     meta         TEXT NOT NULL,
     created_at   INTEGER NOT NULL,
     expires_at   INTEGER,
+    -- Client-supplied absolute unix-ms expiry for org:join grants. Kept
+    -- separate from the legacy relative-TTL unix-seconds column so old rows
+    -- and non-join grants retain their exact semantics.
+    expires_at_ms INTEGER,
     revoked_at   INTEGER,
     signer_pub   TEXT NOT NULL,
     subject_kind TEXT NOT NULL,
@@ -281,6 +286,12 @@ class LinkGrant:
     subject_kind: str
     subject_id: str
     invite_ref: Optional[str] = None
+    expires_at_ms: Optional[int] = None
+
+    def is_expired_at(self, now_seconds: int) -> bool:
+        if self.expires_at_ms is not None:
+            return self.expires_at_ms < now_seconds * 1000
+        return self.expires_at is not None and self.expires_at < now_seconds
 
 
 @dataclass(frozen=True)
@@ -353,6 +364,10 @@ class RegistryStore:
         }
         if "invite_ref" not in link_cols:
             self._conn.execute("ALTER TABLE links ADD COLUMN invite_ref TEXT")
+        if "expires_at_ms" not in link_cols:
+            self._conn.execute(
+                "ALTER TABLE links ADD COLUMN expires_at_ms INTEGER"
+            )
 
     @_locked
     def close(self) -> None:
@@ -528,14 +543,16 @@ class RegistryStore:
             subject_kind=row["subject_kind"],
             subject_id=row["subject_id"],
             invite_ref=row["invite_ref"],
+            expires_at_ms=row["expires_at_ms"],
         )
 
     @_locked
     def create_link(self, grant: LinkGrant) -> None:
         self._conn.execute(
             "INSERT INTO links (token, org_uuid, target_uuid, target_type, invite_ref, meta,"
-            " created_at, expires_at, revoked_at, signer_pub, subject_kind, subject_id)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+            " created_at, expires_at, expires_at_ms, revoked_at,"
+            " signer_pub, subject_kind, subject_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
             (
                 grant.token,
                 grant.org_uuid,
@@ -545,6 +562,7 @@ class RegistryStore:
                 json.dumps(grant.meta),
                 grant.created_at,
                 grant.expires_at,
+                grant.expires_at_ms,
                 grant.signer_pub,
                 grant.subject_kind,
                 grant.subject_id,

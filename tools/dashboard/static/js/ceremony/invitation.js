@@ -23,6 +23,9 @@ if (!webCrypto?.getRandomValues || !webCrypto?.subtle) {
 const textEncoder = new TextEncoder();
 const ROLE_PATTERN = /^[a-z0-9._-]{1,64}$/;
 const KEY_PATTERN = /^[0-9a-f]{64}$/;
+const UUID_PATTERN = (
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+);
 
 function requireRole(value) {
   if (typeof value !== 'string' || !ROLE_PATTERN.test(value)) {
@@ -80,7 +83,33 @@ function buildInviteBody({
   return body;
 }
 
+function buildOrgJoinGrantPayload({
+  orgUuid,
+  inviteId,
+  inviteExpiry,
+}) {
+  if (typeof orgUuid !== 'string' || !UUID_PATTERN.test(orgUuid)) {
+    throw new Error('orgUuid must be a canonical lowercase UUID');
+  }
+  requireKey(inviteId, 'inviteId');
+  if (!Number.isSafeInteger(inviteExpiry) || inviteExpiry < 0) {
+    throw new Error(
+      'inviteExpiry must be a non-negative integer unix-ms timestamp',
+    );
+  }
+  return {
+    org: orgUuid,
+    target_uuid: orgUuid,
+    target_type: 'org:join',
+    invite_ref: inviteId,
+    // Absolute-to-absolute: no client/registry clock skew can shorten the
+    // link below the ledger invitation's own redemption lifetime.
+    expires_at: inviteExpiry,
+  };
+}
+
 export {
   buildInviteBody,
+  buildOrgJoinGrantPayload,
   generateBearerToken,
 };

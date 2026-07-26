@@ -671,7 +671,14 @@ def create_app(
         _require_fields(
             payload,
             allowed=frozenset(
-                {"org", "target_uuid", "target_type", "invite_ref", "meta"}
+                {
+                    "org",
+                    "target_uuid",
+                    "target_type",
+                    "invite_ref",
+                    "expires_at",
+                    "meta",
+                }
             ),
             required=frozenset({"org", "target_uuid", "target_type"}),
             what="link payload",
@@ -682,6 +689,7 @@ def create_app(
         if not isinstance(target_type, str) or not target_type:
             raise _bad_request("target_type must be a non-empty string")
         invite_ref = payload.get("invite_ref")
+        absolute_expires_at = payload.get("expires_at")
         if target_type == "org:join":
             if (
                 not isinstance(invite_ref, str)
@@ -694,8 +702,19 @@ def create_app(
                 raise _bad_request(
                     "org:join target_uuid must equal the organization UUID"
                 )
-        elif invite_ref is not None:
-            raise _bad_request("invite_ref is only valid for target_type org:join")
+            if absolute_expires_at is not None and (
+                type(absolute_expires_at) is not int
+                or absolute_expires_at < 0
+                or absolute_expires_at > 9_007_199_254_740_991
+            ):
+                raise _bad_request(
+                    "org:join expires_at must be a non-negative safe "
+                    "unix-ms integer"
+                )
+        elif invite_ref is not None or absolute_expires_at is not None:
+            raise _bad_request(
+                "invite_ref and expires_at are only valid for target_type org:join"
+            )
         meta = payload.get("meta", {})
         if not isinstance(meta, dict):
             raise _bad_request("meta must be a JSON object")
@@ -705,6 +724,10 @@ def create_app(
         link_ttl = meta.get("ttl")
         if link_ttl is not None and (type(link_ttl) is not int or link_ttl <= 0):
             raise _bad_request("meta.ttl must be a positive integer of seconds")
+        if absolute_expires_at is not None and link_ttl is not None:
+            raise _bad_request(
+                "org:join expires_at and meta.ttl are mutually exclusive"
+            )
 
         t = now()
         binding = _require_binding(store, org_uuid, t)
@@ -726,13 +749,17 @@ def create_app(
                 meta=meta,
                 created_at=t,
                 expires_at=t + link_ttl if link_ttl is not None else None,
+                expires_at_ms=absolute_expires_at,
                 revoked_at=None,
                 signer_pub=auth.signer_pub,
                 subject_kind=auth.subject_kind,
                 subject_id=auth.subject_id,
             )
         )
-        return {"token": token, "url": f"{base_url}/l/{token}"}
+        result = {"token": token, "url": f"{base_url}/l/{token}"}
+        if absolute_expires_at is not None:
+            result["expires_at"] = absolute_expires_at
+        return result
 
     @app.delete("/v1/links/{token}")
     async def revoke_link(token: str, request: Request):
@@ -800,7 +827,7 @@ def create_app(
         if (
             link is None
             or link.revoked_at is not None
-            or (link.expires_at is not None and link.expires_at < t)
+            or link.is_expired_at(t)
         ):
             raise HTTPException(status_code=404, detail="unknown link")
         binding = store.get_org(link.org_uuid)

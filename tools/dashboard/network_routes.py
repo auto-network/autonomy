@@ -646,6 +646,67 @@ async def post_ledger_claim_approval(request: Request) -> JSONResponse:
         return _claim_http_fault(exc)
 
 
+async def post_invite_email(request: Request) -> JSONResponse:
+    """Send one already-minted secret org:join link through host SMTP."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"ok": False, "error": "body must be JSON"},
+            status_code=400,
+        )
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"ok": False, "error": "body must be a JSON object"},
+            status_code=400,
+        )
+
+    requested_org = body.get("org")
+    if requested_org is not None and (
+        not isinstance(requested_org, str) or not requested_org
+    ):
+        return JSONResponse(
+            {"ok": False, "error": "org must be a non-empty slug"},
+            status_code=400,
+        )
+    _org, refused = _scoped_org(requested_org)
+    if refused is not None:
+        return refused
+
+    to_addr = body.get("to")
+    join_link = body.get("join_link")
+    expiry = body.get("expiry")
+    from tools.dashboard.invite_email import (
+        InviteEmailError,
+        send_invite_email,
+        validate_delivery,
+    )
+
+    try:
+        validate_delivery(to_addr, join_link, expiry)
+    except InviteEmailError as exc:
+        return JSONResponse(
+            {"ok": False, "error": str(exc)},
+            status_code=400,
+        )
+
+    org = requested_org or settings_ops._resolve_settings_caller(None)
+    try:
+        receipt = await asyncio.to_thread(
+            send_invite_email,
+            to_addr,
+            join_link,
+            expiry,
+            org,
+        )
+    except InviteEmailError as exc:
+        return JSONResponse(
+            {"ok": False, "error": str(exc)},
+            status_code=502,
+        )
+    return JSONResponse({"ok": True, **receipt})
+
+
 async def post_ledger_invite(request: Request) -> JSONResponse:
     """Authorize and append one client-signed routine invitation."""
     if _mock_mode():
@@ -1128,6 +1189,7 @@ ROUTES = [
         post_ledger_claim_approval,
         methods=["POST"],
     ),
+    Route("/api/network/invite/email", post_invite_email, methods=["POST"]),
     Route("/api/network/register", post_register, methods=["POST"]),
     Route("/api/network/serve-cert", post_serve_cert, methods=["POST"]),
     Route("/api/network/revocations", post_revocation, methods=["POST"]),
