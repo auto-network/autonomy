@@ -75,8 +75,13 @@ import tempfile as _tempfile
 from pathlib import Path as _Path
 
 
+def _dashboard_repo_root() -> _Path:
+    """Return the checkout root, not the ``tools/`` package directory."""
+    return _Path(__file__).resolve().parents[3]
+
+
 def _configure_writable_dbs_if_readonly():
-    repo = _Path(__file__).resolve().parents[2]
+    repo = _dashboard_repo_root()
     data_dir = repo / "data"
     probe = data_dir / f".pytest-write-probe-{_os.getpid()}"
     try:
