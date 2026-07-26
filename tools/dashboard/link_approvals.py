@@ -147,7 +147,12 @@ def _is_registerable_on_first_publish(org: str | None) -> bool:
 
 def _org_join_request(request: dict) -> dict:
     """Validate an org:join mint against the org's own invitation ledger."""
-    from tools.network.ledger import INVITE_LIVE, LedgerStore, org_ledger_db_path
+    from tools.network.ledger import (
+        INVITE_LIVE,
+        LedgerError,
+        LedgerStore,
+        org_ledger_db_path,
+    )
 
     allowed = {
         "org",
@@ -214,7 +219,7 @@ def _org_join_request(request: dict) -> dict:
                 "expiry": expires_at,
                 "org_uuid": org_uuid,
             }
-    except KeyError:
+    except (KeyError, LedgerError):
         raise ValueError("invite_ref is not in the organization ledger")
 
 

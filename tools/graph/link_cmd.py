@@ -156,7 +156,12 @@ def _resolve_uuid_target(target_id: str, target_type: str) -> str:
 
 def _org_join_invite(org: str, invite_ref: str) -> dict:
     """Resolve the invitation from the org's verified local ledger."""
-    from tools.network.ledger import INVITE_LIVE, LedgerStore, org_ledger_db_path
+    from tools.network.ledger import (
+        INVITE_LIVE,
+        LedgerError,
+        LedgerStore,
+        org_ledger_db_path,
+    )
 
     if not isinstance(invite_ref, str) or not _EVENT_ID_RE.fullmatch(invite_ref):
         _fail("org:join target must be a 64-char lowercase invite event id")
@@ -178,7 +183,7 @@ def _org_join_invite(org: str, invite_ref: str) -> dict:
                 "expiry": invite.payload["expiry"],
                 "token_hash": invite.payload.get("token_hash"),
             }
-    except KeyError:
+    except (KeyError, LedgerError):
         _fail(f"invitation {invite_ref} is not in {org!r}'s authority ledger")
 
 

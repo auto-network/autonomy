@@ -220,6 +220,35 @@ def test_authorized_client_mints_exact_expiry_join_link_without_bearer_leak(
             return result
 
         monkeypatch.setattr(link_cmd, "_api_request", fake_api)
+        missing_ref = "00" * 32
+        with pytest.raises(SystemExit):
+            link_cmd.cmd_link_publish(_args(missing_ref))
+        missing_cli = capsys.readouterr()
+        assert "is not in" in missing_cli.err
+        assert "authority ledger" in missing_cli.err
+        assert "Traceback" not in missing_cli.err
+        assert approval_requests == []
+
+        missing_dashboard = dashboard.post(
+            "/api/approvals",
+            json={
+                "kind": "link_publish",
+                "session": "missing-invite",
+                "request": {
+                    "org": ORG,
+                    "target_uuid": ORG_UUID,
+                    "target_type": "org:join",
+                    "invite_ref": missing_ref,
+                    "expires_at": invite_expiry,
+                    "meta": {},
+                },
+            },
+        )
+        assert missing_dashboard.status_code == 400
+        assert missing_dashboard.json() == {
+            "error": "invite_ref is not in the organization ledger"
+        }
+
         monkeypatch.setenv("AUTONOMY_INVITE_TOKEN", "wrong-bearer")
         with pytest.raises(SystemExit):
             link_cmd.cmd_link_publish(_args(invite.event_id))
