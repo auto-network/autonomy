@@ -27,6 +27,7 @@ class TopologyConfig:
     image: str = "autonomy-dashboard:harness"
     source_root: Path = REPO_ROOT
     from_source: bool = True
+    secure_dashboard: bool = False
 
     def validate(self) -> None:
         if not _PROJECT_RE.fullmatch(self.project):
@@ -47,15 +48,21 @@ class TopologyConfig:
             raise TopologyError("source_root must be an Autonomy checkout")
 
 
-def _rooted_environment() -> dict[str, str]:
+def _rooted_environment(*, secure_dashboard: bool = False) -> dict[str, str]:
     """Every manifest store is explicitly rooted inside the node volume."""
     environment = {
         REFUSE_REAL_DATA_FALLBACK_ENV: "1",
-        "DASHBOARD_TLS": "off",
         "DASHBOARD_HOST": "0.0.0.0",
         "DASHBOARD_PORT": "8080",
         "AUTONOMY_NETWORK_REGISTRY_URL": "http://relay:8477",
     }
+    if secure_dashboard:
+        # The existing entrypoint provisions a self-signed keypair.  localhost
+        # is present in its SAN, so the presentation driver can pin and verify
+        # the exact generated certificate from the host.
+        environment["DASHBOARD_DOMAIN"] = "localhost"
+    else:
+        environment["DASHBOARD_TLS"] = "off"
     for store in STORE_MANIFEST:
         if store.env:
             environment[store.env] = f"/app/data/{store.relative}"
@@ -70,7 +77,9 @@ def _node_service(
     first_org: str | None = None,
     invitation: bool = False,
 ) -> dict:
-    environment = _rooted_environment()
+    environment = _rooted_environment(
+        secure_dashboard=config.secure_dashboard,
+    )
     if first_org:
         environment["AUTONOMY_FIRST_ORG"] = first_org
         environment["AUTONOMY_FIRST_ORG_NAME"] = f"Harness {first_org}"
@@ -92,7 +101,14 @@ def _node_service(
         "networks": ["harness"],
         "depends_on": {"relay": {"condition": "service_healthy"}},
         "healthcheck": {
-            "test": ["CMD", "curl", "-fs", "http://127.0.0.1:8080/api/ping"],
+            "test": (
+                [
+                    "CMD", "curl", "--cacert", "/app/data/tls.crt",
+                    "-fs", "https://localhost:8080/api/ping",
+                ]
+                if config.secure_dashboard
+                else ["CMD", "curl", "-fs", "http://127.0.0.1:8080/api/ping"]
+            ),
             "interval": "2s",
             "timeout": "2s",
             "retries": 45,

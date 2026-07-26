@@ -49,8 +49,38 @@ python3 -m deploy.harness --project autonomy-harness-demo
 from source remains the default and requires no image registry.
 
 The `Harness` object exposes the six phase methods individually. A later
-demo-day presentation layer can pause between them and open the loopback
+demo-day presentation layer pauses between them and opens the loopback
 dashboard ports without replacing any acceptance logic.
+
+## Visible demo-day presentation
+
+The presentation command accepts only the verified-published path:
+
+```bash
+python3 -m deploy.demo \
+  --image registry.example/autonomy/autonomy-node@sha256:<digest> \
+  --cosign-public-key deploy/cosign.pub \
+  --recording-path harness-artifacts/demo-day.mp4
+```
+
+It runs `deploy/verify-image.sh` before starting Docker, enables the existing
+node TLS initializer, pins each host-side HTTPS probe to that node's captured
+self-signed certificate, and drives these same phase methods with manual
+narration pauses. The local certificate is real self-signed HTTPS, not public
+CA endorsement; accept its browser warning deliberately. Node graph and
+Design Studio tabs demonstrate tools inside the sovereign node. The separate
+note link is the fixture's real relay-published content; the demo does not
+claim that Design Studio itself is relay-published.
+
+The command opens browser tabs by default. Host-specific launchers are
+parameterized (`--browser-command 'open {url}'` on macOS or
+`--browser-command 'xdg-open {url}'` on Linux), as are the Docker and Compose
+commands and loopback ports. `--pace auto` and `--pace none` support rehearsals.
+
+Screen capture remains an operator-side act on a real Docker host. The command
+never fabricates a recording; it writes `demo-transcript.md` and
+`demo-urls.json` beneath the run artifact directory and records the requested
+recording destination in that manifest.
 
 ## Deliberate fixture boundary
 
