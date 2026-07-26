@@ -37,6 +37,10 @@ from .scopes import validate_scope, validate_scope_list
 EVENT_DOMAIN = b"autonomy.ledger.event.v1\n"
 APPROVAL_DOMAIN = b"autonomy.ledger.approval.v1\n"
 ROTATE_DOMAIN = b"autonomy.ledger.rotate-continuity.v1\n"
+#: Frozen, byte-identical to storagekit.credentials.CREDENTIAL_DOMAIN —
+#: the fold verifies an embedded kem_credential with idkit only, and a
+#: cross-package fidelity test keeps the two constants from drifting.
+KEM_CREDENTIAL_DOMAIN = b"autonomy.storage.persona-kem-credential.v1\n"
 EVENT_VERSION = 1
 
 EVENT_HASH_HEX_LEN = 64
@@ -143,6 +147,75 @@ def _require_approvals(value: object, what: str = "approvals") -> list:
     return value
 
 
+#: Contract §5 credential record: exactly these nine fields.
+_KEM_CREDENTIAL_FIELDS = frozenset(
+    {
+        "version",
+        "suite_id",
+        "genesis_id",
+        "persona",
+        "kem_public_key",
+        "kem_key_id",
+        "authority_heads",
+        "created_hlc",
+        "signature",
+    }
+)
+MAX_KEM_CREDENTIAL_BYTES = 1024
+MAX_KEM_CREDENTIAL_HEADS = 16
+
+
+def _require_kem_credential(value: object, persona_pub: str) -> None:
+    """Structural §5 checks on an embedded persona KEM credential.
+
+    Deep acceptance (fold verification of signature/identifier/genesis)
+    is the fold handler's; full currency/roster checks live in
+    storagekit. Any violation raises :class:`SchemaError` (L8).
+    """
+    if not isinstance(value, dict) or set(value) != _KEM_CREDENTIAL_FIELDS:
+        raise SchemaError(
+            "kem_credential must carry exactly the contract §5 fields: "
+            f"{sorted(_KEM_CREDENTIAL_FIELDS)}"
+        )
+    if type(value["version"]) is not int or value["version"] < 1:
+        raise SchemaError("kem_credential.version must be a positive integer")
+    # The seal-suite identifier is idkit's integer wire tag; exact-type,
+    # bool-rejecting (the require_suite discipline).
+    if type(value["suite_id"]) is not int or not 0 <= value["suite_id"] <= 255:
+        raise SchemaError("kem_credential.suite_id must be an integer wire tag in [0, 255]")
+    _require_hash(value["genesis_id"], "kem_credential.genesis_id")
+    _require_key(value["persona"], "kem_credential.persona")
+    _require_key(value["kem_public_key"], "kem_credential.kem_public_key")
+    _require_hash(value["kem_key_id"], "kem_credential.kem_key_id")
+    require_hash_list(
+        value["authority_heads"],
+        "kem_credential.authority_heads",
+        MAX_KEM_CREDENTIAL_HEADS,
+        allow_empty=False,
+    )
+    hlc = value["created_hlc"]
+    if (
+        not isinstance(hlc, list)
+        or len(hlc) != 2
+        or any(type(v) is not int or v < 0 for v in hlc)
+    ):
+        raise SchemaError("kem_credential.created_hlc must be [ts_ms, count], non-negative ints")
+    _require_str(value["signature"], "kem_credential.signature", max_len=SIGNATURE_HEX_LEN)
+    try:
+        _decode_hex(value["signature"], SIGNATURE_HEX_LEN, "kem_credential.signature")
+    except _IdkitMalformed as exc:
+        raise SchemaError(str(exc)) from None
+    try:
+        raw = canonical_json(value)
+    except _IdkitMalformed as exc:
+        raise SchemaError(f"kem_credential is not canonical-JSON-safe: {exc}") from None
+    if len(raw) > MAX_KEM_CREDENTIAL_BYTES:
+        raise SchemaError(f"kem_credential exceeds {MAX_KEM_CREDENTIAL_BYTES} canonical bytes")
+    if value["persona"] != persona_pub:
+        # A claim cannot bind another persona's credential onto its record.
+        raise SchemaError("kem_credential.persona must equal member.claim.persona_pub")
+
+
 def _profile_size_ok(profile: object) -> None:
     if not isinstance(profile, dict):
         raise SchemaError("profile must be an object")
@@ -239,7 +312,7 @@ def _v_member_claim(p: dict) -> None:
         p,
         "member.claim",
         frozenset({"invite_ref", "persona_pub", "profile", "approvals"}),
-        frozenset({"token"}),
+        frozenset({"token", "kem_credential"}),
     )
     _require_hash(p["invite_ref"], "member.claim.invite_ref")
     _require_key(p["persona_pub"], "member.claim.persona_pub")
@@ -247,6 +320,8 @@ def _v_member_claim(p: dict) -> None:
     _require_approvals(p["approvals"], "member.claim.approvals")
     if "token" in p:
         _require_str(p["token"], "member.claim.token", max_len=128)
+    if "kem_credential" in p:
+        _require_kem_credential(p["kem_credential"], p["persona_pub"])
 
 
 def _v_member_rekey(p: dict) -> None:
