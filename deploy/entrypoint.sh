@@ -17,8 +17,10 @@ if [ "${DASHBOARD_TLS:-}" = "off" ]; then
     INIT_ARGS="--no-tls"
 fi
 
-# Idempotent: an already-initialized data volume is a no-op (H3 contract).
-python3 -m tools.init $INIT_ARGS
+# Refuse a volume written by a newer node before any initializer mutates it,
+# then run every idempotent forward schema migration against the mounted
+# volume. This subsumes first-run init for an empty volume.
+python3 -m tools.portability migrate-on-mount /app/data $INIT_ARGS
 
 SSL_ARGS=""
 if [ -f ${AUTONOMY_TLS_CERT:-/app/data/tls.crt} ] && [ -f ${AUTONOMY_TLS_KEY:-/app/data/tls.key} ] && [ "${DASHBOARD_TLS:-}" != "off" ]; then

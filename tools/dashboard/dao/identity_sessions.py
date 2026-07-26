@@ -92,6 +92,11 @@ def db_path() -> Path:
     return resolve_store("identity_sessions")
 
 
+def init_db(path: Path | str | None = None) -> None:
+    """Ensure the session store exists and is migrated to this node version."""
+    _open_pooled(Path(path) if path is not None else db_path())
+
+
 def _open_pooled(path: Path) -> tuple[sqlite3.Connection, threading.RLock]:
     key = str(path.resolve())
     pooled = _connections.get(key)
