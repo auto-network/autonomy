@@ -616,6 +616,76 @@ def test_transition_unknown_field_names_screen_fields(jira_env, monkeypatch):
                              fields={"Sprint": "42"})
 
 
+# ── issue-type change (Jira's "Move") ──
+
+
+def _issue_type_handler(seen=None):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rest/api/3/issue/ENT-1" and request.method == "GET":
+            assert request.url.params["fields"] == "issuetype,project"
+            return httpx.Response(200, json={"fields": {
+                "issuetype": {"id": "10002", "name": "Task", "subtask": False},
+                "project": {"key": "ENTERPRISE"}}})
+        if request.url.path == "/rest/api/3/project/ENTERPRISE":
+            return httpx.Response(200, json={"issueTypes": [
+                {"id": "10001", "name": "Bug", "subtask": False},
+                {"id": "10002", "name": "Task", "subtask": False},
+                {"id": "10003", "name": "Sub-task", "subtask": True}]})
+        if request.method == "PUT":
+            if seen is not None:
+                seen["path"] = request.url.path
+                seen["body"] = json.loads(request.content)
+            return httpx.Response(204)
+        raise AssertionError(f"unexpected call: {request.method} {request.url}")
+    return handler
+
+
+def test_list_issue_types_shapes_project_types(jira_env, monkeypatch):
+    _mock(monkeypatch, _issue_type_handler())
+    out = api.list_issue_types(api.JiraConfig.resolve(), "ENT-1")
+    assert out["project"] == "ENTERPRISE"
+    assert out["current"] == {"id": "10002", "name": "Task", "subtask": False}
+    assert [t["name"] for t in out["issue_types"]] == ["Bug", "Task", "Sub-task"]
+
+
+def test_change_issue_type_resolves_name_to_id(jira_env, monkeypatch):
+    """The edit endpoint rejects name strings ('Could not find issuetype by
+    id or name') — the change must carry the project-scoped numeric id."""
+    seen = {}
+    _mock(monkeypatch, _issue_type_handler(seen))
+    out = api.change_issue_type(api.JiraConfig.resolve(), "ENT-1", "bug")
+    assert seen["path"] == "/rest/api/3/issue/ENT-1"
+    assert seen["body"] == {"fields": {"issuetype": {"id": "10001"}}}
+    assert out == {"key": "ENT-1", "from": "Task", "to": "Bug"}
+
+
+def test_change_issue_type_errors(jira_env, monkeypatch):
+    _mock(monkeypatch, _issue_type_handler())
+    cfg = api.JiraConfig.resolve()
+    with pytest.raises(api.JiraError, match="Valid types: Bug, Task"):
+        api.change_issue_type(cfg, "ENT-1", "Epic")
+    with pytest.raises(api.JiraError, match="already a Task"):
+        api.change_issue_type(cfg, "ENT-1", "Task")
+    with pytest.raises(api.JiraError, match="hierarchy"):
+        api.change_issue_type(cfg, "ENT-1", "Sub-task")
+
+
+def test_jira_update_redirects_issuetype_to_change_type(jira_env, monkeypatch):
+    """The live failure that motivated the op: jira-update on 'Issue Type'
+    reached Jira with the wrong shape. Now it stops at the broker with a
+    pointer to jira-change-type."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/editmeta")
+        return httpx.Response(200, json={"fields": {
+            "issuetype": {"name": "Issue Type",
+                          "schema": {"type": "issuetype"}}}})
+
+    _mock(monkeypatch, handler)
+    with pytest.raises(api.JiraError, match="jira-change-type"):
+        api.set_editable_field(api.JiraConfig.resolve(), "ENT-1",
+                               "Issue Type", "Bug")
+
+
 # ── named queries (pure resolution over workspace_overrides) ──
 
 
@@ -822,6 +892,38 @@ def test_jira_write_transition_flow(jira_env, monkeypatch):
                 "to_status": "Pending RC", "fields_set": []}
             assert posted["path"] == "/rest/api/3/issue/ENTERPRISE-8348/transitions"
             assert posted["body"] == {"transition": {"id": "41"}}
+
+    asyncio.run(scenario())
+
+
+def test_issue_types_read_route(jira_env, monkeypatch):
+    _mock(monkeypatch, _issue_type_handler())
+    client = TestClient(_app())
+    out = client.get("/api/jira/issue-types/ENT-1").json()
+    assert out["current"]["name"] == "Task"
+    assert [t["name"] for t in out["issue_types"]] == ["Bug", "Task", "Sub-task"]
+
+
+def test_jira_write_change_type_flow(jira_env, monkeypatch):
+    """op=change_type through the approval rendezvous: executor re-resolves
+    the target type and PUTs the numeric id."""
+    seen = {}
+    _mock(monkeypatch, _issue_type_handler(seen))
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=_app())
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://t") as c:
+            r = await c.post("/api/approvals", json={
+                "kind": "jira_write", "session": "auto-1",
+                "request": {"op": "change_type", "key": "ENT-1",
+                            "issue_type": "Bug"}})
+            rid = r.json()["id"]
+            await c.post(f"/api/approvals/{rid}/decision", json={"approved": True})
+            result = (await c.get(f"/api/approvals/{rid}?wait=10")).json()["result"]
+            assert result["execution"] == {
+                "ok": True, "key": "ENT-1", "from": "Task", "to": "Bug"}
+            assert seen["body"] == {"fields": {"issuetype": {"id": "10001"}}}
 
     asyncio.run(scenario())
 

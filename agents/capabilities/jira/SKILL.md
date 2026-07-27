@@ -62,6 +62,7 @@ jira-update ENTERPRISE-8385 --field Assignee -f assignee.txt
 jira-create payload.json                        # create a ticket
 jira-attach ENTERPRISE-8385 repro.log           # upload an attachment (10MB cap)
 jira-transition ENTERPRISE-8385 'Code Review'   # move through a workflow transition
+jira-change-type ENTERPRISE-8853 Bug            # change the issue type (Jira's "Move")
 ```
 
 `jira-update` sets rich-text and supported structured fields by display name
@@ -84,6 +85,19 @@ list from Jira. In ENTERPRISE, the road-to-RC “Developer” requirement is the
 `Assignee` field.
 
 `jira-confirm-plan` remains the idiomatic shortcut for Confirm Plan.
+
+### Changing the issue type
+
+An issue-type change is Jira's "Move", not a field edit — `jira-update
+--field 'Issue Type'` is rejected before it reaches Jira. Use
+`jira-change-type KEY 'Bug'`: it resolves the target name to the project's
+numeric type id host-side (the edit endpoint 400s on name strings),
+preflights before staging approval — unknown types fail with the valid
+list, no-ops and sub-task conversions (which the REST API can't do) fail
+with a clear message — and `jira-change-type KEY --list` shows the
+project's types with the current one marked. Typical use: reclassifying a
+Task as a Bug so it can carry a Confirm Plan (a bug-workflow field
+enforced by the Pending-RC validator).
 
 ### Inline images
 

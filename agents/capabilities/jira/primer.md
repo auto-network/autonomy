@@ -19,6 +19,9 @@ outcome or the decline).
 - ENTERPRISE's “Developer” requirement is the `Assignee` field.
 - `jira-create payload.json` — create a ticket *(operator approval)*
 - `jira-attach KEY FILE` — upload an attachment *(operator approval)*
+- `jira-change-type KEY 'Bug'` — change the issue type (Jira's "Move");
+  `--list` shows the project's types. Preflights invalid/no-op/sub-task
+  targets before staging *(operator approval)*
 - `jira-transition KEY 'Name' [--field 'Name=value' …]` — move through a
   workflow transition; `--list` shows what's valid now + required fields.
   Preflight fails with the missing-fields list before staging approval

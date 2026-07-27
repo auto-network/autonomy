@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Usage: jira-change-type ISSUE_KEY 'Issue Type'   (e.g. jira-change-type ENTERPRISE-8853 Bug)
+#        jira-change-type ISSUE_KEY --list
+# Changes a ticket's issue type (Jira's "Move") — staged for operator
+# approval like every other write. A preflight read runs first: an unknown
+# target type, a no-op (already that type), or a sub-task conversion (the
+# REST API can't do those) fails with a clear message BEFORE any approval
+# overlay opens. The type name matches case-insensitively; the numeric id
+# is resolved host-side, since Jira's edit endpoint rejects name strings.
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/_jira_lib.sh"
+
+KEY="${1:-}"
+[ -n "$KEY" ] || jira_fail "usage: jira-change-type ISSUE_KEY 'Issue Type'  (or: jira-change-type ISSUE_KEY --list)"
+
+if [ "${2:-}" = "--list" ]; then
+  curl -sk "$DASH/api/jira/issue-types/$KEY?org=$ORG" \
+    | python3 -c 'import sys, json
+d = json.load(sys.stdin)
+if "error" in d: sys.exit("jira: " + str(d["error"]))
+cur = d.get("current") or {}
+print("Current type: " + str(cur.get("name")) + "  (project " + str(d.get("project")) + ")")
+for t in d.get("issue_types") or []:
+    marks = []
+    if t.get("id") == cur.get("id"): marks.append("current")
+    if t.get("subtask"): marks.append("sub-task: not changeable via API")
+    suffix = ("  [" + ", ".join(marks) + "]") if marks else ""
+    print("  " + str(t.get("name")) + suffix)'
+  exit $?
+fi
+
+TYPE="${2:-}"
+[ -n "$TYPE" ] && [ "${TYPE#-}" = "$TYPE" ] \
+  || jira_fail "usage: jira-change-type ISSUE_KEY 'Issue Type'"
+[ $# -le 2 ] || jira_fail "jira-change-type: unexpected argument: $3"
+
+req_file="$(mktemp)"
+trap 'rm -f "$req_file"' EXIT
+
+# Preflight: resolve the target against the project's type list and only
+# then emit the approval request — nothing is staged for a doomed change.
+curl -sk "$DASH/api/jira/issue-types/$KEY?org=$ORG" \
+  | python3 -c 'import sys, json
+session, key, org, target = sys.argv[1:5]
+d = json.load(sys.stdin)
+if "error" in d: sys.exit("jira: " + str(d["error"]))
+cur = d.get("current") or {}
+want = target.strip().casefold()
+match = next((t for t in d.get("issue_types") or []
+              if (t.get("name") or "").casefold() == want), None)
+if match is None:
+    valid = ", ".join(t["name"] for t in d.get("issue_types") or []
+                      if not t.get("subtask")) or "none"
+    sys.exit("jira-change-type: no issue type named " + repr(target)
+             + " in project " + str(d.get("project")) + ". Valid: " + valid)
+if match.get("id") == cur.get("id"):
+    sys.exit("jira-change-type: " + key + " is already a " + str(match.get("name")) + " — nothing to do.")
+if match.get("subtask") or cur.get("subtask"):
+    sys.exit("jira-change-type: " + str(cur.get("name")) + " -> " + str(match.get("name"))
+             + " crosses the sub-task boundary; the Jira REST API cannot do that Move —"
+             + " ask the operator to do it in the Jira UI. Nothing was staged for approval.")
+print(json.dumps({"kind": "jira_write", "session": session, "request":
+                  {"op": "change_type", "key": key, "org": org,
+                   "issue_type": match.get("name")}}))' \
+  "$SESSION" "$KEY" "$ORG" "$TYPE" > "$req_file" || exit 1
+
+jira_approval_wait "$req_file"

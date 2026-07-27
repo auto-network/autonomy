@@ -255,6 +255,64 @@ def editmeta_field_id(cfg: JiraConfig, key: str, field_name: str) -> str:
     return editmeta_field(cfg, key, field_name)["id"]
 
 
+def list_issue_types(cfg: JiraConfig, key: str) -> dict[str, Any]:
+    """The issue types valid in *key*'s project, plus its current type."""
+    with _client(cfg) as c:
+        resp = c.get(f"/rest/api/3/issue/{key}",
+                     params={"fields": "issuetype,project"})
+        _check(resp, f"read {key}")
+        f = resp.json().get("fields") or {}
+        current = f.get("issuetype") or {}
+        project = (f.get("project") or {}).get("key") or ""
+        resp = c.get(f"/rest/api/3/project/{project}")
+        _check(resp, f"project {project}")
+        types = resp.json().get("issueTypes") or []
+    return {
+        "project": project,
+        "current": {"id": current.get("id"), "name": current.get("name"),
+                    "subtask": bool(current.get("subtask"))},
+        "issue_types": [{"id": t.get("id"), "name": t.get("name"),
+                         "subtask": bool(t.get("subtask"))} for t in types],
+    }
+
+
+def change_issue_type(cfg: JiraConfig, key: str,
+                      type_name: str) -> dict[str, Any]:
+    """Change *key*'s issue type (the API face of Jira's "Move").
+
+    The edit endpoint only accepts ``{"issuetype": {"id": ...}}`` with the
+    project-scoped numeric id — a name string 400s with "Could not find
+    issuetype by id or name" — so the target name is resolved against the
+    project's type list first. Standard→standard changes go through
+    ``PUT /issue``; conversions in or out of sub-task are a hierarchy Move
+    the REST API doesn't support, and are rejected with a clear message
+    rather than a confusing Jira error."""
+    info = list_issue_types(cfg, key)
+    want = type_name.strip().casefold()
+    match = next((t for t in info["issue_types"]
+                  if (t["name"] or "").casefold() == want), None)
+    if match is None:
+        valid = ", ".join(t["name"] for t in info["issue_types"]
+                          if not t["subtask"]) or "none"
+        raise JiraError(
+            f"no issue type named {type_name!r} in project "
+            f"{info['project']}. Valid types: {valid}")
+    current = info["current"]
+    if match["id"] == current.get("id"):
+        raise JiraError(f"{key} is already a {match['name']}")
+    if match["subtask"] or current.get("subtask"):
+        raise JiraError(
+            f"changing {key} between sub-task and standard types "
+            f"({current.get('name')} -> {match['name']}) is a hierarchy "
+            "Move the Jira REST API does not support — it needs the "
+            "operator in the Jira UI")
+    with _client(cfg) as c:
+        resp = c.put(f"/rest/api/3/issue/{key}",
+                     json={"fields": {"issuetype": {"id": match["id"]}}})
+        _check(resp, f"change {key} to {match['name']}")
+    return {"key": key, "from": current.get("name"), "to": match["name"]}
+
+
 def _transition_meta(cfg: JiraConfig, key: str) -> list[dict[str, Any]]:
     """Raw transition metadata for *key*: id, name, destination status, and
     each transition-screen field with its required flag and schema.
@@ -494,6 +552,13 @@ def set_editable_field(cfg: JiraConfig, key: str, field_reference: str,
     become ``{"value": ...}``, and numeric fields become numbers.
     """
     field = editmeta_field(cfg, key, field_reference)
+    if field["id"] == "issuetype":
+        # An issue-type change is Jira's "Move", not a field edit — the
+        # edit path sends a shape Jira rejects. Point at the real op.
+        raise JiraError(
+            f"changing the issue type of {key} is not a field edit — "
+            "use jira-change-type (it resolves the type id and preflights "
+            "valid targets)")
     if field.get("type") not in {
         "array", "option", "user", "version", "component",
         "priority", "resolution", "number",
