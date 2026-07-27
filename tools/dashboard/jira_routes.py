@@ -16,6 +16,8 @@ result. Ops carried in the request JSON:
 - ``{"op": "attach", "key", "filename", "content_b64", "mime_type"?}``
 - ``{"op": "transition", "key", "transition", "fields"?}`` (fields keyed by
   display name or id, values as CLI strings — coerced per schema host-side)
+- ``{"op": "change_type", "key", "issue_type"}`` (Jira's "Move": target name
+  resolved to the project-scoped id host-side; sub-task conversions rejected)
 """
 
 from __future__ import annotations
@@ -103,6 +105,20 @@ async def get_transitions(request: Request) -> JSONResponse:
     except api.JiraError as e:
         return JSONResponse({"error": str(e)}, status_code=502)
     return JSONResponse({"transitions": out})
+
+
+async def get_issue_types(request: Request) -> JSONResponse:
+    """GET /api/jira/issue-types/{key} -> the issue types valid in the
+    ticket's project + its current type. The jira-change-type preflight
+    reads this so an invalid target fails with the valid list BEFORE any
+    approval overlay opens; the overlay reads it for trusted context."""
+    key = request.path_params["key"]
+    try:
+        out = await asyncio.to_thread(
+            api.list_issue_types, _cfg(_org(request)), key)
+    except api.JiraError as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+    return JSONResponse(out)
 
 
 async def post_search(request: Request) -> JSONResponse:
@@ -238,6 +254,9 @@ async def _execute_jira_write(row: dict, _decision: dict) -> dict:
             out = api.transition_issue(cfg, req["key"],
                                        req.get("transition", ""),
                                        req.get("fields") or None)
+        elif op == "change_type":
+            out = api.change_issue_type(cfg, req["key"],
+                                        req.get("issue_type", ""))
         elif op == "attach":
             out = api.add_attachment(
                 cfg, req["key"], req.get("filename", "attachment"),
@@ -258,6 +277,7 @@ ROUTES = [
     Route("/api/jira/createmeta", get_createmeta, methods=["GET"]),
     Route("/api/jira/attachment/{id}", get_attachment, methods=["GET"]),
     Route("/api/jira/transitions/{key}", get_transitions, methods=["GET"]),
+    Route("/api/jira/issue-types/{key}", get_issue_types, methods=["GET"]),
     Route("/api/jira/search", post_search, methods=["POST"]),
     Route("/api/jira/query", list_named_queries, methods=["GET"]),
     Route("/api/jira/query/{name}", run_named_query, methods=["GET"]),

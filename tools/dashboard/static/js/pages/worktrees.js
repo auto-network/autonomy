@@ -2191,6 +2191,10 @@
                 title: 'Jira transition',
                 action: 'Transition to ' + (req.transition || '?'),
               },
+              change_type: {
+                title: 'Jira issue-type change',
+                action: 'Change type to ' + (req.issue_type || '?'),
+              },
             };
             const op = ops[req.op] || { title: 'Jira write', action: 'Approve' };
             const attachNote = req.op === 'attach'
@@ -2204,13 +2208,17 @@
                 (transitionFieldLines
                   ? '\n\nFields set with the transition:\n' + transitionFieldLines : '')
               : '';
+            const changeTypeNote = req.op === 'change_type'
+              ? 'Change ' + (req.key || '?') + ' to issue type ' + (req.issue_type || '?')
+              : '';
             self.approvalRequest = {
               id: r.id, kind: r.kind, session: r.session,
               title: op.title, actionLabel: op.action, op: req.op,
               target: req.key ||
                 ((req.fields || {}).project ? (req.fields.project.key || '') : ''),
               bodyMarkdown:
-                req.body_markdown || createDescription || attachNote || transitionNote,
+                req.body_markdown || createDescription || attachNote ||
+                transitionNote || changeTypeNote,
               fields: createFields,
             };
             if (req.op === 'transition' && req.key) {
@@ -2244,6 +2252,29 @@
                 if (transitionFieldLines) {
                   lines.push('', 'Fields set with the transition:', transitionFieldLines);
                 }
+                ar.bodyMarkdown = lines.join('\n');
+              });
+            }
+            if (req.op === 'change_type' && req.key) {
+              // Same trusted-context pattern as transitions: summary and the
+              // ticket's REAL current type come from broker read routes,
+              // not the requesting agent's payload.
+              const org = encodeURIComponent(req.org || '');
+              Promise.all([
+                fetch('/api/jira/issue/' + encodeURIComponent(req.key) + '?org=' + org)
+                  .then((resp) => resp.json()).catch(() => null),
+                fetch('/api/jira/issue-types/' + encodeURIComponent(req.key) + '?org=' + org)
+                  .then((resp) => resp.json()).catch(() => null),
+              ]).then(([ticket, types]) => {
+                const ar = self.approvalRequest;
+                if (!ar || ar.id !== r.id) return;   // overlay changed meanwhile
+                const lines = [];
+                if (ticket && !ticket.error && ticket.summary) {
+                  lines.push(req.key + ' — ' + ticket.summary);
+                }
+                const from = (types && !types.error && types.current &&
+                              types.current.name) || '?';
+                lines.push('Issue type: ' + from + ' → ' + (req.issue_type || '?'));
                 ar.bodyMarkdown = lines.join('\n');
               });
             }

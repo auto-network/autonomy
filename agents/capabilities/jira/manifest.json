@@ -2,11 +2,16 @@
     "name": "autonomy/jira",
     "version": 1,
     "implements": [
-        {"contract": "issue_tracker", "version": 1}
+        {
+            "contract": "issue_tracker",
+            "version": 1
+        }
     ],
     "delivery_mode": "mounted_tools",
     "package_root": "agents/capabilities/jira",
-    "tool_paths": ["agents/capabilities/jira/tools"],
+    "tool_paths": [
+        "agents/capabilities/jira/tools"
+    ],
     "tool_target": {
         "source": "agents/capabilities/jira/tools",
         "target": "/opt/jira-tools",
@@ -17,6 +22,7 @@
             "jira-search",
             "jira-query",
             "jira-transition",
+            "jira-change-type",
             "jira-comment",
             "jira-confirm-plan",
             "jira-update",
@@ -30,5 +36,5 @@
         "kind": "command",
         "entrypoint": "jira-read --probe"
     },
-    "notes": "Broker-backed: reads call the dashboard's /api/jira/* routes (the Jira call runs host-side); writes stage kind=jira_write approval requests and execute host-side only after the operator approves. The Jira token lives on the host only — no required_env, no secret file mounts, nothing credential-shaped in the container."
+    "notes": "Broker-backed: reads call the dashboard's /api/jira/* routes (the Jira call runs host-side); writes stage kind=jira_write approval requests and execute host-side only after the operator approves. The Jira token lives on the host only \u2014 no required_env, no secret file mounts, nothing credential-shaped in the container."
 }
