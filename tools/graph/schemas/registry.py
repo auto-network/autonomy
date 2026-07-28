@@ -13,12 +13,22 @@ hop. Callers asking for ``target_revision >= N`` will silently drop
 ``stored_revision < N`` rows when no chain reaches them — see
 ``upconvert_chain``.
 
-Schema-as-Setting (auto-82xyq): registered schemas are also lazily
-upserted into each per-org DB as ``autonomy.schema#1`` Settings, with
-their hand-curated synopsis surfacing as ``autonomy.schema.synopsis#1``.
-``flush_schema_meta(db)`` performs the upsert; ``GraphDB._init_schema``
-calls it once per writable connection. The flush is idempotent — payload
-match is a no-op.
+Schema-as-Setting (auto-82xyq): registered schemas are also upserted
+into each per-org DB as ``autonomy.schema#1`` Settings, with their
+hand-curated synopsis surfacing as ``autonomy.schema.synopsis#1``.
+``flush_schema_meta(db)`` performs the upsert for one DB; the flush is
+idempotent — payload match is a no-op.
+
+Materialization is decoupled from ``_SCHEMA_USER_VERSION`` (auto-06ziz):
+``flush_schema_meta_all_orgs()`` walks every per-org DB and flushes each,
+and is invoked once at dashboard startup (the hot-reload restarts the
+process on every code change, which is the only thing that can change the
+registry). Adding a schema, editing a schema, or editing only a module's
+SYNOPSIS is therefore live after a restart with no version bump and no
+full table re-init. It is deliberately NOT called from
+``GraphDB._init_schema`` — coupling it to the per-connection init path was
+the bug: an already-initialized DB never re-flushed until someone bumped
+the schema version, which also forced an expensive full re-init.
 
 Suffix composition (auto-uqdkk): a subclass may declare
 ``set_id_suffix = "leaf"`` to inherit its parent's ``set_id`` as a
@@ -1045,9 +1055,16 @@ def flush_schema_meta(db) -> None:
     Subsequent calls against an unchanged registry no-op (payload-equality
     short-circuits the UPDATE).
 
-    Called once per writable :class:`GraphDB` connection from
-    ``GraphDB._init_schema``. The cost (~24 SELECT no-ops on a populated
-    DB) is dominated by the surrounding migration pass.
+    Writes both meta-row families: ``autonomy.schema#1`` (from
+    ``export_json_schema()``) and ``autonomy.schema.synopsis#1`` (from the
+    defining module's ``SYNOPSIS`` dict). Editing only a synopsis therefore
+    lands here too — that route is what ``graph set find`` ranks on.
+
+    Invoked once per org at dashboard startup via
+    :func:`flush_schema_meta_all_orgs`; it costs roughly two idempotent
+    SELECT lookups per registered schema (~70+ on the current registry, and
+    growing with every schema added), which is why it runs once at startup
+    rather than on every writable open.
     """
     if getattr(db, "read_only", False):
         return
@@ -1081,3 +1098,56 @@ def flush_schema_meta(db) -> None:
                 now=now,
             )
     db.conn.commit()
+
+
+def flush_schema_meta_all_orgs(*, root=None) -> int:
+    """Flush schema + synopsis meta-Settings into every per-org DB.
+
+    Called once at dashboard startup (see :mod:`tools.dashboard.server`).
+    The dashboard hot-reloads — i.e. restarts the process — on every code
+    change, and the schema registry can only change when code loads, so a
+    single startup flush is sufficient to make schema/synopsis edits live
+    with **no** ``_SCHEMA_USER_VERSION`` bump and **no** full table
+    re-init. Deliberately not wired into ``GraphDB._init_schema``; that
+    coupling was the bug fixed in auto-06ziz.
+
+    Each org is opened writably and flushed via :func:`flush_schema_meta`,
+    which is idempotent (an unchanged registry re-flushes to no-ops).
+    Read-only / broken org DBs are skipped rather than raised. Returns the
+    number of DBs successfully flushed.
+
+    Note: an org DB that is only ever opened read-only never materializes
+    its own rows under any design. Cross-org schema discovery does not
+    depend on per-org materialization — schema-meta rows are written
+    ``publication_state="canonical"`` and every org resolves platform
+    schemas through peer merge from ``autonomy``. That holds only while an
+    org subscribes to ``autonomy`` as a peer; an org pinning a narrower
+    ``autonomy.org.peer-subscription`` would lose platform-schema discovery
+    entirely, and this flush would not restore it.
+    """
+    # Imported lazily to avoid an import cycle: db -> schemas (settings_ops)
+    # -> back into db. org_ops likewise pulls in db.
+    from ..db import GraphDB
+    from .. import org_ops
+
+    flushed = 0
+    for ref in org_ops.list_orgs(root=root):
+        try:
+            db = GraphDB.open_org_db(ref.slug, mode="rw", root=root)
+        except Exception:
+            logger.warning(
+                "flush_schema_meta_all_orgs: could not open org %r; skipping",
+                ref.slug, exc_info=True,
+            )
+            continue
+        try:
+            flush_schema_meta(db)
+            flushed += 1
+        except Exception:
+            logger.warning(
+                "flush_schema_meta_all_orgs: flush failed for org %r; skipping",
+                ref.slug, exc_info=True,
+            )
+        finally:
+            db.close()
+    return flushed

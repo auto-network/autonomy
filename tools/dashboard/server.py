@@ -150,9 +150,9 @@ templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 from tools.dashboard.plugin_api import loader as plugin_loader  # noqa: E402
 
 # Settings-mediator substrate (bead auto-f93wj) — imported eagerly so
-# its cursor + state schemas are in the registry before any GraphDB
-# connection runs ``flush_schema_meta``. The dispatch loop itself
-# starts inside the lifespan hook.
+# its cursor + state schemas are in the registry before
+# ``flush_schema_meta_all_orgs`` runs at lifespan startup. The dispatch
+# loop itself starts inside the lifespan hook.
 from tools.dashboard import settings_mediator as _settings_mediator  # noqa: E402, F401
 from tools.dashboard import harness_usage_settings as _harness_usage_settings  # noqa: E402, F401
 from tools.dashboard import session_upload_settings as _session_upload  # noqa: E402, F401
@@ -165,15 +165,15 @@ from tools.graph import settings_ops  # noqa: E402
 # Activity tab notifications substrate (bead auto-5u8zb) — imported
 # eagerly so the four ``dashboard.activity.*`` SettingSchema classes
 # (ask, ask_vote, ask_refresh, operator_dismissed) are in the registry
-# before ``flush_schema_meta`` runs on the first writable GraphDB
-# connection. See pitfall ``graph://3fe60c25-fab``.
+# before ``flush_schema_meta_all_orgs`` runs at lifespan startup.
+# See pitfall ``graph://3fe60c25-fab``.
 from tools.dashboard import notifications_settings as _notifications_settings  # noqa: E402, F401
 
 # Surface Presence + OperatorActivity substrate (bead auto-i3tki) —
 # imported eagerly for the same reason: its three SettingSchema classes
 # (dashboard.surface.presence, dashboard.surface.ping,
 # dashboard.operator.activity) must be in the registry before
-# ``flush_schema_meta`` runs on the first writable GraphDB connection.
+# ``flush_schema_meta_all_orgs`` runs at lifespan startup.
 # See pitfall ``graph://3fe60c25-fab``.
 from tools.graph import surface as _surface  # noqa: E402, F401
 
@@ -196,13 +196,13 @@ from tools.dashboard import notifications_actions as _notifications_actions  # n
 # the ``dashboard.session.crosstalk`` namespace root is established and
 # any concrete subclass (request-rebase, request-identity-refresh, …)
 # composing under it via ``set_id_suffix`` registers before
-# ``flush_schema_meta`` runs on the first writable GraphDB connection.
+# ``flush_schema_meta_all_orgs`` runs at lifespan startup.
 from tools.dashboard import crosstalk_directive as _crosstalk_directive  # noqa: E402, F401
 
 # Settings Nexus plugin schemas (bead auto-ct3ey) — imported eagerly so
 # ``dashboard.nexus.scene#1`` + ``dashboard.nexus.tile#1`` are in the
-# registry before ``flush_schema_meta`` runs on the first writable
-# GraphDB connection. The plugin loader also imports the module via the
+# registry before ``flush_schema_meta_all_orgs`` runs at lifespan
+# startup. The plugin loader also imports the module via the
 # manifest's ``entrypoints.schemas`` list, but that import runs *after*
 # this top-level reference; the explicit import is the contract per
 # pitfall ``graph://3fe60c25-fab``.
@@ -15964,6 +15964,21 @@ async def _on_startup():
         org_ops.ensure_bootstrap_orgs()
     except Exception:
         logger.exception("ensure_bootstrap_orgs() failed; continuing startup")
+    # Materialize Setting *schema* meta rows (autonomy.schema#1 +
+    # autonomy.schema.synopsis#1) into every org DB. Decoupled from
+    # _SCHEMA_USER_VERSION (auto-06ziz): the hot-reload restarts this process on
+    # every code change, and the schema registry only changes when code loads,
+    # so flushing once here makes schema/synopsis edits live with no version bump
+    # and no full table re-init. Must run after ensure_bootstrap_orgs so the
+    # freshly created autonomy/personal DBs are covered on first launch. All the
+    # eager schema-module imports at the top of this file guarantee the registry
+    # is fully populated before this runs.
+    try:
+        from tools.graph.schemas.registry import flush_schema_meta_all_orgs
+        n = await asyncio.to_thread(flush_schema_meta_all_orgs)
+        logger.info("flush_schema_meta_all_orgs: flushed %d org DB(s)", n)
+    except Exception:
+        logger.exception("flush_schema_meta_all_orgs() failed; continuing startup")
     try:
         await asyncio.to_thread(_warm_personal_settings_store)
     except Exception:

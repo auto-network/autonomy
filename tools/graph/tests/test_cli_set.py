@@ -70,8 +70,18 @@ def _run_cli(argv: list[str]) -> tuple[int, str, str]:
 
 
 def test_parser_recognises_set_list(graph_db_env):
-    # First DB op flushes registered schema metadata in (auto-82xyq), so
-    # an "empty" DB still surfaces autonomy.schema / autonomy.schema.synopsis.
+    # Schema-meta materialization is decoupled from connection open
+    # (auto-06ziz): flush explicitly (as dashboard startup would) so the
+    # meta set_ids autonomy.schema / autonomy.schema.synopsis surface.
+    from tools.graph.db import GraphDB
+    from tools.graph.schemas.registry import flush_schema_meta
+
+    db = GraphDB(str(graph_db_env), mode="rw")
+    try:
+        flush_schema_meta(db)
+    finally:
+        db.close()
+
     rc, out, _ = _run_cli(["set", "list"])
     assert rc == 0
     assert "autonomy.schema" in out

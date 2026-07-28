@@ -84,8 +84,22 @@ def _run_cli(argv: list[str], *, stdin: str | None = None) -> tuple[int, str, st
 
 
 def _trigger_flush(graph_db_env):
-    """Force at least one writable connection so ``flush_schema_meta`` runs."""
-    ops.list_set_ids(org=ops.CALLER_ORG)
+    """Materialize schema-meta rows into the pinned test DB.
+
+    Schema-meta materialization is decoupled from ``_SCHEMA_USER_VERSION``
+    (auto-06ziz): it is no longer done implicitly on connection open, but
+    once at dashboard startup via ``flush_schema_meta_all_orgs``. Here we
+    call ``flush_schema_meta`` directly against the ``GRAPH_DB``-pinned
+    file, which is what the CLI-facing ``set schema/example/find`` tests
+    depend on.
+    """
+    from tools.graph.db import GraphDB
+
+    db = GraphDB(str(graph_db_env), mode="rw")
+    try:
+        flush_schema_meta(db)
+    finally:
+        db.close()
 
 
 # ── 1. registration upserts on import + first DB op ─────────
@@ -306,16 +320,18 @@ def test_validation_error_does_not_get_generic_prefix(graph_db_env):
 
 
 def test_second_connection_does_not_duplicate_meta_rows(graph_db_env):
-    """Open + close two writable GraphDBs against the same path. The second
-    flush should be a payload-equality no-op — ``read_set`` must still
-    show exactly one row per (set_id, key).
+    """Flush twice against the same path (mirroring two dashboard
+    restarts). The second flush should be a payload-equality no-op —
+    ``read_set`` must still show exactly one row per (set_id, key).
     """
     from tools.graph.db import GraphDB
 
-    db1 = GraphDB(graph_db_env)
-    db1.close()
-    db2 = GraphDB(graph_db_env)
-    db2.close()
+    for _ in range(2):
+        db = GraphDB(graph_db_env, mode="rw")
+        try:
+            flush_schema_meta(db)
+        finally:
+            db.close()
 
     members = ops.read_set(SCHEMA_META_SET_ID, org=ops.CALLER_ORG).members
     seen: dict[str, int] = {}
@@ -330,7 +346,7 @@ def test_explicit_flush_is_idempotent(graph_db_env):
 
     db = GraphDB(graph_db_env)
     try:
-        # Two extra explicit flushes after the auto one in _init_schema.
+        # Repeated explicit flushes must not duplicate rows.
         flush_schema_meta(db)
         flush_schema_meta(db)
     finally:
@@ -341,7 +357,7 @@ def test_explicit_flush_is_idempotent(graph_db_env):
     assert len(keys) == len(set(keys))
 
 
-# ── 7. registration of a fresh schema flushes on next DB op ─
+# ── 7. registration of a fresh schema materializes on the next flush ─
 #
 # ``_DemoSchema`` is built inside the tests so its
 # ``__init_subclass__`` auto-registration is scoped to the test that
@@ -370,10 +386,10 @@ def _build_demo_schema() -> type:
     return _DemoSchema
 
 
-def test_newly_registered_schema_flushes_on_first_db_op(graph_db_env):
+def test_newly_registered_schema_materializes_on_flush(graph_db_env):
     _build_demo_schema()  # auto-registers via __init_subclass__
 
-    # Force a writable connection so the lazy flush fires.
+    # A flush (as run at dashboard startup) materializes the new schema.
     _trigger_flush(graph_db_env)
 
     rc, out, err = _run_cli(["set", "schema", "autonomy.test.demo"])
@@ -415,18 +431,20 @@ def test_register_schema_synopsis_round_trip(graph_db_env, monkeypatch):
     assert "autonomy.test.demo#1" in out
 
 
-# ── Schema-meta flush across a _SCHEMA_USER_VERSION bump ─────────────
+# ── Schema-meta flush is decoupled from _SCHEMA_USER_VERSION (auto-06ziz) ──
+#
+# The flush no longer rides on ``GraphDB._init_schema`` behind the
+# ``_SCHEMA_USER_VERSION`` guard. Materializing (or re-materializing) schema
+# meta rows happens once at dashboard startup via
+# ``flush_schema_meta_all_orgs`` and must NOT run on ordinary connection
+# opens, nor trigger a full table re-init.
 
-def test_stale_version_db_picks_up_registered_schemas(tmp_path, monkeypatch):
-    """A DB stamped at an older schema version re-flushes on next open.
 
-    ``_init_schema`` short-circuits when ``PRAGMA user_version`` already
-    equals ``_SCHEMA_USER_VERSION``, which means a newly registered
-    Setting schema never lands as an ``autonomy.schema#1`` row on an
-    existing database until that constant is bumped. When it is bumped,
-    the next writable open must materialise every registered schema —
-    otherwise ``graph set schema <set_id>`` reports schemas as
-    unregistered even though their module imported cleanly.
+def test_ordinary_writable_open_does_not_flush_schema_meta(tmp_path, monkeypatch):
+    """Opening an already-initialized DB writably must NOT materialize
+    schema meta rows. Materialization is a startup step, not a
+    per-connection one — otherwise the expensive coupling this bead
+    removed is back.
     """
     from tools.graph.db import GraphDB, _SCHEMA_USER_VERSION
 
@@ -435,34 +453,117 @@ def test_stale_version_db_picks_up_registered_schemas(tmp_path, monkeypatch):
     monkeypatch.delenv("GRAPH_ORG", raising=False)
     GraphDB.close_all_pooled()
 
-    db = GraphDB.create_org_db("stale-probe")
+    db = GraphDB.create_org_db("decouple-probe")
     db_path = db.db_path
-    expected = set(SCHEMAS)
-    assert expected, "registry should not be empty"
-
-    # Simulate a database created before the newest schemas existed:
-    # drop their meta rows and stamp the previous version.
-    db.conn.execute(f"DELETE FROM settings WHERE set_id = '{SCHEMA_META_SET_ID}'")
-    db.conn.execute(f"PRAGMA user_version = {_SCHEMA_USER_VERSION - 1}")
-    db.conn.commit()
     db.close()
     GraphDB.close_all_pooled()
 
+    # Register a fresh schema AFTER the DB was created + stamped.
+    _build_demo_schema()
+
     reopened = GraphDB(str(db_path), mode="rw")
     try:
+        # Correct version → fast-path guard, no re-init.
+        assert reopened.conn.execute(
+            "PRAGMA user_version"
+        ).fetchone()[0] == _SCHEMA_USER_VERSION
         rows = {
             r[0] for r in reopened.conn.execute(
                 f"SELECT key FROM settings WHERE set_id = '{SCHEMA_META_SET_ID}'"
             ).fetchall()
         }
-        missing = expected - rows
-        assert not missing, (
-            "registered schemas absent from the meta-Settings flush after a "
-            f"version bump: {sorted(missing)}"
-        )
+        # No flush on open: neither the just-registered demo schema nor any
+        # baseline schema is materialized by merely opening the connection.
+        assert not rows, f"open should not flush schema meta; found: {sorted(rows)}"
+    finally:
+        reopened.close()
+        GraphDB.close_all_pooled()
+
+
+def test_flush_all_orgs_materializes_new_schema_without_version_bump(
+    tmp_path, monkeypatch
+):
+    """A schema registered after DB creation materializes on the next
+    ``flush_schema_meta_all_orgs`` with NO ``_SCHEMA_USER_VERSION`` bump
+    and NO full table re-init (the version stays put).
+    """
+    from tools.graph.db import GraphDB, _SCHEMA_USER_VERSION
+    from tools.graph.schemas.registry import flush_schema_meta_all_orgs
+
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    GraphDB.close_all_pooled()
+
+    db = GraphDB.create_org_db("flush-probe")
+    db_path = db.db_path
+    db.close()
+    GraphDB.close_all_pooled()
+
+    _build_demo_schema()  # register after creation; no version bump
+
+    flushed = flush_schema_meta_all_orgs()
+    assert flushed >= 1
+
+    reopened = GraphDB(str(db_path), mode="rw")
+    try:
+        # Version unchanged — materialization did not force a re-init.
         assert reopened.conn.execute(
             "PRAGMA user_version"
         ).fetchone()[0] == _SCHEMA_USER_VERSION
+        rows = {
+            r[0] for r in reopened.conn.execute(
+                f"SELECT key FROM settings WHERE set_id = '{SCHEMA_META_SET_ID}'"
+            ).fetchall()
+        }
+        assert "autonomy.test.demo#1" in rows, (
+            "registered schema absent after flush_schema_meta_all_orgs"
+        )
+        # The whole registry lands, not just the demo schema.
+        assert set(SCHEMAS) <= rows
+    finally:
+        reopened.close()
+        GraphDB.close_all_pooled()
+
+
+def test_flush_all_orgs_also_materializes_synopsis(tmp_path, monkeypatch):
+    """Editing only a module SYNOPSIS is a third materialization route and
+    must land through ``flush_schema_meta_all_orgs`` too — it is what
+    ``graph set find`` ranks on.
+    """
+    from tools.graph.db import GraphDB
+    from tools.graph.schemas.registry import flush_schema_meta_all_orgs
+
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    GraphDB.close_all_pooled()
+
+    db = GraphDB.create_org_db("synopsis-probe")
+    db_path = db.db_path
+    db.close()
+    GraphDB.close_all_pooled()
+
+    demo_cls = _build_demo_schema()
+    import sys as _sys
+    mod = _sys.modules[demo_cls.__module__]
+    monkeypatch.setattr(
+        mod,
+        "SYNOPSIS",
+        {"summary": "syn probe", "nouns": ["synprobe"], "related_set_ids": []},
+        raising=False,
+    )
+
+    flush_schema_meta_all_orgs()
+
+    reopened = GraphDB(str(db_path), mode="rw")
+    try:
+        rows = {
+            r[0] for r in reopened.conn.execute(
+                f"SELECT key FROM settings WHERE set_id = '{SYNOPSIS_META_SET_ID}'"
+            ).fetchall()
+        }
+        assert "autonomy.test.demo#1" in rows
     finally:
         reopened.close()
         GraphDB.close_all_pooled()
