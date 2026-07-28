@@ -749,95 +749,98 @@
             <div class="mx-auto max-w-6xl px-4 pb-8 pt-4 sm:px-6 lg:px-8">
               <div class="-mx-4 mb-4 px-4 pt-1 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
                 <div class="mx-auto max-w-6xl">
-                  <div class="relative mb-2 pr-12">
-                    <div class="flex min-w-0 flex-wrap items-center gap-2">
-                      <template x-if="isPrReview()">
-                        <a :href="selectedCommit.pr.url"
-                           target="_blank"
-                           rel="noreferrer"
-                           class="rounded-full border px-2 py-0.5 text-[10px] font-semibold transition"
-                           :class="prBadgeClass(selectedCommit.pr)"
-                           data-testid="review-pr-badge">
-                          <span class="inline-flex items-center gap-1.5">
-                            <span class="h-1.5 w-1.5 rounded-full"
-                                  :class="prDotClass(selectedCommit.pr)"></span>
-                            <span x-text="'PR #' + selectedCommit.pr.number"></span>
-                          </span>
-                        </a>
+                  <div class="mb-2 flex min-w-0 flex-wrap items-center gap-2">
+                    <template x-if="isPrReview()">
+                      <a :href="selectedCommit.pr.url"
+                         target="_blank"
+                         rel="noreferrer"
+                         class="rounded-full border px-2 py-0.5 text-[10px] font-semibold transition"
+                         :class="prBadgeClass(selectedCommit.pr)"
+                         data-testid="review-pr-badge">
+                        <span class="inline-flex items-center gap-1.5">
+                          <span class="h-1.5 w-1.5 rounded-full"
+                                :class="prDotClass(selectedCommit.pr)"></span>
+                          <span x-text="'PR #' + selectedCommit.pr.number"></span>
+                        </span>
+                      </a>
+                    </template>
+                    <template x-if="!isPrReview()">
+                      <span class="hidden rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200 sm:inline"
+                            x-text="selectedCommit.commit.short_sha || shortSha(selectedCommit.commit.sha)"></span>
+                    </template>
+                    <!-- Session badge — links back to the session viewer
+                         when the session is still live and we know its
+                         project; otherwise renders as a plain badge. -->
+                    <template x-if="selectedCommit.row.session_live && selectedCommit.row.session_project">
+                      <a :href="'/session/' + encodeURIComponent(selectedCommit.row.session_project) + '/' + encodeURIComponent(selectedCommit.row.session_name)"
+                         class="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200 hover:bg-indigo-500/20"
+                         :title="'Open session viewer: ' + selectedCommit.row.session_name">
+                        <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"></span>
+                        <span x-text="selectedCommit.row.session_name"></span>
+                      </a>
+                    </template>
+                    <template x-if="!(selectedCommit.row.session_live && selectedCommit.row.session_project)">
+                      <span class="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200">
+                        <template x-if="selectedCommit.row.session_live">
+                          <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"></span>
+                        </template>
+                        <span x-text="selectedCommit.row.session_name"></span>
+                      </span>
+                    </template>
+                    <template x-if="!isPrReview() && selectedCommit.commit.date">
+                      <span class="hidden rounded-full bg-slate-800 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-400 sm:inline"
+                            x-text="selectedCommit.commit.date"></span>
+                    </template>
+                    <div class="ml-auto flex shrink-0 items-center gap-2">
+                      <template x-if="canRefreshSelectedRow()">
+                        <button type="button"
+                                class="h-10 rounded-2xl border border-white/10 bg-white/[0.03] px-3 text-xs font-semibold text-slate-300 transition hover:border-white/20 hover:text-white disabled:cursor-wait disabled:opacity-50"
+                                :disabled="rowRefreshing"
+                                @click="refreshSelectedRow()"
+                                data-testid="review-overlay-refresh-button"
+                                x-text="rowRefreshing ? 'Refreshing...' : 'Refresh'">Refresh</button>
                       </template>
-                      <template x-if="!isPrReview()">
-                        <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
-                              x-text="selectedCommit.commit.short_sha || shortSha(selectedCommit.commit.sha)"></span>
-                      </template>
-                      <!-- Session badge — links back to the session viewer
-                           when the session is still live and we know its
-                           project; otherwise renders as a plain badge. -->
-                      <template x-if="selectedCommit.row.session_live && selectedCommit.row.session_project">
-                        <a :href="'/session/' + encodeURIComponent(selectedCommit.row.session_project) + '/' + encodeURIComponent(selectedCommit.row.session_name)"
-                           class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200 hover:bg-indigo-500/20"
-                           :title="'Open session viewer: ' + selectedCommit.row.session_name"
-                           x-text="selectedCommit.row.session_name"></a>
-                      </template>
-                      <template x-if="!(selectedCommit.row.session_live && selectedCommit.row.session_project)">
-                        <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
-                              x-text="selectedCommit.row.session_name"></span>
-                      </template>
-                      <template x-if="!isPrReview() && selectedCommit.commit.date">
-                        <span class="rounded-full bg-slate-800 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-400"
-                              x-text="selectedCommit.commit.date"></span>
-                      </template>
-                      <template x-if="!isPrReview() && selectedCommit.total > 1">
-                        <div class="flex items-center gap-1">
-                          <button type="button"
-                                  class="grid h-8 w-8 place-items-center rounded-full border border-white/10 bg-white/[0.03] text-sm font-semibold text-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
-                                  :disabled="!hasEarlierCommit()"
-                                  @click="viewEarlierCommit()">&lt;</button>
-                          <span class="rounded-full bg-slate-800 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-300"
-                                x-text="'commit ' + selectedCommit.position + ' of ' + selectedCommit.total"></span>
-                          <button type="button"
-                                  class="grid h-8 w-8 place-items-center rounded-full border border-white/10 bg-white/[0.03] text-sm font-semibold text-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
-                                  :disabled="!hasLaterCommit()"
-                                  @click="viewLaterCommit()">&gt;</button>
-                        </div>
-                      </template>
-                    </div>
-                    <div class="absolute right-0 top-0 flex items-center gap-2">
-                      <button type="button"
-                              class="h-10 rounded-2xl border border-white/10 bg-white/[0.03] px-3 text-xs font-semibold text-slate-300 transition hover:border-white/20 hover:text-white disabled:cursor-wait disabled:opacity-50"
-                              :disabled="rowRefreshing"
-                              @click="refreshSelectedRow()"
-                              data-testid="review-overlay-refresh-button"
-                              x-text="rowRefreshing ? 'Refreshing...' : 'Refresh'">Refresh</button>
                       <button type="button"
                               class="h-10 w-10 shrink-0 rounded-full border border-white/10 bg-white/[0.03] text-slate-300"
                               @click="selectedCommit = null">×</button>
                     </div>
                   </div>
-                  <div class="mt-1 flex max-w-4xl flex-col items-start gap-1.5"
-                       data-branch-row>
-                    <span class="inline-flex min-w-0 items-center gap-2"
-                          data-branch-part="src">
-                      <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">src</span>
-                      <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
-                        <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
-                              x-text="repoName(selectedCommit.row)"></span>
-                        <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
+                  <template x-if="!isPrReview() && selectedCommit.total > 1">
+                    <div class="mb-2 flex items-center justify-center gap-1 sm:justify-start">
+                      <button type="button"
+                              class="grid h-8 w-8 place-items-center rounded-full border border-white/10 bg-white/[0.03] text-sm font-semibold text-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
+                              :disabled="!hasEarlierCommit()"
+                              @click="viewEarlierCommit()">&lt;</button>
+                      <span class="rounded-full bg-slate-800 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-300"
+                            x-text="'commit ' + selectedCommit.position + ' of ' + selectedCommit.total"></span>
+                      <button type="button"
+                              class="grid h-8 w-8 place-items-center rounded-full border border-white/10 bg-white/[0.03] text-sm font-semibold text-slate-300 disabled:cursor-not-allowed disabled:opacity-40"
+                              :disabled="!hasLaterCommit()"
+                              @click="viewLaterCommit()">&gt;</button>
+                    </div>
+                  </template>
+                  <div class="mt-1 flex max-w-4xl min-w-0 flex-col gap-1.5">
+                    <template x-if="selectedCommit.row.repo_name">
+                      <span class="inline-flex w-fit shrink-0 items-center gap-1.5 rounded-full border border-white/10 bg-slate-800 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-400"
+                            data-branch-part="repo">
+                        <span class="uppercase tracking-wider text-slate-500">repo</span>
+                        <span class="text-slate-200" x-text="repoName(selectedCommit.row)"></span>
+                      </span>
+                    </template>
+                    <div class="flex min-w-0 flex-col gap-1.5 pl-3">
+                      <span class="inline-flex min-w-0 items-center gap-2">
+                        <span class="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-slate-500">src</span>
+                        <span class="min-w-0 truncate rounded-full border border-white/10 bg-slate-900 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-200"
+                              :title="sourceBranch(selectedCommit.row)"
                               x-text="sourceBranch(selectedCommit.row)"></span>
                       </span>
-                    </span>
-                    <span class="text-sm text-slate-600"
-                          data-branch-part="arrow"
-                          aria-hidden="true">→</span>
-                    <span class="inline-flex min-w-0 items-center gap-2"
-                          data-branch-part="dst">
-                      <span class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">dst</span>
-                      <span class="inline-flex max-w-full overflow-hidden rounded-full border border-white/10 font-mono text-[10px] font-semibold">
-                        <span class="bg-slate-800 px-2 py-0.5 text-slate-400"
-                              x-text="repoName(selectedCommit.row)"></span>
-                        <span class="border-l border-white/10 bg-slate-900 px-2 py-0.5 text-slate-200"
+                      <span class="inline-flex min-w-0 items-center gap-2">
+                        <span class="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-slate-500">dst</span>
+                        <span class="min-w-0 truncate rounded-full border border-white/10 bg-slate-900 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-200"
+                              :title="targetBranch(selectedCommit.row)"
                               x-text="targetBranch(selectedCommit.row)"></span>
                       </span>
-                    </span>
+                    </div>
                     <template x-if="!isPrReview() && selectedCommit.pr">
                       <button type="button"
                               class="mt-1 inline-flex max-w-full items-center gap-2 rounded-2xl border border-white/10 bg-slate-950/75 px-3 py-2 text-left transition hover:border-white/20 hover:bg-white/[0.04]"
@@ -1067,22 +1070,30 @@
                              project; otherwise renders as a plain badge. -->
                         <template x-if="selectedDirtyRow.session_live && selectedDirtyRow.session_project">
                           <a :href="'/session/' + encodeURIComponent(selectedDirtyRow.session_project) + '/' + encodeURIComponent(selectedDirtyRow.session_name)"
-                             class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200 hover:bg-indigo-500/20"
-                             :title="'Open session viewer: ' + selectedDirtyRow.session_name"
-                             x-text="selectedDirtyRow.session_name"></a>
+                             class="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200 hover:bg-indigo-500/20"
+                             :title="'Open session viewer: ' + selectedDirtyRow.session_name">
+                            <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"></span>
+                            <span x-text="selectedDirtyRow.session_name"></span>
+                          </a>
                         </template>
                         <template x-if="!(selectedDirtyRow.session_live && selectedDirtyRow.session_project)">
-                          <span class="rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200"
-                                x-text="selectedDirtyRow.session_name"></span>
+                          <span class="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-indigo-500/20 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-indigo-200">
+                            <template x-if="selectedDirtyRow.session_live">
+                              <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"></span>
+                            </template>
+                            <span x-text="selectedDirtyRow.session_name"></span>
+                          </span>
                         </template>
                         <span class="inline-flex overflow-hidden rounded-full border border-white/10 text-[10px] font-semibold">
                           <span class="bg-slate-800 px-2 py-0.5 uppercase tracking-wider text-slate-500">repo</span>
                           <span class="bg-slate-900 px-2 py-0.5 font-mono text-slate-200"
                                 x-text="repoName(selectedDirtyRow)"></span>
                         </span>
-                        <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
-                              :class="statusClass(selectedDirtyRow)"
-                              x-text="statusLabel(selectedDirtyRow)"></span>
+                        <template x-if="statusLabel(selectedDirtyRow) !== 'LIVE'">
+                          <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
+                                :class="statusClass(selectedDirtyRow)"
+                                x-text="statusLabel(selectedDirtyRow)"></span>
+                        </template>
                     </div>
                     <button type="button"
                             class="absolute right-0 top-0 h-10 w-10 shrink-0 rounded-full border border-white/10 bg-white/[0.03] text-slate-300"

@@ -504,6 +504,7 @@
 
       async openWorkspaceReview() {
         if (!this.sessionKey) return;
+        this.workspaceReviewLoading = true;
         try {
           if (window.openWorktreeReviewOverlay) {
             var opened = await window.openWorktreeReviewOverlay(this.sessionKey);
@@ -511,6 +512,8 @@
           }
         } catch (_ignored) {
           // Fall through to the route-based deep link.
+        } finally {
+          this.workspaceReviewLoading = false;
         }
         if (typeof navigateTo === 'function') {
           navigateTo('/worktrees?session=' + encodeURIComponent(this.sessionKey));
@@ -522,6 +525,10 @@
       autoScroll: true,
       loadingOlder: false,
       _workspaceStatus: null,
+      // True from the moment the ⌥ button is tapped until the worktree
+      // review overlay finishes hydrating (or the fetch fails) — drives
+      // the spin affordance on the button so a slow fetch isn't silent.
+      workspaceReviewLoading: false,
       _storeCleanups: [],
       _expanded: {},
       _expandView: {},
