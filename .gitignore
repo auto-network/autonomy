@@ -121,3 +121,5 @@ data/experiments.db
 
 # Run output dirs
 data/agent_runs/
+.beads/config.yaml
+.beads/issues.jsonl
