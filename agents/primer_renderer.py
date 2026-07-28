@@ -42,8 +42,6 @@ from tools.graph.commit_policy import (
 )
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "primers"
-PROJECTS_DIR = Path(__file__).resolve().parent / "projects"
-ORGS_DIR = Path(__file__).resolve().parent / "orgs"
 
 _env = jinja2.Environment(
     loader=jinja2.FileSystemLoader(str(TEMPLATE_DIR)),
@@ -271,20 +269,18 @@ def _overlay_markdown(
     set_id: str,
     revision: int,
     key: str,
-    fallback_path: Path,
 ) -> str:
-    """Resolve one primer overlay layer, Setting first, file second.
+    """Resolve one primer overlay layer from its Setting row.
 
     The Setting row lives in the workspace's own org DB and is read with
     ``peers=[]``, so overlay content never crosses an org boundary. That
     is the point of storing it here rather than in the platform repo,
     which is open source and has no per-org boundary at all.
 
-    ``fallback_path`` is the pre-migration file location. It is consulted
-    only when no Setting row resolves, so an org can migrate by writing
-    the Setting and deleting the file, in either order, without a window
-    where the overlay vanishes. Once every overlay is migrated the
-    fallback — and the file layer — can go.
+    Settings are the sole source: there is no file fallback. An overlay
+    with no Setting row for ``key`` renders nothing (empty string). The
+    pre-migration ``agents/orgs/<org>/primer.md`` /
+    ``agents/projects/<workspace>/primer.md`` files are no longer read.
     """
     try:
         members = graph_ops.read_set(
@@ -294,7 +290,7 @@ def _overlay_markdown(
             target_revision=revision,
         )
     except Exception:
-        members = None
+        return ""
 
     if members is not None:
         for member in members.members:
@@ -303,9 +299,6 @@ def _overlay_markdown(
             payload = member.payload if isinstance(member.payload, dict) \
                 else None
             return resolve_primer_markdown(payload)
-
-    if fallback_path.is_file():
-        return fallback_path.read_text()
     return ""
 
 
@@ -326,14 +319,12 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
         WORKSPACE_PRIMER_SET_ID,
         WORKSPACE_PRIMER_REVISION,
         config.id,
-        PROJECTS_DIR / config.id / "primer.md",
     )
     org_primer = _overlay_markdown(
         config,
         ORG_PRIMER_SET_ID,
         ORG_PRIMER_REVISION,
         config.graph_project,
-        ORGS_DIR / config.graph_project / "primer.md",
     )
     capability_blocks = _capability_primer_blocks(config)
     turn_correction = _turn_correction_block(config)

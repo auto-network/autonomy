@@ -292,36 +292,27 @@ def test_output_is_non_trivial_markdown():
 
 # ── Org primer layer (bead auto-31i3) ───────────────────────────────
 
-def test_org_primer_loaded_when_present(tmp_path, monkeypatch):
-    """Workspaces in an org with an org primer file pick it up."""
-    monkeypatch.setattr("agents.primer_renderer.ORGS_DIR", tmp_path)
-    (tmp_path / "acme").mkdir()
-    (tmp_path / "acme" / "primer.md").write_text(
-        "### Acme conventions\n\n- Always use tabs\n"
-    )
-    out = render_workspace_primer(_cfg(graph_project="acme"))
-    assert "## Org Conventions (acme)" in out
-    assert "### Acme conventions" in out
-    assert "Always use tabs" in out
-
-
-def test_org_primer_missing_silently_skipped(tmp_path, monkeypatch):
-    """Workspaces in an org without a primer file render without the section."""
-    monkeypatch.setattr("agents.primer_renderer.ORGS_DIR", tmp_path)
+def test_org_primer_missing_silently_skipped():
+    """An org with no primer Setting renders without the org section."""
     out = render_workspace_primer(_cfg(graph_project="no-such-org"))
     assert "## Org Conventions" not in out
 
 
 def test_real_anchore_primer_appears_in_enterprise_workspaces(shipped_workspaces):
     """Acceptance criterion: both enterprise-ng and enterprise-v5 sessions
-    see the Anchore org conventions without duplication."""
+    see the shared Anchore org primer — from its Setting, not a file — with
+    no duplication."""
+    _write_overlay(
+        _ORG_PRIMER_SET_ID, _ORG_PRIMER_REV, "anchore",
+        {"markdown": "### Anchore house style\n\n- `task lint` must pass.\n"},
+        org="anchore",
+    )
     ng = render_workspace_primer(get_workspace("enterprise-ng"))
     v5 = render_workspace_primer(get_workspace("enterprise-v5"))
     for out in (ng, v5):
         assert "## Org Conventions (anchore)" in out
-        # Representative content from agents/orgs/anchore/primer.md
-        assert "Pre-existing" in out
         assert "task lint" in out
+        assert out.count("## Org Conventions (anchore)") == 1
 
 
 def test_autonomy_workspace_has_no_anchore_primer(shipped_workspaces):
@@ -930,28 +921,6 @@ def test_org_overlay_read_from_setting(_turn_correction_org_env):
     out = render_workspace_primer(_cfg(id="sample"))
     assert "## Org Conventions (sample-org)" in out
     assert "Always tee test output." in out
-
-
-def test_overlay_setting_wins_over_file(_turn_correction_org_env, tmp_path,
-                                        monkeypatch):
-    """During migration the Setting is authoritative, not the file."""
-    projects = tmp_path / "projects" / "sample"
-    projects.mkdir(parents=True)
-    (projects / "primer.md").write_text("## From File\n\nstale copy")
-    monkeypatch.setattr(
-        "agents.primer_renderer.PROJECTS_DIR", tmp_path / "projects"
-    )
-
-    out = render_workspace_primer(_cfg(id="sample"))
-    assert "## From File" in out, "file is the fallback when no Setting"
-
-    _write_overlay(
-        _WS_PRIMER_SET_ID, _WS_PRIMER_REV, "sample",
-        {"markdown": "## From Setting\n\nauthoritative"},
-    )
-    out = render_workspace_primer(_cfg(id="sample"))
-    assert "## From Setting" in out
-    assert "## From File" not in out
 
 
 def test_overlay_is_org_isolated(_turn_correction_org_env):
