@@ -208,7 +208,7 @@ from .primer import generate_primer, collect_primer_data, format_for_agent, form
 from .dispatch_cmd import cmd_dispatch_default, cmd_dispatch_runs, cmd_dispatch_status, cmd_dispatch_stats, cmd_dispatch_approve, cmd_dispatch_watch, cmd_dispatch_nag, cmd_dispatch_reset
 from .worktree_cmd import cmd_worktree_default, cmd_worktree_list, cmd_worktree_prune
 from . import client as _client_mod
-from .client import get_client, HttpClient
+from .client import get_client, HttpClient, GraphHttpError
 
 
 def cmd_ingest(args):
@@ -2336,8 +2336,29 @@ def cmd_ingest_session(args):
 
 
 def cmd_docs_ingest(args):
-    """Ingest documentation files."""
-    db = GraphDB(args.db)
+    """Ingest documentation files.
+
+    Container-aware: in HttpClient mode the per-org DBs are mounted
+    read-only, so a direct GraphDB write fails with ``attempt to write a
+    readonly database``. Route the ingest through the dashboard API (which
+    runs it host-side against the writable DB), mirroring ``cmd_move`` and
+    ``ingest_sessions``.
+    """
+    client = get_client()
+    if isinstance(client, HttpClient):
+        try:
+            result = client.ingest_docs(args.path, org=args.org, force=args.force)
+        except GraphHttpError as e:
+            print(f"Error: docs-ingest via dashboard failed: {e}", file=sys.stderr)
+            sys.exit(1)
+        output = (result or {}).get("output")
+        if output:
+            print(output.rstrip("\n"))
+        else:
+            print(json.dumps(result, indent=2))
+        return
+
+    db = GraphDB(_get_db_path(args.org) if args.org else args.db)
     path = Path(args.path)
 
     if path.is_file():
@@ -5218,6 +5239,7 @@ def main():
     p = sub.add_parser("docs-ingest", help="Ingest documentation files (TOOL.md, README.md, etc.)")
     p.add_argument("path", help="File or directory to scan")
     p.add_argument("--force", action="store_true", help="Re-ingest existing files")
+    p.add_argument("--org", help="Target org slug (default: GRAPH_ORG)")
     p.set_defaults(func=cmd_docs_ingest)
 
     # status-ingest

@@ -12574,6 +12574,83 @@ async def api_graph_sessions(request):
         return JSONResponse({"ok": True, "output": stdout or summary, "counts": counts})
 
 
+async def _run_graph_docs_ingest_cli(
+    *,
+    path: str,
+    org: str | None,
+    force: bool,
+) -> tuple[str, str, int]:
+    """Run ``graph docs-ingest`` out-of-process, host-side.
+
+    Containers mount the per-org graph DBs read-only, so ``docs-ingest``
+    cannot write directly. This runs the CLI in ``--force-host`` mode against
+    the writable host DB, pinning the target org via ``GRAPH_ORG``. Parsing
+    markdown and rebuilding FTS indexes is CPU-bound, so — like the session
+    sweep — it runs in a subprocess rather than a worker thread to avoid
+    stalling the event loop under the GIL.
+    """
+    cmd = ["graph", "--force-host", "docs-ingest", path]
+    if force:
+        cmd.append("--force")
+
+    env = os.environ.copy()
+    # Defense in depth: --force-host bypasses HttpClient, and removing
+    # GRAPH_API prevents future CLI path changes from recursing into this API.
+    env.pop("GRAPH_API", None)
+    if org:
+        env["GRAPH_ORG"] = org
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=_GRAPH_SESSIONS_INGEST_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        return "", "graph docs-ingest timed out", -1
+    return stdout.decode(), stderr.decode(), proc.returncode
+
+
+async def api_graph_docs(request):
+    """Ingest documentation files host-side (container-safe).
+
+    Containers mount the per-org graph DBs read-only, so ``graph docs-ingest``
+    cannot write directly and crashes with ``attempt to write a readonly
+    database``. The container CLI POSTs here instead; we run the ingest in a
+    host subprocess (``--force-host``) against the writable DB. Mirrors
+    :func:`api_graph_sessions`.
+
+    Body: ``{"path": <file-or-dir>, "org": <slug?>, "force": <bool?>}``.
+    The path is resolved on the host filesystem — it must be visible to the
+    dashboard process (shared bind mount / worktree), not container-only.
+    """
+    body = await request.json()
+    path = body.get("path")
+    if not path:
+        return JSONResponse({"error": "path required"}, status_code=400)
+    org = body.get("org") or _caller_org(request)
+    force = bool(body.get("force"))
+
+    async with _ingest_lock:
+        stdout, stderr, rc = await _run_graph_docs_ingest_cli(
+            path=str(path),
+            org=org,
+            force=force,
+        )
+    if rc != 0:
+        return JSONResponse(
+            {"error": stderr.strip() or stdout.strip() or "graph docs-ingest failed", "rc": rc},
+            status_code=500,
+        )
+    return JSONResponse({"ok": True, "output": stdout})
+
+
 async def api_graph_attach(request):
     """Attach a file to the graph via multipart form upload."""
     import tempfile
@@ -15607,6 +15684,7 @@ routes = [
     Route("/api/graph/link", api_graph_link, methods=["POST"]),
     Route("/api/graph/journal", api_graph_journal_write, methods=["POST"]),
     Route("/api/graph/sessions", api_graph_sessions, methods=["POST"]),
+    Route("/api/graph/docs", api_graph_docs, methods=["POST"]),
     Route("/api/graph/attach", api_graph_attach, methods=["POST"]),
 
     # CrossTalk
