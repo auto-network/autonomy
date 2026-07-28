@@ -499,3 +499,28 @@ def test_primer_overlay_rejects_bodyless_payload():
         with pytest.raises(SchemaValidationError, match="required"):
             cls.validate({"enabled": False})
         cls.validate({"markdown": "## Fine", "enabled": False})
+
+
+def test_validation_400_surfaces_schema_detail():
+    """A schema-validation 400 must carry the specific failure, not just
+    "schema validation failed".
+
+    The dashboard returns the schema's own message in ``detail``; dropping
+    it leaves the operator with a generic string and no indication of
+    which field is wrong.
+    """
+    from tools.graph.client import _translate_http_error
+
+    exc = _translate_http_error(400, {
+        "error": "schema validation failed",
+        "detail": "OrgPrimerV1: 'markdown' is required",
+    })
+    assert isinstance(exc, ValueError)
+    assert "markdown" in str(exc)
+    assert "required" in str(exc)
+
+    # No detail, or detail identical to error → no duplication.
+    assert str(_translate_http_error(400, {"error": "bad request"})) \
+        == "bad request"
+    assert str(_translate_http_error(
+        400, {"error": "same", "detail": "same"})) == "same"

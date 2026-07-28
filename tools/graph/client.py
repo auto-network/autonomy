@@ -102,6 +102,13 @@ def _translate_http_error(status: int, body: dict) -> Exception:
         return NotFoundError(msg, body)
     if status == 400:
         msg = body.get("error") or "bad request"
+        # Schema validation 400s carry the specific failure in ``detail``
+        # (see ``server.py`` schema-validation responses). Dropping it
+        # leaves the caller with a bare "schema validation failed" and no
+        # indication of which field is wrong or why.
+        detail = body.get("detail")
+        if detail and detail != msg:
+            msg = f"{msg}: {detail}"
         return ValueError(msg)
     return GraphHttpError(body.get("error") or f"HTTP {status}", status, body)
 
