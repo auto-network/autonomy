@@ -890,3 +890,101 @@ def test_platform_baseline_section_rendered():
     out = render_workspace_primer(_cfg())
     assert "## Platform Baseline" in out
     assert "graph://fedda572-5f4" in out
+
+
+# ── Graph-native primer overlays (org + workspace) ───────────────────
+
+from tools.graph.schemas.org_primer import (  # noqa: E402
+    SCHEMA_REVISION as _ORG_PRIMER_REV,
+    SET_ID as _ORG_PRIMER_SET_ID,
+)
+from tools.graph.schemas.workspace_primer import (  # noqa: E402
+    SCHEMA_REVISION as _WS_PRIMER_REV,
+    SET_ID as _WS_PRIMER_SET_ID,
+)
+
+
+def _write_overlay(set_id, rev, key, payload, org="sample-org"):
+    from tools.graph import ops as _overlay_ops
+
+    _overlay_ops.upsert_by_key(set_id, rev, key, payload, org=org)
+
+
+def test_workspace_overlay_read_from_setting(_turn_correction_org_env):
+    """A workspace overlay Setting renders without any file on disk."""
+    _write_overlay(
+        _WS_PRIMER_SET_ID, _WS_PRIMER_REV, "sample",
+        {"markdown": "## Runbooks\n\nFleet status lives here."},
+    )
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "## Runbooks" in out
+    assert "Fleet status lives here." in out
+
+
+def test_org_overlay_read_from_setting(_turn_correction_org_env):
+    """An org overlay Setting renders under the generated heading."""
+    _write_overlay(
+        _ORG_PRIMER_SET_ID, _ORG_PRIMER_REV, "sample-org",
+        {"markdown": "### House style\n\nAlways tee test output."},
+    )
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "## Org Conventions (sample-org)" in out
+    assert "Always tee test output." in out
+
+
+def test_overlay_setting_wins_over_file(_turn_correction_org_env, tmp_path,
+                                        monkeypatch):
+    """During migration the Setting is authoritative, not the file."""
+    projects = tmp_path / "projects" / "sample"
+    projects.mkdir(parents=True)
+    (projects / "primer.md").write_text("## From File\n\nstale copy")
+    monkeypatch.setattr(
+        "agents.primer_renderer.PROJECTS_DIR", tmp_path / "projects"
+    )
+
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "## From File" in out, "file is the fallback when no Setting"
+
+    _write_overlay(
+        _WS_PRIMER_SET_ID, _WS_PRIMER_REV, "sample",
+        {"markdown": "## From Setting\n\nauthoritative"},
+    )
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "## From Setting" in out
+    assert "## From File" not in out
+
+
+def test_overlay_is_org_isolated(_turn_correction_org_env):
+    """An overlay written in another org never renders here.
+
+    This is the property the file layer could not provide: overlay
+    content lives in the owning org's DB and is read with peers=[], so
+    it cannot leak across an org boundary.
+    """
+    _write_overlay(
+        _WS_PRIMER_SET_ID, _WS_PRIMER_REV, "sample",
+        {"markdown": "## Secret Ops\n\nother org's runbook"},
+        org="other-org",
+    )
+    out = render_workspace_primer(_cfg(id="sample", graph_project="sample-org"))
+    assert "Secret Ops" not in out
+    assert "other org's runbook" not in out
+
+
+def test_disabled_overlay_is_skipped(_turn_correction_org_env):
+    """enabled=false parks content without deleting the row."""
+    _write_overlay(
+        _WS_PRIMER_SET_ID, _WS_PRIMER_REV, "sample",
+        {"markdown": "## Parked\n\nnot rendered", "enabled": False},
+    )
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "## Parked" not in out
+
+
+def test_blank_org_overlay_emits_no_heading(_turn_correction_org_env):
+    """An empty body must not render a bare 'Org Conventions' heading."""
+    _write_overlay(
+        _ORG_PRIMER_SET_ID, _ORG_PRIMER_REV, "sample-org", {"markdown": ""},
+    )
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "## Org Conventions" not in out

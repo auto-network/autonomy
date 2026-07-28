@@ -26,6 +26,15 @@ from tools.graph.schemas.turn_correction import (
     SET_ID as TURN_CORRECTION_SET_ID,
     resolve_payload as resolve_turn_correction_payload,
 )
+from tools.graph.schemas.org_primer import (
+    SCHEMA_REVISION as ORG_PRIMER_REVISION,
+    SET_ID as ORG_PRIMER_SET_ID,
+    resolve_markdown as resolve_primer_markdown,
+)
+from tools.graph.schemas.workspace_primer import (
+    SCHEMA_REVISION as WORKSPACE_PRIMER_REVISION,
+    SET_ID as WORKSPACE_PRIMER_SET_ID,
+)
 from tools.graph.commit_policy import (
     WorkspaceCapabilityContext,
     describe_commit_policy,
@@ -257,6 +266,49 @@ def _commit_policy_block(config: WorkspaceV1) -> dict:
     }
 
 
+def _overlay_markdown(
+    config: WorkspaceV1,
+    set_id: str,
+    revision: int,
+    key: str,
+    fallback_path: Path,
+) -> str:
+    """Resolve one primer overlay layer, Setting first, file second.
+
+    The Setting row lives in the workspace's own org DB and is read with
+    ``peers=[]``, so overlay content never crosses an org boundary. That
+    is the point of storing it here rather than in the platform repo,
+    which is open source and has no per-org boundary at all.
+
+    ``fallback_path`` is the pre-migration file location. It is consulted
+    only when no Setting row resolves, so an org can migrate by writing
+    the Setting and deleting the file, in either order, without a window
+    where the overlay vanishes. Once every overlay is migrated the
+    fallback — and the file layer — can go.
+    """
+    try:
+        members = graph_ops.read_set(
+            set_id,
+            org=config.graph_project,
+            peers=[],
+            target_revision=revision,
+        )
+    except Exception:
+        members = None
+
+    if members is not None:
+        for member in members.members:
+            if member.key != key:
+                continue
+            payload = member.payload if isinstance(member.payload, dict) \
+                else None
+            return resolve_primer_markdown(payload)
+
+    if fallback_path.is_file():
+        return fallback_path.read_text()
+    return ""
+
+
 def render_workspace_primer(config: WorkspaceV1) -> str:
     """Render the workspace runtime primer for a given project config.
 
@@ -269,17 +321,19 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
     template = _env.get_template("workspace.md.j2")
     writable_repos = [r for r in config.repos if r.writable]
     readonly_repos = [r for r in config.repos if not r.writable]
-    workspace_primer_path = PROJECTS_DIR / config.id / "primer.md"
-    workspace_primer = (
-        workspace_primer_path.read_text()
-        if workspace_primer_path.is_file()
-        else ""
+    workspace_primer = _overlay_markdown(
+        config,
+        WORKSPACE_PRIMER_SET_ID,
+        WORKSPACE_PRIMER_REVISION,
+        config.id,
+        PROJECTS_DIR / config.id / "primer.md",
     )
-    org_primer_path = ORGS_DIR / config.graph_project / "primer.md"
-    org_primer = (
-        org_primer_path.read_text()
-        if org_primer_path.is_file()
-        else ""
+    org_primer = _overlay_markdown(
+        config,
+        ORG_PRIMER_SET_ID,
+        ORG_PRIMER_REVISION,
+        config.graph_project,
+        ORGS_DIR / config.graph_project / "primer.md",
     )
     capability_blocks = _capability_primer_blocks(config)
     turn_correction = _turn_correction_block(config)
