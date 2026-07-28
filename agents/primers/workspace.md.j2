@@ -279,6 +279,26 @@ the org.
 - **graph** is the cross-session memory: `graph note` for insights/pitfalls, `graph bead` for work items
 - **Local `~/.claude/`** is ephemeral — wiped when this container exits. Never save memories here.
 
+## Platform Baseline
+Knowledge every org needs to operate on this platform, indexed in one
+canonical note — read it when platform behaviour surprises you, before
+you go reading platform source:
+
+`graph://fedda572-5f4`  (resolves to: `graph read fedda572-5f4`)
+
+It covers how your `~/.claude/CLAUDE.md` is composed and how to add to
+it, what `publication_state` controls about who can see what you write,
+and the cross-org read rules. Everything it links is `published` or
+`canonical`, so it resolves from any org's seat.
+
+Two of those are worth knowing up front:
+
+- **Revising a graph note** — `graph note update` hard-gates on the Note
+  Revision Protocol: `graph://843a8137-3c7`
+- **Searching found nothing?** That is not proof the knowledge is
+  absent. Peer orgs expose only `published`/`canonical` notes, so it may
+  exist one org away — see `graph://8cf067e3-ca3`.
+
 ## Bead Polishing Protocol
 When formulating or refining beads, read the protocol directly:
 `graph://f6c6c43e-24a`  (resolves to: `graph read f6c6c43e-24a`)
