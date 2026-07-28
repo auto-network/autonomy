@@ -472,3 +472,30 @@ def test_primer_overlay_schemas_are_registered():
     """The org/workspace primer overlays must be discoverable via set schema."""
     assert "autonomy.org.primer#1" in SCHEMAS
     assert "autonomy.workspace.primer#1" in SCHEMAS
+
+
+def test_primer_overlay_example_stub_is_useful():
+    """``set example`` must emit a body field, not an empty object.
+
+    Both overlay fields were optional at first, so the stub generator
+    produced ``{}`` — an operator copying it would write a row that
+    renders nothing. ``markdown`` is required precisely so the stub
+    carries the field the operator has to fill in.
+    """
+    for set_id in ("autonomy.org.primer#1", "autonomy.workspace.primer#1"):
+        schema = SCHEMAS[set_id].export_json_schema()
+        assert "markdown" in schema.get("required", []), (
+            f"{set_id}: 'markdown' must be required so the example stub "
+            f"is not empty"
+        )
+
+
+def test_primer_overlay_rejects_bodyless_payload():
+    """A row with no markdown is a no-op row; reject it at write time."""
+    from tools.graph.schemas.registry import SchemaValidationError
+
+    for set_id in ("autonomy.org.primer#1", "autonomy.workspace.primer#1"):
+        cls = SCHEMAS[set_id]
+        with pytest.raises(SchemaValidationError, match="required"):
+            cls.validate({"enabled": False})
+        cls.validate({"markdown": "## Fine", "enabled": False})

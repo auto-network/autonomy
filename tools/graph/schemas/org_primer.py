@@ -60,6 +60,7 @@ class OrgPrimerV1(SettingSchema):
     _field_metadata: dict[str, dict] = {
         "markdown": {
             "type": "string",
+            "required": True,
             "description": (
                 "Markdown body inlined under the generated "
                 "``## Org Conventions ({org})`` heading. Supply section "
@@ -93,7 +94,13 @@ def _validate_primer_payload(cls: type, payload: Any) -> None:
         raise SchemaValidationError(
             f"{cls.__name__}: unknown field(s): {sorted(extra)}"
         )
-    if "markdown" in payload and not isinstance(payload["markdown"], str):
+    if "markdown" not in payload:
+        raise SchemaValidationError(
+            f"{cls.__name__}: 'markdown' is required — a row with no body "
+            f"renders nothing. To park content, keep the markdown and set "
+            f"'enabled' to false."
+        )
+    if not isinstance(payload["markdown"], str):
         raise SchemaValidationError(
             f"{cls.__name__}: 'markdown' must be a string"
         )
