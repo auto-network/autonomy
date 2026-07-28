@@ -55,6 +55,7 @@ class WorkspacePrimerV1(SettingSchema):
     _field_metadata: dict[str, dict] = {
         "markdown": {
             "type": "string",
+            "required": True,
             "description": (
                 "Markdown body inlined verbatim, with no wrapping "
                 "heading. Open it with your own ``##`` heading or the "

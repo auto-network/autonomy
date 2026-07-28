@@ -39,7 +39,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #   >>> though the module imported fine.
 # (A future enhancement can auto-derive this from the schema; for now the whole
 # point is to prove the perf win with the smallest possible change.)
-_SCHEMA_USER_VERSION = 2
+_SCHEMA_USER_VERSION = 3
 DEFAULT_DB = REPO_ROOT / "data" / "graph.db"
 DEFAULT_ORGS_DIR = REPO_ROOT / "data" / "orgs"
 
