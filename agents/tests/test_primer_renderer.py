@@ -10,6 +10,9 @@ Covers the conditional sections driven by WorkspaceV1 flags:
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
 from agents.primer_renderer import render_workspace_primer
@@ -804,3 +807,86 @@ def test_turn_correction_section_appears_after_bead_polishing(_turn_correction_o
     bp_idx = out.index("## Bead Polishing Protocol")
     tc_idx = out.index("## Turn Corrections")
     assert bp_idx < tc_idx
+
+
+# ── Cross-org resolvability of embedded pointers ─────────────────────
+
+TEMPLATE_PATH = (
+    Path(__file__).resolve().parents[1] / "primers" / "workspace.md.j2"
+)
+
+# Both citation forms the template uses. Kept as two plain patterns
+# rather than one alternation: a ``(?:`` group whose first branch starts
+# with ``/`` silently fails to match here, which would make this guard
+# quietly check nothing.
+_ID = r"([0-9a-f]{6,}-[0-9a-f]{2,3})"
+_POINTER_RES = (
+    re.compile(r"graph://" + _ID),
+    re.compile(r"graph\s+read\s+" + _ID),
+)
+
+# Architectural Signpost Index — published, long-lived, and not
+# referenced by the template, so it works as a liveness probe for
+# "is the real platform graph reachable from this process?"
+_CONTROL_SOURCE_ID = "38c10838-094"
+
+
+def _template_pointers() -> set[str]:
+    """Every graph note id cited by the universal template."""
+    text = TEMPLATE_PATH.read_text()
+    found: set[str] = set()
+    for rx in _POINTER_RES:
+        found.update(rx.findall(text))
+    return found
+
+
+def test_template_pointers_are_peer_visible():
+    """Template pointers must resolve from *any* org's seat.
+
+    The template is the universal layer — it renders into the primer of
+    every workspace in every org. Peer orgs see only the public surface
+    of another org's DB (``publication_state`` in ``published`` /
+    ``canonical``), so a pointer at ``raw`` or ``curated`` is a dead link
+    for everyone outside the org that owns it.
+
+    This enforces invariant 7 of the Primer Composition Contract
+    (``graph://c07a3d75-bfb``): referenced IDs resolve.
+    """
+    from tools.graph import ops
+    from tools.graph.cross_org import PEER_VISIBLE_STATES
+
+    # Self-calibrate: the platform graph is only reachable where the real
+    # org databases are mounted (the host). Containers and CI see either
+    # no ``data/orgs`` at all or a stub holding just ``personal.db``, and
+    # in-process reads there resolve nothing. Probe with a control note
+    # that is independent of the template — the Architectural Signpost
+    # Index — and skip rather than fail when it isn't there.
+    if ops.get_source(_CONTROL_SOURCE_ID) is None:
+        pytest.skip("platform graph not reachable in-process; host-only check")
+
+    pointers = _template_pointers()
+    assert pointers, "template should embed at least one graph:// pointer"
+
+    unresolvable = {}
+    for src_id in sorted(pointers):
+        src = ops.get_source(src_id)
+        if src is None:
+            unresolvable[src_id] = "not found in any org"
+            continue
+        state = src.get("publication_state")
+        if state not in PEER_VISIBLE_STATES:
+            unresolvable[src_id] = f"publication_state={state!r}"
+
+    assert not unresolvable, (
+        "graph:// pointers in workspace.md.j2 are dead links for every "
+        "non-owning org: "
+        + "; ".join(f"{k} ({v})" for k, v in sorted(unresolvable.items()))
+        + ". Fix with: graph promote <id> published"
+    )
+
+
+def test_platform_baseline_section_rendered():
+    """Every org's primer points at the cross-org baseline index."""
+    out = render_workspace_primer(_cfg())
+    assert "## Platform Baseline" in out
+    assert "graph://fedda572-5f4" in out
