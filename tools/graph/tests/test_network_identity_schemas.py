@@ -55,6 +55,24 @@ def graph_db_env(tmp_path, monkeypatch):
     yield db_path
 
 
+def _flush_schema_meta(graph_db_env):
+    """Materialize schema-meta rows into the pinned test DB.
+
+    Schema-meta materialization is decoupled from connection open
+    (auto-06ziz) and runs once at dashboard startup via
+    ``flush_schema_meta_all_orgs``. Tests that read the ``autonomy.schema``
+    meta set must flush the pinned ``GRAPH_DB`` file explicitly.
+    """
+    from tools.graph.db import GraphDB
+    from tools.graph.schemas.registry import flush_schema_meta
+
+    db = GraphDB(str(graph_db_env), mode="rw")
+    try:
+        flush_schema_meta(db)
+    finally:
+        db.close()
+
+
 # ── valid payload factories ──────────────────────────────────
 
 
@@ -370,6 +388,7 @@ def test_set_schema_meta_flush_exposes_all_three(graph_db_env):
     """`graph set schema <id>` reads the autonomy.schema meta-Setting; the
     flush that backs it must carry all three new set_ids with their
     declared shape."""
+    _flush_schema_meta(graph_db_env)
     members = ops.read_set("autonomy.schema", org=ops.CALLER_ORG).to_dict()
     for set_id, (revision, _) in ALL_SET_IDS.items():
         key = f"{set_id}#{revision}"
@@ -384,6 +403,7 @@ def test_set_schema_meta_flush_exposes_all_three(graph_db_env):
 def test_set_example_stub_covers_required_fields(graph_db_env):
     """`graph set example <id>` builds its stub from the exported schema;
     the stub must name every required field (operators fill in values)."""
+    _flush_schema_meta(graph_db_env)
     members = ops.read_set("autonomy.schema", org=ops.CALLER_ORG).to_dict()
     for set_id, (revision, _) in ALL_SET_IDS.items():
         payload = members[f"{set_id}#{revision}"].payload

@@ -119,11 +119,12 @@ def orgs_dir(tmp_path) -> Path:
 
 
 def _settings_rows(org_db: Path) -> list[dict]:
-    """Return settings rows excluding the auto-flushed schema metadata.
+    """Return settings rows excluding any schema metadata.
 
-    ``autonomy.schema`` / ``autonomy.schema.synopsis`` rows land in every
-    writable DB at first connection (auto-82xyq) and would drown the
-    workspace-migration assertions in this module — filter them out.
+    ``autonomy.schema`` / ``autonomy.schema.synopsis`` rows are materialized
+    by the dashboard startup flush (auto-06ziz), not on connection open, so
+    they are normally absent here — but filter them defensively so the
+    workspace-migration assertions in this module never see them.
     """
     db = GraphDB(org_db)
     try:

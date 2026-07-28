@@ -122,6 +122,12 @@ def orgs_root(tmp_path, monkeypatch):
     # Create the target org DBs so graph_ops writes have somewhere to land.
     GraphDB.create_org_db("personal", type_="personal").close()
     GraphDB.create_org_db("autonomy").close()
+    # Materialize schema-meta rows the way dashboard startup does (auto-06ziz):
+    # this is no longer done implicitly on connection open, and the TestClient
+    # here never enters the lifespan, so the fixture must flush explicitly.
+    from tools.graph.schemas.registry import flush_schema_meta_all_orgs
+    flush_schema_meta_all_orgs()
+    GraphDB.close_all_pooled()
     try:
         yield root
     finally:
@@ -882,16 +888,17 @@ def test_graph_comment_router_roundtrip_via_api(
 def test_cmd_set_list_routes_through_api(
     api_client, forbid_cli_sqlite, capsys, monkeypatch,
 ):
-    """``graph set list`` hits GET /api/graph/sets — fixture DB only carries
-    the schema-meta Settings auto-flushed at first connection (auto-82xyq).
+    """``graph set list`` hits GET /api/graph/sets — the fixture DB only
+    carries the schema-meta Settings materialized by the ``orgs_root``
+    startup flush (auto-06ziz).
     """
     monkeypatch.setenv("GRAPH_ORG", "autonomy")
     args = _cli_args()
     set_cmd.cmd_set_list(args)
     out = capsys.readouterr().out
-    # The flush surfaces autonomy.schema / autonomy.schema.synopsis on
-    # every writable DB; absence of either means the request didn't reach
-    # the server or the flush regressed.
+    # The startup flush surfaces autonomy.schema / autonomy.schema.synopsis;
+    # absence of either means the request didn't reach the server or the
+    # flush regressed.
     assert "autonomy.schema" in out
 
 

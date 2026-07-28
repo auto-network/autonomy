@@ -20,7 +20,7 @@ extra-field rejection).
 
 Eager-import note: this module is referenced from ``server.py`` so
 that auto-registration via ``SettingSchema.__init_subclass__`` runs
-before ``GraphDB._init_schema`` calls ``flush_schema_meta``. See
+before ``flush_schema_meta_all_orgs`` runs at lifespan startup. See
 pitfall ``graph://3fe60c25-fab``.
 """
 from __future__ import annotations

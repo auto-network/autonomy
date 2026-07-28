@@ -66,10 +66,11 @@ def _count_sources(db_path: Path) -> int:
 def _count_settings(db_path: Path) -> int:
     """Count Settings rows excluding the registered-schema meta-Settings.
 
-    ``autonomy.schema`` / ``autonomy.schema.synopsis`` rows are written
-    automatically by the lazy schema-meta flush (auto-82xyq) on every
-    writable DB connection, so they're not what the routing tests care
-    about. Filter them out so the assertion targets the row under test.
+    ``autonomy.schema`` / ``autonomy.schema.synopsis`` rows are materialized
+    by the dashboard startup flush (auto-06ziz), not on connection open, so
+    they are normally absent in these fixtures — but they're not what the
+    routing tests care about, so filter them out defensively to keep the
+    assertion targeting the row under test.
     """
     conn = sqlite3.connect(str(db_path))
     try:
