@@ -31,9 +31,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #   >>> If you change schema.sql, add/alter/remove any `_migrate_*` method, or
 #   >>> change `_seed_tags`/`_flush_schema_meta`, you MUST bump this number, or
 #   >>> existing databases will NOT pick up your change.
+#   >>> This includes ADDING OR CHANGING A SETTING SCHEMA under
+#   >>> `tools/graph/schemas/`. You will not have touched `_flush_schema_meta`
+#   >>> itself — it walks the live registry — but its output changes, so
+#   >>> without a bump the new schema never lands as an `autonomy.schema#1`
+#   >>> row and `graph set schema <set_id>` reports it as unregistered even
+#   >>> though the module imported fine.
 # (A future enhancement can auto-derive this from the schema; for now the whole
 # point is to prove the perf win with the smallest possible change.)
-_SCHEMA_USER_VERSION = 1
+_SCHEMA_USER_VERSION = 2
 DEFAULT_DB = REPO_ROOT / "data" / "graph.db"
 DEFAULT_ORGS_DIR = REPO_ROOT / "data" / "orgs"
 
