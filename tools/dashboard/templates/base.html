@@ -1589,6 +1589,18 @@
         color: #fde68a; background: rgba(251, 191, 36, 0.12);
       }
     }
+    /* Loading modifier — set for the span between tapping the ⌥ button
+       and the worktree review overlay finishing its fetch, so a slow
+       hydration isn't silent. Spins the glyph in place; stops the instant
+       ``workspaceReviewLoading`` flips back to false. */
+    .sv-term-toggle.workspace-review-loading { color: #a5b4fc; }
+    .sv-term-toggle.workspace-review-loading .sv-term-glyph {
+      display: inline-block;
+      animation: sv-term-glyph-spin 0.7s linear infinite;
+    }
+    @keyframes sv-term-glyph-spin {
+      to { transform: rotate(360deg); }
+    }
     .sv-term-glyph {
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 14px;
@@ -2138,7 +2150,7 @@
               onclick="event.stopPropagation();"
               @click.stop="openWorkspaceReview()"
               class="sv-term-toggle"
-              :class="{ 'workspace-lit': hasCommitsAhead }"
+              :class="{ 'workspace-lit': hasCommitsAhead, 'workspace-review-loading': workspaceReviewLoading }"
               x-show="hasWorkspaceChanges"
               :title="workspaceStatusTooltip"
               data-testid="session-worktree-review-button"

@@ -140,7 +140,7 @@
                    falling back to /worktrees?session=... only if needed. -->
               <button type="button"
                       class="sv-term-toggle"
-                      :class="{ 'workspace-lit': hasCommitsAhead }"
+                      :class="{ 'workspace-lit': hasCommitsAhead, 'workspace-review-loading': workspaceReviewLoading }"
                       @click.stop="openWorkspaceReview()"
                       x-show="hasWorkspaceChanges"
                       :title="workspaceStatusTooltip"
