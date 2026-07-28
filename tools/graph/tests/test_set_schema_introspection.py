@@ -413,3 +413,62 @@ def test_register_schema_synopsis_round_trip(graph_db_env, monkeypatch):
     rc, out, err = _run_cli(["set", "find", "round-trip"])
     assert rc == 0, err
     assert "autonomy.test.demo#1" in out
+
+
+# ── Schema-meta flush across a _SCHEMA_USER_VERSION bump ─────────────
+
+def test_stale_version_db_picks_up_registered_schemas(tmp_path, monkeypatch):
+    """A DB stamped at an older schema version re-flushes on next open.
+
+    ``_init_schema`` short-circuits when ``PRAGMA user_version`` already
+    equals ``_SCHEMA_USER_VERSION``, which means a newly registered
+    Setting schema never lands as an ``autonomy.schema#1`` row on an
+    existing database until that constant is bumped. When it is bumped,
+    the next writable open must materialise every registered schema —
+    otherwise ``graph set schema <set_id>`` reports schemas as
+    unregistered even though their module imported cleanly.
+    """
+    from tools.graph.db import GraphDB, _SCHEMA_USER_VERSION
+
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(tmp_path / "orgs"))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    GraphDB.close_all_pooled()
+
+    db = GraphDB.create_org_db("stale-probe")
+    db_path = db.db_path
+    expected = set(SCHEMAS)
+    assert expected, "registry should not be empty"
+
+    # Simulate a database created before the newest schemas existed:
+    # drop their meta rows and stamp the previous version.
+    db.conn.execute(f"DELETE FROM settings WHERE set_id = '{SCHEMA_META_SET_ID}'")
+    db.conn.execute(f"PRAGMA user_version = {_SCHEMA_USER_VERSION - 1}")
+    db.conn.commit()
+    db.close()
+    GraphDB.close_all_pooled()
+
+    reopened = GraphDB(str(db_path), mode="rw")
+    try:
+        rows = {
+            r[0] for r in reopened.conn.execute(
+                f"SELECT key FROM settings WHERE set_id = '{SCHEMA_META_SET_ID}'"
+            ).fetchall()
+        }
+        missing = expected - rows
+        assert not missing, (
+            "registered schemas absent from the meta-Settings flush after a "
+            f"version bump: {sorted(missing)}"
+        )
+        assert reopened.conn.execute(
+            "PRAGMA user_version"
+        ).fetchone()[0] == _SCHEMA_USER_VERSION
+    finally:
+        reopened.close()
+        GraphDB.close_all_pooled()
+
+
+def test_primer_overlay_schemas_are_registered():
+    """The org/workspace primer overlays must be discoverable via set schema."""
+    assert "autonomy.org.primer#1" in SCHEMAS
+    assert "autonomy.workspace.primer#1" in SCHEMAS
