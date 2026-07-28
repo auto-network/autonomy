@@ -976,6 +976,21 @@ class HttpClient:
             body["force"] = True
         return self._post("/api/graph/sessions", body, org=org) or {}
 
+    def ingest_docs(self, path, *, org=None, force=False):
+        """Ingest documentation files via the dashboard (host-side, RW DB).
+
+        Containers mount the per-org graph DBs read-only, so a direct
+        ``docs-ingest`` write raises ``attempt to write a readonly
+        database``. This routes the ingest through the dashboard, which runs
+        it host-side against the writable DB. Mirrors :meth:`ingest_sessions`.
+        """
+        body = {"path": str(path)}
+        if org:
+            body["org"] = org
+        if force:
+            body["force"] = True
+        return self._post("/api/graph/docs", body, org=org) or {}
+
     def get_dispatch_wait_status(self, bead_id):
         return self._get(f"/api/dispatch/wait/{bead_id}") or {}
 

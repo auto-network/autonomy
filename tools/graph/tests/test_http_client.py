@@ -265,6 +265,48 @@ def test_read_source_full_forwards_window_and_tail():
     assert "window=3" in captured["url"]
 
 
+def test_ingest_docs_posts_to_api_graph_docs():
+    """HttpClient.ingest_docs → POST /api/graph/docs with path/org/force body
+    and the ``X-Graph-Org`` header (so the host writes to the right RW DB)."""
+    client = _make_client()
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None, context=None):
+        captured["url"] = req.full_url
+        captured["method"] = req.get_method()
+        captured["body"] = json.loads(req.data.decode())
+        captured["org_header"] = req.get_header("X-graph-org")
+        return _FakeResponse({"ok": True, "output": "Total: 3 ingested, 0 skipped"})
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        result = client.ingest_docs("/workspace/repo/docs", org="blindhash", force=True)
+
+    assert "/api/graph/docs" in captured["url"]
+    assert captured["method"] == "POST"
+    assert captured["body"] == {
+        "path": "/workspace/repo/docs",
+        "org": "blindhash",
+        "force": True,
+    }
+    assert captured["org_header"] == "blindhash"
+    assert result == {"ok": True, "output": "Total: 3 ingested, 0 skipped"}
+
+
+def test_ingest_docs_omits_force_and_org_when_absent():
+    """Without org/force, the body carries only ``path`` — no falsey noise."""
+    client = _make_client()
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None, context=None):
+        captured["body"] = json.loads(req.data.decode())
+        return _FakeResponse({"ok": True, "output": "Total: 1 ingested, 0 skipped"})
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        client.ingest_docs("/tmp/TOOL.md")
+
+    assert captured["body"] == {"path": "/tmp/TOOL.md"}
+
+
 def test_get_dispatch_wait_status_calls_dashboard_endpoint():
     """Dispatch wait status routes to the dedicated dashboard endpoint."""
     client = _make_client()

@@ -977,6 +977,64 @@ def test_cmd_move_routes_through_api(
         nc.close()
 
 
+def test_cmd_docs_ingest_routes_through_api(monkeypatch, capsys):
+    """In HttpClient mode ``graph docs-ingest`` must POST to the dashboard
+    instead of opening a read-only org DB directly (auto-wnj15).
+
+    The container mounts the per-org DBs read-only, so a direct write raises
+    ``attempt to write a readonly database``. This pins that the CLI routes
+    the ingest through ``HttpClient.ingest_docs`` and never touches GraphDB.
+    """
+    from tools.graph import client as client_mod
+
+    captured: dict = {}
+
+    class _StubHttpClient(client_mod.HttpClient):
+        def __init__(self):
+            pass
+
+        def ingest_docs(self, path, *, org=None, force=False):
+            captured["path"] = path
+            captured["org"] = org
+            captured["force"] = force
+            return {"ok": True, "output": "Total: 3 ingested, 0 skipped"}
+
+    monkeypatch.setattr(graph_cli, "get_client", lambda: _StubHttpClient())
+
+    args = _cli_args(path="/workspace/repo/docs", org="blindhash", force=True)
+    graph_cli.cmd_docs_ingest(args)
+
+    assert captured == {
+        "path": "/workspace/repo/docs",
+        "org": "blindhash",
+        "force": True,
+    }
+    out = capsys.readouterr().out
+    assert "3 ingested" in out
+
+
+def test_cmd_docs_ingest_http_error_exits_1(monkeypatch, capsys):
+    """A dashboard failure surfaces as a clean message + exit 1, never a
+    raw ``readonly database`` traceback (the reported symptom)."""
+    from tools.graph import client as client_mod
+
+    class _StubHttpClient(client_mod.HttpClient):
+        def __init__(self):
+            pass
+
+        def ingest_docs(self, path, *, org=None, force=False):
+            raise client_mod.GraphHttpError("boom", 500)
+
+    monkeypatch.setattr(graph_cli, "get_client", lambda: _StubHttpClient())
+
+    args = _cli_args(path="/tmp/x", org=None, force=False)
+    with pytest.raises(SystemExit) as exc_info:
+        graph_cli.cmd_docs_ingest(args)
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "docs-ingest via dashboard failed" in err
+
+
 # ── Read-command smoke for previously-bypassed commands ──────
 
 
