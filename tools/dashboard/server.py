@@ -6034,7 +6034,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             mounts=project_mounts or None,
             metadata=meta,
             harness=proj.harness,
-            model=proj.model or None,
+            model=job.config.get("model") or proj.model or None,
             extra_env=extra_env,
             output_dir=str(run_dir),
             global_claude_md=primer_path,
@@ -6832,6 +6832,9 @@ async def api_session_create(request):
                 "primer_url": primer_url,
                 "attempt": 1,
                 "event_loop": asyncio.get_running_loop(),
+                # Optional per-launch model override; falls back to the
+                # workspace config in the worker when absent.
+                "model": body.get("model"),
             },
         )
         if not _SESSION_LIFECYCLE_WORKER.try_enqueue(job):
