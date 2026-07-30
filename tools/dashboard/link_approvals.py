@@ -596,16 +596,34 @@ def _envelope_and_subject(decision: dict) -> tuple[dict | None, dict | None, str
     return envelope, subject, None
 
 
-def _authorized_at_current_head(
-    org: str, persona_pub: str, required_scope: str,
-) -> bool:
-    """Ask the authority ledger, failing closed on every read/fold error."""
+def _authorization_refusal(
+    org: str, persona_pub: str, required_scope: str, action: str,
+) -> str | None:
+    """Ask the authority ledger; a non-None return is the refusal reason.
+
+    Every path fails closed, but the reasons stay distinct: a genesis-less
+    ledger is an operational state — the organization's ledger was never
+    founded — not a permission denial. Collapsing it into "not authorized"
+    sends the operator auditing roles instead of founding (the 2026-07-30
+    autonomy incident: two sessions chased scopes and a phantom wipe
+    because this except swallowed GenesisError).
+    """
     try:
         from tools.dashboard.org_authority import authorize
+        from tools.network.ledger import GenesisError
 
-        return authorize(org, persona_pub, required_scope, at_head=None)
-    except Exception:
-        return False
+        authorized = authorize(org, persona_pub, required_scope, at_head=None)
+    except GenesisError:
+        return (
+            f"the {org} authority ledger has no genesis event — the "
+            f"organization was never founded, so no persona can {action} "
+            f"yet; found it with `graph org retrofit-ledgers`"
+        )
+    except Exception as exc:
+        return f"could not read the {org} authority ledger: {exc}"
+    if not authorized:
+        return f"{persona_pub} is not authorized to {action} in {org}"
+    return None
 
 
 async def _forward_to_registry(staged: dict, envelope: dict) -> tuple[httpx.Response | None, str | None]:
@@ -640,13 +658,11 @@ async def _execute_link_publish(row: dict, decision: dict) -> dict:
     if err:
         return _fail(err)
     acting_persona_pub = subject["id"]
-    if not _authorized_at_current_head(
-        org, acting_persona_pub, "link:publish",
-    ):
-        return _fail(
-            f"{acting_persona_pub} is not authorized to publish "
-            f"share links in {org}"
-        )
+    refusal = _authorization_refusal(
+        org, acting_persona_pub, "link:publish", "publish share links",
+    )
+    if refusal:
+        return _fail(refusal)
     staged, err = _frozen_staged(row)
     if err:
         return _fail(err)
@@ -748,13 +764,11 @@ async def _execute_link_revoke(row: dict, decision: dict) -> dict:
     if err:
         return _fail(err)
     acting_persona_pub = subject["id"]
-    if not _authorized_at_current_head(
-        org, acting_persona_pub, "link:revoke",
-    ):
-        return _fail(
-            f"{acting_persona_pub} is not authorized to revoke "
-            f"share links in {org}"
-        )
+    refusal = _authorization_refusal(
+        org, acting_persona_pub, "link:revoke", "revoke share links",
+    )
+    if refusal:
+        return _fail(refusal)
     staged, err = _frozen_staged(row)
     if err:
         return _fail(err)

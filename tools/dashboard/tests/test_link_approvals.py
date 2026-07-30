@@ -830,7 +830,45 @@ def test_authority_store_error_fails_closed(
     result = _decide_and_wait(env, rid, _approve_body(envelope, rr))
 
     assert result["execution"]["ok"] is False
-    assert "is not authorized to publish share links" in result["execution"]["error"]
+    assert (
+        f"could not read the {ORG} authority ledger"
+        in result["execution"]["error"]
+    )
+    assert forwarded == []
+    assert _cached_grants() == {}
+
+
+def test_unfounded_ledger_names_founding_not_authorization(
+    env, session_key, session_cert, monkeypatch,
+):
+    """A genesis-less ledger must read as "never founded", not as a
+    permission denial — the distinction that cost the 2026-07-30 hunt."""
+    from tools.dashboard import org_authority
+    from tools.network.ledger import GenesisError
+
+    rid = _create_publish(env)
+    rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
+    envelope = _signed_envelope(session_key, session_cert, rr)
+    forwarded = []
+
+    def unfounded(*args, **kwargs):
+        raise GenesisError("ledger has no genesis event")
+
+    async def forbidden_forward(*args):
+        forwarded.append(args)
+        raise AssertionError("unfounded-org publish reached the registry")
+
+    monkeypatch.setattr(org_authority, "authorize", unfounded)
+    monkeypatch.setattr(
+        link_approvals, "_forward_to_registry", forbidden_forward,
+    )
+    result = _decide_and_wait(env, rid, _approve_body(envelope, rr))
+
+    assert result["execution"]["ok"] is False
+    error = result["execution"]["error"]
+    assert "never founded" in error
+    assert "retrofit-ledgers" in error
+    assert "not authorized" not in error
     assert forwarded == []
     assert _cached_grants() == {}
 
