@@ -5912,6 +5912,7 @@ def _register_project_session_from_worker(
     run_dir: Path,
     primer_url: str | None,
     loop: asyncio.AbstractEventLoop | None,
+    harness: str,
 ) -> None:
     """Register the launched session without doing lifecycle state writes."""
     sess_dir = run_dir / "sessions"
@@ -5922,7 +5923,7 @@ def _register_project_session_from_worker(
                 session_type="container",
                 project=proj.id,
                 jsonl_path=sess_dir,
-                harness=proj.harness or "claude",
+                harness=harness,
                 seed_message="Starting..." if not primer_url else "",
             ),
             loop,
@@ -5938,7 +5939,7 @@ def _register_project_session_from_worker(
         "UPDATE tmux_sessions"
         " SET type=?, project=?, harness=?, resolution_dir=?"
         " WHERE tmux_name=?",
-        ("container", proj.id, proj.harness or "claude", str(sess_dir), tmux_name),
+        ("container", proj.id, harness, str(sess_dir), tmux_name),
     )
     conn.commit()
     if not primer_url:
@@ -5965,6 +5966,14 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             attempt=attempt,
         )
         return
+
+    # Per-launch harness override (request body → job config), falling back to
+    # the workspace default. Resolve ONCE so every downstream write — session
+    # row, monitor registration, first-message injection, launch, trace —
+    # records the SAME harness. A mismatch makes the viewer pick the wrong
+    # parser: a codex rollout read by the claude parser renders as an empty
+    # session even though turns/topic still update.
+    resolved_harness = job.config.get("harness") or proj.harness or "claude"
 
     phase = "start"
     try:
@@ -6033,7 +6042,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             image=proj.image,
             mounts=project_mounts or None,
             metadata=meta,
-            harness=job.config.get("harness") or proj.harness,
+            harness=resolved_harness,
             model=job.config.get("model") or proj.model or None,
             extra_env=extra_env,
             output_dir=str(run_dir),
@@ -6088,6 +6097,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             run_dir=run_dir,
             primer_url=primer_url if isinstance(primer_url, str) else None,
             loop=loop,
+            harness=resolved_harness,
         )
         setup_deadline = time.monotonic() + _LIFECYCLE_SETUP_TIMEOUT_S
         _wait_for_setup_complete(
@@ -6119,7 +6129,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             _inject_echo_verified(
                 tmux_name=tmux_name,
                 message=first_message,
-                harness_name=proj.harness or "claude",
+                harness_name=resolved_harness,
                 deadline=inject_deadline,
             )
             logger.info(
@@ -6127,7 +6137,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
                 tmux_name,
                 len(first_message),
                 used_primer,
-                proj.harness or "claude",
+                resolved_harness,
             )
         writer.set_state(tmux_name, "running")
     except TimeoutError as exc:
@@ -6857,7 +6867,7 @@ async def api_session_create(request):
                 status_code=503,
             )
 
-        _trace("queued", project=proj.id, harness=proj.harness or "claude")
+        _trace("queued", project=proj.id, harness=body.get("harness") or proj.harness or "claude")
         logger.info("phase-trace: response-ready  tmux=%s  dt_from_post_ms=%d  queued=1",
                     tmux_name, int((time.monotonic() - _phase_t0) * 1000))
         return JSONResponse({
