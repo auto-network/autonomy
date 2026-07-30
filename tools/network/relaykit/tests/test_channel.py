@@ -204,6 +204,15 @@ class TestRecordLayer:
             for record in client.seal_message(b"z" * 64):
                 server.open_record(record)
 
+    def test_oversize_outgoing_message_rejected_before_sealing(
+        self, root, session_key, session_cert, now
+    ):
+        client, _server = handshake(root, session_key, session_cert, now)
+        client._max_message_size = 16
+        with pytest.raises(RecordError, match="message exceeds maximum size"):
+            client.seal_message(b"z" * 17)
+        assert client._send_seq == 0
+
     def test_streaming_message_boundaries_without_whole_exchange_buffer(
         self, root, session_key, session_cert, now
     ):
