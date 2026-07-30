@@ -16,8 +16,10 @@ or its siblings.
 
 The *handler* is the application seam (C4 wires the real target
 resolver into it): ``async def handler(token, message) -> response``.
-Request/response per E2E message; ``EchoHandler`` is the reference
-implementation used by the soak tests.
+A response is either one bytes-like message or an async iterator of
+bytes-like messages.  Iterator responses are sent message-by-message,
+without materializing the whole exchange. ``EchoHandler`` is the reference
+one-shot implementation used by the soak tests.
 
 Runnable directly for tests / manual bring-up::
 
@@ -31,6 +33,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import inspect
 import json
 import random
 import secrets
@@ -59,15 +62,58 @@ async def echo_handler(token: str, message: bytes) -> bytes:
     return message
 
 
+def _message_bytes(value) -> bytes:
+    if not isinstance(value, (bytes, bytearray, memoryview)):
+        raise TypeError("channel handler messages must be bytes-like")
+    return bytes(value)
+
+
+async def _response_messages(response):
+    """Yield ``(message, stream_final)`` with one-message lookahead.
+
+    The record format marks the last *real* message in an exchange, so an
+    iterator needs one bounded item of lookahead rather than an artificial
+    empty terminator.  Closing the iterator in ``finally`` releases an open
+    file/generator when transport send is cancelled or fails.
+    """
+    if isinstance(response, (bytes, bytearray, memoryview)):
+        yield _message_bytes(response), True
+        return
+    if not hasattr(response, "__aiter__"):
+        raise TypeError(
+            "channel handler response must be bytes-like or an async iterator"
+        )
+
+    iterator = aiter(response)
+    try:
+        try:
+            current = _message_bytes(await anext(iterator))
+        except StopAsyncIteration as exc:
+            raise ValueError("channel handler stream must yield at least one message") from exc
+        while True:
+            try:
+                following = _message_bytes(await anext(iterator))
+            except StopAsyncIteration:
+                yield current, True
+                return
+            yield current, False
+            current = following
+    finally:
+        close = getattr(iterator, "aclose", None)
+        if close is not None:
+            await close()
+
+
 async def serve_channel(key: KeyPair, cert: DelegationCert, *, org: str, token: str,
                         recv, send, handler) -> None:
     """Serve one E2E channel from the org-key end, transport-agnostic.
 
-    *recv* returns the next incoming channel message (``None`` ends the
-    channel), *send* transmits one outgoing message. The tunnel path
-    feeds these from mux frames; the direct path (G1) feeds them from a
-    dedicated WebSocket. Handshake first, then request/response messages
-    through *handler*.
+    *recv* returns the next incoming channel record (``None`` ends the
+    channel), *send* transmits one outgoing record. The tunnel path feeds
+    these from mux frames; the direct path (G1) feeds them from a dedicated
+    WebSocket. Handshake first, then request/response exchanges through
+    *handler*. A bytes-like handler response is one message; an async
+    iterator response is streamed as multiple bounded messages.
     """
     first = await recv()
     if first is None:
@@ -86,11 +132,16 @@ async def serve_channel(key: KeyPair, cert: DelegationCert, *, org: str, token: 
         message = crypto.open_record(record)
         if message is None:
             continue
-        response = await handler(token, message)
+        response = handler(token, message)
+        if inspect.isawaitable(response):
+            response = await response
         if response is None:
             continue
-        for out in crypto.seal_message(response):
-            await send(out)
+        async for response_message, stream_final in _response_messages(response):
+            for out in crypto.iter_seal_message(
+                response_message, stream_final=stream_final
+            ):
+                await send(out)
 
 
 def file_handler(path: str, content_type: str):
