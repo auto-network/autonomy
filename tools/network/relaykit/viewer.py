@@ -87,6 +87,30 @@ class ViewerChannel:
             if message is not None:
                 return message
 
+    async def recv_message_stream(self):
+        """Yield ``(message, stream_final)`` for a streamed response exchange.
+
+        The client counterpart to the connector's streaming send (c31xb):
+        each record is authenticated and reassembled through
+        ``open_stream_record`` without buffering the whole exchange; the
+        generator ends after the record flagged ``STREAM_FINAL``. A record
+        anomaly raises ``RecordError`` and stops delivery, per the record
+        layer's tear-down contract.
+        """
+        parts: list[bytes] = []
+        while True:
+            record = await self._ws.recv()
+            if isinstance(record, str):
+                continue
+            opened = self._crypto.open_stream_record(record)
+            parts.append(opened.chunk)
+            if opened.message_end:
+                message = b"".join(parts)
+                parts = []
+                yield message, opened.stream_final
+                if opened.stream_final:
+                    return
+
     async def close(self) -> None:
         with contextlib.suppress(Exception):
             await self._ws.close()

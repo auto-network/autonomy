@@ -59,6 +59,16 @@ CLOSE_UNAUTHENTICATED = 4403
 CLOSE_UNKNOWN_LINK = 4404  # unknown token or no serving tunnel
 CLOSE_REPLACED = 4409
 CLOSE_VIEWER_QUEUE_OVERFLOW = 4413
+CLOSE_TUNNEL_CHANNELS_EXCEEDED = 4429  # per-tunnel concurrent viewer cap hit
+
+# A single org tunnel may carry at most this many concurrent viewer channels.
+# Each channel is independently bounded to VIEWER_QUEUE_MAX_BYTES of relay
+# buffer (per-channel writer queue), so this caps total relay memory per org
+# at MAX * VIEWER_QUEUE_MAX_BYTES and stops any bearer-link holder from
+# opening unbounded attachment-streaming channels on the shared tunnel.
+# Accounting is per authenticated tunnel/org, never global. A one-line
+# operator policy knob.
+MAX_VIEWER_CHANNELS_PER_TUNNEL = 128
 
 # A viewer never gets to make the org tunnel retain an attachment-sized
 # window.  The channel record layer currently emits 128 KiB records, so this
@@ -513,6 +523,13 @@ async def viewer_endpoint(websocket: WebSocket, token: str, hub: TunnelHub,
         # resolved the envelope, so it can distinguish an invalid token from
         # a valid link whose sharing dashboard is disconnected.
         await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
+        return
+
+    # Bound concurrent viewer channels per org tunnel: one bearer-link holder
+    # cannot open unbounded attachment-streaming channels to exhaust relay
+    # memory on the shared tunnel. Accounting is per this tunnel, not global.
+    if len(tunnel.channels) >= MAX_VIEWER_CHANNELS_PER_TUNNEL:
+        await _close_quietly(websocket, CLOSE_TUNNEL_CHANNELS_EXCEEDED)
         return
 
     channel_id = new_channel_id()
