@@ -449,6 +449,11 @@ def _enrich_link_revoke(row: dict) -> dict:
     out = {
         "target_title": target_title,
         "type_label": type_label,
+        # The raw target type routes the browser's signature: a cached
+        # share link is signed over the tunnel proof-of-possession bytes;
+        # org:join (and any token not positively classifiable) is signed
+        # over the HTTP registry bytes — the same split the executor uses.
+        "target_type": grant.get("target_type") if grant else None,
         "label": (grant.get("meta") or {}).get("label") if grant else None,
         "cached": grant is not None,
         "binding_error": binding_error,
