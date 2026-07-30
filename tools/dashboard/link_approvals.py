@@ -600,6 +600,84 @@ def _envelope_and_subject(decision: dict) -> tuple[dict | None, dict | None, str
     return envelope, subject, None
 
 
+#: The proof-of-possession domain a share-link approval envelope signs
+#: over on the D19 tunnel path. It is NOT a destination (the tunnel is the
+#: destination, register D19) — it is a fixed, non-routable pair whose only
+#: job is to bind the session-key signature to these bytes so a stray cert
+#: cannot be replayed. The browser signs the same pair; the dashboard
+#: reconstructs and verifies it locally.
+_TUNNEL_POP_METHOD = "TUNNEL"
+_TUNNEL_POP_PATH = "/control/create-link"
+_TUNNEL_REVOKE_POP_PATH = "/control/revoke-link"
+
+
+def _verify_local_publish_authority(
+    envelope: dict, subject: dict, org_slug: str, binding: dict,
+    required_scope: str, pop_path: str,
+) -> str | None:
+    """Authenticate the acting persona LOCALLY for a tunnel control op.
+
+    Once publish/revoke ride the authenticated tunnel, the registry no
+    longer verifies the publish cert chain (register D19) — so the
+    dashboard must, or ``subject.id`` would be an unauthenticated claim a
+    compromised browser could forge to any persona. This mirrors the
+    registry's own I4 gate (`_authorize`): the envelope signature proves
+    possession of the session key over fixed proof-of-possession bytes,
+    and the cert must chain to the org's OWN bound root with the required
+    scope and delegate to that signer. Returns a refusal string, or None
+    when the persona is authenticated AND the fold grants the scope."""
+    from tools.network.idkit import (
+        DelegationCert,
+        IdkitError,
+        MalformedError,
+        verify_chain,
+        verify_signature,
+    )
+    from tools.network.registry.signing import (
+        MAX_CLOCK_SKEW,
+        request_signing_input,
+    )
+
+    signer = envelope.get("signer")
+    ts = envelope.get("ts")
+    sig = envelope.get("sig")
+    cert_wire = envelope.get("cert")
+    if not (isinstance(signer, str) and isinstance(sig, str)
+            and isinstance(cert_wire, str) and type(ts) is int):
+        return "approval envelope is malformed — unlock the org and retry"
+    now = int(time.time())
+    if abs(now - ts) > MAX_CLOCK_SKEW:
+        return "approval is stale (clock skew) — unlock the org and retry"
+    try:
+        signing_input = request_signing_input(
+            _TUNNEL_POP_METHOD, pop_path, ts, signer, envelope["payload"])
+        verify_signature(signer, sig, signing_input)
+    except (IdkitError, MalformedError, KeyError):
+        return "approval signature does not verify — unlock the org and retry"
+    try:
+        cert = DelegationCert.from_json(cert_wire)
+        if cert.child_pub != signer:
+            return "approval cert does not delegate to its signer"
+        mid = (cert.not_before + cert.not_after) // 2
+        verify_chain(
+            cert, binding["root_pub"], org=binding["org_uuid"], now=mid,
+            required_scope=required_scope,
+        )
+    except (IdkitError, MalformedError) as exc:
+        return (
+            f"approval cert does not chain to this org's root with "
+            f"{required_scope}: {exc}")
+    if {"kind": cert.subject.kind, "id": cert.subject.id} != subject:
+        return "approval subject does not match its certificate"
+    # Authenticated: subject.id is now trustworthy for the fold, which
+    # authorizes by the dashboard-side org SLUG (its ledger DB), while the
+    # chain above verified against the registry-side org UUID.
+    return _authorization_refusal(
+        org_slug, subject["id"], required_scope,
+        "publish share links" if required_scope == "link:publish"
+        else "revoke share links")
+
+
 def _authorization_refusal(
     org: str, persona_pub: str, required_scope: str, action: str,
 ) -> str | None:
@@ -653,11 +731,102 @@ def _registry_error(resp: httpx.Response) -> str:
 async def _execute_link_publish(row: dict, decision: dict) -> dict:
     req = row["request"]
     org = req.get("org")
+    # org:join invitations keep the HTTP publish path (option A): their
+    # transport is a separate concern from D19's share-link tunnel move.
     if req.get("target_type") == "org:join":
         try:
             _org_join_request(req)
         except ValueError as exc:
             return _fail(str(exc))
+        return await _execute_link_publish_http(row, decision)
+    return await _execute_share_link_publish_tunnel(row, decision)
+
+
+async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
+    """Publish a share link as a control frame on the org's authenticated
+    tunnel (register D19). Authority is proven LOCALLY — the persona is
+    authenticated against the org's bound root and the ledger fold grants
+    ``link:publish`` — before any frame is emitted or grant written; the
+    registry sees only the org, never the persona."""
+    from tools.dashboard.link_serving_supervisor import (
+        TunnelUnavailable,
+        control,
+        get_supervisor,
+    )
+
+    req = row["request"]
+    org = req.get("org")
+    envelope, subject, err = _envelope_and_subject(decision)
+    if err:
+        return _fail(err)
+    binding, binding_error = _load_binding(org)
+    if binding_error:
+        return _fail(binding_error)
+    refusal = _verify_local_publish_authority(
+        envelope, subject, org, binding, "link:publish", _TUNNEL_POP_PATH)
+    if refusal:
+        return _fail(refusal)
+
+    meta = _tunnel_link_meta(req)
+    args = {
+        "target_uuid": req["target_uuid"],
+        "target_type": req["target_type"],
+    }
+    if meta:
+        args["meta"] = meta
+    try:
+        reply = await asyncio.to_thread(control, org, "create-link", args)
+    except TunnelUnavailable as exc:
+        # Publish rides the tunnel: no live tunnel means no publish. Nudge
+        # the supervisor so the next attempt has serving up, write nothing.
+        try:
+            await asyncio.to_thread(get_supervisor().ensure, org)
+        except Exception:
+            pass
+        return _fail(f"serving tunnel is not up — publish rides the tunnel ({exc})")
+    if not reply.get("ok"):
+        return _fail(reply.get("error", "the registry refused the link"))
+    token, url = reply.get("token"), reply.get("url")
+    if not isinstance(token, str) or not _TOKEN_RE.match(token):
+        return _fail("registry returned a malformed grant token — not caching it")
+
+    grant = {
+        "token": token,
+        "url": url,
+        "target_uuid": req["target_uuid"],
+        "target_type": req["target_type"],
+        "meta": meta or {},
+        "subject": subject,  # I6: the authenticated acting persona
+        "issued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    settings_ops.upsert_by_key(
+        NETWORK_LINK_GRANT_SET_ID, NETWORK_LINK_GRANT_REVISION,
+        token, grant, org=org,
+    )
+    # The frame round-tripped on the live tunnel, so serving IS live by
+    # construction — no separate probe needed on this path (register D19 B10).
+    return {
+        "ok": True,
+        "url": url,
+        "token": token,
+        "serving": {"live": True, "via": "tunnel-control"},
+        "actor": _approval_identities(org)["actor_identity"],
+    }
+
+
+def _tunnel_link_meta(req: dict) -> dict:
+    """The meta a share-link control frame carries — TTL + label only; the
+    registry re-validates the field set (org:join fields never ride here)."""
+    meta = dict(req.get("meta") or {})
+    return {k: meta[k] for k in ("ttl", "label") if k in meta}
+
+
+async def _execute_link_publish_http(row: dict, decision: dict) -> dict:
+    """The pre-D19 HTTP publish path, retained for org:join invitations
+    (option A): the signed envelope is forwarded to the registry, which
+    verifies the chain and mints the grant."""
+    req = row["request"]
+    org = req.get("org")
     envelope, subject, err = _envelope_and_subject(decision)
     if err:
         return _fail(err)
@@ -761,6 +930,52 @@ async def _probe_serving(binding: dict, token: str) -> dict:
 
 
 async def _execute_link_revoke(row: dict, decision: dict) -> dict:
+    req = row["request"]
+    org = req.get("org")
+    token = req.get("token", "")
+    # An org:join invitation grant is revoked over HTTP (option A); every
+    # other (share-link) grant is revoked over the tunnel. The cached grant
+    # names which — an unknown token defaults to the tunnel path.
+    grant = _cached_grant(token, org)
+    if grant and grant.get("target_type") == "org:join":
+        return await _execute_link_revoke_http(row, decision)
+    return await _execute_share_link_revoke_tunnel(row, decision)
+
+
+async def _execute_share_link_revoke_tunnel(row: dict, decision: dict) -> dict:
+    """Revoke a share link as a control frame on the org tunnel (D19).
+    Authority is proven locally, exactly as publish; the registry checks
+    only that the token's grant belongs to the tunnel's org."""
+    from tools.dashboard.link_serving_supervisor import TunnelUnavailable, control
+
+    req = row["request"]
+    org = req.get("org")
+    token = req.get("token", "")
+    envelope, subject, err = _envelope_and_subject(decision)
+    if err:
+        return _fail(err)
+    binding, binding_error = _load_binding(org)
+    if binding_error:
+        return _fail(binding_error)
+    refusal = _verify_local_publish_authority(
+        envelope, subject, org, binding, "link:revoke", _TUNNEL_REVOKE_POP_PATH)
+    if refusal:
+        return _fail(refusal)
+    try:
+        reply = await asyncio.to_thread(control, org, "revoke-link", {"token": token})
+    except TunnelUnavailable as exc:
+        return _fail(f"serving tunnel is not up — revoke rides the tunnel ({exc})")
+    # An "unknown link" reply means the registry already has no such grant;
+    # the local cache row must still die so the dashboard stops serving it.
+    if not reply.get("ok") and "unknown link" not in (reply.get("error") or ""):
+        return _fail(reply.get("error", "the registry refused the revoke"))
+    removed = _drop_cached_grant(token, org)
+    return {"ok": True, "token": token, "via": "tunnel-control",
+            "cache_removed": removed}
+
+
+async def _execute_link_revoke_http(row: dict, decision: dict) -> dict:
+    """The pre-D19 HTTP revoke path, retained for org:join grants."""
     req = row["request"]
     org = req.get("org")
     token = req.get("token", "")
