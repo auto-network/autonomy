@@ -116,9 +116,9 @@ echo "    Worktree: $WORKTREE_DIR"
 BRANCH_BASE=$(git -C "$WORKTREE_DIR" rev-parse HEAD)
 echo "$BRANCH_BASE" > "$OUTPUT_DIR/.branch_base"
 
-# Configure git identity in worktree
-git -C "$WORKTREE_DIR" config user.name "autonomy-agent"
-git -C "$WORKTREE_DIR" config user.email "agent@autonomy.local"
+# Git identity is inherited from the repo config (one source of truth) — do not
+# hardcode it here. Change it via `git config user.{name,email}` on the host +
+# bare repos if it ever needs to move.
 
 # ── Container name ────────────────────────────────────
 CONTAINER_NAME="agent-${BEAD_ID}-$$"
