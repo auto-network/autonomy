@@ -49,6 +49,8 @@ REPO = Path(__file__).resolve().parents[3]
 ORG = "netorg"
 ORG_UUID = "77777777-7777-4777-8777-777777777777"
 ISO = "%Y-%m-%dT%H:%M:%SZ"
+CHUNK = 1024 * 1024
+WINDOW = 8 * CHUNK
 
 
 def free_port() -> int:
@@ -161,8 +163,10 @@ async def _fetch_manifest(port: int, token: str, root_pub: str) -> list:
     return json.loads(header)["content"]["attachments"]
 
 
-def _make_fetch_window(port: int, token: str, root_pub: str, *, drop=None):
+def _make_fetch_window(port: int, token: str, root_pub: str, *, drop=None, requests=None):
     async def fetch_window(request):
+        if requests is not None:
+            requests.append(dict(request))
         channel = await ViewerChannel.connect(
             f"ws://127.0.0.1:{port}", token, root_pub=root_pub, org=ORG_UUID)
 
@@ -216,16 +220,21 @@ def test_end_to_end_download_reconstructs_and_hashes(stack, tmp_path):
 
             sink = attachment_download.MemoryAttachmentSink()
             cursors = attachment_download.MemoryCursorStore()
+            requests: list[dict] = []
             downloader = attachment_download.AttachmentDownloader(
                 entry, link_token=token, note_id=note_id, sink=sink,
                 cursors=cursors,
                 fetch_window=_make_fetch_window(
-                    stack["port"], token, stack["root_pub"]),
+                    stack["port"], token, stack["root_pub"], requests=requests),
             )
             result = await downloader.run()
             assert result.status == "complete"
             assert sink.data == data
             assert hashlib.sha256(sink.data).hexdigest() == entry["raw_sha256"]
+            # Exactly one 8 MiB window at a time, contiguous, no overlap.
+            assert [(r["offset"], r["length"]) for r in requests] == [
+                (0, WINDOW), (WINDOW, WINDOW),
+            ]
         finally:
             await _stop(stack["connector"], task)
 
@@ -246,6 +255,7 @@ def test_end_to_end_disconnect_then_resume(stack, tmp_path):
             sink = attachment_download.MemoryAttachmentSink()
             cursors = attachment_download.MemoryCursorStore()
             drop = {"seen": 0, "at": 3, "done": False}
+            requests: list[dict] = []
 
             def build(fetch_window):
                 return attachment_download.AttachmentDownloader(
@@ -255,18 +265,24 @@ def test_end_to_end_disconnect_then_resume(stack, tmp_path):
             # First run drops mid-window after two committed chunks.
             with pytest.raises(attachment_download.AttachmentDisconnected):
                 await build(_make_fetch_window(
-                    stack["port"], token, stack["root_pub"], drop=drop)).run()
+                    stack["port"], token, stack["root_pub"],
+                    drop=drop, requests=requests)).run()
             assert drop["done"]
             cursor = cursors.get(f"{attachment_download.cursor_id(token)}:{entry['ref']}")
-            assert cursor["committed_offset"] == 2 * 1024 * 1024  # only whole chunks
-            assert sink.size == 2 * 1024 * 1024
+            assert cursor["committed_offset"] == 2 * CHUNK  # only whole chunks
+            assert sink.size == 2 * CHUNK
 
             # Resume on a fresh channel completes from the committed offset.
             result = await build(_make_fetch_window(
-                stack["port"], token, stack["root_pub"])).run()
+                stack["port"], token, stack["root_pub"], requests=requests)).run()
             assert result.status == "complete"
             assert sink.data == data
             assert hashlib.sha256(sink.data).hexdigest() == entry["raw_sha256"]
+            # D2 evidence: the resume re-requests only the unfetched suffix
+            # (offset == committed), never the already-committed [0, 2 MiB).
+            assert [(r["offset"], r["length"]) for r in requests] == [
+                (0, WINDOW), (2 * CHUNK, WINDOW),
+            ]
         finally:
             await _stop(stack["connector"], task)
 
