@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import asyncio
 
+import tools.network.registry.relay as relay
 from tools.network.registry.relay import (
+    CLOSE_TUNNEL_CHANNELS_EXCEEDED,
     CLOSE_VIEWER_QUEUE_OVERFLOW,
     VIEWER_QUEUE_MAX_BYTES,
     Tunnel,
+    viewer_endpoint,
 )
 from tools.network.relaykit.frames import FRAME_CLOSE, decode_frame
 
@@ -120,3 +123,69 @@ def test_tunnel_teardown_cancels_writer_and_releases_queued_bytes():
         assert socket.close_codes == [1001]
 
     asyncio.run(run())
+
+
+# -- per-tunnel viewer channel cap (auto-lh57j abuse bound) -----------------
+
+
+class _AcceptCloseSocket:
+    def __init__(self):
+        self.accepted = False
+        self.close_codes: list[int] = []
+
+    async def accept(self):
+        self.accepted = True
+
+    async def close(self, *, code: int):
+        self.close_codes.append(code)
+
+
+def test_viewer_channel_cap_rejects_when_tunnel_full(monkeypatch):
+    # A tunnel already at the per-tunnel cap refuses a further viewer with a
+    # dedicated close code and does not add a channel — one bearer-link holder
+    # cannot open unbounded attachment-streaming channels on the org tunnel.
+    monkeypatch.setattr(relay, "MAX_VIEWER_CHANNELS_PER_TUNNEL", 2)
+    tunnel = Tunnel(_TunnelSocket(), "test-org")
+    tunnel.channels = {b"a" * 16: object(), b"b" * 16: object()}  # at cap
+
+    class _Link:
+        org_uuid = "test-org"
+
+    class _Hub:
+        def get(self, org):
+            return tunnel
+
+    monkeypatch.setattr(relay, "_resolve_live_link", lambda store, token, now: _Link())
+    ws = _AcceptCloseSocket()
+
+    asyncio.run(viewer_endpoint(ws, "0" * 32, _Hub(), None, lambda: 0))
+
+    assert ws.accepted
+    assert ws.close_codes == [CLOSE_TUNNEL_CHANNELS_EXCEEDED]
+    assert len(tunnel.channels) == 2  # the rejected viewer was not admitted
+
+
+def test_viewer_channel_cap_admits_below_capacity(monkeypatch):
+    # Below the cap a viewer is admitted (a channel is created); the send of
+    # its FRAME_OPEN then fails on the fake tunnel and it is cleaned up — the
+    # point here is that the cap did not reject it.
+    monkeypatch.setattr(relay, "MAX_VIEWER_CHANNELS_PER_TUNNEL", 8)
+    tunnel = Tunnel(_TunnelSocket(), "test-org")
+
+    class _Link:
+        org_uuid = "test-org"
+
+    class _Hub:
+        def get(self, org):
+            return tunnel
+
+    monkeypatch.setattr(relay, "_resolve_live_link", lambda store, token, now: _Link())
+
+    class _AdmitSocket(_AcceptCloseSocket):
+        async def receive(self):
+            return {"type": "websocket.disconnect"}
+
+    ws = _AdmitSocket()
+    asyncio.run(viewer_endpoint(ws, "0" * 32, _Hub(), None, lambda: 0))
+    # Not rejected with the cap code (it either opened and closed normally).
+    assert CLOSE_TUNNEL_CHANNELS_EXCEEDED not in ws.close_codes
