@@ -1024,6 +1024,21 @@ class TestWorktreePage:
         assert 'data-testid="approval-revoke-password"' in template
         assert 'data-testid="approval-simple-error"' in template
 
+    def test_share_links_sign_tunnel_pop_bytes_not_registry_bytes(self):
+        """D19 (Codex finding #3): a share-link approval must sign the tunnel
+        proof-of-possession bytes (TUNNEL + a /control path) that the
+        dashboard's _verify_local_publish_authority reconstructs — NOT the
+        registry method/path. org:join keeps the HTTP registry bytes. The
+        browser and executor must agree on these exact strings."""
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+        assert "signMethod = 'TUNNEL'" in js
+        assert "'/control/revoke-link' : '/control/create-link'" in js
+        # Routing matches the executor: a share link (publish always; revoke
+        # only when the cached type is a non-org:join) signs the tunnel bytes.
+        assert "const isShareLink = !isOrgJoin" in js
+        assert "req.targetType && req.targetType !== 'org:join'" in js
+        assert "signer.signRegistryRequest(signMethod, signPath, payload)" in js
+
     def test_template_uses_required_status_labels(self):
         template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
         js = (JS_DIR / "pages" / "worktrees.js").read_text()

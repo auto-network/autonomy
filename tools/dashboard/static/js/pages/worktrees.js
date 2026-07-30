@@ -289,10 +289,25 @@
           : Number(req.duration));
       payload = _linkPayloadWithTtl(rr.payload, ttl);
     }
+    // D19 routing: share links publish/revoke ride the org tunnel, so the
+    // dashboard authenticates them LOCALLY and verifies this signature over
+    // fixed proof-of-possession bytes (TUNNEL + a control path), NOT the
+    // registry's method/path. org:join keeps the HTTP registry bytes (it
+    // still travels to POST /v1/links). The executor's
+    // _verify_local_publish_authority reconstructs the SAME bytes, so the
+    // two sides must agree here (Codex D19 finding #3).
+    const isShareLink = !isOrgJoin && (
+      isRevoke ? (req.targetType && req.targetType !== 'org:join') : true);
+    let signMethod = rr.method;
+    let signPath = rr.path;
+    if (isShareLink) {
+      signMethod = 'TUNNEL';
+      signPath = isRevoke ? '/control/revoke-link' : '/control/create-link';
+    }
     try {
       let envelope;
       try {
-        envelope = await signer.signRegistryRequest(rr.method, rr.path, payload);
+        envelope = await signer.signRegistryRequest(signMethod, signPath, payload);
       } catch (error) {
         throw new Error('This approval could not be signed. Unlock it again and retry.');
       }
@@ -2374,6 +2389,7 @@
               bodyMarkdown: lines.join('\n'),
               orgSlug: req.org || '',
               orgUuid: r.org_uuid || null,
+              targetType: r.target_type || null,
               password: '', showPassword: false,
               allowSessionApprovals: false,
               needsPassword: false,
