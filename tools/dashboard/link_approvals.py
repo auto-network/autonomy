@@ -808,7 +808,9 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     if refusal:
         return _fail(refusal)
 
-    meta = _tunnel_link_meta(req)
+    meta, meta_error = _tunnel_link_meta(req, decision)
+    if meta_error:
+        return _fail(meta_error)
     args = {
         "target_uuid": req["target_uuid"],
         "target_type": req["target_type"],
@@ -855,11 +857,32 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     }
 
 
-def _tunnel_link_meta(req: dict) -> dict:
-    """The meta a share-link control frame carries — TTL + label only; the
-    registry re-validates the field set (org:join fields never ride here)."""
-    meta = dict(req.get("meta") or {})
-    return {k: meta[k] for k in ("ttl", "label") if k in meta}
+def _tunnel_link_meta(req: dict, decision: dict) -> tuple[dict, str | None]:
+    """The meta a share-link control frame carries — TTL + label only.
+
+    The approval sheet's duration selection rides the decision as ``ttl``
+    (the same edit the HTTP path applies via _publish_payload_for_decision);
+    honor it so the operator's chosen link lifetime actually takes effect.
+    Absent ``ttl`` keeps the request's own value; JSON null means no
+    expiration and drops meta.ttl. Returns (meta, error)."""
+    base = req.get("meta")
+    if base is not None and not isinstance(base, dict):
+        return {}, "request metadata is malformed"
+    meta = {k: base[k] for k in ("ttl", "label") if k in (base or {})}
+    if "ttl" in decision:
+        ttl = decision.get("ttl")
+        if ttl is not None and (
+            type(ttl) is not int or ttl <= 0 or ttl > MAX_LINK_TTL_S
+        ):
+            return {}, (
+                "link duration must be No expiration or a whole number of "
+                "seconds between 1 and 365 days"
+            )
+        if ttl is None:
+            meta.pop("ttl", None)
+        else:
+            meta["ttl"] = ttl
+    return meta, None
 
 
 async def _execute_link_publish_http(row: dict, decision: dict) -> dict:
