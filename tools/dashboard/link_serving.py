@@ -736,6 +736,24 @@ def make_grant_handler(org: str | None = None, *, now=None):
         # tunnel's event loop so one slow lookup can't stall siblings.
         if op in JOIN_OPS:
             return await asyncio.to_thread(_join, token, request)
+        if op == "attachment.fetch":
+            # A well-formed fetch returns a bounded async stream of body
+            # frames (or a single error message); the connector streams it
+            # record-by-record. Malformed shape is a hard bad request.
+            from tools.dashboard import attachment_serving
+            if not attachment_serving.valid_fetch_request(request):
+                return BAD_REQUEST
+            return attachment_serving.fetch_stream(
+                token, request, org=org, now=clock
+            )
+        if op == "attachment.cancel":
+            # The real cancel is the client not requesting the next window;
+            # an explicit cancel is accepted and ends the exchange with no
+            # response, leaving the channel up.
+            from tools.dashboard import attachment_serving
+            if not attachment_serving.valid_cancel_request(request):
+                return BAD_REQUEST
+            return None
         if op not in ("fetch", "head") or set(request) != {"v", "op"}:
             return BAD_REQUEST
         return await asyncio.to_thread(_serve, token, op == "head")

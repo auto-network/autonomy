@@ -2559,6 +2559,17 @@ def _note_attachment_slots(
     return []
 
 
+def attachment_store_root(org: str | None = None) -> "Path":
+    """Root directory that holds every managed attachment file for *org*.
+
+    Attachments are stored under ``<db_dir>/../attachments/<hash[:2]>/`` (see
+    :func:`_store_attachment_db`). A serving path that resolves outside this
+    root is not a managed attachment and must be refused (path-traversal
+    guard for the on-demand fetch path).
+    """
+    return Path(_db_path(org)).parent.parent / "attachments"
+
+
 def note_slot_attachments(
     note_id: str,
     *,
