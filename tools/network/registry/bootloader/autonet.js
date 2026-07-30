@@ -659,6 +659,7 @@ const autonet = (() => {
       capturedWindow.postMessage({
         v: 1, op: "content", title: artifact.content.title,
         markdown: decoder.decode(body.slice(md.offset, md.end)), parts,
+        attachments: artifact.content.attachments,
       }, "*", transfer);
     }
 
