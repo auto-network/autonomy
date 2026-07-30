@@ -66,7 +66,10 @@ def _live_server(app, port: int):
 
 
 def _identity_source(*, armor: str, root_pub: str, org_uuid: str,
-                     registry_url: str, requests: list[str]) -> Starlette:
+                     registry_url: str, requests: list[str],
+                     genesis_id: str | None = None,
+                     personal_armor: str | None = None,
+                     personal_root_pub: str | None = None) -> Starlette:
     async def org_key(request: Request):
         requests.append(str(request.url.path))
         if request.query_params.get("org") != ORG_SLUG:
@@ -87,9 +90,31 @@ def _identity_source(*, armor: str, root_pub: str, org_uuid: str,
             "registry_url": registry_url,
         })
 
+    async def ledger_heads(request: Request):
+        requests.append(str(request.url.path))
+        if request.query_params.get("org") != ORG_SLUG or genesis_id is None:
+            return JSONResponse(
+                {"ok": False, "error": "organization ledger is not founded"},
+                status_code=404,
+            )
+        return JSONResponse({"genesis_id": genesis_id, "heads": [genesis_id]})
+
+    async def personal(request: Request):
+        requests.append(str(request.url.path))
+        if personal_armor is None:
+            return JSONResponse(
+                {"error": "no personal identity"}, status_code=404,
+            )
+        return JSONResponse({
+            "armored_private_key": personal_armor,
+            "root_pub": personal_root_pub,
+        })
+
     return Starlette(routes=[
         Route("/api/network/org-key", org_key),
         Route("/api/network/binding", binding),
+        Route("/api/network/ledger/heads", ledger_heads),
+        Route("/api/identity/personal", personal),
     ])
 
 
@@ -208,10 +233,17 @@ def test_node_signon_is_accepted_and_tampering_is_rejected():
             },
         }
         assert registry_posts == ["/v1/links"]
+        # The unfounded ledger (heads → 404) short-circuits the persona
+        # resolution before the personal armor is ever fetched, and the
+        # cert falls back to the legacy label subject.
         assert identity_requests == [
             "/api/network/org-key",
             "/api/network/binding",
+            "/api/network/ledger/heads",
         ]
+        legacy_subject = json.loads(output["envelope"]["cert"])["subject"]
+        assert legacy_subject["kind"] == "operator"
+        assert legacy_subject["id"].startswith("browser-")
 
         signature_mutation = copy.deepcopy(output["envelope"])
         signature_mutation["sig"] = (
@@ -255,3 +287,125 @@ def test_node_signon_is_accepted_and_tampering_is_rejected():
         assert "missing passphrase source" in missing_passphrase.stderr
         assert len(registry_posts) == posts_before_missing_passphrase
         assert len(identity_requests) == identity_reads_before_missing_passphrase
+
+
+def _publish_run(*, root: KeyPair, org_uuid: str, passphrase: str,
+                 identity_kwargs: dict) -> tuple[dict, list[str]]:
+    """Stand up registry + identity source, register the org, run the
+    command with *passphrase*, and return (parsed output, identity trace)."""
+    registry_port = _free_port()
+    registry_url = f"http://127.0.0.1:{registry_port}"
+    registry = create_app(
+        ":memory:",
+        base_url=registry_url,
+        secure_cookies=False,
+    )
+    identity_requests: list[str] = []
+    identity_port = _free_port()
+    identity = _identity_source(
+        armor=encrypt_root_key(root, passphrase, iterations=10_000),
+        root_pub=root.public_hex,
+        org_uuid=org_uuid,
+        registry_url=registry_url,
+        requests=identity_requests,
+        **identity_kwargs,
+    )
+    with (
+        _live_server(registry, registry_port),
+        _live_server(identity, identity_port) as identity_url,
+    ):
+        registration = httpx.post(
+            f"{registry_url}/v1/orgs",
+            json=sign_request(
+                root,
+                "POST",
+                "/v1/orgs",
+                {
+                    "org_uuid": org_uuid,
+                    "root_pub": root.public_hex,
+                    "recovery_policy": "none",
+                },
+                ts=int(time.time()),
+            ),
+            timeout=10,
+        )
+        assert registration.status_code == 201, registration.text
+        command = _run_with_passphrase(identity_url, passphrase)
+    assert command.returncode == 0, command.stdout + "\n" + command.stderr
+    return json.loads(command.stdout), identity_requests
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_node_signon_mints_persona_subject_for_a_founded_org():
+    """D13: with a founded ledger and a personal identity whose armor the
+    entered passphrase opens, the session cert names the derived persona
+    as its subject — byte-identical to idkit's derivation — and the
+    registry accepts the resulting envelope unchanged."""
+    from tools.network.idkit.persona import derive_persona
+
+    root = KeyPair.generate()
+    personal_root = KeyPair.generate()
+    passphrase = "one passphrase opens both armors"
+    genesis_id = "c0" * 32
+    output, identity_requests = _publish_run(
+        root=root,
+        org_uuid=str(uuid.uuid4()),
+        passphrase=passphrase,
+        identity_kwargs={
+            "genesis_id": genesis_id,
+            "personal_armor": encrypt_root_key(
+                personal_root, passphrase, iterations=10_000,
+            ),
+            "personal_root_pub": personal_root.public_hex,
+        },
+    )
+    expected = derive_persona(
+        bytes.fromhex(personal_root.private_hex), genesis_id,
+    ).public_hex
+    assert output["status"] == 201
+    # Kind stays 'operator' on the rung-1 HTTP transport (the registry
+    # 501s kind 'persona'); the persona rides in subject.id, which is
+    # what the dashboard's fold-based gate authorizes.
+    assert json.loads(output["envelope"]["cert"])["subject"] == {
+        "kind": "operator",
+        "id": expected,
+    }
+    assert identity_requests == [
+        "/api/network/org-key",
+        "/api/network/binding",
+        "/api/network/ledger/heads",
+        "/api/identity/personal",
+    ]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_node_signon_falls_back_to_label_when_personal_armor_stays_shut():
+    """A passphrase that opens the org armor but not the personal armor
+    must not fail sign-on: the cert falls back to the legacy label
+    subject (and the founded ledger changes nothing about that)."""
+    root = KeyPair.generate()
+    personal_root = KeyPair.generate()
+    passphrase = "opens only the org armor"
+    output, identity_requests = _publish_run(
+        root=root,
+        org_uuid=str(uuid.uuid4()),
+        passphrase=passphrase,
+        identity_kwargs={
+            "genesis_id": "d1" * 32,
+            "personal_armor": encrypt_root_key(
+                personal_root, "a different personal password",
+                iterations=10_000,
+            ),
+            "personal_root_pub": personal_root.public_hex,
+        },
+    )
+    assert output["status"] == 201
+    subject = json.loads(output["envelope"]["cert"])["subject"]
+    assert subject["kind"] == "operator"
+    assert subject["id"].startswith("browser-")
+    assert identity_requests == [
+        "/api/network/org-key",
+        "/api/network/binding",
+        "/api/network/ledger/heads",
+        "/api/identity/personal",
+    ]

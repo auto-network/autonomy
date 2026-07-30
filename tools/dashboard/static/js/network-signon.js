@@ -6,6 +6,7 @@ import {
   decryptArmor,
   importEd25519RootSigningKey,
 } from './ceremony/primitives.js';
+import { derivePersona } from './ceremony/ledger-event.js';
 import { createBrowserStorage } from './ceremony/storage.js';
 
 var CryptoKeyConstructor = globalThis.CryptoKey;
@@ -207,6 +208,52 @@ var signRegistryRequestCore;
     return resp.json();
   }
 
+  // D13 — the certificate subject is the ACTOR: the operator's per-org
+  // persona, HKDF-derived from the PERSONAL root at the moment of unlock
+  // and never stored. The authority ledger's fold authorizes
+  // cert.subject.id, so once an org is founded a random browser label
+  // authorizes nothing. Resolution is best-effort by design: an unfounded
+  // ledger, a missing personal identity, or a passphrase that opens the
+  // org armor but not the personal armor all return null and sign-on
+  // falls back to the legacy label subject — signing on must never
+  // regress for orgs that have no ledger yet.
+  async function _personaSubject(orgQ, org, passphrase) {
+    var heads, personal;
+    try {
+      heads = await _fetchJson('/api/network/ledger/heads' + orgQ, org);
+      personal = await _fetchJson('/api/identity/personal');
+    } catch (e) {
+      return null;
+    }
+    if (!heads || typeof heads.genesis_id !== 'string' ||
+        !personal || !personal.armored_private_key) {
+      return null;
+    }
+    var openedPersonal = null;
+    try {
+      openedPersonal = await decryptArmor(
+        personal.armored_private_key, passphrase);
+      var persona = await derivePersona(
+        openedPersonal.seed, heads.genesis_id);
+      // Subject KIND stays 'operator' on the rung-1 HTTP transport: the
+      // registry's mutation gate 501s kind 'persona' ("rung-2: persona
+      // subjects require viewer authn", registry/app.py) and the gwxfb
+      // gate tests pin operator-kind certs carrying the persona in
+      // subject.id. The kind upgrades to 'persona' when publish moves
+      // onto the org tunnel (D19, auto-zudu9).
+      return { kind: 'operator', id: persona.publicHex };
+    } catch (e) {
+      return null;
+    } finally {
+      // I1: the personal seed follows the same lifecycle as the org root
+      // seed — zeroed before this function returns, never stored.
+      if (openedPersonal && openedPersonal.seed) {
+        openedPersonal.seed.fill(0);
+        openedPersonal.seed = null;
+      }
+    }
+  }
+
   // Like _fetchJson but a 404 reads as "not configured" → null. Used for
   // the OPTIONAL registry binding: unlocking a key is a local act and
   // must not require the org to have registered with any registry (the
@@ -251,8 +298,15 @@ var signRegistryRequestCore;
     var orgId = bound ? binding.org_uuid : orgKey.root_pub;
     var registryUrl = bound ? binding.registry_url : null;
 
+    // Resolve the persona subject BEFORE the org armor opens so the org
+    // root plaintext window stays as tight as it was.
+    var personaSubject = await _personaSubject(orgQ, opts.org, passphrase);
+
     var opened = await decryptArmor(orgKey.armored_private_key, passphrase);
-    var diagnostics = { rootDropped: false, extractable: null };
+    var diagnostics = {
+      rootDropped: false, extractable: null,
+      subjectResolution: personaSubject ? 'persona' : 'label',
+    };
     var sessionKeys, certWire;
     try {
       if (expectedRoot && opened.rootPub !== expectedRoot) {
@@ -269,11 +323,15 @@ var signRegistryRequestCore;
       var sessionPub = bytesToHex(
         await crypto.subtle.exportKey('raw', sessionKeys.publicKey));
 
-      var subjectId = await _storage.getSubjectId();
-      if (!subjectId) {
-        subjectId = 'browser-' +
-          bytesToHex(crypto.getRandomValues(new Uint8Array(4)));
-        await _storage.setSubjectId(subjectId);
+      var subject = personaSubject;
+      if (!subject) {
+        var subjectId = await _storage.getSubjectId();
+        if (!subjectId) {
+          subjectId = 'browser-' +
+            bytesToHex(crypto.getRandomValues(new Uint8Array(4)));
+          await _storage.setSubjectId(subjectId);
+        }
+        subject = { kind: 'operator', id: subjectId };
       }
 
       var now = _nowS();
@@ -282,7 +340,7 @@ var signRegistryRequestCore;
         child_pub: sessionPub,
         scope: SESSION_SCOPES.slice(),
         org: orgId,
-        subject: { kind: 'operator', id: subjectId },
+        subject: subject,
         not_before: now - NOT_BEFORE_SKEW_S,
         not_after: now + ttl,
       };
