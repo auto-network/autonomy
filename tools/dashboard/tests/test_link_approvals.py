@@ -779,6 +779,26 @@ def test_publish_refused_without_link_publish_scope(
     assert upserts == []
 
 
+def test_revoke_enrich_exposes_the_frozen_org_uuid(
+    env, session_key, session_cert,
+):
+    """The revoke payload is empty by contract, so the browser cannot read
+    the org uuid out of it the way publish does — the enrich must expose
+    the frozen binding's uuid for retained-session matching."""
+    _, _, published = _publish(env, session_key, session_cert)
+    token = published["execution"]["token"]
+    created = env.post("/api/approvals", json={
+        "kind": "link_revoke",
+        "session": SESSION,
+        "request": {"org": ORG, "token": token},
+    })
+    rid = created.json()["id"]
+    r = env.get(f"/api/approvals/{rid}").json()
+    assert r["org_uuid"] == ORG_UUID
+    assert r["registry_request"]["method"] == "DELETE"
+    assert r["registry_request"]["payload"] == {}
+
+
 def test_legacy_label_subject_is_refused(
     env, root, session_key, monkeypatch,
 ):

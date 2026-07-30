@@ -1003,6 +1003,27 @@ class TestWorktreePage:
         assert "_signLinkDecision(req)" not in js
         assert js.count("=> _signLinkDecision(self, req)") == 2
 
+    def test_revoke_decision_path_has_its_own_shape(self):
+        """The revoke approve path is not the publish path: its envelope
+        payload must be EMPTY (the server refuses anything else), its
+        retained-authority match reads the enrich's org_uuid (the empty
+        payload carries none), and the simple sheet can actually collect a
+        password and surface the execution error inline. Every one of
+        these was missing when revoke approval first became reachable
+        (2026-07-30) and each absence broke the approve."""
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+        template = (
+            TEMPLATE_DIR / "partials" / "worktree-review-overlays.html"
+        ).read_text()
+        assert "const isRevoke = req.op === 'revoke';" in js
+        assert "req.orgUuid || (" in js
+        assert "orgUuid: r.org_uuid || null," in js
+        assert "approval.needsPassword = !approval.allowSessionApprovals;" in js
+        assert "(isOrgJoin || isRevoke) ? { envelope } : { envelope, ttl }" in js
+        assert "req.gate2 || req.op === 'revoke'" in js
+        assert 'data-testid="approval-revoke-password"' in template
+        assert 'data-testid="approval-simple-error"' in template
+
     def test_template_uses_required_status_labels(self):
         template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
         js = (JS_DIR / "pages" / "worktrees.js").read_text()

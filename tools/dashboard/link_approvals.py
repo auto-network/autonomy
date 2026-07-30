@@ -455,6 +455,10 @@ def _enrich_link_revoke(row: dict) -> dict:
         "binding_drift": drift,
     }
     if staged:
+        # The revoke payload is empty by contract, so the browser cannot read
+        # the org uuid out of it the way publish does — expose the frozen
+        # binding's uuid so retained-session matching works for revoke too.
+        out["org_uuid"] = (staged.get("binding") or {}).get("org_uuid")
         out["registry_request"] = {k: staged[k]
                                    for k in ("method", "path", "registry_url", "payload")}
     return out
