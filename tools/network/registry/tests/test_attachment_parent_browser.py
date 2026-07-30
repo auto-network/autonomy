@@ -95,12 +95,19 @@ function bytesAt(offset, length) {
   for (let i = 0; i < length; i++) out[i] = (offset + i) % 251;
   return out;
 }
+function patternedFrame(offset, flags, length) {
+  const out = new Uint8Array(9 + length);
+  new DataView(out.buffer).setBigUint64(0, BigInt(offset));
+  out[8] = flags;
+  for (let i = 0; i < length; i++) out[9 + i] = (offset + i) % 251;
+  return out;
+}
 function windowMessages(start, limit) {
   return (async function* () {
     for (let offset = start; offset < limit;) {
       const end = Math.min(offset + CHUNK, limit);
       const flags = (end === limit ? 1 : 0) | (end === TOTAL ? 2 : 0);
-      yield frame(offset, flags, bytesAt(offset, end - offset));
+      yield patternedFrame(offset, flags, end - offset);
       offset = end;
     }
   })();
@@ -140,7 +147,7 @@ def test_opfs_cursor_survives_reload_and_fetches_only_suffix(tmp_path):
     fetchWindow: async (request) => {
       requests.push({...request});
       return (async function* () {
-        yield frame(0, 0, bytesAt(0, CHUNK));
+        yield patternedFrame(0, 0, CHUNK);
         throw new Error("forced browser reload");
       })();
     },
@@ -182,6 +189,8 @@ def test_opfs_cursor_survives_reload_and_fetches_only_suffix(tmp_path):
   const requests = [];
   let inFlight = 0;
   let maxInFlight = 0;
+  const heapBaseline = performance.memory.usedJSHeapSize;
+  let heapPeak = heapBaseline;
   const downloader = new A.AttachmentDownloader({
     entry: ENTRY, cursorId: CURSOR, noteId: NOTE, sink, cursors,
     fetchWindow: async (request) => {
@@ -191,7 +200,11 @@ def test_opfs_cursor_survives_reload_and_fetches_only_suffix(tmp_path):
       const limit = Math.min(request.offset + request.length, TOTAL);
       return (async function* () {
         try {
-          yield* windowMessages(request.offset, limit);
+          for await (const message of windowMessages(request.offset, limit)) {
+            heapPeak = Math.max(heapPeak, performance.memory.usedJSHeapSize);
+            yield message;
+            heapPeak = Math.max(heapPeak, performance.memory.usedJSHeapSize);
+          }
         } finally {
           inFlight -= 1;
         }
@@ -199,6 +212,7 @@ def test_opfs_cursor_survives_reload_and_fetches_only_suffix(tmp_path):
     },
   });
   const result = await downloader.run();
+  heapPeak = Math.max(heapPeak, performance.memory.usedJSHeapSize);
   const file = await sink.file();
   const bytes = new Uint8Array(await file.arrayBuffer());
   let bytesMatch = bytes.length === TOTAL;
@@ -210,7 +224,8 @@ def test_opfs_cursor_survives_reload_and_fetches_only_suffix(tmp_path):
   return JSON.stringify({
     result, requestOffsets: requests.map((request) => request.offset),
     requestLengths: requests.map((request) => request.length),
-    maxInFlight, size: bytes.length, bytesMatch,
+    maxInFlight, heapDelta: heapPeak - heapBaseline,
+    size: bytes.length, bytesMatch,
   });
 })();
 """,
@@ -223,14 +238,19 @@ def test_opfs_cursor_survives_reload_and_fetches_only_suffix(tmp_path):
             check=False,
         )
 
-    assert second == {
-        "result": {
-            "status": "ready",
-            "received": 9 * 1024 * 1024 + 17,
-        },
-        "requestOffsets": [1024 * 1024, 9 * 1024 * 1024],
-        "requestLengths": [8 * 1024 * 1024, 8 * 1024 * 1024],
-        "maxInFlight": 1,
-        "size": 9 * 1024 * 1024 + 17,
-        "bytesMatch": True,
+    assert second["result"] == {
+        "status": "ready",
+        "received": 9 * 1024 * 1024 + 17,
     }
+    assert second["requestOffsets"] == [
+        1024 * 1024,
+        9 * 1024 * 1024,
+    ]
+    assert second["requestLengths"] == [8 * 1024 * 1024] * 2
+    assert second["maxInFlight"] == 1
+    # The frozen D1 bound is one window plus fixed framing/driver overhead.
+    # Chrome's precise heap counter observes ~180 KiB beyond the 8 MiB of
+    # successive test frames; allow 512 KiB, independent of file size.
+    assert second["heapDelta"] <= 8 * 1024 * 1024 + 512 * 1024
+    assert second["size"] == 9 * 1024 * 1024 + 17
+    assert second["bytesMatch"] is True

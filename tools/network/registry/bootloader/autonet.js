@@ -942,7 +942,9 @@ const autonet = (() => {
         }
         const offset = Number(offsetBig);
         const flags = message[8];
-        const chunk = message.slice(9);
+        // A view avoids a second 1 MiB browser-heap copy; writeAt closes its
+        // OPFS stream before the next channel message is requested.
+        const chunk = message.subarray(9);
         if (flags & ~(ATTACHMENT_LAST_IN_WINDOW | ATTACHMENT_EOF)
             || offset !== expected || chunk.length > ATTACHMENT_CHUNK_SIZE
             || (total > 0 && chunk.length === 0)) {
