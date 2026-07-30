@@ -2559,6 +2559,46 @@ def _note_attachment_slots(
     return []
 
 
+def note_slot_attachments(
+    note_id: str,
+    *,
+    org: str | None = None,
+    peers: list[str] | None = None,
+) -> list[dict]:
+    """Attachment rows a note binds into its content slots (membership).
+
+    This is the authoritative note->attachment membership for serving a
+    note's attachments over a share link: the note's positional attachment
+    slots, NOT the row ``source_id`` (which is wrong for bytes deduplicated
+    across notes into a single row) and NOT bounded by the 50-row
+    :func:`list_attachments` cap. Rows are returned in slot order, deduped
+    by id, skipping slot ids that no longer resolve.
+    """
+    src = get_source(note_id, org=org, peers=peers)
+    if src is None or src.get("type") != "note":
+        return []
+    metadata = src.get("metadata")
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (ValueError, TypeError):
+            metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    out: list[dict] = []
+    seen: set[str] = set()
+    for att_id in _note_attachment_slots(metadata):
+        att = get_attachment(att_id, org=org, peers=peers)
+        if att is None:
+            continue
+        aid = att.get("id") or att_id
+        if aid in seen:
+            continue
+        seen.add(aid)
+        out.append(att)
+    return out
+
+
 def _transform_inline_markdown_text(
     line: str,
     transform: Callable[[str], str],

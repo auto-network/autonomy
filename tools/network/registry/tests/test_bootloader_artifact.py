@@ -64,13 +64,24 @@ def test_valid_note_and_design_headers_are_accepted():
         "name": "Example Org", "color": "#123456", "initial": "E",
         "favicon_url": "https://example.test/favicon.png",
     }
+    with_manifest = _note_header()
+    with_manifest["content"]["attachments"] = [
+        {"ref": "a1", "name": "doc.txt", "mime": "text/plain",
+         "raw_sha256": "deadbeef", "total_size": 100, "oversize": False},
+        {"ref": "a2", "name": "", "mime": "application/octet-stream",
+         "raw_sha256": "", "total_size": 0, "oversize": True},
+    ]
+    empty_manifest = _note_header()
+    empty_manifest["content"]["attachments"] = []
     assert _validate([
         {"header": _note_header(), "size": 20},
         {"header": unicode_title, "size": 20},
         {"header": design, "size": 20},
         {"header": branded, "size": 23},
         {"header": branded_url, "size": 20},
-    ]) == [True, True, True, True, True]
+        {"header": with_manifest, "size": 20},
+        {"header": empty_manifest, "size": 20},
+    ]) == [True, True, True, True, True, True, True]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
@@ -114,5 +125,24 @@ def test_malformed_ranges_refs_and_unions_are_rejected():
     missing_content = _note_header()
     del missing_content["content"]
     cases.append({"header": missing_content, "size": 20})
+
+    def add_manifest(mutator):
+        header = _note_header()
+        header["content"]["attachments"] = [{
+            "ref": "a1", "name": "n", "mime": "text/plain",
+            "raw_sha256": "x", "total_size": 1, "oversize": False,
+        }]
+        mutator(header["content"])
+        cases.append({"header": header, "size": 20})
+
+    add_manifest(lambda c: c["attachments"][0].update(total_size=-1))
+    add_manifest(lambda c: c["attachments"][0].update(total_size=0.5))
+    add_manifest(lambda c: c["attachments"][0].update(oversize="yes"))
+    add_manifest(lambda c: c["attachments"][0].update(ref=""))
+    add_manifest(lambda c: c["attachments"][0].update(mime=""))
+    add_manifest(lambda c: c["attachments"][0].pop("raw_sha256"))
+    add_manifest(lambda c: c["attachments"][0].update(extra=True))
+    add_manifest(lambda c: c["attachments"].append(dict(c["attachments"][0])))
+    add_manifest(lambda c: c.update(attachments="not-a-list"))
 
     assert _validate(cases) == [False] * len(cases)
