@@ -15751,6 +15751,7 @@ routes = [
 _dispatch_watcher_task: asyncio.Task | None = None
 _mock_event_watcher_task: asyncio.Task | None = None
 _harness_usage_poller_task: asyncio.Task | None = None
+_serving_bootstrap_task: asyncio.Task | None = None
 _claude_credentials_refresh_task: asyncio.Task | None = None
 _event_loop_watchdog_task: asyncio.Task | None = None
 _recent_sessions_refresher_task: asyncio.Task | None = None
@@ -15899,7 +15900,7 @@ def _warm_personal_settings_store() -> None:
 async def _on_startup():
     global _dispatch_watcher_task, _mock_event_watcher_task, _harness_usage_poller_task
     global _claude_credentials_refresh_task, _event_loop_watchdog_task
-    global _recent_sessions_refresher_task
+    global _recent_sessions_refresher_task, _serving_bootstrap_task
     # Re-arm the emit hook on every lifespan startup. Module import
     # already wires it (so ASGITransport-based tests that skip lifespan
     # still get function-level emits), but we re-arm here so that
@@ -16083,21 +16084,38 @@ async def _on_startup():
     # org whose serve-cert is provisioned and whose links are live, and arm the
     # watchdog. So a restart re-establishes serving on its own, without waiting
     # for the next publish. Skipped in mock mode (no real settings DB).
-    # Off-loop and best-effort — startup is never held up by a serving hiccup.
+    #
+    # FIRE-AND-FORGET: bootstrap() reconciles serving per org, which now does
+    # real connector bring-up (network work) and can block for tens of seconds
+    # once grants are live. AWAITing it here held the whole startup lifespan
+    # hostage — the server accepted connections but returned no HTTP response
+    # until it finished (a ~55s dead window). Scheduling it as a background
+    # task lets the lifespan return immediately; serving reconciles a beat
+    # later and the watchdog it arms keeps it converged. The task ref is
+    # retained (else the loop may GC it) and a done-callback logs any fault.
     if not os.environ.get("DASHBOARD_MOCK"):
-        try:
-            from tools.dashboard import link_serving_supervisor
-            await asyncio.to_thread(link_serving_supervisor.bootstrap)
-        except Exception:
-            logger.exception(
-                "link_serving_supervisor.bootstrap() failed; serving recovers "
-                "on the next publish or watchdog tick"
-            )
+        from tools.dashboard import link_serving_supervisor
+
+        def _log_bootstrap_result(task: asyncio.Task) -> None:
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                logger.error(
+                    "link_serving_supervisor.bootstrap() failed; serving "
+                    "recovers on the next publish or watchdog tick",
+                    exc_info=exc,
+                )
+
+        _serving_bootstrap_task = asyncio.create_task(
+            asyncio.to_thread(link_serving_supervisor.bootstrap)
+        )
+        _serving_bootstrap_task.add_done_callback(_log_bootstrap_result)
 
 async def _on_shutdown():
     global _dispatch_watcher_task, _mock_event_watcher_task
     global _harness_usage_poller_task, _claude_credentials_refresh_task
-    global _settings_mediator_started
+    global _settings_mediator_started, _serving_bootstrap_task
     # Clear the emit hook so a subsequent process / test reload doesn't
     # leak a stale binding into a swapped module-level event_bus.
     try:
@@ -16105,6 +16123,15 @@ async def _on_shutdown():
         _settings_ops.set_emit_hook(None)
     except Exception:
         logger.exception("settings_ops.set_emit_hook(None) failed; continuing")
+    # Cancel a still-running background bootstrap FIRST, so it cannot spawn a
+    # connector in the window between stop_all() and process exit.
+    if _serving_bootstrap_task is not None and not _serving_bootstrap_task.done():
+        _serving_bootstrap_task.cancel()
+        try:
+            await _serving_bootstrap_task
+        except (asyncio.CancelledError, Exception):
+            pass
+    _serving_bootstrap_task = None
     # Stop the serving watchdog and terminate any connector subprocesses so a
     # reload cycle doesn't leak them (a fresh process re-establishes serving in
     # _on_startup).
