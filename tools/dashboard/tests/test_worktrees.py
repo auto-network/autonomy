@@ -992,6 +992,17 @@ class TestWorktreePage:
         # refresh modal in app.js is allowed to call reload for all routes.
         assert "data-testid', 'fatal-modal-refresh'" in app_js
 
+    def test_link_decision_handlers_forward_both_arguments(self):
+        """Every approval-kind decision handler must call
+        ``_signLinkDecision(self, req)`` with BOTH arguments. The revoke
+        handler once passed only ``req``, which landed in the ``self``
+        parameter and left ``req`` undefined — every revoke Approve then
+        crashed client-side ("undefined is not an object (evaluating
+        'req.registryRequest')"), which read as an operator decline."""
+        js = (JS_DIR / "pages" / "worktrees.js").read_text()
+        assert "_signLinkDecision(req)" not in js
+        assert js.count("=> _signLinkDecision(self, req)") == 2
+
     def test_template_uses_required_status_labels(self):
         template = (TEMPLATE_DIR / "pages" / "worktrees.html").read_text()
         js = (JS_DIR / "pages" / "worktrees.js").read_text()

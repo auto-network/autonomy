@@ -2366,7 +2366,7 @@
               registryRequest: r.registry_request || null,
             };
           },
-          decision: (self, req) => _signLinkDecision(req),
+          decision: (self, req) => _signLinkDecision(self, req),
         },
         commit_sign: {
           async open(self, r) {
