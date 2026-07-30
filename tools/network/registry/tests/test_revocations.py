@@ -155,3 +155,29 @@ class TestRetentionI7:
         store = app.state.store
         assert store.purge_expired_revocations(now=clock.now + DAY) == 0
         assert store.get_revocation(ORG, session_key.public_hex) is not None
+
+
+class TestRevocationListEndpoint:
+    """GET /v1/orgs/{uuid}/revocations — the denylist the D19 dashboard
+    reads to run the revocation check locally (the registry no longer sees
+    the publish, so the dashboard must consult the same list)."""
+
+    def test_empty_when_none(self, client, bound_org):
+        r = client.get(f"/v1/orgs/{ORG}/revocations")
+        assert r.status_code == 200
+        assert r.json() == {"revoked": []}
+
+    def test_lists_a_revoked_key(self, client, clock, root, bound_org,
+                                 session_key, session_cert):
+        record = issue_revocation(
+            root, session_key.public_hex, org=ORG,
+            revoked_at=clock.now, expires_at=clock.now + DAY,
+            revoked_cert=session_cert,
+        )
+        assert post_revocation(client, record, session_cert).status_code == 201
+        r = client.get(f"/v1/orgs/{ORG}/revocations")
+        assert r.status_code == 200
+        assert r.json()["revoked"] == [session_key.public_hex]
+
+    def test_bad_uuid_rejected(self, client):
+        assert client.get("/v1/orgs/not-a-uuid/revocations").status_code == 400
