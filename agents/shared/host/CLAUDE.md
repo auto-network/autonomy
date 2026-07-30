@@ -84,6 +84,23 @@ agents/launch.sh <bead-id> --detach   # launch in background (dispatcher manages
 agents/build.sh                       # rebuild the autonomy-agent image
 ```
 
+**Launch a workspace session from the host — model + harness per launch.** The
+dashboard API is reachable on localhost with no auth gate, so you can start any
+workspace session directly and override model and/or harness in the request body
+(each falls back to the workspace's configured default when omitted):
+```bash
+curl -sk -X POST https://localhost:8080/api/session/create \
+  -H 'Content-Type: application/json' \
+  -d '{"project":"enterprise-ng","harness":"codex","model":"gpt-5.6-sol"}'
+```
+- `project` — workspace id; full list + each one's defaults: `graph set members autonomy.workspace`.
+- `harness` (`claude`|`codex`) and `model` — per-launch overrides. You never touch a
+  Setting to run a workspace under a different harness/model — pass them in the body.
+  A `codex` harness needs a gpt-\* model (`gpt-5.6-sol` = "Codex 5.6 Sol"); a `claude`
+  harness needs a claude-\* model.
+- Returns immediately with an auto-assigned `auto-MMDD-HHMMSS` tmux name; the container
+  boots in the background — watch it reach `idle` via `graph sessions --status`.
+
 ### File handoff with container sessions
 Bidirectional: the directory `$REPO_ROOT/data/agent-runs/<session-name>[-TIMESTAMP]/`
 on the host maps to `/workspace/output/` inside the matching container session.

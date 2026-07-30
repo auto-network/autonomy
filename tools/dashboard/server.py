@@ -6033,7 +6033,7 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
             image=proj.image,
             mounts=project_mounts or None,
             metadata=meta,
-            harness=proj.harness,
+            harness=job.config.get("harness") or proj.harness,
             model=job.config.get("model") or proj.model or None,
             extra_env=extra_env,
             output_dir=str(run_dir),
@@ -6822,7 +6822,7 @@ async def api_session_create(request):
             tmux_name,
             session_type="container",
             project=proj.id,
-            harness=proj.harness or "claude",
+            harness=body.get("harness") or proj.harness or "claude",
         )
         job = LifecycleJob(
             "start",
@@ -6832,9 +6832,10 @@ async def api_session_create(request):
                 "primer_url": primer_url,
                 "attempt": 1,
                 "event_loop": asyncio.get_running_loop(),
-                # Optional per-launch model override; falls back to the
-                # workspace config in the worker when absent.
+                # Optional per-launch model + harness overrides; each falls
+                # back to the workspace config in the worker when absent.
                 "model": body.get("model"),
+                "harness": body.get("harness"),
             },
         )
         if not _SESSION_LIFECYCLE_WORKER.try_enqueue(job):
