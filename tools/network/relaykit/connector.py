@@ -73,8 +73,11 @@ async def _response_messages(response):
 
     The record format marks the last *real* message in an exchange, so an
     iterator needs one bounded item of lookahead rather than an artificial
-    empty terminator.  Closing the iterator in ``finally`` releases an open
-    file/generator when transport send is cancelled or fails.
+    empty terminator. Peak send-side plaintext retained here is therefore
+    approximately twice the largest yielded message; streaming handlers MUST
+    yield bounded messages (attachment v1 yields one 1 MiB application chunk).
+    Closing the iterator in ``finally`` releases an open file/generator when
+    transport send is cancelled or fails.
     """
     if isinstance(response, (bytes, bytearray, memoryview)):
         yield _message_bytes(response), True
@@ -114,6 +117,11 @@ async def serve_channel(key: KeyPair, cert: DelegationCert, *, org: str, token: 
     WebSocket. Handshake first, then request/response exchanges through
     *handler*. A bytes-like handler response is one message; an async
     iterator response is streamed as multiple bounded messages.
+
+    Streaming consumers are responsible for the D1 memory bound: yield
+    chunk/window-sized messages, never the whole file. The channel rejects any
+    individual message above its symmetric ``MAX_MESSAGE_SIZE`` backstop, and
+    the one-item final-boundary lookahead retains at most two yielded messages.
     """
     first = await recv()
     if first is None:
@@ -137,11 +145,15 @@ async def serve_channel(key: KeyPair, cert: DelegationCert, *, org: str, token: 
             response = await response
         if response is None:
             continue
-        async for response_message, stream_final in _response_messages(response):
-            for out in crypto.iter_seal_message(
-                response_message, stream_final=stream_final
-            ):
-                await send(out)
+        response_messages = _response_messages(response)
+        try:
+            async for response_message, stream_final in response_messages:
+                for out in crypto.iter_seal_message(
+                    response_message, stream_final=stream_final
+                ):
+                    await send(out)
+        finally:
+            await response_messages.aclose()
 
 
 def file_handler(path: str, content_type: str):

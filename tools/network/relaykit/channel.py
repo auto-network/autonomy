@@ -351,6 +351,11 @@ class ChannelCrypto:
         """
         if not isinstance(plaintext, (bytes, bytearray, memoryview)):
             raise TypeError("channel message must be bytes-like")
+        plaintext_size = (
+            plaintext.nbytes if isinstance(plaintext, memoryview) else len(plaintext)
+        )
+        if plaintext_size > self._max_message_size:
+            raise RecordError("message exceeds maximum size")
         plaintext = bytes(plaintext)
         offset = 0
         while True:
