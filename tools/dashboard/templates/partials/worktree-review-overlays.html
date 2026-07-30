@@ -772,6 +772,17 @@
           <pre class="mt-4 whitespace-pre-wrap rounded-2xl border border-white/10 bg-slate-900/60 p-4 font-sans text-sm leading-relaxed text-slate-200"
                data-testid="approval-body" x-text="approvalRequest.bodyMarkdown"></pre>
         </template>
+        <template x-if="approvalRequest.needsPassword">
+          <div class="mt-4">
+            <label for="approval-revoke-password" class="text-sm font-medium text-slate-200">Organization password</label>
+            <input id="approval-revoke-password" data-testid="approval-revoke-password"
+                   x-model="approvalRequest.password" type="password"
+                   autocomplete="current-password" placeholder="Enter password"
+                   class="mt-2 w-full rounded-2xl border border-slate-600 bg-slate-900/60 px-4 py-3 text-sm text-slate-100 focus:border-indigo-400 focus:outline-none">
+          </div>
+        </template>
+        <p x-show="approvalRequest.error" x-cloak data-testid="approval-simple-error"
+           class="mt-3 text-xs leading-5 text-red-300" x-text="approvalRequest.error"></p>
         <template x-if="approvalRequest.fields">
           <pre class="mt-4 whitespace-pre-wrap rounded-2xl border border-white/10 bg-slate-900/60 p-4 text-xs leading-relaxed text-slate-200"
                data-testid="approval-fields" x-text="JSON.stringify(approvalRequest.fields, null, 2)"></pre>

@@ -88,8 +88,12 @@
     const session = window.AutonomyNetworkSession;
     if (!session || typeof session.state !== 'function') return false;
     const state = session.state();
-    const expectedOrg = req.registryRequest && req.registryRequest.payload &&
-      req.registryRequest.payload.org;
+    // Publish carries the org uuid inside the staged payload; revoke's
+    // payload is empty by contract, so its rows expose the frozen
+    // binding's uuid as req.orgUuid instead.
+    const expectedOrg = req.orgUuid || (
+      req.registryRequest && req.registryRequest.payload &&
+      req.registryRequest.payload.org);
     return !!(state && state.signedIn && state.org === expectedOrg);
   }
 
@@ -260,10 +264,15 @@
       }
     }
 
-    const isOrgJoin = rr.payload && rr.payload.target_type === 'org:join';
+    const isRevoke = req.op === 'revoke';
+    const isOrgJoin = !isRevoke && rr.payload && rr.payload.target_type === 'org:join';
     let ttl = null;
     let payload;
-    if (isOrgJoin) {
+    if (isRevoke) {
+      // Registry contract: revoke envelopes carry an EMPTY payload — the
+      // server refuses to forward anything else.
+      payload = {};
+    } else if (isOrgJoin) {
       const invitation = await import('../ceremony/invitation.js');
       payload = invitation.buildOrgJoinGrantPayload({
         orgUuid: rr.payload.org,
@@ -287,7 +296,7 @@
       } catch (error) {
         throw new Error('This approval could not be signed. Unlock it again and retry.');
       }
-      return isOrgJoin ? { envelope } : { envelope, ttl };
+      return (isOrgJoin || isRevoke) ? { envelope } : { envelope, ttl };
     } finally {
       // Unchecked is deliberately one action only. Checked retains the
       // non-extractable authority, never the password; Lock clears this same
@@ -2358,13 +2367,24 @@
             if (r.binding_drift) {
               lines.push('', '⚠ the org binding changed after this request was staged — approving will be refused; decline and re-run the revoke');
             }
-            self.approvalRequest = {
+            const approval = {
               id: r.id, kind: r.kind, session: r.session,
               title: 'Revoke share-link', actionLabel: 'Approve & revoke',
               op: 'revoke', target: title,
               bodyMarkdown: lines.join('\n'),
+              orgSlug: req.org || '',
+              orgUuid: r.org_uuid || null,
+              password: '', showPassword: false,
+              allowSessionApprovals: false,
+              needsPassword: false,
+              error: '',
               registryRequest: r.registry_request || null,
             };
+            // A retained session matching this org signs without a password;
+            // otherwise the sheet collects one (same rule as publish).
+            approval.allowSessionApprovals = _matchingApprovalAuthority(approval);
+            approval.needsPassword = !approval.allowSessionApprovals;
+            self.approvalRequest = approval;
           },
           decision: (self, req) => _signLinkDecision(self, req),
         },
@@ -2527,21 +2547,22 @@
           if (!resp.ok || !decisionResult.ok) {
             throw new Error(decisionResult.error || 'This approval is no longer available.');
           }
-          if (req.gate2) {
+          if (req.gate2 || req.op === 'revoke') {
             const outcomeResp = await fetch(
               '/api/approvals/' + encodeURIComponent(req.id) + '?wait=20');
             const outcome = await outcomeResp.json().catch(() => ({}));
             const execution = outcome.result && outcome.result.execution;
             if (!outcomeResp.ok || !execution || execution.ok !== true) {
               throw new Error((execution && execution.error) || outcome.error ||
-                'auto.network did not finish publishing the link. Try again.');
+                'auto.network did not finish executing this approval. Try again.');
             }
           }
           this.approvalRequest = null;
-          _toast(req.gate2 ? 'Share link published' : 'Approved', 'success');
+          _toast(req.op === 'revoke' ? 'Share link revoked'
+            : (req.gate2 ? 'Share link published' : 'Approved'), 'success');
         } catch (e) {
           const message = e && e.message ? e.message : String(e);
-          if (req.gate2) req.error = message;
+          if (req.gate2 || req.op === 'revoke') req.error = message;
           else _toast('Could not approve: ' + message, 'error');
         } finally {
           this.approvalBusy = false;
