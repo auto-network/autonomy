@@ -33,6 +33,7 @@ import asyncio
 import contextlib
 import json
 import random
+import secrets
 import time
 
 import websockets
@@ -41,7 +42,9 @@ from tools.network.idkit import DelegationCert, KeyPair
 
 from .channel import ChannelCrypto, build_server_hello, parse_client_hello
 from .frames import (
+    CTRL_CHANNEL_ID,
     FRAME_CLOSE,
+    FRAME_CTRL,
     FRAME_DATA,
     FRAME_OPEN,
     FrameError,
@@ -153,9 +156,46 @@ class TunnelConnector:
         self._stop = asyncio.Event()
         #: set while a tunnel is authenticated and serving (tests await it)
         self.connected = asyncio.Event()
+        #: control-frame reply correlation — id -> Future, resolved in the
+        #: serve loop; the send hook is live only while a tunnel is up.
+        self._pending: dict = {}
+        self._ctrl_send = None
 
     def stop(self) -> None:
         self._stop.set()
+
+    async def control(self, op: str, args: dict, timeout: float = 10.0) -> dict:
+        """Send one D19 control op over the live tunnel and await its
+        correlated reply (register D19 §3). Raises ConnectionError when no
+        tunnel is up or the reply does not arrive within *timeout*."""
+        send = self._ctrl_send
+        if send is None:
+            raise ConnectionError("no live tunnel to carry a control frame")
+        correlation = secrets.token_hex(16)
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        self._pending[correlation] = future
+        request = {"id": correlation, "op": op, "args": args}
+        try:
+            await send(FRAME_CTRL, CTRL_CHANNEL_ID,
+                       json.dumps(request).encode("utf-8"))
+            return await asyncio.wait_for(future, timeout)
+        except asyncio.TimeoutError as exc:
+            raise ConnectionError(
+                f"control op {op!r} timed out after {timeout}s") from exc
+        finally:
+            self._pending.pop(correlation, None)
+
+    def _resolve_ctrl_reply(self, payload: bytes) -> None:
+        """Deliver a FRAME_CTRL reply to its waiting control() caller."""
+        try:
+            reply = json.loads(payload.decode("utf-8"))
+            correlation = reply["id"]
+        except (ValueError, KeyError, TypeError):
+            return  # unparseable reply: the caller times out honestly
+        future = self._pending.get(correlation)
+        if future is not None and not future.done():
+            future.set_result(reply)
 
     async def run(self) -> None:
         """Dial, serve, and re-dial until :meth:`stop`."""
@@ -203,6 +243,10 @@ class TunnelConnector:
             async with send_lock:
                 await ws.send(encode_frame(frame_type, channel_id, payload))
 
+        # Publish the send hook so control() can emit on this live tunnel;
+        # cleared in the finally so a call between tunnels fails closed.
+        self._ctrl_send = send_frame
+
         def drop(channel_id: bytes) -> None:
             queue = channels.pop(channel_id, None)
             if queue is not None:
@@ -216,6 +260,9 @@ class TunnelConnector:
                     frame = decode_frame(raw)
                 except FrameError:
                     break
+                if frame.type == FRAME_CTRL:
+                    self._resolve_ctrl_reply(frame.payload)
+                    continue
                 if frame.type == FRAME_OPEN:
                     try:
                         token = json.loads(frame.payload)["token"]
@@ -234,6 +281,14 @@ class TunnelConnector:
                 elif frame.type == FRAME_CLOSE:
                     drop(frame.channel_id)
         finally:
+            self._ctrl_send = None
+            # Fail any in-flight control calls rather than let them hang to
+            # timeout — the tunnel that would carry their reply is gone.
+            for correlation, future in list(self._pending.items()):
+                if not future.done():
+                    future.set_exception(
+                        ConnectionError("tunnel dropped before control reply"))
+                self._pending.pop(correlation, None)
             for channel_id in list(channels):
                 drop(channel_id)
             for task in tasks.values():
