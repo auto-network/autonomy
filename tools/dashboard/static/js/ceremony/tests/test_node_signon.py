@@ -247,6 +247,9 @@ def test_node_signon_is_accepted_and_tampering_is_rejected():
         legacy_subject = json.loads(output["envelope"]["cert"])["subject"]
         assert legacy_subject["kind"] == "operator"
         assert legacy_subject["id"].startswith("browser-")
+        diagnostics = output["signOn"]["diagnostics"]
+        assert diagnostics["subjectResolution"] == "label"
+        assert diagnostics["subjectFallbackReason"] == "ledger-not-founded"
 
         signature_mutation = copy.deepcopy(output["envelope"])
         signature_mutation["sig"] = (
@@ -373,6 +376,9 @@ def test_node_signon_mints_persona_subject_for_a_founded_org():
         "kind": "operator",
         "id": expected,
     }
+    diagnostics = output["signOn"]["diagnostics"]
+    assert diagnostics["subjectResolution"] == "persona"
+    assert diagnostics["subjectFallbackReason"] is None
     assert identity_requests == [
         "/api/network/org-key",
         "/api/network/binding",
@@ -406,6 +412,9 @@ def test_node_signon_falls_back_to_label_when_personal_armor_stays_shut():
     subject = json.loads(output["envelope"]["cert"])["subject"]
     assert subject["kind"] == "operator"
     assert subject["id"].startswith("browser-")
+    diagnostics = output["signOn"]["diagnostics"]
+    assert diagnostics["subjectResolution"] == "label"
+    assert diagnostics["subjectFallbackReason"] == "personal-armor-locked"
     assert identity_requests == [
         "/api/network/org-key",
         "/api/network/binding",
@@ -468,6 +477,9 @@ def test_node_signon_opens_sealed_org_armor_and_publishes():
         "kind": "operator",
         "id": expected,
     }
+    diagnostics = output["signOn"]["diagnostics"]
+    assert diagnostics["subjectResolution"] == "persona"
+    assert diagnostics["subjectFallbackReason"] is None
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
