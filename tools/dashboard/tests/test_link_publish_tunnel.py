@@ -466,3 +466,59 @@ def test_revocation_fetch_failure_fails_closed(env, root, session_key,
     assert "revocation list" in result["execution"]["error"]
     assert recorder.calls == []
     assert _cached_grants() == {}
+
+
+# ── TTL override from the approval sheet (re-expressed on the tunnel) ──
+
+
+def test_ttl_override_from_decision_is_applied(env, root, session_key,
+                                               session_cert, monkeypatch):
+    """The operator's duration choice rides the decision as ttl and must
+    reach the grant meta (the tunnel path honors it, as the HTTP path did)."""
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+    rid = _create_publish(env, meta={"ttl": 3600, "label": "binder"})
+    envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
+    ok = env.post(f"/api/approvals/{rid}/decision",
+                  json={"approved": True, "envelope": envelope, "ttl": 86400})
+    assert ok.status_code == 200
+    for _ in range(50):
+        d = env.get(f"/api/approvals/{rid}?wait=2").json()
+        if d["result"] is not None:
+            break
+    token = d["result"]["execution"]["token"]
+    assert recorder.calls[0][2]["meta"] == {"ttl": 86400, "label": "binder"}
+    assert _cached_grants()[token]["meta"] == {"ttl": 86400, "label": "binder"}
+
+
+def test_ttl_override_none_removes_expiry(env, root, session_key, session_cert,
+                                          monkeypatch):
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+    rid = _create_publish(env, meta={"ttl": 3600, "label": "binder"})
+    envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
+    env.post(f"/api/approvals/{rid}/decision",
+             json={"approved": True, "envelope": envelope, "ttl": None})
+    for _ in range(50):
+        d = env.get(f"/api/approvals/{rid}?wait=2").json()
+        if d["result"] is not None:
+            break
+    assert recorder.calls[0][2]["meta"] == {"label": "binder"}
+
+
+def test_invalid_ttl_override_is_refused(env, root, session_key, session_cert,
+                                         monkeypatch):
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+    rid = _create_publish(env, meta={"ttl": 3600})
+    envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
+    env.post(f"/api/approvals/{rid}/decision",
+             json={"approved": True, "envelope": envelope, "ttl": -1})
+    for _ in range(50):
+        d = env.get(f"/api/approvals/{rid}?wait=2").json()
+        if d["result"] is not None:
+            break
+    assert d["result"]["execution"]["ok"] is False
+    assert "between 1 and 365 days" in d["result"]["execution"]["error"]
+    assert recorder.calls == []
+    assert _cached_grants() == {}
