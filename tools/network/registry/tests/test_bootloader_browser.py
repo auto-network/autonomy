@@ -223,6 +223,8 @@ def test_rejects_malformed_state_envelopes(tmp_path):
     {v:1, type:'attachment.state', ref:'a1', state:'downloading', received:1, total:2, path:'/tmp/evil'},
     {v:1, type:'attachment.state', ref:'a1', state:'bogus'},
     {v:1, type:'attachment.state', ref:'a1', state:'downloading', error_code:5, received:1, total:2},
+    {v:1, type:'attachment.state', ref:'a1', state:'downloading', received:1},   // half-present pair
+    {v:1, type:'attachment.state', ref:'a1', state:'downloading', total:2},      // half-present pair
   ];
   for (const m of bad) { post(m); await wait(8); }
   const afterBad = {state: c.dataset.state, status: c.querySelector('.attachment-status').textContent};

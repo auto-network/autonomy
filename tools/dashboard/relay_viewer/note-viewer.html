@@ -1557,6 +1557,10 @@ return Pe}()
       if (!STATE_FIELDS.has(key)) return;
     }
     const { received, total } = message;
+    // Progress is optional but only as a PAIR: both present (downloading) or
+    // both absent (idle/ready/complete/...). Half-present is not a coherent
+    // envelope and is rejected.
+    if ((received === undefined) !== (total === undefined)) return;
     if (received !== undefined && (!Number.isSafeInteger(received) || received < 0)) return;
     if (total !== undefined && (!Number.isSafeInteger(total) || total < 0)) return;
     if (received !== undefined && total !== undefined && received > total) return;
