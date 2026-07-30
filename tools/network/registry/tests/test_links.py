@@ -6,7 +6,7 @@ import sqlite3
 
 from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.registry.signing import sign_request
-from tools.network.registry.store import RegistryStore
+from tools.network.registry.store import LinkGrant, RegistryStore
 
 from .conftest import DAY, HOUR, NOW, ORG, TARGET, publish_link, signed
 
@@ -238,6 +238,55 @@ def test_absolute_expiry_column_migrates_existing_registry(tmp_path):
     }
     assert "expires_at_ms" in columns
     store.close()
+
+
+def test_d19_rebuild_preserves_rows_and_makes_persona_cols_nullable(tmp_path):
+    """The D19 store change makes signer_pub / subject_id nullable so
+    org-tunnel grants (no persona) can be stored. A pre-D19 table has them
+    NOT NULL, so the store rebuilds it — this must preserve existing rows
+    byte-for-byte and admit a NULL-persona grant afterwards."""
+    path = tmp_path / "registry.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """
+        CREATE TABLE links (
+            token TEXT PRIMARY KEY, org_uuid TEXT NOT NULL,
+            target_uuid TEXT NOT NULL, target_type TEXT NOT NULL,
+            invite_ref TEXT, meta TEXT NOT NULL, created_at INTEGER NOT NULL,
+            expires_at INTEGER, revoked_at INTEGER,
+            signer_pub TEXT NOT NULL, subject_kind TEXT NOT NULL,
+            subject_id TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO links (token, org_uuid, target_uuid, target_type, meta,"
+        " created_at, signer_pub, subject_kind, subject_id)"
+        " VALUES ('tok1', 'org-1', 'tgt-1', 'present', '{}', 100,"
+        " 'signer-1', 'operator', 'persona-1')"
+    )
+    connection.commit()
+    connection.close()
+
+    store = RegistryStore(str(path))
+    try:
+        # The pre-D19 row survived the table rebuild unchanged.
+        old = store.get_link("tok1")
+        assert old is not None
+        assert (old.org_uuid, old.target_type, old.signer_pub,
+                old.subject_kind, old.subject_id) == (
+            "org-1", "present", "signer-1", "operator", "persona-1")
+        # And a persona-less org-tunnel grant is now storable.
+        store.create_link(LinkGrant(
+            token="tok2", org_uuid="org-1", target_uuid="tgt-2",
+            target_type="present", meta={}, created_at=200, expires_at=None,
+            revoked_at=None, signer_pub=None, subject_kind="org-tunnel",
+            subject_id=None))
+        tunnel = store.get_link("tok2")
+        assert tunnel.signer_pub is None and tunnel.subject_id is None
+        assert tunnel.subject_kind == "org-tunnel"
+    finally:
+        store.close()
 
 
 # -- I4: every mutation verifies a chain ----------------------------------------
