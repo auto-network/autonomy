@@ -779,6 +779,36 @@ def test_publish_refused_without_link_publish_scope(
     assert upserts == []
 
 
+def test_legacy_label_subject_is_refused(
+    env, root, session_key, monkeypatch,
+):
+    """The sign-on persona-resolution fallback mints a 'browser-*' label
+    subject so signing on never regresses — but a label holds no fold
+    role, so it must preserve sign-on and nothing more: publish refused."""
+    cert = _persona_cert(root, session_key, "browser-ab12cd34")
+    rid = _create_publish(env)
+    rr = env.get(f"/api/approvals/{rid}").json()["registry_request"]
+    envelope = _signed_envelope(session_key, cert, rr)
+    forwarded = []
+
+    async def forbidden_forward(*args):
+        forwarded.append(args)
+        raise AssertionError("label-subject publish reached the registry")
+
+    monkeypatch.setattr(
+        link_approvals, "_forward_to_registry", forbidden_forward,
+    )
+    result = _decide_and_wait(env, rid, _approve_body(envelope, rr))
+
+    assert result["execution"]["ok"] is False
+    assert (
+        "browser-ab12cd34 is not authorized to publish share links"
+        in result["execution"]["error"]
+    )
+    assert forwarded == []
+    assert _cached_grants() == {}
+
+
 def test_malformed_persona_key_fails_closed(
     env, root, session_key, monkeypatch,
 ):
