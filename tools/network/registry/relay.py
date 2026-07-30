@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import Dict, Optional
+from typing import Callable, Coroutine, Dict, Optional
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
@@ -58,6 +58,113 @@ from .store import LinkGrant, RegistryStore
 CLOSE_UNAUTHENTICATED = 4403
 CLOSE_UNKNOWN_LINK = 4404  # unknown token or no serving tunnel
 CLOSE_REPLACED = 4409
+CLOSE_VIEWER_QUEUE_OVERFLOW = 4413
+
+# A viewer never gets to make the org tunnel retain an attachment-sized
+# window.  The channel record layer currently emits 128 KiB records, so this
+# is a small cushion for ordinary scheduler/network jitter while remaining
+# far below the attachment protocol's 8 MiB pull window.
+VIEWER_QUEUE_MAX_BYTES = 2 * 1024 * 1024
+
+
+class _ViewerRelayChannel:
+    """One viewer's bounded dashboard→viewer writer.
+
+    ``try_enqueue`` is deliberately synchronous: the shared tunnel receive
+    loop must never wait for a viewer socket.  Bytes remain charged while a
+    send is in flight, not merely while they sit in ``asyncio.Queue``, so a
+    wedged socket cannot hide one unbounded payload outside the accounting.
+    """
+
+    def __init__(
+        self,
+        ws: WebSocket,
+        *,
+        on_writer_failure: Callable[["_ViewerRelayChannel"], None],
+        max_queued_bytes: int = VIEWER_QUEUE_MAX_BYTES,
+    ):
+        self.ws = ws
+        self.max_queued_bytes = max_queued_bytes
+        self._on_writer_failure = on_writer_failure
+        self._queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._queued_bytes = 0
+        self._closing = False
+        self._close_task: Optional[asyncio.Task] = None
+        self._writer_task = asyncio.create_task(self._writer())
+        self._writer_task.add_done_callback(self._writer_done)
+
+    @property
+    def queued_bytes(self) -> int:
+        """Bytes queued or currently blocked in ``send_bytes``."""
+        return self._queued_bytes
+
+    def try_enqueue(self, payload: bytes) -> bool:
+        """Queue *payload* without waiting; false means the byte cap hit."""
+        if self._closing:
+            return False
+        payload = bytes(payload)
+        if len(payload) > self.max_queued_bytes - self._queued_bytes:
+            return False
+        self._queued_bytes += len(payload)
+        self._queue.put_nowait(payload)
+        return True
+
+    def start_close(self, code: int) -> asyncio.Task:
+        """Cancel the writer, release queued bytes, and close asynchronously."""
+        if self._close_task is not None:
+            return self._close_task
+        self._closing = True
+        self._release_pending()
+        self._writer_task.cancel()
+        self._close_task = asyncio.create_task(self._finish_close(code))
+        return self._close_task
+
+    async def close(self, code: int) -> None:
+        await self.start_close(code)
+
+    async def wait_closed(self) -> None:
+        if self._close_task is not None:
+            await self._close_task
+        else:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._writer_task
+
+    async def _writer(self) -> None:
+        while True:
+            payload = await self._queue.get()
+            try:
+                await self.ws.send_bytes(payload)
+            finally:
+                self._queued_bytes -= len(payload)
+                self._queue.task_done()
+
+    def _writer_done(self, task: asyncio.Task) -> None:
+        # Always retrieve the exception so a failed socket send does not
+        # become an unhandled-task warning.
+        with contextlib.suppress(asyncio.CancelledError):
+            task.exception()
+        if self._closing:
+            return
+        self._closing = True
+        self._release_pending()
+        self._on_writer_failure(self)
+        self._close_task = asyncio.create_task(
+            _close_quietly(self.ws, 1001)
+        )
+
+    def _release_pending(self) -> None:
+        while True:
+            try:
+                payload = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            self._queued_bytes -= len(payload)
+            self._queue.task_done()
+
+    async def _finish_close(self, code: int) -> None:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await self._writer_task
+        await _close_quietly(self.ws, code)
 
 
 class Tunnel:
@@ -66,12 +173,85 @@ class Tunnel:
     def __init__(self, ws: WebSocket, org: str):
         self.ws = ws
         self.org = org
-        self.channels: Dict[bytes, WebSocket] = {}
+        self.channels: Dict[bytes, _ViewerRelayChannel] = {}
         self._send_lock = asyncio.Lock()
+        self._background_tasks: set[asyncio.Task] = set()
 
     async def send_frame(self, frame_type: int, channel_id: bytes, payload: bytes = b"") -> None:
         async with self._send_lock:
             await self.ws.send_bytes(encode_frame(frame_type, channel_id, payload))
+
+    def add_viewer(self, channel_id: bytes, ws: WebSocket) -> _ViewerRelayChannel:
+        channel = _ViewerRelayChannel(
+            ws,
+            on_writer_failure=lambda failed: self._writer_failed(
+                channel_id, failed
+            ),
+        )
+        self.channels[channel_id] = channel
+        return channel
+
+    def enqueue_viewer(self, channel_id: bytes, payload: bytes) -> None:
+        """Enqueue only; a slow viewer never blocks the tunnel read loop."""
+        channel = self.channels.get(channel_id)
+        if channel is None:
+            return
+        if channel.try_enqueue(payload):
+            return
+        if self.channels.get(channel_id) is channel:
+            del self.channels[channel_id]
+        channel.start_close(CLOSE_VIEWER_QUEUE_OVERFLOW)
+        self._notify_dashboard_closed(channel_id)
+
+    def close_viewer(self, channel_id: bytes, code: int) -> None:
+        channel = self.channels.pop(channel_id, None)
+        if channel is not None:
+            channel.start_close(code)
+
+    def detach_viewer(
+        self, channel_id: bytes, channel: _ViewerRelayChannel
+    ) -> bool:
+        if self.channels.get(channel_id) is not channel:
+            return False
+        del self.channels[channel_id]
+        return True
+
+    async def close_all_viewers(self, code: int) -> None:
+        channels = list(self.channels.values())
+        self.channels.clear()
+        if channels:
+            await asyncio.gather(
+                *(channel.close(code) for channel in channels),
+                return_exceptions=True,
+            )
+        tasks = list(self._background_tasks)
+        self._background_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _writer_failed(
+        self, channel_id: bytes, failed: _ViewerRelayChannel
+    ) -> None:
+        if self.channels.get(channel_id) is not failed:
+            return
+        del self.channels[channel_id]
+        self._notify_dashboard_closed(channel_id)
+
+    def _notify_dashboard_closed(self, channel_id: bytes) -> None:
+        self._spawn_background(self.send_frame(FRAME_CLOSE, channel_id))
+
+    def _spawn_background(self, coro: Coroutine) -> None:
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+
+        def done(completed: asyncio.Task) -> None:
+            self._background_tasks.discard(completed)
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                completed.result()
+
+        task.add_done_callback(done)
 
 
 class TunnelHub:
@@ -296,22 +476,15 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
                 except FrameError:
                     break
                 continue
-            viewer = tunnel.channels.get(frame.channel_id)
-            if viewer is None:
+            if frame.channel_id not in tunnel.channels:
                 continue  # viewer already gone; stale frame
             if frame.type == FRAME_DATA:
-                try:
-                    await viewer.send_bytes(frame.payload)
-                except Exception:
-                    tunnel.channels.pop(frame.channel_id, None)
+                tunnel.enqueue_viewer(frame.channel_id, frame.payload)
             elif frame.type == FRAME_CLOSE:
-                tunnel.channels.pop(frame.channel_id, None)
-                await _close_quietly(viewer, 1000)
+                tunnel.close_viewer(frame.channel_id, 1000)
     finally:
         hub.unregister(tunnel)
-        for viewer in list(tunnel.channels.values()):
-            await _close_quietly(viewer, 1001)
-        tunnel.channels.clear()
+        await tunnel.close_all_viewers(1001)
 
 
 def _resolve_live_link(store: RegistryStore, token: str, now: int):
@@ -343,13 +516,13 @@ async def viewer_endpoint(websocket: WebSocket, token: str, hub: TunnelHub,
         return
 
     channel_id = new_channel_id()
-    tunnel.channels[channel_id] = websocket
+    relay_channel = tunnel.add_viewer(channel_id, websocket)
     try:
         await tunnel.send_frame(FRAME_OPEN, channel_id,
                                 canonical_json({"token": token}))
     except Exception:
-        tunnel.channels.pop(channel_id, None)
-        await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
+        tunnel.detach_viewer(channel_id, relay_channel)
+        await relay_channel.close(CLOSE_UNKNOWN_LINK)
         return
 
     try:
@@ -360,13 +533,16 @@ async def viewer_endpoint(websocket: WebSocket, token: str, hub: TunnelHub,
             raw = message.get("bytes")
             if raw is None:
                 continue
-            if tunnel.channels.get(channel_id) is not websocket:
+            if tunnel.channels.get(channel_id) is not relay_channel:
                 break  # channel torn down from the dashboard side
             try:
                 await tunnel.send_frame(FRAME_DATA, channel_id, raw)
             except Exception:
                 break  # tunnel died mid-channel
     finally:
-        if tunnel.channels.pop(channel_id, None) is not None:
+        if tunnel.detach_viewer(channel_id, relay_channel):
+            await relay_channel.close(1001)
             with contextlib.suppress(Exception):
                 await tunnel.send_frame(FRAME_CLOSE, channel_id)
+        else:
+            await relay_channel.wait_closed()
