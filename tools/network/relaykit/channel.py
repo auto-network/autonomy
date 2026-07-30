@@ -40,7 +40,16 @@ Record layer (Q3: chunking + backpressure)::
     record    = [8B seq BE][AES-256-GCM ciphertext]
     nonce     = direction_tag (4B) || seq (8B BE)      # never reused
     AAD       = transcript_hash || direction_tag || seq
-    plaintext = [1B flags][chunk]                       # 0x01 = final
+    plaintext = [1B flags][chunk]
+
+Flags preserve the original ``0x01 = final`` meaning for deployed v1
+clients while separating message and exchange boundaries:
+
+    0x01 STREAM_FINAL  no message follows in this response exchange
+    0x02 MSG_END       this record completes the current message
+
+One-shot messages set both bits.  A legacy peer that sends only 0x01 is
+accepted as ending both its message and exchange.
 
 Messages are chunked at ``CHUNK_SIZE`` (128 KiB) so a 1.5 MB+ artifact
 never occupies one giant WS message anywhere on the path; senders await
@@ -53,7 +62,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Optional, Tuple
+from dataclasses import dataclass
+from typing import Iterator, Optional, Tuple
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
@@ -83,7 +93,12 @@ DIR_S2C = b"s2c\x00"
 CHUNK_SIZE = 128 * 1024
 MAX_MESSAGE_SIZE = 64 * 1024 * 1024
 _SEQ_LEN = 8
-_FLAG_FINAL = 0x01
+_FLAG_STREAM_FINAL = 0x01
+_FLAG_MSG_END = 0x02
+_KNOWN_FLAGS = _FLAG_STREAM_FINAL | _FLAG_MSG_END
+# Compatibility name used by the original record protocol and its browser
+# implementation.  STREAM_FINAL deliberately keeps this bit assignment.
+_FLAG_FINAL = _FLAG_STREAM_FINAL
 _MAX_SEQ = 2**63
 
 
@@ -93,6 +108,22 @@ class HandshakeError(Exception):
 
 class RecordError(Exception):
     """A record failed authentication, ordering, or size checks."""
+
+
+@dataclass(frozen=True)
+class OpenedRecord:
+    """One authenticated plaintext record in streaming receive mode.
+
+    ``chunk`` may be handed to a bounded staging sink immediately.  A caller
+    commits the staged message only after ``message_end``; teardown before
+    that boundary therefore discards an incomplete message.  ``stream_final``
+    marks the last message in the current response exchange, not the lifetime
+    of the bidirectional channel.
+    """
+
+    chunk: bytes
+    message_end: bool
+    stream_final: bool
 
 
 def _eph_pub_hex(private_key: X25519PrivateKey) -> str:
@@ -263,7 +294,9 @@ class ChannelCrypto:
     Build with :meth:`client` or :meth:`server` after the handshake.
     ``seal_message`` chunks a full message into records; feed incoming
     records to ``open_record`` and it returns a completed message when
-    the final chunk arrives (else ``None``).
+    its ``MSG_END`` arrives (else ``None``).  Large-message consumers use
+    ``open_stream_record`` to receive each authenticated record without the
+    compatibility path's whole-message buffer.
     """
 
     def __init__(self, send_key: bytes, recv_key: bytes, transcript_hash: bytes,
@@ -277,6 +310,8 @@ class ChannelCrypto:
         self._send_seq = 0
         self._recv_seq = 0
         self._buffer = bytearray()
+        self._incoming_message_size = 0
+        self._peak_buffered_bytes = 0
         self._max_message_size = max_message_size
 
     @classmethod
@@ -292,6 +327,10 @@ class ChannelCrypto:
         return cls(key_s2c, key_c2s, transcript_hash, DIR_S2C, DIR_C2S, **kw)
 
     def _seal_record(self, flags: int, chunk: bytes) -> bytes:
+        if flags & ~_KNOWN_FLAGS:
+            raise RecordError("record has unknown flags")
+        if len(chunk) > CHUNK_SIZE:
+            raise RecordError("record chunk exceeds maximum size")
         if self._send_seq >= _MAX_SEQ:
             raise RecordError("send sequence exhausted; channel must be re-keyed")
         seq = self._send_seq.to_bytes(_SEQ_LEN, "big")
@@ -301,24 +340,42 @@ class ChannelCrypto:
         self._send_seq += 1
         return seq + ciphertext
 
-    def seal_message(self, plaintext: bytes) -> list:
-        """Chunk *plaintext* into sealed records (at least one)."""
-        records = []
+    def iter_seal_message(
+        self, plaintext: bytes, *, stream_final: bool = True
+    ) -> Iterator[bytes]:
+        """Yield sealed records for one message without buffering ciphertext.
+
+        ``stream_final=False`` ends this message with ``MSG_END`` while
+        leaving the response exchange open for another message.  At least one
+        record is produced, including for an empty message.
+        """
+        if not isinstance(plaintext, (bytes, bytearray, memoryview)):
+            raise TypeError("channel message must be bytes-like")
+        plaintext = bytes(plaintext)
         offset = 0
         while True:
             chunk = plaintext[offset:offset + CHUNK_SIZE]
             offset += CHUNK_SIZE
-            final = offset >= len(plaintext)
-            records.append(self._seal_record(_FLAG_FINAL if final else 0, chunk))
-            if final:
-                return records
+            message_end = offset >= len(plaintext)
+            flags = 0
+            if message_end:
+                flags |= _FLAG_MSG_END
+                if stream_final:
+                    flags |= _FLAG_STREAM_FINAL
+            yield self._seal_record(flags, chunk)
+            if message_end:
+                return
 
-    def open_record(self, record: bytes) -> Optional[bytes]:
-        """Authenticate one record; returns the full message when its final
-        chunk arrives, ``None`` while mid-message.
+    def seal_message(self, plaintext: bytes, *, stream_final: bool = True) -> list:
+        """Compatibility wrapper returning all records for one message."""
+        return list(self.iter_seal_message(plaintext, stream_final=stream_final))
+
+    def open_stream_record(self, record: bytes) -> OpenedRecord:
+        """Authenticate one record and return its plaintext and boundaries.
 
         Raises :class:`RecordError` on tamper, replay, reorder, or
-        oversize — after which the channel must be torn down.
+        oversize — after which the channel must be torn down.  This mode does
+        not append plaintext to the whole-message compatibility buffer.
         """
         if not isinstance(record, (bytes, bytearray)) or len(record) <= _SEQ_LEN:
             raise RecordError("record too short")
@@ -337,11 +394,47 @@ class ChannelCrypto:
         if not plaintext:
             raise RecordError("record missing flags byte")
         flags, chunk = plaintext[0], plaintext[1:]
-        if len(self._buffer) + len(chunk) > self._max_message_size:
+        if flags & ~_KNOWN_FLAGS:
+            raise RecordError("record has unknown flags")
+        if len(chunk) > CHUNK_SIZE:
+            raise RecordError("record chunk exceeds maximum size")
+
+        self._incoming_message_size += len(chunk)
+        if self._incoming_message_size > self._max_message_size:
             raise RecordError("message exceeds maximum size")
+        stream_final = bool(flags & _FLAG_STREAM_FINAL)
+        # Original clients use 0x01 as their sole final/message-end bit.
+        message_end = bool(flags & _FLAG_MSG_END) or stream_final
+        if message_end:
+            self._incoming_message_size = 0
+        return OpenedRecord(
+            chunk=bytes(chunk),
+            message_end=message_end,
+            stream_final=stream_final,
+        )
+
+    def open_record(self, record: bytes) -> Optional[bytes]:
+        """Compatibility whole-message receive path.
+
+        Returns the completed message at ``MSG_END`` (or a legacy 0x01
+        boundary), and ``None`` while mid-message.
+        """
+        opened = self.open_stream_record(record)
+        chunk = opened.chunk
         self._buffer.extend(chunk)
-        if flags & _FLAG_FINAL:
+        self._peak_buffered_bytes = max(self._peak_buffered_bytes, len(self._buffer))
+        if opened.message_end:
             message = bytes(self._buffer)
             self._buffer = bytearray()
             return message
         return None
+
+    @property
+    def buffered_bytes(self) -> int:
+        """Bytes held by the compatibility whole-message receive path."""
+        return len(self._buffer)
+
+    @property
+    def peak_buffered_bytes(self) -> int:
+        """Peak compatibility-buffer occupancy (zero in pure stream mode)."""
+        return self._peak_buffered_bytes

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -18,6 +19,7 @@ from tools.network.relaykit.channel import (
     parse_client_hello,
     verify_server_hello,
 )
+from tools.network.relaykit.connector import serve_channel
 
 from .conftest import ORG, TOKEN
 
@@ -201,3 +203,167 @@ class TestRecordLayer:
         with pytest.raises(RecordError):
             for record in client.seal_message(b"z" * 64):
                 server.open_record(record)
+
+    def test_streaming_message_boundaries_without_whole_exchange_buffer(
+        self, root, session_key, session_cert, now
+    ):
+        client, server = handshake(root, session_key, session_cert, now)
+        messages = [
+            b"a" * (CHUNK_SIZE + 17),
+            b"",
+            b"last",
+        ]
+        records = []
+        for index, message in enumerate(messages):
+            records.extend(
+                client.seal_message(
+                    message, stream_final=index == len(messages) - 1
+                )
+            )
+
+        delivered = []
+        current = bytearray()
+        boundaries = []
+        for record in records:
+            opened = server.open_stream_record(record)
+            current.extend(opened.chunk)
+            if opened.message_end:
+                delivered.append(bytes(current))
+                current.clear()
+                boundaries.append(opened.stream_final)
+
+        assert delivered == messages
+        assert boundaries == [False, False, True]
+        assert server.buffered_bytes == 0
+        assert server.peak_buffered_bytes == 0
+
+    def test_legacy_final_bit_still_ends_a_message(
+        self, root, session_key, session_cert, now
+    ):
+        """Deployed browser clients send the original sole 0x01 final bit."""
+        client, server = handshake(root, session_key, session_cert, now)
+        legacy_record = client._seal_record(0x01, b"legacy")
+        assert server.open_record(legacy_record) == b"legacy"
+
+    def test_stream_tamper_stops_before_later_plaintext(
+        self, root, session_key, session_cert, now
+    ):
+        client, server = handshake(root, session_key, session_cert, now)
+        first_message = client.seal_message(
+            b"a" * (CHUNK_SIZE + 5), stream_final=False
+        )
+        later_message = client.seal_message(b"must not arrive", stream_final=True)
+        tampered = bytearray(first_message[1])
+        tampered[-1] ^= 0x01
+        records = [first_message[0], bytes(tampered), *later_message]
+
+        delivered = bytearray()
+        with pytest.raises(RecordError):
+            for record in records:
+                opened = server.open_stream_record(record)
+                delivered.extend(opened.chunk)
+
+        assert delivered == b"a" * CHUNK_SIZE
+
+    def test_stream_reorder_stops_before_delivery(
+        self, root, session_key, session_cert, now
+    ):
+        client, server = handshake(root, session_key, session_cert, now)
+        records = client.seal_message(
+            b"a" * (CHUNK_SIZE + 1), stream_final=True
+        )
+        delivered = bytearray()
+        with pytest.raises(RecordError):
+            for record in reversed(records):
+                opened = server.open_stream_record(record)
+                delivered.extend(opened.chunk)
+        assert delivered == b""
+
+
+@pytest.mark.asyncio
+async def test_serve_channel_streams_async_iterator_with_bounded_lookahead(
+    root, session_key, session_cert, now
+):
+    """The handler exchange is streamed as messages, not one aggregate."""
+    to_server: asyncio.Queue = asyncio.Queue()
+    from_server: asyncio.Queue = asyncio.Queue()
+    produced = 0
+    completed = 0
+    peak_outstanding = 0
+    observer = None
+    largest_wire_record = 0
+    app_messages = [
+        b"a" * (1024 * 1024),
+        b"b" * (1024 * 1024),
+        b"tail",
+    ]
+
+    async def handler(token, request):
+        assert token == TOKEN
+        assert request == b"request"
+        nonlocal produced, peak_outstanding
+        for message in app_messages:
+            produced += 1
+            peak_outstanding = max(peak_outstanding, produced - completed)
+            yield message
+
+    async def recv():
+        return await to_server.get()
+
+    async def send(payload):
+        nonlocal completed, largest_wire_record
+        if observer is not None:
+            largest_wire_record = max(largest_wire_record, len(payload))
+            opened = observer.open_stream_record(payload)
+            if opened.message_end:
+                completed += 1
+        await from_server.put(payload)
+
+    client_priv, client_hello = build_client_hello()
+    client_eph = parse_client_hello(client_hello)
+    await to_server.put(client_hello)
+    task = asyncio.create_task(
+        serve_channel(
+            session_key,
+            session_cert,
+            org=ORG,
+            token=TOKEN,
+            recv=recv,
+            send=send,
+            handler=handler,
+        )
+    )
+
+    server_hello = await from_server.get()
+    server_eph, transcript_hash = verify_server_hello(
+        server_hello,
+        root_pub=root.public_hex,
+        org=ORG,
+        token=TOKEN,
+        client_eph=client_eph,
+        now=now,
+    )
+    client = ChannelCrypto.client(client_priv, server_eph, transcript_hash)
+    observer = ChannelCrypto.client(client_priv, server_eph, transcript_hash)
+    for record in client.seal_message(b"request"):
+        await to_server.put(record)
+
+    delivered = []
+    current = bytearray()
+    while True:
+        opened = client.open_stream_record(await from_server.get())
+        current.extend(opened.chunk)
+        if opened.message_end:
+            delivered.append(bytes(current))
+            current.clear()
+        if opened.stream_final:
+            break
+
+    await to_server.put(None)
+    await task
+
+    assert delivered == app_messages
+    assert completed == produced == len(app_messages)
+    assert peak_outstanding <= 2
+    assert largest_wire_record <= 8 + 1 + CHUNK_SIZE + 16
+    assert client.peak_buffered_bytes == 0
