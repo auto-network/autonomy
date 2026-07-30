@@ -10,8 +10,9 @@ scope sets covers the required scope under the attenuation order
 (exact, ``*``, and ``prefix:*`` covering).
 
 Fail closed: a missing or genesis-less ledger raises (``GenesisError``
-or the store's own errors) — the caller treats any exception as not
-authorized. Folds carry no ``now``, so authority is a pure function of
+or the store's own errors) — the caller must refuse the action, but
+must surface ``GenesisError`` as "ledger not founded", never as a
+permission denial. Folds carry no ``now``, so authority is a pure function of
 the head set and the head-keyed cache stays sound: a head advance
 changes the key and recomputes; pinning ``at_head`` reproduces a past
 decision exactly.
