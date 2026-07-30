@@ -89,9 +89,12 @@ CREATE TABLE IF NOT EXISTS links (
     -- and non-join grants retain their exact semantics.
     expires_at_ms INTEGER,
     revoked_at   INTEGER,
-    signer_pub   TEXT NOT NULL,
+    -- signer_pub / subject_id are NULL for org-tunnel grants (register
+    -- D19): a link minted over the authenticated tunnel is an act of the
+    -- tunnel's org, and the registry never sees a persona on that path.
+    signer_pub   TEXT,
     subject_kind TEXT NOT NULL,
-    subject_id   TEXT NOT NULL
+    subject_id   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_links_org ON links (org_uuid);
 
@@ -367,6 +370,44 @@ class RegistryStore:
         if "expires_at_ms" not in link_cols:
             self._conn.execute(
                 "ALTER TABLE links ADD COLUMN expires_at_ms INTEGER"
+            )
+        # D19: org-tunnel grants carry no persona, so signer_pub/subject_id
+        # must be nullable. A pre-D19 table has them NOT NULL; SQLite cannot
+        # drop a column constraint in place, so rebuild the table when the
+        # old constraint is present. Existing rows migrate unchanged.
+        link_info = {
+            r["name"]: r["notnull"]
+            for r in self._conn.execute("PRAGMA table_info(links)")
+        }
+        if link_info and (link_info.get("signer_pub") or link_info.get("subject_id")):
+            self._conn.executescript(
+                """
+                ALTER TABLE links RENAME TO links_pre_d19;
+                CREATE TABLE links (
+                    token        TEXT PRIMARY KEY,
+                    org_uuid     TEXT NOT NULL,
+                    target_uuid  TEXT NOT NULL,
+                    target_type  TEXT NOT NULL,
+                    invite_ref   TEXT,
+                    meta         TEXT NOT NULL,
+                    created_at   INTEGER NOT NULL,
+                    expires_at   INTEGER,
+                    expires_at_ms INTEGER,
+                    revoked_at   INTEGER,
+                    signer_pub   TEXT,
+                    subject_kind TEXT NOT NULL,
+                    subject_id   TEXT
+                );
+                INSERT INTO links (token, org_uuid, target_uuid, target_type,
+                    invite_ref, meta, created_at, expires_at, expires_at_ms,
+                    revoked_at, signer_pub, subject_kind, subject_id)
+                SELECT token, org_uuid, target_uuid, target_type,
+                    invite_ref, meta, created_at, expires_at, expires_at_ms,
+                    revoked_at, signer_pub, subject_kind, subject_id
+                FROM links_pre_d19;
+                DROP TABLE links_pre_d19;
+                CREATE INDEX IF NOT EXISTS idx_links_org ON links (org_uuid);
+                """
             )
 
     @_locked

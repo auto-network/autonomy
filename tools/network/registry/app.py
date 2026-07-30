@@ -1576,7 +1576,8 @@ def create_app(
 
     @app.websocket("/t/{org_uuid}")
     async def relay_tunnel(websocket: WebSocket, org_uuid: str):
-        await tunnel_endpoint(websocket, org_uuid, hub, store, now_fn)
+        await tunnel_endpoint(websocket, org_uuid, hub, store, now_fn,
+                              base_url=base_url)
 
     @app.websocket("/v1/links/{token}/channel")
     async def relay_viewer(websocket: WebSocket, token: str):
