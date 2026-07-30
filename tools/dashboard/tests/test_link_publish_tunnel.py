@@ -72,12 +72,13 @@ def founded_org(tmp_path, monkeypatch, root):
 
 
 def _persona_cert(root, session_key, persona_pub, *, kind="operator",
-                  scope=SESSION_SCOPE):
+                  scope=SESSION_SCOPE, not_before=None, not_after=None):
     now = int(time.time())
     return issue_cert(
         root, session_key.public_hex, scope=scope, org=ORG_UUID,
         subject=Subject(kind, persona_pub),
-        not_before=now - 3600, not_after=now + 30 * 86400,
+        not_before=now - 3600 if not_before is None else not_before,
+        not_after=now + 30 * 86400 if not_after is None else not_after,
     )
 
 
@@ -330,3 +331,89 @@ def test_revoke_refused_without_scope(
     assert "not authorized to revoke" in result["execution"]["error"]
     assert recorder.calls == []
     assert token in _cached_grants()     # nothing revoked
+
+
+# ── Codex D19 review findings (2026-07-30) — regression guards ──
+
+
+def test_expired_cert_is_refused(env, root, session_key, founded_org, monkeypatch):
+    """Finding #1: a cert whose validity window has passed must not mint.
+    (The chain check must verify at request time, not the cert midpoint.)"""
+    now = int(time.time())
+    cert = _persona_cert(root, session_key, founded_org.founder_persona_pub,
+                        not_before=now - 7200, not_after=now - 3600)
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+    rid = _create_publish(env)
+    envelope = _tunnel_envelope(session_key, cert, "/control/create-link")
+    result = _decide_and_wait(env, rid, envelope)
+    assert result["execution"]["ok"] is False
+    assert recorder.calls == []
+    assert _cached_grants() == {}
+
+
+def test_not_yet_valid_cert_is_refused(env, root, session_key, founded_org,
+                                       monkeypatch):
+    """Finding #1: a cert whose validity window is in the future must not mint."""
+    now = int(time.time())
+    cert = _persona_cert(root, session_key, founded_org.founder_persona_pub,
+                        not_before=now + 3600, not_after=now + 7200)
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+    rid = _create_publish(env)
+    envelope = _tunnel_envelope(session_key, cert, "/control/create-link")
+    result = _decide_and_wait(env, rid, envelope)
+    assert result["execution"]["ok"] is False
+    assert recorder.calls == []
+    assert _cached_grants() == {}
+
+
+def test_non_operator_subject_kind_is_refused(env, root, session_key,
+                                              founded_org, monkeypatch):
+    """Finding #4: an agent- or persona-kind cert whose subject.id names an
+    authorized persona must not reach mint — the rung-1 transport pins the
+    subject kind to 'operator'."""
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+    for kind in ("agent", "persona"):
+        cert = _persona_cert(root, session_key, founded_org.founder_persona_pub,
+                            kind=kind)
+        rid = _create_publish(env)
+        envelope = _tunnel_envelope(session_key, cert, "/control/create-link")
+        result = _decide_and_wait(env, rid, envelope)
+        assert result["execution"]["ok"] is False, kind
+        assert "operator subjects only" in result["execution"]["error"]
+    assert recorder.calls == []
+    assert _cached_grants() == {}
+
+
+def test_uncached_token_revoke_never_reaches_the_tunnel(
+    env, root, session_key, session_cert, monkeypatch,
+):
+    """Finding #5: a token not classifiable as a share link (cache miss, as
+    an org:join token would be if uncached) must NOT be routed to the tunnel
+    revoke. It goes to the HTTP path instead; the tunnel control seam is
+    never called."""
+    recorder = _ControlRecorder()
+    _install_control(monkeypatch, recorder)
+    forwarded = []
+
+    async def fake_http(staged, envelope):
+        forwarded.append(staged)
+        # Emulate the registry accepting the revoke over HTTP.
+        class _Resp:
+            status_code = 200
+        return _Resp(), None
+
+    monkeypatch.setattr(link_approvals, "_forward_to_registry", fake_http)
+
+    created = env.post("/api/approvals", json={
+        "kind": "link_revoke", "session": SESSION,
+        "request": {"org": ORG, "token": "deadbeef" * 4},  # not in cache
+    })
+    rid = created.json()["id"]
+    envelope = _tunnel_envelope(session_key, session_cert,
+                               "/control/revoke-link", payload={})
+    _decide_and_wait(env, rid, envelope)
+    # The tunnel control seam was never used for an unclassifiable token.
+    assert recorder.calls == []
