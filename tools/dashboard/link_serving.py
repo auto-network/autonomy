@@ -729,7 +729,9 @@ def make_grant_handler(org: str | None = None, *, now=None):
             return BAD_REQUEST
         if not isinstance(request, dict):
             return BAD_REQUEST
-        if request.get("v") != 1:
+        # Strict version match: bool is an int subclass and True == 1, so a
+        # loose ``!= 1`` would accept ``{"v": true, ...}``. Require an int.
+        if type(request.get("v")) is not int or request.get("v") != 1:
             return BAD_REQUEST
         op = request.get("op")
         # Settings + sqlite + file reads are blocking; keep them off the
