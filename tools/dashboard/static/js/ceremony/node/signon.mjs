@@ -125,7 +125,7 @@ async function main(argv) {
   if (options.ttlSeconds !== null) {
     signOnOptions.ttlSeconds = options.ttlSeconds;
   }
-  await signOn(passphrase, signOnOptions);
+  const signOnResult = await signOn(passphrase, signOnOptions);
 
   const session = await storage.getSession();
   if (!session || !session.key || !session.registryUrl || !session.org) {
@@ -168,6 +168,7 @@ async function main(argv) {
       subject: cert.subject,
       scope: cert.scope,
       notAfter: cert.not_after,
+      diagnostics: signOnResult.diagnostics,
     },
     request: {
       method: 'POST',

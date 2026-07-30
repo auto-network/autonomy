@@ -249,22 +249,47 @@ var signRegistryRequestCore;
   // org armor but not the personal armor all return null and sign-on
   // falls back to the legacy label subject — signing on must never
   // regress for orgs that have no ledger yet.
-  async function _personaSubject(orgQ, org, passphrase) {
-    var heads, personal;
+  // Returns { subject, reason }: subject is null on any fallback, and
+  // reason names WHY — the sanctioned degrades get stable names and
+  // anything else keeps its message. A swallowed distinction here is how
+  // the 2026-07-30 incident started (auto-i3syn); don't reintroduce it.
+  async function _resolvePersonaSubject(orgQ, org, passphrase) {
+    var heads;
     try {
       heads = await _fetchJson('/api/network/ledger/heads' + orgQ, org);
+    } catch (e) {
+      if (e && (e.status === 404 || e.status === 409)) {
+        return { subject: null, reason: 'ledger-not-founded' };
+      }
+      return { subject: null,
+               reason: 'unexpected:' + String((e && e.message) || e) };
+    }
+    if (!heads || typeof heads.genesis_id !== 'string') {
+      return { subject: null, reason: 'ledger-not-founded' };
+    }
+    var personal;
+    try {
       personal = await _fetchJson('/api/identity/personal');
     } catch (e) {
-      return null;
+      if (e && e.status === 404) {
+        return { subject: null, reason: 'no-personal-identity' };
+      }
+      return { subject: null,
+               reason: 'unexpected:' + String((e && e.message) || e) };
     }
-    if (!heads || typeof heads.genesis_id !== 'string' ||
-        !personal || !personal.armored_private_key) {
-      return null;
+    if (!personal || !personal.armored_private_key) {
+      return { subject: null, reason: 'no-personal-identity' };
     }
     var openedPersonal = null;
     try {
       openedPersonal = await decryptArmor(
         personal.armored_private_key, passphrase);
+    } catch (e) {
+      // The entered passphrase opens the org armor but not the personal
+      // armor — sign-on proceeds, publish authority will not.
+      return { subject: null, reason: 'personal-armor-locked' };
+    }
+    try {
       var persona = await derivePersona(
         openedPersonal.seed, heads.genesis_id);
       // Subject KIND stays 'operator' on the rung-1 HTTP transport: the
@@ -273,9 +298,11 @@ var signRegistryRequestCore;
       // gate tests pin operator-kind certs carrying the persona in
       // subject.id. The kind upgrades to 'persona' when publish moves
       // onto the org tunnel (D19, auto-zudu9).
-      return { kind: 'operator', id: persona.publicHex };
+      return { subject: { kind: 'operator', id: persona.publicHex },
+               reason: null };
     } catch (e) {
-      return null;
+      return { subject: null,
+               reason: 'unexpected:' + String((e && e.message) || e) };
     } finally {
       // I1: the personal seed follows the same lifecycle as the org root
       // seed — zeroed before this function returns, never stored.
@@ -332,12 +359,15 @@ var signRegistryRequestCore;
 
     // Resolve the persona subject BEFORE the org armor opens so the org
     // root plaintext window stays as tight as it was.
-    var personaSubject = await _personaSubject(orgQ, opts.org, passphrase);
+    var personaResolution = await _resolvePersonaSubject(
+      orgQ, opts.org, passphrase);
+    var personaSubject = personaResolution.subject;
 
     var opened = await _openOrgRoot(orgKey, passphrase);
     var diagnostics = {
       rootDropped: false, extractable: null,
       subjectResolution: personaSubject ? 'persona' : 'label',
+      subjectFallbackReason: personaResolution.reason,
     };
     var sessionKeys, certWire;
     try {
