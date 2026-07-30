@@ -23,6 +23,10 @@ const autonet = (() => {
   const DIR_C2S = "c2s\x00";
   const DIR_S2C = "s2c\x00";
   const CHUNK_SIZE = 128 * 1024;
+  const ATTACHMENT_CHUNK_SIZE = 1024 * 1024;
+  const ATTACHMENT_WINDOW_SIZE = 8 * ATTACHMENT_CHUNK_SIZE;
+  const ATTACHMENT_LAST_IN_WINDOW = 0x01;
+  const ATTACHMENT_EOF = 0x02;
   const MAX_MESSAGE_SIZE = 64 * 1024 * 1024;
   const MAX_ARTIFACT_BYTES = 48 * 1024 * 1024;
   const MAX_TITLE_CHARS = 500;
@@ -37,6 +41,14 @@ const autonet = (() => {
   // follows is NOT bounded here: a large artifact may legitimately take time.
   const CONNECT_TIMEOUT_MS = 10000;
   const VIEWER_READY_TIMEOUT_MS = 10000;
+  const STREAM_FINAL = 0x01;
+  const MSG_END = 0x02;
+  const KNOWN_RECORD_FLAGS = STREAM_FINAL | MSG_END;
+  const ATTACHMENT_CURSOR_DOMAIN = "autonomy.attachment.cursor.v1";
+  const ATTACHMENT_ERROR_CODES = new Set([
+    "not_found", "not_authorized", "oversize", "out_of_range",
+    "unavailable", "internal",
+  ]);
 
   const te = new TextEncoder();
 
@@ -270,13 +282,18 @@ const autonet = (() => {
       }
     }
 
-    async recvMessage() {
-      const parts = [];
-      let size = 0;
-      for (;;) {
+    close() {
+      if (this.ws && typeof this.ws.close === "function") this.ws.close();
+    }
+
+    async recvRecord() {
+      try {
         const record = await this.ws.recvBinary();
+        if (!(record instanceof Uint8Array) || record.length < 8 + 1 + 16) {
+          throw new Error("record is too short");
+        }
         const seq = record.slice(0, 8);
-        if (new DataView(seq.buffer, seq.byteOffset).getBigUint64(0) !== BigInt(this.recvSeq)) {
+        if (new DataView(seq.buffer, seq.byteOffset, 8).getBigUint64(0) !== BigInt(this.recvSeq)) {
           throw new Error("record out of sequence");
         }
         const plaintext = new Uint8Array(await crypto.subtle.decrypt(
@@ -284,11 +301,50 @@ const autonet = (() => {
             additionalData: concatBytes(this.transcript, this.recvDir, seq) },
           this.recvKey, record.slice(8)));
         this.recvSeq++;
-        size += plaintext.length - 1;
-        if (size > MAX_MESSAGE_SIZE) throw new Error("message exceeds maximum size");
-        parts.push(plaintext.slice(1));
-        if (plaintext[0] & 1) return concatBytes(...parts);
+        if (plaintext.length < 1) throw new Error("record plaintext is empty");
+        const flags = plaintext[0];
+        const chunk = plaintext.slice(1);
+        if (flags & ~KNOWN_RECORD_FLAGS) throw new Error("record has unknown flags");
+        if (chunk.length > CHUNK_SIZE) throw new Error("record chunk exceeds maximum size");
+        return { flags, chunk };
+      } catch (err) {
+        // Authentication, sequence, and record-framing failures poison the
+        // stream. Never leave unread records available to a later exchange.
+        this.close();
+        throw err;
       }
+    }
+
+    async *recvMessageStream() {
+      let parts = [];
+      let size = 0;
+      for (;;) {
+        const { flags, chunk } = await this.recvRecord();
+        size += chunk.length;
+        if (size > MAX_MESSAGE_SIZE) throw new Error("message exceeds maximum size");
+        parts.push(chunk);
+        // STREAM_FINAL is the deployed v1 final bit, so it also terminates
+        // the current message for compatibility with one-shot peers.
+        const messageEnd = Boolean(flags & (MSG_END | STREAM_FINAL));
+        if (messageEnd) {
+          yield concatBytes(...parts);
+          parts = [];
+          size = 0;
+        }
+        if (flags & STREAM_FINAL) return;
+      }
+    }
+
+    async recvMessage() {
+      let message = null;
+      for await (const candidate of this.recvMessageStream()) {
+        if (message !== null) {
+          throw new Error("one-shot response carried multiple messages");
+        }
+        message = candidate;
+      }
+      if (message === null) throw new Error("response exchange ended without a message");
+      return message;
     }
   }
 
@@ -542,6 +598,701 @@ const autonet = (() => {
     };
   }
 
+  // ---- attachment window/resume + parent-owned storage --------------------
+
+  function hasExactKeys(value, allowed) {
+    return hasOnlyKeys(value, allowed)
+      && Object.keys(value).length === allowed.length
+      && allowed.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+  }
+
+  async function attachmentCursorId(linkToken) {
+    if (typeof linkToken !== "string" || !linkToken) {
+      throw new Error("link token must be a non-empty string");
+    }
+    const key = await crypto.subtle.importKey(
+      "raw", te.encode(ATTACHMENT_CURSOR_DOMAIN),
+      { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    return bytesToHex(await crypto.subtle.sign("HMAC", key, te.encode(linkToken)));
+  }
+
+  async function attachmentSinkId(cursorId, ref) {
+    const refHash = bytesToHex(await crypto.subtle.digest("SHA-256", te.encode(ref)));
+    return "attachment-" + cursorId + "-" + refHash + ".part";
+  }
+
+  class AttachmentTransferError extends Error {
+    constructor(code, message = null) {
+      super(message || ("attachment transfer failed: " + code));
+      this.name = "AttachmentTransferError";
+      this.code = code;
+    }
+  }
+
+  class BrowserCursorStore {
+    constructor(
+      indexedDBApi = globalThis.indexedDB,
+      lockManager = globalThis.navigator && globalThis.navigator.locks,
+    ) {
+      if (!indexedDBApi) throw new AttachmentTransferError("storage_unavailable");
+      if (!lockManager || typeof lockManager.request !== "function") {
+        throw new AttachmentTransferError("storage_unavailable");
+      }
+      this.indexedDB = indexedDBApi;
+      this.lockManager = lockManager;
+      this.dbPromise = null;
+      this.active = new Set();
+      this.lockReleases = new Map();
+    }
+
+    async _db() {
+      if (this.dbPromise) return this.dbPromise;
+      this.dbPromise = new Promise((resolve, reject) => {
+        const request = this.indexedDB.open("autonomy-attachment-cursors-v1", 1);
+        request.onupgradeneeded = () => {
+          if (!request.result.objectStoreNames.contains("cursors")) {
+            request.result.createObjectStore("cursors");
+          }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error || new Error("cursor database open failed"));
+      });
+      return this.dbPromise;
+    }
+
+    async _request(mode, operation) {
+      const db = await this._db();
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction("cursors", mode);
+        const store = transaction.objectStore("cursors");
+        let settled = false;
+        let result;
+        const fail = (error) => {
+          if (settled) return;
+          settled = true;
+          reject(error);
+        };
+        let request;
+        try {
+          request = operation(store);
+        } catch (err) {
+          fail(err);
+          return;
+        }
+        request.onsuccess = () => { result = request.result; };
+        request.onerror = () => fail(
+          request.error || new Error("cursor operation failed"));
+        transaction.oncomplete = () => {
+          if (settled) return;
+          settled = true;
+          resolve(result);
+        };
+        transaction.onabort = () => fail(
+          transaction.error || new Error("cursor transaction aborted"));
+        transaction.onerror = () => fail(
+          transaction.error || new Error("cursor transaction failed"));
+      });
+    }
+
+    async get(key) {
+      const value = await this._request("readonly", (store) => store.get(key));
+      return value === undefined ? null : value;
+    }
+
+    async put(key, value) {
+      await this._request("readwrite", (store) => store.put(value, key));
+    }
+
+    async delete(key) {
+      await this._request("readwrite", (store) => store.delete(key));
+    }
+
+    async acquire(key) {
+      if (this.active.has(key)) return false;
+      return new Promise((resolve) => {
+        let answered = false;
+        const answer = (value) => {
+          if (answered) return;
+          answered = true;
+          resolve(value);
+        };
+        // The cursor id is already an HMAC of the bearer token, so the
+        // origin-wide Web Lock name discloses no capability.  Holding this
+        // request open prevents a second tab from writing the same OPFS file.
+        void this.lockManager.request(
+          "autonomy-attachment:" + key,
+          { ifAvailable: true },
+          (lock) => {
+            if (!lock) {
+              answer(false);
+              return undefined;
+            }
+            this.active.add(key);
+            answer(true);
+            return new Promise((release) => {
+              this.lockReleases.set(key, release);
+            });
+          },
+        ).catch(() => answer(false));
+      });
+    }
+
+    release(key) {
+      this.active.delete(key);
+      const release = this.lockReleases.get(key);
+      this.lockReleases.delete(key);
+      if (release) release();
+    }
+  }
+
+  class OpfsAttachmentSink {
+    constructor(directory, handle, sinkId) {
+      this.directory = directory;
+      this.handle = handle;
+      this.sinkId = sinkId;
+    }
+
+    static async open(sinkId, storageManager = navigator.storage) {
+      if (!storageManager || typeof storageManager.getDirectory !== "function") {
+        throw new AttachmentTransferError("storage_unavailable");
+      }
+      const root = await storageManager.getDirectory();
+      const directory = await root.getDirectoryHandle(
+        "autonomy-attachments-v1", { create: true });
+      const handle = await directory.getFileHandle(sinkId, { create: true });
+      return new OpfsAttachmentSink(directory, handle, sinkId);
+    }
+
+    async size() {
+      return (await this.handle.getFile()).size;
+    }
+
+    async _withWritable(operation) {
+      const writable = await this.handle.createWritable({ keepExistingData: true });
+      try {
+        await operation(writable);
+        // FileSystemWritableFileStream has no flush primitive. close() commits
+        // the staged write, so every application chunk is closed before the
+        // cursor transaction advances.
+        await writable.close();
+      } catch (err) {
+        try { await writable.abort(); } catch (_ignored) { /* best effort */ }
+        throw err;
+      }
+    }
+
+    async writeAt(offset, bytes) {
+      const current = await this.size();
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset !== current) {
+        throw new AttachmentTransferError("storage_non_contiguous");
+      }
+      await this._withWritable(async (writable) => {
+        await writable.seek(offset);
+        await writable.write(bytes);
+      });
+    }
+
+    async truncate(size) {
+      if (!Number.isSafeInteger(size) || size < 0) {
+        throw new AttachmentTransferError("storage_invalid_size");
+      }
+      await this._withWritable((writable) => writable.truncate(size));
+    }
+
+    async flush() {
+      // writeAt/truncate close each writable stream before returning.
+    }
+
+    async file() {
+      return this.handle.getFile();
+    }
+
+    async remove() {
+      await this.directory.removeEntry(this.sinkId);
+    }
+  }
+
+  const ATTACHMENT_CURSOR_FIELDS = [
+    "v", "cursor_id", "note_id", "ref", "raw_sha256",
+    "total_size", "committed_offset", "sink_id",
+  ];
+
+  class AttachmentDownloader {
+    constructor({
+      entry, cursorId, noteId, sink, cursors, fetchWindow, onState = () => {},
+    }) {
+      this.entry = entry;
+      this.cursorId = cursorId;
+      this.noteId = noteId;
+      this.sink = sink;
+      this.cursors = cursors;
+      this.fetchWindow = fetchWindow;
+      this.onState = onState;
+      this.cursorKey = cursorId + ":" + entry.ref;
+      this.committedOffset = 0;
+      this.cancelRequested = false;
+      this.pauseRequested = false;
+    }
+
+    _record(committedOffset) {
+      return {
+        v: 1,
+        cursor_id: this.cursorId,
+        note_id: this.noteId,
+        ref: this.entry.ref,
+        raw_sha256: this.entry.raw_sha256,
+        total_size: this.entry.total_size,
+        committed_offset: committedOffset,
+        sink_id: this.sink.sinkId,
+      };
+    }
+
+    _recordMatches(record) {
+      return hasExactKeys(record, ATTACHMENT_CURSOR_FIELDS)
+        && record.v === 1
+        && record.cursor_id === this.cursorId
+        && record.note_id === this.noteId
+        && record.ref === this.entry.ref
+        && record.raw_sha256 === this.entry.raw_sha256
+        && record.total_size === this.entry.total_size
+        && record.sink_id === this.sink.sinkId
+        && Number.isSafeInteger(record.committed_offset)
+        && record.committed_offset >= 0
+        && record.committed_offset <= this.entry.total_size
+        && record.committed_offset % ATTACHMENT_CHUNK_SIZE === 0;
+    }
+
+    async _reset() {
+      await this.sink.truncate(0);
+      this.committedOffset = 0;
+      await this.cursors.put(this.cursorKey, this._record(0));
+      return 0;
+    }
+
+    async _prepare() {
+      const record = await this.cursors.get(this.cursorKey);
+      if (!this._recordMatches(record)) return this._reset();
+      const size = await this.sink.size();
+      if (!Number.isSafeInteger(size) || size < record.committed_offset) {
+        return this._reset();
+      }
+      await this.sink.truncate(record.committed_offset);
+      this.committedOffset = record.committed_offset;
+      return this.committedOffset;
+    }
+
+    async _commit(offset) {
+      await this.sink.flush();
+      await this.cursors.put(this.cursorKey, this._record(offset));
+      this.committedOffset = offset;
+    }
+
+    _parseError(message) {
+      // Body offsets are below the 16 GiB cap and therefore start with 0x00;
+      // a leading "{" unambiguously identifies a canonical JSON error.
+      if (message[0] !== 0x7b) return null;
+      let text;
+      let value;
+      try {
+        text = new TextDecoder("utf-8", { fatal: true }).decode(message);
+        value = JSON.parse(text);
+      } catch (err) {
+        throw new AttachmentTransferError("invalid_message", "malformed attachment error");
+      }
+      const keys = Object.keys(value || {});
+      const base = ["code", "op", "ref", "v"];
+      const withDetail = ["code", "detail", "op", "ref", "v"];
+      if (!(hasExactKeys(value, base) || hasExactKeys(value, withDetail))
+          || value.v !== 1 || value.op !== "error" || value.ref !== this.entry.ref
+          || !ATTACHMENT_ERROR_CODES.has(value.code)
+          || ("detail" in value && typeof value.detail !== "string")
+          || canonicalJson(value) !== text) {
+        throw new AttachmentTransferError("invalid_message", "invalid attachment error");
+      }
+      return value.code;
+    }
+
+    async _consumeWindow(start) {
+      const total = this.entry.total_size;
+      const limit = Math.min(start + ATTACHMENT_WINDOW_SIZE, total);
+      const request = {
+        v: 1, op: "attachment.fetch", ref: this.entry.ref,
+        offset: start, length: ATTACHMENT_WINDOW_SIZE,
+      };
+      const response = await this.fetchWindow(request);
+      if (!response || typeof response[Symbol.asyncIterator] !== "function") {
+        throw new AttachmentTransferError("disconnected", "fetch produced no stream");
+      }
+      let expected = start;
+      let sawLast = false;
+      let sawMessage = false;
+      for await (const raw of response) {
+        sawMessage = true;
+        const message = raw instanceof Uint8Array
+          ? raw : raw instanceof ArrayBuffer ? new Uint8Array(raw) : null;
+        if (!message) throw new AttachmentTransferError("invalid_message");
+        if (sawLast) throw new AttachmentTransferError("invalid_message", "message after window end");
+        const refusal = this._parseError(message);
+        if (refusal) throw new AttachmentTransferError(refusal);
+        if (message.length < 9) throw new AttachmentTransferError("invalid_message");
+        const view = new DataView(message.buffer, message.byteOffset, 8);
+        const offsetBig = view.getBigUint64(0);
+        if (offsetBig > BigInt(Number.MAX_SAFE_INTEGER)) {
+          throw new AttachmentTransferError("invalid_message");
+        }
+        const offset = Number(offsetBig);
+        const flags = message[8];
+        const chunk = message.slice(9);
+        if (flags & ~(ATTACHMENT_LAST_IN_WINDOW | ATTACHMENT_EOF)
+            || offset !== expected || chunk.length > ATTACHMENT_CHUNK_SIZE
+            || (total > 0 && chunk.length === 0)) {
+          throw new AttachmentTransferError("invalid_message");
+        }
+        const end = offset + chunk.length;
+        if (end > limit
+            || Boolean(flags & ATTACHMENT_LAST_IN_WINDOW) !== (end === limit)
+            || Boolean(flags & ATTACHMENT_EOF) !== (end === total)
+            || ((flags & ATTACHMENT_EOF) && !(flags & ATTACHMENT_LAST_IN_WINDOW))) {
+          throw new AttachmentTransferError("invalid_message");
+        }
+        await this.sink.writeAt(offset, chunk);
+        expected = end;
+        sawLast = Boolean(flags & ATTACHMENT_LAST_IN_WINDOW);
+        if (expected < total && expected % ATTACHMENT_CHUNK_SIZE === 0) {
+          await this._commit(expected);
+        }
+        this.onState("downloading", expected, total);
+      }
+      if (!sawMessage) throw new AttachmentTransferError("disconnected");
+      if (!sawLast) throw new AttachmentTransferError("invalid_message", "window ended early");
+      return { end: expected, complete: expected === total };
+    }
+
+    requestCancel() {
+      this.cancelRequested = true;
+    }
+
+    requestPause() {
+      this.pauseRequested = true;
+    }
+
+    async clear() {
+      await this.sink.truncate(0);
+      await this.cursors.delete(this.cursorKey);
+      this.committedOffset = 0;
+    }
+
+    async run() {
+      if (this.entry.oversize) throw new AttachmentTransferError("oversize");
+      if (!(await this.cursors.acquire(this.cursorKey))) {
+        throw new AttachmentTransferError("already_active");
+      }
+      try {
+        let offset = await this._prepare();
+        this.onState("downloading", offset, this.entry.total_size);
+        if (this.cancelRequested) {
+          await this.clear();
+          this.onState("cancelled");
+          return { status: "cancelled", received: 0 };
+        }
+        if (this.pauseRequested) {
+          await this.sink.truncate(this.committedOffset);
+          return { status: "paused", received: this.committedOffset };
+        }
+        if (offset === this.entry.total_size) {
+          this.onState("ready");
+          return { status: "ready", received: offset };
+        }
+        for (;;) {
+          let result;
+          try {
+            result = await this._consumeWindow(offset);
+          } catch (err) {
+            await this.sink.truncate(this.committedOffset);
+            throw err;
+          }
+          if (this.cancelRequested) {
+            await this.clear();
+            this.onState("cancelled");
+            return { status: "cancelled", received: 0 };
+          }
+          if (this.pauseRequested) {
+            await this.sink.truncate(this.committedOffset);
+            return { status: "paused", received: this.committedOffset };
+          }
+          if (result.complete) {
+            try {
+              await this.sink.flush();
+              if (result.end % ATTACHMENT_CHUNK_SIZE === 0) {
+                await this._commit(result.end);
+              }
+            } catch (err) {
+              await this.sink.truncate(this.committedOffset);
+              throw err;
+            }
+            this.onState("ready");
+            return { status: "ready", received: result.end };
+          }
+          if (result.end % ATTACHMENT_CHUNK_SIZE !== 0) {
+            await this.sink.truncate(this.committedOffset);
+            throw new AttachmentTransferError("invalid_message");
+          }
+          offset = result.end;
+        }
+      } finally {
+        this.cursors.release(this.cursorKey);
+      }
+    }
+  }
+
+  function safeAttachmentName(displayName) {
+    let value = typeof displayName === "string" ? displayName.normalize("NFKC") : "";
+    value = value.replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/g, "_")
+      .replace(/^\.+/, "").trim();
+    if (!value || value === "." || value === "..") value = "attachment";
+    return Array.from(value).slice(0, 180).join("");
+  }
+
+  function channelAttachmentFetch(channel, request) {
+    return (async function* () {
+      await channel.sendMessage(te.encode(canonicalJson(request)));
+      yield* channel.recvMessageStream();
+    })();
+  }
+
+  class AttachmentController {
+    constructor({
+      frame, channel, token, noteId, manifest, exportButton = null,
+      cursors = null,
+      sinkFactory = (sinkId) => OpfsAttachmentSink.open(sinkId),
+      hostWindow = window, documentObject = document,
+    }) {
+      this.frame = frame;
+      this.childWindow = frame.contentWindow;
+      this.channel = channel;
+      this.token = token;
+      this.noteId = noteId;
+      this.manifest = new Map(manifest.map((entry) => [entry.ref, entry]));
+      this.exportButton = exportButton;
+      this.cursors = cursors;
+      this.sinkFactory = sinkFactory;
+      this.hostWindow = hostWindow;
+      this.document = documentObject;
+      this.active = null;
+      this.ready = new Map();
+      this.exportCandidate = null;
+      this.onMessage = (event) => {
+        void this.handleEvent(event).catch(() => {});
+      };
+      this.onExportClick = () => {
+        void this.exportSelected();
+      };
+      hostWindow.addEventListener("message", this.onMessage);
+      if (exportButton) {
+        exportButton.addEventListener("click", this.onExportClick);
+      }
+    }
+
+    _send(ref, attachmentState, received, total, errorCode) {
+      const message = {
+        v: 1, type: "attachment.state", ref, state: attachmentState,
+      };
+      if (received !== undefined || total !== undefined) {
+        if (!Number.isSafeInteger(received) || !Number.isSafeInteger(total)
+            || received < 0 || total < 0 || received > total) {
+          throw new Error("invalid attachment progress");
+        }
+        message.received = received;
+        message.total = total;
+      }
+      if (errorCode !== undefined) message.error_code = String(errorCode);
+      this.childWindow.postMessage(message, "*");
+    }
+
+    _selectExport(ref) {
+      const item = this.ready.get(ref);
+      if (!item || !this.exportButton) return;
+      this.exportCandidate = ref;
+      this.exportButton.hidden = false;
+      this.exportButton.disabled = false;
+      this.exportButton.textContent = "Save " + safeAttachmentName(item.entry.name);
+    }
+
+    async _prepareFallback(item) {
+      if (typeof this.hostWindow.showSaveFilePicker === "function") return;
+      const file = await item.sink.file();
+      item.objectUrl = this.hostWindow.URL.createObjectURL(file);
+    }
+
+    async _start(entry) {
+      if (entry.oversize) {
+        this._send(entry.ref, "error", undefined, undefined, "oversize");
+        return;
+      }
+      if (this.active) {
+        if (this.active.ref === entry.ref) return; // coalesce same-ref selects
+        this._send(entry.ref, "error", undefined, undefined, "busy");
+        return;
+      }
+      if (this.ready.has(entry.ref)) {
+        this._send(entry.ref, "ready");
+        this._selectExport(entry.ref);
+        return;
+      }
+      const placeholder = {
+        ref: entry.ref, downloader: null,
+        cancelRequested: false, pauseRequested: false,
+      };
+      this.active = placeholder;
+      this._send(entry.ref, "queued");
+      try {
+        const cursorId = await attachmentCursorId(this.token);
+        const sinkId = await attachmentSinkId(cursorId, entry.ref);
+        // Storage capability is tested only when the user selects an
+        // attachment. A browser without OPFS/IndexedDB/Web Locks must still
+        // render ordinary shared notes unchanged.
+        if (!this.cursors) this.cursors = new BrowserCursorStore();
+        const sink = await this.sinkFactory(sinkId);
+        const downloader = new AttachmentDownloader({
+          entry, cursorId, noteId: this.noteId, sink, cursors: this.cursors,
+          fetchWindow: (request) => channelAttachmentFetch(this.channel, request),
+          onState: (value, received, total) => {
+            // "ready" is parent-owned: do not expose it until fallback
+            // export preparation and the ready-map insertion have finished.
+            if (value !== "ready") {
+              this._send(entry.ref, value, received, total);
+            }
+          },
+        });
+        placeholder.downloader = downloader;
+        if (placeholder.cancelRequested) downloader.requestCancel();
+        if (placeholder.pauseRequested) downloader.requestPause();
+        const result = await downloader.run();
+        if (result.status === "ready") {
+          const item = { entry, sink, downloader, objectUrl: null };
+          await this._prepareFallback(item);
+          this.ready.set(entry.ref, item);
+          this._send(entry.ref, "ready");
+          this._selectExport(entry.ref);
+        }
+      } catch (err) {
+        const code = err instanceof AttachmentTransferError
+          ? err.code : "unavailable";
+        if (!(err instanceof AttachmentTransferError)
+            || code === "invalid_message" || code === "disconnected") {
+          this.channel.close?.();
+        }
+        this._send(entry.ref, "error", undefined, undefined, code);
+      } finally {
+        if (this.active === placeholder) this.active = null;
+      }
+    }
+
+    async _cancel(ref) {
+      if (this.active && this.active.ref === ref) {
+        this.active.cancelRequested = true;
+        if (this.active.downloader) this.active.downloader.requestCancel();
+        return;
+      }
+      const item = this.ready.get(ref);
+      if (!item) return;
+      if (item.objectUrl) this.hostWindow.URL.revokeObjectURL(item.objectUrl);
+      await item.downloader.clear();
+      try { await item.sink.remove(); } catch (_ignored) { /* best effort */ }
+      this.ready.delete(ref);
+      if (this.exportCandidate === ref) this._hideExport();
+      this._send(ref, "cancelled");
+    }
+
+    _hideExport() {
+      this.exportCandidate = null;
+      if (!this.exportButton) return;
+      this.exportButton.hidden = true;
+      this.exportButton.disabled = true;
+      this.exportButton.textContent = "Save attachment";
+    }
+
+    async _requestExport(ref) {
+      if (!this.ready.has(ref)) return;
+      this._selectExport(ref);
+      // postMessage does not transfer user activation. Focus the real parent
+      // control; only its own click is allowed to invoke a save destination.
+      this.exportButton?.focus();
+    }
+
+    async exportSelected() {
+      const ref = this.exportCandidate;
+      const item = ref && this.ready.get(ref);
+      if (!item) return;
+      this._send(ref, "exporting");
+      try {
+        if (typeof this.hostWindow.showSaveFilePicker === "function") {
+          // This call is deliberately the first await in the parent-owned
+          // click handler, preserving transient user activation.
+          const destination = await this.hostWindow.showSaveFilePicker({
+            suggestedName: safeAttachmentName(item.entry.name),
+          });
+          const source = await item.sink.file();
+          const writable = await destination.createWritable();
+          await source.stream().pipeTo(writable);
+        } else {
+          if (!item.objectUrl) throw new Error("download URL is unavailable");
+          const anchor = this.document.createElement("a");
+          anchor.href = item.objectUrl;
+          anchor.download = safeAttachmentName(item.entry.name);
+          anchor.hidden = true;
+          this.document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+        }
+        await this.cursors.delete(item.downloader.cursorKey);
+        this._send(ref, "complete");
+        this.ready.delete(ref);
+        this._hideExport();
+        const objectUrl = item.objectUrl;
+        this.hostWindow.setTimeout(() => {
+          if (objectUrl) this.hostWindow.URL.revokeObjectURL(objectUrl);
+          void item.sink.remove().catch(() => {});
+        }, 60000);
+      } catch (err) {
+        // Picker cancellation/permission denial keeps the staged file and
+        // cursor intact, ready for another parent-owned gesture.
+        this._send(ref, "ready");
+        this._selectExport(ref);
+      }
+    }
+
+    async handleEvent(event) {
+      if (event.source !== this.childWindow) return;
+      const message = event.data;
+      if (!hasExactKeys(message, ["v", "type", "ref"])
+          || message.v !== 1
+          || !["attachment.select", "attachment.cancel", "attachment.export"].includes(message.type)
+          || typeof message.ref !== "string"
+          || !this.manifest.has(message.ref)) {
+        return;
+      }
+      const entry = this.manifest.get(message.ref);
+      if (message.type === "attachment.select") {
+        await this._start(entry);
+      } else if (message.type === "attachment.cancel") {
+        await this._cancel(entry.ref);
+      } else {
+        await this._requestExport(entry.ref);
+      }
+    }
+
+    dispose() {
+      this.hostWindow.removeEventListener("message", this.onMessage);
+      this.exportButton?.removeEventListener("click", this.onExportClick);
+      if (this.active) {
+        this.active.pauseRequested = true;
+        this.active.downloader?.requestPause();
+      }
+      this._hideExport();
+    }
+  }
+
   // ---- page shell -----------------------------------------------------------
 
   const state = {
@@ -549,6 +1300,7 @@ const autonet = (() => {
     bodySha256: null, artifactTitle: null, artifactHeight: null,
     error: null, errorKind: null,
   };
+  let attachmentController = null;
 
   function show(id) {
     for (const section of document.querySelectorAll("main > section")) {
@@ -616,7 +1368,7 @@ const autonet = (() => {
     show(ERROR_VIEWS[state.errorKind]);
   }
 
-  async function renderArtifact(header, body) {
+  async function renderArtifact(header, body, attachmentContext = null) {
     const artifact = validateArtifact(header, body);
     state.bodyLength = body.length;
     renderBrand(artifact.branding, body);
@@ -638,6 +1390,20 @@ const autonet = (() => {
         state.artifactHeight = Math.max(0, Math.min(event.data.height, 1000000));
       }
     });
+    if (attachmentController) {
+      attachmentController.dispose();
+      attachmentController = null;
+    }
+    if (artifact.kind === "note" && attachmentContext) {
+      attachmentController = new AttachmentController({
+        frame,
+        channel: attachmentContext.channel,
+        token: attachmentContext.token,
+        noteId: attachmentContext.noteId,
+        manifest: artifact.content.attachments,
+        exportButton: document.getElementById("attachment-export"),
+      });
+    }
 
     const viewerBytes = body.slice(
       artifact.viewer.offset, artifact.viewer.offset + artifact.viewer.length
@@ -779,7 +1545,9 @@ const autonet = (() => {
       if (header.status !== "ok") return showError("unavailable");
       state.bodySha256 = bytesToHex(await crypto.subtle.digest("SHA-256", body));
       state.phase = "rendering";
-      await renderArtifact(header, body);
+      await renderArtifact(header, body, {
+        channel, token, noteId: envelope.target_uuid,
+      });
     } catch (err) {
       state.error = String(err && err.message || err);
       showError("content");
@@ -791,7 +1559,12 @@ const autonet = (() => {
     attemptDirectEndpoint, performHandshake, openSocket, fetchArtifact,
     validateArtifact, renderArtifact,
     assembleJoinContext, deliverJoinContext,
-    withTimeout,
+    withTimeout, SecureChannel,
+    attachmentCursorId, attachmentSinkId, safeAttachmentName,
+    BrowserCursorStore, OpfsAttachmentSink,
+    AttachmentTransferError, AttachmentDownloader, AttachmentController,
+    channelAttachmentFetch,
+    getAttachmentController: () => attachmentController,
   };
 })();
 

@@ -33,6 +33,18 @@
   }
   header .brand-icon img { width: 100%; height: 100%; object-fit: cover; }
   header .brand-initial { color: #fff; font-size: 11px; font-weight: 700; }
+  #attachment-export {
+    margin-left: auto; max-width: min(42vw, 320px); padding: 4px 10px;
+    border: 1px solid #3b4655; border-radius: 5px;
+    background: #1a222c; color: #dce9ff; font: inherit; font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    cursor: pointer;
+  }
+  #attachment-export:hover:not(:disabled),
+  #attachment-export:focus-visible {
+    border-color: #74a7e8; background: #202c39; outline: none;
+  }
+  #attachment-export:disabled { opacity: .55; cursor: default; }
   main { flex: 1; display: flex; min-height: 0; }
   main > section { flex: 1; display: flex; min-height: 0; }
   section[hidden] { display: none; }
@@ -56,6 +68,7 @@
 <header>
   <span id="brand" class="brand">auto.network</span>
   <span id="status-line"></span>
+  <button id="attachment-export" type="button" hidden disabled>Save attachment</button>
 </header>
 <main>
   <section id="loading-view">
@@ -94,6 +107,6 @@
             title="shared artifact"></iframe>
   </section>
 </main>
-<script src="/l-assets/autonet.js?v=2"></script>
+<script src="/l-assets/autonet.js?v=3"></script>
 </body>
 </html>
