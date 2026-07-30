@@ -128,22 +128,13 @@ class _ControlRecorder:
         return {"ok": True, "token": token, "url": f"{PUBLIC_LINK_URL}/l/{token}"}
 
 
-def _install_control(monkeypatch, recorder, revoked=None):
+def _install_control(monkeypatch, recorder):
     monkeypatch.setattr(link_serving_supervisor, "control", recorder)
     ensured = []
     monkeypatch.setattr(
         link_serving_supervisor, "get_supervisor",
         lambda: type("S", (), {"ensure": lambda self, org: ensured.append(org)})(),
     )
-    # The executor fetches the org's revocation denylist from the registry;
-    # the tunnel-test env has no registry, so stub it. Default: nothing
-    # revoked. Pass `revoked` to simulate a revoked session/cert key.
-    revoked_set = set(revoked or [])
-
-    async def _fake_fetch(binding):
-        return revoked_set
-
-    monkeypatch.setattr(link_approvals, "_fetch_org_revocations", _fake_fetch)
     return ensured
 
 
@@ -426,46 +417,6 @@ def test_uncached_token_revoke_never_reaches_the_tunnel(
     _decide_and_wait(env, rid, envelope)
     # The tunnel control seam was never used for an unclassifiable token.
     assert recorder.calls == []
-
-
-def test_revoked_session_key_is_refused(env, root, session_key, session_cert,
-                                        monkeypatch):
-    """Finding #2: a session cert whose key is on the org's revocation
-    denylist must not publish, even though its subject is still an
-    authorized persona. The dashboard fetches the denylist and passes it to
-    verify_chain (the check the registry used to run)."""
-    recorder = _ControlRecorder()
-    # The signing session key is revoked on the org's denylist.
-    _install_control(monkeypatch, recorder, revoked=[session_key.public_hex])
-    rid = _create_publish(env)
-    envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
-    result = _decide_and_wait(env, rid, envelope)
-    assert result["execution"]["ok"] is False
-    assert recorder.calls == []
-    assert _cached_grants() == {}
-
-
-def test_revocation_fetch_failure_fails_closed(env, root, session_key,
-                                               session_cert, monkeypatch):
-    """Finding #2: if the revocation denylist cannot be fetched, publish is
-    refused rather than proceeding without the check."""
-    recorder = _ControlRecorder()
-    monkeypatch.setattr(link_serving_supervisor, "control", recorder)
-    monkeypatch.setattr(
-        link_serving_supervisor, "get_supervisor",
-        lambda: type("S", (), {"ensure": lambda self, org: None})())
-
-    async def _boom(binding):
-        raise RuntimeError("registry unreachable")
-
-    monkeypatch.setattr(link_approvals, "_fetch_org_revocations", _boom)
-    rid = _create_publish(env)
-    envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
-    result = _decide_and_wait(env, rid, envelope)
-    assert result["execution"]["ok"] is False
-    assert "revocation list" in result["execution"]["error"]
-    assert recorder.calls == []
-    assert _cached_grants() == {}
 
 
 # ── TTL override from the approval sheet (re-expressed on the tunnel) ──

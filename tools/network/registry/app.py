@@ -815,20 +815,6 @@ def create_app(
         store.purge_expired_revocations(now=t)
         return {"revoked_key_id": record.revoked_key_id, "expires_at": record.expires_at}
 
-    @app.get("/v1/orgs/{org_uuid}/revocations")
-    async def list_revocations(org_uuid: str):
-        # The org's live key denylist. Read-only and non-secret: the
-        # registry already enforces it publicly on every chain verification,
-        # and a revoked key id reveals nothing usable. Under D19 the
-        # dashboard authenticates the acting persona LOCALLY, so it must be
-        # able to consult the same denylist the registry's own chain gate
-        # uses — this endpoint is that source. Expired entries are purged
-        # first so the list is exactly what verify_chain would honor now.
-        t = now()
-        uuid_str = _require_uuid(org_uuid, "org")
-        store.purge_expired_revocations(now=t)
-        return {"revoked": sorted(store.revoked_key_ids(uuid_str))}
-
     # -- §4.6 grant envelope (bootloader) -------------------------------------
 
     @app.get("/v1/links/{token}/envelope")

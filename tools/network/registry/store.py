@@ -653,16 +653,6 @@ class RegistryStore:
         return rset
 
     @_locked
-    def revoked_key_ids(self, org_uuid: str) -> list:
-        """The org's revoked key ids — the denylist the D19 dashboard reads
-        to run the same revocation check the registry's chain gate does."""
-        rows = self._conn.execute(
-            "SELECT revoked_key_id FROM revocations WHERE org_uuid = ?",
-            (org_uuid,),
-        ).fetchall()
-        return [row["revoked_key_id"] for row in rows]
-
-    @_locked
     def get_revocation(self, org_uuid: str, revoked_key_id: str) -> Optional[RevocationRecord]:
         row = self._conn.execute(
             "SELECT record FROM revocations WHERE org_uuid = ? AND revoked_key_id = ?",

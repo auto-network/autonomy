@@ -616,29 +616,9 @@ _TUNNEL_POP_PATH = "/control/create-link"
 _TUNNEL_REVOKE_POP_PATH = "/control/revoke-link"
 
 
-async def _fetch_org_revocations(binding: dict) -> set:
-    """The org's key denylist from the registry (GET
-    /v1/orgs/{uuid}/revocations). Under D19 the registry no longer verifies
-    the publish chain, so the dashboard must run the revocation check the
-    registry's chain gate used to run — and the registry is the source of
-    truth for the denylist. Returns the set of revoked key ids, or raises
-    so the caller fails closed: skipping the check on a fetch error would
-    let a revoked session key publish (Codex D19 finding #2)."""
-    uuid = binding["org_uuid"]
-    async with _registry_client(binding["registry_url"]) as client:
-        resp = await client.get(f"/v1/orgs/{uuid}/revocations")
-    if resp.status_code != 200:
-        raise RuntimeError(
-            f"registry revocation list unavailable ({resp.status_code})")
-    revoked = resp.json().get("revoked")
-    if not isinstance(revoked, list):
-        raise RuntimeError("registry returned a malformed revocation list")
-    return set(revoked)
-
-
 def _verify_local_publish_authority(
     envelope: dict, subject: dict, org_slug: str, binding: dict,
-    required_scope: str, pop_path: str, revocations: set,
+    required_scope: str, pop_path: str,
 ) -> str | None:
     """Authenticate the acting persona LOCALLY for a tunnel control op.
 
@@ -687,9 +667,14 @@ def _verify_local_publish_authority(
         # An earlier version passed the cert's own midpoint, which made the
         # validity window tautologically satisfied — an expired or
         # not-yet-valid cert would pass (Codex D19 finding #1).
+        # Authority revocation is enforced sovereignly by the ledger fold
+        # below (role.revoke / member.rekey), not by a registry-supplied
+        # denylist — the registry is untrusted for authority. The session
+        # signing key is non-extractable and short-TTL, so there is no
+        # extractable-key-leak threat for the registry denylist to cover.
         verify_chain(
             cert, binding["root_pub"], org=binding["org_uuid"], now=now,
-            required_scope=required_scope, revocations=revocations,
+            required_scope=required_scope,
         )
     except (IdkitError, MalformedError) as exc:
         return (
@@ -798,13 +783,8 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     binding, binding_error = _load_binding(org)
     if binding_error:
         return _fail(binding_error)
-    try:
-        revocations = await _fetch_org_revocations(binding)
-    except Exception as exc:
-        return _fail(f"could not check the org revocation list — refusing to publish ({exc})")
     refusal = _verify_local_publish_authority(
-        envelope, subject, org, binding, "link:publish", _TUNNEL_POP_PATH,
-        revocations)
+        envelope, subject, org, binding, "link:publish", _TUNNEL_POP_PATH)
     if refusal:
         return _fail(refusal)
 
@@ -1029,13 +1009,8 @@ async def _execute_share_link_revoke_tunnel(row: dict, decision: dict) -> dict:
     binding, binding_error = _load_binding(org)
     if binding_error:
         return _fail(binding_error)
-    try:
-        revocations = await _fetch_org_revocations(binding)
-    except Exception as exc:
-        return _fail(f"could not check the org revocation list — refusing to revoke ({exc})")
     refusal = _verify_local_publish_authority(
-        envelope, subject, org, binding, "link:revoke", _TUNNEL_REVOKE_POP_PATH,
-        revocations)
+        envelope, subject, org, binding, "link:revoke", _TUNNEL_REVOKE_POP_PATH)
     if refusal:
         return _fail(refusal)
     try:
