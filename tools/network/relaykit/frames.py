@@ -19,11 +19,19 @@ Types:
   relay NEVER looks past the header (I5: ciphertext only).
 - ``FRAME_CLOSE`` (0x03, both directions): channel ended; payload is an
   optional 2-byte big-endian code.
+- ``FRAME_CTRL``  (0x04, both directions): an org-level control message
+  riding the authenticated tunnel (register D19). ``channel_id`` is the
+  reserved :data:`CTRL_CHANNEL_ID` — there is no viewer channel. Payload
+  is canonical JSON: request ``{"id": <32-hex>, "op": ..., "args": {...}}``,
+  reply ``{"id": <same>, "ok": true, ...}`` or
+  ``{"id", "ok": false, "error": ...}``.
 
 Channel ids are 16 CSPRNG bytes minted by the relay per viewer
-connection. Payload size is bounded by the channel layer's chunking
-(``channel.CHUNK_SIZE``), so tunnel messages stay well under WS
-``max_size`` limits (Q3).
+connection (``new_channel_id`` collides with the reserved control id
+only with negligible probability, and the relay never routes
+``FRAME_CTRL`` to a viewer). Payload size is bounded by the channel
+layer's chunking (``channel.CHUNK_SIZE``), so tunnel messages stay well
+under WS ``max_size`` limits (Q3).
 """
 
 from __future__ import annotations
@@ -34,11 +42,16 @@ from dataclasses import dataclass
 FRAME_OPEN = 0x01
 FRAME_DATA = 0x02
 FRAME_CLOSE = 0x03
+FRAME_CTRL = 0x04
 
-_TYPES = frozenset({FRAME_OPEN, FRAME_DATA, FRAME_CLOSE})
+_TYPES = frozenset({FRAME_OPEN, FRAME_DATA, FRAME_CLOSE, FRAME_CTRL})
 
 CHANNEL_ID_LEN = 16
 HEADER_LEN = 1 + CHANNEL_ID_LEN
+
+#: The reserved channel id every FRAME_CTRL message carries — control
+#: messages belong to the tunnel's org, not to any viewer channel.
+CTRL_CHANNEL_ID = b"\x00" * CHANNEL_ID_LEN
 
 
 class FrameError(ValueError):
