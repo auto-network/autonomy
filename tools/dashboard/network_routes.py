@@ -133,15 +133,21 @@ async def get_org_key(request: Request) -> JSONResponse:
     except Exception as e:
         return JSONResponse({"error": f"could not read the org key setting: {e}"},
                             status_code=500)
-    if member is None or not member.payload.get("armored_private_key"):
+    payload = member.payload if member is not None else {}
+    # Two armor generations: revision-1 password armor and the revision-2
+    # Option-B seal the founding ceremony writes. The browser opens either
+    # with the one personal password; refusing to serve the sealed shape
+    # made every ceremony-created org unable to sign on at all (auto-05tom).
+    if not (payload.get("armored_private_key") or payload.get("sealed_root_key")):
         return JSONResponse({"error": (
             "This organization has no signing key yet."
         )}, status_code=404)
-    return JSONResponse({
-        "label": member.key,
-        "armored_private_key": member.payload["armored_private_key"],
-        "root_pub": member.payload.get("root_pub"),
-    })
+    out = {"label": member.key, "root_pub": payload.get("root_pub")}
+    for field in ("armored_private_key", "sealed_root_key",
+                  "owner_kem_pub", "seal_purpose"):
+        if payload.get(field):
+            out[field] = payload[field]
+    return JSONResponse(out)
 
 
 async def get_binding(request: Request) -> JSONResponse:

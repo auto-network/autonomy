@@ -5,6 +5,7 @@ import {
   domainBytes,
   decryptArmor,
   importEd25519RootSigningKey,
+  openSealedArmor,
 } from './ceremony/primitives.js';
 import { derivePersona } from './ceremony/ledger-event.js';
 import { createBrowserStorage } from './ceremony/storage.js';
@@ -208,6 +209,37 @@ var signRegistryRequestCore;
     return resp.json();
   }
 
+  // Open the org root from either armor generation, one password either
+  // way. Revision-1 legacy armor decrypts directly with the entered
+  // passphrase. Revision-2 (B4 Option B, what the founding ceremony
+  // writes) holds the root as a seal to the owner's personal-derived
+  // X25519 key — so the passphrase opens the PERSONAL armor, the derived
+  // key opens the seal, and the personal seed dies before returning.
+  async function _openOrgRoot(orgKey, passphrase) {
+    if (orgKey.armored_private_key) {
+      return decryptArmor(orgKey.armored_private_key, passphrase);
+    }
+    if (orgKey.sealed_root_key) {
+      var personal = await _fetchJson('/api/identity/personal');
+      if (!personal || !personal.armored_private_key) {
+        throw new Error('this organization\'s key is sealed to your ' +
+          'personal identity, but no personal identity is stored on this ' +
+          'node — set one up from the getting-started flow first');
+      }
+      var openedPersonal = await decryptArmor(
+        personal.armored_private_key, passphrase);
+      try {
+        var seed = await openSealedArmor(orgKey, openedPersonal.seed);
+        return { seed: seed, rootPub: orgKey.root_pub };
+      } finally {
+        openedPersonal.seed.fill(0);
+        openedPersonal.seed = null;
+      }
+    }
+    throw new Error('no identity key is stored for this org yet — create ' +
+      'one from the getting-started flow first');
+  }
+
   // D13 — the certificate subject is the ACTOR: the operator's per-org
   // persona, HKDF-derived from the PERSONAL root at the moment of unlock
   // and never stored. The authority ledger's fold authorizes
@@ -285,7 +317,7 @@ var signRegistryRequestCore;
     // a binding is present its coordinates pin the session; when absent the
     // sovereign root itself anchors the local session.
     var orgKey = await _fetchJson('/api/network/org-key' + orgQ, opts.org);
-    if (!orgKey.armored_private_key) {
+    if (!orgKey.armored_private_key && !orgKey.sealed_root_key) {
       throw new Error('no identity key is stored for this org yet — create ' +
         'one from the getting-started flow first');
     }
@@ -302,7 +334,7 @@ var signRegistryRequestCore;
     // root plaintext window stays as tight as it was.
     var personaSubject = await _personaSubject(orgQ, opts.org, passphrase);
 
-    var opened = await decryptArmor(orgKey.armored_private_key, passphrase);
+    var opened = await _openOrgRoot(orgKey, passphrase);
     var diagnostics = {
       rootDropped: false, extractable: null,
       subjectResolution: personaSubject ? 'persona' : 'label',
@@ -405,11 +437,11 @@ var signRegistryRequestCore;
       throw new Error('could not load the org signing key (' + keyResp.status + ')');
     }
     var orgKey = await keyResp.json();
-    if (!orgKey.armored_private_key) {
+    if (!orgKey.armored_private_key && !orgKey.sealed_root_key) {
       throw new Error('this org has no signing key to mint a serving delegate');
     }
 
-    var opened = await decryptArmor(orgKey.armored_private_key, passphrase);
+    var opened = await _openOrgRoot(orgKey, passphrase);
     var privateKeyHex = null;
     try {
       var rootKey = await _importRootKey(opened.seed);
@@ -477,10 +509,10 @@ var signRegistryRequestCore;
     }
     var orgQ = session.orgSlug ? ('?org=' + encodeURIComponent(session.orgSlug)) : '';
     var orgKey = await _fetchJson('/api/network/org-key' + orgQ, session.orgSlug);
-    if (!orgKey.armored_private_key) {
+    if (!orgKey.armored_private_key && !orgKey.sealed_root_key) {
       throw new Error('no auto.network org key is stored for this org');
     }
-    var opened = await decryptArmor(orgKey.armored_private_key, passphrase);
+    var opened = await _openOrgRoot(orgKey, passphrase);
     var recordWire;
     try {
       if (opened.rootPub !== session.rootPub) {

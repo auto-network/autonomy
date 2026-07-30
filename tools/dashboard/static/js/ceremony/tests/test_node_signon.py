@@ -69,11 +69,14 @@ def _identity_source(*, armor: str, root_pub: str, org_uuid: str,
                      registry_url: str, requests: list[str],
                      genesis_id: str | None = None,
                      personal_armor: str | None = None,
-                     personal_root_pub: str | None = None) -> Starlette:
+                     personal_root_pub: str | None = None,
+                     org_key_payload: dict | None = None) -> Starlette:
     async def org_key(request: Request):
         requests.append(str(request.url.path))
         if request.query_params.get("org") != ORG_SLUG:
             return JSONResponse({"error": "unknown org"}, status_code=404)
+        if org_key_payload is not None:
+            return JSONResponse(org_key_payload)
         return JSONResponse({
             "label": "default",
             "armored_private_key": armor,
@@ -409,3 +412,85 @@ def test_node_signon_falls_back_to_label_when_personal_armor_stays_shut():
         "/api/network/ledger/heads",
         "/api/identity/personal",
     ]
+
+
+def _sealed_org_key_payload(root: KeyPair, personal_root: KeyPair) -> dict:
+    """The revision-2 org-key payload the founding ceremony writes."""
+    from tools.graph.schemas.network_identity import ORG_ROOT_ARMOR_PURPOSE
+    from tools.network.idkit.sealing import derive_encapsulation_keypair, seal
+
+    _, recipient_pub = derive_encapsulation_keypair(
+        bytes.fromhex(personal_root.private_hex), ORG_ROOT_ARMOR_PURPOSE,
+    )
+    return {
+        "label": "default",
+        "root_pub": root.public_hex,
+        "sealed_root_key": seal(
+            bytes.fromhex(root.private_hex), recipient_pub,
+            ORG_ROOT_ARMOR_PURPOSE,
+        ).hex(),
+        "owner_kem_pub": recipient_pub,
+        "seal_purpose": ORG_ROOT_ARMOR_PURPOSE,
+    }
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_node_signon_opens_sealed_org_armor_and_publishes():
+    """auto-05tom: a founding-ceremony org (revision-2 sealed root) signs
+    on with the ONE personal password — the passphrase opens the personal
+    armor, the derived X25519 key opens the seal, and the publish flows
+    with the persona subject."""
+    from tools.network.idkit.persona import derive_persona
+
+    root = KeyPair.generate()
+    personal_root = KeyPair.generate()
+    passphrase = "the one personal password"
+    genesis_id = "e2" * 32
+    output, identity_requests = _publish_run(
+        root=root,
+        org_uuid=str(uuid.uuid4()),
+        passphrase=passphrase,
+        identity_kwargs={
+            "genesis_id": genesis_id,
+            "personal_armor": encrypt_root_key(
+                personal_root, passphrase, iterations=10_000,
+            ),
+            "personal_root_pub": personal_root.public_hex,
+            "org_key_payload": _sealed_org_key_payload(root, personal_root),
+        },
+    )
+    expected = derive_persona(
+        bytes.fromhex(personal_root.private_hex), genesis_id,
+    ).public_hex
+    assert output["status"] == 201
+    assert output["signOn"]["rootPub"] == root.public_hex
+    assert json.loads(output["envelope"]["cert"])["subject"] == {
+        "kind": "operator",
+        "id": expected,
+    }
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_node_signon_sealed_org_fails_closed_on_wrong_password():
+    """A passphrase that does not open the personal armor cannot reach the
+    sealed org root — sign-on refuses before any registry call."""
+    root = KeyPair.generate()
+    personal_root = KeyPair.generate()
+    identity_requests: list[str] = []
+    identity_port = _free_port()
+    identity = _identity_source(
+        armor="",
+        root_pub=root.public_hex,
+        org_uuid=str(uuid.uuid4()),
+        registry_url="http://127.0.0.1:9",
+        requests=identity_requests,
+        personal_armor=encrypt_root_key(
+            personal_root, "a different personal password", iterations=10_000,
+        ),
+        personal_root_pub=personal_root.public_hex,
+        org_key_payload=_sealed_org_key_payload(root, personal_root),
+    )
+    with _live_server(identity, identity_port) as identity_url:
+        command = _run_with_passphrase(identity_url, "opens nothing")
+    assert command.returncode != 0
+    assert "wrong passphrase" in (command.stdout + command.stderr)
