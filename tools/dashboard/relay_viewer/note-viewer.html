@@ -1399,13 +1399,21 @@ return Pe}()
   // Attachment download controls (auto-1cs87). The viewer renders the note's
   // metadata-only manifest as clickable controls and speaks the frozen
   // semantic-intent bridge (wire protocol v1, note 072cd1af) to the
-  // same-origin parent: it emits attachment.select/cancel/export by ref and
-  // consumes attachment.state. It never sees a token, path, offset, or byte;
-  // the parent owns the channel, storage, and export.
+  // same-origin parent: it emits attachment.select/cancel/export carrying only
+  // a ref, and consumes only attachment.state. It receives the authenticated
+  // display name (never a destination path or the parent's sanitized output
+  // filename) and never a token, offset, or byte; the parent owns the channel,
+  // storage, and export. Both the manifest and the state envelope are
+  // validated to their exact frozen shapes as defence in depth.
   const ATTACHMENT_STATES = new Set([
     'idle', 'queued', 'downloading', 'ready',
     'exporting', 'complete', 'cancelled', 'error',
   ]);
+  const MANIFEST_FIELDS = ['ref', 'name', 'mime', 'raw_sha256', 'total_size', 'oversize'];
+  const STATE_FIELDS = new Set([
+    'v', 'type', 'ref', 'state', 'received', 'total', 'error_code',
+  ]);
+  const SHA256_RE = /^[0-9a-f]{64}$/;
   // The intent a click emits depends on the control's current state; a state
   // with no action (in-flight save, terminal complete) is not clickable.
   const ACTION_BY_STATE = {
@@ -1484,10 +1492,15 @@ return Pe}()
     section.appendChild(heading);
     let shown = 0;
     for (const entry of entries) {
-      if (!entry || typeof entry.ref !== 'string' || !entry.ref
-          || controlsByRef.has(entry.ref)
-          || typeof entry.name !== 'string'
-          || typeof entry.mime !== 'string'
+      // Exact frozen manifest shape: the six fields and nothing else, so a
+      // crafted entry cannot smuggle an extra field or a non-canonical value.
+      if (!entry || typeof entry !== 'object'
+          || Object.keys(entry).length !== MANIFEST_FIELDS.length
+          || !MANIFEST_FIELDS.every((k) => Object.prototype.hasOwnProperty.call(entry, k))
+          || typeof entry.ref !== 'string' || !entry.ref || controlsByRef.has(entry.ref)
+          || typeof entry.name !== 'string' || Array.from(entry.name).length > 255
+          || typeof entry.mime !== 'string' || !entry.mime
+          || typeof entry.raw_sha256 !== 'string' || !SHA256_RE.test(entry.raw_sha256)
           || !Number.isSafeInteger(entry.total_size) || entry.total_size < 0
           || typeof entry.oversize !== 'boolean') {
         continue;
@@ -1534,14 +1547,23 @@ return Pe}()
   }
 
   function applyAttachmentState(message) {
-    if (!message || typeof message.ref !== 'string'
+    // Exact frozen parent->child shape: v===1, only the known keys, a known
+    // state, and safe nonnegative integer progress with received<=total.
+    // Anything else leaves the control unchanged.
+    if (!message || message.v !== 1 || message.type !== 'attachment.state'
+        || typeof message.ref !== 'string'
         || !ATTACHMENT_STATES.has(message.state)) return;
+    for (const key of Object.keys(message)) {
+      if (!STATE_FIELDS.has(key)) return;
+    }
+    const { received, total } = message;
+    if (received !== undefined && (!Number.isSafeInteger(received) || received < 0)) return;
+    if (total !== undefined && (!Number.isSafeInteger(total) || total < 0)) return;
+    if (received !== undefined && total !== undefined && received > total) return;
+    if ('error_code' in message && typeof message.error_code !== 'string') return;
     const control = controlsByRef.get(message.ref);
     if (!control || control.dataset.oversize === '1') return;
-    const errorCode = typeof message.error_code === 'string' ? message.error_code : '';
-    setControlState(
-      control, message.state, message.received, message.total, errorCode,
-    );
+    setControlState(control, message.state, received, total, message.error_code || '');
   }
 
   function unavailableImage(img) {
