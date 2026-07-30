@@ -430,6 +430,45 @@ async def test_task_cancellation_discards_only_uncommitted_tail():
 
 
 @pytest.mark.asyncio
+async def test_final_flush_failure_discards_uncommitted_tail():
+    manifest = {
+        "ref": "att-test",
+        "raw_sha256": "a" * 64,
+        "total_size": CHUNK + 4,
+    }
+
+    class FailFinalFlushSink(MemoryAttachmentSink):
+        async def flush(self):
+            await super().flush()
+            if self.flush_count == 2:
+                raise OSError("quota exhausted")
+
+    sink = FailFinalFlushSink()
+    cursors = MemoryCursorStore()
+
+    async def complete_window(request):
+        yield (0).to_bytes(8, "big") + b"\x00" + b"x" * CHUNK
+        yield (
+            CHUNK.to_bytes(8, "big")
+            + bytes([LAST_IN_WINDOW | EOF])
+            + b"tail"
+        )
+
+    downloader = _driver(
+        manifest,
+        _token(51),
+        "note-test",
+        sink,
+        cursors,
+        complete_window,
+    )
+    with pytest.raises(AttachmentDisconnected):
+        await downloader.run()
+    assert sink.size == CHUNK
+    assert cursors.get(downloader.cursor_key)["committed_offset"] == CHUNK
+
+
+@pytest.mark.asyncio
 async def test_cancel_clears_staged_bytes_and_cursor():
     manifest = {
         "ref": "att-test",

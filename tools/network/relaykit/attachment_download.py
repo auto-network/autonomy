@@ -437,8 +437,15 @@ class AttachmentDownloader:
 
                 windows += 1
                 if complete:
-                    await self.sink.flush()
-                    self.cursors.delete(self.cursor_key)
+                    try:
+                        await self.sink.flush()
+                        self.cursors.delete(self.cursor_key)
+                    except Exception as exc:
+                        await self.sink.truncate(self._committed_offset)
+                        raise AttachmentDisconnected(str(exc)) from exc
+                    except BaseException:
+                        await self.sink.truncate(self._committed_offset)
+                        raise
                     return DownloadResult("complete", end, windows)
                 if end % CHUNK != 0:
                     await self.sink.truncate(self._committed_offset)
