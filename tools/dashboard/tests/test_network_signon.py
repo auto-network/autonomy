@@ -136,6 +136,38 @@ def test_org_key_serves_encrypted_armor_only(env, root):
     assert root.private_hex not in r.text
 
 
+def test_org_key_serves_sealed_revision_2(env, root):
+    """A founding-ceremony org stores its root as an Option-B seal, not
+    password armor — the route must serve that shape too (auto-05tom:
+    refusing it left every ceremony-created org unable to sign on)."""
+    from tools.graph.schemas.network_identity import (
+        NETWORK_ORG_KEY_REVISION_2, ORG_ROOT_ARMOR_PURPOSE)
+    from tools.network.idkit.sealing import derive_encapsulation_keypair, seal
+
+    personal = KeyPair.generate()
+    _, recipient_pub = derive_encapsulation_keypair(
+        bytes.fromhex(personal.private_hex), ORG_ROOT_ARMOR_PURPOSE)
+    sealed = seal(bytes.fromhex(root.private_hex), recipient_pub,
+                  ORG_ROOT_ARMOR_PURPOSE).hex()
+    settings_ops.add_setting(
+        NETWORK_ORG_KEY_SET_ID, NETWORK_ORG_KEY_REVISION_2, "default",
+        {"root_pub": root.public_hex, "sealed_root_key": sealed,
+         "owner_kem_pub": recipient_pub,
+         "seal_purpose": ORG_ROOT_ARMOR_PURPOSE},
+        org=ORG,
+    )
+    r = env.get(f"/api/network/org-key?org={ORG}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["sealed_root_key"] == sealed
+    assert body["seal_purpose"] == ORG_ROOT_ARMOR_PURPOSE
+    assert body["root_pub"] == root.public_hex
+    assert "armored_private_key" not in body
+    # I1: nothing in the response is usable without the personal password.
+    assert root.private_hex not in r.text
+    assert personal.private_hex not in r.text
+
+
 def test_binding_404_when_unset(env):
     r = env.get(f"/api/network/binding?org={ORG}")
     assert r.status_code == 404

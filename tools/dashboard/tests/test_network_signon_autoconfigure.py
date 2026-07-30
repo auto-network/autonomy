@@ -50,6 +50,10 @@ def test_browser_module_load_configures_real_signon_path():
     assert output["fetchCalls"] == [
         "/api/network/org-key?org=module-load-org",
         "/api/network/binding?org=module-load-org",
+        # Persona-subject resolution probes the ledger; the 404 here means
+        # "not founded", so the personal armor is never fetched and the
+        # cert falls back to the label subject.
+        "/api/network/ledger/heads?org=module-load-org",
     ]
 
     certificate = DelegationCert.from_json(
