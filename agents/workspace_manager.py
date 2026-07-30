@@ -1144,6 +1144,23 @@ def _worktree_dashboard_base_ref(
     return fallback
 
 
+def _shares_history_with_base(worktree: Path, base_ref: str) -> bool:
+    """True when ``base_ref`` and ``HEAD`` have a common ancestor.
+
+    ``git cherry`` / ``rev-list base..HEAD`` / ``diff base...HEAD`` all
+    assume the branch descends from the base. When they share no common
+    ancestor — after a base history rewrite, or for an orphaned branch —
+    those commands stop being O(unmerged) and become O(all commits): every
+    commit is "ahead", and ``git cherry`` computes a patch-id diff for each
+    one. That turned the startup worktree sweep into a 55s hang across ~70
+    orphaned branches on 2026-07-30. ``git merge-base`` is a commit-graph
+    walk with no diffing, so it stays cheap even on unrelated histories, and
+    an empty result lets callers short-circuit before the expensive command.
+    """
+    rc, out, _ = _git_output(["merge-base", base_ref, "HEAD"], worktree, timeout=15)
+    return rc == 0 and bool(out.strip())
+
+
 def _worktree_commits_ahead(worktree: Path, *, base_ref: str | None = None) -> int:
     """Count commits whose patches are NOT yet on the merge base ref.
 
@@ -1170,6 +1187,11 @@ def _worktree_commits_ahead(worktree: Path, *, base_ref: str | None = None) -> i
     base_ref = base_ref or _worktree_merge_base_ref(worktree)
     if base_ref is None:
         return 0
+    if not _shares_history_with_base(worktree, base_ref):
+        # No common ancestor: the branch cannot land on this base by any
+        # normal path, and `git cherry` would scan its whole history. Report
+        # nothing pending rather than pay O(all commits).
+        return 0
     rc, out, _ = _git_output(["cherry", base_ref, "HEAD"], worktree, timeout=15)
     if rc != 0:
         return 0
@@ -1187,6 +1209,10 @@ def _worktree_net_empty(worktree: Path, *, base_ref: str | None = None) -> bool:
     """
     base_ref = base_ref or _worktree_merge_base_ref(worktree)
     if base_ref is None:
+        return False
+    if not _shares_history_with_base(worktree, base_ref):
+        # `diff base...HEAD` resolves the merge base; with none it is neither
+        # cheap nor meaningful. Conservative: report not-empty.
         return False
     rc, _, _ = _git_output(
         ["diff", "--quiet", f"{base_ref}...HEAD"],
@@ -1402,6 +1428,12 @@ def _dashboard_pending_commit_shas(
     has always counted only cherry ``+`` lines.
     """
     base_ref = base_ref or _worktree_merge_base_ref(worktree)
+    if base_ref is not None and not _shares_history_with_base(worktree, base_ref):
+        # No common ancestor: `rev-list base..HEAD` would list the branch's
+        # entire history as pending and `git cherry` would patch-id every
+        # commit. Nothing on this branch can land on this base by a normal
+        # path, so report nothing pending rather than pay O(all commits).
+        return []
     pending = _worktree_commit_shas(worktree, base_ref=base_ref)
     if not pending or base_ref is None:
         return pending
