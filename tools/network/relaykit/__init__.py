@@ -36,7 +36,9 @@ from .channel import (
     verify_server_hello,
 )
 from .frames import (
+    CTRL_CHANNEL_ID,
     FRAME_CLOSE,
+    FRAME_CTRL,
     FRAME_DATA,
     FRAME_OPEN,
     Frame,
@@ -51,6 +53,8 @@ __all__ = [
     "FRAME_OPEN",
     "FRAME_DATA",
     "FRAME_CLOSE",
+    "FRAME_CTRL",
+    "CTRL_CHANNEL_ID",
     "ChannelCrypto",
     "HandshakeError",
     "HANDSHAKE_DOMAIN",

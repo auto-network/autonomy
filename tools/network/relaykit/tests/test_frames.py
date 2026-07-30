@@ -6,7 +6,9 @@ import pytest
 
 from tools.network.relaykit.frames import (
     CHANNEL_ID_LEN,
+    CTRL_CHANNEL_ID,
     FRAME_CLOSE,
+    FRAME_CTRL,
     FRAME_DATA,
     FRAME_OPEN,
     FrameError,
@@ -18,10 +20,20 @@ from tools.network.relaykit.frames import (
 
 def test_roundtrip_all_types():
     channel_id = new_channel_id()
-    for frame_type in (FRAME_OPEN, FRAME_DATA, FRAME_CLOSE):
+    for frame_type in (FRAME_OPEN, FRAME_DATA, FRAME_CLOSE, FRAME_CTRL):
         payload = b"payload-bytes" if frame_type != FRAME_CLOSE else b""
         frame = decode_frame(encode_frame(frame_type, channel_id, payload))
         assert (frame.type, frame.channel_id, frame.payload) == (frame_type, channel_id, payload)
+
+
+def test_ctrl_channel_id_is_reserved_and_sized():
+    assert len(CTRL_CHANNEL_ID) == CHANNEL_ID_LEN
+    assert CTRL_CHANNEL_ID == b"\x00" * CHANNEL_ID_LEN
+    payload = b'{"id":"ab","op":"create-link","args":{}}'
+    frame = decode_frame(encode_frame(FRAME_CTRL, CTRL_CHANNEL_ID, payload))
+    assert (frame.type, frame.channel_id, frame.payload) == (
+        FRAME_CTRL, CTRL_CHANNEL_ID, payload,
+    )
 
 
 def test_channel_ids_are_random_and_sized():
