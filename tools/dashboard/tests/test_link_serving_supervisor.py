@@ -59,8 +59,9 @@ class FakeSpawn:
         self.calls = []
         self.procs = []
 
-    def __call__(self, argv, env, *, log_path=None):
-        self.calls.append({"argv": argv, "env": env, "log_path": log_path})
+    def __call__(self, argv, env, *, log_path=None, ctl_path=None):
+        self.calls.append({"argv": argv, "env": env, "log_path": log_path,
+                           "ctl_path": ctl_path})
         p = FakeProc()
         self.procs.append(p)
         return p

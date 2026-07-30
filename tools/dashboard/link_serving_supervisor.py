@@ -35,7 +35,10 @@ tools.dashboard.link_serving``.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -189,6 +192,64 @@ def _log_path_for(key_path: str) -> str:
     return os.path.splitext(key_path)[0] + ".log"
 
 
+def _control_path_for(key_path: str) -> str:
+    """The loopback control-listener descriptor file the connector writes
+    ({port, auth}) so the dashboard can drive D19 control ops on its
+    tunnel. Sits next to the serving key, same convention as .cert/.log."""
+    return os.path.splitext(key_path)[0] + ".ctl"
+
+
+class TunnelUnavailable(RuntimeError):
+    """No live serving tunnel to carry a control op — names the remedy."""
+
+
+def control(org: str | None, op: str, args: dict, *, timeout: float = 12.0) -> dict:
+    """Drive one D19 control op on *org*'s serving tunnel (register §3/§4).
+
+    Reads the connector's ``.ctl`` descriptor, opens the loopback control
+    listener, and returns the connector's reply. Raises
+    :class:`TunnelUnavailable` when no connector/tunnel is up — the caller
+    (the publish executor) turns that into ``ensure(org)`` + a retry."""
+    state = serve_cert_state(org)
+    key_path = state.get("key_path")
+    if not key_path:
+        raise TunnelUnavailable(
+            "no serving delegate is provisioned for this org — provision "
+            "serving, then retry")
+    ctl_path = _control_path_for(key_path)
+    try:
+        with open(ctl_path) as fh:
+            descriptor = json.load(fh)
+        port = int(descriptor["port"])
+        auth = descriptor["auth"]
+    except (OSError, ValueError, KeyError) as exc:
+        raise TunnelUnavailable(
+            "the serving connector is not running (no control listener) — "
+            f"start serving and retry ({exc})") from exc
+
+    request = json.dumps({"auth": auth, "op": op, "args": args}) + "\n"
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout) as sock:
+            sock.sendall(request.encode("utf-8"))
+            sock.settimeout(timeout)
+            buf = b""
+            while b"\n" not in buf:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+    except OSError as exc:
+        raise TunnelUnavailable(
+            f"could not reach the serving connector's control listener ({exc})"
+        ) from exc
+    if b"\n" not in buf:
+        raise TunnelUnavailable("serving connector closed the control connection")
+    reply = json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
+    if reply.get("error_kind") == "no-tunnel":
+        raise TunnelUnavailable(reply.get("error", "no live tunnel"))
+    return reply
+
+
 def _materialize_cert(key_path: str, cert_wire: str) -> str:
     """Write the (public) cert next to the key file for ``--cert-file``.
     Atomic replace so a concurrent launch never reads a half-written cert."""
@@ -209,6 +270,7 @@ def _connector_command(binding: dict, org: str | None, key_path: str,
         "--org", binding["org_uuid"],
         "--key-file", key_path,
         "--cert-file", cert_path,
+        "--control-file", _control_path_for(key_path),
     ]
     if org:
         argv += ["--graph-org", org]
@@ -225,25 +287,35 @@ class _Proc:
     needs; the connector self-reconnects to the relay on its own, so the
     supervisor only supervises the OS process, not the tunnel."""
 
-    def __init__(self, popen):
+    def __init__(self, popen, ctl_path: str | None = None):
         self._p = popen
+        self._ctl_path = ctl_path
 
     def alive(self) -> bool:
         return self._p.poll() is None
 
     def stop(self) -> None:
-        if self._p.poll() is not None:
-            return
-        self._p.terminate()
         try:
-            self._p.wait(timeout=5)
-        except Exception:
-            self._p.kill()
+            if self._p.poll() is None:
+                self._p.terminate()
+                try:
+                    self._p.wait(timeout=5)
+                except Exception:
+                    self._p.kill()
+        finally:
+            # The connector removes its own .ctl on a clean exit; on a kill
+            # it cannot, so the supervisor sweeps it — a stale descriptor
+            # would otherwise point control() at a dead listener.
+            if self._ctl_path:
+                with contextlib.suppress(OSError):
+                    os.remove(self._ctl_path)
 
 
-def _default_spawn(argv: list, env: dict, *, log_path: str | None = None):
+def _default_spawn(argv: list, env: dict, *, log_path: str | None = None,
+                   ctl_path: str | None = None):
     out = open(log_path, "ab") if log_path else subprocess.DEVNULL
-    return _Proc(subprocess.Popen(argv, env=env, stdout=out, stderr=out))
+    return _Proc(subprocess.Popen(argv, env=env, stdout=out, stderr=out),
+                 ctl_path=ctl_path)
 
 
 class ServingSupervisor:
@@ -304,8 +376,14 @@ class ServingSupervisor:
         if binding_error:
             return {"running": False, "reason": binding_error}
         cert_path = _materialize_cert(state["key_path"], state["cert"])
+        ctl_path = _control_path_for(state["key_path"])
+        # A stale descriptor from a previous killed connector would mislead
+        # control() until the new connector rewrites it; clear it up front.
+        with contextlib.suppress(OSError):
+            os.remove(ctl_path)
         argv, env = _connector_command(binding, org, state["key_path"], cert_path)
-        handle = self._spawn(argv, env, log_path=_log_path_for(state["key_path"]))
+        handle = self._spawn(argv, env, log_path=_log_path_for(state["key_path"]),
+                             ctl_path=ctl_path)
         self._procs[org] = handle
         return {"running": True, "reason": "launched"}
 

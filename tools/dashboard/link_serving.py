@@ -54,6 +54,7 @@ import asyncio
 import base64
 import binascii
 import calendar
+import contextlib
 import json
 import mimetypes
 import re
@@ -645,6 +646,72 @@ def make_grant_handler(org: str | None = None, *, now=None):
     return handler
 
 
+async def _serve_control_listener(connector, ctl_path: str) -> None:
+    """A loopback listener the dashboard drives to run D19 control ops on
+    this connector's tunnel (register §3). One newline-delimited JSON
+    request per connection — ``{auth, op, args}`` → the connector's reply
+    (or ``{ok: false, error_kind: "no-tunnel", ...}`` when no tunnel is
+    up). Bound to 127.0.0.1 only; a per-process random token gates it so a
+    co-tenant process cannot drive the tunnel. The descriptor
+    ``{port, auth}`` is written to *ctl_path* and removed on exit."""
+    import json as _json
+    import os as _os
+    import secrets as _secrets
+
+    auth = _secrets.token_hex(16)
+
+    async def handle(reader, writer):
+        try:
+            line = await reader.readline()
+            try:
+                request = _json.loads(line.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                reply = {"ok": False, "error": "control request is not JSON"}
+            else:
+                if request.get("auth") != auth:
+                    reply = {"ok": False, "error": "control auth rejected"}
+                else:
+                    try:
+                        reply = await connector.control(
+                            request.get("op"), request.get("args") or {})
+                    except ConnectionError as exc:
+                        reply = {"ok": False, "error_kind": "no-tunnel",
+                                 "error": str(exc)}
+            writer.write((_json.dumps(reply) + "\n").encode("utf-8"))
+            await writer.drain()
+        except Exception:
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    tmp = ctl_path + ".tmp"
+    with open(tmp, "w") as fh:
+        _json.dump({"port": port, "auth": auth}, fh)
+    _os.replace(tmp, ctl_path)
+    try:
+        async with server:
+            await server.serve_forever()
+    finally:
+        with contextlib.suppress(OSError):
+            _os.remove(ctl_path)
+
+
+async def _run_connector_with_control(connector, ctl_path: str | None) -> None:
+    if ctl_path is None:
+        await connector.run()
+        return
+    listener = asyncio.create_task(_serve_control_listener(connector, ctl_path))
+    try:
+        await connector.run()
+    finally:
+        listener.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await listener
+
+
 def main() -> None:
     from tools.network.idkit import DelegationCert, KeyPair
     from tools.network.relaykit.connector import TunnelConnector
@@ -658,6 +725,9 @@ def main() -> None:
     parser.add_argument("--cert-file", required=True, help="file holding the cert wire JSON")
     parser.add_argument("--graph-org", default=None,
                         help="dashboard org slug scoping the grant cache")
+    parser.add_argument("--control-file", default=None,
+                        help="path to write the loopback control descriptor "
+                             "(enables D19 publish/revoke over this tunnel)")
     parser.add_argument("--min-backoff", type=float, default=0.2)
     parser.add_argument("--max-backoff", type=float, default=5.0)
     args = parser.parse_args()
@@ -672,7 +742,7 @@ def main() -> None:
         args.relay, args.org, key, cert, handler,
         min_backoff=args.min_backoff, max_backoff=args.max_backoff,
     )
-    asyncio.run(connector.run())
+    asyncio.run(_run_connector_with_control(connector, args.control_file))
 
 
 if __name__ == "__main__":
