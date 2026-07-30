@@ -507,6 +507,116 @@ class TestNoteResolver:
         assert serve(token) == link_serving.REFUSED
 
 
+class TestAttachmentManifest:
+    """The metadata-only download manifest (wire protocol v1, auto-b94x6)."""
+
+    def test_lists_every_slot_attachment_with_no_bytes(self, env, tmp_path):
+        img1 = tmp_path / "inline.png"
+        doc = tmp_path / "notes.txt"
+        img2 = tmp_path / "gallery.png"
+        img1.write_bytes(b"PNG-INLINE")
+        doc.write_bytes(b"DOCUMENT-BYTES")
+        img2.write_bytes(b"PNG-GALLERY")
+        note = graph_ops.create_note(
+            "![inline]({1})", title="Gallery",
+            attachments=[str(img1), str(doc), str(img2)], org=ORG,
+        )
+        token = _token(40)
+        put_grant(token, note["id"], "note")
+        header, body = parse(serve(token))
+
+        manifest = header["content"]["attachments"]
+        assert len(manifest) == 3
+        assert [e["ref"] for e in manifest] == [
+            a["id"] for a in note["attachments"]
+        ]
+        for entry in manifest:
+            assert set(entry) == {
+                "ref", "name", "mime", "raw_sha256", "total_size", "oversize"
+            }
+            assert entry["raw_sha256"] and isinstance(entry["raw_sha256"], str)
+            assert entry["total_size"] > 0
+            assert entry["oversize"] is False
+        names = {e["name"] for e in manifest}
+        assert names == {"inline.png", "notes.txt", "gallery.png"}
+
+        # The inline image still renders as a bundled part; the two
+        # non-inline attachments are offered for download only — their bytes
+        # never appear in the artifact body.
+        assert [p["ref"] for p in header["content"]["parts"]] == [
+            note["attachments"][0]["id"]
+        ]
+        assert b"PNG-INLINE" in body
+        assert b"DOCUMENT-BYTES" not in body
+        assert b"PNG-GALLERY" not in body
+
+    def test_membership_is_slots_not_source_id(self, env, tmp_path):
+        # Identical bytes stored under two notes deduplicate into one row that
+        # keeps the FIRST note's source_id. The second note must still offer
+        # the attachment: membership is the note's slots, not the row source_id.
+        shared = tmp_path / "shared.bin"
+        shared.write_bytes(b"SHARED-DEDUP-BYTES")
+        note1 = graph_ops.create_note(
+            "![a]({1})", title="N1", attachments=[str(shared)], org=ORG,
+        )
+        note2 = graph_ops.create_note(
+            "![b]({1})", title="N2", attachments=[str(shared)], org=ORG,
+        )
+        ref1 = note1["attachments"][0]["id"]
+        ref2 = note2["attachments"][0]["id"]
+        assert ref1 == ref2  # deduplicated into a single row
+        row = graph_ops.get_attachment(ref1, org=ORG, peers=[])
+        assert row["source_id"] == note1["id"]  # row belongs to note1
+
+        token = _token(41)
+        put_grant(token, note2["id"], "note")
+        header, _ = parse(serve(token))
+        assert [e["ref"] for e in header["content"]["attachments"]] == [ref1]
+
+    def test_marks_oversize_above_the_cap(self, env, tmp_path, monkeypatch):
+        big = tmp_path / "big.bin"
+        big.write_bytes(b"X" * 100)
+        note = graph_ops.create_note(
+            "body", title="Big", attachments=[str(big)], org=ORG,
+        )
+        monkeypatch.setattr(link_serving, "AUTONET_MAX_ATTACHMENT_BYTES", 50)
+        token = _token(42)
+        put_grant(token, note["id"], "note")
+        header, _ = parse(serve(token))
+        manifest = header["content"]["attachments"]
+        assert len(manifest) == 1
+        assert manifest[0]["total_size"] == 100
+        assert manifest[0]["oversize"] is True
+
+    def test_artifact_size_independent_of_attachment_bytes(self, env, tmp_path):
+        small = tmp_path / "aa.bin"
+        big = tmp_path / "bb.bin"
+        small.write_bytes(b"S" * 10)
+        big.write_bytes(b"B" * 100_000)
+        note_s = graph_ops.create_note(
+            "body", title="T", attachments=[str(small)], org=ORG,
+        )
+        note_b = graph_ops.create_note(
+            "body", title="T", attachments=[str(big)], org=ORG,
+        )
+        put_grant(_token(43), note_s["id"], "note")
+        put_grant(_token(44), note_b["id"], "note")
+        _, body_s = parse(serve(_token(43)))
+        header_b, body_b = parse(serve(_token(44)))
+        # No attachment bytes ride in the body, so its size is independent of
+        # the attachment file size even as the manifest reports the true size.
+        assert len(body_s) == len(body_b)
+        assert header_b["content"]["attachments"][0]["total_size"] == 100_000
+        assert b"B" * 100_000 not in body_b
+
+    def test_empty_manifest_for_note_without_attachments(self, env):
+        note = graph_ops.create_note("plain body", title="Plain", org=ORG)
+        token = _token(45)
+        put_grant(token, note["id"], "note")
+        header, _ = parse(serve(token))
+        assert header["content"]["attachments"] == []
+
+
 class TestDesignResolvers:
     @pytest.fixture
     def deck(self, env):

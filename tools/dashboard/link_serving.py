@@ -74,6 +74,10 @@ from tools.network.idkit import canonical_json
 AUTONET_MAX_ARTIFACT_BYTES = 48 * 1024 * 1024
 AUTONET_MAX_FAVICON_BYTES = 512 * 1024
 AUTONET_MAX_TITLE_CHARS = 500
+# On-demand attachment download cap (wire protocol v1). An attachment above
+# this is listed in the manifest with ``oversize: true`` and is not
+# downloadable in v1. This is a serving policy, not a structural limit.
+AUTONET_MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024 * 1024
 _NOTE_VIEWER = Path(__file__).resolve().parent / "relay_viewer" / "note-viewer.html"
 _DASHBOARD_STATIC = Path(__file__).resolve().parent / "static"
 
@@ -371,6 +375,36 @@ def _resolve_note(target_uuid: str, org: str | None):
     serialized_size += len(markdown.encode("utf-8"))
     if serialized_size > AUTONET_MAX_ARTIFACT_BYTES:
         raise _ArtifactTooLarge
+
+    # Metadata-only manifest of the note's downloadable attachments. Membership
+    # is the note's content-bound attachment slots (never the row source_id,
+    # which is shared for deduplicated bytes), so a note that shares bytes with
+    # another note still offers its own attachments. No bytes are carried here;
+    # on-demand fetch (wire protocol v1) streams them over the channel.
+    attachments: list[dict] = []
+    for att in graph_ops.note_slot_attachments(source_id, org=org, peers=[]):
+        ref = att.get("id")
+        if not isinstance(ref, str) or not ref:
+            continue
+        size = att.get("size_bytes")
+        if not isinstance(size, int) or size < 0:
+            size = 0
+        name = att.get("filename")
+        mime = att.get("mime_type")
+        raw_sha256 = att.get("hash")
+        attachments.append({
+            "ref": ref,
+            "name": name if isinstance(name, str) else "",
+            "mime": mime if isinstance(mime, str) and mime else "application/octet-stream",
+            "raw_sha256": raw_sha256 if isinstance(raw_sha256, str) else "",
+            "total_size": size,
+            "oversize": size > AUTONET_MAX_ATTACHMENT_BYTES,
+        })
+    # The manifest is metadata carried in the artifact header, not the
+    # size-capped body; it does not count toward AUTONET_MAX_ARTIFACT_BYTES
+    # (which bounds body bytes). Its size is bounded by the note's own
+    # attachment count.
+
     title = source.get("title") or "Note"
     if not isinstance(title, str):
         title = "Note"
@@ -381,6 +415,7 @@ def _resolve_note(target_uuid: str, org: str | None):
             "title": title[:AUTONET_MAX_TITLE_CHARS],
             "markdown": markdown,
             "parts": list(parts_by_ref.values()),
+            "attachments": attachments,
         },
     }
 
@@ -415,6 +450,8 @@ def _serialize_artifact(artifact: dict) -> tuple[dict, bytes]:
         if not isinstance(content, dict):
             raise ValueError("note requires content")
 
+        if not set(content).issubset({"title", "markdown", "parts", "attachments"}):
+            raise ValueError("note content carries unknown fields")
         title = content.get("title")
         markdown = content.get("markdown")
         parts = content.get("parts")
@@ -453,6 +490,40 @@ def _serialize_artifact(artifact: dict) -> tuple[dict, bytes]:
             "markdown": markdown_slice,
             "parts": part_headers,
         }
+
+        manifest = content.get("attachments")
+        if manifest is not None:
+            if not isinstance(manifest, list):
+                raise ValueError("invalid note attachments")
+            manifest_headers = []
+            manifest_refs = set()
+            for entry in manifest:
+                if not isinstance(entry, dict) or not set(entry).issubset({
+                    "ref", "name", "mime", "raw_sha256", "total_size", "oversize",
+                }):
+                    raise ValueError("invalid attachment manifest entry")
+                ref = entry.get("ref")
+                name = entry.get("name")
+                mime = entry.get("mime")
+                raw_sha256 = entry.get("raw_sha256")
+                total_size = entry.get("total_size")
+                oversize = entry.get("oversize")
+                if (
+                    not isinstance(ref, str) or not ref or ref in manifest_refs
+                    or not isinstance(name, str)
+                    or not isinstance(mime, str) or not mime
+                    or not isinstance(raw_sha256, str)
+                    or not isinstance(total_size, int) or total_size < 0
+                    or not isinstance(oversize, bool)
+                ):
+                    raise ValueError("invalid attachment manifest entry")
+                manifest_refs.add(ref)
+                manifest_headers.append({
+                    "ref": ref, "name": name, "mime": mime,
+                    "raw_sha256": raw_sha256, "total_size": total_size,
+                    "oversize": oversize,
+                })
+            header["content"]["attachments"] = manifest_headers
 
     branding = artifact.get("branding")
     if branding is not None:

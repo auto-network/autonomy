@@ -428,7 +428,7 @@ const autonet = (() => {
     let content = null;
     if (header.kind === "note") {
       if (!Object.prototype.hasOwnProperty.call(header, "content")
-          || !hasOnlyKeys(header.content, ["title", "markdown", "parts"])
+          || !hasOnlyKeys(header.content, ["title", "markdown", "parts", "attachments"])
           || typeof header.content.title !== "string"
           || codePointLength(header.content.title) > MAX_TITLE_CHARS
           || !Array.isArray(header.content.parts)) {
@@ -452,7 +452,31 @@ const autonet = (() => {
         ranges.push(range);
         return { ref: part.ref, mime: part.mime, ...range };
       });
-      content = { title: header.content.title, markdown, parts };
+      let attachments = [];
+      if (Object.prototype.hasOwnProperty.call(header.content, "attachments")) {
+        if (!Array.isArray(header.content.attachments)) {
+          throw new Error("invalid note attachments");
+        }
+        const manifestRefs = new Set();
+        attachments = header.content.attachments.map((entry) => {
+          if (!hasOnlyKeys(entry, ["ref", "name", "mime", "raw_sha256", "total_size", "oversize"])
+              || typeof entry.ref !== "string" || !entry.ref || manifestRefs.has(entry.ref)
+              || typeof entry.name !== "string"
+              || typeof entry.mime !== "string" || !entry.mime
+              || typeof entry.raw_sha256 !== "string"
+              || !Number.isSafeInteger(entry.total_size) || entry.total_size < 0
+              || typeof entry.oversize !== "boolean") {
+            throw new Error("invalid attachment manifest entry");
+          }
+          manifestRefs.add(entry.ref);
+          return {
+            ref: entry.ref, name: entry.name, mime: entry.mime,
+            raw_sha256: entry.raw_sha256, total_size: entry.total_size,
+            oversize: entry.oversize,
+          };
+        });
+      }
+      content = { title: header.content.title, markdown, parts, attachments };
     } else if (Object.prototype.hasOwnProperty.call(header, "content")) {
       throw new Error("content forbidden for design");
     }
