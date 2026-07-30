@@ -658,15 +658,26 @@ def _verify_local_publish_authority(
         cert = DelegationCert.from_json(cert_wire)
         if cert.child_pub != signer:
             return "approval cert does not delegate to its signer"
-        mid = (cert.not_before + cert.not_after) // 2
+        # Verify at REQUEST time (the same `now` as the freshness check).
+        # An earlier version passed the cert's own midpoint, which made the
+        # validity window tautologically satisfied — an expired or
+        # not-yet-valid cert would pass (Codex D19 finding #1).
         verify_chain(
-            cert, binding["root_pub"], org=binding["org_uuid"], now=mid,
+            cert, binding["root_pub"], org=binding["org_uuid"], now=now,
             required_scope=required_scope,
         )
     except (IdkitError, MalformedError) as exc:
         return (
             f"approval cert does not chain to this org's root with "
             f"{required_scope}: {exc}")
+    # Rung-1 transport pins the subject kind to 'operator' carrying the
+    # persona public key in subject.id (settled D19 representation). A
+    # non-operator cert (agent/persona kind) whose id happens to name an
+    # authorized persona must not reach mint (Codex D19 finding #4).
+    if cert.subject.kind != "operator":
+        return (
+            f"approval subject kind {cert.subject.kind!r} cannot publish or "
+            "revoke on this transport (operator subjects only)")
     if {"kind": cert.subject.kind, "id": cert.subject.id} != subject:
         return "approval subject does not match its certificate"
     # Authenticated: subject.id is now trustworthy for the fold, which
@@ -933,13 +944,21 @@ async def _execute_link_revoke(row: dict, decision: dict) -> dict:
     req = row["request"]
     org = req.get("org")
     token = req.get("token", "")
-    # An org:join invitation grant is revoked over HTTP (option A); every
-    # other (share-link) grant is revoked over the tunnel. The cached grant
-    # names which — an unknown token defaults to the tunnel path.
+    # Route by the cached grant's type: a KNOWN share-link goes over the
+    # tunnel; org:join AND any token we cannot positively classify go over
+    # HTTP. Defaulting the unknown/cache-miss case to the tunnel (the prior
+    # behaviour) let an uncached org:join token reach the tunnel revoke,
+    # violating option A's "org:join never rides the tunnel" (Codex D19
+    # finding #5). HTTP is the safe default: the registry's DELETE revokes
+    # any token by id, so an uncached share link still revokes correctly,
+    # and an org:join token never crosses to the tunnel.
     grant = _cached_grant(token, org)
-    if grant and grant.get("target_type") == "org:join":
-        return await _execute_link_revoke_http(row, decision)
-    return await _execute_share_link_revoke_tunnel(row, decision)
+    is_share_link = bool(
+        grant and grant.get("target_type")
+        and grant.get("target_type") != "org:join")
+    if is_share_link:
+        return await _execute_share_link_revoke_tunnel(row, decision)
+    return await _execute_link_revoke_http(row, decision)
 
 
 async def _execute_share_link_revoke_tunnel(row: dict, decision: dict) -> dict:
