@@ -26,6 +26,7 @@ const autonet = (() => {
   const MAX_MESSAGE_SIZE = 64 * 1024 * 1024;
   const MAX_ARTIFACT_BYTES = 48 * 1024 * 1024;
   const MAX_TITLE_CHARS = 500;
+  const MAX_ATTACHMENT_NAME_CHARS = 255;
   const MAX_CHAIN_DEPTH = 16;
   const HANDSHAKE_VERSION = 1;
   // Bound establishing a live channel (connect + handshake). The relay may
@@ -461,9 +462,9 @@ const autonet = (() => {
         attachments = header.content.attachments.map((entry) => {
           if (!hasOnlyKeys(entry, ["ref", "name", "mime", "raw_sha256", "total_size", "oversize"])
               || typeof entry.ref !== "string" || !entry.ref || manifestRefs.has(entry.ref)
-              || typeof entry.name !== "string"
+              || typeof entry.name !== "string" || codePointLength(entry.name) > MAX_ATTACHMENT_NAME_CHARS
               || typeof entry.mime !== "string" || !entry.mime
-              || typeof entry.raw_sha256 !== "string"
+              || typeof entry.raw_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.raw_sha256)
               || !Number.isSafeInteger(entry.total_size) || entry.total_size < 0
               || typeof entry.oversize !== "boolean") {
             throw new Error("invalid attachment manifest entry");

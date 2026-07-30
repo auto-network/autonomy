@@ -530,11 +530,12 @@ class TestAttachmentManifest:
         assert [e["ref"] for e in manifest] == [
             a["id"] for a in note["attachments"]
         ]
+        import re as _re
         for entry in manifest:
             assert set(entry) == {
                 "ref", "name", "mime", "raw_sha256", "total_size", "oversize"
             }
-            assert entry["raw_sha256"] and isinstance(entry["raw_sha256"], str)
+            assert _re.fullmatch(r"[0-9a-f]{64}", entry["raw_sha256"])
             assert entry["total_size"] > 0
             assert entry["oversize"] is False
         names = {e["name"] for e in manifest}
@@ -551,11 +552,12 @@ class TestAttachmentManifest:
         assert b"PNG-GALLERY" not in body
 
     def test_membership_is_slots_not_source_id(self, env, tmp_path):
-        # Identical bytes stored under two notes deduplicate into one row that
-        # keeps the FIRST note's source_id. The second note must still offer
-        # the attachment: membership is the note's slots, not the row source_id.
-        shared = tmp_path / "shared.bin"
-        shared.write_bytes(b"SHARED-DEDUP-BYTES")
+        # Identical image bytes stored under two notes deduplicate into one row
+        # that keeps the FIRST note's source_id. The second note must still
+        # both LIST the attachment for download AND bundle it inline: both use
+        # slot membership, never the row source_id.
+        shared = tmp_path / "shared.png"
+        shared.write_bytes(b"PNG-SHARED-BYTES")
         note1 = graph_ops.create_note(
             "![a]({1})", title="N1", attachments=[str(shared)], org=ORG,
         )
@@ -570,8 +572,13 @@ class TestAttachmentManifest:
 
         token = _token(41)
         put_grant(token, note2["id"], "note")
-        header, _ = parse(serve(token))
+        header, body = parse(serve(token))
+        # Download manifest membership by slots.
         assert [e["ref"] for e in header["content"]["attachments"]] == [ref1]
+        # Inline bundling also by slots — the shared image is NOT dropped from
+        # note2 even though the row's source_id is note1 (the source_id bug).
+        assert [p["ref"] for p in header["content"]["parts"]] == [ref1]
+        assert sliced(body, header["content"]["parts"][0]) == b"PNG-SHARED-BYTES"
 
     def test_marks_oversize_above_the_cap(self, env, tmp_path, monkeypatch):
         big = tmp_path / "big.bin"
@@ -615,6 +622,83 @@ class TestAttachmentManifest:
         put_grant(token, note["id"], "note")
         header, _ = parse(serve(token))
         assert header["content"]["attachments"] == []
+
+    def test_attachment_with_noncanonical_hash_is_omitted(self, env, tmp_path):
+        # raw_sha256 is load-bearing (client verify + resume identity); an
+        # attachment whose stored hash is not canonical 64-hex is failed
+        # closed — omitted from the manifest, never emitted with a bad hash.
+        from tools.graph.db import GraphDB
+
+        f = tmp_path / "corrupt.bin"
+        f.write_bytes(b"DATA")
+        note = graph_ops.create_note(
+            "body", title="Corrupt", attachments=[str(f)], org=ORG,
+        )
+        ref = note["attachments"][0]["id"]
+        db = GraphDB(os.environ["GRAPH_DB"])
+        try:
+            db.conn.execute(
+                "UPDATE attachments SET hash = ? WHERE id = ?", ("NOTHEX", ref)
+            )
+            db.conn.commit()
+        finally:
+            db.close()
+        token = _token(46)
+        put_grant(token, note["id"], "note")
+        header, _ = parse(serve(token))
+        assert header["content"]["attachments"] == []
+
+
+class TestManifestSerializerValidation:
+    """_serialize_artifact enforces the frozen manifest schema (auto-b94x6)."""
+
+    @staticmethod
+    def _artifact(entries: list) -> dict:
+        return {
+            "kind": "note", "viewer": b"V",
+            "content": {
+                "title": "T", "markdown": "m", "parts": [],
+                "attachments": entries,
+            },
+        }
+
+    def test_valid_entry_round_trips(self):
+        entry = {
+            "ref": "r1", "name": "doc.txt", "mime": "text/plain",
+            "raw_sha256": "a" * 64, "total_size": 0, "oversize": False,
+        }
+        header, _ = link_serving._serialize_artifact(self._artifact([entry]))
+        assert header["content"]["attachments"] == [entry]
+
+    @pytest.mark.parametrize("bad", [
+        {"raw_sha256": "deadbeef"},        # too short
+        {"raw_sha256": ""},                 # empty
+        {"raw_sha256": "A" * 64},          # uppercase (non-canonical)
+        {"raw_sha256": "a" * 63},          # 63 chars
+        {"raw_sha256": "g" * 64},          # non-hex char
+        {"total_size": True},               # bool is an int subclass
+        {"total_size": -1},                 # negative
+        {"ref": ""},                        # empty ref
+        {"mime": ""},                       # empty mime
+        {"name": "x" * 256},               # name too long
+        {"extra": True},                    # unknown key
+    ])
+    def test_invalid_entry_rejected(self, bad):
+        entry = {
+            "ref": "r1", "name": "n", "mime": "text/plain",
+            "raw_sha256": "a" * 64, "total_size": 1, "oversize": False,
+        }
+        entry.update(bad)
+        with pytest.raises(ValueError):
+            link_serving._serialize_artifact(self._artifact([entry]))
+
+    def test_duplicate_ref_rejected(self):
+        entry = {
+            "ref": "dup", "name": "n", "mime": "text/plain",
+            "raw_sha256": "a" * 64, "total_size": 1, "oversize": False,
+        }
+        with pytest.raises(ValueError):
+            link_serving._serialize_artifact(self._artifact([entry, dict(entry)]))
 
 
 class TestDesignResolvers:

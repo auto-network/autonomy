@@ -231,6 +231,13 @@ def _resolve_design(target_uuid: str):
 
 
 _GRAPH_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(graph://([^)]+)\)")
+# raw_sha256 is a SHA-256 of the file bytes: 64 lowercase hex chars (wire
+# protocol v1). It is load-bearing for the client's whole-file verification
+# and resume identity, so a non-canonical value is refused, never coerced.
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
+# A manifest display name is bounded; consumers re-sanitize before any
+# filesystem use (the same-origin parent owns path-safe naming).
+_MANIFEST_NAME_MAX = 255
 
 
 class _ArtifactTooLarge(ValueError):
@@ -330,6 +337,18 @@ def _resolve_note(target_uuid: str, org: str | None):
     source_id = source.get("id")
     if not isinstance(source_id, str) or not source_id:
         return None
+
+    # The note's content-bound attachment slots are the single membership set
+    # for BOTH inline image bundling and the download manifest. Using the row
+    # source_id would be wrong for bytes deduplicated across notes into one
+    # row: a note that shares an image with another note keeps that other
+    # note's source_id, so a source_id check would drop its own inline image.
+    slot_attachments = graph_ops.note_slot_attachments(
+        source_id, org=org, peers=[]
+    )
+    slot_ids = {
+        att["id"] for att in slot_attachments if isinstance(att.get("id"), str)
+    }
     parts_by_ref: dict[str, dict] = {}
 
     def replace_image(match: re.Match) -> str:
@@ -341,13 +360,13 @@ def _resolve_note(target_uuid: str, org: str | None):
                 requested_ref, org=org, peers=[]
             )
             mime = attachment.get("mime_type") if attachment else None
+            canonical_ref = attachment.get("id") if attachment else None
             if (
                 attachment
-                and attachment.get("source_id") == source_id
+                and canonical_ref in slot_ids
                 and isinstance(mime, str)
                 and mime.startswith("image/")
             ):
-                canonical_ref = attachment.get("id") or requested_ref
                 file_path = attachment.get("file_path")
                 if isinstance(file_path, str) and canonical_ref not in parts_by_ref:
                     remaining = AUTONET_MAX_ARTIFACT_BYTES - serialized_size
@@ -382,21 +401,27 @@ def _resolve_note(target_uuid: str, org: str | None):
     # another note still offers its own attachments. No bytes are carried here;
     # on-demand fetch (wire protocol v1) streams them over the channel.
     attachments: list[dict] = []
-    for att in graph_ops.note_slot_attachments(source_id, org=org, peers=[]):
+    for att in slot_attachments:
         ref = att.get("id")
         if not isinstance(ref, str) or not ref:
             continue
+        raw_sha256 = att.get("hash")
         size = att.get("size_bytes")
-        if not isinstance(size, int) or size < 0:
-            size = 0
+        # Fail closed: an attachment we cannot describe with a canonical
+        # raw_sha256 and a real byte size is omitted rather than offered with
+        # an unverifiable hash or a coerced size (bool excluded — it is an int
+        # subclass but never a valid size).
+        if not (isinstance(raw_sha256, str) and _SHA256_HEX_RE.fullmatch(raw_sha256)):
+            continue
+        if type(size) is not int or size < 0:
+            continue
         name = att.get("filename")
         mime = att.get("mime_type")
-        raw_sha256 = att.get("hash")
         attachments.append({
             "ref": ref,
-            "name": name if isinstance(name, str) else "",
+            "name": name[:_MANIFEST_NAME_MAX] if isinstance(name, str) else "",
             "mime": mime if isinstance(mime, str) and mime else "application/octet-stream",
-            "raw_sha256": raw_sha256 if isinstance(raw_sha256, str) else "",
+            "raw_sha256": raw_sha256,
             "total_size": size,
             "oversize": size > AUTONET_MAX_ATTACHMENT_BYTES,
         })
@@ -510,10 +535,11 @@ def _serialize_artifact(artifact: dict) -> tuple[dict, bytes]:
                 oversize = entry.get("oversize")
                 if (
                     not isinstance(ref, str) or not ref or ref in manifest_refs
-                    or not isinstance(name, str)
+                    or not isinstance(name, str) or len(name) > _MANIFEST_NAME_MAX
                     or not isinstance(mime, str) or not mime
                     or not isinstance(raw_sha256, str)
-                    or not isinstance(total_size, int) or total_size < 0
+                    or not _SHA256_HEX_RE.fullmatch(raw_sha256)
+                    or type(total_size) is not int or total_size < 0
                     or not isinstance(oversize, bool)
                 ):
                     raise ValueError("invalid attachment manifest entry")

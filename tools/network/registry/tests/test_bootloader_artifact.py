@@ -11,6 +11,7 @@ import pytest
 
 
 AUTONET_JS = Path(__file__).resolve().parents[1] / "bootloader" / "autonet.js"
+_EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 
 def _validate(cases: list[dict]) -> list[bool]:
@@ -67,9 +68,9 @@ def test_valid_note_and_design_headers_are_accepted():
     with_manifest = _note_header()
     with_manifest["content"]["attachments"] = [
         {"ref": "a1", "name": "doc.txt", "mime": "text/plain",
-         "raw_sha256": "deadbeef", "total_size": 100, "oversize": False},
+         "raw_sha256": "a" * 64, "total_size": 100, "oversize": False},
         {"ref": "a2", "name": "", "mime": "application/octet-stream",
-         "raw_sha256": "", "total_size": 0, "oversize": True},
+         "raw_sha256": _EMPTY_SHA256, "total_size": 0, "oversize": True},
     ]
     empty_manifest = _note_header()
     empty_manifest["content"]["attachments"] = []
@@ -127,20 +128,28 @@ def test_malformed_ranges_refs_and_unions_are_rejected():
     cases.append({"header": missing_content, "size": 20})
 
     def add_manifest(mutator):
+        # Base entry is valid so each mutation isolates exactly one defect.
         header = _note_header()
         header["content"]["attachments"] = [{
             "ref": "a1", "name": "n", "mime": "text/plain",
-            "raw_sha256": "x", "total_size": 1, "oversize": False,
+            "raw_sha256": "a" * 64, "total_size": 1, "oversize": False,
         }]
         mutator(header["content"])
         cases.append({"header": header, "size": 20})
 
     add_manifest(lambda c: c["attachments"][0].update(total_size=-1))
     add_manifest(lambda c: c["attachments"][0].update(total_size=0.5))
+    add_manifest(lambda c: c["attachments"][0].update(total_size=True))
     add_manifest(lambda c: c["attachments"][0].update(oversize="yes"))
     add_manifest(lambda c: c["attachments"][0].update(ref=""))
     add_manifest(lambda c: c["attachments"][0].update(mime=""))
     add_manifest(lambda c: c["attachments"][0].pop("raw_sha256"))
+    add_manifest(lambda c: c["attachments"][0].update(raw_sha256="deadbeef"))
+    add_manifest(lambda c: c["attachments"][0].update(raw_sha256=""))
+    add_manifest(lambda c: c["attachments"][0].update(raw_sha256="A" * 64))
+    add_manifest(lambda c: c["attachments"][0].update(raw_sha256="a" * 63))
+    add_manifest(lambda c: c["attachments"][0].update(raw_sha256="g" * 64))
+    add_manifest(lambda c: c["attachments"][0].update(name="x" * 256))
     add_manifest(lambda c: c["attachments"][0].update(extra=True))
     add_manifest(lambda c: c["attachments"].append(dict(c["attachments"][0])))
     add_manifest(lambda c: c.update(attachments="not-a-list"))
