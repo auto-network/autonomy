@@ -8553,7 +8553,7 @@ async def page_test_input(request):
     from pathlib import Path
     no_cache = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
     # Baked reference prototype (graph attachment 976c334a-97e)
-    path = Path(__file__).resolve().parent.parent.parent / "data/test-fixtures/input-prototype.html"
+    path = Path(__file__).resolve().parent / "test_fixtures/input-prototype.html"
     try:
         return HTMLResponse(path.read_text(), headers=no_cache)
     except FileNotFoundError:

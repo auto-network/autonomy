@@ -5,6 +5,17 @@ harness-artifacts/
 *.pyc
 *.egg-info/
 
+# ── data/ is runtime + generated state — ignore the ENTIRE tree ─────────
+# Nothing under data/ is source: managed repo clones, per-session worktrees,
+# machine-local key material, regenerable DBs (+ their multi-GB backups —
+# staging those once orphaned 12 GiB into .git), operator uploads, per-org
+# graph DBs, runtime state, session output, launch-timeline traces, and
+# scraped conversations. The app recreates the subdirs it needs on first run;
+# any fixture that must be tracked lives under tools/, never here. The specific
+# data/ rules kept below are redundant with this blanket rule but document
+# *why* each category must never be committed.
+/data/
+
 # Managed project clones + per-session worktrees (workspace_manager)
 data/repos/
 data/worktrees/
@@ -57,8 +68,8 @@ data/*.db.*
 data/backups/
 data/*.log
 data/*.pid
-# Session runtime output (container /workspace/output handoff dirs).
-# NOT data/session-traces/ — that has deliberately tracked files.
+# Session runtime output (container /workspace/output handoff dirs) and
+# per-session launch-timeline traces (data/session-traces/) — all runtime.
 data/agent-runs/
 
 # Beads (Dolt local state — .beads/issues.jsonl IS tracked via git add -f)
