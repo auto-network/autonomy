@@ -1,5 +1,0 @@
-{"t": "2026-07-08T18:17:39.436107+00:00", "mono_ms": 0, "phase": "enter", "dt_ms": 0, "project": null, "session_type": "host", "primer": false}
-{"t": "2026-07-08T18:17:39.449620+00:00", "mono_ms": 13, "phase": "launch-session-built", "dt_ms": 13}
-{"t": "2026-07-08T18:17:39.455846+00:00", "mono_ms": 19, "phase": "harness_starting", "dt_ms": 19}
-{"t": "2026-07-08T18:17:39.959956+00:00", "mono_ms": 523, "phase": "response-ready", "dt_ms": 523}
-{"t": "2026-07-08T18:17:39.960051+00:00", "mono_ms": 523, "phase": "returned", "dt_ms": 523, "outcome": "host_immediate"}

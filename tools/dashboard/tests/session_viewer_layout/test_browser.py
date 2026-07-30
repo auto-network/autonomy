@@ -282,13 +282,13 @@ class TestEditable:
 
 class TestPrototypeRoute:
     def test_test_input_route_returns_html(self, h):
-        """/test/input must serve the baked prototype (data/test-fixtures/input-prototype.html)."""
+        """/test/input must serve the baked prototype (tools/dashboard/test_fixtures/input-prototype.html)."""
         import httpx
         resp = httpx.get(f"http://localhost:{TEST_PORT}/test/input", timeout=5)
         assert resp.status_code == 200
         assert "Session Viewer — Input Prototype" in resp.text or \
                "input-bar" in resp.text or "sv-input" in resp.text, (
-            "Prototype HTML did not load from baked file at data/test-fixtures/"
+            "Prototype HTML did not load from baked file at tools/dashboard/test_fixtures/"
         )
 
 
