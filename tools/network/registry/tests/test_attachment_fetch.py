@@ -327,3 +327,106 @@ def test_zero_byte_attachment_yields_one_empty_eof_frame(env, tmp_path):
     assert len(msgs) == 1
     o, flags, chunk = _decode_body(msgs[0])
     assert (o, flags, chunk) == (0, LAST_IN_WINDOW | EOF, b"")
+
+
+# ── version type confusion (bool is an int subclass) ───────────────
+
+
+def test_boolean_version_is_bad_request_not_a_body(env, tmp_path):
+    note, ref = _note_with_attachment(tmp_path, os.urandom(CHUNK))
+    token = _token(23)
+    put_grant(token, note["id"], "note")
+    # {"v": true, ...} must NOT slip past the version gate and serve bytes.
+    fetch = {"v": True, "op": "attachment.fetch", "ref": ref,
+             "offset": 0, "length": CHUNK}
+    assert _messages(fetch, token) == [link_serving.BAD_REQUEST]
+    cancel = {"v": True, "op": "attachment.cancel", "ref": ref}
+    assert _messages(cancel, token) == [link_serving.BAD_REQUEST]
+
+
+# ── operational faults become a typed error, not a channel teardown ──
+
+
+class _FakeHandle:
+    def __init__(self, reads):
+        self._reads = list(reads)
+        self.closed = False
+
+    def read(self, n):
+        item = self._reads.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def close(self):
+        self.closed = True
+
+
+def test_db_fault_during_authorization_yields_unavailable(env, tmp_path, monkeypatch):
+    note, ref = _note_with_attachment(tmp_path, os.urandom(CHUNK))
+    token = _token(24)
+    put_grant(token, note["id"], "note")
+
+    def boom(*a, **k):
+        raise OSError("database is locked")
+
+    monkeypatch.setattr(graph_ops, "note_slot_attachments", boom)
+    # Must be one typed error, not an exception that tears the channel down.
+    _assert_error(_fetch(token, ref, 0), "unavailable")
+
+
+def test_open_fault_after_authorization_yields_unavailable(env, tmp_path, monkeypatch):
+    note, ref = _note_with_attachment(tmp_path, os.urandom(CHUNK))
+    token = _token(25)
+    put_grant(token, note["id"], "note")
+
+    def boom(path, offset):
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(attachment_serving, "_open_at", boom)
+    _assert_error(_fetch(token, ref, 0), "unavailable")
+
+
+def test_read_fault_yields_unavailable(env, tmp_path, monkeypatch):
+    note, ref = _note_with_attachment(tmp_path, os.urandom(CHUNK))
+    token = _token(26)
+    put_grant(token, note["id"], "note")
+    monkeypatch.setattr(
+        attachment_serving, "_open_at",
+        lambda path, offset: _FakeHandle([OSError("read error")]),
+    )
+    _assert_error(_fetch(token, ref, 0), "unavailable")
+
+
+def test_file_shrinks_after_one_chunk_yields_prefix_then_unavailable(
+    env, tmp_path, monkeypatch
+):
+    note, ref = _note_with_attachment(tmp_path, os.urandom(2 * CHUNK))
+    token = _token(27)
+    put_grant(token, note["id"], "note")
+    # First read is a full chunk; the file then "shrinks" (short read).
+    monkeypatch.setattr(
+        attachment_serving, "_open_at",
+        lambda path, offset: _FakeHandle([b"a" * CHUNK, b""]),
+    )
+    msgs = _fetch(token, ref, 0)
+    assert len(msgs) == 2
+    o, flags, chunk = _decode_body(msgs[0])
+    assert (o, flags, chunk) == (0, 0, b"a" * CHUNK)  # valid prefix frame
+    err = json.loads(msgs[1])
+    assert err["op"] == "error" and err["code"] == "unavailable"
+
+
+# ── length above the window cap clamps (frozen protocol), never rejects ──
+
+
+def test_length_above_window_clamps_to_window(env, tmp_path):
+    data = os.urandom(WINDOW + CHUNK)
+    note, ref = _note_with_attachment(tmp_path, data)
+    token = _token(28)
+    put_grant(token, note["id"], "note")
+    msgs = _fetch(token, ref, 0, 100 * CHUNK)  # far above the 8 MiB cap
+    served = b"".join(_decode_body(m)[2] for m in msgs)
+    assert len(served) == WINDOW  # clamped, not the whole file, not refused
+    o, flags, _ = _decode_body(msgs[-1])
+    assert flags & LAST_IN_WINDOW and not (flags & EOF)

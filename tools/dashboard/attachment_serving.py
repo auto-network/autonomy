@@ -17,6 +17,7 @@ and the byte reads are all blocking work kept off the event loop.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 from typing import AsyncIterator, Optional
 
@@ -140,7 +141,16 @@ async def fetch_stream(
     offset = request["offset"]
     requested = request.get("length", WINDOW)
 
-    att, err = await asyncio.to_thread(_authorize, token, ref, org, clock)
+    # Authorization touches the grant cache, sqlite, and the filesystem; an
+    # operational fault there must become one typed error that ends this
+    # exchange, never an exception that tears down the whole channel. except
+    # Exception deliberately does not catch CancelledError/GeneratorExit
+    # (both BaseException), so cancellation still unwinds normally.
+    try:
+        att, err = await asyncio.to_thread(_authorize, token, ref, org, clock)
+    except Exception:
+        yield _error(ref, "unavailable")
+        return
     if err is not None:
         yield _error(ref, err)
         return
@@ -171,15 +181,26 @@ async def fetch_stream(
     effective_end = min(offset + min(requested, WINDOW), total_size)
 
     path = att["_resolved_path"]
-    handle = await asyncio.to_thread(_open_at, path, offset)
+    try:
+        handle = await asyncio.to_thread(_open_at, path, offset)
+    except Exception:
+        # The file was authorized but is gone/unreadable now (e.g. deleted
+        # after the slot lookup) — one typed error, channel stays up.
+        yield _error(ref, "unavailable")
+        return
     try:
         cursor = offset
         while cursor < effective_end:
             to_read = min(CHUNK, effective_end - cursor)
-            chunk = await asyncio.to_thread(handle.read, to_read)
+            try:
+                chunk = await asyncio.to_thread(handle.read, to_read)
+            except Exception:
+                yield _error(ref, "unavailable")
+                return
             if len(chunk) != to_read:
-                # File shrank/changed under us — refuse rather than serve a
-                # short frame the client would misassemble.
+                # File shrank/changed under us — end the exchange after the
+                # valid prefix rather than serve a short frame the client
+                # would misassemble.
                 yield _error(ref, "unavailable")
                 return
             chunk_end = cursor + len(chunk)
@@ -191,7 +212,8 @@ async def fetch_stream(
             yield _body_frame(cursor, flags, chunk)
             cursor = chunk_end
     finally:
-        handle.close()
+        with contextlib.suppress(Exception):
+            handle.close()
 
 
 def _open_at(path: str, offset: int):
