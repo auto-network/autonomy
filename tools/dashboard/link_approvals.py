@@ -121,7 +121,13 @@ def _org_has_key(org: str | None) -> bool:
         members = settings_ops.read_owned_set(NETWORK_ORG_KEY_SET_ID, org=org).members
     except Exception:
         return False
-    return any(isinstance(m.payload, dict) and m.payload.get("armored_private_key")
+    # The org root is stored either password-armored (armored_private_key) or
+    # sealed to the owner's personal-root-derived X25519 key (sealed_root_key,
+    # the B4 Option-B scheme). Recognise BOTH — matching network_routes.py's
+    # keyed-check and the browser's _openOrgRoot — so an org keyed with the
+    # sealed scheme is still offered inline first-publish registration.
+    return any(isinstance(m.payload, dict) and
+               (m.payload.get("armored_private_key") or m.payload.get("sealed_root_key"))
                for m in members)
 
 
