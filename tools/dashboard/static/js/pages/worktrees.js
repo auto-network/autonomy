@@ -2495,8 +2495,13 @@
 
       // ── "Remember for this session": passphrase encrypted with a
       // non-extractable AES-GCM key (kept in IndexedDB so its raw bytes never
-      // touch JS); ciphertext + expiry in sessionStorage (clears on tab close).
-      _REMEMBER_TTL_MS: 15 * 60 * 1000,
+      // touch JS); ciphertext in sessionStorage.
+      //
+      // The lifetime IS the tab session — sessionStorage drops the ciphertext
+      // on tab close, which is the bound the checkbox promises. There is no
+      // additional timeout: re-entering the passphrase every few minutes buys
+      // nothing once the tab already holds it, and the expiry only trained the
+      // operator to retype it.
       _idb() {
         return new Promise((res, rej) => {
           const req = indexedDB.open('sign-remember', 1);
@@ -2520,7 +2525,7 @@
         const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(passphrase));
         await this._idbOp('readwrite', (s) => s.put(key, 'k'));
         sessionStorage.setItem('sign-remember', JSON.stringify({
-          iv: Array.from(iv), ct: Array.from(new Uint8Array(ct)), exp: Date.now() + this._REMEMBER_TTL_MS,
+          iv: Array.from(iv), ct: Array.from(new Uint8Array(ct)),
         }));
       },
       async _rememberedPassphrase() {
@@ -2528,7 +2533,6 @@
           const raw = sessionStorage.getItem('sign-remember');
           if (!raw) return null;
           const blob = JSON.parse(raw);
-          if (!blob.exp || Date.now() > blob.exp) { await this._rememberClear(); return null; }
           const key = await this._idbOp('readonly', (s) => s.get('k'));
           if (!key) return null;
           const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(blob.iv) }, key, new Uint8Array(blob.ct));
