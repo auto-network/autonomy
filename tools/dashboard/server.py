@@ -8975,6 +8975,10 @@ async def _signal_session_merge_celebration(
         f"You got merged! {repo_name}@{short_sha}"
         + (f" — {first_line}" if first_line else "")
         + suffix_by_kind.get(kind, "")
+        + "\nReminder: the dashboard hot-reloads — merged Python + templates are"
+          " LIVE immediately, no redeploy. Only a browser/PWA client restart is"
+          " needed to pick up changed static JS. (Non-dashboard components —"
+          " Go CLI, registry — deploy on their own paths.)"
     )
     try:
         await _send_dashboard_ui_crosstalk(target_session, message)
