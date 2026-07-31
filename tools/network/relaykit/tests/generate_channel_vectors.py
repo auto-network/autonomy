@@ -15,12 +15,14 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from tools.network.idkit import KeyPair, Subject, canonical_json, issue_cert
+from tools.network.idkit.certs import DelegationCert
 from tools.network.relaykit.channel import (
     CHUNK_SIZE,
     DIR_C2S,
@@ -166,7 +168,7 @@ def _build_handshake(name: str, *, chain: str):
     derived = {
         "transcript": transcript, "key_c2s": key_c2s, "key_s2c": key_s2c,
         "client_pub": client_pub, "server_pub": server_pub, "root_pub": root.public_hex,
-        "server_hello": server_hello, "cert_wire": cert_wire,
+        "root_kp": root, "server_hello": server_hello, "cert_wire": cert_wire,
     }
     return fixture, derived
 
@@ -334,6 +336,54 @@ def _negatives(d: dict) -> list:
     noncanon_cert = json.loads(hello)
     noncanon_cert["cert"] = '{"child_pub":"x"}'   # not a canonical cert wire
     hello_case("noncanonical_cert", canonical_json(noncanon_cert), "noncanonical_cert")
+
+    # A VALID chain under the REAL pinned root, but the leaf lacks tunnel:serve —
+    # verify_chain must reject on the required-scope gate, distinct from a
+    # wrong-root failure (note 8b745204 requirement (a)).
+    real_root = d["root_kp"]
+    ms_leaf = _keypair("negative/missing_scope/leaf")
+    ms_cert = issue_cert(real_root, ms_leaf.public_hex, scope=("link:read",), org=ORG,
+                         subject=Subject("operator", "op-noserve"),
+                         not_before=NOW - 900, not_after=NOW + 3600)
+    ms_sig = ms_leaf.sign_hex(_signed_payload(ORG, TOKEN, cp, sp))
+    hello_case("missing_tunnel_serve_scope",
+               _server_hello_bytes(sp, ms_cert.to_json().decode("ascii"), ms_sig),
+               "invalid_scope")
+
+    # Two-hop chains that DEFEAT narrowing. issue_cert refuses to mint these, so
+    # each defective leaf is signed directly with the parent key past that guard
+    # (as _aesgcm_record bypasses the flag guard) — note 8b745204 requirement (b).
+    def craft_child(parent_kp, parent_cert, child_pub, *, scope, not_before, not_after, sid):
+        unsigned = DelegationCert(
+            child_pub=child_pub, scope=tuple(sorted(set(scope))), org=ORG,
+            subject=Subject("operator", sid), not_before=not_before,
+            not_after=not_after, sig="0" * 128, parent_cert=parent_cert)
+        return replace(unsigned, sig=parent_kp.sign_hex(unsigned.signing_input()))
+
+    esc_mid_kp = _keypair("negative/narrow/mid")
+    esc_leaf_kp = _keypair("negative/narrow/leaf")
+    esc_mid = issue_cert(real_root, esc_mid_kp.public_hex, scope=("tunnel:serve",), org=ORG,
+                         subject=Subject("operator", "op-mid"),
+                         not_before=NOW - 3600, not_after=NOW + 172800)
+
+    # (b1) scope escalation: leaf claims link:read the parent never held.
+    scope_esc = craft_child(esc_mid_kp, esc_mid, esc_leaf_kp.public_hex,
+                            scope=("link:read", "tunnel:serve"),
+                            not_before=NOW - 1800, not_after=NOW + 86400, sid="op-escalate")
+    se_sig = esc_leaf_kp.sign_hex(_signed_payload(ORG, TOKEN, cp, sp))
+    hello_case("scope_escalation_two_hop",
+               _server_hello_bytes(sp, scope_esc.to_json().decode("ascii"), se_sig),
+               "invalid_narrowing")
+
+    # (b2) validity-window escalation: leaf not_after reaches the parent's
+    # (>= is rejected — the child window must be strictly nested).
+    win_esc = craft_child(esc_mid_kp, esc_mid, esc_leaf_kp.public_hex,
+                          scope=("tunnel:serve",),
+                          not_before=NOW - 1800, not_after=NOW + 172800, sid="op-window")
+    we_sig = esc_leaf_kp.sign_hex(_signed_payload(ORG, TOKEN, cp, sp))
+    hello_case("window_escalation_two_hop",
+               _server_hello_bytes(sp, win_esc.to_json().decode("ascii"), we_sig),
+               "invalid_narrowing")
 
     # ---- record_open negatives ----
     def rec_open(name, records, expected, *, key=ks, transcript=t, direction="s2c",

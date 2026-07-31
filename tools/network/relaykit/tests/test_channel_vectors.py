@@ -114,9 +114,9 @@ def test_required_negative_catalogue_present(vectors):
     by_err = {n["expected_error"] for n in vectors["negative_cases"]}
     for required in ("wrong_root", "wrong_org", "invalid_signature", "unsupported_version",
                      "invalid_fields", "invalid_ephemeral", "invalid_encoding",
-                     "noncanonical_cert", "invalid_time", "authentication_failed",
-                     "sequence_mismatch", "reserved_flags", "message_too_large",
-                     "sequence_exhausted"):
+                     "noncanonical_cert", "invalid_time", "invalid_scope", "invalid_narrowing",
+                     "authentication_failed", "sequence_mismatch", "reserved_flags",
+                     "message_too_large", "sequence_exhausted"):
         assert required in by_err, f"missing negative category: {required}"
 
 
