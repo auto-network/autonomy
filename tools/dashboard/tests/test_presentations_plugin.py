@@ -354,6 +354,10 @@ const doc = helpers.iframeDocument({{
 assert(doc.includes('<section>Right</section>'));
 assert(!doc.includes('<section>Wrong</section>'));
 assert(doc.includes('scroll-snap-type:y mandatory'));
+assert(
+  fs.readFileSync({str(PLUGIN_DIR / 'page.js')!r}, 'utf8').includes("document.title = deckName ? deckName + ' \\u00b7 Present' : 'Present'"),
+  'opening a deck must surface its name in the page title',
+);
 assert(doc.includes('applySnapMode'), 'runtime must relax snapping for slides taller than the viewport');
 assert(doc.includes('y proximity'), 'tall-slide decks must downgrade mandatory snapping to proximity');
 assert(doc.includes('present-slide-gap'), 'adjacent slides must be separated by a visible gap');

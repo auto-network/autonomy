@@ -434,6 +434,8 @@
         },
 
         updateTopbar: function () {
+          var deckName = (this.deck && this.deck.name) || '';
+          document.title = deckName ? deckName + ' · Present' : 'Present';
           if (!window.Autonomy || typeof window.Autonomy.setTopbar !== 'function') return;
           window.Autonomy.setTopbar({
             html: topbarHtml(
