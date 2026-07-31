@@ -2430,11 +2430,33 @@
         },
       },
 
+      // Ids we have seen decided, by anyone on any client. The server round-trip
+      // below cannot close the race on its own: a re-delivered approval:pending
+      // that arrives while the decision is in flight still reads result === null
+      // and re-opens the overlay. This set is the local memory that makes a
+      // retransmit a no-op regardless of timing.
+      _decidedApprovals: null,
+
+      _markApprovalDecided(id) {
+        if (!id) return;
+        if (!this._decidedApprovals) this._decidedApprovals = new Set();
+        this._decidedApprovals.add(id);
+        // Dismiss if this overlay is the one showing it — the decision may have
+        // been made on another device, so this is not necessarily our own click.
+        if (this.approvalRequest && this.approvalRequest.id === id) {
+          this.approvalRequest = null;
+        }
+        if (this.selectedCommit && this.selectedCommit.approvalId === id) {
+          this.selectedCommit = null;
+        }
+      },
+
       async openApprovalRequest(id) {
+        if (this._decidedApprovals && this._decidedApprovals.has(id)) return;
         this.detailLoading = true;
         try {
           const r = await (await fetch('/api/approvals/' + encodeURIComponent(id))).json();
-          if (r.result !== null) return;   // already decided (e.g. stale SSE cache replay)
+          if (r.result !== null) { this._markApprovalDecided(id); return; }
           const kind = this._approvalKinds[r.kind];
           if (!kind) throw new Error('unknown approval kind: ' + r.kind);
           await kind.open(this, r);
@@ -2485,7 +2507,8 @@
             body: JSON.stringify({ approved: true, signature: sig }),
           });
           if (!resp.ok) throw new Error('the dashboard rejected the signature');
-          this.signPrompt = false; this.selectedCommit = null;
+          this.signPrompt = false;
+          this._markApprovalDecided(sc.approvalId);
           _toast('Commit signed', 'success');
           return true;
         } catch (e) {
@@ -2580,7 +2603,7 @@
                 'auto.network did not finish executing this approval. Try again.');
             }
           }
-          this.approvalRequest = null;
+          this._markApprovalDecided(req.id);
           _toast(req.op === 'revoke' ? 'Share link revoked'
             : (req.gate2 ? 'Share link published' : 'Approved'), 'success');
         } catch (e) {
@@ -2597,7 +2620,7 @@
         // Cancel must RESOLVE the server row (decline), not just hide it — else
         // the pending request re-surfaces on every reload. Declining executes nothing.
         const id = this.approvalRequest.id;
-        this.approvalRequest = null;
+        this._markApprovalDecided(id);
         if (id) {
           try {
             await fetch('/api/approvals/' + encodeURIComponent(id) + '/decision', {
@@ -2632,8 +2655,7 @@
             body: JSON.stringify({ approved: false }),
           });
         } catch (e) { /* best-effort */ }
-        this.approvalRequest = null;
-        if (this.selectedCommit && this.selectedCommit.approvalId) this.selectedCommit = null;
+        this._markApprovalDecided(id);
       },
 
       async openCommitAt(row, index, options) {
@@ -3103,8 +3125,16 @@
           this._globalApprovalHandler = (d) => {
             if (d && d.id && window.openApprovalOverlay) window.openApprovalOverlay(d.id);
           };
+          // The server broadcasts approval:decided to every client, so a
+          // decision taken on another device dismisses the overlay here too.
+          // This page renders the overlay; without this handler it was the one
+          // surface that never learned a request had been answered.
+          this._globalApprovalDecidedHandler = (d) => {
+            if (d && d.id) this._markApprovalDecided(d.id);
+          };
           if (typeof window.registerHandler === 'function') {
             window.registerHandler('approval:pending', this._globalApprovalHandler);
+            window.registerHandler('approval:decided', this._globalApprovalDecidedHandler);
           }
           this.loading = false;
         } else {
@@ -3223,6 +3253,10 @@
         if (this._globalApprovalHandler && typeof window.unregisterHandler === 'function') {
           window.unregisterHandler('approval:pending', this._globalApprovalHandler);
           this._globalApprovalHandler = null;
+          if (this._globalApprovalDecidedHandler) {
+            window.unregisterHandler('approval:decided', this._globalApprovalDecidedHandler);
+            this._globalApprovalDecidedHandler = null;
+          }
         }
         this.disconnectCommitStickyObserver();
         this.disconnectReviewTitleObserver();
