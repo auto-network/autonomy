@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import sys
 import time
@@ -163,3 +164,66 @@ def test_legacy_alias_supports_no_watch_and_explicit_api(monkeypatch):
 
     assert args["api"] == "https://explicit.example:7443"
     assert args["once"] is True
+
+
+def test_duplicate_name_conflict_explains_revision_and_force_paths(tmp_path, monkeypatch, capsys):
+    payload = {
+        "error": "duplicate_design_name",
+        "message": "A design named 'Test deck' already exists.",
+        "existing": [{
+            "design_id": "design-1",
+            "latest_revision_id": "revision-2",
+            "title": "Test deck",
+            "revision_count": 2,
+        }],
+    }
+
+    def urlopen(req, *, context, timeout):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            409,
+            "Conflict",
+            hdrs=None,
+            fp=io.BytesIO(json.dumps(payload).encode()),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.cmd_ui_design(_args(tmp_path))
+
+    captured = capsys.readouterr()
+    assert exc_info.value.code == 2
+    assert "Existing design: design-1" in captured.err
+    assert "--design design-1" in captured.err
+    assert "Intentional duplicate: re-run with --force" in captured.err
+    assert "Couldn't reach" not in captured.err
+
+
+def test_force_is_sent_to_design_and_present_activation(tmp_path, monkeypatch):
+    requests = []
+
+    def urlopen(req, *, context, timeout):
+        requests.append(req)
+        if req.full_url.endswith("/api/design"):
+            return _Response({"id": "revision-1"})
+        return _Response({"ok": True})
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    cli.cmd_ui_design(_args(tmp_path, force=True, present=True))
+
+    create_payload = json.loads(requests[0].data)
+    assert create_payload["force"] is True
+    assert requests[-1].full_url.endswith(
+        "/api/presentations/deck/revision-1/shown?force=true"
+    )
+
+
+def test_force_flag_is_available_on_primary_and_legacy_commands(monkeypatch):
+    monkeypatch.setattr(cli, "_in_container", lambda: False)
+    primary = _parse_ui_args(monkeypatch, ["ui-design", "Title", "/tmp/deck", "--force"])
+    legacy = _parse_ui_args(monkeypatch, ["ui-exp", "Title", "/tmp/deck", "--force"])
+
+    assert primary["force"] is True
+    assert legacy["force"] is True

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Design Studio"
+  short_description: "Publish and revise Design Studio designs"
+  default_prompt: "Use $design-studio to publish or update an Autonomy Design Studio design."

@@ -71,6 +71,15 @@ CREATE TABLE IF NOT EXISTS experiment_variants (
 _initialized = False
 
 
+class DuplicateDesignTitleError(ValueError):
+    """Raised when a new design would duplicate an existing design title."""
+
+    def __init__(self, title: str, existing: list[dict]):
+        super().__init__(f"A design named {title!r} already exists")
+        self.title = title
+        self.existing = existing
+
+
 def _ensure_init() -> None:
     global _initialized
     if not _initialized:
@@ -194,16 +203,23 @@ def create_design(
     alpine: bool = False,
     creator_session_id: str | None = None,
     creator_session_label: str | None = None,
+    force: bool = False,
 ) -> str:
     """Create a design revision with variants. Returns the revision UUID.
 
     If design_id is provided the new revision is appended to that design
     with revision_seq = MAX(revision_seq) + 1.  If omitted the revision is
-    standalone: design_id = its own id, revision_seq = 1.
+    standalone: design_id = its own id, revision_seq = 1.  A standalone
+    design whose title exactly matches the latest title of an existing design
+    is rejected unless ``force`` is true.
     """
     rev_id = str(uuid.uuid4())
     conn = _get_conn()
     try:
+        # Serialize the duplicate check with the insert. Without an immediate
+        # transaction, two concurrent publishers could both observe no match
+        # and create the same accidental duplicate.
+        conn.execute("BEGIN IMMEDIATE")
         if design_id:
             row = conn.execute(
                 "SELECT MAX(revision_seq) FROM designs WHERE design_id = ?",
@@ -211,6 +227,30 @@ def create_design(
             ).fetchone()
             revision_seq = (row[0] or 0) + 1
         else:
+            if not force:
+                rows = conn.execute(
+                    """\
+                    SELECT d.design_id, d.id AS latest_revision_id, d.title,
+                           (SELECT COUNT(*) FROM designs AS revisions
+                            WHERE revisions.design_id = d.design_id) AS revision_count
+                    FROM designs AS d
+                    JOIN (
+                        SELECT design_id, MAX(revision_seq) AS revision_seq
+                        FROM designs
+                        GROUP BY design_id
+                    ) AS latest
+                      ON latest.design_id = d.design_id
+                     AND latest.revision_seq = d.revision_seq
+                    WHERE d.title = ?
+                    ORDER BY d.created_at DESC, d.id DESC
+                    """,
+                    (title,),
+                ).fetchall()
+                if rows:
+                    raise DuplicateDesignTitleError(
+                        title,
+                        [{k: row[k] for k in row.keys()} for row in rows],
+                    )
             design_id = rev_id
             revision_seq = 1
         conn.execute(

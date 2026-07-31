@@ -77,6 +77,7 @@ from agents.workspace_manager import (
     sync_session_worktree_base,
     worktree_target_branch_name,
 )
+from agents.design_db import DuplicateDesignTitleError
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao.mock import (
         create_design, get_design, submit_results,
@@ -8678,6 +8679,7 @@ async def api_design_create(request):
     alpine = bool(body.get("alpine"))  # inject Alpine.js runtime in iframe
     creator_session_id = body.get("creator_session_id")
     creator_session_label = body.get("creator_session_label")
+    force = body.get("force") is True
 
     if not variants:
         return JSONResponse({"error": "At least one variant required"}, status_code=400)
@@ -8686,17 +8688,31 @@ async def api_design_create(request):
     if fixture and not isinstance(fixture, str):
         fixture = json.dumps(fixture)
 
-    rev_id = await asyncio.to_thread(
-        create_design,
-        title=title,
-        description=description,
-        fixture=fixture,
-        variants=variants,
-        design_id=design_id,
-        alpine=alpine,
-        creator_session_id=creator_session_id,
-        creator_session_label=creator_session_label,
-    )
+    try:
+        rev_id = await asyncio.to_thread(
+            create_design,
+            title=title,
+            description=description,
+            fixture=fixture,
+            variants=variants,
+            design_id=design_id,
+            alpine=alpine,
+            creator_session_id=creator_session_id,
+            creator_session_label=creator_session_label,
+            force=force,
+        )
+    except DuplicateDesignTitleError as exc:
+        return JSONResponse(
+            {
+                "error": "duplicate_design_name",
+                "message": (
+                    f"A design named {title!r} already exists. Append a revision "
+                    "with design_id, or retry with force=true."
+                ),
+                "existing": exc.existing,
+            },
+            status_code=409,
+        )
 
     # Broadcast to SSE so gallery pages auto-update without refresh
     design_data = await asyncio.to_thread(get_design, rev_id)

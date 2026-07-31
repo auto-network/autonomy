@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -3989,6 +3990,18 @@ def cmd_ui_design(args):
         resp = urllib.request.urlopen(req, context=ctx, timeout=30)
         return json.loads(resp.read())
 
+    def _http_error_payload(exc):
+        try:
+            return json.loads(exc.read().decode())
+        except Exception:
+            return {}
+
+    def _fail_http(exc, action):
+        payload = _http_error_payload(exc)
+        message = payload.get("message") or payload.get("error") or str(exc)
+        print(f"Dashboard refused to {action}: {message}", file=sys.stderr)
+        sys.exit(2)
+
     def _fail_connection(exc):
         print(
             f"Couldn't reach the dashboard at {api_base} ({exc}). "
@@ -4003,9 +4016,13 @@ def cmd_ui_design(args):
         /present. This is a SEPARATE step from creating the Design Studio
         design, and is the #1 recurring miss: a design that is only created
         (never activated) lives in the Studio and never reaches the Present
-        app. GET loads/creates the deck entry; POST /shown surfaces it."""
+        app. GET validates and loads the deck; POST /shown adds it to the
+        library."""
+        shown_endpoint = f"/api/presentations/deck/{did}/shown"
+        if getattr(args, "force", False):
+            shown_endpoint += "?force=true"
         for endpoint, method in ((f"/api/presentations/deck/{did}", "GET"),
-                                 (f"/api/presentations/deck/{did}/shown", "POST")):
+                                 (shown_endpoint, "POST")):
             req = urllib.request.Request(f"{api_base}{endpoint}", method=method)
             urllib.request.urlopen(req, context=ctx, timeout=10).read()
 
@@ -4044,11 +4061,35 @@ def cmd_ui_design(args):
         exp_data["creator_session_id"] = creator_session_id
     if args.design:
         exp_data["design_id"] = args.design
+    elif getattr(args, "force", False):
+        exp_data["force"] = True
     if fixture:
         exp_data["fixture"] = fixture
     print(f"  Publishing to {api_base}…")
     try:
         result = _post("/api/design", exp_data)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 409:
+            payload = _http_error_payload(exc)
+            print(f"Error: {payload.get('message') or 'duplicate design name'}", file=sys.stderr)
+            for existing in payload.get("existing") or []:
+                existing_id = existing.get("design_id") or ""
+                revision_id = existing.get("latest_revision_id") or existing_id
+                print(
+                    f"  Existing design: {existing_id} "
+                    f"({api_base}/design/{revision_id})",
+                    file=sys.stderr,
+                )
+                if existing_id:
+                    print(
+                        "  Publish a revision: graph ui-design "
+                        f"{shlex.quote(args.title)} {shlex.quote(str(dir_path))} "
+                        f"--design {shlex.quote(existing_id)}",
+                        file=sys.stderr,
+                    )
+            print("  Intentional duplicate: re-run with --force", file=sys.stderr)
+            sys.exit(2)
+        _fail_http(exc, "publish the design")
     except (urllib.error.URLError, OSError) as exc:
         _fail_connection(exc)
     exp_id = result["id"]
@@ -4074,6 +4115,22 @@ def cmd_ui_design(args):
         try:
             _activate_in_present(design_id)
             print(f"  ✓ Activated in Present — live now at {api_base}/present")
+        except urllib.error.HTTPError as exc:
+            if exc.code == 409:
+                payload = _http_error_payload(exc)
+                print(
+                    f"Error: {payload.get('message') or 'duplicate presentation name'}",
+                    file=sys.stderr,
+                )
+                for existing in payload.get("existing") or []:
+                    print(
+                        f"  Existing presentation: {existing.get('design_id') or ''} "
+                        f"({existing.get('name') or args.title})",
+                        file=sys.stderr,
+                    )
+                print("  Intentional duplicate: re-run with --force", file=sys.stderr)
+                sys.exit(2)
+            _fail_http(exc, "activate the presentation")
         except (urllib.error.URLError, OSError) as exc:
             _fail_connection(exc)
         except Exception as e:
@@ -5514,6 +5571,10 @@ def main():
                    help="Also activate the design in the Present app (register it in the /present "
                         "deck library). Use for presentations/boards meant to be shown; omit for "
                         "design-review mockups, which stay in the Design Studio.")
+    p.add_argument(
+        "--force", action="store_true",
+        help="Allow an intentional new design (and Present deck) whose title exactly matches an existing one",
+    )
     p.set_defaults(func=cmd_ui_design)
 
     # Legacy alias for backwards compat
@@ -5533,6 +5594,10 @@ def main():
     )
     p_alias.add_argument("--present", action="store_true",
                          help="Also activate the design in the Present app (deck library at /present).")
+    p_alias.add_argument(
+        "--force", action="store_true",
+        help="Allow an intentional new design (and Present deck) whose title exactly matches an existing one",
+    )
     p_alias.set_defaults(func=cmd_ui_design)
 
     # dispatch
