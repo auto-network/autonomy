@@ -372,6 +372,43 @@ graph set-role <designer|builder|researcher|reviewer|...>
 
 Update `set-topics` again whenever the phase shifts noticeably (e.g. "exploring auth options" → "implementing passkey flow" → "polishing UX"). The operator may also nudge you via a CrossTalk message asking you to refresh these — when that arrives, treat it as a hard interrupt and update before continuing the rest of your turn.
 
+## Customizing This Primer
+
+This file is **rendered, not stored**. `~/.claude/CLAUDE.md` is a read-only mount, regenerated from source every time a session starts — editing it in place changes nothing and the next session sees the old text. Change the source layer instead.
+
+Three layers compose this primer. Pick the one matching the scope of what you're adding:
+
+| Scope of the content | Source to edit |
+|---|---|
+| This workspace only (`{{ config.id }}`) | `autonomy.workspace.primer#1` Setting, key `{{ config.id }}` |
+| Every workspace `{{ org }}` owns | `autonomy.org.primer#1` Setting, key `{{ org }}` |
+| Every workspace on the platform | `agents/primers/workspace.md.j2` in the repo — a code change, not a Setting |
+
+Either Setting layer is assembled from the bare key **plus any number of named blocks** keyed `<key>:<block-name>`. Every block has its own `enabled` flag defaulting to true, so one section can be switched off without disturbing the rest and without losing the text.
+
+```bash
+graph set members autonomy.workspace.primer          # which blocks exist
+
+# add a block — workspace bodies open with their own `##`; org bodies
+# nest under a generated `##`, so start those at `###`
+python3 -c 'import json,sys; print(json.dumps({"markdown": sys.stdin.read()}))' > /tmp/block.json <<'MD'
+## My Section
+
+Body text.
+MD
+graph set add autonomy.workspace.primer#1 --key {{ config.id }}:<block> --from /tmp/block.json
+
+# park it / bring it back — a partial override, so `markdown` survives
+graph set override autonomy.workspace.primer {{ config.id }}:<block> --inline '{"enabled": false}'
+
+# preview the render without starting a session
+curl -sk -H "X-Graph-Org: {{ org }}" https://localhost:8080/api/primers/workspace/{{ config.id }}
+```
+
+Leave overlay rows at `raw` — promoting pushes the content onto peer orgs and undoes the isolation the Setting exists to provide. And a Setting edit only reaches *new* sessions; your own primer is fixed for the rest of this one, so verify with the preview above rather than re-reading this file.
+
+Full detail — block ordering, org isolation, capability primers, the whole render pipeline: `graph read {{ primer_customization_note }}`.
+
 ## Working Style
 {% if writable_repos %}
 - **You implement locally — you do not dispatch.** This is a writable workspace session. The normal flow is: discuss/design → optionally write a bead to *track* the work → implement it yourself in the worktree → commit and merge → mark the bead complete (`bd close <id>`). Use the bead system as a work-tracking ledger, **not** as a hand-off to auto-dispatch. Do not run `graph dispatch approve` / `graph wait` on your own work; that auto-dispatch path is being retired because providers are starting to charge extra for fully non-interactive sessions.

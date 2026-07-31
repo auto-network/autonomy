@@ -13,13 +13,25 @@ Setting row lives in the owning org's database and is read with
 ``peers=[]``, so it never crosses an org boundary.
 
 Keyed by workspace id, matching ``autonomy.workspace.turn_correction#1``.
+
+A layer may be split across several rows: the bare key ``<workspace-id>``
+plus any number of named blocks keyed ``<workspace-id>:<block-name>``.
+Every matching row renders, concatenated in ``(order, key)`` sequence.
+Each block carries its own ``enabled`` flag, so a single section can be
+switched off without touching the rest of the layer and without deleting
+the content.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from .org_primer import _validate_primer_payload, resolve_markdown  # noqa: F401
+from .org_primer import (  # noqa: F401
+    DEFAULT_ORDER,
+    _validate_primer_payload,
+    resolve_markdown,
+    resolve_order,
+)
 from .registry import SettingSchema, keyed_per_entity
 
 
@@ -69,6 +81,16 @@ class WorkspacePrimerV1(SettingSchema):
                 "row, so content can be parked without losing it."
             ),
             "default": True,
+        },
+        "order": {
+            "type": "integer",
+            "description": (
+                "Sort position among the blocks sharing this layer. "
+                "Lower renders earlier; ties break on key, so the "
+                "unsuffixed row always leads. Default 100 leaves room "
+                "on both sides without renumbering."
+            ),
+            "default": DEFAULT_ORDER,
         },
     }
 
