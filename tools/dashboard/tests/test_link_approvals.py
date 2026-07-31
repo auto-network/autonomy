@@ -424,6 +424,16 @@ def _seed_org_key(org, root):
     )
 
 
+def _seed_org_key_sealed(org, root):
+    """Store a keyed org via the B4 Option-B SEALED scheme (sealed_root_key,
+    no armored_private_key) — the state anchore was in when first-publish
+    registration was wrongly disabled — again WITHOUT a registry binding."""
+    import os
+
+    from tools.graph import org_ops
+    org_ops._seal_org_root_setting(org, root, os.urandom(32))
+
+
 def _isolated_orgs_with_peer_binding(tmp_path, monkeypatch, root, *test_orgs):
     """Own-DB-per-org isolation + a PEER (canonical) binding published by ORG.
 
@@ -473,6 +483,27 @@ def test_keyed_unregistered_org_enrich_is_registerable_not_c1(tmp_path, monkeypa
     assert "registry_request" not in enriched
     blob = json.dumps(enriched)
     assert "C1" not in blob and "ceremony" not in blob
+    from tools.graph.db import GraphDB
+    GraphDB.close_all_pooled()
+
+
+def test_sealed_keyed_unregistered_org_is_registerable(tmp_path, monkeypatch, root):
+    """Regression: an org keyed with the B4 Option-B SEALED scheme
+    (sealed_root_key, no armored_private_key) — anchore's real state — must be
+    recognised as keyed and offered inline first-publish registration, exactly
+    like an armored org. Before the fix, _org_has_key checked only
+    armored_private_key, so registration_required stayed False and the publish
+    dialog dead-ended with 'not registered' + a disabled Approve button."""
+    _isolated_orgs_with_peer_binding(tmp_path, monkeypatch, root, "sealedorg")
+    _seed_org_key_sealed("sealedorg", root)
+    enriched = link_approvals._enrich_link_publish({
+        "id": "r-sealed",
+        "request": {"org": "sealedorg", "target_uuid": TARGET,
+                    "target_type": "present", "meta": {"ttl": 3600}},
+    })
+    assert enriched["registration_required"] is True
+    assert not enriched.get("binding_error")
+    assert "registry_request" not in enriched
     from tools.graph.db import GraphDB
     GraphDB.close_all_pooled()
 

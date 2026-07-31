@@ -695,6 +695,7 @@ var signRegistryRequestCore;
     _internals: {
       canonicalJson: canonicalJson,
       decryptArmor: decryptArmor,
+      openOrgRoot: _openOrgRoot,
       provisionServeCert: provisionServeCert,
       installSession: _installSession,
       loadFromStore: _loadFromStore,

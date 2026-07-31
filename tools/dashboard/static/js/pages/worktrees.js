@@ -135,10 +135,13 @@
       throw new Error('Could not load this organization\'s signing key (' + keyResp.status + ').');
     }
     const orgKey = await keyResp.json();
-    if (!orgKey.armored_private_key) {
+    if (!orgKey.armored_private_key && !orgKey.sealed_root_key) {
       throw new Error('This organization has no signing key to register.');
     }
-    const opened = await S.decryptArmor(orgKey.armored_private_key, req.password);
+    // Open the root the same way the signer does — handles both the
+    // password-armored key and the sealed_root_key scheme (unsealed via the
+    // personal root). Returns the same {seed, rootPub} shape either way.
+    const opened = await S.openOrgRoot(orgKey, req.password);
     let rootKey = null;
     try {
       rootKey = await I.importSigningKey(opened.seed);
