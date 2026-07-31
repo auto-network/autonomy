@@ -30,6 +30,7 @@ from tools.graph.schemas.org_primer import (
     SCHEMA_REVISION as ORG_PRIMER_REVISION,
     SET_ID as ORG_PRIMER_SET_ID,
     resolve_markdown as resolve_primer_markdown,
+    resolve_order as resolve_primer_order,
 )
 from tools.graph.schemas.workspace_primer import (
     SCHEMA_REVISION as WORKSPACE_PRIMER_REVISION,
@@ -42,6 +43,14 @@ from tools.graph.commit_policy import (
 )
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "primers"
+
+#: Long-form companion to the template's "Customizing This Primer"
+#: section. Rendered for every org, so this note is kept ``published``
+#: — a ``curated`` or ``raw`` note is invisible to peer orgs and the
+#: pointer would be a dead link everywhere but ``autonomy``. Bare id,
+#: not a ``graph://`` URI — the template renders it into a literal
+#: ``graph read`` command, and that CLI does not accept the scheme.
+PRIMER_CUSTOMIZATION_NOTE = "6acb146f-d16"
 
 _env = jinja2.Environment(
     loader=jinja2.FileSystemLoader(str(TEMPLATE_DIR)),
@@ -270,16 +279,27 @@ def _overlay_markdown(
     revision: int,
     key: str,
 ) -> str:
-    """Resolve one primer overlay layer from its Setting row.
+    """Resolve one primer overlay layer from its Setting rows.
 
-    The Setting row lives in the workspace's own org DB and is read with
+    The Setting rows live in the workspace's own org DB and are read with
     ``peers=[]``, so overlay content never crosses an org boundary. That
     is the point of storing it here rather than in the platform repo,
     which is open source and has no per-org boundary at all.
 
-    Settings are the sole source: there is no file fallback. An overlay
-    with no Setting row for ``key`` renders nothing (empty string). The
-    pre-migration ``agents/orgs/<org>/primer.md`` /
+    A layer is assembled from every row whose key is either ``key``
+    itself or ``key:<block-name>``, concatenated in ``(order, key)``
+    sequence. Splitting a layer into named blocks is what makes a single
+    section independently switchable: each row carries its own
+    ``enabled`` flag, so parking one block leaves the others rendering
+    and leaves the parked text in place.
+
+    Rows that are disabled or blank contribute nothing and, importantly,
+    leave no blank gap — a layer whose every block is off resolves to
+    ``""``, which the template treats the same as no rows at all.
+
+    Settings are the sole source: there is no file fallback. A layer
+    with no matching row renders nothing. The pre-migration
+    ``agents/orgs/<org>/primer.md`` /
     ``agents/projects/<workspace>/primer.md`` files are no longer read.
     """
     try:
@@ -292,21 +312,31 @@ def _overlay_markdown(
     except Exception:
         return ""
 
-    if members is not None:
-        for member in members.members:
-            if member.key != key:
-                continue
-            payload = member.payload if isinstance(member.payload, dict) \
-                else None
-            return resolve_primer_markdown(payload)
-    return ""
+    if members is None:
+        return ""
+
+    prefix = f"{key}:"
+    blocks: list[tuple[int, str, str]] = []
+    for member in members.members:
+        if member.key != key and not member.key.startswith(prefix):
+            continue
+        payload = member.payload if isinstance(member.payload, dict) else None
+        body = resolve_primer_markdown(payload).rstrip()
+        if not body.strip():
+            continue
+        blocks.append((resolve_primer_order(payload), member.key, body))
+
+    blocks.sort(key=lambda block: (block[0], block[1]))
+    return "\n\n".join(body for _, _, body in blocks)
 
 
 def render_workspace_primer(config: WorkspaceV1) -> str:
     """Render the workspace runtime primer for a given project config.
 
     Args:
-        config: Parsed project entry from agents/projects.yaml.
+        config: The workspace's launch shape, resolved entirely from
+            graph Settings by ``agents.workspace_settings``. There is no
+            ``agents/projects.yaml``; it was removed.
 
     Returns:
         The rendered markdown primer as a string.
@@ -339,4 +369,5 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
         capability_blocks=capability_blocks,
         turn_correction=turn_correction,
         commit_policy=commit_policy,
+        primer_customization_note=PRIMER_CUSTOMIZATION_NOTE,
     )

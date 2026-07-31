@@ -15,6 +15,13 @@ Keyed by org slug. The key is redundant with the database the row lives
 in, but keeping it explicit matches ``autonomy.workspace.turn_correction#1``
 and makes a misfiled row obvious on inspection rather than silently
 rendering into the wrong org.
+
+A layer may be split across several rows: the bare key ``<org>`` plus any
+number of named blocks keyed ``<org>:<block-name>``. Every matching row
+renders, concatenated in ``(order, key)`` sequence. Each block carries its
+own ``enabled`` flag, which is the point of the split — a block can be
+switched off without touching the rest of the layer and without deleting
+the content.
 """
 
 from __future__ import annotations
@@ -30,6 +37,9 @@ from .registry import (
 
 SET_ID = "autonomy.org.primer"
 SCHEMA_REVISION = 1
+
+#: Sort position assumed for a row that does not set ``order``.
+DEFAULT_ORDER = 100
 
 
 SYNOPSIS = {
@@ -75,6 +85,16 @@ class OrgPrimerV1(SettingSchema):
             ),
             "default": True,
         },
+        "order": {
+            "type": "integer",
+            "description": (
+                "Sort position among the blocks sharing this layer. "
+                "Lower renders earlier; ties break on key, so the "
+                "unsuffixed row always leads. Default 100 leaves room "
+                "on both sides without renumbering."
+            ),
+            "default": DEFAULT_ORDER,
+        },
     }
 
     @classmethod
@@ -108,6 +128,15 @@ def _validate_primer_payload(cls: type, payload: Any) -> None:
         raise SchemaValidationError(
             f"{cls.__name__}: 'enabled' must be a bool"
         )
+    # bool is a subclass of int; reject it explicitly so a mistyped
+    # 'order': true reads as an error rather than sorting at position 1.
+    if "order" in payload and (
+        isinstance(payload["order"], bool)
+        or not isinstance(payload["order"], int)
+    ):
+        raise SchemaValidationError(
+            f"{cls.__name__}: 'order' must be an int"
+        )
 
 
 def resolve_markdown(payload: dict | None) -> str:
@@ -123,3 +152,18 @@ def resolve_markdown(payload: dict | None) -> str:
         return ""
     body = payload.get("markdown") or ""
     return body if isinstance(body, str) else ""
+
+
+def resolve_order(payload: dict | None) -> int:
+    """Return the sort position for ``payload``, or the default.
+
+    A row with no ``order`` sorts at :data:`DEFAULT_ORDER`, so blocks
+    added without thinking about placement land together in key order
+    rather than jumping to the front.
+    """
+    if not payload or not isinstance(payload, dict):
+        return DEFAULT_ORDER
+    order = payload.get("order", DEFAULT_ORDER)
+    if isinstance(order, bool) or not isinstance(order, int):
+        return DEFAULT_ORDER
+    return order

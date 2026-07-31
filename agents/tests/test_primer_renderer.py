@@ -950,6 +950,137 @@ def test_disabled_overlay_is_skipped(_turn_correction_org_env):
     assert "## Parked" not in out
 
 
+def test_customization_section_names_this_workspace(_turn_correction_org_env):
+    """Every session is told how to change its own primer, concretely.
+
+    The section is worthless if it shows placeholders — the agent must
+    see its own workspace id and org in the commands it is meant to run.
+    """
+    out = render_workspace_primer(_cfg(id="sample", graph_project="sample-org"))
+    assert "## Customizing This Primer" in out
+    assert "autonomy.workspace.primer#1 --key sample:<block>" in out
+    assert "X-Graph-Org: sample-org" in out
+    assert "/api/primers/workspace/sample" in out
+
+
+def test_customization_note_pointer_is_a_bare_id(_turn_correction_org_env):
+    """The pointer must be pasteable into ``graph read`` as rendered.
+
+    ``graph read`` rejects a ``graph://`` URI, so a scheme-prefixed
+    constant would render a command that fails for every agent that
+    follows it.
+    """
+    from agents.primer_renderer import PRIMER_CUSTOMIZATION_NOTE
+
+    assert not PRIMER_CUSTOMIZATION_NOTE.startswith("graph://")
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert f"graph read {PRIMER_CUSTOMIZATION_NOTE}" in out
+
+
+def test_named_blocks_render_alongside_the_bare_row(_turn_correction_org_env):
+    """A layer assembles from the bare key plus every ``key:block`` row."""
+    _write_overlay(
+        _WS_PRIMER_SET_ID, _WS_PRIMER_REV, "sample",
+        {"markdown": "## Runbooks\n\nbase layer"},
+    )
+    _write_overlay(
+        _WS_PRIMER_SET_ID, _WS_PRIMER_REV, "sample:escalation",
+        {"markdown": "## Escalation\n\npage the operator"},
+    )
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "base layer" in out
+    assert "page the operator" in out
+
+
+def test_one_block_parks_without_touching_the_others(_turn_correction_org_env):
+    """The point of splitting a layer: park one section, keep the rest.
+
+    This is what a single-row layer could not do — switching content off
+    meant editing it out of the shared markdown blob and losing it.
+    """
+    _write_overlay(
+        _WS_PRIMER_SET_ID, _WS_PRIMER_REV, "sample:keep",
+        {"markdown": "## Keep\n\nstill rendering"},
+    )
+    _write_overlay(
+        _WS_PRIMER_SET_ID, _WS_PRIMER_REV, "sample:park",
+        {"markdown": "## Park\n\nparked text", "enabled": False},
+    )
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "still rendering" in out
+    assert "parked text" not in out
+    assert "## Park" not in out
+
+
+def test_blocks_sort_by_order_then_key(_turn_correction_org_env):
+    """Explicit ``order`` wins; equal order falls back to key sequence."""
+    _write_overlay(
+        _WS_PRIMER_SET_ID, _WS_PRIMER_REV, "sample:zulu",
+        {"markdown": "## Zulu\n\nfirst by order", "order": 10},
+    )
+    _write_overlay(
+        _WS_PRIMER_SET_ID, _WS_PRIMER_REV, "sample:alpha",
+        {"markdown": "## Alpha\n\ndefault order"},
+    )
+    _write_overlay(
+        _WS_PRIMER_SET_ID, _WS_PRIMER_REV, "sample:bravo",
+        {"markdown": "## Bravo\n\ndefault order too"},
+    )
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert out.index("## Zulu") < out.index("## Alpha") < out.index("## Bravo")
+
+
+def test_bare_row_leads_its_named_blocks(_turn_correction_org_env):
+    """At equal order the unsuffixed row sorts ahead of ``key:block``."""
+    _write_overlay(
+        _WS_PRIMER_SET_ID, _WS_PRIMER_REV, "sample:aaa",
+        {"markdown": "## Suffixed\n\nblock body"},
+    )
+    _write_overlay(
+        _WS_PRIMER_SET_ID, _WS_PRIMER_REV, "sample",
+        {"markdown": "## Bare\n\nbase body"},
+    )
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert out.index("## Bare") < out.index("## Suffixed")
+
+
+def test_blocks_do_not_leak_across_similarly_named_workspaces(
+    _turn_correction_org_env,
+):
+    """``sample`` must not absorb blocks belonging to ``sample-two``.
+
+    The prefix guard is ``key:``, not ``key``, so a workspace whose id
+    is a string prefix of another's keeps its own blocks.
+    """
+    _write_overlay(
+        _WS_PRIMER_SET_ID, _WS_PRIMER_REV, "sample-two:runbook",
+        {"markdown": "## Neighbour\n\nnot mine"},
+    )
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "not mine" not in out
+
+
+def test_org_layer_also_supports_named_blocks(_turn_correction_org_env):
+    """Block splitting is a property of both overlay layers, not just one."""
+    _write_overlay(
+        _ORG_PRIMER_SET_ID, _ORG_PRIMER_REV, "sample-org:style",
+        {"markdown": "### House style\n\ntee your test output"},
+    )
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "## Org Conventions (sample-org)" in out
+    assert "tee your test output" in out
+
+
+def test_all_blocks_disabled_emits_no_org_heading(_turn_correction_org_env):
+    """Every block off must render like no rows at all — no bare heading."""
+    _write_overlay(
+        _ORG_PRIMER_SET_ID, _ORG_PRIMER_REV, "sample-org:style",
+        {"markdown": "### Style\n\nparked", "enabled": False},
+    )
+    out = render_workspace_primer(_cfg(id="sample"))
+    assert "## Org Conventions" not in out
+
+
 def test_blank_org_overlay_emits_no_heading(_turn_correction_org_env):
     """An empty body must not render a bare 'Org Conventions' heading."""
     _write_overlay(
