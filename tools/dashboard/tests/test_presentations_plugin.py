@@ -131,6 +131,48 @@ def test_presentations_api_reads_design_and_records_shown(tmp_path, monkeypatch)
     assert "latest_revision_id" not in persisted["_all"][0]["payload"]
 
 
+def test_present_activation_rejects_duplicate_name_unless_forced(tmp_path, monkeypatch):
+    fixture_path = tmp_path / "fixture.json"
+    fixture = {
+        "active_sessions": [],
+        "beads": [],
+        "experiments": [
+            make_experiment("design-a", title="Quarterly review", html="<section>A</section>"),
+            make_experiment("design-b", title="Quarterly review", html="<section>B</section>"),
+        ],
+        "settings": {
+            PRESENTATION_DECK_SET_ID: {
+                "_all": [{
+                    "key": "design-a",
+                    "payload": {"design_id": "design-a", "name": "Quarterly review"},
+                }]
+            }
+        },
+    }
+    write_fixture(fixture, fixture_path)
+    monkeypatch.setenv("DASHBOARD_MOCK", str(fixture_path))
+
+    from tools.dashboard.dao import mock as dao_mock
+
+    monkeypatch.setattr(dao_mock, "FIXTURE_PATH", fixture_path)
+    app = Starlette(routes=present_api.routes)
+
+    with TestClient(app) as client:
+        conflict = client.post("/api/presentations/deck/design-b/shown")
+        forced = client.post("/api/presentations/deck/design-b/shown?force=true")
+        library = client.get("/api/presentations/decks")
+
+    assert conflict.status_code == 409
+    assert conflict.json()["error"] == "duplicate_presentation_name"
+    assert conflict.json()["existing"] == [{
+        "design_id": "design-a",
+        "latest_revision_id": "design-a",
+        "name": "Quarterly review",
+    }]
+    assert forced.status_code == 200
+    assert {deck["design_id"] for deck in library.json()["decks"]} == {"design-a", "design-b"}
+
+
 def test_presentations_library_hydrates_latest_design_revision(tmp_path, monkeypatch):
     fixture_path = tmp_path / "fixture.json"
     design_id = "roadmap-deck"

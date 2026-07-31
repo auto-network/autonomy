@@ -179,6 +179,18 @@ graph share <file> --alt "..." --caption "..."  # render a file as an inline til
 ```
 Run `graph --help` for full reference.
 
+### Design Studio and Present
+
+Use the repo skills for the complete, current workflows:
+
+- `design-studio` — find, create, pull down, watch, and append design revisions.
+- `present` — create or update HTML artifacts and activate them in `/present`.
+
+The normal commands are `graph ui-design "Title" <dir>` for Design Studio and
+the same command with `--present` for a new Present artifact. Always search by
+exact title first; update an existing stable `design_id` instead of creating a
+duplicate. Use `--force` only when a same-named new artifact is intentional.
+
 **Reading a session by tmux name.** `graph read`, `graph context`, and `graph tail` accept either a source-id prefix or the tmux name shown by `graph sessions --status` (e.g. `auto-0506-001257`, `host-0506-095207`). Names containing non-hex characters are auto-resolved through the dashboard DB; pass them directly, no UUID lookup needed.
 
 **Search heuristic.** Lead with the single highest-signal term. Multi-term queries and `--or` widen the candidate set and tend to score the obvious hit *down*, not up. If the row you want is buried, scope before widening: `--type session` / `--type note` / `--only-org` / `--tag` all compose. Reach for `--or` only when the strict-AND query legitimately returns nothing.

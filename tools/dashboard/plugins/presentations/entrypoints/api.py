@@ -255,6 +255,25 @@ def _hydrate_deck_record(payload: dict) -> dict:
     return deck
 
 
+def _same_name_decks(name: str, design_id: str, org: str) -> list[dict]:
+    """Return other Present entries whose current display name matches exactly."""
+    matches = []
+    for row in _read_deck_members(org):
+        deck = _hydrate_deck_record(row.get("payload") or {})
+        existing_id = deck.get("design_id") or row.get("key") or ""
+        if existing_id != design_id and deck.get("name") == name:
+            matches.append({
+                "design_id": existing_id,
+                "latest_revision_id": deck.get("latest_revision_id") or "",
+                "name": deck.get("name") or "",
+            })
+    return matches
+
+
+def _force_requested(request: Request) -> bool:
+    return request.query_params.get("force", "").lower() in {"1", "true", "yes"}
+
+
 async def list_decks(request: Request) -> JSONResponse:
     org = _caller_org(request)
     rows = _read_deck_members(org)
@@ -289,6 +308,19 @@ async def mark_shown(request: Request) -> JSONResponse:
     if not design:
         return JSONResponse({"error": "design not found"}, status_code=404)
     payload = _deck_record_payload(design, last_shown_at=_iso_now())
+    duplicates = _same_name_decks(payload["name"], payload["design_id"], org)
+    if duplicates and not _force_requested(request):
+        return JSONResponse(
+            {
+                "error": "duplicate_presentation_name",
+                "message": (
+                    f"A presentation named {payload['name']!r} already exists. "
+                    "Publish a revision of its design, or retry with ?force=true."
+                ),
+                "existing": duplicates,
+            },
+            status_code=409,
+        )
     _upsert_deck(payload["design_id"], payload, org)
     return JSONResponse({"ok": True, "deck": _deck_payload(design, last_shown_at=payload["last_shown_at"])})
 

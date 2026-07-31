@@ -412,6 +412,7 @@ def create_design(
     alpine=False,
     creator_session_id=None,
     creator_session_label=None,
+    force=False,
 ):
     """No-op in mock mode — designs are defined in fixture file."""
     import uuid

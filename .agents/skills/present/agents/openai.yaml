@@ -1,0 +1,4 @@
+interface:
+  display_name: "Present"
+  short_description: "Publish and update Present artifacts"
+  default_prompt: "Use $present to publish or update an artifact in the Autonomy Present app."
