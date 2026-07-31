@@ -136,8 +136,10 @@ function fakeWs(records) {
   //    ephemeral, so it can't be fixture-driven) or the hardcoded message cap
   //    are skipped here and covered by the Python suite (test_channel_vectors).
   const skipped = [];
-  //  a) cert-chain tampering -> the shipped verifyChain rejects it.
-  const CHAIN_ERR = new Set(['wrong_root', 'wrong_org', 'invalid_time', 'noncanonical_cert']);
+  //  a) cert-chain tampering -> the shipped verifyChain rejects it (wrong root/
+  //     org, expiry, noncanonical cert, missing required scope, broken narrowing).
+  const CHAIN_ERR = new Set(['wrong_root', 'wrong_org', 'invalid_time', 'noncanonical_cert',
+    'invalid_scope', 'invalid_narrowing']);
   //  b) signature/eph/token tampering -> the cert is valid but the Ed25519
   //     signed-payload check (the exact composition performHandshake runs at the
   //     sig step: canonicalJson + WebCrypto Ed25519) fails.
