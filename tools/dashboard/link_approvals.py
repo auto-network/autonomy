@@ -769,6 +769,30 @@ async def _execute_link_publish(row: dict, decision: dict) -> dict:
     return await _execute_share_link_publish_tunnel(row, decision)
 
 
+# Control failures that occur BEFORE any frame reaches the registry — the
+# connector/listener is still coming up, or the tunnel is not yet dialed — so
+# retrying create-link on these can never double-create a link.
+_TUNNEL_STARTUP_RETRY_KINDS = frozenset({"no-listener", "unreachable", "no-tunnel"})
+
+
+def _create_link_over_tunnel(org, args, *, timeout: float = 25.0, poll: float = 0.5):
+    """Send the create-link control op, tolerating a connector/tunnel that is
+    still coming up on a first publish. Retries ONLY the pre-write failures
+    (see _TUNNEL_STARTUP_RETRY_KINDS), so a retry cannot double-create; any
+    other failure raises immediately, and the last pre-write failure raises if
+    the tunnel never comes up within *timeout*."""
+    from tools.dashboard.link_serving_supervisor import TunnelUnavailable, control
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return control(org, "create-link", args)
+        except TunnelUnavailable as exc:
+            if getattr(exc, "kind", None) not in _TUNNEL_STARTUP_RETRY_KINDS \
+                    or time.monotonic() >= deadline:
+                raise
+            time.sleep(poll)
+
+
 async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     """Publish a share link as a control frame on the org's authenticated
     tunnel (register D19). Authority is proven LOCALLY — the persona is
@@ -777,7 +801,6 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     registry sees only the org, never the persona."""
     from tools.dashboard.link_serving_supervisor import (
         TunnelUnavailable,
-        control,
         get_supervisor,
     )
 
@@ -803,16 +826,21 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
     }
     if meta:
         args["meta"] = meta
+    # First publish is chicken-and-egg: the serving tunnel only runs while a
+    # link is live, but the very first link is created BY riding the tunnel.
+    # Start serving now (the approve step minted the serve-cert); the
+    # supervisor's fresh-tunnel grace keeps the watchdog from reaping it before
+    # this publish caches its grant.
+    sup = get_supervisor()
+    started = await asyncio.to_thread(sup.start, org)
+    if not started.get("running"):
+        return _fail(
+            "could not start the serving tunnel for this publish "
+            f"({started.get('reason')})")
     try:
-        reply = await asyncio.to_thread(control, org, "create-link", args)
+        reply = await asyncio.to_thread(_create_link_over_tunnel, org, args)
     except TunnelUnavailable as exc:
-        # Publish rides the tunnel: no live tunnel means no publish. Nudge
-        # the supervisor so the next attempt has serving up, write nothing.
-        try:
-            await asyncio.to_thread(get_supervisor().ensure, org)
-        except Exception:
-            pass
-        return _fail(f"serving tunnel is not up — publish rides the tunnel ({exc})")
+        return _fail(f"the serving tunnel did not come up in time ({exc})")
     if not reply.get("ok"):
         return _fail(reply.get("error", "the registry refused the link"))
     token, url = reply.get("token"), reply.get("url")

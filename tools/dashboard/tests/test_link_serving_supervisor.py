@@ -229,14 +229,68 @@ def test_no_launch_when_key_does_not_match_cert(env):
 def test_stops_when_last_grant_revoked(env):
     _provision_serve_cert(env)
     _put_grant()
+    clock = [1000.0]
     spawn = FakeSpawn()
-    s = sup.ServingSupervisor(spawn=spawn)
+    s = sup.ServingSupervisor(spawn=spawn, now=lambda: clock[0])
     assert s.ensure(ORG)["running"] is True
     proc = spawn.procs[0]
 
     _drop_grant()  # what link_revoke does to the cache
+    clock[0] += 60  # past the fresh-tunnel grace, so the watchdog reaps it
     assert s.ensure(ORG) == {"running": False, "reason": "no-live-grants"}
     assert proc.alive() is False  # the connector was stopped
+
+
+def test_start_launches_without_a_live_grant(env):
+    """First publish: ensure() won't start (no grant yet), but start() must —
+    the grant is created BY riding this tunnel, so it cannot pre-exist."""
+    _provision_serve_cert(env)  # cert present, NO grant cached
+    spawn = FakeSpawn()
+    s = sup.ServingSupervisor(spawn=spawn)
+    assert s.ensure(ORG) == {"running": False, "reason": "no-live-grants"}
+    assert s.start(ORG) == {"running": True, "reason": "launched"}
+    assert len(spawn.calls) == 1
+    assert s.start(ORG) == {"running": True, "reason": "already-running"}  # idempotent
+    assert len(spawn.calls) == 1
+
+
+def test_start_refuses_without_a_serve_cert(env):
+    spawn = FakeSpawn()  # no serve-cert provisioned
+    s = sup.ServingSupervisor(spawn=spawn)
+    assert s.start(ORG) == {"running": False, "reason": "missing"}
+    assert spawn.calls == []
+
+
+def test_fresh_tunnel_survives_the_grace_then_is_reaped(env):
+    """A just-started tunnel with no grant yet is skipped for one interval, then
+    reaped if the publish never cached a grant."""
+    _provision_serve_cert(env)
+    clock = [1000.0]
+    spawn = FakeSpawn()
+    s = sup.ServingSupervisor(spawn=spawn, now=lambda: clock[0])
+    assert s.start(ORG)["running"] is True
+    proc = spawn.procs[0]
+    clock[0] += 5  # inside the 20s grace
+    assert s.ensure(ORG) == {"running": True, "reason": "fresh-grace"}
+    assert proc.alive() is True
+    clock[0] += 60  # past the grace, still no grant
+    assert s.ensure(ORG) == {"running": False, "reason": "no-live-grants"}
+    assert proc.alive() is False
+
+
+def test_fresh_tunnel_kept_once_its_grant_lands(env):
+    """The normal success path: the publish caches its grant within the grace,
+    so the tunnel keeps running past the grace with no restart."""
+    _provision_serve_cert(env)
+    clock = [1000.0]
+    spawn = FakeSpawn()
+    s = sup.ServingSupervisor(spawn=spawn, now=lambda: clock[0])
+    assert s.start(ORG)["running"] is True
+    _put_grant()  # the publish round-tripped and cached its grant
+    clock[0] += 60  # well past the grace
+    assert s.ensure(ORG) == {"running": True, "reason": "already-running"}
+    assert spawn.procs[0].alive() is True
+    assert len(spawn.calls) == 1  # never respawned
 
 
 def test_watchdog_reconcile_relaunches_dead_proc(env):
