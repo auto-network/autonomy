@@ -213,11 +213,20 @@
     var parts = extractHtmlParts(html);
     return '<!DOCTYPE html><html><head><meta charset="utf-8">' +
       '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">' +
+      // Cosmetic defaults (dark chrome, light ink, sans) go BEFORE the deck's
+      // own <head> so an unstyled deck still reads, but any deck stylesheet
+      // wins the cascade — injecting these after deck styles silently
+      // overrode deck body color/font and made light decks unreadable.
+      '<style>' +
+      'html,body{background:#020617;color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}' +
+      '</style>' +
       parts.head +
       '<script src="/static/vendor/tailwind-browser.min.js"><\/script>' +
       '<script defer src="/static/vendor/alpine.min.js"><\/script>' +
+      // Structural pager rules stay AFTER deck styles — the scroll root and
+      // snap mechanics must hold regardless of what the deck ships.
       '<style>' +
-      'html,body{height:100%;margin:0;overflow:hidden;background:#020617;color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}' +
+      'html,body{height:100%;margin:0;overflow:hidden;}' +
       '#present-scroll-root{height:100%;overflow-y:auto;overflow-x:hidden;scroll-snap-type:y mandatory;scroll-behavior:smooth;}' +
       '.present-runtime-slide{min-height:100svh;scroll-snap-align:start;scroll-snap-stop:always;box-sizing:border-box;}' +
       '.present-runtime-slide+.present-runtime-slide{margin-top:var(--present-slide-gap,48px);}' +

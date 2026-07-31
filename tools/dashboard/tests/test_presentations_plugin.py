@@ -362,6 +362,14 @@ const fullDoc = helpers.iframeDocument({{
   variants: [{{ html: '<!doctype html><html><head><style>.x{{color:red}}</style></head><body><section>Full</section></body></html>' }}],
 }}, 0);
 assert(fullDoc.includes('<style>.x{{color:red}}</style>'));
+assert(
+  fullDoc.indexOf('color:#e5e7eb') < fullDoc.indexOf('.x{{color:red}}'),
+  'viewer cosmetic defaults must precede deck styles so deck CSS wins the cascade',
+);
+assert(
+  fullDoc.indexOf('.x{{color:red}}') < fullDoc.indexOf('#present-scroll-root{{'),
+  'structural pager rules must come after deck styles',
+);
 assert(fullDoc.includes('<main id="present-scroll-root"><section>Full</section></main>'));
 assert(!fullDoc.includes('<main id="present-scroll-root"><!doctype html>'));
 assert.equal(helpers.presentSurfaceId('/presentations/deck-1/3'), 'presentations:deck-1');
