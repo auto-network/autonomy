@@ -187,7 +187,12 @@
       'slides.forEach(function(el,i){el.classList.add("present-runtime-slide");el.setAttribute("data-present-index",String(i));});' +
       '}' +
       'function post(type,detail){try{parent.postMessage(Object.assign({type:type},detail||{}),"*");}catch(_){}}' +
-      'function activeIndex(){var best=0,bestDist=Infinity,base=root?root.getBoundingClientRect().top:0;slides.forEach(function(el,i){var r=el.getBoundingClientRect();var d=Math.abs(r.top-base);if(d<bestDist){bestDist=d;best=i;}});return best;}' +
+      'function activeIndex(){var base=root?root.getBoundingClientRect().top:0;var best=0,bestDist=Infinity;for(var i=0;i<slides.length;i++){var r=slides[i].getBoundingClientRect();if(r.top<=base+1&&r.bottom>base+1){return i;}var d=Math.abs(r.top-base);if(d<bestDist){bestDist=d;best=i;}}return best;}' +
+      // Slides taller than the viewport get no snap alignment (free scroll — the
+      // reader can rest at the bottom), and their presence relaxes the container
+      // from mandatory to proximity snapping: mobile engines otherwise yank the
+      // scroller back to the slide top, making tall-slide bottoms unreadable.
+      'function applySnapMode(){if(!root)return;var vh=root.clientHeight||window.innerHeight;var anyTall=false;slides.forEach(function(el){var tall=el.offsetHeight>vh+8;if(tall)anyTall=true;el.style.scrollSnapAlign=tall?"none":"";el.style.scrollSnapStop=tall?"normal":"";});root.style.scrollSnapType=anyTall?"y proximity":"";}' +
       'function reveal(index){index=Math.max(0,Math.min(slides.length-1,Number(index)||0));var el=slides[index];if(el){el.classList.add("in");el.classList.add("present-runtime-active");}}' +
       'var scheduled=false;' +
       'function report(){scheduled=false;var index=activeIndex();reveal(index);post("present:active",{index:index,count:slides.length});}' +
@@ -195,7 +200,9 @@
       'function go(index,behavior){index=Math.max(0,Math.min(slides.length-1,Number(index)||0));reveal(index);var el=slides[index];if(el&&root){root.scrollTo({top:el.offsetTop||0,behavior:behavior||"smooth"});}setTimeout(report,80);}' +
       'window.__presentGoToSlide=go;' +
       'window.addEventListener("message",function(event){var data=event.data||{};if(data.type==="present:goto")go(data.index);});' +
-      'collect();root.addEventListener("scroll",schedule,{passive:true});window.addEventListener("resize",schedule);' +
+      'collect();applySnapMode();root.addEventListener("scroll",schedule,{passive:true});' +
+      'window.addEventListener("resize",function(){applySnapMode();schedule();});' +
+      'window.addEventListener("load",applySnapMode);setTimeout(applySnapMode,600);' +
       'requestAnimationFrame(function(){post("present:ready",{count:slides.length});go(initial,"auto");});' +
       '})();<\/script>';
   }
@@ -213,6 +220,7 @@
       'html,body{height:100%;margin:0;overflow:hidden;background:#020617;color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}' +
       '#present-scroll-root{height:100%;overflow-y:auto;overflow-x:hidden;scroll-snap-type:y mandatory;scroll-behavior:smooth;}' +
       '.present-runtime-slide{min-height:100svh;scroll-snap-align:start;scroll-snap-stop:always;box-sizing:border-box;}' +
+      '.present-runtime-slide+.present-runtime-slide{margin-top:var(--present-slide-gap,48px);}' +
       '@supports not (min-height:100svh){.present-runtime-slide{min-height:100vh;}}' +
       '*{box-sizing:border-box;}' +
       '</style>' +
