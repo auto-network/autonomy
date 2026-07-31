@@ -354,6 +354,9 @@ const doc = helpers.iframeDocument({{
 assert(doc.includes('<section>Right</section>'));
 assert(!doc.includes('<section>Wrong</section>'));
 assert(doc.includes('scroll-snap-type:y mandatory'));
+assert(doc.includes('applySnapMode'), 'runtime must relax snapping for slides taller than the viewport');
+assert(doc.includes('y proximity'), 'tall-slide decks must downgrade mandatory snapping to proximity');
+assert(doc.includes('present-slide-gap'), 'adjacent slides must be separated by a visible gap');
 assert(doc.includes('window.FIXTURE_STATES'));
 const fullDoc = helpers.iframeDocument({{
   variants: [{{ html: '<!doctype html><html><head><style>.x{{color:red}}</style></head><body><section>Full</section></body></html>' }}],
