@@ -3961,6 +3961,7 @@ def cmd_agent_runs(args):
 def cmd_ui_design(args):
     """Create a Design Studio design from HTML files and watch for changes."""
     import time as _time
+    import urllib.error
     import urllib.request
     import ssl
 
@@ -3985,8 +3986,17 @@ def cmd_ui_design(args):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        resp = urllib.request.urlopen(req, context=ctx)
+        resp = urllib.request.urlopen(req, context=ctx, timeout=30)
         return json.loads(resp.read())
+
+    def _fail_connection(exc):
+        print(
+            f"Couldn't reach the dashboard at {api_base} ({exc}). "
+            "If you are in a container, the dashboard is on the host: "
+            "--api https://host.docker.internal:8080",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     def _activate_in_present(did):
         """Register the design in Present's deck library so it appears in
@@ -4036,7 +4046,11 @@ def cmd_ui_design(args):
         exp_data["design_id"] = args.design
     if fixture:
         exp_data["fixture"] = fixture
-    result = _post("/api/design", exp_data)
+    print(f"  Publishing to {api_base}…")
+    try:
+        result = _post("/api/design", exp_data)
+    except (urllib.error.URLError, OSError) as exc:
+        _fail_connection(exc)
     exp_id = result["id"]
 
     # If no design was specified, use this revision's ID as the design
@@ -4060,6 +4074,8 @@ def cmd_ui_design(args):
         try:
             _activate_in_present(design_id)
             print(f"  ✓ Activated in Present — live now at {api_base}/present")
+        except (urllib.error.URLError, OSError) as exc:
+            _fail_connection(exc)
         except Exception as e:
             print(f"  ⚠ --present failed ({e}); activate manually:", file=sys.stderr)
             print(f"      curl -sk {api_base}/api/presentations/deck/{design_id} >/dev/null", file=sys.stderr)
@@ -4069,6 +4085,9 @@ def cmd_ui_design(args):
         print(f"    the Present app (/present), re-run with --present — or activate now:")
         print(f"      curl -sk {api_base}/api/presentations/deck/{design_id} >/dev/null")
         print(f"      curl -sk -X POST {api_base}/api/presentations/deck/{design_id}/shown >/dev/null")
+
+    if getattr(args, "once", False):
+        return
 
     print(f"\n  Watching {dir_path}/ for changes... (Ctrl+C to stop)\n")
 
@@ -5478,7 +5497,19 @@ def main():
     p.add_argument("--design", help="Existing design ID to append to")
     p.add_argument("--description", help="Subtitle/summary stored on each design revision")
     p.add_argument("--fixture", help="Path to fixture JSON file")
-    p.add_argument("--api", default="https://localhost:8080", help="Dashboard API base URL")
+    ui_api_default = (
+        os.environ.get("GRAPH_API")
+        or ("https://host.docker.internal:8080" if _in_container()
+            else "https://localhost:8080")
+    )
+    p.add_argument(
+        "--api", default=ui_api_default,
+        help="Dashboard API base URL (default: GRAPH_API, then a container-aware local URL)",
+    )
+    p.add_argument(
+        "--once", "--no-watch", dest="once", action="store_true",
+        help="Publish once and exit instead of watching for file changes",
+    )
     p.add_argument("--present", action="store_true",
                    help="Also activate the design in the Present app (register it in the /present "
                         "deck library). Use for presentations/boards meant to be shown; omit for "
@@ -5492,7 +5523,14 @@ def main():
     p_alias.add_argument("--series", dest="design", help="Existing design ID to append to")
     p_alias.add_argument("--description", help="Subtitle/summary stored on each design revision")
     p_alias.add_argument("--fixture", help="Path to fixture JSON file")
-    p_alias.add_argument("--api", default="https://localhost:8080", help="Dashboard API base URL")
+    p_alias.add_argument(
+        "--api", default=ui_api_default,
+        help="Dashboard API base URL (default: GRAPH_API, then a container-aware local URL)",
+    )
+    p_alias.add_argument(
+        "--once", "--no-watch", dest="once", action="store_true",
+        help="Publish once and exit instead of watching for file changes",
+    )
     p_alias.add_argument("--present", action="store_true",
                          help="Also activate the design in the Present app (deck library at /present).")
     p_alias.set_defaults(func=cmd_ui_design)
