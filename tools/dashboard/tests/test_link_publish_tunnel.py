@@ -121,6 +121,8 @@ class _ControlRecorder:
     def __call__(self, org, op, args, **kwargs):
         self.calls.append((org, op, args))
         if self._raise:
+            # kind=None -> non-retryable, so the publish fails immediately
+            # rather than retrying create-link for the full startup window.
             raise link_serving_supervisor.TunnelUnavailable("no tunnel")
         if self._reply is not None:
             return self._reply
@@ -129,13 +131,18 @@ class _ControlRecorder:
 
 
 def _install_control(monkeypatch, recorder):
+    """Patch the tunnel control seam and the supervisor. Returns the list of
+    orgs the publish asked to start (the first-publish tunnel launch)."""
     monkeypatch.setattr(link_serving_supervisor, "control", recorder)
-    ensured = []
-    monkeypatch.setattr(
-        link_serving_supervisor, "get_supervisor",
-        lambda: type("S", (), {"ensure": lambda self, org: ensured.append(org)})(),
-    )
-    return ensured
+    started = []
+
+    class _S:
+        def start(self, org):
+            started.append(org)
+            return {"running": True, "reason": "launched"}
+
+    monkeypatch.setattr(link_serving_supervisor, "get_supervisor", lambda: _S())
+    return started
 
 
 def _tunnel_envelope(session_key, cert, pop_path, payload=None):
@@ -257,20 +264,62 @@ def test_publish_refused_when_signature_forged(
     assert _cached_grants() == {}
 
 
-def test_publish_tunnel_unavailable_fails_and_triggers_ensure(
+def test_publish_starts_tunnel_and_fails_if_it_never_comes_up(
     env, root, session_key, session_cert, monkeypatch,
 ):
     recorder = _ControlRecorder(raise_unavailable=True)
-    ensured = _install_control(monkeypatch, recorder)
+    started = _install_control(monkeypatch, recorder)
 
     rid = _create_publish(env)
     envelope = _tunnel_envelope(session_key, session_cert, "/control/create-link")
     result = _decide_and_wait(env, rid, envelope)
 
     assert result["execution"]["ok"] is False
-    assert "publish rides the tunnel" in result["execution"]["error"]
+    assert "serving tunnel did not come up" in result["execution"]["error"]
     assert _cached_grants() == {}        # no grant for an unminted link
-    assert ensured == [ORG]              # nudged serving for next time
+    assert started == [ORG]              # the publish DID start the tunnel first
+
+
+def test_create_link_over_tunnel_retries_until_the_tunnel_dials(monkeypatch):
+    """A first publish tolerates the connector/tunnel still coming up: it retries
+    the pre-write 'no-tunnel' failures, then sends create-link once it dials."""
+    calls = {"n": 0}
+    token = "d0d0d0d0" * 4
+
+    def flaky(org, op, args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise link_serving_supervisor.TunnelUnavailable("no tunnel", kind="no-tunnel")
+        return {"ok": True, "token": token, "url": "x"}
+
+    monkeypatch.setattr(link_serving_supervisor, "control", flaky)
+    reply = link_approvals._create_link_over_tunnel(ORG, {}, timeout=2.0, poll=0.01)
+    assert reply["ok"] and reply["token"] == token
+    assert calls["n"] == 3               # two no-tunnel retries, then success
+
+
+def test_create_link_over_tunnel_gives_up_after_timeout(monkeypatch):
+    def always_no_tunnel(org, op, args, **kwargs):
+        raise link_serving_supervisor.TunnelUnavailable("no tunnel", kind="no-tunnel")
+
+    monkeypatch.setattr(link_serving_supervisor, "control", always_no_tunnel)
+    with pytest.raises(link_serving_supervisor.TunnelUnavailable):
+        link_approvals._create_link_over_tunnel(ORG, {}, timeout=0.2, poll=0.02)
+
+
+def test_create_link_over_tunnel_never_retries_an_ambiguous_failure(monkeypatch):
+    """A 'closed' failure may have sent the frame already, so retrying could
+    double-create — it must raise on the first attempt."""
+    calls = {"n": 0}
+
+    def closed(org, op, args, **kwargs):
+        calls["n"] += 1
+        raise link_serving_supervisor.TunnelUnavailable("closed", kind="closed")
+
+    monkeypatch.setattr(link_serving_supervisor, "control", closed)
+    with pytest.raises(link_serving_supervisor.TunnelUnavailable):
+        link_approvals._create_link_over_tunnel(ORG, {}, timeout=2.0, poll=0.01)
+    assert calls["n"] == 1               # no retry on a possibly-post-send failure
 
 
 # ── revoke ────────────────────────────────────────────────────

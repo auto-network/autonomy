@@ -200,7 +200,17 @@ def _control_path_for(key_path: str) -> str:
 
 
 class TunnelUnavailable(RuntimeError):
-    """No live serving tunnel to carry a control op — names the remedy."""
+    """No live serving tunnel to carry a control op — names the remedy.
+
+    ``kind`` classifies WHERE the op failed so a caller can safely retry only
+    the pre-write cases (the connector/tunnel is still coming up and no control
+    frame ever reached the registry): ``no-listener``, ``unreachable``, and
+    ``no-tunnel`` are pre-write and retryable; ``no-delegate`` and ``closed``
+    are not (``closed`` is ambiguous — the frame may have been sent)."""
+
+    def __init__(self, message: str, *, kind: str | None = None):
+        super().__init__(message)
+        self.kind = kind
 
 
 def control(org: str | None, op: str, args: dict, *, timeout: float = 12.0) -> dict:
@@ -215,7 +225,7 @@ def control(org: str | None, op: str, args: dict, *, timeout: float = 12.0) -> d
     if not key_path:
         raise TunnelUnavailable(
             "no serving delegate is provisioned for this org — provision "
-            "serving, then retry")
+            "serving, then retry", kind="no-delegate")
     ctl_path = _control_path_for(key_path)
     try:
         with open(ctl_path) as fh:
@@ -225,7 +235,7 @@ def control(org: str | None, op: str, args: dict, *, timeout: float = 12.0) -> d
     except (OSError, ValueError, KeyError) as exc:
         raise TunnelUnavailable(
             "the serving connector is not running (no control listener) — "
-            f"start serving and retry ({exc})") from exc
+            f"start serving and retry ({exc})", kind="no-listener") from exc
 
     request = json.dumps({"auth": auth, "op": op, "args": args}) + "\n"
     try:
@@ -240,13 +250,14 @@ def control(org: str | None, op: str, args: dict, *, timeout: float = 12.0) -> d
                 buf += chunk
     except OSError as exc:
         raise TunnelUnavailable(
-            f"could not reach the serving connector's control listener ({exc})"
-        ) from exc
+            f"could not reach the serving connector's control listener ({exc})",
+            kind="unreachable") from exc
     if b"\n" not in buf:
-        raise TunnelUnavailable("serving connector closed the control connection")
+        raise TunnelUnavailable("serving connector closed the control connection",
+                               kind="closed")
     reply = json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
     if reply.get("error_kind") == "no-tunnel":
-        raise TunnelUnavailable(reply.get("error", "no live tunnel"))
+        raise TunnelUnavailable(reply.get("error", "no live tunnel"), kind="no-tunnel")
     return reply
 
 
@@ -332,6 +343,8 @@ class ServingSupervisor:
         self._now = now or time.time
         self._procs: dict = {}       # org -> handle
         self._managed: set = set()   # orgs seen via ensure(), re-checked by the watchdog
+        self._started_at: dict = {}  # org -> launch time; fresh-tunnel grace
+        self._grace_s: float = 20.0  # one watchdog interval; a fresh tunnel is skipped once
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._watchdog: threading.Thread | None = None
@@ -351,6 +364,23 @@ class ServingSupervisor:
                 except Exception:
                     pass  # one org's failure must not stall the others
 
+    def start(self, org: str | None) -> dict:
+        """Launch serving for an imminent first publish WITHOUT requiring a live
+        grant — on a first publish the grant is created BY riding this tunnel,
+        so it cannot pre-exist. The watchdog stays the only teardown: the
+        fresh-tunnel grace keeps it from reaping a connector during the one
+        interval it takes the publish to cache its grant. Idempotent."""
+        with self._lock:
+            self._managed.add(org)
+            proc = self._procs.get(org)
+            if proc is not None and proc.alive():
+                return {"running": True, "reason": "already-running"}
+            self._procs.pop(org, None)
+            state = serve_cert_state(org, now=self._now())
+            if state["status"] != "ok":
+                return {"running": False, "reason": state["status"]}
+            return self._launch(org, state)
+
     def _reconcile(self, org: str | None) -> dict:
         now = self._now()
         state = serve_cert_state(org, now=now)
@@ -358,9 +388,18 @@ class ServingSupervisor:
         should_run = state["status"] == "ok" and _has_live_grant(org, now)
 
         if not should_run:
+            # Fresh-tunnel grace: a connector just launched for a first publish
+            # has no live grant YET — the grant is created by riding it. Skip
+            # the "no live links" teardown for one watchdog interval so the
+            # publish can cache that grant first. Pure in-memory launch-time
+            # comparison; a bad/expired cert is torn down immediately regardless.
+            if (proc is not None and proc.alive() and state["status"] == "ok"
+                    and now - self._started_at.get(org, 0.0) < self._grace_s):
+                return {"running": True, "reason": "fresh-grace"}
             if proc is not None:
                 proc.stop()
                 self._procs.pop(org, None)
+            self._started_at.pop(org, None)
             reason = state["status"] if state["status"] != "ok" else "no-live-grants"
             return {"running": False, "reason": reason}
 
@@ -368,7 +407,12 @@ class ServingSupervisor:
             return {"running": True, "reason": "already-running"}
         # A dead handle: drop it and relaunch below.
         self._procs.pop(org, None)
+        return self._launch(org, state)
 
+    def _launch(self, org: str | None, state: dict) -> dict:
+        """Spawn the connector for *org* (``state`` must be an ``ok``
+        serve-cert state) and record its launch time for the fresh-tunnel
+        grace. Callers hold the lock."""
         ok, detail = _verify_key_matches(state["cert"], state["key_path"])
         if not ok:
             return {"running": False, "reason": detail}
@@ -382,14 +426,15 @@ class ServingSupervisor:
         with contextlib.suppress(OSError):
             os.remove(ctl_path)
         argv, env = _connector_command(binding, org, state["key_path"], cert_path)
-        handle = self._spawn(argv, env, log_path=_log_path_for(state["key_path"]),
-                             ctl_path=ctl_path)
-        self._procs[org] = handle
+        self._procs[org] = self._spawn(
+            argv, env, log_path=_log_path_for(state["key_path"]), ctl_path=ctl_path)
+        self._started_at[org] = self._now()
         return {"running": True, "reason": "launched"}
 
     def start_watchdog(self, interval: float = 20.0) -> None:
         """Periodically re-reconcile every managed org — restart the dead,
         tear down the expired/revoked. No-op if already running."""
+        self._grace_s = interval  # a fresh tunnel is skipped for exactly one interval
         if self._watchdog is not None:
             return
         self._stop.clear()
@@ -414,6 +459,7 @@ class ServingSupervisor:
                     pass
             self._procs.clear()
             self._managed.clear()
+            self._started_at.clear()
         if watchdog is not None and watchdog is not threading.current_thread():
             watchdog.join(timeout=2)
         self._watchdog = None
