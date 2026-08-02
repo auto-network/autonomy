@@ -2880,7 +2880,11 @@ async def api_workspace_local_create(request):
             setting_created = True
         else:
             existing_repos = existing.payload.get("repos") or []
-            if existing_repos:
+            already_configured = (
+                existing_repos == [repo_spec]
+                and existing.payload.get("working_dir") == mount
+            )
+            if already_configured:
                 setting_id = existing.id
             else:
                 chain = graph_ops.chain_setting(
