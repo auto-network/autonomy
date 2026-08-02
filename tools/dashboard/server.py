@@ -5810,7 +5810,8 @@ def _inject_echo_verified(
     harness_name: str | None,
     deadline: float,
 ) -> None:
-    settle = {"codex": 1.5, "claude": 0.0}.get((harness_name or "").lower(), 0.0)
+    harness = (harness_name or "").lower()
+    settle = {"codex": 1.5, "claude": 0.0}.get(harness, 0.0)
     if settle:
         time.sleep(min(settle, max(0.0, deadline - time.monotonic())))
 
@@ -5825,6 +5826,22 @@ def _inject_echo_verified(
         time.sleep(0.2)
         after = _run_tmux_capture(tmux_name, timeout=op_timeout)
         if _message_echo_visible(before, after, message):
+            tmux_enter_checked_sync(tmux_name, timeout=op_timeout)
+            return
+        # Codex may accept a bracketed/multi-line paste into its composer
+        # without rendering any of the pasted bytes in capture-pane until the
+        # input is submitted.  Retrying in that state only duplicates the
+        # orientation in the hidden input buffer, then tears down an otherwise
+        # healthy container when the visibility deadline expires.  A
+        # successful tmux paste is the strongest acknowledgement available for
+        # this harness, so submit it once and let the normal transcript/first-
+        # response path provide the durable confirmation.
+        if harness == "codex":
+            logger.warning(
+                "session_lifecycle: codex paste had no visible echo; "
+                "submitting once tmux=%s",
+                tmux_name,
+            )
             tmux_enter_checked_sync(tmux_name, timeout=op_timeout)
             return
         last_error = "paste echo was not visible"

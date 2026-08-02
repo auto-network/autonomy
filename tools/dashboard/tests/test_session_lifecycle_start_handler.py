@@ -205,6 +205,45 @@ def test_inject_echo_verified_pastes_before_enter(monkeypatch):
     assert [call[0] for call in calls] == ["capture", "paste", "capture", "enter"]
 
 
+def test_inject_echo_verified_codex_submits_once_without_visible_echo(monkeypatch):
+    """Codex can hold a paste without exposing its bytes to capture-pane.
+
+    A successful tmux paste must still be submitted exactly once; retrying
+    duplicates hidden input and eventually kills a healthy session.
+    """
+    from tools.dashboard import server
+
+    calls = []
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        server,
+        "_run_tmux_capture",
+        lambda tmux_name, *, timeout=None: "> ",
+    )
+    monkeypatch.setattr(
+        server,
+        "tmux_paste_checked_sync",
+        lambda tmux_name, message, *, timeout: calls.append(("paste", message)),
+    )
+    monkeypatch.setattr(
+        server,
+        "tmux_enter_checked_sync",
+        lambda tmux_name, *, timeout: calls.append(("enter", tmux_name)),
+    )
+
+    server._inject_echo_verified(
+        tmux_name="auto-codex",
+        message="A long orientation message\nwith multiple lines",
+        harness_name="codex",
+        deadline=server.time.monotonic() + 30,
+    )
+
+    assert calls == [
+        ("paste", "A long orientation message\nwith multiple lines"),
+        ("enter", "auto-codex"),
+    ]
+
+
 def test_wait_for_prompt_waits_for_poller_signal(monkeypatch, tmp_path):
     """_wait_for_prompt is a signal-waiter: the pane-poller is the single
     pane reader/keystroke sender; the worker step waits on the durable
