@@ -315,6 +315,52 @@ def test_smart_ranker_does_not_duplicate_a_single_term_stream(graph_db_env):
         db.close()
 
 
+def test_smart_term_stream_fanout_is_source_diverse(graph_db_env):
+    """Hundreds of turns from one session cannot hide a small source."""
+    db = _make_db(graph_db_env)
+    try:
+        viewer_noise = Source(
+            type="session", title="Viewer noise", file_path="session:viewer",
+        )
+        inline_noise = Source(
+            type="session", title="Inline noise", file_path="session:inline",
+        )
+        answer = Source(
+            type="note", title="Operator guide", file_path="note:answer",
+        )
+        for source in (viewer_noise, inline_noise, answer):
+            db.insert_source(source)
+        for turn in range(250):
+            db.insert_thought(Thought(
+                source_id=viewer_noise.id,
+                content="viewer details repeated",
+                turn_number=turn,
+            ))
+            db.insert_thought(Thought(
+                source_id=inline_noise.id,
+                content="inline details repeated",
+                turn_number=turn,
+            ))
+        # The answer covers both concepts across rows, so the strict FTS query
+        # cannot see it. It must enter through both source-diverse term lists.
+        db.insert_thought(Thought(
+            source_id=answer.id, content="viewer instructions", turn_number=1,
+        ))
+        db.insert_thought(Thought(
+            source_id=answer.id, content="inline rendering", turn_number=2,
+        ))
+        db.commit()
+
+        results = db.search("viewer inline", limit=10, ranker="smart")
+        assert results[0]["source_id"] == answer.id
+        assert results[0]["ranking_explain"]["stream_ranks"] == {
+            "term:viewer": 2,
+            "term:inline": 2,
+        }
+    finally:
+        db.close()
+
+
 def test_search_rejects_unknown_ranker(graph_db_env):
     db = _make_db(graph_db_env)
     try:
