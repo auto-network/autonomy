@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any
+import json
+import threading
+from typing import Any, Callable
 
 from tools.graph.schemas.registry import (
     SchemaValidationError,
@@ -16,11 +18,59 @@ from tools.graph.schemas.registry import (
 
 HARNESS_USAGE_SET_ID = "dashboard.harness.usage"
 HARNESS_USAGE_SCHEMA_REVISION = 1
+# Harness credentials and usage are host-local operator data.  Keep the
+# owning org next to the schema constants so every publisher uses the same
+# scope instead of independently deriving it from GRAPH_ORG.
+HARNESS_USAGE_ORG = "personal"
 
 # The background publisher refreshes active identities every minute.
 # Keep UI staleness much tighter than the cache TTL, and let cache-gc
 # sweep old rows eventually when identities stop reporting entirely.
 HARNESS_USAGE_CACHE_TTL = timedelta(minutes=15)
+
+_publish_lock = threading.RLock()
+_published_payload_fingerprints: dict[str, str] = {}
+
+
+def clear_published_payload_cache(*, key: str | None = None) -> None:
+    """Clear one publisher fingerprint, or all memory at lifecycle reset."""
+    with _publish_lock:
+        if key is None:
+            _published_payload_fingerprints.clear()
+        else:
+            _published_payload_fingerprints.pop(key, None)
+
+
+def publish_if_changed(
+    key: str,
+    payload: dict[str, Any],
+    *,
+    upsert_by_key: Callable[..., Any],
+) -> bool:
+    """Persist one Personal/raw usage row only when telemetry changed.
+
+    ``updated_at`` timestamps the telemetry envelope and can advance while the
+    actual rate-limit state is identical, so it is deliberately excluded from
+    equality. The lock makes the comparison + write single-flight across the
+    session-tail and background-poller publishers.
+    """
+    semantic_payload = {k: v for k, v in payload.items() if k != "updated_at"}
+    fingerprint = json.dumps(
+        semantic_payload, sort_keys=True, separators=(",", ":"),
+    )
+    with _publish_lock:
+        if _published_payload_fingerprints.get(key) == fingerprint:
+            return False
+        upsert_by_key(
+            HARNESS_USAGE_SET_ID,
+            HARNESS_USAGE_SCHEMA_REVISION,
+            key,
+            payload,
+            org=HARNESS_USAGE_ORG,
+            state="raw",
+        )
+        _published_payload_fingerprints[key] = fingerprint
+        return True
 
 
 SYNOPSIS = {

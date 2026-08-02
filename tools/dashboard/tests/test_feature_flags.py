@@ -24,7 +24,9 @@ def graph_db_env(tmp_path, monkeypatch):
     db_path = tmp_path / "graph.db"
     monkeypatch.setenv("GRAPH_DB", str(db_path))
     monkeypatch.delenv("GRAPH_API", raising=False)
+    ff.invalidate_cache(all_orgs=True)
     yield db_path
+    ff.invalidate_cache(all_orgs=True)
 
 
 def _seed_flag(name: str, *, enabled: bool, owner: str = "test", description: str = "test flag"):
@@ -35,6 +37,9 @@ def _seed_flag(name: str, *, enabled: bool, owner: str = "test", description: st
         {"enabled": enabled, "description": description, "owner": owner},
         org=settings_ops.CALLER_ORG,
     )
+    # Production receives this through server._settings_emit_hook. These
+    # focused helper tests do not require importing the full ASGI server.
+    ff.invalidate_cache(org=settings_ops._resolve_org_arg(settings_ops.CALLER_ORG))
 
 
 # ── is_enabled ───────────────────────────────────────────────
@@ -134,3 +139,22 @@ def test_all_flags_returns_fresh_dicts(graph_db_env):
     snapshot["voice.client_enabled"]["enabled"] = False
     # Re-read; original value preserved.
     assert ff.is_enabled("voice.client_enabled") is True
+
+
+def test_multiple_flag_checks_share_one_settings_read(graph_db_env, monkeypatch):
+    _seed_flag("voice.client_enabled", enabled=True)
+    ff.invalidate_cache(all_orgs=True)
+    original = settings_ops.read_set
+    calls = 0
+
+    def counted_read_set(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(settings_ops, "read_set", counted_read_set)
+
+    assert ff.is_enabled("voice.client_enabled") is True
+    assert ff.is_enabled("voice.unknown") is False
+    assert ff.all_flags()["voice.client_enabled"]["enabled"] is True
+    assert calls == 1

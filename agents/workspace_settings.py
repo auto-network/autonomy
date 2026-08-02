@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -75,7 +76,7 @@ ARTIFACT_PATH_REVISION = 1
 logger = logging.getLogger(__name__)
 
 
-# ── Per-org-state cache ──────────────────────────────────────
+# ── Setting-event-invalidated cache ──────────────────────────
 #
 # load_workspaces() and load_org_overrides() each iterate every per-org
 # DB and run a Setting read against each one. On a 3-org installation
@@ -85,48 +86,57 @@ logger = logging.getLogger(__name__)
 # into multi-second hangs.
 #
 # These functions are pure reads of slow-changing Settings, so they're
-# safe to memoise process-wide. The cache key is the on-disk landscape:
-# orgs root path, GRAPH_DB env override, and the (filename, mtime_ns) of
-# every ``*.db`` and ``*.db-wal`` file under the orgs dir. Any Setting
-# write bumps a file's mtime (WAL writes touch ``*.db-wal``; checkpoints
-# touch ``*.db``), so the next read sees a fresh key and rebuilds.
-# Per-test ``AUTONOMY_ORGS_DIR`` overrides naturally produce distinct
-# keys without explicit invalidation.
-_workspaces_cache_key: tuple | None = None
-_workspaces_cache_value: "dict[str, WorkspaceV1]" = {}
-_overrides_cache_key: tuple | None = None
-_overrides_cache_value: "dict[str, OrgOverride]" = {}
+# memoised process-wide and invalidated by the post-commit
+# ``setting.changed`` hook in the dashboard.  An RLock deliberately stays
+# held through a rebuild: concurrent request threads then share one rebuild
+# instead of stampeding every org DB after an invalidation.
+_cache_lock = threading.RLock()
+_cache_context: tuple[str, str] | None = None
+_workspaces_cache_value: "dict[str, WorkspaceV1] | None" = None
+_overrides_cache_value: "dict[str, OrgOverride] | None" = None
 
-
-def _orgs_state_key() -> tuple:
-    """Cheap fingerprint of the per-org DB landscape for cache keying."""
-    from tools.graph.cross_org import _orgs_root
-    root = _orgs_root()
-    graph_db = os.environ.get("GRAPH_DB", "")
-    if not root.exists():
-        return ("missing", str(root), graph_db, ())
-    try:
-        files = tuple(sorted(
-            (p.name, p.stat().st_mtime_ns)
-            for p in root.iterdir()
-            if p.suffix in (".db",) or p.name.endswith(".db-wal")
-        ))
-    except OSError:
-        files = ()
-    return ("ok", str(root), graph_db, files)
+_WORKSPACE_COMPOSITION_SET_IDS = frozenset({
+    WORKSPACE_SET_ID,
+    ARTIFACT_SET_ID,
+    MOUNT_SET_ID,
+    WORKSPACE_CAPABILITY_ENABLE_SET_ID,
+    ORG_CAPABILITY_INSTALL_SET_ID,
+    CAPABILITY_IMPL_SET_ID,
+})
 
 
 def invalidate_caches() -> None:
     """Drop the in-process workspace + org-override caches.
 
-    Useful for tests that mutate Settings within a single process and
-    want the next read to round-trip through the DB unconditionally.
-    Production callers should not need this — mtime-keyed invalidation
-    already catches Setting writes that happen via ``ops.add_setting``.
+    Useful for tests and lifecycle boundaries. Production mutations call
+    :func:`invalidate_for_setting` from the post-commit event hook.
     """
-    global _workspaces_cache_key, _overrides_cache_key
-    _workspaces_cache_key = None
-    _overrides_cache_key = None
+    global _workspaces_cache_value, _overrides_cache_value
+    with _cache_lock:
+        _workspaces_cache_value = None
+        _overrides_cache_value = None
+
+
+def _ensure_cache_context() -> None:
+    """Clear snapshots when the process is explicitly repointed at another DB."""
+    global _cache_context, _workspaces_cache_value, _overrides_cache_value
+    from tools.graph.cross_org import _orgs_root
+
+    context = (str(_orgs_root()), os.environ.get("GRAPH_DB", ""))
+    if context != _cache_context:
+        _cache_context = context
+        _workspaces_cache_value = None
+        _overrides_cache_value = None
+
+
+def invalidate_for_setting(set_id: str) -> None:
+    """Invalidate only caches whose composition depends on *set_id*."""
+    global _workspaces_cache_value, _overrides_cache_value
+    with _cache_lock:
+        if set_id in _WORKSPACE_COMPOSITION_SET_IDS:
+            _workspaces_cache_value = None
+        if set_id == ORG_SET_ID:
+            _overrides_cache_value = None
 
 
 class WorkspaceSettingsError(ValueError):
@@ -505,6 +515,24 @@ def _artifacts_for_workspace(
     return tuple(out)
 
 
+def _artifacts_by_workspace(
+    workspace_ids: set[str], *, org: str | None,
+) -> dict[str, tuple[ArtifactSpec, ...]]:
+    """Resolve artifacts for many workspaces with one Set read."""
+    grouped: dict[str, list[ArtifactSpec]] = {wid: [] for wid in workspace_ids}
+    for member in ops.read_set(ARTIFACT_SET_ID, org=org, peers=[]).members:
+        workspace_id, separator, _ = member.key.partition(":")
+        if not separator or workspace_id not in grouped:
+            continue
+        grouped[workspace_id].append(
+            _artifact_from_setting(member.key, member.payload, workspace_id)
+        )
+    return {
+        workspace_id: tuple(sorted(values, key=lambda artifact: artifact.name))
+        for workspace_id, values in grouped.items()
+    }
+
+
 def load_mounts(
     workspace_id: str, *, org: str | None = None,
 ) -> dict[str, ResolvedSetting]:
@@ -527,6 +555,25 @@ def load_mounts(
         prefix=workspace_id,
         model=WorkspaceMountV1,
     ).to_dict()
+
+
+def _mounts_by_workspace(
+    workspace_ids: set[str], *, org: str | None,
+) -> dict[str, dict[str, ResolvedSetting]]:
+    """Resolve mounts for many workspaces with one Set read."""
+    grouped: dict[str, dict[str, ResolvedSetting]] = {
+        wid: {} for wid in workspace_ids
+    }
+    if get_schema(MOUNT_SET_ID, MOUNT_REVISION) is None:
+        return grouped
+    members = ops.read_set(
+        MOUNT_SET_ID, org=org, peers=[], model=WorkspaceMountV1,
+    ).members
+    for member in members:
+        workspace_id, separator, _ = member.key.partition(":")
+        if separator and workspace_id in grouped:
+            grouped[workspace_id][member.key] = member
+    return grouped
 
 
 def _impl_slug(name: str) -> str:
@@ -671,7 +718,18 @@ def resolve_capabilities(
     }
 
     impls = _read_capability_impls(org=org)
+    return _resolve_capabilities_from_members(
+        workspace_id, enable_members, install_by_contract, impls,
+    )
 
+
+def _resolve_capabilities_from_members(
+    workspace_id: str,
+    enable_members: list[ResolvedSetting] | tuple[ResolvedSetting, ...],
+    install_by_contract: dict[str, dict],
+    impls: dict[tuple[str, int], dict],
+) -> tuple[MaterializedCapability, ...]:
+    """Materialize one workspace from already-loaded capability Sets."""
     out: list[MaterializedCapability] = []
     prefix = f"{workspace_id}:"
     for em in enable_members:
@@ -714,6 +772,72 @@ def resolve_capabilities(
     return tuple(out)
 
 
+def _capabilities_by_workspace(
+    workspace_ids: set[str], *, org: str | None,
+) -> dict[str, tuple[MaterializedCapability, ...]]:
+    """Resolve capability chains for many workspaces once per org."""
+    empty = {workspace_id: () for workspace_id in workspace_ids}
+    if get_schema(
+        WORKSPACE_CAPABILITY_ENABLE_SET_ID,
+        WORKSPACE_CAPABILITY_ENABLE_REVISION,
+    ) is None:
+        return empty
+    enable_members = ops.read_set(
+        WORKSPACE_CAPABILITY_ENABLE_SET_ID, org=org, peers=[],
+    ).members
+    grouped: dict[str, list[ResolvedSetting]] = {
+        workspace_id: [] for workspace_id in workspace_ids
+    }
+    for member in enable_members:
+        workspace_id, separator, _ = member.key.partition(":")
+        if separator and workspace_id in grouped:
+            grouped[workspace_id].append(member)
+    if not any(grouped.values()) or get_schema(
+        ORG_CAPABILITY_INSTALL_SET_ID,
+        ORG_CAPABILITY_INSTALL_REVISION,
+    ) is None:
+        return empty
+    install_by_contract = {
+        member.key: member.payload
+        for member in ops.read_set(
+            ORG_CAPABILITY_INSTALL_SET_ID, org=org, peers=[],
+        ).members
+    }
+    impls = _read_capability_impls(org=org)
+    return {
+        workspace_id: _resolve_capabilities_from_members(
+            workspace_id, members, install_by_contract, impls,
+        )
+        for workspace_id, members in grouped.items()
+    }
+
+
+def _compose_workspaces(
+    members: list[ResolvedSetting] | tuple[ResolvedSetting, ...],
+    *,
+    org: str | None,
+    graph_project: str | None = None,
+) -> dict[str, WorkspaceV1]:
+    """Compose a workspace Set using one read per dependent Set."""
+    if not members:
+        return {}
+    workspace_ids = {member.key for member in members}
+    artifacts = _artifacts_by_workspace(workspace_ids, org=org)
+    mounts = _mounts_by_workspace(workspace_ids, org=org)
+    capabilities = _capabilities_by_workspace(workspace_ids, org=org)
+    return {
+        member.key: _workspace_from_setting(
+            member.payload,
+            workspace_id=member.key,
+            graph_project=(graph_project if graph_project is not None else member.org or ""),
+            artifacts=artifacts[member.key],
+            mounts=mounts[member.key],
+            capabilities=capabilities[member.key],
+        )
+        for member in members
+    }
+
+
 def _workspaces_in_org(slug: str) -> dict[str, WorkspaceV1]:
     """Read every ``autonomy.workspace#1`` owned by *slug* + attach artifacts.
 
@@ -731,16 +855,7 @@ def _workspaces_in_org(slug: str) -> dict[str, WorkspaceV1]:
     members = ops.read_set(
         WORKSPACE_SET_ID, org=slug, peers=["personal"],
     ).members
-    out: dict[str, WorkspaceV1] = {}
-    for m in members:
-        artifacts = _artifacts_for_workspace(m.key, org=slug)
-        mounts = load_mounts(m.key, org=slug)
-        capabilities = resolve_capabilities(m.key, org=slug)
-        out[m.key] = _workspace_from_setting(
-            m.payload, workspace_id=m.key, graph_project=slug,
-            artifacts=artifacts, mounts=mounts, capabilities=capabilities,
-        )
-    return out
+    return _compose_workspaces(members, org=slug, graph_project=slug)
 
 
 def load_workspaces() -> dict[str, WorkspaceV1]:
@@ -750,16 +865,15 @@ def load_workspaces() -> dict[str, WorkspaceV1]:
     ``autonomy.workspace#1`` from each, attaching its artifact Settings.
     Ops owns DB routing; consumers do not enumerate peers themselves.
 
-    Process-wide cached on the per-org DB landscape — see the cache block
-    near the top of this module.
+    Process-wide cached until a dependent ``setting.changed`` event. A
+    single lock protects misses so concurrent callers share one rebuild.
     """
-    global _workspaces_cache_key, _workspaces_cache_value
-    key = _orgs_state_key()
-    if key == _workspaces_cache_key:
+    global _workspaces_cache_value
+    with _cache_lock:
+        _ensure_cache_context()
+        if _workspaces_cache_value is None:
+            _workspaces_cache_value = _load_workspaces_uncached()
         return _workspaces_cache_value
-    _workspaces_cache_value = _load_workspaces_uncached()
-    _workspaces_cache_key = key
-    return _workspaces_cache_value
 
 
 def _load_workspaces_uncached() -> dict[str, WorkspaceV1]:
@@ -769,18 +883,7 @@ def _load_workspaces_uncached() -> dict[str, WorkspaceV1]:
         # workspace Setting authored in the default DB is still
         # discoverable. ``org=None`` is explicit per auto-cfb8u.
         members = ops.read_set(WORKSPACE_SET_ID, org=None).members
-        out: dict[str, WorkspaceV1] = {}
-        for m in members:
-            artifacts = _artifacts_for_workspace(m.key, org=None)
-            mounts = load_mounts(m.key, org=None)
-            capabilities = resolve_capabilities(m.key, org=None)
-            graph_project = m.org or ""
-            out[m.key] = _workspace_from_setting(
-                m.payload, workspace_id=m.key, graph_project=graph_project,
-                artifacts=artifacts, mounts=mounts,
-                capabilities=capabilities,
-            )
-        return out
+        return _compose_workspaces(members, org=None)
     out = {}
     for ref in refs:
         for wid, workspace in _workspaces_in_org(ref.slug).items():
@@ -806,16 +909,14 @@ def load_org_overrides() -> dict[str, OrgOverride]:
     Fields not present in the Setting payload remain ``None`` so the
     :mod:`tools.dashboard.org_identity` cascade can fall through per-field.
 
-    Process-wide cached on the per-org DB landscape — see the cache block
-    near the top of this module.
+    Process-wide cached until an ``autonomy.org`` changed event.
     """
-    global _overrides_cache_key, _overrides_cache_value
-    key = _orgs_state_key()
-    if key == _overrides_cache_key:
+    global _overrides_cache_value
+    with _cache_lock:
+        _ensure_cache_context()
+        if _overrides_cache_value is None:
+            _overrides_cache_value = _load_org_overrides_uncached()
         return _overrides_cache_value
-    _overrides_cache_value = _load_org_overrides_uncached()
-    _overrides_cache_key = key
-    return _overrides_cache_value
 
 
 def _load_org_overrides_uncached() -> dict[str, OrgOverride]:

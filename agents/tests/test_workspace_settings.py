@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+import time
+
 import pytest
+
+import agents.workspace_settings as workspace_settings
 
 from agents.workspace_settings import (
     CAPABILITIES_MOUNT_DIR,
@@ -11,8 +17,10 @@ from agents.workspace_settings import (
     WorkspaceSettingsError,
     _impl_mount_target,
     _parse_repo,
+    _compose_workspaces,
     _workspace_from_setting,
     invalidate_caches,
+    invalidate_for_setting,
     load_workspaces,
     resolve_capabilities,
 )
@@ -30,6 +38,76 @@ from tools.graph.schemas.workspace_capability_enable import (
     SCHEMA_REVISION as WORKSPACE_CAPABILITY_ENABLE_REVISION,
 )
 from tools.graph.schemas.workspace import WORKSPACE_REVISION, WORKSPACE_SET_ID
+from tools.graph.schemas.workspace_artifact import SET_ID as ARTIFACT_SET_ID
+from tools.graph.schemas.mount import SET_ID as MOUNT_SET_ID
+
+
+def test_workspace_cache_ignores_unrelated_setting_changes(monkeypatch):
+    invalidate_caches()
+    rebuilds = 0
+
+    def rebuild():
+        nonlocal rebuilds
+        rebuilds += 1
+        return {"workspace": object()}
+
+    monkeypatch.setattr(workspace_settings, "_load_workspaces_uncached", rebuild)
+
+    load_workspaces()
+    invalidate_for_setting("dashboard.harness.usage")
+    load_workspaces()
+    assert rebuilds == 1
+
+    invalidate_for_setting(WORKSPACE_SET_ID)
+    load_workspaces()
+    assert rebuilds == 2
+    invalidate_caches()
+
+
+def test_workspace_cache_rebuild_is_singleflight(monkeypatch):
+    invalidate_caches()
+    rebuilds = 0
+
+    def rebuild():
+        nonlocal rebuilds
+        rebuilds += 1
+        time.sleep(0.03)
+        return {"workspace": object()}
+
+    monkeypatch.setattr(workspace_settings, "_load_workspaces_uncached", rebuild)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: load_workspaces(), range(8)))
+
+    assert rebuilds == 1
+    assert all(result is results[0] for result in results)
+    invalidate_caches()
+
+
+def test_workspace_composition_reads_dependent_sets_once_for_many_workspaces(
+    monkeypatch,
+):
+    members = [
+        SimpleNamespace(
+            key="one", payload={"name": "One", "image": "image:one"}, org="autonomy",
+        ),
+        SimpleNamespace(
+            key="two", payload={"name": "Two", "image": "image:two"}, org="autonomy",
+        ),
+    ]
+    reads: list[str] = []
+
+    def read_set(set_id, **_kwargs):
+        reads.append(set_id)
+        return SimpleNamespace(members=[])
+
+    monkeypatch.setattr(workspace_settings.ops, "read_set", read_set)
+
+    composed = _compose_workspaces(members, org="autonomy", graph_project="autonomy")
+
+    assert set(composed) == {"one", "two"}
+    assert reads.count(ARTIFACT_SET_ID) == 1
+    assert reads.count(MOUNT_SET_ID) == 1
+    assert reads.count(WORKSPACE_CAPABILITY_ENABLE_SET_ID) == 1
 
 
 def test_workspace_from_setting_defaults_harness_to_claude():

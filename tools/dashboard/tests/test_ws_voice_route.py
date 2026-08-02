@@ -86,8 +86,10 @@ def voice_route_env(test_client, monkeypatch):
         return name in known_sessions
 
     flag_state = {"voice.pipe_enabled": True}
+    flag_calls: list[str] = []
 
     def fake_is_enabled(name):
+        flag_calls.append(name)
         return flag_state.get(name, False)
 
     monkeypatch.setattr(server, "_tmux_session_exists", fake_tmux_exists)
@@ -128,6 +130,7 @@ def voice_route_env(test_client, monkeypatch):
         "client": test_client,
         "known_sessions": known_sessions,
         "flag_state": flag_state,
+        "flag_calls": flag_calls,
         "manager": fresh_manager,
         "stub_instances": _StubWhisperLiveClient.instances,
         "tmux_send_calls": tmux_send_calls,
@@ -264,6 +267,8 @@ def test_ws_voice_audio_frames_silently_dropped_in_s32(voice_route_env):
         ws.send_text(json.dumps({"type": "mute"}))
         ws.send_bytes(b"\x00" * 100)  # dropped silently
         ws.send_text(json.dumps({"type": "end"}))
+
+    assert voice_route_env["flag_calls"].count("voice.audio_capture") == 1
 
 
 def test_ws_voice_ended_state_rejects_subsequent_commands(voice_route_env):

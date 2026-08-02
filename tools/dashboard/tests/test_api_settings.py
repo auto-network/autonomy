@@ -394,6 +394,12 @@ def test_diag_settings_counts_direct_and_http_traffic(
     assert body["last_60s"]["latency_ms"]["p50"] is not None
     assert body["last_60s"]["latency_ms"]["p95"] is not None
     assert body["last_60s"]["latency_ms"]["p99"] is not None
+    assert body["last_10s"]["calls_per_second"] == round(
+        body["last_10s"]["calls"] / 10, 3,
+    )
+    assert body["last_60s"]["calls_per_second"] == round(
+        body["last_60s"]["calls"] / 60, 3,
+    )
 
 
 def test_diag_settings_counts_errors(graph_db_env, example_schema, client):

@@ -5,22 +5,55 @@ flags. Missing rows always read as ``False`` — consumers gate behavior
 on a flag by calling :func:`is_enabled` and treating absent rows as
 disabled.
 
-No caching layer in v1: reads go through the existing
-:mod:`settings_ops` primitive each call. Flag reads are infrequent
-(per-render in the dashboard, per-session-start in WS handlers) and the
-underlying Settings substrate is fast (SQLite). If a measured hot path
-emerges, add :func:`functools.lru_cache` with explicit ``cache_clear()``
-exposed for tests and writes — as its own slice.
+Snapshots are cached once per resolved org and invalidated by the dashboard's
+post-commit ``setting.changed`` hook. This keeps flag checks safe in hot paths
+(notably voice audio frames) without sacrificing live flag changes.
 
 Spec: graph://40dd9d7a-23a.
 """
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from tools.graph import settings_ops
 from tools.graph.schemas.feature_flags import FEATURE_FLAGS_SET_ID
+
+_cache_lock = threading.RLock()
+_flags_by_org: dict[str | None, dict[str, dict[str, Any]]] = {}
+
+
+def _resolved_org(
+    org: "str | None | settings_ops._CallerOrgSentinel",
+) -> str | None:
+    # Cache by the actual request/env-cascade result, not by the shared
+    # CALLER_ORG sentinel, or two request orgs could share one snapshot.
+    return settings_ops._resolve_org_arg(org)
+
+
+def invalidate_cache(*, org: str | None = None, all_orgs: bool = False) -> None:
+    """Drop one org's flag snapshot, or every snapshot at lifecycle reset."""
+    with _cache_lock:
+        if all_orgs:
+            _flags_by_org.clear()
+        else:
+            _flags_by_org.pop(org, None)
+
+
+def _flags_snapshot(
+    org: "str | None | settings_ops._CallerOrgSentinel",
+) -> dict[str, dict[str, Any]]:
+    resolved_org = _resolved_org(org)
+    with _cache_lock:
+        snapshot = _flags_by_org.get(resolved_org)
+        if snapshot is None:
+            members = settings_ops.read_set(
+                FEATURE_FLAGS_SET_ID, org=resolved_org, peers=[],
+            )
+            snapshot = {m.key: dict(m.payload or {}) for m in members.members}
+            _flags_by_org[resolved_org] = snapshot
+        return snapshot
 
 
 def is_enabled(
@@ -45,17 +78,10 @@ def is_enabled(
     ``org`` defaults to :data:`settings_ops.CALLER_ORG` (env-cascade
     resolution). Tests pass an explicit slug.
     """
-    members = settings_ops.read_set(
-        FEATURE_FLAGS_SET_ID,
-        org=org,
-        peers=[],
-    )
-    for m in members.members:
-        if m.key == name:
-            payload = m.payload or {}
-            value = payload.get("enabled")
-            return value is True
-    return default
+    payload = _flags_snapshot(org).get(name)
+    if payload is None:
+        return default
+    return payload.get("enabled") is True
 
 
 def all_flags(
@@ -67,9 +93,4 @@ def all_flags(
     Useful for the Settings UI inspector or test introspection. Order
     is not guaranteed. Empty when the set has no members.
     """
-    members = settings_ops.read_set(
-        FEATURE_FLAGS_SET_ID,
-        org=org,
-        peers=[],
-    )
-    return {m.key: dict(m.payload or {}) for m in members.members}
+    return {name: dict(payload) for name, payload in _flags_snapshot(org).items()}
