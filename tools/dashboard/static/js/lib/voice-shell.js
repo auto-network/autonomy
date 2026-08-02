@@ -229,7 +229,8 @@
     return (
       '<svg class="voice-capsule__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
       '<polygon points="11 5 6 9 3 9 3 15 6 15 11 19 11 5"></polygon>' +
-      (active ? '<path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M18 6a8.5 8.5 0 0 1 0 12"></path>' : '') +
+      '<path d="M15 9.25a4 4 0 0 1 0 5.5"></path>' +
+      (active ? '<path d="M18 6.5a8 8 0 0 1 0 11"></path>' : '') +
       '</svg>'
     );
   }

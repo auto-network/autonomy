@@ -249,8 +249,14 @@ describe('voice shell helpers', () => {
 
   it('speaker action toggles Voiceover mode without opening the sheet', () => {
     const h = loadVoiceShell();
+    const inactiveIcon = h.component.capsuleIcon('voiceover');
+    assert.match(inactiveIcon, /M15 9\.25a4 4/);
+    assert.doesNotMatch(inactiveIcon, /M18 6\.5a8 8/);
     assert.equal(h.component.runCapsuleAction('voiceover'), true);
     assert.equal(h.component.voiceoverMode, true);
+    const activeIcon = h.component.capsuleIcon('voiceover');
+    assert.match(activeIcon, /M15 9\.25a4 4/);
+    assert.match(activeIcon, /M18 6\.5a8 8/);
     assert.equal(h.component.runCapsuleAction('voiceover'), true);
     assert.equal(h.component.voiceoverMode, false);
   });
