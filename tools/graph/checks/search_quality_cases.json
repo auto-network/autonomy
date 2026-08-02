@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "description": "Non-sensitive graph-search relevance judgments for stable platform protocols and architecture notes. Grades: 3=primary answer, 2=strong companion, 1=useful context.",
+  "cases": [
+    {"query": "platform baseline", "relevant": {"fedda572": 3}},
+    {"query": "minimum knowledge every org", "relevant": {"fedda572": 3}},
+    {"query": "note revision protocol", "relevant": {"843a8137": 3}},
+    {"query": "update living graph note", "relevant": {"843a8137": 3}},
+    {"query": "bead polishing protocol", "relevant": {"f6c6c43e": 3}},
+    {"query": "improve bead acceptance criteria", "relevant": {"f6c6c43e": 3}},
+    {"query": "graph share operator tile", "relevant": {"3570406f": 3}},
+    {"query": "attach file inline viewer", "relevant": {"3570406f": 3}},
+    {"query": "cross org search architecture", "relevant": {"bcce359d": 3, "8cf067e3": 1}},
+    {"query": "publication state access propagation", "relevant": {"8cf067e3": 3, "edbf9e14": 1}},
+    {"query": "why peer org search returns nothing", "relevant": {"edbf9e14": 3, "8cf067e3": 2}},
+    {"query": "scoping boundary enforcement", "relevant": {"75f1b82d": 3}},
+    {"query": "per org graph database isolation", "relevant": {"7c296600": 3}},
+    {"query": "customize session primer", "relevant": {"6acb146f": 3}},
+    {"query": "workspace primer layers", "relevant": {"6acb146f": 3, "2e5986be": 2}},
+    {"query": "force host disaster recovery", "relevant": {"90e6fe6d": 3}},
+    {"query": "public surface bootstrap curation", "relevant": {"93cf3026": 3}},
+    {"query": "turn correction architecture", "relevant": {"1a928bec": 3}},
+    {"query": "session id tmux name architecture", "relevant": {"cc23ec1c": 3}},
+    {"query": "graph search ranking study", "relevant": {"3a45bff7": 3}}
+  ]
+}

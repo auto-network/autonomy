@@ -1442,6 +1442,27 @@ def test_scopeless_search_returns_curated_results_from_every_org(
     )
 
 
+def test_api_graph_search_accepts_smart_ranker(api_client, monkeypatch):
+    """The structured CLI endpoint carries the experimental ranker through."""
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    needle = f"smart-ranker-probe-{uuid.uuid4().hex[:8]}"
+    source_id = _seed_curated_note("autonomy", content=needle)
+
+    resp = api_client.get(
+        f"/api/graph/search?q={needle}&limit=10&ranker=smart"
+    )
+
+    assert resp.status_code == 200
+    assert source_id in {row.get("source_id") for row in resp.json()}
+
+
+def test_api_graph_search_rejects_unknown_ranker(api_client):
+    resp = api_client.get("/api/graph/search?q=probe&ranker=surprise")
+
+    assert resp.status_code == 400
+    assert resp.json() == {"error": "invalid ranker"}
+
+
 def test_scopeless_list_sources_returns_curated_from_every_org(
     api_client, monkeypatch,
 ):

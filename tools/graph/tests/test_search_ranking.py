@@ -214,6 +214,89 @@ def test_hyphenated_tag_overlap_uses_fts_like_tokens(graph_db_env):
         db.close()
 
 
+def test_smart_ranker_prioritizes_term_coverage_over_one_term_title(
+    graph_db_env,
+):
+    """A coherent two-term body match beats a one-term title match."""
+    db = _make_db(graph_db_env)
+    try:
+        title_only = Source(
+            type="note",
+            title="Viewer notes",
+            file_path="note:smart-title-only",
+        )
+        coherent = Source(
+            type="note",
+            title="Operator attachment guide",
+            file_path="note:smart-coherent",
+        )
+        db.insert_source(title_only)
+        db.insert_source(coherent)
+        db.insert_thought(Thought(
+            source_id=coherent.id,
+            content="The file renders as an inline viewer for the operator.",
+            turn_number=1,
+        ))
+        db.commit()
+
+        legacy = db.search("inline viewer", or_mode=True, limit=10)
+        assert legacy[0]["source_id"] == title_only.id
+
+        smart = db.search(
+            "inline viewer", or_mode=True, limit=10, ranker="smart",
+        )
+        assert smart[0]["source_id"] == coherent.id
+        explain = smart[0]["ranking_explain"]
+        assert explain["matched_terms"] == ["inline", "viewer"]
+        assert explain["best_row_terms"] == ["inline", "viewer"]
+        assert explain["channel_ranks"]["thought"] == 1
+    finally:
+        db.close()
+
+
+def test_smart_ranker_uses_metadata_channel_to_break_coverage_tie(
+    graph_db_env,
+):
+    """Curated metadata wins when coverage and coherence are equal."""
+    db = _make_db(graph_db_env)
+    try:
+        metadata = Source(
+            type="note",
+            title="Worktree dashboard specification",
+            file_path="note:smart-metadata",
+        )
+        body = Source(
+            type="session",
+            title="Implementation session",
+            file_path="session:smart-body",
+        )
+        db.insert_source(metadata)
+        db.insert_source(body)
+        db.insert_thought(Thought(
+            source_id=body.id,
+            content="Worktree dashboard implementation details.",
+            turn_number=1,
+        ))
+        db.commit()
+
+        results = db.search("worktree dashboard", limit=10, ranker="smart")
+        assert results[0]["source_id"] == metadata.id
+        assert results[0]["ranking_explain"]["channel_ranks"] == {
+            "metadata": 1,
+        }
+    finally:
+        db.close()
+
+
+def test_search_rejects_unknown_ranker(graph_db_env):
+    db = _make_db(graph_db_env)
+    try:
+        with pytest.raises(ValueError, match="unknown search ranker"):
+            db.search("anything", ranker="mystery")
+    finally:
+        db.close()
+
+
 def test_tag_overlap_boost_capped(graph_db_env):
     """A row with many overlapping tags doesn't dominate beyond the cap."""
     db = _make_db(graph_db_env)

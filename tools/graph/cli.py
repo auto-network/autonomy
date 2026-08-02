@@ -401,6 +401,7 @@ def cmd_search(args):
         "session_source_ids": session_ids,
         "session_author_pattern": author_pattern,
         "source_type": source_type,
+        "ranker": getattr(args, "ranker", "legacy"),
     }
     or_mode = getattr(args, "or_mode", False)
     results = client.search(args.query, or_mode=or_mode, **search_kwargs)
@@ -5237,6 +5238,10 @@ def main():
     p.add_argument(
         "--verbose", "-v", action="store_true",
         help="Show every matching excerpt instead of one compact card per source",
+    )
+    p.add_argument(
+        "--ranker", choices=("legacy", "smart"), default="legacy",
+        help="Relevance ranker (smart is experimental coverage + channel fusion)",
     )
     p.add_argument(
         "--only-org",
