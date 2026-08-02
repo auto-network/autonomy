@@ -50,7 +50,7 @@ fi
 fw=$(api GET "/firewalls?name=firewall-estate" | json_get 'd["firewalls"][0]["id"] if d["firewalls"] else ""')
 if [ -z "$fw" ]; then
     echo "==> creating firewall-estate (applies to $ESTATE_LABEL)" >&2
-    api POST /firewalls "$(python3 - "$ESTATE_LABEL" <<'PY'
+    api POST /firewalls "$("$ESTATE_PY" - "$ESTATE_LABEL" <<'PY'
 import json, sys
 any_src = ["0.0.0.0/0", "::/0"]
 rules = [{"direction": "in", "protocol": "tcp", "port": p, "source_ips": any_src}
@@ -69,7 +69,7 @@ fi
 # 2. Create the server.
 ssh_key=$(api GET /ssh_keys | json_get 'd["ssh_keys"][0]["name"]')
 echo "==> creating $NAME ($TYPE, $LOCATION, ubuntu-24.04, key=$ssh_key)" >&2
-create=$(api POST /servers "$(python3 - "$NAME" "$TYPE" "$LOCATION" "$ssh_key" "$ROLE" <<'PY'
+create=$(api POST /servers "$("$ESTATE_PY" - "$NAME" "$TYPE" "$LOCATION" "$ssh_key" "$ROLE" <<'PY'
 import json, sys
 name, stype, location, key, role = sys.argv[1:6]
 user_data = """#cloud-config
