@@ -75,6 +75,21 @@
   ];
   var DEFAULT_ORDER_KEY = 'relevance';
 
+  // Ranking lens — only meaningful when order=relevance. Legacy is the
+  // production default; Smart is the opt-in whole-query + per-term RRF
+  // experiment. URL state makes comparisons bookmarkable and reversible.
+  var RANKER_OPTIONS = [
+    {
+      key: 'legacy', label: 'Legacy', hint: 'default',
+      description: 'BM25 with title, tag, and hit-count signals.',
+    },
+    {
+      key: 'smart', label: 'Smart', hint: 'experimental',
+      description: 'Fuses the whole query with one ranking per term.',
+    },
+  ];
+  var DEFAULT_RANKER_KEY = 'legacy';
+
   // Debounce window for global-search input → refetch on /search. Matches
   // the brief: "300ms".
   var GLOBAL_INPUT_DEBOUNCE_MS = 300;
@@ -135,6 +150,11 @@
       selectedOrder: DEFAULT_ORDER_KEY,
       orderDropdownOpen: false,
       orderOptions: ORDER_OPTIONS,
+      // Ranking lens — mirrors ?ranker=smart. Hidden under Recent because
+      // relevance rankers do not affect chronological ordering.
+      selectedRanker: DEFAULT_RANKER_KEY,
+      rankerDropdownOpen: false,
+      rankerOptions: RANKER_OPTIONS,
       _refetchTimer: null,
 
       init() {
@@ -153,6 +173,9 @@
         var orderParam = params.get('order') || '';
         var orderMatch = ORDER_OPTIONS.find(o => o.key === orderParam);
         this.selectedOrder = orderMatch ? orderMatch.key : DEFAULT_ORDER_KEY;
+        var rankerParam = params.get('ranker') || '';
+        var rankerMatch = RANKER_OPTIONS.find(o => o.key === rankerParam);
+        this.selectedRanker = rankerMatch ? rankerMatch.key : DEFAULT_RANKER_KEY;
         // Sync the global header input with our query so it isn't blank
         // when the page lands via deep link.
         this._syncGlobalInput();
@@ -215,6 +238,7 @@
       toggleOrgDropdown() {
         this.stateDropdownOpen = false;
         this.orderDropdownOpen = false;
+        this.rankerDropdownOpen = false;
         this.orgDropdownOpen = !this.orgDropdownOpen;
       },
 
@@ -247,6 +271,7 @@
       toggleStateDropdown() {
         this.orgDropdownOpen = false;
         this.orderDropdownOpen = false;
+        this.rankerDropdownOpen = false;
         this.stateDropdownOpen = !this.stateDropdownOpen;
       },
 
@@ -272,16 +297,44 @@
       toggleOrderDropdown() {
         this.orgDropdownOpen = false;
         this.stateDropdownOpen = false;
+        this.rankerDropdownOpen = false;
         this.orderDropdownOpen = !this.orderDropdownOpen;
       },
 
       pickOrder(key) {
         this.orderDropdownOpen = false;
+        this.rankerDropdownOpen = false;
         var resolved = this._orderOption(key).key;
         if (resolved === this.selectedOrder) return;
         this.selectedOrder = resolved;
         this._writeUrl();
         if (this.query) this._refetch();
+      },
+
+      // ── Ranking lens chip + dropdown ──────────────────────────────
+      _rankerOption(key) {
+        return RANKER_OPTIONS.find(o => o.key === (key || '')) ||
+               RANKER_OPTIONS.find(o => o.key === DEFAULT_RANKER_KEY);
+      },
+
+      get rankerChipLabel() {
+        return this._rankerOption(this.selectedRanker).label;
+      },
+
+      toggleRankerDropdown() {
+        this.orgDropdownOpen = false;
+        this.stateDropdownOpen = false;
+        this.orderDropdownOpen = false;
+        this.rankerDropdownOpen = !this.rankerDropdownOpen;
+      },
+
+      pickRanker(key) {
+        this.rankerDropdownOpen = false;
+        var resolved = this._rankerOption(key).key;
+        if (resolved === this.selectedRanker) return;
+        this.selectedRanker = resolved;
+        this._writeUrl();
+        if (this.query && this.selectedOrder === 'relevance') this._refetch();
       },
 
       // ── Global header input bridge ─────────────────────────────────
@@ -347,6 +400,11 @@
         } else {
           url.searchParams.delete('order');
         }
+        if (this.selectedRanker && this.selectedRanker !== DEFAULT_RANKER_KEY) {
+          url.searchParams.set('ranker', this.selectedRanker);
+        } else {
+          url.searchParams.delete('ranker');
+        }
         window.history.replaceState({}, '', url.toString());
       },
 
@@ -377,6 +435,13 @@
         }
         if (this.selectedOrder && this.selectedOrder !== DEFAULT_ORDER_KEY) {
           url += '&order=' + encodeURIComponent(this.selectedOrder);
+        }
+        // Ranker is omitted for the default and under Recent. Keeping the
+        // preference in the page URL means switching back to Relevance
+        // restores the selected comparison lens without sending a no-op knob.
+        if (this.selectedOrder === 'relevance' &&
+            this.selectedRanker !== DEFAULT_RANKER_KEY) {
+          url += '&ranker=' + encodeURIComponent(this.selectedRanker);
         }
         // Round 7l: pill click re-fetches with the session_type filter
         // pushed to the API (not just a client-side filter over
