@@ -192,6 +192,37 @@ describe('#43 client epoch acceptance + resetEpoch (flag ON)', () => {
     assert.ok(h.renders.some((r) => /after the reconnect/.test(r)),
       'epoch-0 frames on the new connection are accepted, not silently dropped');
   });
+
+  it('7. Clear drops a carried prefix before accepting the reset acknowledgment', () => {
+    const h = makeHarness({ resetMode: true });
+    const ws = h.startListening();
+
+    // Represents text retained across a target-session switch.
+    h.cap._state.carryPrefix = 'Ugh';
+    h.voice.setBufferText('Ugh');
+
+    // Actual Clear ordering: empty the visible store, then reset capture.
+    h.voice.setBufferText('');
+    h.resetEpoch('clear');
+
+    assert.equal(h.cap._state.carryPrefix, '');
+
+    // The server correctly acknowledges the reset with an empty,
+    // incremented-epoch buffer. This must remain empty.
+    ws.fireBufferState('', 1);
+    assert.equal(h.voice.bufferText, '');
+  });
+
+  it('8. reset-mode Clear schedules a buffered trace dump when tracing is enabled', () => {
+    const h = makeHarness({ resetMode: true });
+    h.cap.startTrace();
+
+    h.resetEpoch('clear');
+
+    assert.ok(h.cap._state.traceDumpTimer,
+      'Clear should schedule one post-reset trace upload');
+    clearTimeout(h.cap._state.traceDumpTimer);
+  });
 });
 
 describe('#43 reversibility (flag OFF = legacy behavior)', () => {
