@@ -29,6 +29,25 @@ const RESET_FLAG = 'voice.reset_suppression';
 function makeHarness(opts) {
   opts = opts || {};
   const resetMode = opts.resetMode === true;
+  let nowMs = opts.nowMs || 1_000_000;
+  class FakeDate extends Date {
+    static now() { return nowMs; }
+  }
+  const stored = new Map();
+  const localStorage = {
+    getItem(key) { return stored.has(key) ? stored.get(key) : null; },
+    setItem(key, value) { stored.set(key, String(value)); },
+    removeItem(key) { stored.delete(key); },
+  };
+  const fetches = [];
+  let resolveUpload = null;
+  const fetch = (url, init) => {
+    fetches.push({ url, init });
+    if (opts.deferUpload) {
+      return new Promise((resolve) => { resolveUpload = resolve; });
+    }
+    return Promise.resolve({ ok: opts.uploadOk !== false });
+  };
   const sockets = [];
   class FakeWS {
     constructor(url) { this.url = url; this.readyState = 0; this._l = {}; this.sent = []; sockets.push(this); }
@@ -72,9 +91,10 @@ function makeHarness(opts) {
   stores.flags = { isLoaded: true, get(name) { return name === RESET_FLAG ? resetMode : false; } };
 
   const sandbox = {
-    console, setTimeout, clearTimeout, setInterval, clearInterval, Promise, JSON, Math, Date, Object, Array, String,
+    console, setTimeout, clearTimeout, setInterval, clearInterval, Promise, JSON, Math,
+    Date: FakeDate, Object, Array, String, localStorage, fetch,
     WebSocket: FakeWS,
-    location: { protocol: 'https:', host: 'localhost:8080' },
+    location: { protocol: 'https:', host: 'localhost:8080', search: opts.search || '' },
     navigator: {},
     document,
     window: { console, Autonomy: {}, addEventListener() {}, removeEventListener() {} },
@@ -90,7 +110,9 @@ function makeHarness(opts) {
   function runEffects() { for (const fn of effects) fn(); }
   const cap = sandbox.window.Autonomy.voiceCapture;
   return {
-    voice, sockets, renders, runEffects, cap,
+    voice, sockets, renders, runEffects, cap, fetches, localStorage,
+    advanceTime(ms) { nowMs += ms; },
+    resolveUpload(ok) { resolveUpload({ ok: ok !== false }); },
     resetEpoch(reason) { return cap.resetEpoch(reason); },
     clearBox() { voice.setBufferText(''); renders.length = 0; runEffects(); },
     startListening() {
@@ -222,6 +244,72 @@ describe('#43 client epoch acceptance + resetEpoch (flag ON)', () => {
     assert.ok(h.cap._state.traceDumpTimer,
       'Clear should schedule one post-reset trace upload');
     clearTimeout(h.cap._state.traceDumpTimer);
+  });
+
+  it('9. trace activation expires after one hour even while the page stays open', () => {
+    const h = makeHarness({ resetMode: true });
+    h.cap.startTrace();
+    const expiresAt = Number(h.localStorage.getItem('voice-trace'));
+    assert.equal(expiresAt, 1_000_000 + 60 * 60 * 1000);
+
+    h.advanceTime(60 * 60 * 1000 + 1);
+    h.resetEpoch('send');
+
+    assert.equal(h.cap._state.traceOn, false);
+    assert.equal(h.localStorage.getItem('voice-trace'), null);
+    assert.equal(h.cap._state.trace.length, 0);
+  });
+
+  it('10. tracing is off by default', () => {
+    const h = makeHarness({ resetMode: true });
+
+    h.resetEpoch('send');
+
+    assert.equal(h.cap._state.traceOn, false);
+    assert.equal(h.localStorage.getItem('voice-trace'), null);
+    assert.equal(h.cap._state.trace.length, 0);
+  });
+
+  it('11. a successful upload advances the trace ring instead of repeating history', async () => {
+    const h = makeHarness({ resetMode: true });
+    h.cap.startTrace();
+    h.resetEpoch('send');
+    assert.equal(h.cap._state.trace.length, 1);
+
+    h.cap.dumpTrace();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.equal(h.fetches.length, 1);
+    assert.equal(h.fetches[0].url, '/api/voice/trace');
+    assert.equal(h.cap._state.trace.length, 0);
+  });
+
+  it('12. a failed upload retains the ring for a later retry', async () => {
+    const h = makeHarness({ resetMode: true, uploadOk: false });
+    h.cap.startTrace();
+    h.resetEpoch('send');
+
+    h.cap.dumpTrace();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.equal(h.cap._state.trace.length, 1);
+  });
+
+  it('13. a successful upload retains events appended while it was in flight', async () => {
+    const h = makeHarness({ resetMode: true, deferUpload: true });
+    h.cap.startTrace();
+    h.resetEpoch('send');
+
+    const upload = h.cap.dumpTrace();
+    h.resetEpoch('clear');
+    assert.equal(h.cap._state.trace.length, 2);
+    h.resolveUpload(true);
+    await upload;
+
+    assert.equal(h.cap._state.trace.length, 1);
+    assert.equal(h.cap._state.trace[0].v.reason, 'clear');
   });
 });
 

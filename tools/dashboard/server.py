@@ -11416,25 +11416,94 @@ async def api_voice_diag(request):
     return JSONResponse({"ok": True})
 
 
+VOICE_TRACE_MAX_BODY_BYTES = 2 * 1024 * 1024
+VOICE_TRACE_MAX_FRAMES = 1200
+VOICE_TRACE_MAX_FILES = 100
+VOICE_TRACE_MAX_TOTAL_BYTES = 50 * 1024 * 1024
+VOICE_TRACE_MAX_AGE_S = 7 * 24 * 60 * 60
+
+
+def _prune_voice_traces(traces_dir: Path, *, now: float) -> int:
+    """Bound disposable voice diagnostics by age, count, and total bytes."""
+    kept: list[tuple[Path, os.stat_result]] = []
+    removed = 0
+    cutoff = now - VOICE_TRACE_MAX_AGE_S
+    for path in traces_dir.glob("voice-trace-*.json"):
+        try:
+            stat = path.stat()
+            if stat.st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+            else:
+                kept.append((path, stat))
+        except OSError:
+            logger.warning("VOICE-TRACE could not inspect/prune %s", path,
+                           exc_info=True)
+
+    kept.sort(key=lambda item: (item[1].st_mtime, item[0].name))
+    total_bytes = sum(stat.st_size for _path, stat in kept)
+    while kept and (len(kept) > VOICE_TRACE_MAX_FILES
+                    or total_bytes > VOICE_TRACE_MAX_TOTAL_BYTES):
+        path, stat = kept.pop(0)
+        try:
+            path.unlink()
+            removed += 1
+            total_bytes -= stat.st_size
+        except OSError:
+            logger.warning("VOICE-TRACE could not prune %s", path,
+                           exc_info=True)
+    return removed
+
+
 async def api_voice_trace(request):
     """Persist a client-side voice failure-trace (real inbound frames + render +
     clear events) so a flaky clear can be replayed deterministically in the mock
     harness instead of guessed. Debug aid — the client only POSTs when enabled
     via ?vtrace=1, once per clear (never per audio frame)."""
+    chunks: list[bytes] = []
+    nbytes = 0
+    async for chunk in request.stream():
+        nbytes += len(chunk)
+        if nbytes > VOICE_TRACE_MAX_BODY_BYTES:
+            return JSONResponse(
+                {"ok": False, "error": "voice trace exceeds the 2 MiB limit"},
+                status_code=413,
+            )
+        chunks.append(chunk)
     try:
-        body = await request.json()
-    except Exception:
-        body = {}
+        body = json.loads(b"".join(chunks))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse({"ok": False, "error": "voice trace must be JSON"},
+                            status_code=400)
+    if not isinstance(body, dict) or not isinstance(body.get("frames"), list):
+        return JSONResponse(
+            {"ok": False, "error": "voice trace must carry a frames list"},
+            status_code=400,
+        )
+    if len(body["frames"]) > VOICE_TRACE_MAX_FRAMES:
+        return JSONResponse(
+            {"ok": False, "error": "voice trace exceeds the 1200-frame limit"},
+            status_code=413,
+        )
     try:
+        rendered = json.dumps(body, indent=2).encode("utf-8")
+        if len(rendered) > VOICE_TRACE_MAX_BODY_BYTES:
+            return JSONResponse(
+                {"ok": False, "error": "rendered voice trace exceeds the 2 MiB limit"},
+                status_code=413,
+            )
         traces_dir = _REPO_ROOT / "data" / "voice-traces"
         traces_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
         reason = re.sub(r"[^a-z0-9]+", "-", str(body.get("reason", "trace")).lower())[:24] or "trace"
         out = traces_dir / f"voice-trace-{ts}-{reason}.json"
-        out.write_text(json.dumps(body, indent=2), encoding="utf-8")
+        out.write_bytes(rendered)
         nframes = len(body.get("frames", []) or [])
-        logger.info("VOICE-TRACE saved %s (%d frames)", out, nframes)
-        return JSONResponse({"ok": True, "path": str(out), "frames": nframes})
+        pruned = _prune_voice_traces(traces_dir, now=time.time())
+        logger.info("VOICE-TRACE saved %s (%d frames, %d pruned)",
+                    out, nframes, pruned)
+        return JSONResponse({"ok": True, "path": str(out), "frames": nframes,
+                             "pruned": pruned})
     except Exception:
         logger.exception("api_voice_trace: save failed")
         return JSONResponse({"ok": False}, status_code=500)
