@@ -47,42 +47,76 @@
     lastFrameAt: 0,         // last worklet audio frame — audio-stall watchdog baseline
     trace: [],              // failure-trace ring (debug only)
     traceOn: false,
+    traceExpiresAt: 0,
     traceDumpTimer: null,
   };
 
   // ── Failure-trace recorder (clearing reliability) ───────────────────────
   // Capture REAL frames so a flaky clear can be replayed deterministically in the
-  // mock harness instead of guessed. OFF by default — enable with ?vtrace=1 (sticks
-  // in localStorage). Records inbound WS frames, every render, and buffer-empty
+  // mock harness instead of guessed. OFF by default — enable with ?vtrace=1 (the
+  // localStorage activation expires after one hour). Records inbound WS frames,
+  // every render, and buffer-empty
   // (clear/send) events into a bounded in-memory ring. On a clear it auto-POSTs the
   // window ONCE a few seconds later (to capture the post-clear re-emits) — never
   // per-frame (a per-frame POST once flooded the loop and stalled the audio path).
   var TRACE_MAX = 1200;
+  var TRACE_TTL_MS = 60 * 60 * 1000;
+  var TRACE_STORAGE_KEY = 'voice-trace';
+  function _traceDisable() {
+    try { localStorage.removeItem(TRACE_STORAGE_KEY); } catch (_e) {}
+    s.traceOn = false;
+    s.traceExpiresAt = 0;
+    s.trace = [];
+  }
+  function _traceEnable() {
+    var expiresAt = _nowMs() + TRACE_TTL_MS;
+    try { localStorage.setItem(TRACE_STORAGE_KEY, String(expiresAt)); } catch (_e) {}
+    s.traceExpiresAt = expiresAt;
+    s.traceOn = true;
+  }
+  function _traceActive() {
+    if (!s.traceOn) return false;
+    if (!Number.isSafeInteger(s.traceExpiresAt) || _nowMs() >= s.traceExpiresAt) {
+      _traceDisable();
+      return false;
+    }
+    return true;
+  }
   function _traceRec(kind, payload) {
-    if (!s.traceOn) return;
+    if (!_traceActive()) return;
     var e = { t: _nowMs(), kind: kind };
     if (payload !== undefined) e.v = payload;
     s.trace.push(e);
     if (s.trace.length > TRACE_MAX) s.trace.shift();
   }
   function _traceDump(reason) {
-    if (!s.traceOn || !s.trace.length) return;
+    if (!_traceActive() || !s.trace.length) return;
+    var frames = s.trace.slice();
     try {
-      fetch('/api/voice/trace', {
+      return fetch('/api/voice/trace', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           reason: reason || 'manual',
           bind: s.bind || '',
           ua: (typeof navigator !== 'undefined' && navigator.userAgent) || '',
-          frames: s.trace.slice(),
+          frames: frames,
         }),
         keepalive: true,
-      }).catch(function () {});
-    } catch (_e) {}
+      }).then(function (response) {
+        if (!response.ok) return false;
+        // Drop only the prefix that this successful request persisted. Events
+        // appended while the POST was in flight remain available to the next
+        // dump, and a failed request keeps the complete ring for retry.
+        var last = frames[frames.length - 1];
+        var index = s.trace.indexOf(last);
+        if (index >= 0) s.trace.splice(0, index + 1);
+        return true;
+      }).catch(function () { return false; });
+    } catch (_e) { return Promise.resolve(false); }
   }
   function _traceScheduleDump() {
-    if (!s.traceOn || s.traceDumpTimer) return;   // one pending dump at a time
+    if (!_traceActive() || s.traceDumpTimer) return;   // one pending dump at a time
     s.traceDumpTimer = setTimeout(function () {
       s.traceDumpTimer = null;
       _traceDump('clear+window');
@@ -92,10 +126,14 @@
     try {
       if (typeof location !== 'undefined' && /[?&]vtrace=1\b/.test(location.search) &&
           typeof localStorage !== 'undefined') {
-        localStorage.setItem('voice-trace', '1');
+        _traceEnable();
+        return;
       }
-      s.traceOn = (typeof localStorage !== 'undefined' && localStorage.getItem('voice-trace') === '1');
-    } catch (_e) { s.traceOn = false; }
+      var expiresAt = Number(localStorage.getItem(TRACE_STORAGE_KEY));
+      s.traceExpiresAt = Number.isSafeInteger(expiresAt) ? expiresAt : 0;
+      s.traceOn = s.traceExpiresAt > _nowMs();
+      if (!s.traceOn) _traceDisable();
+    } catch (_e) { _traceDisable(); }
   }
 
   // ── Auto-reconnect with backoff ─────────────────────────────────────────
@@ -697,9 +735,9 @@
     retryReconnect: retryReconnectNow,
     onServerRecovered: onServerRecovered,
     resetEpoch: resetEpoch,   // #43: explicit Send/Clear reset hook (voice-shell.js calls this)
-    dumpTrace: function () { _traceDump('manual'); },
-    startTrace: function () { try { localStorage.setItem('voice-trace', '1'); } catch (_e) {} s.traceOn = true; },
-    stopTrace: function () { try { localStorage.removeItem('voice-trace'); } catch (_e) {} s.traceOn = false; },
+    dumpTrace: function () { return _traceDump('manual'); },
+    startTrace: _traceEnable,
+    stopTrace: _traceDisable,
     _audioWatchdogTick: _audioWatchdogTick,   // exposed for tests
     _state: s,
   };
