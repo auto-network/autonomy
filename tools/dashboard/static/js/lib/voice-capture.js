@@ -361,11 +361,17 @@
   // the flag is off — the legacy discard path owns reset then.
   function resetEpoch(reason) {
     if (!_resetMode()) return false;
+    var why = reason || '';
     s.acceptEpoch = s.serverEpoch + 1;
     s.finals = '';
+    // A target switch can preserve text here. Send/Clear are terminal
+    // boundaries for that text, so it must not survive the reset and
+    // reappear when the server sends buffer_state("").
+    s.carryPrefix = '';
     s.lastRendered = '';
-    _traceRec('reset', { reason: reason || '', acceptEpoch: s.acceptEpoch });
-    return sendControl('reset', { reason: reason || '' });
+    _traceRec('reset', { reason: why, acceptEpoch: s.acceptEpoch });
+    if (why === 'clear') _traceScheduleDump();
+    return sendControl('reset', { reason: why });
   }
 
   function _renderBuffer(text) {
