@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import sys
 import traceback
@@ -57,6 +58,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = REPO_ROOT / "data"
 REPOS_DIR = DATA_DIR / "repos"
 WORKTREES_DIR = DATA_DIR / "worktrees"
+LOCAL_WORKSPACE_REPOS_DIR = DATA_DIR / "workspace-repos"
+
+_LOCAL_WORKSPACE_COMPONENT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +74,82 @@ def _refuse_pytest_against_real_worktrees(worktrees_dir: Path, op: str) -> None:
 
 class WorkspaceError(RuntimeError):
     """Raised when repo clone, fetch, or worktree operations fail."""
+
+
+def local_workspace_repo_path(
+    org: str,
+    workspace_id: str,
+    *,
+    root: Path = LOCAL_WORKSPACE_REPOS_DIR,
+) -> Path:
+    """Return the dashboard-owned bare repository for a local workspace.
+
+    Both path components are strict slugs so an API caller cannot escape the
+    runtime data directory.  Repositories are bare because they are backing
+    stores: every agent session receives an isolated writable worktree, while
+    accepted commits fast-forward this durable base for subsequent sessions.
+    """
+    for label, value in (("org", org), ("workspace_id", workspace_id)):
+        if not isinstance(value, str) or not _LOCAL_WORKSPACE_COMPONENT_RE.fullmatch(value):
+            raise WorkspaceError(f"invalid local workspace repository {label}: {value!r}")
+    return root / org / workspace_id
+
+
+def ensure_local_workspace_repository(
+    org: str,
+    workspace_id: str,
+    *,
+    name: str | None = None,
+    root: Path = LOCAL_WORKSPACE_REPOS_DIR,
+) -> tuple[Path, bool]:
+    """Create an API-managed local Git backing store, idempotently.
+
+    The initial commit carries a small README so Git has a real ``main`` ref
+    from which session worktrees can branch.  Returns ``(path, created)``.
+    Existing paths are accepted only when they are bare Git repositories.
+    """
+    target = local_workspace_repo_path(org, workspace_id, root=root)
+    if target.exists():
+        rc, out, _ = _git_output(
+            ["rev-parse", "--is-bare-repository"], target, timeout=15,
+        )
+        if rc != 0 or out.strip() != "true":
+            raise WorkspaceError(
+                f"local workspace repository path exists but is not a bare Git repository: {target}"
+            )
+        return target, False
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    display_name = str(name or workspace_id).strip() or workspace_id
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=f".{workspace_id}-init-", dir=target.parent,
+        ) as tmp:
+            seed = Path(tmp)
+            _run_git(["init", "-q", "-b", "main"], cwd=seed, timeout=30)
+            (seed / "README.md").write_text(
+                f"# {display_name}\n\n"
+                "This local repository is the durable working area for the "
+                f"{display_name} workspace.\n"
+            )
+            _run_git(["add", "README.md"], cwd=seed, timeout=15)
+            _run_git(
+                [
+                    "-c", "user.name=Autonomy Workspace",
+                    "-c", "user.email=workspace@local",
+                    "-c", "commit.gpgsign=false",
+                    "commit", "-q", "-m", "Initialize workspace",
+                ],
+                cwd=seed,
+                timeout=30,
+            )
+            _run_git(["clone", "-q", "--bare", str(seed), str(target)], timeout=60)
+    except Exception:
+        # A failed first creation must not poison all future idempotent calls.
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+        raise
+    return target, True
 
 
 class RebaseRequiredError(WorkspaceError):
@@ -1039,6 +1119,34 @@ def _autonomy_target_branch_and_head() -> tuple[str | None, str | None]:
     return branch, _repo_branch_head(REPO_ROOT, branch)
 
 
+def _local_workspace_target_for_clone(clone: Path) -> Path | None:
+    """Resolve an API-managed local backing repo from a managed clone.
+
+    Arbitrary local origins are deliberately excluded.  The merge endpoint may
+    advance only bare repositories created beneath
+    :data:`LOCAL_WORKSPACE_REPOS_DIR`; this keeps a workspace declaration from
+    turning the dashboard into a write primitive for unrelated host repos.
+    """
+    rc, out, _ = _git_output(["remote", "get-url", "origin"], clone, timeout=15)
+    if rc != 0:
+        return None
+    raw = out.strip()
+    if not raw or not raw.startswith("/"):
+        return None
+    target = Path(raw).resolve()
+    root = LOCAL_WORKSPACE_REPOS_DIR.resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None
+    rc, bare, _ = _git_output(
+        ["rev-parse", "--is-bare-repository"], target, timeout=15,
+    )
+    if rc != 0 or bare.strip() != "true":
+        return None
+    return target
+
+
 def _managed_clone_synced_source_ref(branch: str) -> str:
     """Ref that records an explicit non-origin source for ``branch``."""
     return f"refs/dashboard/synced-source/{branch}"
@@ -1129,7 +1237,20 @@ def _worktree_dashboard_base_ref(
     """
     fallback = _worktree_merge_base_ref(worktree)
     if repo_name != "autonomy":
-        return fallback
+        clone = _find_managed_clone_for_worktree(worktree)
+        target = _local_workspace_target_for_clone(clone) if clone else None
+        if target is None:
+            return fallback
+        branch = _repo_default_branch(target)
+        target_head = _repo_branch_head(target, branch) if branch else None
+        if not target_head:
+            return fallback
+        rc, _, _ = _git_output(
+            ["merge-base", "--is-ancestor", target_head, "HEAD"],
+            worktree,
+            timeout=15,
+        )
+        return target_head if rc == 0 else fallback
 
     _target_branch, target_head = (
         target_branch_and_head if target_branch_and_head is not None
@@ -2770,20 +2891,24 @@ def merge_session_worktree(
             f"(ahead={commits_ahead}, dirty={is_dirty}, branch={branch!r})"
         )
 
-    # Only the autonomy repo has a known local checkout in this process: the
-    # dashboard's own repository. Cross-repo merge targets need explicit
-    # workspace metadata before they can be made safe.
-    if repo_name != "autonomy":
-        raise WorkspaceError(
-            f"merge target unsupported for repo {repo_name!r}; "
-            "only 'autonomy' can be merged from the dashboard today"
-        )
+    if repo_name == "autonomy":
+        target_repo = REPO_ROOT
+        target_branch, _target_head = _autonomy_target_branch_and_head()
+        if target_branch is None:
+            raise WorkspaceError("could not determine autonomy integration branch")
+    else:
+        target_repo = _local_workspace_target_for_clone(clone)
+        if target_repo is None:
+            raise WorkspaceError(
+                f"merge target unsupported for repo {repo_name!r}; expected "
+                "an API-managed local workspace repository"
+            )
+        target_branch = _repo_default_branch(target_repo)
+        if target_branch is None:
+            raise WorkspaceError(
+                f"could not determine integration branch for local workspace repo {repo_name!r}"
+            )
 
-    target_branch, _target_head = _autonomy_target_branch_and_head()
-    if target_branch is None:
-        raise WorkspaceError("could not determine autonomy integration branch")
-
-    target_repo = REPO_ROOT
     _run_git(["fetch", str(clone), branch], cwd=target_repo)
     target_sha = _run_git(["rev-parse", "FETCH_HEAD"], cwd=target_repo).strip()
     rc, current_head, _ = _git_output(
@@ -2801,7 +2926,16 @@ def merge_session_worktree(
             f"selected branch tip is not fast-forward eligible from {target_branch}"
         )
 
-    rc, head_branch, _ = _git_output(["symbolic-ref", "--quiet", "--short", "HEAD"], target_repo, timeout=15)
+    if repo_name == "autonomy":
+        rc, head_branch, _ = _git_output(
+            ["symbolic-ref", "--quiet", "--short", "HEAD"],
+            target_repo,
+            timeout=15,
+        )
+    else:
+        # API-managed repositories are bare, so no working tree can be checked
+        # out. Advancing the branch ref is the complete fast-forward operation.
+        rc, head_branch = 1, ""
     if rc == 0 and head_branch.strip() == target_branch:
         _run_git(["merge", "--ff-only", target_sha], cwd=target_repo)
     else:

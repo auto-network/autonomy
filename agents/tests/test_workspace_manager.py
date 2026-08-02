@@ -46,6 +46,89 @@ def test_managed_clone_path_layout(tmp_path):
 
 # ── Local-first repos (no git remote, e.g. a git-svn mirror) ───────
 
+def test_ensure_local_workspace_repository_is_safe_and_idempotent(tmp_path):
+    root = tmp_path / "workspace-repos"
+
+    repo, created = wm.ensure_local_workspace_repository(
+        "personal", "idea-board", name="Idea Board", root=root,
+    )
+    again, created_again = wm.ensure_local_workspace_repository(
+        "personal", "idea-board", name="Idea Board", root=root,
+    )
+
+    assert repo == root / "personal" / "idea-board"
+    assert again == repo
+    assert created is True
+    assert created_again is False
+    assert subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--is-bare-repository"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip() == "true"
+    assert subprocess.run(
+        ["git", "-C", str(repo), "show", "main:README.md"],
+        capture_output=True, text=True, check=True,
+    ).stdout.startswith("# Idea Board\n")
+
+    with pytest.raises(wm.WorkspaceError, match="invalid"):
+        wm.ensure_local_workspace_repository(
+            "personal", "../escape", root=root,
+        )
+
+
+def test_api_managed_local_repo_round_trips_through_session_merge(tmp_path, monkeypatch):
+    """A committed idea becomes the base of the next isolated session."""
+    local_root = tmp_path / "workspace-repos"
+    repo, _ = wm.ensure_local_workspace_repository(
+        "personal", "idea-board", name="Idea Board", root=local_root,
+    )
+    monkeypatch.setattr(wm, "LOCAL_WORKSPACE_REPOS_DIR", local_root)
+    repos_dir = tmp_path / "repos"
+    worktrees_dir = tmp_path / "worktrees"
+    project = ProjectConfig(
+        id="idea-board",
+        name="Idea Board",
+        description="",
+        image="img",
+        graph_project="personal",
+        repos=(RepoMount(url=str(repo), mount="/workspace/repo", writable=True),),
+    )
+
+    wm.prepare_session_mounts(
+        project,
+        "sess-one",
+        repos_dir=repos_dir,
+        worktrees_dir=worktrees_dir,
+    )
+    first = worktrees_dir / "sess-one" / "idea-board"
+    (first / "IDEAS.md").write_text("# Ideas\n\n- Durable local workspaces\n")
+    subprocess.run(["git", "-C", str(first), "add", "IDEAS.md"], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(first),
+            "-c", "user.name=Test", "-c", "user.email=test@example.com",
+            "-c", "commit.gpgsign=false", "commit", "-q", "-m", "Save idea",
+        ],
+        check=True,
+    )
+
+    merged = wm.merge_session_worktree(
+        "sess-one", "idea-board", worktrees_dir=worktrees_dir,
+    )
+    assert merged["target_repo"] == str(repo)
+    assert subprocess.run(
+        ["git", "-C", str(repo), "show", "main:IDEAS.md"],
+        capture_output=True, text=True, check=True,
+    ).stdout == "# Ideas\n\n- Durable local workspaces\n"
+
+    wm.prepare_session_mounts(
+        project,
+        "sess-two",
+        repos_dir=repos_dir,
+        worktrees_dir=worktrees_dir,
+    )
+    second = worktrees_dir / "sess-two" / "idea-board"
+    assert (second / "IDEAS.md").read_text() == "# Ideas\n\n- Durable local workspaces\n"
+
 @pytest.mark.parametrize(
     "url, expected",
     [
@@ -1930,7 +2013,7 @@ def test_merge_session_worktree_rejects_non_autonomy_repo(tmp_path, monkeypatch)
         check=True,
     )
 
-    with pytest.raises(wm.WorkspaceError, match="only 'autonomy'"):
+    with pytest.raises(wm.WorkspaceError, match="API-managed local workspace"):
         wm.merge_session_worktree(
             session, "upstream", worktrees_dir=worktrees_dir,
         )
