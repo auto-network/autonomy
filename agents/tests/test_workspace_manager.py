@@ -100,12 +100,19 @@ def test_api_managed_local_repo_round_trips_through_session_merge(tmp_path, monk
         worktrees_dir=worktrees_dir,
     )
     first = worktrees_dir / "sess-one" / "idea-board"
+    assert subprocess.run(
+        ["git", "-C", str(first), "config", "--get", "user.email"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip() == "workspace@local"
+    assert wm.worktree_target_branch_name(
+        "sess-one", "idea-board", "session/sess-one",
+        worktrees_dir=worktrees_dir,
+    ) == "main"
     (first / "IDEAS.md").write_text("# Ideas\n\n- Durable local workspaces\n")
     subprocess.run(["git", "-C", str(first), "add", "IDEAS.md"], check=True)
     subprocess.run(
         [
             "git", "-C", str(first),
-            "-c", "user.name=Test", "-c", "user.email=test@example.com",
             "-c", "commit.gpgsign=false", "commit", "-q", "-m", "Save idea",
         ],
         check=True,
