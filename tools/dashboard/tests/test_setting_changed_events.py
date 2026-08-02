@@ -286,6 +286,38 @@ def test_unrelated_writes_do_not_emit_setting_changed(
     assert _setting_changed_events(fresh_bus) == []
 
 
+def test_setting_emit_hook_invalidates_targeted_caches(monkeypatch, fresh_bus):
+    from tools.dashboard import feature_flags
+
+    workspace_invalidations: list[str] = []
+    feature_invalidations: list[str | None] = []
+    monkeypatch.setattr(
+        server_mod.workspace_settings,
+        "invalidate_for_setting",
+        workspace_invalidations.append,
+    )
+    monkeypatch.setattr(
+        feature_flags,
+        "invalidate_cache",
+        lambda *, org=None, all_orgs=False: feature_invalidations.append(org),
+    )
+
+    server_mod._settings_emit_hook(
+        operation="upsert",
+        snapshot={
+            "set_id": feature_flags.FEATURE_FLAGS_SET_ID,
+            "schema_revision": 1,
+            "key": "voice.audio_capture",
+            "publication_state": "raw",
+            "deprecated": False,
+        },
+        org="personal",
+    )
+
+    assert workspace_invalidations == [feature_flags.FEATURE_FLAGS_SET_ID]
+    assert feature_invalidations == ["personal"]
+
+
 def test_failed_write_does_not_emit(graph_db_env, example_schema, client, fresh_bus):
     """400 from validation must not produce a setting.changed event."""
     r = client.post("/api/graph/setting", json={

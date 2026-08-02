@@ -20,6 +20,13 @@ def graph_db_env(tmp_path, monkeypatch):
     yield db_path
 
 
+@pytest.fixture(autouse=True)
+def _clear_harness_usage_write_cache():
+    hus.clear_published_payload_cache()
+    yield
+    hus.clear_published_payload_cache()
+
+
 def _count_setting_rows(db_path, set_id: str, key: str) -> int:
     conn = sqlite3.connect(str(db_path))
     try:
@@ -178,7 +185,9 @@ def test_upsert_by_key_replaces_payload_in_place(graph_db_env):
     assert members.members[0].payload["windows"]["short"]["used_percent"] == 9.0
 
 
-def test_publish_codex_harness_usage_setting_writes_directly(graph_db_env):
+def test_publish_codex_harness_usage_setting_writes_personal_once_when_unchanged(
+    monkeypatch,
+):
     row = {"harness": "codex"}
     state = {
         "kind": "rate_limits",
@@ -194,13 +203,105 @@ def test_publish_codex_harness_usage_setting_writes_directly(graph_db_env):
         },
     }
 
-    wrote = session_monitor._publish_codex_harness_usage_setting(row, state)
+    writes = []
+    monkeypatch.setattr(
+        session_monitor.graph_ops,
+        "upsert_by_key",
+        lambda set_id, schema_revision, key, payload, *, org, state="raw":
+            writes.append({
+                "set_id": set_id,
+                "schema_revision": schema_revision,
+                "key": key,
+                "payload": payload,
+                "org": org,
+                "state": state,
+            }) or "sid",
+    )
 
-    assert wrote is True
-    members = ops.read_set(hus.HARNESS_USAGE_SET_ID, org=ops.CALLER_ORG)
-    assert len(members.members) == 1
-    assert members.members[0].key == "codex:default"
-    assert members.members[0].payload["windows"]["short"]["used_percent"] == 4.0
+    first = session_monitor._publish_codex_harness_usage_setting(row, state)
+    second = session_monitor._publish_codex_harness_usage_setting(row, state)
+
+    assert first is True
+    assert second is False
+    assert len(writes) == 1
+    assert writes[0]["org"] == "personal"
+    assert writes[0]["state"] == "raw"
+    assert writes[0]["key"] == "codex:default"
+    assert writes[0]["payload"]["windows"]["short"]["used_percent"] == 4.0
+
+
+def test_publish_codex_harness_usage_setting_rewrites_changed_payload(monkeypatch):
+    writes = []
+    monkeypatch.setattr(
+        session_monitor.graph_ops,
+        "upsert_by_key",
+        lambda set_id, schema_revision, key, payload, *, org, state="raw":
+            writes.append(payload) or "sid",
+    )
+    state = {
+        "kind": "rate_limits",
+        "source": "transcript",
+        "updated_at": "2026-05-02T21:01:00Z",
+        "limit_id": "codex",
+        "windows": {
+            "short": {
+                "used_percent": 4.0,
+                "window_minutes": 300,
+                "resets_at": 1777755350,
+            },
+        },
+    }
+
+    assert session_monitor._publish_codex_harness_usage_setting(
+        {"harness": "codex"}, state,
+    ) is True
+    changed = {
+        **state,
+        "updated_at": "2026-05-02T21:02:00Z",
+        "windows": {
+            "short": {
+                **state["windows"]["short"],
+                "used_percent": 5.0,
+            },
+        },
+    }
+    assert session_monitor._publish_codex_harness_usage_setting(
+        {"harness": "codex"}, changed,
+    ) is True
+
+    assert len(writes) == 2
+    assert writes[1]["windows"]["short"]["used_percent"] == 5.0
+
+
+def test_publish_codex_harness_usage_ignores_timestamp_only_refresh(monkeypatch):
+    writes = []
+    monkeypatch.setattr(
+        session_monitor.graph_ops,
+        "upsert_by_key",
+        lambda *args, **kwargs: writes.append((args, kwargs)) or "sid",
+    )
+    state = {
+        "kind": "rate_limits",
+        "source": "transcript",
+        "updated_at": "2026-05-02T21:01:00Z",
+        "limit_id": "codex",
+        "windows": {
+            "short": {
+                "used_percent": 4.0,
+                "window_minutes": 300,
+                "resets_at": 1777755350,
+            },
+        },
+    }
+
+    assert session_monitor._publish_codex_harness_usage_setting(
+        {"harness": "codex"}, state,
+    ) is True
+    assert session_monitor._publish_codex_harness_usage_setting(
+        {"harness": "codex"},
+        {**state, "updated_at": "2026-05-02T21:02:00Z"},
+    ) is False
+    assert len(writes) == 1
 
 
 def test_claude_harness_state_tracks_last_user_message_at():
@@ -292,7 +393,9 @@ def test_publish_harness_usage_snapshot_skips_codex_when_no_new_user_messages(mo
     assert writes == ["codex:default"]
 
 
-def test_publish_harness_usage_snapshot_runs_claude_every_tick(monkeypatch):
+def test_publish_harness_usage_snapshot_collects_claude_but_writes_only_changes(
+    monkeypatch,
+):
     """auto-08n3f: Claude path is decoupled from live sessions, so it
     runs every tick regardless of the session-signature dedup that
     governs codex.
@@ -333,8 +436,9 @@ def test_publish_harness_usage_snapshot_runs_claude_every_tick(monkeypatch):
     server._publish_harness_usage_snapshot()
     server._publish_harness_usage_snapshot()
 
-    # Two ticks → two writes. The substrate enumeration runs every tick.
-    assert writes == ["claude:org:org-X", "claude:org:org-X"]
+    # Substrate enumeration still runs every tick, but timestamp-only refreshes
+    # do not rewrite the Personal/raw Setting.
+    assert writes == ["claude:org:org-X"]
 
 
 def test_operator_is_idle_delegates_to_operator_activity(monkeypatch):
@@ -595,4 +699,3 @@ def test_schema_migration_preserves_existing_window_substructure():
     payload["windows"]["short"]["unexpected_subfield"] = "boom"
     with pytest.raises(SchemaValidationError):
         hus.DashboardHarnessUsageV1.validate(payload)
-

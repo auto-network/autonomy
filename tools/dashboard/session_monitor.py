@@ -120,10 +120,6 @@ except ImportError:
 # removed with the FSM completion.
 
 
-def _harness_usage_org() -> str:
-    return os.environ.get("GRAPH_ORG") or "autonomy"
-
-
 def _codex_identity_for_row(row: dict[str, Any]) -> tuple[str, str]:
     # Future-proof the key space for multiple Codex subscriptions. Launch-time
     # auth-slot metadata is not available on session rows yet, so we fall back
@@ -148,14 +144,11 @@ def _publish_codex_harness_usage_setting(
         identity_id=identity_id,
         identity_label=identity_label,
     )
-    graph_ops.upsert_by_key(
-        _harness_usage_settings.HARNESS_USAGE_SET_ID,
-        _harness_usage_settings.HARNESS_USAGE_SCHEMA_REVISION,
+    return _harness_usage_settings.publish_if_changed(
         key,
         payload,
-        org=_harness_usage_org(),
+        upsert_by_key=graph_ops.upsert_by_key,
     )
-    return True
 
 
 def _find_primary_jsonls(directory: Path) -> list[Path]:

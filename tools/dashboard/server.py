@@ -8468,6 +8468,7 @@ async def ws_voice(websocket: WebSocket):
         bind, session.state, len(acq.buffer_text),
     )
     _audio_frames = 0
+    _audio_capture_enabled = _voice_audio_capture_enabled()
     _audio_capture_wav = None   # debug WAV writer (lazily opened if capture flag set)
 
     try:
@@ -8606,9 +8607,9 @@ async def ws_voice(websocket: WebSocket):
                 should_forward = session.handle_audio(msg["bytes"])
                 _audio_frames += 1
                 # Debug: capture the RAW browser PCM (real mic, ambient room tone)
-                # to a WAV when the flag file is present. Lazily opened on the first
-                # frame; harmless no-op otherwise.
-                if _audio_capture_wav is None and _voice_audio_capture_enabled():
+                # to a WAV when enabled at WS start. Never consult Settings from
+                # the per-frame path.
+                if _audio_capture_wav is None and _audio_capture_enabled:
                     _audio_capture_wav = _open_voice_audio_capture(bind)
                 if _audio_capture_wav is not None:
                     try:
@@ -11349,7 +11350,7 @@ def _harness_usage_org() -> str:
     # pinned to personal.db (read with peers=[]), independent of the dashboard
     # shell's default org, so the poller write, launcher, refresh, and CLI all
     # converge on the same rows. (Do NOT route these through the shell org.)
-    return "personal"
+    return _harness_usage_settings.HARNESS_USAGE_ORG
 
 
 def _should_run_harness_usage_poller() -> bool:
@@ -11455,12 +11456,10 @@ def _publish_harness_usage_snapshot() -> None:
         if str(row.get("harness") or "claude").strip().lower() == "claude"
     ]
 
-    org = _harness_usage_org()
     _maybe_publish_harness_usage(
         harness="codex",
         rows=codex_rows,
         updated_at=updated_at,
-        org=org,
         collector=_collect_codex_usage_payloads,
     )
     # auto-08n3f: Claude usage is enumerated from substrate-stored
@@ -11469,29 +11468,27 @@ def _publish_harness_usage_snapshot() -> None:
     # gates on live sessions because its telemetry is harvested from
     # session transcripts.
     _publish_claude_harness_usage_unconditional(
-        updated_at=updated_at, org=org,
+        updated_at=updated_at,
     )
 
 
 def _publish_claude_harness_usage_unconditional(
-    *, updated_at: str, org: str,
+    *, updated_at: str,
 ) -> None:
-    """Run the Claude harness-usage collector and persist every payload.
+    """Run the Claude collector every tick and persist changed payloads.
 
     Bypasses the `rows`-based dedup in :func:`_maybe_publish_harness_usage`
     because Claude usage no longer depends on live sessions — every
     installed credentials row gets a tick whether or not anyone is
-    burning it. The collector itself decides whether each row writes
-    `ok` or `unavailable`.
+    burning it. The collector decides whether each row is `ok` or
+    `unavailable`; the shared publisher suppresses unchanged telemetry.
     """
     payloads = _collect_claude_usage_payloads([], updated_at)
     for key, payload in payloads:
-        graph_ops.upsert_by_key(
-            _harness_usage_settings.HARNESS_USAGE_SET_ID,
-            _harness_usage_settings.HARNESS_USAGE_SCHEMA_REVISION,
+        _harness_usage_settings.publish_if_changed(
             key,
             payload,
-            org=org,
+            upsert_by_key=graph_ops.upsert_by_key,
         )
 
 
@@ -11500,7 +11497,6 @@ def _maybe_publish_harness_usage(
     harness: str,
     rows: list[dict[str, Any]],
     updated_at: str,
-    org: str,
     collector,
 ) -> None:
     if not rows:
@@ -11524,12 +11520,10 @@ def _maybe_publish_harness_usage(
 
     payloads = collector(rows, updated_at)
     for key, payload in payloads:
-        graph_ops.upsert_by_key(
-            _harness_usage_settings.HARNESS_USAGE_SET_ID,
-            _harness_usage_settings.HARNESS_USAGE_SCHEMA_REVISION,
+        _harness_usage_settings.publish_if_changed(
             key,
             payload,
-            org=org,
+            upsert_by_key=graph_ops.upsert_by_key,
         )
     _harness_usage_last_refresh_context[harness] = (
         session_signature,
@@ -13257,6 +13251,18 @@ async def api_graph_entity_thoughts(request):
 # ── Settings primitive (graph://0d3f750f-f9c) ──────────────
 
 
+def _invalidate_setting_caches(
+    set_id: str, *, key: str, org: str | None,
+) -> None:
+    """Apply targeted in-process invalidation for a committed Setting."""
+    workspace_settings.invalidate_for_setting(set_id)
+    from tools.dashboard import feature_flags
+    if set_id == feature_flags.FEATURE_FLAGS_SET_ID:
+        feature_flags.invalidate_cache(org=org)
+    if set_id == _harness_usage_settings.HARNESS_USAGE_SET_ID:
+        _harness_usage_settings.clear_published_payload_cache(key=key)
+
+
 def _parse_settings_read_params(query_params) -> tuple[int | None, int | None, int | None, str | None]:
     """Pull target/min/stored revision + error str from query params."""
     def _to_int(name):
@@ -13309,6 +13315,9 @@ def _settings_emit_hook(
         "deprecated": snapshot["deprecated"],
         "operation": operation,
     }
+    _invalidate_setting_caches(
+        payload["set_id"], key=payload["key"], org=org,
+    )
     try:
         event_bus.broadcast_sync("setting.changed", payload, dedup=False)
     except Exception:
@@ -13368,6 +13377,9 @@ async def _emit_setting_changed(
         "deprecated": snapshot["deprecated"],
         "operation": operation,
     }
+    _invalidate_setting_caches(
+        payload["set_id"], key=payload["key"], org=org,
+    )
     await event_bus.broadcast("setting.changed", payload, dedup=False)
 
 
