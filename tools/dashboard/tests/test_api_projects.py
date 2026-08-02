@@ -67,6 +67,7 @@ def test_api_projects_includes_resolved_org_identity(shipped_settings_orgs, test
 def test_local_workspace_api_attaches_repo_to_existing_personal_workspace(
     shipped_settings_orgs, test_app, tmp_path, monkeypatch,
 ):
+    repo = tmp_path / "workspace-repos" / "personal" / "idea-board"
     ops.add_setting(
         workspace_settings.WORKSPACE_SET_ID,
         workspace_settings.WORKSPACE_REVISION,
@@ -76,12 +77,16 @@ def test_local_workspace_api_attaches_repo_to_existing_personal_workspace(
             "description": "Personal ideas",
             "image": "autonomy-agent:dashboard",
             "harness": "codex",
-            "working_dir": "/workspace/output",
+            "working_dir": "/workspace/repo",
+            "repos": [{
+                "url": str(repo),
+                "mount": "/workspace/repo",
+                "writable": True,
+            }],
         },
         state="raw",
         org="personal",
     )
-    repo = tmp_path / "workspace-repos" / "personal" / "idea-board"
     monkeypatch.setattr(
         server,
         "local_workspace_repo_path",
