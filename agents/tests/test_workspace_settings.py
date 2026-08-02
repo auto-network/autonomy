@@ -12,6 +12,8 @@ from agents.workspace_settings import (
     _impl_mount_target,
     _parse_repo,
     _workspace_from_setting,
+    invalidate_caches,
+    load_workspaces,
     resolve_capabilities,
 )
 from tools.graph import ops
@@ -27,6 +29,7 @@ from tools.graph.schemas.workspace_capability_enable import (
     SET_ID as WORKSPACE_CAPABILITY_ENABLE_SET_ID,
     SCHEMA_REVISION as WORKSPACE_CAPABILITY_ENABLE_REVISION,
 )
+from tools.graph.schemas.workspace import WORKSPACE_REVISION, WORKSPACE_SET_ID
 
 
 def test_workspace_from_setting_defaults_harness_to_claude():
@@ -53,6 +56,35 @@ def test_workspace_from_setting_reads_codex_harness():
         mounts={},
     )
     assert workspace.harness == "codex"
+
+
+def test_load_workspaces_includes_raw_personal_owned_workspace(shipped_workspaces):
+    """A private workspace may be rooted directly in personal.db.
+
+    Raw state keeps the declaration invisible when personal.db is consulted as
+    another org's peer, but the personal org's own loader must still discover
+    it and assign personal as its graph routing scope.
+    """
+    ops.add_setting(
+        WORKSPACE_SET_ID,
+        WORKSPACE_REVISION,
+        key="idea-board",
+        payload={
+            "name": "Idea Board",
+            "image": "autonomy-agent:dashboard",
+            "harness": "codex",
+            "working_dir": "/workspace/output",
+        },
+        state="raw",
+        org="personal",
+    )
+    invalidate_caches()
+
+    workspace = load_workspaces()["idea-board"]
+
+    assert workspace.graph_project == "personal"
+    assert workspace.harness == "codex"
+    assert workspace.repos == ()
 
 
 def test_legacy_dind_defaults_to_privileged_nested_docker():

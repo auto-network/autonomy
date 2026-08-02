@@ -720,10 +720,13 @@ def _workspaces_in_org(slug: str) -> dict[str, WorkspaceV1]:
     ``peers=["personal"]`` whitelists personal.db so operators can layer
     operator-local overrides (e.g. credential env values) on top of the
     canonical workspace via standard ``graph set override --org personal``.
-    Personal.db is operator-local by definition and never owns workspaces,
-    so the auto-txg5.4 double-attribution concern (peer orgs both claiming
-    a shared workspace key) doesn't apply. PEER_VISIBLE_STATES still gates:
-    only published/canonical personal.db rows contribute.
+    Personal.db is operator-local by definition. It may own private
+    workspaces directly; those rows are discovered when ``slug`` itself is
+    ``personal``. For every other org, personal.db is only an override peer,
+    so the auto-txg5.4 double-attribution concern (peer orgs both claiming a
+    shared workspace key) doesn't apply. PEER_VISIBLE_STATES still gates the
+    peer path: only published/canonical personal.db rows can contribute to a
+    shared org's workspace, while raw personal-owned workspaces remain private.
     """
     members = ops.read_set(
         WORKSPACE_SET_ID, org=slug, peers=["personal"],
