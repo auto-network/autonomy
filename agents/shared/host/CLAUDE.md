@@ -14,7 +14,8 @@ This is an open-ended interactive session. There is no bead, no task directive, 
 100K+ thoughts, 6000+ sources, full-text search. Primary tool for orienting around any topic.
 
 ```bash
-graph search "query"                  # FTS search (--or for ANY term)
+graph search "query"                  # Compact FTS search (strict first; any-term fallback on zero hits)
+graph search "query" --verbose        # Show every matching excerpt (high-volume)
 graph search "query" --type session   # scope by source kind (session/note/bead/…)
 graph search "query" --project jira   # scoped to a project
 graph attention --last 20             # human focus trail

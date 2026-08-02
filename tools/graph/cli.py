@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import sqlite3
 import subprocess
@@ -269,53 +270,20 @@ def cmd_ingest(args):
     db.close()
 
 
-def cmd_search(args):
-    """Full-text search across the graph."""
-    states, include_raw = _parse_state_args(args)
-    only_org, peers = _parse_org_args(args)
-    # Session context is a host-local carve-out (raw-from-current-session)
-    # keyed to the tmux session; skip in API/container mode where the
-    # container's session isn't visible to the server anyway.
-    session_ids: list[str] | None = None
-    author_pattern: str | None = None
-    if not isinstance(get_client(), HttpClient):
-        db = GraphDB(args.db)
-        try:
-            session_ids, author_pattern = _current_session_context(db)
-        finally:
-            db.close()
-    type_arg = getattr(args, "source_type", None)
-    source_type = (
-        [t.strip() for t in type_arg.split(",") if t.strip()]
-        if type_arg else None
-    )
-    results = get_client().search(
-        args.query,
-        limit=args.limit,
-        or_mode=getattr(args, 'or_mode', False),
-        tag=getattr(args, 'tag', None),
-        states=states,
-        include_raw=include_raw,
-        only_org=only_org,
-        peers=peers,
-        session_source_ids=session_ids,
-        session_author_pattern=author_pattern,
-        source_type=source_type,
-    )
+def _search_allows_any_term_fallback(query: object) -> bool:
+    """Return whether an interactive strict query may broaden on zero hits.
 
-    if args.json:
-        import json as _json
-        for r in results:
-            if len(r.get("content", "")) > args.width:
-                r["content"] = r["content"][:args.width] + "…"
-        print(_json.dumps(results, default=str))
-        return
+    Quoted queries are an explicit request for phrase semantics, so never
+    broaden them automatically.  Structured callers also skip this path in
+    :func:`cmd_search`; their empty result is part of the machine contract.
+    """
+    if not isinstance(query, str) or '"' in query:
+        return False
+    return len(re.findall(r"[^\W_]+", query, flags=re.UNICODE)) > 1
 
-    if not results:
-        print("No results found.")
-        return
 
-    width = args.width
+def _print_search_verbose(results: list[dict], width: int) -> None:
+    """Render the legacy row-per-excerpt search output."""
     for r in results:
         rtype = r["result_type"]
         org = r.get("org") or ""
@@ -350,6 +318,122 @@ def cmd_search(args):
             print(f"  [{tag}] {source[:50]} t{turn} (src:{sid}){org_tag}")
             print(f"    {lines}")
             print()
+
+
+def _print_search_compact(results: list[dict], width: int) -> None:
+    """Render one bounded, source-shaped card per search result.
+
+    The search API intentionally returns multiple excerpt rows per source for
+    dashboard consumers.  Printing every row made the CLI's ``--limit`` bound
+    sources but not terminal output, so callers routinely added ``| head``.
+    Compact mode preserves the source rank order and shows only the strongest
+    non-source excerpt.  ``--verbose`` remains available for the full stream.
+    """
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for row in results:
+        key = (row.get("org") or "", row.get("source_id") or row.get("id") or "?")
+        groups.setdefault(key, []).append(row)
+
+    for (org, full_sid), rows in groups.items():
+        head = rows[0]
+        org_tag = f" [{org}]" if org else ""
+        sid = full_sid[:12]
+        title = head.get("source_title") or head.get("content") or "?"
+        title = re.sub(r"\s+", " ", str(title)).strip()
+        print(f"  [S] {title[:60]} (src:{sid}){org_tag}")
+
+        stype = head.get("source_type") or ""
+        platform = head.get("platform") or ""
+        created = (head.get("source_created_at") or head.get("created_at") or "")[:10]
+        hit_count = head.get("hit_count")
+        detail_parts = [p for p in (stype, platform, created) if p]
+        if isinstance(hit_count, int) and hit_count > 1:
+            detail_parts.append(f"{hit_count} matches")
+        if detail_parts:
+            print(f"    {' | '.join(detail_parts)}")
+
+        excerpt = next(
+            (r for r in rows if r.get("result_type") not in ("source", "edge")),
+            None,
+        )
+        if excerpt is not None:
+            rtype = excerpt.get("result_type") or "result"
+            tag = rtype[0].upper()
+            turn = excerpt.get("turn_number")
+            turn_tag = f" t{turn}" if turn is not None else ""
+            content = re.sub(r"\s+", " ", str(excerpt.get("content") or "")).strip()
+            if len(content) > width:
+                content = content[:width] + "…"
+            print(f"    [{tag}{turn_tag}] {content}")
+        print()
+
+
+def cmd_search(args):
+    """Full-text search across the graph."""
+    states, include_raw = _parse_state_args(args)
+    only_org, peers = _parse_org_args(args)
+    client = get_client()
+
+    # Session context is a host-local carve-out (raw-from-current-session)
+    # keyed to the tmux session; skip in API/container mode where the
+    # container's session isn't visible to the server anyway.
+    session_ids: list[str] | None = None
+    author_pattern: str | None = None
+    if not isinstance(client, HttpClient):
+        db = GraphDB(args.db)
+        try:
+            session_ids, author_pattern = _current_session_context(db)
+        finally:
+            db.close()
+    type_arg = getattr(args, "source_type", None)
+    source_type = (
+        [t.strip() for t in type_arg.split(",") if t.strip()]
+        if type_arg else None
+    )
+
+    search_kwargs = {
+        "limit": args.limit,
+        "tag": getattr(args, "tag", None),
+        "states": states,
+        "include_raw": include_raw,
+        "only_org": only_org,
+        "peers": peers,
+        "session_source_ids": session_ids,
+        "session_author_pattern": author_pattern,
+        "source_type": source_type,
+    }
+    or_mode = getattr(args, "or_mode", False)
+    results = client.search(args.query, or_mode=or_mode, **search_kwargs)
+
+    used_fallback = False
+    if (
+        not results
+        and not or_mode
+        and not getattr(args, "json", False)
+        and _search_allows_any_term_fallback(args.query)
+    ):
+        results = client.search(args.query, or_mode=True, **search_kwargs)
+        used_fallback = bool(results)
+
+    if getattr(args, "json", False):
+        for r in results:
+            if len(r.get("content", "")) > args.width:
+                r["content"] = r["content"][:args.width] + "…"
+        print(json.dumps(results, default=str))
+        return
+
+    if not results:
+        print("No results found.")
+        return
+    if used_fallback:
+        print("No all-term matches; showing results that match any term.\n")
+
+    if getattr(args, "verbose", False) or any(
+        r.get("result_type") == "edge" for r in results
+    ):
+        _print_search_verbose(results, args.width)
+    else:
+        _print_search_compact(results, args.width)
 
 
 def _in_container() -> bool:
@@ -5150,6 +5234,10 @@ def main():
                    help="Filter by source kind (comma-separated: session, note, bead, …); composes with --tag / --state")
     p.add_argument("--state", help="Filter by publication_state (comma-separated: raw,curated,published,canonical)")
     p.add_argument("--include", choices=["raw"], help="Include additional state categories (use 'raw' to surface raw sources from other sessions)")
+    p.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Show every matching excerpt instead of one compact card per source",
+    )
     p.add_argument(
         "--only-org",
         dest="only_org",

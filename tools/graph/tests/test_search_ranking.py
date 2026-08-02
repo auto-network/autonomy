@@ -177,6 +177,43 @@ def test_tag_overlap_post_process_boost(graph_db_env):
         db.close()
 
 
+def test_hyphenated_tag_overlap_uses_fts_like_tokens(graph_db_env):
+    """``publication-state`` reinforces a ``publication state`` query."""
+    db = _make_db(graph_db_env)
+    try:
+        tagged = Source(
+            type="note",
+            title="Visibility architecture",
+            file_path="note:hyphen-tag-1",
+            metadata={"tags": ["publication-state"]},
+        )
+        plain = Source(
+            type="note",
+            title="Visibility architecture",
+            file_path="note:hyphen-tag-2",
+            metadata={"tags": []},
+        )
+        db.insert_source(tagged)
+        db.insert_source(plain)
+        db.commit()
+
+        results = db.search(
+            "publication state visibility", or_mode=True, limit=10,
+        )
+        ranks = {
+            r["source_id"]: r["rank"]
+            for r in results
+            if r["source_id"] in {tagged.id, plain.id}
+        }
+        assert set(ranks) == {tagged.id, plain.id}
+        # Two normalized tag tokens overlap the query.
+        assert ranks[tagged.id] <= (
+            ranks[plain.id] + 2 * SEARCH_TAG_OVERLAP_BOOST
+        )
+    finally:
+        db.close()
+
+
 def test_tag_overlap_boost_capped(graph_db_env):
     """A row with many overlapping tags doesn't dominate beyond the cap."""
     db = _make_db(graph_db_env)
