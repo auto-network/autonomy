@@ -106,7 +106,7 @@ def test_local_workspace_api_attaches_repo_to_existing_personal_workspace(
         "org": "personal",
         "setting_id": response.json()["setting_id"],
         "repo": str(repo),
-        "mount": "/workspace/repo",
+        "mount": "/workspace/idea-board",
         "repo_created": True,
         "workspace_created": False,
         "workspace_overridden": True,
@@ -117,10 +117,10 @@ def test_local_workspace_api_attaches_repo_to_existing_personal_workspace(
         ).members
         if m.key == "idea-board"
     )
-    assert member.payload["working_dir"] == "/workspace/repo"
+    assert member.payload["working_dir"] == "/workspace/idea-board"
     assert member.payload["repos"] == [{
         "url": str(repo),
-        "mount": "/workspace/repo",
+        "mount": "/workspace/idea-board",
         "writable": True,
     }]
 
@@ -171,5 +171,5 @@ def test_local_workspace_api_creates_new_workspace_in_one_call(
     )
     assert member.payload["name"] == "Field Notes"
     assert member.payload["model"] == "gpt-5.6-sol"
-    assert member.payload["working_dir"] == "/workspace/repo"
+    assert member.payload["working_dir"] == "/workspace/field-notes"
     assert member.payload["repos"][0]["url"] == str(repo)
