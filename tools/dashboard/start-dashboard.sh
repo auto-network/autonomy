@@ -14,6 +14,23 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
+
+# The dashboard shells out to `bd` (and `dolt`) to serve /api/graph/bead,
+# /api/dao/beads and friends. Those live in per-user bin dirs that a service
+# manager's minimal PATH does not include, so a dashboard started without a
+# login shell answers `graph bead` with "bd: No such file or directory" — and
+# because container sessions reach bd only THROUGH this API, one such dashboard
+# breaks bead creation for every session at once. Guarantee the lookup here, at
+# the single entry point both systemd and manual starts go through, rather than
+# relying on whatever PATH the caller happened to have.
+for _bin in "$HOME/.local/bin" "$HOME/go/bin"; do
+    case ":$PATH:" in
+        *":$_bin:"*) ;;
+        *) [ -d "$_bin" ] && PATH="$_bin:$PATH" ;;
+    esac
+done
+unset _bin
+export PATH
 PID_FILE="$REPO_ROOT/data/dashboard.pid"
 LOG_FILE="$REPO_ROOT/data/dashboard.log"
 VENV="$REPO_ROOT/.venv/bin/python"
