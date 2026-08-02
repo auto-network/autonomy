@@ -654,6 +654,20 @@ def prepare_session_mounts(
                 refresh_existing=refresh_existing_worktree,
                 git_timeout=git_timeout,
             )
+            if _local_workspace_target_for_clone(clone) is not None:
+                # API-managed repos have no operator-level Git config to
+                # inherit. Make a brand-new workspace commit-ready without
+                # mutating global or host configuration.
+                _run_git(
+                    ["config", "user.name", "Autonomy Workspace"],
+                    cwd=worktree,
+                    timeout=15,
+                )
+                _run_git(
+                    ["config", "user.email", "workspace@local"],
+                    cwd=worktree,
+                    timeout=15,
+                )
             # If the workspace's commit policy requires a GPG signature, wire the
             # worktree to sign via the operator's browser (best-effort; a policy
             # that doesn't require signing writes nothing, and any failure is
@@ -1211,12 +1225,19 @@ def worktree_target_branch_name(
     session_name: str,
     repo_name: str,
     branch: str | None,
+    *,
+    worktrees_dir: Path = WORKTREES_DIR,
 ) -> str:
     """Return the dashboard target-branch label for a worktree."""
     target_branch, _target_head = _autonomy_target_branch_and_head()
     default_branch = target_branch or "main"
     if repo_name == "autonomy":
         return default_branch
+    worktree = worktrees_dir / session_name / repo_name
+    clone = _find_managed_clone_for_worktree(worktree)
+    local_target = _local_workspace_target_for_clone(clone) if clone else None
+    if local_target is not None:
+        return _repo_default_branch(local_target) or default_branch
     if branch and branch != f"{SESSION_BRANCH_PREFIX}{session_name}":
         return branch
     return default_branch
