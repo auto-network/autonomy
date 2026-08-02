@@ -270,6 +270,36 @@ def test_codex_interactive_does_not_require_claude_credentials(
     assert "codex" in cmd
 
 
+def test_codex_trust_uses_dedicated_working_repo_mount(
+    tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch,
+):
+    """A non-Autonomy repo must not hide or trust the platform checkout."""
+    worktree = tmp_path / "idea-board-worktree"
+    worktree.mkdir()
+    captured: dict = {}
+
+    def fake_tool_mounts(**kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(
+        session_launcher, "_resolve_optional_tool_mounts", fake_tool_mounts,
+    )
+    _run(
+        output_dir=str(tmp_path / "run"),
+        harness="codex",
+        mounts={str(worktree): "/workspace/idea-board"},
+        working_dir="/workspace/idea-board",
+    )
+
+    assert captured["worktree_host"] == worktree
+    cmd = captured_run[0]
+    joined = " ".join(cmd)
+    assert f"{worktree}:/workspace/idea-board" in joined
+    assert f"{session_launcher.REPO_ROOT}:/workspace/repo:ro" in joined
+    assert cmd[cmd.index("-w") + 1] == "/workspace/idea-board"
+
+
 def test_codex_interactive_resume_uses_resume_uuid(
     tmp_path, fake_creds, fake_crosstalk, captured_run,
 ):

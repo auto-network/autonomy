@@ -1177,14 +1177,17 @@ def launch_session(
     for host_path, container_spec in default_mounts.items():
         cmd.extend(["-v", f"{host_path}:{container_spec}"])
 
-    # Codex trust pre-seed: find this session's worktree mount and generate a
-    # per-session config.toml that trusts its git-root, so Codex never tries to
-    # write trust into the :ro shared config (auto-sigkn).
-    worktree_host = next(
-        (Path(hp) for hp, spec in default_mounts.items()
-         if spec.split(":", 1)[0] == "/workspace/repo"),
-        None,
-    )
+    # Codex trust pre-seed: find the mount containing the actual working
+    # directory and trust that worktree's git-root. Workspaces may keep the
+    # platform checkout at /workspace/repo while working in their own repo at
+    # /workspace/<id>; hardcoding /workspace/repo makes those sessions trust
+    # the wrong repository and strand Codex on its read-only trust dialog.
+    working_mounts: list[tuple[int, Path]] = []
+    for host_path, spec in default_mounts.items():
+        container_path = spec.split(":", 1)[0].rstrip("/") or "/"
+        if working_dir == container_path or working_dir.startswith(f"{container_path}/"):
+            working_mounts.append((len(container_path), Path(host_path)))
+    worktree_host = max(working_mounts, default=(0, None), key=lambda item: item[0])[1]
     for host_path, container_spec in _resolve_optional_tool_mounts(
         worktree_host=worktree_host, run_dir=run_dir
     ).items():

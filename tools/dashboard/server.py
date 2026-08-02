@@ -2791,8 +2791,9 @@ async def api_workspace_local_create(request):
     body ``{id, name?, description?, image?, harness?, model?}`` is the
     repository-less counterpart to configuring a remote Git URL.  New
     workspaces and existing repo-less workspaces both end up with a durable
-    bare backing repo plus isolated writable session worktrees at
-    ``/workspace/repo``.
+    bare backing repo plus isolated writable session worktrees at a dedicated
+    ``/workspace/<id>`` path.  The platform checkout remains visible at
+    ``/workspace/repo`` so built-in CLIs such as ``graph`` keep working.
     """
     org = _caller_org(request)
     if not org:
@@ -2812,7 +2813,7 @@ async def api_workspace_local_create(request):
         return JSONResponse(
             {"error": "harness must be 'claude' or 'codex'"}, status_code=400,
         )
-    mount = "/workspace/repo"
+    mount = f"/workspace/{workspace_id}"
     try:
         expected_repo_path = local_workspace_repo_path(org, workspace_id)
     except WorkspaceError as exc:
@@ -2831,10 +2832,8 @@ async def api_workspace_local_create(request):
     }
     if existing is not None:
         existing_repos = existing.payload.get("repos") or []
-        if existing_repos and (
-            existing_repos != [repo_spec]
-            or existing.payload.get("working_dir") != mount
-        ):
+        existing_repo_urls = [r.get("url") for r in existing_repos]
+        if existing_repos and existing_repo_urls != [str(expected_repo_path)]:
             return JSONResponse(
                 {
                     "error": (
