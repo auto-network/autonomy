@@ -106,6 +106,21 @@ def test_search_page_renders_with_grouped_fixture(test_app):
     assert 'class="sp-excerpt"' in html or "sp-excerpt-text" in html
 
 
+def test_search_page_exposes_ranker_comparison_control(test_app):
+    """The search page offers a bookmarkable Legacy/Smart ranking lens."""
+    with TestClient(test_app) as client:
+        html = client.get("/pages/search").text
+        script = client.get("/static/js/pages/search.js").text
+
+    assert 'data-testid="sp-ranker-chip"' in html
+    assert 'data-testid="sp-ranker-dropdown"' in html
+    assert ':data-ranker-key="opt.key"' in html
+    assert "selectedOrder === 'relevance'" in html
+    assert "pickRanker(key)" in script
+    assert "url.searchParams.set('ranker', this.selectedRanker)" in script
+    assert "url += '&ranker='" in script
+
+
 # ── 2. Chip rail counts ───────────────────────────────────────────────
 
 

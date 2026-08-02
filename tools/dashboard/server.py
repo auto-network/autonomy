@@ -2356,6 +2356,7 @@ async def api_dispatch_trace(request):
     })
 
 _SEARCH_VALID_ORDERS = ("relevance", "recent")
+_SEARCH_VALID_RANKERS = ("legacy", "smart")
 _SEARCH_VALID_SESSION_TYPES = (
     "terminal", "chatwith", "dispatch", "librarian", "agentic",
 )
@@ -2374,6 +2375,17 @@ async def api_search(request):
         return JSONResponse(
             {"error": f"invalid order {order!r}; "
                       f"expected one of {list(_SEARCH_VALID_ORDERS)}"},
+            status_code=400,
+        )
+
+    # ``ranker`` selects the relevance algorithm. It is still parsed for
+    # recent-order requests so malformed/bookmarked values fail consistently;
+    # GraphDB treats recency as authoritative and ignores relevance ranking.
+    ranker = request.query_params.get("ranker", "legacy")
+    if ranker not in _SEARCH_VALID_RANKERS:
+        return JSONResponse(
+            {"error": f"invalid ranker {ranker!r}; "
+                      f"expected one of {list(_SEARCH_VALID_RANKERS)}"},
             status_code=400,
         )
 
@@ -2431,7 +2443,7 @@ async def api_search(request):
         limit=limit, or_mode=or_mode, tag=tag,
         states=states, include_raw=include_raw,
         excluded_source_types=excluded_source_types,
-        order=order, session_type=session_type,
+        order=order, session_type=session_type, ranker=ranker,
     )
     if request.query_params.get("group"):
         results = _group_search_results(results, order=order)

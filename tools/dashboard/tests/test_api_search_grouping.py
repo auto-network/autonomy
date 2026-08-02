@@ -127,3 +127,31 @@ def test_search_passes_through_only_org_tag_states(test_app):
     assert captured.get("tag") == "pitfall"
     assert captured.get("states") == ["published", "canonical"]
     assert captured.get("include_raw") is True
+
+
+def test_search_passes_through_ranker(test_app):
+    """The dashboard comparison control reaches ``graph_ops.search``."""
+    from tools.dashboard import server
+
+    captured: dict = {}
+
+    def fake_search(q, **kwargs):
+        captured["q"] = q
+        captured.update(kwargs)
+        return []
+
+    with patch.object(server.graph_ops, "search", side_effect=fake_search):
+        with TestClient(test_app) as client:
+            response = client.get("/api/search?q=ranking&ranker=smart")
+
+    assert response.status_code == 200
+    assert captured["q"] == "ranking"
+    assert captured["ranker"] == "smart"
+
+
+def test_search_rejects_unknown_ranker(test_app):
+    with TestClient(test_app) as client:
+        response = client.get("/api/search?q=ranking&ranker=surprise")
+
+    assert response.status_code == 400
+    assert "invalid ranker" in response.json()["error"]

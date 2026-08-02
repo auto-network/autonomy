@@ -9631,6 +9631,41 @@ SEARCH_SORT_CHIP_CHECKS = """(async () => {
     ? capturedURLs[capturedURLs.length - 1]
     : null;
 
+  // ── 4. Switch ranking lens to Smart ────────────────────────────────
+  capturedURLs.length = 0;
+  spScope.pickRanker('smart');
+  await sleep(400);
+  r.smart_selected_ranker = spScope.selectedRanker;
+  r.smart_chip_label = spScope.rankerChipLabel;
+  r.smart_url_search = window.location.search;
+  r.smart_fetch_url = capturedURLs.length
+    ? capturedURLs[capturedURLs.length - 1]
+    : null;
+
+  // Recent hides the relevance-only control and omits ranker from the
+  // request, but keeps the preference in the page URL for restoration.
+  capturedURLs.length = 0;
+  spScope.pickOrder('recent');
+  await sleep(400);
+  var rankerChip = spRoot.querySelector('[data-testid="sp-ranker-chip"]');
+  r.recent_smart_selected_order = spScope.selectedOrder;
+  r.recent_ranker_anchor_style = rankerChip
+    ? rankerChip.closest('.sp-filter-anchor').getAttribute('style') : null;
+  r.recent_ranker_chip_display = rankerChip
+    ? window.getComputedStyle(rankerChip.closest('.sp-filter-anchor')).display : null;
+  r.recent_smart_url_search = window.location.search;
+  r.recent_smart_fetch_url = capturedURLs.length
+    ? capturedURLs[capturedURLs.length - 1]
+    : null;
+
+  capturedURLs.length = 0;
+  spScope.pickOrder('relevance');
+  await sleep(400);
+  r.restored_selected_ranker = spScope.selectedRanker;
+  r.restored_fetch_url = capturedURLs.length
+    ? capturedURLs[capturedURLs.length - 1]
+    : null;
+
   // Restore real fetch.
   window.fetch = origFetch;
 
@@ -9746,6 +9781,23 @@ class TestSearchSortChip:
             f"After toggle back, outgoing fetch must drop order=; "
             f"got {fetch_url!r}"
         )
+
+    def test_smart_ranker_writes_url_and_refetches(self):
+        """Smart is bookmarkable and reaches the API immediately."""
+        c = self._checks
+        assert c.get("smart_selected_ranker") == "smart"
+        assert c.get("smart_chip_label") == "Smart"
+        assert "ranker=smart" in (c.get("smart_url_search") or "")
+        assert "ranker=smart" in (c.get("smart_fetch_url") or "")
+
+    def test_recent_hides_ranker_but_restores_preference(self):
+        """Recent omits the no-op wire knob without forgetting Smart."""
+        c = self._checks
+        assert c.get("recent_smart_selected_order") == "recent"
+        assert "ranker=smart" in (c.get("recent_smart_url_search") or "")
+        assert "ranker=" not in (c.get("recent_smart_fetch_url") or "")
+        assert c.get("restored_selected_ranker") == "smart"
+        assert "ranker=smart" in (c.get("restored_fetch_url") or "")
 
 
 SEARCH_PILL_REFETCH_CHECKS = """(async () => {
@@ -9961,11 +10013,11 @@ SEARCH_DROPDOWN_POSITIONING_CHECKS = """(async () => {
   if (!spScope) return JSON.stringify(r);
 
   function chipRect(testid) {
-    var el = document.querySelector('[data-testid="' + testid + '"]');
+    var el = spRoot.querySelector('[data-testid="' + testid + '"]');
     return el ? el.getBoundingClientRect() : null;
   }
   function dropdownRect(testid) {
-    var el = document.querySelector('[data-testid="' + testid + '"]');
+    var el = spRoot.querySelector('[data-testid="' + testid + '"]');
     if (!el) return null;
     // Alpine x-show toggles display; getBoundingClientRect on a
     // display:none element returns all zeros, so opening the dropdown
@@ -10017,7 +10069,7 @@ SEARCH_DROPDOWN_POSITIONING_CHECKS = """(async () => {
   // Every chip+dropdown pair sits inside a .sp-filter-anchor wrapper.
   // The wrapper IS the dropdown's positioning ancestor — so the row's
   // own left:0 no longer wins.
-  r.anchor_wrappers = document.querySelectorAll('.sp-filter-anchor').length;
+  r.anchor_wrappers = spRoot.querySelectorAll('.sp-filter-anchor').length;
 
   return JSON.stringify(r);
 })()"""
@@ -10048,9 +10100,9 @@ class TestSearchDropdownPositioning:
     def test_alpine_root_present(self):
         c = self._checks
         assert c.get("has_alpine_root"), "searchPage Alpine component missing"
-        # Three chips → three anchor wrappers.
-        assert c.get("anchor_wrappers") == 3, (
-            f"Expected 3 .sp-filter-anchor wrappers (Org/State/Sort); "
+        # Four chips → four anchor wrappers.
+        assert c.get("anchor_wrappers") == 4, (
+            f"Expected 4 .sp-filter-anchor wrappers (Org/State/Sort/Ranker); "
             f"got {c.get('anchor_wrappers')}"
         )
 
@@ -10123,17 +10175,22 @@ SEARCH_FILTER_STRIP_NARROW_CHECKS = """(async () => {
   var orgRect = chipRect('sp-org-chip');
   var stateRect = chipRect('sp-state-chip');
   var orderRect = chipRect('sp-order-chip');
+  var rankerRect = chipRect('sp-ranker-chip');
   r.org_top = orgRect ? orgRect.top : null;
   r.state_top = stateRect ? stateRect.top : null;
   r.order_top = orderRect ? orderRect.top : null;
+  r.ranker_top = rankerRect ? rankerRect.top : null;
   r.org_height = orgRect ? orgRect.height : null;
   r.state_height = stateRect ? stateRect.height : null;
   r.order_height = orderRect ? orderRect.height : null;
+  r.ranker_height = rankerRect ? rankerRect.height : null;
   r.org_right = orgRect ? orgRect.right : null;
   r.state_left = stateRect ? stateRect.left : null;
   r.state_right = stateRect ? stateRect.right : null;
   r.order_left = orderRect ? orderRect.left : null;
   r.order_right = orderRect ? orderRect.right : null;
+  r.ranker_left = rankerRect ? rankerRect.left : null;
+  r.ranker_right = rankerRect ? rankerRect.right : null;
 
   // Viewport width — sanity check that the resize actually landed.
   r.viewport_width = window.innerWidth;
@@ -10167,12 +10224,26 @@ SEARCH_FILTER_STRIP_NARROW_CHECKS = """(async () => {
     '[data-testid="sp-order-chip-glyph"]'
   );
 
+  // The rightmost ranking menu is wider than its chip. On mobile it
+  // right-aligns to the anchor so the descriptive options stay on-screen.
+  document.querySelector('[data-testid="sp-ranker-chip"]').click();
+  await sleep(120);
+  var rankerDropdown = document.querySelector(
+    '[data-testid="sp-ranker-dropdown"]'
+  );
+  if (rankerDropdown) {
+    var rdr = rankerDropdown.getBoundingClientRect();
+    r.ranker_dropdown_left = rdr.left;
+    r.ranker_dropdown_right = rdr.right;
+  }
+  document.querySelector('[data-testid="sp-ranker-chip"]').click();
+
   return JSON.stringify(r);
 })()"""
 
 
 class TestSearchFilterStripNarrowViewport:
-    """At iPhone width (390px) Org / State / Sort chips share one row.
+    """At iPhone width, Org / State / Sort / Ranker share one row.
 
     Pre-Round-7m the labels + values + padding overflowed and Sort
     wrapped to a second row. The class fixture switches the agent
@@ -10232,21 +10303,25 @@ class TestSearchFilterStripNarrowViewport:
             "([data-testid=\"sp-order-chip-glyph\"])"
         )
 
-    def test_three_chips_share_one_row(self):
-        """Org, State, Sort chip ``getBoundingClientRect().top`` values
+    def test_four_chips_share_one_row(self):
+        """All four chip ``getBoundingClientRect().top`` values
         must all sit within ~4px of each other — proving they share
         the same row."""
         c = self._checks
-        tops = [c.get("org_top"), c.get("state_top"), c.get("order_top")]
+        tops = [
+            c.get("org_top"), c.get("state_top"), c.get("order_top"),
+            c.get("ranker_top"),
+        ]
         assert all(t is not None for t in tops), (
             f"Some chip is missing from the DOM: "
-            f"org={tops[0]!r} state={tops[1]!r} order={tops[2]!r}"
+            f"org={tops[0]!r} state={tops[1]!r} order={tops[2]!r} "
+            f"ranker={tops[3]!r}"
         )
         spread = max(tops) - min(tops)
         assert spread <= 4, (
             f"Chips are not on the same row at 390px viewport "
             f"(top spread = {spread}px); tops: org={tops[0]} "
-            f"state={tops[1]} order={tops[2]}"
+            f"state={tops[1]} order={tops[2]} ranker={tops[3]}"
         )
 
     def test_filter_row_height_single_row(self):
@@ -10270,10 +10345,13 @@ class TestSearchFilterStripNarrowViewport:
         state_left = c.get("state_left")
         state_right = c.get("state_right")
         order_left = c.get("order_left")
+        order_right = c.get("order_right")
+        ranker_left = c.get("ranker_left")
         assert (
             org_right is not None and state_left is not None
             and state_right is not None and order_left is not None
-        ), "Some chip rect is missing — see test_three_chips_share_one_row"
+            and order_right is not None and ranker_left is not None
+        ), "Some chip rect is missing — see test_four_chips_share_one_row"
         assert state_left >= org_right, (
             f"State chip ({state_left}px) overlaps Org chip "
             f"(right={org_right}px)"
@@ -10281,6 +10359,22 @@ class TestSearchFilterStripNarrowViewport:
         assert order_left >= state_right, (
             f"Sort chip ({order_left}px) overlaps State chip "
             f"(right={state_right}px)"
+        )
+        assert ranker_left >= order_right, (
+            f"Ranker chip ({ranker_left}px) overlaps Sort chip "
+            f"(right={order_right}px)"
+        )
+
+    def test_ranker_dropdown_stays_inside_mobile_viewport(self):
+        """The wide A/B description menu cannot spill off either edge."""
+        c = self._checks
+        left = c.get("ranker_dropdown_left")
+        right = c.get("ranker_dropdown_right")
+        width = c.get("viewport_width")
+        assert left is not None and right is not None
+        assert left >= 0, f"Ranker dropdown spills left: left={left}px"
+        assert right <= width, (
+            f"Ranker dropdown spills right: right={right}px viewport={width}px"
         )
 
     def test_filter_strip_has_breathing_room_below_global_header(self):

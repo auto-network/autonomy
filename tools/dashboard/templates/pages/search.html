@@ -4,7 +4,7 @@
 
      Chrome rules:
        - NO back button, NO page-level search input.
-       - Row 1: Org chip + Publication-state chip.
+       - Row 1: Org + publication-state + sort + ranking-lens chips.
        - Row 2: horizontal-scrolling type pills.
        - Row 3: summary row.
 
@@ -118,6 +118,76 @@
   .sp-order-glyph-line-1 { width: 12px; }
   .sp-order-glyph-line-2 { width: 9px; }
   .sp-order-glyph-line-3 { width: 6px; }
+
+  /* Ranking lens — an A/B instrument, not a generic settings toggle.
+     The fork glyph converges three query formulations into one ranked list;
+     Smart illuminates the junction while Legacy stays neutral. */
+  .sp-ranker-glyph {
+    position: relative; width: 16px; height: 14px; flex-shrink: 0;
+    display: inline-block;
+  }
+  .sp-ranker-glyph-path,
+  .sp-ranker-glyph-out {
+    position: absolute; display: block; height: 2px;
+    border-radius: 2px; background: var(--sp-accent);
+    transform-origin: right center;
+  }
+  .sp-ranker-glyph-path { left: 0; width: 10px; }
+  .sp-ranker-glyph-path-1 { top: 2px; transform: rotate(26deg); }
+  .sp-ranker-glyph-path-2 { top: 6px; }
+  .sp-ranker-glyph-path-3 { top: 10px; transform: rotate(-26deg); }
+  .sp-ranker-glyph-out { right: 0; top: 6px; width: 6px; }
+  .sp-ranker-glyph::after {
+    content: ''; position: absolute; width: 4px; height: 4px;
+    right: 4px; top: 5px; border-radius: 50%;
+    background: var(--sp-text-3); box-shadow: 0 0 0 2px var(--sp-surface);
+    transition: background 0.15s, box-shadow 0.15s;
+  }
+  .sp-ranker-glyph-smart::after {
+    background: #a5b4fc;
+    box-shadow: 0 0 0 2px var(--sp-surface), 0 0 8px #818cf899;
+  }
+  .sp-ranker-dropdown { min-width: 286px; padding: 6px; }
+  .sp-ranker-option {
+    align-items: flex-start; padding: 9px 10px; gap: 9px;
+  }
+  .sp-ranker-option-mark {
+    width: 16px; height: 16px; margin-top: 1px; flex-shrink: 0;
+    border: 1px solid #4b5563; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .sp-ranker-option-mark::after {
+    content: ''; width: 6px; height: 6px; border-radius: 50%;
+    background: transparent;
+  }
+  .sp-org-option-selected .sp-ranker-option-mark {
+    border-color: var(--sp-accent);
+  }
+  .sp-org-option-selected .sp-ranker-option-mark::after {
+    background: var(--sp-accent);
+  }
+  .sp-ranker-option-copy { min-width: 0; flex: 1; }
+  .sp-ranker-option-title {
+    display: flex; align-items: center; gap: 7px;
+    color: var(--sp-text-1); font-size: 13px; font-weight: 600;
+  }
+  .sp-ranker-option-description {
+    display: block; margin-top: 3px; color: var(--sp-text-3);
+    font-size: 11px; line-height: 1.35;
+  }
+  .sp-ranker-option-badge {
+    padding: 1px 5px; border-radius: 999px;
+    border: 1px solid #6366f166; background: #4f46e522;
+    color: #a5b4fc; font-size: 8px; font-weight: 700;
+    letter-spacing: 0.06em; text-transform: uppercase;
+  }
+  .sp-ranker-chip-mobile { display: none; }
+  @media (max-width: 430px) {
+    .sp-filter-row-1 { gap: 6px; }
+    .sp-ranker-chip-full { display: none; }
+    .sp-ranker-chip-mobile { display: inline; }
+    .sp-state-dropdown.sp-ranker-dropdown { left: auto; right: 0; }
+  }
 
   .sp-filter-chip-value { color: #c4b5fd; font-weight: 600; }
 
@@ -350,7 +420,7 @@
        only the centered "type a query" hint. -->
   <div class="sp-header" data-testid="sp-filter-strip" x-show="query !== ''">
 
-    <!-- Row 1: org chip + publication-state chip + sort chip.
+    <!-- Row 1: org + publication-state + sort + ranking-lens chips.
          Round 7l: each chip + its dropdown live inside a
          ``.sp-filter-anchor`` (position:relative) so the dropdown panel
          anchors under its OWN button instead of the row's left edge. -->
@@ -487,6 +557,59 @@
                     @click="pickOrder(opt.key)">
               <span x-text="opt.label"></span>
               <span class="sp-state-option-hint" x-text="opt.hint"></span>
+            </button>
+          </template>
+        </div>
+      </div>
+
+      <!-- Ranking lens — visible only for relevance ordering. The URL keeps
+           ?ranker=smart even while Recent is selected so returning to
+           Relevance restores the operator's comparison choice. -->
+      <div class="sp-filter-anchor"
+           x-show="selectedOrder === 'relevance'">
+        <button class="sp-filter-chip"
+                data-testid="sp-ranker-chip"
+                @click.stop="toggleRankerDropdown()"
+                aria-haspopup="listbox"
+                :aria-expanded="rankerDropdownOpen"
+                :title="selectedRanker === 'smart' ? 'Smart query-fusion ranking (experimental)' : 'Legacy relevance ranking (default)'">
+          <span class="sp-ranker-glyph"
+                data-testid="sp-ranker-chip-glyph"
+                :class="selectedRanker === 'smart' ? 'sp-ranker-glyph-smart' : ''">
+            <span class="sp-ranker-glyph-path sp-ranker-glyph-path-1"></span>
+            <span class="sp-ranker-glyph-path sp-ranker-glyph-path-2"></span>
+            <span class="sp-ranker-glyph-path sp-ranker-glyph-path-3"></span>
+            <span class="sp-ranker-glyph-out"></span>
+          </span>
+          <span class="sp-filter-chip-value sp-ranker-chip-full"
+                x-text="rankerChipLabel"></span>
+          <span class="sp-filter-chip-value sp-ranker-chip-mobile"
+                x-text="selectedRanker === 'smart' ? 'S' : 'L'"></span>
+        </button>
+
+        <div class="sp-state-dropdown sp-ranker-dropdown"
+             data-testid="sp-ranker-dropdown"
+             role="listbox"
+             x-show="rankerDropdownOpen"
+             @click.outside="rankerDropdownOpen = false"
+             x-cloak>
+          <template x-for="opt in rankerOptions" :key="opt.key">
+            <button class="sp-org-option sp-ranker-option"
+                    role="option"
+                    :aria-selected="selectedRanker === opt.key"
+                    :data-ranker-key="opt.key"
+                    :class="selectedRanker === opt.key ? 'sp-org-option-selected' : ''"
+                    @click="pickRanker(opt.key)">
+              <span class="sp-ranker-option-mark"></span>
+              <span class="sp-ranker-option-copy">
+                <span class="sp-ranker-option-title">
+                  <span x-text="opt.label"></span>
+                  <span class="sp-ranker-option-badge"
+                        x-show="opt.key === 'smart'">Experimental</span>
+                </span>
+                <span class="sp-ranker-option-description"
+                      x-text="opt.description"></span>
+              </span>
             </button>
           </template>
         </div>
