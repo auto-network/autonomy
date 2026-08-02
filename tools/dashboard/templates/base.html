@@ -2247,16 +2247,22 @@
          x-cloak
          :class="{
            'voice-sheet--partial': sheetMode === 'partial',
-           'voice-sheet--full': sheetMode === 'full'
+           'voice-sheet--full': sheetMode === 'full',
+           'voice-sheet--voiceover': voiceoverMode
          }">
       <div class="voice-sheet__handle"
            @pointerdown="startSheetGesture($event)">
         <span></span>
       </div>
+      <div class="voice-sheet__voiceover-mode" x-show="voiceoverMode" x-cloak>
+        <span class="voice-sheet__destination-pulse" aria-hidden="true"></span>
+        <span class="voice-sheet__voiceover-mode-name">VOICEOVER</span>
+        <span class="voice-sheet__voiceover-mode-copy">ASKING ABOUT THIS SESSION</span>
+      </div>
       <!-- Cross-session banner (#23): this keyboard is composing into a DIFFERENT
            session than the one being viewed. Violet, consistent with the dictation
            tile, so Send isn't a surprise. -->
-      <div class="voice-sheet__cross" x-show="sheetCrossSession" x-cloak>
+      <div class="voice-sheet__cross" x-show="sheetCrossSession && !voiceoverMode" x-cloak>
         <span class="voice-sheet__cross-arrow">→</span>
         <span class="voice-sheet__cross-label">Sending to</span>
         <span class="voice-sheet__cross-target" x-text="sheetCrossTargetTitle"></span>
@@ -2266,12 +2272,26 @@
                   x-ref="sheetInput"
                   x-model="$store.voice.bufferText"
                   @input="onSheetInput()"
+                  :placeholder="voiceoverMode ? 'Ask what this session is doing…' : ''"
                   spellcheck="false"></textarea>
+        <div class="voice-sheet__voiceover-reply"
+             x-show="voiceoverMode && voiceoverReply"
+             x-cloak>
+          <div class="voice-sheet__voiceover-header">
+            <span class="voice-sheet__voiceover-mark">VOICEOVER</span>
+            <span class="voice-sheet__voiceover-spoken">SPOKEN REPLY</span>
+            <button type="button"
+                    class="voice-sheet__voiceover-replay"
+                    @click="replayVoiceover()"
+                    aria-label="Replay Voiceover response">Replay</button>
+          </div>
+          <div class="voice-sheet__voiceover-copy" x-text="voiceoverReply"></div>
+        </div>
         <div class="voice-sheet__error"
              x-show="$store.voice.sheetError"
              x-text="$store.voice.sheetError"></div>
         <div class="voice-sheet__chips"
-             x-show="$store.voice.attachments.length"
+             x-show="!voiceoverMode && $store.voice.attachments.length"
              x-cloak>
           <template x-for="att in $store.voice.attachments" :key="att.id">
             <div class="voice-sheet__chip"
@@ -2303,6 +2323,7 @@
                tabindex="-1">
         <button type="button"
                 class="voice-sheet__attach"
+                x-show="!voiceoverMode"
                 @click="openVoiceFilePicker()"
                 aria-label="Add attachment"
                 title="Add attachment">+</button>
@@ -2311,9 +2332,13 @@
                 @click="clearBuffer()">Clear</button>
         <button type="button"
                 class="voice-sheet__send"
-                :class="{ 'voice-sheet__send--disabled': !canSendVoice }"
+                :class="{
+                  'voice-sheet__send--disabled': !canSendVoice,
+                  'voice-sheet__send--voiceover': voiceoverMode
+                }"
                 :disabled="!canSendVoice"
-                @click="sendBuffer()">Send</button>
+                @click="sendBuffer()"
+                x-text="voiceoverBusy ? 'Listening…' : (voiceoverMode ? 'Ask' : 'Send')"></button>
       </div>
     </div>
 
@@ -2339,13 +2364,14 @@
       <div class="voice-capsule__action voice-capsule__send"
            role="button"
            tabindex="0"
-           aria-label="Send voice buffer"
-           title="Send voice buffer"
+           :aria-label="voiceoverMode ? 'Ask Voiceover' : 'Send voice buffer'"
+           :title="voiceoverMode ? 'Ask Voiceover' : 'Send voice buffer'"
            data-voice-action="send"
            :class="{
              'voice-capsule__action--pressed': capsulePressedAction === 'send',
              'voice-capsule__send--pulse': sendPulse,
-             'voice-capsule__send--disabled': !hasBufferText
+             'voice-capsule__send--disabled': !hasBufferText,
+             'voice-capsule__send--voiceover': voiceoverMode
            }"
            @keydown.enter.prevent="onCapsuleKey('send')"
            @keydown.space.prevent="onCapsuleKey('send')">
@@ -2360,6 +2386,23 @@
               x-show="bufferWordCount > 0"
               x-text="bufferWordCount"
               data-testid="voice-buffer-count"></span>
+      </div>
+      <div class="voice-capsule__action voice-capsule__voiceover"
+           x-show="voiceoverEnabled"
+           x-cloak
+           role="button"
+           tabindex="0"
+           :aria-pressed="voiceoverMode.toString()"
+           :aria-label="voiceoverMode ? 'Disable Voiceover mode' : 'Enable Voiceover mode'"
+           :title="voiceoverMode ? 'Voiceover on · tap for Session' : 'Voiceover off · tap to ask'"
+           data-voice-action="voiceover"
+           :class="{
+             'voice-capsule__voiceover--active': voiceoverMode,
+             'voice-capsule__action--pressed': capsulePressedAction === 'voiceover'
+           }"
+           @keydown.enter.prevent="onCapsuleKey('voiceover')"
+           @keydown.space.prevent="onCapsuleKey('voiceover')">
+        <span class="voice-capsule__icon-wrap" x-html="capsuleIcon('voiceover')"></span>
       </div>
       <div class="voice-capsule__action voice-capsule__type"
            role="button"

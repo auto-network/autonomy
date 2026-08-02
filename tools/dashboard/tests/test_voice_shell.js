@@ -26,7 +26,15 @@ function loadVoiceShell(opts) {
     sheetOpen: false,
     sheetMode: 'partial',
     sheetError: '',
+    deliveryMode: 'session',
+    voiceoverEnabled: true,
+    get voiceoverActive() {
+      return this.voiceoverEnabled === true && this.deliveryMode === 'voiceover';
+    },
+    voiceoverBusy: false,
+    voiceoverReply: '',
     _sendCalls: 0,
+    _voiceoverCalls: 0,
     _openSheetCalls: 0,
     _setCapsuleCalls: [],
     openSheet() {
@@ -54,6 +62,15 @@ function loadVoiceShell(opts) {
       this._sendCalls += 1;
       return true;
     },
+    async askVoiceover() {
+      this._voiceoverCalls += 1;
+      return true;
+    },
+    setDeliveryMode(mode) {
+      this.deliveryMode = mode;
+      return true;
+    },
+    speakVoiceover() { return true; },
     confirmRebind() {
       this.boundSessionId = this.pendingRebindTarget;
       this.pendingRebindTarget = '';
@@ -73,6 +90,7 @@ function loadVoiceShell(opts) {
   const flagsStore = {
     get(name) {
       if (name === 'voice.client_enabled') return true;
+      if (name === 'voice.voiceover_enabled') return true;
       if (name === 'voice.responsive_collapse_enabled') return false;
       return false;
     },
@@ -209,6 +227,34 @@ function actionTarget(action) {
 }
 
 describe('voice shell helpers', () => {
+  it('routes commit to Voiceover only when the operator selects it', async () => {
+    const h = loadVoiceShell();
+    assert.equal(await h.component.sendBuffer(), true);
+    assert.equal(h.voiceStore._sendCalls, 1);
+    assert.equal(h.voiceStore._voiceoverCalls, 0);
+
+    h.component.setVoiceDelivery('voiceover');
+    assert.equal(h.component.voiceoverMode, true);
+    assert.equal(await h.component.sendBuffer(), true);
+    assert.equal(h.voiceStore._sendCalls, 1);
+    assert.equal(h.voiceStore._voiceoverCalls, 1);
+  });
+
+  it('hides and disables the speaker control when the Voiceover feature flag is off', () => {
+    const h = loadVoiceShell({ voiceStore: { voiceoverEnabled: false } });
+    assert.equal(h.component.voiceoverEnabled, false);
+    assert.equal(h.component.toggleVoiceover(), false);
+    assert.equal(h.voiceStore.deliveryMode, 'session');
+  });
+
+  it('speaker action toggles Voiceover mode without opening the sheet', () => {
+    const h = loadVoiceShell();
+    assert.equal(h.component.runCapsuleAction('voiceover'), true);
+    assert.equal(h.component.voiceoverMode, true);
+    assert.equal(h.component.runCapsuleAction('voiceover'), true);
+    assert.equal(h.component.voiceoverMode, false);
+  });
+
   it('hides the inline composer on mobile whenever voice is bound (voice-first viewer)', () => {
     // Pinned behavior: a bound voice session on mobile always replaces the
     // keyboard composer with the voice UI — no longer gated on sheetOpen +
@@ -492,6 +538,28 @@ describe('voice shell helpers', () => {
     assert.equal(h.window.Autonomy.voice.shell.syncViewerOutboxCapture(), true);
     assert.equal(sessionStore.outbox && sessionStore.outbox.state, 'capturing');
     assert.equal(sessionStore.outbox && sessionStore.outbox.text, 'existing dictation');
+  });
+
+  it('keeps Voiceover questions out of the coding session outbox', () => {
+    const sessionStore = {
+      outbox: { localId: 'ob_old', state: 'capturing', source: 'voice', text: 'private question' },
+    };
+    const h = loadVoiceShell({
+      voiceStore: {
+        boundSessionId: 'session-a',
+        viewedSessionId: 'session-a',
+        bufferText: 'What is the session doing?',
+        deliveryMode: 'voiceover',
+      },
+    });
+    h.window.getSessionStore = function () { return sessionStore; };
+    h.document.body.classList.add('sv-viewer-composer-active');
+    h.document.body.dataset.svComposerSession = 'session-a';
+
+    assert.equal(h.window.Autonomy.voice.shell.syncViewerOutboxCapture(), true);
+    assert.equal(sessionStore.outbox, null);
+    assert.equal(h.window.Autonomy.voice.shell.syncViewerOutboxCapture(), false);
+    assert.equal(sessionStore.outbox, null);
   });
 
   it('updates the capturing outbox as the voice buffer changes', () => {

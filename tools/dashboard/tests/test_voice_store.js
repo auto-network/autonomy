@@ -12,6 +12,7 @@ function loadVoiceStore(opts) {
   const stores = Object.assign({}, (opts && opts.initialStores) || {});
   const storageData = Object.assign({}, (opts && opts.localStorage) || {});
   const fetchCalls = [];
+  const spoken = [];
 
   const document = {
     addEventListener(name, cb) {
@@ -34,6 +35,14 @@ function loadVoiceStore(opts) {
   const windowObj = {
     localStorage,
     Autonomy: {},
+    speechSynthesis: {
+      cancel() {},
+      speak(utterance) {
+        spoken.push(utterance.text);
+        if (typeof utterance.onend === 'function') utterance.onend();
+      },
+    },
+    SpeechSynthesisUtterance: function(text) { this.text = text; },
   };
   const fetchImpl = (opts && opts.fetchImpl) || (async function() {
     throw new Error('unexpected fetch');
@@ -87,6 +96,7 @@ function loadVoiceStore(opts) {
     storageData,
     window: windowObj,
     fetchCalls,
+    spoken,
   };
 }
 
@@ -115,6 +125,65 @@ describe('voice store substrate', () => {
     }
     assert.equal(h.store.boundSessionId, '');
     assert.equal(h.store.micMode, 'idle');
+  });
+
+  it('keeps the existing session delivery path as the default', () => {
+    const h = loadVoiceStore();
+    assert.equal(h.store.deliveryMode, 'session');
+    assert.equal(h.store.voiceoverEnabled, false);
+    assert.equal(h.store.voiceoverBusy, false);
+    assert.equal(h.store.voiceoverReply, '');
+  });
+
+  it('asks Voiceover about the viewed session, speaks the answer, and does not stage attachments', async () => {
+    const h = loadVoiceStore({
+      initialStores: {
+        flags: { get(name) { return name === 'voice.voiceover_enabled'; } },
+      },
+      fetchImpl: async function() {
+        return {
+          ok: true,
+          async json() {
+            return { ok: true, text: 'The session is validating the new voice path.' };
+          },
+        };
+      },
+    });
+    h.store.boundSessionId = 'bound-session';
+    h.store.micMode = 'listening';
+    h.store.viewedSessionId = 'viewed-session';
+    h.store.bufferText = 'What is it doing?';
+    h.store.attachments = [{ id: 1, path: '/tmp/design.png' }];
+    h.store.setDeliveryMode('voiceover');
+
+    assert.equal(await h.store.askVoiceover(), true);
+    assert.equal(h.fetchCalls.length, 1);
+    assert.equal(h.fetchCalls[0].url, '/api/voiceover/ask');
+    const body = JSON.parse(h.fetchCalls[0].init.body);
+    assert.equal(body.session_id, 'viewed-session');
+    assert.equal(body.question, 'What is it doing?');
+    assert.equal(h.store.bufferText, '');
+    assert.equal(h.store.attachments.length, 1);
+    assert.equal(h.store.voiceoverReply, 'The session is validating the new voice path.');
+    assert.deepEqual(h.spoken, ['The session is validating the new voice path.']);
+    assert.equal(h.store.micMode, 'listening');
+  });
+
+  it('preserves the question when Voiceover is unavailable', async () => {
+    const h = loadVoiceStore({
+      initialStores: {
+        flags: { get(name) { return name === 'voice.voiceover_enabled'; } },
+      },
+      fetchImpl: async function() { throw new Error('offline'); },
+    });
+    h.store.boundSessionId = 'session-a';
+    h.store.bufferText = 'Do you need me?';
+    h.store.setDeliveryMode('voiceover');
+
+    assert.equal(await h.store.askVoiceover(), false);
+    assert.equal(h.store.bufferText, 'Do you need me?');
+    assert.match(h.store.sheetError, /local model is unavailable/i);
+    assert.equal(h.store.voiceoverBusy, false);
   });
 
   it('hydrates discoverability and capsule position from localStorage', () => {

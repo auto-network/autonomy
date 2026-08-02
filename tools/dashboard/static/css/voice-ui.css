@@ -265,6 +265,35 @@ body.sv-viewer-composer-active .voice-caption {
   background: rgba(148, 163, 184, 0.38);
 }
 
+.voice-sheet__voiceover-mode {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 16px 10px;
+  padding: 7px 11px;
+  border-left: 3px solid #f59e0b;
+  border-radius: 3px 10px 10px 3px;
+  background: linear-gradient(90deg, rgba(120, 53, 15, 0.24), rgba(120, 53, 15, 0.03));
+}
+
+.voice-sheet__destination-pulse {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #f59e0b;
+  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.11), 0 0 16px rgba(245, 158, 11, 0.38);
+}
+
+.voice-sheet__voiceover-mode-name,
+.voice-sheet__voiceover-mode-copy {
+  font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.09em;
+}
+
+.voice-sheet__voiceover-mode-name { color: #fbbf24; }
+.voice-sheet__voiceover-mode-copy { color: #9a7a47; }
+
 /* Cross-session banner (#23) — same violet language as the dictation tile, so
    composing into a session other than the one being viewed is never a surprise. */
 .voice-sheet__cross {
@@ -305,11 +334,68 @@ body.sv-viewer-composer-active .voice-caption {
   font: 500 16px/1.55 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
+.voice-sheet--voiceover .voice-sheet__buffer {
+  min-height: 72px;
+}
+
 .voice-sheet__error {
   margin-top: 8px;
   color: #fca5a5;
   font-size: 12px;
   line-height: 1.4;
+}
+
+.voice-sheet__voiceover-reply {
+  max-height: min(26svh, 210px);
+  overflow-y: auto;
+  margin-top: 8px;
+  padding: 12px 13px 13px;
+  border: 1px solid rgba(245, 158, 11, 0.22);
+  border-left: 3px solid #f59e0b;
+  border-radius: 4px 14px 14px 4px;
+  background:
+    linear-gradient(110deg, rgba(120, 53, 15, 0.2), rgba(15, 23, 42, 0.72)),
+    repeating-linear-gradient(90deg, transparent 0 15px, rgba(245, 158, 11, 0.018) 15px 16px);
+}
+
+.voice-sheet--partial .voice-sheet__voiceover-reply {
+  max-height: 104px;
+}
+
+.voice-sheet__voiceover-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.voice-sheet__voiceover-mark,
+.voice-sheet__voiceover-spoken {
+  font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.1em;
+}
+
+.voice-sheet__voiceover-mark { color: #fbbf24; }
+.voice-sheet__voiceover-spoken { color: #718096; }
+
+.voice-sheet__voiceover-replay {
+  appearance: none;
+  margin-left: auto;
+  padding: 4px 7px;
+  border: 1px solid rgba(245, 158, 11, 0.22);
+  border-radius: 7px;
+  background: rgba(2, 6, 23, 0.38);
+  color: #fcd34d;
+  cursor: pointer;
+  font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-transform: uppercase;
+}
+
+.voice-sheet__voiceover-copy {
+  color: #f1f5f9;
+  font-size: 14px;
+  line-height: 1.52;
+  text-wrap: pretty;
 }
 
 /* Staged-attachment chips, shown above the action row once a file is picked. */
@@ -443,6 +529,12 @@ body.sv-viewer-composer-active .voice-caption {
 .voice-sheet__send {
   background: #2563eb;
   color: #eff6ff;
+}
+
+.voice-sheet__send--voiceover {
+  background: linear-gradient(180deg, #d97706 0%, #a84f08 100%);
+  color: #fff7ed;
+  box-shadow: 0 8px 24px rgba(180, 83, 9, 0.18);
 }
 
 .voice-sheet__send--disabled {
@@ -606,6 +698,21 @@ body.sv-cross-session-dictation .voice-capsule__send-fill {
 
 .voice-capsule__type {
   background: rgba(30, 41, 59, 0.92);
+}
+
+.voice-capsule__voiceover {
+  background: rgba(30, 41, 59, 0.92);
+  color: #94a3b8;
+}
+
+.voice-capsule__voiceover--active {
+  background: linear-gradient(180deg, #d97706 0%, #92400e 100%);
+  color: #fff7ed;
+  box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.32), 0 0 22px rgba(217, 119, 6, 0.3);
+}
+
+.voice-capsule__send--voiceover .voice-capsule__send-fill {
+  background: linear-gradient(180deg, #f59e0b 0%, #b45309 100%);
 }
 
 .voice-capsule__send--disabled {

@@ -4187,6 +4187,82 @@ async def api_dispatch_latest(request):
 # ── Session Tail & Send API ────────────────────────────────────
 
 
+async def api_voiceover_ask(request):
+    """Ask the spoken-first local model about one monitored session.
+
+    This is intentionally read-only: it resolves and normalizes the same
+    transcript the viewer consumes, but has no tmux or harness execution path.
+    """
+    from tools.dashboard import voiceover
+    from tools.dashboard import feature_flags
+
+    if not feature_flags.is_enabled("voice.voiceover_enabled"):
+        return JSONResponse(
+            {"ok": False, "code": "voiceover_disabled", "error": "Voiceover is disabled."},
+            status_code=404,
+        )
+
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return JSONResponse(
+            {"ok": False, "code": "invalid_json", "error": "Request body must be JSON."},
+            status_code=400,
+        )
+    if not isinstance(payload, dict):
+        return JSONResponse(
+            {"ok": False, "code": "invalid_request", "error": "Request body must be an object."},
+            status_code=400,
+        )
+
+    session_id = str(payload.get("session_id") or "").strip()
+    if not session_id:
+        return JSONResponse(
+            {"ok": False, "code": "missing_session", "error": "Choose a session for Voiceover."},
+            status_code=400,
+        )
+
+    row = session_monitor.get_one(session_id)
+    if row is None:
+        owner = session_monitor._find_session_by_uuid(session_id)
+        if owner:
+            row = session_monitor.get_one(owner)
+    session_file = session_monitor.resolve_session_file(session_id)
+    if row is None or session_file is None or not session_file.exists():
+        return JSONResponse(
+            {"ok": False, "code": "session_not_found", "error": "Voiceover cannot read that session yet."},
+            status_code=404,
+        )
+
+    resolved_id = str(row.get("tmux_name") or session_id)
+    try:
+        answer = await voiceover.ask_session(
+            session_id=resolved_id,
+            question=str(payload.get("question") or ""),
+            row=row,
+            path=session_file,
+            history=payload.get("history"),
+        )
+    except voiceover.VoiceoverError as exc:
+        return JSONResponse(
+            {"ok": False, "code": exc.code, "error": exc.message},
+            status_code=exc.status_code,
+        )
+    except Exception:
+        logger.exception("voiceover ask failed for session=%s", resolved_id)
+        return JSONResponse(
+            {"ok": False, "code": "voiceover_failed", "error": "Voiceover could not answer right now."},
+            status_code=500,
+        )
+
+    return JSONResponse({
+        "ok": True,
+        "text": answer.text,
+        "model": answer.model,
+        "session_id": answer.session_id,
+    })
+
+
 async def api_session_tail(request):
     """Tail JSONL entries for any session by project/session_id.
 
@@ -15699,6 +15775,7 @@ routes = [
     Route("/api/session/send", api_session_send, methods=["POST"]),
     Route("/api/session/{project}/{session_id}/tail", api_session_tail),
     Route("/api/session/{project}/{session_id}/send", api_session_send, methods=["POST"]),
+    Route("/api/voiceover/ask", api_voiceover_ask, methods=["POST"]),
     Route("/api/upload", api_upload, methods=["POST"]),
     Route("/api/timeline", api_timeline),
     Route("/api/timeline/stats", api_timeline_stats),
