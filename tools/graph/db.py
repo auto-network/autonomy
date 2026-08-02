@@ -172,7 +172,6 @@ SEARCH_VALID_RANKERS = ("legacy", "smart")
 SEARCH_SMART_RRF_K = 60
 SEARCH_SMART_STREAM_FANOUT = 100
 SEARCH_SMART_MAX_TERM_STREAMS = 6
-SEARCH_SMART_RAW_ROW_FANOUT = 2000
 
 
 import re as _re
@@ -1276,8 +1275,7 @@ class GraphDB:
                order: str = "relevance",
                session_type: list[str] | None = None,
                source_type: list[str] | None = None,
-               ranker: str = "legacy",
-               _source_diverse: bool = False) -> list[dict]:
+               ranker: str = "legacy") -> list[dict]:
         """Full-text search across thoughts and derivations, scoped to this DB.
 
         Org scoping is which database this method runs against — callers
@@ -1302,11 +1300,6 @@ class GraphDB:
         fusion over the legacy whole-query list and one legacy list per query
         term. Smart ranking is ignored for ``order='recent'`` because recency
         is authoritative there.
-
-        ``_source_diverse`` is an internal smart-ranker primitive. It keeps
-        only the best thought and derivation row per source before applying
-        phase-one fanout, preventing long sessions from monopolizing a term
-        stream's candidate window. Public callers should leave it false.
 
         ``session_type`` filters strictly on ``metadata.session_type``: rows
         whose JSON ``session_type`` is NULL or absent are NEVER returned
@@ -1414,42 +1407,8 @@ class GraphDB:
         ).fetchall()
         hit_rows.extend(dict(r) for r in sources_hits)
 
-        if _source_diverse:
-            thoughts_sql = f"""WITH raw_hits AS (
-                    SELECT t.source_id as source_id,
-                           rank as rank,
-                           t.content as content,
-                           t.turn_number as turn_number,
-                           t.tags as tags,
-                           t.id as id,
-                           s.title as source_title, s.platform,
-                           s.type as source_type,
-                           s.created_at as source_created_at,
-                           s.short_description, s.keywords,
-                           s.metadata as source_metadata,
-                           'thought' as result_type
-                    FROM thoughts_fts fts
-                    JOIN thoughts t ON t.rowid = fts.rowid
-                    JOIN sources s ON s.id = t.source_id
-                    WHERE thoughts_fts MATCH ?{common_filters}
-                    ORDER BY rank
-                    LIMIT ?
-                ), ranked_hits AS (
-                    SELECT *, row_number() OVER (
-                        PARTITION BY source_id ORDER BY rank
-                    ) as source_row
-                    FROM raw_hits
-                )
-                SELECT source_id, rank, content, turn_number, tags, id,
-                       source_title, platform, source_type,
-                       source_created_at, short_description, keywords,
-                       source_metadata, result_type
-                FROM ranked_hits
-                WHERE source_row = 1
-                ORDER BY rank
-                LIMIT ?"""
-        else:
-            thoughts_sql = f"""SELECT t.source_id as source_id,
+        thoughts_hits = self.conn.execute(
+            f"""SELECT t.source_id as source_id,
                       rank as rank,
                       t.content as content,
                       t.turn_number as turn_number,
@@ -1466,54 +1425,13 @@ class GraphDB:
                JOIN sources s ON s.id = t.source_id
                WHERE thoughts_fts MATCH ?{common_filters}
                ORDER BY rank
-               LIMIT ?"""
-        thoughts_hits = self.conn.execute(
-            thoughts_sql,
-            (
-                (fts_query, *common_params, SEARCH_SMART_RAW_ROW_FANOUT,
-                 SEARCH_PHASE1_FANOUT)
-                if _source_diverse else
-                (fts_query, *common_params, SEARCH_PHASE1_FANOUT)
-            ),
+               LIMIT ?""",
+            (fts_query, *common_params, SEARCH_PHASE1_FANOUT),
         ).fetchall()
         hit_rows.extend(dict(r) for r in thoughts_hits)
 
-        if _source_diverse:
-            deriv_sql = f"""WITH raw_hits AS (
-                    SELECT d.source_id as source_id,
-                           rank as rank,
-                           d.content as content,
-                           d.turn_number as turn_number,
-                           NULL as tags,
-                           d.id as id,
-                           s.title as source_title, s.platform,
-                           s.type as source_type,
-                           s.created_at as source_created_at,
-                           s.short_description, s.keywords,
-                           s.metadata as source_metadata,
-                           'derivation' as result_type
-                    FROM derivations_fts fts
-                    JOIN derivations d ON d.rowid = fts.rowid
-                    JOIN sources s ON s.id = d.source_id
-                    WHERE derivations_fts MATCH ?{common_filters}
-                    ORDER BY rank
-                    LIMIT ?
-                ), ranked_hits AS (
-                    SELECT *, row_number() OVER (
-                        PARTITION BY source_id ORDER BY rank
-                    ) as source_row
-                    FROM raw_hits
-                )
-                SELECT source_id, rank, content, turn_number, tags, id,
-                       source_title, platform, source_type,
-                       source_created_at, short_description, keywords,
-                       source_metadata, result_type
-                FROM ranked_hits
-                WHERE source_row = 1
-                ORDER BY rank
-                LIMIT ?"""
-        else:
-            deriv_sql = f"""SELECT d.source_id as source_id,
+        deriv_hits = self.conn.execute(
+            f"""SELECT d.source_id as source_id,
                       rank as rank,
                       d.content as content,
                       d.turn_number as turn_number,
@@ -1530,15 +1448,8 @@ class GraphDB:
                JOIN sources s ON s.id = d.source_id
                WHERE derivations_fts MATCH ?{common_filters}
                ORDER BY rank
-               LIMIT ?"""
-        deriv_hits = self.conn.execute(
-            deriv_sql,
-            (
-                (fts_query, *common_params, SEARCH_SMART_RAW_ROW_FANOUT,
-                 SEARCH_PHASE1_FANOUT)
-                if _source_diverse else
-                (fts_query, *common_params, SEARCH_PHASE1_FANOUT)
-            ),
+               LIMIT ?""",
+            (fts_query, *common_params, SEARCH_PHASE1_FANOUT),
         ).fetchall()
         hit_rows.extend(dict(r) for r in deriv_hits)
 
@@ -1749,7 +1660,6 @@ class GraphDB:
                 session_type=session_type,
                 source_type=source_type,
                 ranker="legacy",
-                _source_diverse=name != "strict",
             )
             groups: dict[str, list[dict]] = {}
             positions: dict[str, int] = {}
