@@ -5435,6 +5435,150 @@ JIRA_CREATE_APPROVAL_CHECKS = """(async () => {
 })()"""
 
 
+DASHBOARD_ACCESS_APPROVAL_CHECKS = """(async () => {
+    var r = {};
+    var sleep = function(ms) { return new Promise(resolve => setTimeout(resolve, ms)); };
+    var tick = async function() { await Alpine.nextTick(); await sleep(60); };
+    var q = function(id) { return document.querySelector('[data-testid="' + id + '"]'); };
+    var textOf = function(el) { return el ? el.textContent.replace(/\\s+/g, ' ').trim() : ''; };
+    var data = window._worktreeReviewOverlay;
+    if (!data) { r.error = 'no review-overlay component'; return JSON.stringify(r); }
+
+    var grant = {
+        v: 1,
+        nonce: 'ab'.repeat(32),
+        grantee: 'auto-agent-voice',
+        ephemeral_pub: '12'.repeat(32),
+        scope: ['dashboard:ui'],
+        issued_at: 1785698469,
+        expires_at: 1785705669,
+    };
+    var row = function(id) { return {
+        id: id, kind: 'dashboard_access', session: grant.grantee,
+        request: {ephemeral_pub: grant.ephemeral_pub}, staged: grant, result: null,
+    }; };
+
+    var canonical = function(value) {
+        if (value === null || typeof value !== 'object') return JSON.stringify(value);
+        if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
+        return '{' + Object.keys(value).sort().map(function(key) {
+            return JSON.stringify(key) + ':' + canonical(value[key]);
+        }).join(',') + '}';
+    };
+    var bytesToHex = function(bytes) {
+        return Array.from(bytes).map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+    };
+    var origFetch = window.fetch;
+    var origSession = window.AutonomyNetworkSession;
+    var origIdentity = window.AutonomyNetworkIdentity;
+    var posted = [], waitGets = 0, openedSeed = null, approvalGets = 0;
+    var keyPair = await crypto.subtle.generateKey({name: 'Ed25519'}, true, ['sign', 'verify']);
+    try {
+        window.AutonomyNetworkSession = {_internals: {
+            canonicalJson: canonical,
+            bytesToHex: bytesToHex,
+            decryptArmor: async function(armor, password) {
+                if (password !== 'personal password') throw new Error('wrong password');
+                openedSeed = new Uint8Array([9, 8, 7, 6]);
+                return {seed: openedSeed, rootPub: '34'.repeat(32)};
+            },
+        }};
+        window.AutonomyNetworkIdentity = {_internals: {
+            importSigningKey: async function(seed) {
+                if (seed !== openedSeed) throw new Error('unexpected seed');
+                return keyPair.privateKey;
+            },
+        }};
+        window.fetch = async function(url, opts) {
+            var u = String(url);
+            if (u === '/api/identity/personal') return {
+                ok: true, json: async function() { return {
+                    display_name: 'Alex Operator', armored_private_key: 'encrypted armor',
+                    root_pub: '34'.repeat(32),
+                }; },
+            };
+            if (u.indexOf('/decision') !== -1) {
+                posted.push(JSON.parse((opts || {}).body || '{}'));
+                return {ok: true, json: async function() { return {ok: true}; }};
+            }
+            if (u.indexOf('?wait=20') !== -1) {
+                waitGets++;
+                return {ok: true, json: async function() { return {
+                    result: {execution: {ok: true}},
+                }; }};
+            }
+            if (u.indexOf('/api/approvals/apr-generic-dedup') !== -1) {
+                approvalGets++;
+                await sleep(40);
+                return {ok: true, json: async function() { return {
+                    id: 'apr-generic-dedup', kind: 'jira_write', session: 'auto-agent-jira',
+                    request: {op: 'comment', key: 'AUTO-123', body_markdown: 'Ship it.'},
+                    result: null,
+                }; }};
+            }
+            throw new Error('unexpected fetch ' + u);
+        };
+
+        data._approvalKinds.dashboard_access.open(data, row('apr-access-ok'));
+        await tick();
+        r.sheet_open = !!q('approval-request-overlay');
+        r.title = textOf(q('approval-title-bar'));
+        r.body = textOf(q('approval-body'));
+        r.password_label = textOf(q('approval-password-label'));
+        r.password_visible = !!q('approval-revoke-password') && q('approval-revoke-password').offsetParent !== null;
+        r.action_label = textOf(q('approval-approve-button'));
+
+        data.approvalRequest.password = 'personal password';
+        await data.approveRequest();
+        await tick();
+        r.closed_after_success = !q('approval-request-overlay');
+        r.waited_for_execution = waitGets === 1;
+        r.posted = posted[0] || null;
+        r.seed_zeroed = !!openedSeed && Array.from(openedSeed).every(function(b) { return b === 0; });
+        var signedInput = new TextEncoder().encode(
+            'autonomy.identity.dashboard-access-grant.v1\\n' + canonical(grant));
+        r.signature_verifies = !!r.posted && await crypto.subtle.verify(
+            'Ed25519', keyPair.publicKey,
+            Uint8Array.from(r.posted.signature.match(/.{2}/g).map(function(h) { return parseInt(h, 16); })),
+            signedInput);
+
+        // A wrong password leaves the sheet open, shows the error inline, and
+        // never submits a decision body.
+        data._approvalKinds.dashboard_access.open(data, row('apr-access-wrong'));
+        await tick();
+        data.approvalRequest.password = 'wrong';
+        var postsBeforeWrong = posted.length;
+        await data.approveRequest();
+        await tick();
+        r.wrong_stays_open = !!q('approval-request-overlay');
+        r.wrong_error = textOf(q('approval-simple-error'));
+        r.wrong_not_posted = posted.length === postsBeforeWrong;
+
+        // Both the global and session-specific listeners can deliver one id.
+        // Exercise a DIFFERENT kind through the public opener so this pins
+        // deduplication as approval-shell behavior, not dashboard-access
+        // handler behavior.
+        data.approvalRequest = null;
+        data._openingApprovals = null;
+        await Promise.all([
+            data.openApprovalRequest('apr-generic-dedup'),
+            data.openApprovalRequest('apr-generic-dedup'),
+        ]);
+        await tick();
+        r.duplicate_fetch_count = approvalGets;
+        r.duplicate_sheet_open = !!q('approval-request-overlay');
+        r.duplicate_kind = data.approvalRequest && data.approvalRequest.kind;
+    } finally {
+        window.fetch = origFetch;
+        window.AutonomyNetworkSession = origSession;
+        window.AutonomyNetworkIdentity = origIdentity;
+        data.approvalRequest = null;
+        data._openingApprovals = null;
+    }
+    return JSON.stringify(r);
+})()"""
+
+
 LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
     var r = {};
     var sleep = function(ms) { return new Promise(resolve => setTimeout(resolve, ms)); };
@@ -5761,6 +5905,49 @@ class TestApprovalRequired:
         assert c["stale_stays_open"] is True
         assert "already been completed" in c["stale_error"]
         assert c["stale_can_cancel"] is True
+
+
+class TestDashboardAccessApproval:
+    """L2.B for root-signed, one-time dashboard-access approvals."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        request.cls._checks = _navigate_and_eval_async(
+            "/worktrees", DASHBOARD_ACCESS_APPROVAL_CHECKS, wait_ms=1200)
+
+    def test_frozen_grant_renders_in_existing_approval_overlay(self):
+        c = self._checks
+        assert c.get("sheet_open"), c
+        assert "Dashboard access" in c["title"]
+        assert "dashboard:ui" in c["body"]
+        assert "auto-agent-voice" in c["body"]
+        assert "121212121212" in c["body"]
+        assert c["password_label"] == "Personal identity password"
+        assert c["password_visible"] is True
+        assert "Approve access" in c["action_label"]
+
+    def test_approval_signs_exact_grant_and_waits_for_executor(self):
+        c = self._checks
+        assert c["posted"] is not None
+        assert set(c["posted"]) == {"approved", "grant", "signature"}
+        assert c["posted"]["approved"] is True
+        assert c["posted"]["grant"]["scope"] == ["dashboard:ui"]
+        assert c["signature_verifies"] is True
+        assert c["seed_zeroed"] is True
+        assert c["waited_for_execution"] is True
+        assert c["closed_after_success"] is True
+
+    def test_wrong_password_is_inline_and_submits_nothing(self):
+        c = self._checks
+        assert c["wrong_stays_open"] is True
+        assert "did not open your personal identity" in c["wrong_error"]
+        assert c["wrong_not_posted"] is True
+
+    def test_duplicate_delivery_is_coalesced_by_shared_opener(self):
+        c = self._checks
+        assert c["duplicate_fetch_count"] == 1
+        assert c["duplicate_sheet_open"] is True
+        assert c["duplicate_kind"] == "jira_write"
 
 
 ORG_JOIN_APPROVAL_CHECKS = """(async () => {
