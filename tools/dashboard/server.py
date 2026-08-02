@@ -71,6 +71,8 @@ from agents.workspace_manager import (
     get_session_worktree_dirty_detail,
     get_session_worktree_integrated_diff,
     cherry_pick_session_worktree,
+    ensure_local_workspace_repository,
+    local_workspace_repo_path,
     merge_session_worktree,
     merge_session_worktree_commit,
     prepare_session_mounts,
@@ -2780,6 +2782,145 @@ async def api_projects(request):
             "dind": p.needs_nested_docker,
         })
     return JSONResponse({"projects": entries})
+
+
+async def api_workspace_local_create(request):
+    """Create or attach an API-managed local Git repo to a workspace.
+
+    ``POST /api/workspaces/local`` with an explicit ``X-Graph-Org`` header and
+    body ``{id, name?, description?, image?, harness?, model?}`` is the
+    repository-less counterpart to configuring a remote Git URL.  New
+    workspaces and existing repo-less workspaces both end up with a durable
+    bare backing repo plus isolated writable session worktrees at
+    ``/workspace/repo``.
+    """
+    org = _caller_org(request)
+    if not org:
+        return JSONResponse(
+            {"error": "X-Graph-Org header is required"}, status_code=400,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    workspace_id = body.get("id")
+    if not isinstance(workspace_id, str) or not workspace_id:
+        return JSONResponse({"error": "id is required"}, status_code=400)
+
+    harness = body.get("harness", "codex")
+    if harness not in {"claude", "codex"}:
+        return JSONResponse(
+            {"error": "harness must be 'claude' or 'codex'"}, status_code=400,
+        )
+    mount = "/workspace/repo"
+    try:
+        expected_repo_path = local_workspace_repo_path(org, workspace_id)
+    except WorkspaceError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    members = graph_ops.read_set(
+        workspace_settings.WORKSPACE_SET_ID,
+        org=org,
+        peers=[],
+    ).members
+    existing = next((m for m in members if m.key == workspace_id), None)
+    repo_spec = {
+        "url": str(expected_repo_path),
+        "mount": mount,
+        "writable": True,
+    }
+    if existing is not None:
+        existing_repos = existing.payload.get("repos") or []
+        if existing_repos and (
+            existing_repos != [repo_spec]
+            or existing.payload.get("working_dir") != mount
+        ):
+            return JSONResponse(
+                {
+                    "error": (
+                        f"workspace {workspace_id!r} already has repository configuration"
+                    )
+                },
+                status_code=409,
+            )
+
+    try:
+        repo_path, repo_created = await asyncio.to_thread(
+            ensure_local_workspace_repository,
+            org,
+            workspace_id,
+            name=body.get("name") or workspace_id,
+        )
+    except WorkspaceError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    setting_created = False
+    setting_overridden = False
+    try:
+        if existing is None:
+            payload = {
+                "name": str(body.get("name") or workspace_id),
+                "description": str(body.get("description") or ""),
+                "image": str(body.get("image") or "autonomy-agent:dashboard"),
+                "harness": harness,
+                "working_dir": mount,
+                "repos": [repo_spec],
+                "dind": False,
+            }
+            model = body.get("model")
+            if isinstance(model, str) and model:
+                payload["model"] = model
+            setting_id = graph_ops.add_setting(
+                workspace_settings.WORKSPACE_SET_ID,
+                workspace_settings.WORKSPACE_REVISION,
+                workspace_id,
+                payload,
+                state="raw",
+                org=org,
+            )
+            setting_created = True
+        else:
+            existing_repos = existing.payload.get("repos") or []
+            if existing_repos:
+                setting_id = existing.id
+            else:
+                chain = graph_ops.chain_setting(
+                    workspace_settings.WORKSPACE_SET_ID,
+                    workspace_id,
+                    org=org,
+                    peers=[],
+                )
+                layers = chain.get("layers", []) if chain else []
+                if not layers:
+                    raise WorkspaceError(
+                        f"could not resolve base Setting for workspace {workspace_id!r}"
+                    )
+                setting_id = graph_ops.override_setting(
+                    layers[0]["id"],
+                    {"working_dir": mount, "repos": [repo_spec]},
+                    state="raw",
+                    org=org,
+                )
+                setting_overridden = True
+    except WorkspaceError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    except (LookupError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    workspace_settings.invalidate_caches()
+    return JSONResponse(
+        {
+            "id": workspace_id,
+            "org": org,
+            "setting_id": setting_id,
+            "repo": str(repo_path),
+            "mount": mount,
+            "repo_created": repo_created,
+            "workspace_created": setting_created,
+            "workspace_overridden": setting_overridden,
+        },
+        status_code=201 if setting_created or setting_overridden else 200,
+    )
 
 async def api_stats(request):
     if os.environ.get("DASHBOARD_MOCK"):
@@ -15736,6 +15877,7 @@ routes = [
     Route("/api/source/{id}", api_source_read),
     Route("/api/source/{id}/attachments", api_source_attachments),
     Route("/api/context/{id}/{turn}", api_context),
+    Route("/api/workspaces/local", api_workspace_local_create, methods=["POST"]),
     Route("/api/projects", api_projects),
     Route("/api/orgs", api_orgs_list, methods=["GET"]),
     Route("/api/orgs", api_orgs_create, methods=["POST"]),
