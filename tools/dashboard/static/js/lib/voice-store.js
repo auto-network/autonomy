@@ -12,6 +12,7 @@
  */
 (function () {
   var VOICE_CLIENT_FLAG = 'voice.client_enabled';
+  var VOICEOVER_FLAG = 'voice.voiceover_enabled';
   var STORAGE_KEYS = {
     capsulePosition: 'autonomy.voice.capsulePosition',
     discoverabilitySeen: 'autonomy.voice.discoverabilitySeen',
@@ -98,6 +99,16 @@
     }
   }
 
+  function _isVoiceoverEnabled() {
+    var flags = _getFlagsStore();
+    if (!flags || typeof flags.get !== 'function') return false;
+    try {
+      return flags.get(VOICEOVER_FLAG) === true;
+    } catch (_err) {
+      return false;
+    }
+  }
+
   function _isLiveSession(opts) {
     return !!(opts && opts.isLive === true);
   }
@@ -179,6 +190,12 @@
       sheetError: '',
       sheetOpenedAt: 0,
       sheetResumeListeningOnDismiss: false,
+      // The existing session path remains the default. Voiceover is an
+      // explicit, read-only destination that answers about the viewed session.
+      deliveryMode: 'session',
+      voiceoverBusy: false,
+      voiceoverReply: '',
+      voiceoverHistory: [],
       attachments: [],
       _nextAttachId: 0,
 
@@ -188,6 +205,14 @@
 
       get active() {
         return !!this.boundSessionId && this.micMode !== 'idle';
+      },
+
+      get voiceoverEnabled() {
+        return _isVoiceoverEnabled();
+      },
+
+      get voiceoverActive() {
+        return this.voiceoverEnabled && this.deliveryMode === 'voiceover';
       },
 
       // True while any attachment's upload is still in flight (no path yet).
@@ -200,6 +225,9 @@
       // Send is allowed when there's transcript text OR at least one
       // fully-uploaded attachment, and nothing is mid-upload.
       get canSend() {
+        if (this.voiceoverActive) {
+          return !this.voiceoverBusy && !!(this.bufferText || '').trim();
+        }
         if (this.attachmentsPending) return false;
         if ((this.bufferText || '').trim()) return true;
         return this.attachments.some(function (a) { return !!a.path; });
@@ -291,6 +319,14 @@
         } catch (_e) {}
       },
 
+      setDeliveryMode(mode) {
+        if (mode !== 'session' && mode !== 'voiceover') return false;
+        if (mode === 'voiceover' && !this.voiceoverEnabled) return false;
+        this.deliveryMode = mode;
+        this.sheetError = '';
+        return true;
+      },
+
       pulseAwayEvent(sessionId) {
         if (!sessionId || sessionId !== this.boundSessionId) return false;
         this.awayEventSessionId = sessionId;
@@ -320,6 +356,10 @@
         this.sheetMode = 'partial';
         this.sheetError = '';
         this.sheetResumeListeningOnDismiss = false;
+        this.deliveryMode = 'session';
+        this.voiceoverBusy = false;
+        this.voiceoverReply = '';
+        this.voiceoverHistory = [];
       },
 
       setCapsulePosition(position) {
@@ -518,6 +558,84 @@
         } catch (_err) {
           this.sheetError = _sendErrorMessage(0);
           return false;
+        }
+      },
+
+      speakVoiceover(text) {
+        if (!text || typeof window === 'undefined' || !window.speechSynthesis ||
+            typeof window.SpeechSynthesisUtterance !== 'function') return false;
+        var self = this;
+        var resumeMode = (this.micMode === 'listening' || this.micMode === 'vad_paused')
+          ? 'listening' : '';
+        try {
+          window.speechSynthesis.cancel();
+          var utterance = new window.SpeechSynthesisUtterance(text);
+          utterance.rate = 1.04;
+          utterance.pitch = 0.98;
+          // Do not feed Voiceover's own speech back through Whisper. Resume
+          // only if capture was active and the operator has not changed state.
+          if (resumeMode && typeof this.setMicMode === 'function') this.setMicMode('muted');
+          var restoreCapture = function () {
+            if (resumeMode && self.boundSessionId && self.micMode === 'muted' &&
+                typeof self.setMicMode === 'function') self.setMicMode(resumeMode);
+          };
+          utterance.onend = restoreCapture;
+          utterance.onerror = restoreCapture;
+          window.speechSynthesis.speak(utterance);
+          return true;
+        } catch (_err) {
+          if (resumeMode && this.boundSessionId && this.micMode === 'muted' &&
+              typeof this.setMicMode === 'function') this.setMicMode(resumeMode);
+          return false;
+        }
+      },
+
+      async askVoiceover() {
+        if (!this.voiceoverEnabled) {
+          this.deliveryMode = 'session';
+          this.sheetError = 'Voiceover is disabled.';
+          return false;
+        }
+        var question = (this.bufferText || '').trim();
+        var sessionId = this.viewedSessionId || this.boundSessionId;
+        if (!sessionId) {
+          this.sheetError = 'Voiceover needs a session to read.';
+          return false;
+        }
+        if (!question || this.voiceoverBusy) return false;
+
+        this.voiceoverBusy = true;
+        this.sheetError = '';
+        try {
+          var response = await _sendFetch('/api/voiceover/ask', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              session_id: sessionId,
+              question: question,
+              history: this.voiceoverHistory.slice(-8),
+            }),
+          });
+          var data = await response.json();
+          if (!response.ok || !data || data.ok !== true || !data.text) {
+            this.sheetError = (data && data.error) || 'Voiceover could not answer right now.';
+            return false;
+          }
+          this.voiceoverReply = String(data.text);
+          this.voiceoverHistory.push({ role: 'user', content: question });
+          this.voiceoverHistory.push({ role: 'assistant', content: this.voiceoverReply });
+          if (this.voiceoverHistory.length > 8) {
+            this.voiceoverHistory = this.voiceoverHistory.slice(-8);
+          }
+          _resetVoiceCaptureEpoch('voiceover');
+          this.bufferText = '';
+          this.speakVoiceover(this.voiceoverReply);
+          return true;
+        } catch (_err) {
+          this.sheetError = 'Voiceover\'s local model is unavailable. Check Ollama and try again.';
+          return false;
+        } finally {
+          this.voiceoverBusy = false;
         }
       },
     };

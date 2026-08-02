@@ -225,6 +225,15 @@
     );
   }
 
+  function _speakerIcon(active) {
+    return (
+      '<svg class="voice-capsule__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<polygon points="11 5 6 9 3 9 3 15 6 15 11 19 11 5"></polygon>' +
+      (active ? '<path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M18 6a8.5 8.5 0 0 1 0 12"></path>' : '') +
+      '</svg>'
+    );
+  }
+
   function _viewportWidth() {
     var viewport = (typeof window !== 'undefined' && window.visualViewport) || null;
     return (viewport && viewport.width) || (typeof window !== 'undefined' && window.innerWidth) || 0;
@@ -253,6 +262,16 @@
     if (!bound || !_viewerComposerActive()) return false;
     var s = window.getSessionStore(bound);
     if (!s) return false;
+    // Voiceover questions are private to the read-only meta layer. Never mirror
+    // them into the coding session's capturing outbox tile; switching modes
+    // also removes a capture preview created while Session was selected.
+    if (voice.voiceoverActive === true) {
+      if (s.outbox && s.outbox.source === 'voice' && s.outbox.state === 'capturing') {
+        s.outbox = null;
+        return true;
+      }
+      return false;
+    }
     var text = typeof voice.bufferText === 'string' ? voice.bufferText : '';
     var trimmed = text.trim();
     if (s.outbox && (typeof s.outbox.text !== 'string' ||
@@ -336,6 +355,17 @@
           // caption occupies — otherwise the last entries scroll underneath it.
           var self = this;
           if (typeof Alpine !== 'undefined' && typeof Alpine.effect === 'function') {
+            // A live feature-flag change removes Voiceover immediately and
+            // returns the capsule to its default Session destination.
+            Alpine.effect(function () {
+              var st = _voiceStore();
+              if (!st) return;
+              var _voiceoverEnabled = st.voiceoverEnabled;
+              if (!_voiceoverEnabled && st.deliveryMode === 'voiceover' &&
+                  typeof st.setDeliveryMode === 'function') {
+                st.setDeliveryMode('session');
+              }
+            });
             Alpine.effect(function () {
               document.body.classList.toggle('voice-caption-active', !!self.showCaption);
             });
@@ -365,6 +395,7 @@
               var _bound = voice.boundSessionId;      // track for reactivity
               var _text = voice.bufferText;           // track for reactivity
               var _viewed = voice.viewedSessionId;    // track viewer composer changes
+              var _delivery = voice.deliveryMode;     // keep Voiceover out of session outbox
               _syncViewerOutboxCapture();
             });
           }
@@ -410,6 +441,22 @@
         // landed attachment, disabled while any upload is in flight.
         get canSendVoice() {
           return !!(this.voice && this.voice.canSend);
+        },
+
+        get voiceoverMode() {
+          return !!(this.voice && this.voice.voiceoverActive === true);
+        },
+
+        get voiceoverEnabled() {
+          return !!(this.voice && this.voice.voiceoverEnabled === true);
+        },
+
+        get voiceoverBusy() {
+          return !!(this.voice && this.voice.voiceoverBusy);
+        },
+
+        get voiceoverReply() {
+          return (this.voice && this.voice.voiceoverReply) || '';
         },
 
         // Live word count of the capture buffer — the operator's "it's working"
@@ -493,6 +540,7 @@
 
         capsuleIcon(action) {
           if (action === 'type') return _typeIcon();
+          if (action === 'voiceover') return _speakerIcon(this.voiceoverMode);
           if (action === 'mic') {
             var voice = this.voice;
             if (voice && (voice.connState === 'reconnecting' || voice.connState === 'disconnected')) {
@@ -675,6 +723,10 @@
         _commitBuffer() {
           var voice = this.voice;
           if (!voice) return false;
+          if (voice.voiceoverActive === true) {
+            if (typeof voice.askVoiceover !== 'function') return false;
+            return voice.askVoiceover();
+          }
           if (typeof voice.sendBuffer !== 'function') return false;
           return voice.sendBuffer();
         },
@@ -684,6 +736,22 @@
           var ok = await this._commitBuffer();
           if (!ok && this.$refs && this.$refs.sheetInput) this.$refs.sheetInput.focus();
           return ok;
+        },
+
+        setVoiceDelivery(mode) {
+          if (!this.voice || typeof this.voice.setDeliveryMode !== 'function') return false;
+          return this.voice.setDeliveryMode(mode);
+        },
+
+        toggleVoiceover() {
+          if (!this.voice || this.voice.voiceoverEnabled !== true ||
+              typeof this.voice.setDeliveryMode !== 'function') return false;
+          return this.voice.setDeliveryMode(this.voiceoverMode ? 'session' : 'voiceover');
+        },
+
+        replayVoiceover() {
+          if (!this.voice || typeof this.voice.speakVoiceover !== 'function') return false;
+          return this.voice.speakVoiceover(this.voice.voiceoverReply || '');
         },
 
         confirmRebind() {
@@ -725,6 +793,7 @@
           if (action === 'type' && typeof this.voice.openSheet === 'function') {
             return this.voice.openSheet();
           }
+          if (action === 'voiceover') return this.toggleVoiceover();
           if (action === 'send' && typeof this.voice.sendBuffer === 'function') {
             return this._commitBuffer();
           }
