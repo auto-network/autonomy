@@ -774,7 +774,9 @@
         </template>
         <template x-if="approvalRequest.needsPassword">
           <div class="mt-4">
-            <label for="approval-revoke-password" class="text-sm font-medium text-slate-200">Organization password</label>
+            <label for="approval-revoke-password" data-testid="approval-password-label"
+                   class="text-sm font-medium text-slate-200"
+                   x-text="approvalRequest.passwordLabel || 'Organization password'"></label>
             <input id="approval-revoke-password" data-testid="approval-revoke-password"
                    x-model="approvalRequest.password" type="password"
                    autocomplete="current-password" placeholder="Enter password"

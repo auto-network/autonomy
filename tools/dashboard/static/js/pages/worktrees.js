@@ -74,6 +74,9 @@
     '604800', '2592000', '31536000',
   ]);
 
+  const _DASHBOARD_ACCESS_GRANT_DOMAIN =
+    'autonomy.identity.dashboard-access-grant.v1\n';
+
   function _linkPayloadWithTtl(payload, ttl) {
     const next = JSON.parse(JSON.stringify(payload || {}));
     const meta = Object.assign({}, next.meta || {});
@@ -321,6 +324,61 @@
       // AutonomyNetworkSession store.
       req.password = '';
       if (!req.allowSessionApprovals) await session.signOut();
+    }
+  }
+
+  // Dashboard access is personal authority, not organization authority. Open
+  // the password-armored personal root locally, sign the exact server-frozen
+  // grant, and destroy the plaintext seed before returning. The decision body
+  // carries only the grant and detached signature; the password never leaves
+  // the browser.
+  async function _signDashboardAccessDecision(self, req) {
+    if (!req.password) throw new Error('Enter your personal identity password to continue.');
+    if (!req.grant || typeof req.grant !== 'object') {
+      throw new Error('This access request has no server-frozen grant. Decline it and request a new one.');
+    }
+    const session = window.AutonomyNetworkSession;
+    const identity = window.AutonomyNetworkIdentity;
+    if (!session || !session._internals || !identity || !identity._internals ||
+        typeof session._internals.decryptArmor !== 'function' ||
+        typeof session._internals.canonicalJson !== 'function' ||
+        typeof session._internals.bytesToHex !== 'function' ||
+        typeof identity._internals.importSigningKey !== 'function') {
+      throw new Error('Personal approval is unavailable in this browser. Reload and try again.');
+    }
+
+    const personalResp = await fetch('/api/identity/personal');
+    const personal = await personalResp.json().catch(() => ({}));
+    if (!personalResp.ok || !personal.armored_private_key) {
+      throw new Error(personal.error || 'No personal identity is available to sign this approval.');
+    }
+
+    let opened = null;
+    let signingKey = null;
+    try {
+      try {
+        opened = await session._internals.decryptArmor(
+          personal.armored_private_key, req.password);
+      } catch (error) {
+        throw new Error('That password did not open your personal identity.');
+      }
+      signingKey = await identity._internals.importSigningKey(opened.seed);
+      opened.seed.fill(0);
+      opened.seed = null;
+      const input = new TextEncoder().encode(
+        _DASHBOARD_ACCESS_GRANT_DOMAIN +
+        session._internals.canonicalJson(req.grant));
+      const signature = await crypto.subtle.sign('Ed25519', signingKey, input);
+      return {
+        grant: req.grant,
+        signature: session._internals.bytesToHex(new Uint8Array(signature)),
+      };
+    } finally {
+      if (opened && opened.seed) {
+        opened.seed.fill(0);
+        opened.seed = null;
+      }
+      signingKey = null;
     }
   }
 
@@ -2407,6 +2465,42 @@
           },
           decision: (self, req) => _signLinkDecision(self, req),
         },
+        dashboard_access: {
+          open(self, r) {
+            const grant = r.staged;
+            if (!grant || typeof grant !== 'object') {
+              throw new Error('dashboard access request has no server-frozen grant');
+            }
+            const expiry = Number.isSafeInteger(grant.expires_at)
+              ? new Date(grant.expires_at * 1000).toLocaleString()
+              : 'unknown';
+            const ephemeral = typeof grant.ephemeral_pub === 'string'
+              ? grant.ephemeral_pub : '';
+            const fingerprint = ephemeral
+              ? ephemeral.slice(0, 12) + '…' + ephemeral.slice(-12)
+              : 'unavailable';
+            self.approvalBusy = false;
+            self.approvalRequest = {
+              id: r.id, kind: r.kind, session: r.session,
+              title: 'Dashboard access', actionLabel: 'Approve access',
+              op: 'grant', target: 'Dashboard UI',
+              bodyMarkdown: [
+                'Grant temporary Dashboard UI access to ' + (grant.grantee || r.session) + '.',
+                '',
+                'Scope: ' + ((grant.scope || []).join(', ') || 'none'),
+                'Expires: ' + expiry,
+                'Requester key: ' + fingerprint,
+              ].join('\n'),
+              needsPassword: true,
+              passwordLabel: 'Personal identity password',
+              password: '',
+              grant,
+              awaitExecution: true,
+              error: '',
+            };
+          },
+          decision: (self, req) => _signDashboardAccessDecision(self, req),
+        },
         commit_sign: {
           async open(self, r) {
             // Render the pending commit in THIS overlay, in sign mode.
@@ -2436,6 +2530,7 @@
       // and re-opens the overlay. This set is the local memory that makes a
       // retransmit a no-op regardless of timing.
       _decidedApprovals: null,
+      _openingApprovals: null,
 
       _markApprovalDecided(id) {
         if (!id) return;
@@ -2453,6 +2548,11 @@
 
       async openApprovalRequest(id) {
         if (this._decidedApprovals && this._decidedApprovals.has(id)) return;
+        if ((this.approvalRequest && this.approvalRequest.id === id) ||
+            (this.selectedCommit && this.selectedCommit.approvalId === id)) return;
+        if (!this._openingApprovals) this._openingApprovals = new Set();
+        if (this._openingApprovals.has(id)) return;
+        this._openingApprovals.add(id);
         this.detailLoading = true;
         try {
           const r = await (await fetch('/api/approvals/' + encodeURIComponent(id))).json();
@@ -2463,6 +2563,7 @@
         } catch (e) {
           _toast('Could not load the approval request: ' + (e.message || e), 'error');
         } finally {
+          this._openingApprovals.delete(id);
           this.detailLoading = false;
         }
       },
@@ -2593,14 +2694,14 @@
           if (!resp.ok || !decisionResult.ok) {
             throw new Error(decisionResult.error || 'This approval is no longer available.');
           }
-          if (req.gate2 || req.op === 'revoke') {
+          if (req.gate2 || req.op === 'revoke' || req.awaitExecution) {
             const outcomeResp = await fetch(
               '/api/approvals/' + encodeURIComponent(req.id) + '?wait=20');
             const outcome = await outcomeResp.json().catch(() => ({}));
             const execution = outcome.result && outcome.result.execution;
             if (!outcomeResp.ok || !execution || execution.ok !== true) {
               throw new Error((execution && execution.error) || outcome.error ||
-                'auto.network did not finish executing this approval. Try again.');
+                'The approval did not finish executing. Try again.');
             }
           }
           this._markApprovalDecided(req.id);
@@ -2608,7 +2709,7 @@
             : (req.gate2 ? 'Share link published' : 'Approved'), 'success');
         } catch (e) {
           const message = e && e.message ? e.message : String(e);
-          if (req.gate2 || req.op === 'revoke') req.error = message;
+          if (req.gate2 || req.op === 'revoke' || req.awaitExecution) req.error = message;
           else _toast('Could not approve: ' + message, 'error');
         } finally {
           this.approvalBusy = false;
