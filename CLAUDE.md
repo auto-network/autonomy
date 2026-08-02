@@ -40,8 +40,9 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 ### Knowledge Graph (`graph`)
 | Command | What | Example |
 |---------|------|---------|
-| `graph search "query"` | Full-text search (use `--or` for OR mode) | `graph search "CVSS fuzzing" --only-org enterprise-ng` |
+| `graph search "query"` | Compact source-level FTS; visibly broadens only after zero strict hits | `graph search "CVSS fuzzing" --only-org enterprise-ng` |
 | `graph search "query" --or` | Match ANY term instead of all | `graph search "auth login session" --or` |
+| `graph search "query" --verbose` | Show every matching excerpt (high-volume) | `graph search "auth" --verbose` |
 | `graph search "query" --type <kind>` | Scope by source kind (comma-separated: session, note, bead, …); composes with --tag / --state | `graph search "terminate" --type session` |
 | `graph read <src_id\|tmux_name>` | Read full source content (tmux names like `auto-0506-001257` auto-resolve) | `graph read dc4c73ee --max-chars 2000` / `graph read auto-0506-001257` |
 | `graph read <src_id> --save <path>` | Export raw content to file for editing | `graph read abc123 --save /tmp/notes/abc123.md` |
@@ -181,13 +182,13 @@ graph primer <bead-id>                        # description + pitfalls + provena
 
 ### Before creating any bead — research first
 ```bash
-graph search "topic" --or --limit 10          # mine the graph for context
+graph search "topic" --limit 10               # mine the graph for context
 graph read <src_id> --max-chars 3000          # read full sources
 # THEN create the bead with informed context
 ```
 
 ### Search heuristic — when widening hurts
-Start with the single highest-signal term. Multi-term queries and `--or` widen the candidate set and tend to score the obvious hit *down* in the relevance ranking, not up. If the result you want is buried, scope before widening: `--type session` / `--type note` / `--only-org <slug>` / `--tag <tag>` all compose. Reach for `--or` only when AND mode legitimately returns nothing.
+Start with the single highest-signal term. Multi-term queries and `--or` widen the candidate set and tend to score the obvious hit *down* in the relevance ranking, not up. If a multi-term AND query has no hits, the interactive CLI automatically shows clearly labelled any-term fallback results; quoted phrases and `--json` stay strict. If the result you want is buried, scope before widening: `--type session` / `--type note` / `--only-org <slug>` / `--tag <tag>` all compose. Search output is compact by default (one excerpt per source); use `--verbose` only when you need every matching excerpt.
 
 ### Checking human attention trail
 ```bash

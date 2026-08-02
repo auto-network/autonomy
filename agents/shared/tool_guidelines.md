@@ -11,8 +11,9 @@ commits after you exit.
 ## Knowledge Graph (`graph`)
 
 ```
-graph search "query"              # Full-text search (use --or for OR mode)
+graph search "query"              # Compact source-level search; strict first, any-term fallback on zero hits
 graph search "query" --or         # Match ANY term instead of all
+graph search "query" --verbose    # Show every matching excerpt (high-volume)
 graph search "query" --type X     # Scope by source kind (session/note/bead/…); composes with --project / --tag / --state
 graph read <src_id|tmux_name>     # Read full source content (tmux names like auto-* auto-resolve)
 graph read <src_id> --max-chars N # Read with character limit

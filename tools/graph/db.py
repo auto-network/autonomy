@@ -207,6 +207,22 @@ def _sanitize_fts_query(query: str, or_mode: bool = False) -> str:
     return joiner.join(tokens)
 
 
+def _search_tokens(value: str) -> set[str]:
+    """Tokenize text closely enough to FTS5 ``unicode61`` for soft signals.
+
+    Tag names commonly use punctuation as a separator (``cross-org``,
+    ``publication-state``), while callers naturally type spaces.  The old
+    overlap check compared whole strings and therefore missed both tokens.
+    Splitting on non-word characters (and underscore, which unicode61 also
+    treats as a separator) makes tag boosts agree with lexical retrieval.
+    """
+    return {
+        token.casefold()
+        for token in _re.findall(r"[^\W_]+", value, flags=_re.UNICODE)
+        if len(token) > 2
+    }
+
+
 class GraphDB:
     def __init__(
         self,
@@ -1445,7 +1461,7 @@ class GraphDB:
                 per_source_excerpts[sid].append(h)
 
         # ── Phase 2: compute per-source rank, apply tag-overlap, sort ───
-        query_tokens = {t.lower() for t in query.split() if len(t) > 2}
+        query_tokens = _search_tokens(query)
         for sid, src in per_source.items():
             hit_count = src["hit_count"]
             best_rank = src["best_rank"]
@@ -1463,11 +1479,11 @@ class GraphDB:
                     except (json.JSONDecodeError, TypeError):
                         meta = {}
                 if isinstance(meta, dict):
-                    tags = [
-                        t.lower() for t in (meta.get("tags") or [])
-                        if isinstance(t, str)
-                    ]
-                    overlap = len(query_tokens & set(tags))
+                    tag_tokens: set[str] = set()
+                    for tag in meta.get("tags") or []:
+                        if isinstance(tag, str):
+                            tag_tokens.update(_search_tokens(tag))
+                    overlap = len(query_tokens & tag_tokens)
                     if overlap > 0:
                         src_rank += max(
                             SEARCH_TAG_OVERLAP_BOOST * overlap,
