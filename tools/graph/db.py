@@ -164,17 +164,14 @@ SEARCH_EXCERPTS_PER_SOURCE = 10
 # can't crowd out other distinct sources at the candidate-collection step.
 SEARCH_PHASE1_FANOUT = 200
 
-# Opt-in Round 8 ranker.  Candidate streams remain separate until source-level
-# scoring so metadata BM25, thought BM25, and derivation BM25 are never added as
-# though their corpus statistics were comparable.  Coordination (distinct query
-# terms matched) is the primary level; weighted RRF breaks ties within a level.
+# Opt-in Round 8 ranker. It fuses the legacy whole-query ranking with one
+# legacy ranking per distinct query term. This rewards sources that agree
+# across query formulations without giving verbose metadata/thought/derivation
+# storage channels independent votes.
 SEARCH_VALID_RANKERS = ("legacy", "smart")
 SEARCH_SMART_RRF_K = 60
-SEARCH_SMART_CHANNEL_WEIGHTS = {
-    "metadata": 3.0,
-    "thought": 1.5,
-    "derivation": 1.0,
-}
+SEARCH_SMART_STREAM_FANOUT = 100
+SEARCH_SMART_MAX_TERM_STREAMS = 6
 
 
 import re as _re
@@ -1299,11 +1296,10 @@ class GraphDB:
         ``source.created_at DESC``. Any other value raises ``ValueError``.
 
         ``ranker`` selects relevance scoring. ``'legacy'`` preserves BM25 plus
-        fixed title/tag/hit-count boosts. ``'smart'`` retrieves an any-term
-        candidate set from metadata, user-thought, and agent-derivation FTS
-        channels separately; distinct query-term coverage is the primary rank
-        level and weighted reciprocal-rank fusion breaks ties. Smart ranking is
-        ignored for ``order='recent'`` because recency is authoritative there.
+        fixed title/tag/hit-count boosts. ``'smart'`` uses reciprocal-rank
+        fusion over the legacy whole-query list and one legacy list per query
+        term. Smart ranking is ignored for ``order='recent'`` because recency
+        is authoritative there.
 
         ``session_type`` filters strictly on ``metadata.session_type``: rows
         whose JSON ``session_type`` is NULL or absent are NEVER returned
@@ -1336,13 +1332,17 @@ class GraphDB:
                 excluded_source_types=excluded_source_types,
             )
 
-        smart_mode = ranker == "smart" and order == "relevance"
-        # Smart ranking needs a recall-oriented candidate pool so it can rank
-        # by coordination itself. Quoted phrases remain phrases inside the OR
-        # expression; single-term queries are naturally unchanged.
-        fts_query = _sanitize_fts_query(
-            query, or_mode=(or_mode or smart_mode),
-        )
+        if ranker == "smart" and order == "relevance":
+            return self._search_smart_query_fusion(
+                query, limit=limit, or_mode=or_mode, tag=tag,
+                states=states, include_raw=include_raw,
+                session_source_ids=session_source_ids,
+                session_author_pattern=session_author_pattern,
+                excluded_source_types=excluded_source_types,
+                session_type=session_type, source_type=source_type,
+            )
+
+        fts_query = _sanitize_fts_query(query, or_mode=or_mode)
 
         tag_clause = ""
         tag_params: list[str] = []
@@ -1385,14 +1385,9 @@ class GraphDB:
         # We pull the raw FTS hits then aggregate per source_id in Python.
         hit_rows: list[dict] = []
 
-        source_rank_sql = (
-            "bm25(sources_fts, 0.0, 5.0, 2.0, 3.0)"
-            if smart_mode else "(rank + ?)"
-        )
-        source_rank_params: tuple = () if smart_mode else (SEARCH_TITLE_BOOST,)
         sources_hits = self.conn.execute(
             f"""SELECT s.id as source_id,
-                      {source_rank_sql} as rank,
+                      (rank + ?) as rank,
                       s.title as content,
                       NULL as turn_number,
                       NULL as tags,
@@ -1408,7 +1403,7 @@ class GraphDB:
                WHERE sources_fts MATCH ?{common_filters}
                ORDER BY rank
                LIMIT ?""",
-            (*source_rank_params, fts_query, *common_params, SEARCH_PHASE1_FANOUT),
+            (SEARCH_TITLE_BOOST, fts_query, *common_params, SEARCH_PHASE1_FANOUT),
         ).fetchall()
         hit_rows.extend(dict(r) for r in sources_hits)
 
@@ -1461,28 +1456,12 @@ class GraphDB:
         if not hit_rows:
             return []
 
-        # Rank positions inside each independently-scored FTS channel. A
-        # source gets one position per channel no matter how many matching
-        # turns it owns; this prevents verbose sessions from consuming the
-        # whole ranking signal before source-level fusion.
-        channel_positions: dict[str, dict[str, int]] = {}
-        for channel, rows in (
-            ("metadata", sources_hits),
-            ("thought", thoughts_hits),
-            ("derivation", deriv_hits),
-        ):
-            positions: dict[str, int] = {}
-            for row in rows:
-                sid = row["source_id"]
-                if sid not in positions:
-                    positions[sid] = len(positions) + 1
-            channel_positions[channel] = positions
-
         # ── Phase 1b: aggregate per source ──────────────────────────────
-        # Per source: best (most-negative) rank is retained for a stable
-        # within-level tiebreak. Legacy mode additionally folds in the fixed
-        # title and hit-count boosts below; smart mode does not compare raw
-        # scores from independent FTS tables.
+        # Per source: best (most-negative) rank wins as the source-rank
+        # baseline; hit-count adds a log-shaped negative bonus so a
+        # 30-hit session ranks above a 1-hit session for the same query.
+        # Title-boost is already folded into individual sources_fts rows
+        # via (rank + SEARCH_TITLE_BOOST) above, so MIN(rank) carries it.
         per_source: dict[str, dict] = {}
         per_source_excerpts: dict[str, list[dict]] = {}
         for h in hit_rows:
@@ -1531,83 +1510,20 @@ class GraphDB:
                 if isinstance(tag, str):
                     tag_tokens.update(_search_tokens(tag))
 
-            if smart_mode:
-                # Coordination is the primary relevance level: how many
-                # distinct query concepts appear anywhere in the source. The
-                # best single row is the second level, so one coherent passage
-                # beats a verbose session that scatters terms across turns.
-                source_tokens = set(tag_tokens)
-                source_tokens.update(_search_tokens(" ".join(
-                    str(v or "") for v in (
-                        src.get("source_title"),
-                        src.get("short_description"),
-                        src.get("keywords"),
+            # Multi-hit bonus — log-shaped so it nudges without dominating.
+            # log2(1+30)≈4.95 → ~-4.95 bonus.
+            bonus = SEARCH_HIT_COUNT_BONUS_FACTOR * math.log2(1 + hit_count)
+            src_rank = best_rank + bonus
+            # Tag-overlap soft signal: query tokens matching source tags
+            # add a capped negative delta. Skipped under recency.
+            if order == "relevance" and query_tokens:
+                overlap = len(query_tokens & tag_tokens)
+                if overlap > 0:
+                    src_rank += max(
+                        SEARCH_TAG_OVERLAP_BOOST * overlap,
+                        SEARCH_TAG_OVERLAP_CAP,
                     )
-                )))
-                best_row_terms: set[str] = set()
-                for excerpt in per_source_excerpts[sid]:
-                    row_terms = query_tokens & _search_tokens(
-                        str(excerpt.get("content") or "")
-                    )
-                    source_tokens.update(row_terms)
-                    if len(row_terms) > len(best_row_terms):
-                        best_row_terms = row_terms
-
-                matched_terms = query_tokens & source_tokens
-                channel_ranks = {
-                    channel: positions[sid]
-                    for channel, positions in channel_positions.items()
-                    if sid in positions
-                }
-                rrf_score = sum(
-                    SEARCH_SMART_CHANNEL_WEIGHTS[channel]
-                    / (SEARCH_SMART_RRF_K + position)
-                    for channel, position in channel_ranks.items()
-                )
-                coverage_count = len(matched_terms)
-                best_row_count = len(best_row_terms)
-
-                # The numeric rank mirrors the lexicographic ordering for
-                # consumers that regroup/sort rows after this method returns.
-                # RRF is intentionally only a fractional tie-breaker.
-                src["rank"] = -(
-                    coverage_count * 1000
-                    + best_row_count * 100
-                    + rrf_score
-                )
-                src["_smart_sort"] = (
-                    -coverage_count,
-                    -best_row_count,
-                    -rrf_score,
-                    best_rank,
-                )
-                src["ranking_explain"] = {
-                    "ranker": "smart",
-                    "query_terms": sorted(query_tokens),
-                    "matched_terms": sorted(matched_terms),
-                    "coverage_count": coverage_count,
-                    "best_row_terms": sorted(best_row_terms),
-                    "best_row_count": best_row_count,
-                    "channel_ranks": channel_ranks,
-                    "rrf_score": rrf_score,
-                }
-            else:
-                # Legacy multi-hit bonus — log-shaped so it nudges without
-                # dominating. log2(1+30)≈4.95 → ~-4.95 bonus.
-                bonus = (
-                    SEARCH_HIT_COUNT_BONUS_FACTOR * math.log2(1 + hit_count)
-                )
-                src_rank = best_rank + bonus
-                # Tag-overlap soft signal: query tokens matching source tags
-                # add a capped negative delta. Skipped under recency.
-                if order == "relevance" and query_tokens:
-                    overlap = len(query_tokens & tag_tokens)
-                    if overlap > 0:
-                        src_rank += max(
-                            SEARCH_TAG_OVERLAP_BOOST * overlap,
-                            SEARCH_TAG_OVERLAP_CAP,
-                        )
-                src["rank"] = src_rank
+            src["rank"] = src_rank
 
         # Order sources at the source level (not row level) so LIMIT N
         # picks N distinct sources — this is the core Round 7l fix.
@@ -1621,10 +1537,6 @@ class GraphDB:
             ordered_sources.sort(
                 key=lambda s: s.get("source_created_at") or "",
                 reverse=True,
-            )
-        elif smart_mode:
-            ordered_sources = sorted(
-                per_source.values(), key=lambda s: s["_smart_sort"],
             )
         else:
             ordered_sources = sorted(
@@ -1663,8 +1575,6 @@ class GraphDB:
             head_row["source_id"] = sid
             head_row["rank"] = src_rank
             head_row["hit_count"] = src["hit_count"]
-            if src.get("ranking_explain") is not None:
-                head_row["ranking_explain"] = src["ranking_explain"]
             results.append(head_row)
             # Emit additional excerpts (capped) for the dashboard's
             # group step. Skip the head row to avoid duplication.
@@ -1683,6 +1593,161 @@ class GraphDB:
                 # excerpt first within the card. Source-level rank lives
                 # only on the head row.
                 results.append(ex_row)
+
+        return results
+
+    def _search_smart_query_fusion(
+        self,
+        query: str,
+        *,
+        limit: int,
+        or_mode: bool,
+        tag: str | None,
+        states: list[str] | None,
+        include_raw: bool,
+        session_source_ids: list[str] | None,
+        session_author_pattern: str | None,
+        excluded_source_types: list[str] | None,
+        session_type: list[str] | None,
+        source_type: list[str] | None,
+    ) -> list[dict]:
+        """Fuse whole-query and per-term legacy rankings at source level.
+
+        Each constituent stream is already source-aware and keeps the mature
+        title, tag, hit-count, state, and type behavior of legacy search. RRF
+        combines only distinct-source positions, so repeated excerpts and the
+        three physical FTS tables cannot create extra votes. The term-stream
+        cap bounds work for long generated queries; recent agent searches are
+        normally one or two terms.
+        """
+        ordered_terms: list[str] = []
+        seen_terms: set[str] = set()
+        for token in _re.findall(r"[^\W_]+", query, flags=_re.UNICODE):
+            token = token.casefold()
+            if len(token) <= 2 or token in seen_terms:
+                continue
+            seen_terms.add(token)
+            ordered_terms.append(token)
+
+        stream_specs: list[tuple[str, str, bool]] = [
+            ("strict", query, or_mode),
+        ]
+        # A one-term stream would be identical to the strict stream. Avoid
+        # doing the same three FTS queries twice in that common case.
+        if len(ordered_terms) > 1:
+            stream_specs.extend(
+                (f"term:{term}", term, False)
+                for term in ordered_terms[:SEARCH_SMART_MAX_TERM_STREAMS]
+            )
+
+        stream_limit = max(limit, SEARCH_SMART_STREAM_FANOUT)
+        stream_groups: dict[str, dict[str, list[dict]]] = {}
+        stream_positions: dict[str, dict[str, int]] = {}
+        scores: dict[str, float] = {}
+
+        for name, stream_query, stream_or_mode in stream_specs:
+            rows = self.search(
+                stream_query,
+                limit=stream_limit,
+                or_mode=stream_or_mode,
+                tag=tag,
+                states=states,
+                include_raw=include_raw,
+                session_source_ids=session_source_ids,
+                session_author_pattern=session_author_pattern,
+                excluded_source_types=excluded_source_types,
+                order="relevance",
+                session_type=session_type,
+                source_type=source_type,
+                ranker="legacy",
+            )
+            groups: dict[str, list[dict]] = {}
+            positions: dict[str, int] = {}
+            for row in rows:
+                sid = row.get("source_id") or row.get("id")
+                if not sid:
+                    continue
+                if sid not in groups:
+                    groups[sid] = []
+                    positions[sid] = len(positions) + 1
+                    scores[sid] = scores.get(sid, 0.0) + (
+                        1.0 / (SEARCH_SMART_RRF_K + positions[sid])
+                    )
+                groups[sid].append(row)
+            stream_groups[name] = groups
+            stream_positions[name] = positions
+
+        if not scores:
+            return []
+
+        # Match the evaluated prototype exactly: descending fused score with
+        # source ID as the deterministic tie-break. No raw BM25 scores cross
+        # stream boundaries.
+        ordered_sources = sorted(scores, key=lambda sid: (-scores[sid], sid))
+        results: list[dict] = []
+        for sid in ordered_sources[:limit]:
+            available_streams = [
+                name for name, _, _ in stream_specs
+                if sid in stream_groups[name]
+            ]
+            representative = (
+                "strict" if sid in stream_groups["strict"]
+                else min(
+                    available_streams,
+                    key=lambda name: stream_positions[name][sid],
+                )
+            )
+            representative_rows = stream_groups[representative][sid]
+            head = dict(representative_rows[0])
+            head["source_id"] = sid
+            head["rank"] = -scores[sid]
+            head["hit_count"] = max(
+                int(stream_groups[name][sid][0].get("hit_count") or 1)
+                for name in available_streams
+            )
+            head["ranking_explain"] = {
+                "ranker": "smart",
+                "query_terms": ordered_terms,
+                "stream_ranks": {
+                    name: stream_positions[name][sid]
+                    for name in available_streams
+                },
+                "rrf_score": scores[sid],
+                "term_streams_truncated": max(
+                    0, len(ordered_terms) - SEARCH_SMART_MAX_TERM_STREAMS,
+                ),
+            }
+            results.append(head)
+
+            # Use the strict-query excerpts when available, then fill from
+            # the strongest term streams. This keeps the most coherent
+            # passage visible while still giving term-only candidates useful
+            # snippets. Dedupe rows that appear in multiple formulations.
+            seen_rows = {
+                (head.get("id"), head.get("result_type"), head.get("content")),
+            }
+            excerpt_streams = [representative] + sorted(
+                (name for name in available_streams if name != representative),
+                key=lambda name: stream_positions[name][sid],
+            )
+            emitted = 1
+            for name in excerpt_streams:
+                for row in stream_groups[name][sid]:
+                    row_key = (
+                        row.get("id"), row.get("result_type"), row.get("content"),
+                    )
+                    if row_key in seen_rows:
+                        continue
+                    seen_rows.add(row_key)
+                    excerpt = dict(row)
+                    excerpt["source_id"] = sid
+                    excerpt["hit_count"] = head["hit_count"]
+                    results.append(excerpt)
+                    emitted += 1
+                    if emitted >= SEARCH_EXCERPTS_PER_SOURCE:
+                        break
+                if emitted >= SEARCH_EXCERPTS_PER_SOURCE:
+                    break
 
         return results
 

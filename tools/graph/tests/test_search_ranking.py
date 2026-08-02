@@ -247,17 +247,19 @@ def test_smart_ranker_prioritizes_term_coverage_over_one_term_title(
         )
         assert smart[0]["source_id"] == coherent.id
         explain = smart[0]["ranking_explain"]
-        assert explain["matched_terms"] == ["inline", "viewer"]
-        assert explain["best_row_terms"] == ["inline", "viewer"]
-        assert explain["channel_ranks"]["thought"] == 1
+        assert explain["query_terms"] == ["inline", "viewer"]
+        assert set(explain["stream_ranks"]) == {
+            "strict", "term:inline", "term:viewer",
+        }
+        assert explain["rrf_score"] > 0
     finally:
         db.close()
 
 
-def test_smart_ranker_uses_metadata_channel_to_break_coverage_tie(
+def test_smart_ranker_preserves_metadata_strength_in_each_query_stream(
     graph_db_env,
 ):
-    """Curated metadata wins when coverage and coherence are equal."""
+    """A concise metadata answer beats the same terms in a session body."""
     db = _make_db(graph_db_env)
     try:
         metadata = Source(
@@ -281,9 +283,34 @@ def test_smart_ranker_uses_metadata_channel_to_break_coverage_tie(
 
         results = db.search("worktree dashboard", limit=10, ranker="smart")
         assert results[0]["source_id"] == metadata.id
-        assert results[0]["ranking_explain"]["channel_ranks"] == {
-            "metadata": 1,
+        assert results[0]["ranking_explain"]["stream_ranks"] == {
+            "strict": 1,
+            "term:worktree": 1,
+            "term:dashboard": 1,
         }
+    finally:
+        db.close()
+
+
+def test_smart_ranker_does_not_duplicate_a_single_term_stream(graph_db_env):
+    """One-term queries preserve legacy order without redundant retrieval."""
+    db = _make_db(graph_db_env)
+    try:
+        first = Source(type="note", title="Primer", file_path="note:primer")
+        second = Source(type="session", title="Session", file_path="session:p")
+        db.insert_source(first)
+        db.insert_source(second)
+        db.insert_thought(Thought(
+            source_id=second.id, content="primer body", turn_number=1,
+        ))
+        db.commit()
+
+        legacy = db.search("primer", limit=10)
+        smart = db.search("primer", limit=10, ranker="smart")
+        assert [row["source_id"] for row in smart] == [
+            row["source_id"] for row in legacy
+        ]
+        assert smart[0]["ranking_explain"]["stream_ranks"] == {"strict": 1}
     finally:
         db.close()
 
