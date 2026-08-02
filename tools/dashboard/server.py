@@ -12900,6 +12900,9 @@ async def api_graph_search(request):
     session_author_pattern = request.query_params.get("session_author_pattern")
     type_param = request.query_params.get("source_type")
     source_type = [t for t in type_param.split(",") if t] if type_param else None
+    ranker = request.query_params.get("ranker", "legacy")
+    if ranker not in ("legacy", "smart"):
+        return JSONResponse({"error": "invalid ranker"}, status_code=400)
     results = graph_ops.search(
         q, org=org, peers=peers, only_org=only_org,
         limit=limit, or_mode=or_mode, tag=tag,
@@ -12907,6 +12910,7 @@ async def api_graph_search(request):
         session_source_ids=session_source_ids,
         session_author_pattern=session_author_pattern,
         source_type=source_type,
+        ranker=ranker,
     )
     return JSONResponse(results)
 

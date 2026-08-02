@@ -65,6 +65,20 @@ def test_search_passes_or_mode_and_tag():
     assert "tag=pitfall" in captured["url"]
 
 
+def test_search_passes_nondefault_ranker():
+    client = _make_client()
+    captured = {}
+
+    def fake_urlopen(req, timeout=None, context=None):
+        captured["url"] = req.full_url
+        return _FakeResponse([])
+
+    with patch("urllib.request.urlopen", fake_urlopen):
+        client.search("q", ranker="smart")
+
+    assert "ranker=smart" in captured["url"]
+
+
 def test_get_source_returns_dict_on_200():
     """200 OK with dict body is returned directly."""
     client = _make_client()

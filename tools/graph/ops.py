@@ -296,6 +296,7 @@ def search(
     order: str = "relevance",
     session_type: list[str] | None = None,
     source_type: list[str] | None = None,
+    ranker: str = "legacy",
 ) -> list[dict]:
     """Full-text search across the graph with cross-org RRF merge.
 
@@ -337,6 +338,7 @@ def search(
                 states=states, include_raw=include_raw,
                 excluded_source_types=excluded_source_types,
                 order=order, session_type=session_type, source_type=source_type,
+                ranker=ranker,
             )
             for r in rows:
                 r["org"] = slug
@@ -367,6 +369,7 @@ def search(
                     session_author_pattern=session_author_pattern,
                     excluded_source_types=excluded_source_types,
                     order=order, session_type=session_type, source_type=source_type,
+                    ranker=ranker,
                 )
             finally:
                 db.close()
@@ -382,6 +385,7 @@ def search(
             states=list(PEER_VISIBLE_STATES), include_raw=False,
             excluded_source_types=excluded_source_types,
             order=order, session_type=session_type, source_type=source_type,
+            ranker=ranker,
         )
         for r in rows:
             r.setdefault("org", only_org)
@@ -397,6 +401,7 @@ def search(
             session_author_pattern=session_author_pattern,
             excluded_source_types=excluded_source_types,
             order=order, session_type=session_type, source_type=source_type,
+            ranker=ranker,
         )
 
     def fetch_peer(db: GraphDB, _slug: str) -> list[dict]:
@@ -405,6 +410,7 @@ def search(
             states=list(PEER_VISIBLE_STATES), include_raw=False,
             excluded_source_types=excluded_source_types,
             order=order, session_type=session_type, source_type=source_type,
+            ranker=ranker,
         )
 
     org_lists = run_across_orgs(
