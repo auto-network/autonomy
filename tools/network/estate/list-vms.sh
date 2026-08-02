@@ -7,7 +7,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 . ./lib.sh
 resolve_token
 
-api GET "/servers?per_page=50" | python3 -c '
+api GET "/servers?per_page=50" | "$ESTATE_PY" -c '
 import json, sys
 for s in json.load(sys.stdin)["servers"]:
     labels = s["labels"]
