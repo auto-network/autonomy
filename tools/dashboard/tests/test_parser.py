@@ -735,6 +735,41 @@ class TestTurnCorrectionUpconversion:
         assert tc["reason"] == "dictation cleanup"
         assert tc["confidence"] == pytest.approx(0.9)
 
+    @pytest.mark.parametrize("suffix", [
+        " > /dev/null",
+        " >/dev/null",
+        " 2>/dev/null",
+        " | tee >/dev/null",
+        "\ngraph set-label 'Later metadata command'",
+    ])
+    def test_codex_blank_output_fallback_ignores_shell_suffix(self, suffix):
+        """Shell plumbing after a positional emitter is not CLI argv."""
+        fixture = json.loads(json.dumps(
+            FIXTURE_CODEX_EXEC_END_TURN_CORRECTION_BLANK_OUTPUT
+        ))
+        command = fixture["payload"]["command"][2] + suffix
+        fixture["payload"]["command"][2] = command
+        fixture["payload"]["parsed_cmd"] = [{"type": "unknown", "cmd": command}]
+
+        result = _parse_codex_line(_line(fixture))
+        entries = result if isinstance(result, list) else [result]
+        tc = next((e for e in entries if e.get("type") == "turn_correction"), None)
+        assert tc is not None
+        assert tc["corrected_text"] == "JSON encoded message"
+        assert tc["reason"] == "dictation cleanup"
+
+    def test_codex_blank_output_does_not_recover_failed_command(self):
+        """Command text cannot override a non-zero CLI completion."""
+        fixture = json.loads(json.dumps(
+            FIXTURE_CODEX_EXEC_END_TURN_CORRECTION_BLANK_OUTPUT
+        ))
+        fixture["payload"]["exit_code"] = 2
+        fixture["payload"]["status"] = "failed"
+
+        result = _parse_codex_line(_line(fixture))
+        entries = result if isinstance(result, list) else [result]
+        assert all(e.get("type") != "turn_correction" for e in entries)
+
     def test_codex_exec_end_blank_output_does_not_guess_stdin_payload(self):
         """Command fallback stays conservative when the replacement text was piped via stdin."""
         result = _parse_codex_line(_line(FIXTURE_CODEX_EXEC_END_TURN_CORRECTION_BLANK_STDIO))

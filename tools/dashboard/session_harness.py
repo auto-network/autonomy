@@ -728,14 +728,28 @@ def _upconvert_turn_correction_command(
 
     Some live Codex ``exec_command_end`` envelopes arrive with empty captured
     output even though the immediate tool return contained the JSON payload.
-    For the canonical one-shot command, the corrected replacement string and
-    optional metadata are already present in the command text, so we can
-    synthesize the same typed event without depending on stdout capture.
+    For a positional invocation, the corrected replacement string and optional
+    metadata are already present in the command text, so we can synthesize the
+    same typed event without depending on stdout capture.  Only inspect the
+    first shell command: agents commonly put a redirection, pipe, or later
+    metadata command after the emitter, and none of those tokens belong to the
+    turn-correction argv.
     """
     if not isinstance(command, str) or not command.strip():
         return None
     try:
-        tokens = shlex.split(command)
+        lexer = shlex.shlex(
+            command,
+            posix=True,
+            punctuation_chars=";&|<>\n",
+        )
+        # Preserve newlines as tokens so a following command cannot be
+        # mistaken for another positional argument. Quoted newlines remain
+        # inside their quoted token, as desired.
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
     except ValueError:
         return None
     if not tokens:
@@ -744,10 +758,17 @@ def _upconvert_turn_correction_command(
         tokens = tokens[1:]
     if not tokens:
         return None
-    for op in ("|", "&&", ";"):
-        if op in tokens:
-            tokens = tokens[:tokens.index(op)]
-            break
+    for idx, token in enumerate(tokens):
+        if not re.fullmatch(r"[;&|<>\n]+", token):
+            continue
+        # A numeric fd immediately before a redirection (``2>/dev/null``)
+        # belongs to the redirect, not to the CLI's positional arguments.
+        cut = idx
+        if "<" in token or ">" in token:
+            if idx > 0 and tokens[idx - 1].isdigit():
+                cut -= 1
+        tokens = tokens[:cut]
+        break
     if not tokens:
         return None
     prefix_len = 0
@@ -2480,7 +2501,10 @@ def _parse_codex_exec_end(payload: dict, timestamp: str) -> dict | list[dict] | 
         "process_id": payload.get("process_id") or "",
     }
     tc = _upconvert_turn_correction(output, timestamp, tool_id=tool_id)
-    if tc is None:
+    # Command-text recovery is only evidence of intent. A non-zero completion
+    # means the CLI did not successfully emit a valid event, even if stdout was
+    # redirected and its error text is unavailable.
+    if tc is None and exit_code in (None, 0):
         tc = _upconvert_turn_correction_command(command, timestamp, tool_id=tool_id)
     va = _upconvert_viewer_attachment(output, timestamp, tool_id=tool_id)
     sem = _upconvert_graph_result(output, timestamp, tool_id=tool_id)

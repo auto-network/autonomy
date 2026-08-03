@@ -338,6 +338,14 @@ The command shape (v1 contract):
 long corrections. Do **not** supply `target_message_id` or
 `original_sha256` — the session side resolves them.
 
+**Delivery requirement:** the JSON printed by this command is the correction
+event. Run it as a standalone tool call and leave its output visible in the
+session log. Never pipe, redirect, capture, or suppress that output (for
+example with `>/dev/null`, `&>/dev/null`, a downstream pipe, or command
+substitution). A zero exit status only means the CLI emitted JSON; if that JSON
+is absent from the recorded tool result, the dashboard may have no correction
+to render.
+
 Workflow, end to end:
 
 1. Read the message and decide the full corrected replacement.

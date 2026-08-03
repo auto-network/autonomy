@@ -598,6 +598,16 @@ def test_turn_correction_explains_full_replacement_semantics(_turn_correction_or
     assert "full replacement message" in out
 
 
+def test_turn_correction_requires_visible_standalone_output(_turn_correction_org_env):
+    """The CLI's JSON stdout is the event transport, not disposable noise."""
+    out = render_workspace_primer(_cfg(id="sample"))
+    flat = " ".join(out.split())
+    assert "Run it as a standalone tool call" in flat
+    assert "leave its output visible in the session log" in flat
+    assert ">/dev/null" in out
+    assert "if that JSON is absent from the recorded tool result" in flat
+
+
 def test_turn_correction_explains_session_side_resolution(_turn_correction_org_env):
     """The primer must teach the workflow, not just the command name.
 
