@@ -100,12 +100,25 @@ Each tool has a `TOOL.md` describing its purpose, usage, and architecture.
 | `graph set read <set_id> <key>` | Resolved effective payload for a member | `graph set read dashboard.agent-actions bead.dry-run-implement` |
 | `graph set schema <set_id>` | Print the registered schema for a set_id | `graph set schema dashboard.agent-actions` |
 | `graph set example <set_id>` | Emit a stub JSON payload for a registered schema | `graph set example dashboard.agent-actions` |
-| `graph set add <set_id> <key> --payload @<file>` | Create a base Setting | `graph set add dashboard.agent-actions bead.ask-question --payload @ask-question.json` |
-| `graph set override / exclude / deprecate / remove` | Lifecycle commands for layered overrides | `graph set --help` for full list |
+| `graph set add <set_id> <key> --payload @<file>` | Create **or update** a base Setting — writes the whole payload, upserting in place when the key exists | `graph set add dashboard.agent-actions bead.ask-question --payload @ask-question.json` |
+| `graph set override <id> --inline '{...}'` | Patch selected fields of an existing Setting, leaving the rest alone | `graph set override 40d144a4-b5 --inline '{"image":"autonomy-agent:scale-harness"}'` |
+| `graph set exclude / deprecate / remove` | Lifecycle commands | `graph set --help` for full list |
 | `graph set find <noun>` | Search schemas by topic | `graph set find action` |
 | `graph set migrate <set_id> --target <rev>` | Rewrite stored rows up to a target schema revision | `graph set migrate dashboard.agent-actions --target 2` |
 
 When to read or author a Setting (e.g. dashboard actions, coordinator config, workspace policies), prefer `graph set` over hitting the dashboard HTTP API — it's faster, surfaces the schema, and gives you a stub via `graph set example`.
+
+### Changing an existing Setting
+
+Two ways, and picking the right one matters:
+
+- **`graph set add`** when you have the complete payload. It upserts: the base row is updated in place, keeping its id and `created_at`. Re-running it is safe and is the normal way to revise a Setting.
+- **`graph set override`** when you only want to change some fields. It writes a patch layered over the base; the resolved value is base + patches, newest patch winning per field.
+
+Two rules that will otherwise cost you an hour:
+
+- **Never override an override.** Only patches attached to the *base* are applied. Aim at the base (`graph set show <id>` reports `supersedes`) or at the newest override, which is retargeted to the base for you. Overriding an older, superseded revision is refused.
+- **Verify what resolved, not what was written.** A write reporting success is not proof the value took effect — check with `graph set read <set_id> <key>`, or resolve it through the consuming code.
 
 ### Beads (`bd`)
 | Command | What | Example |
