@@ -1082,6 +1082,32 @@ def override_setting(
     target = _fetch_setting_any_org(target_id, org)
     if target is None:
         raise LookupError(f"override target not found: {target_id!r}")
+
+    # Resolution applies ONLY overrides whose ``supersedes`` points at the
+    # chosen base row (see read_set / explain_setting). An override of an
+    # override is silently inert: the write succeeds, the row is canonical and
+    # undeprecated, and the value never resolves. Rather than create a dead
+    # row, retarget to the base when the caller passed the current tail — they
+    # meant "patch the latest state" — and refuse when they passed an older
+    # revision, which would be editing history.
+    #
+    # Retargeting also fixes a second-order surprise: validation merges the
+    # patch onto the *target's* payload, so overriding a partial override used
+    # to fail schema validation for missing required fields. Against the base
+    # the payload is complete and validation behaves.
+    if target["supersedes"]:
+        base_id, tail_id = _base_and_tail_for(target, org)
+        if target_id != tail_id:
+            raise ValueError(
+                f"cannot override {target_id!r}: it is a superseded revision, "
+                f"not the current one. Override the base ({base_id!r}) or the "
+                f"newest override ({tail_id!r})."
+            )
+        target_id = base_id
+        target = _fetch_setting_any_org(base_id, org)
+        if target is None:
+            raise LookupError(f"override base not found: {base_id!r}")
+
     db = _open(org)
     try:
         target_payload = json.loads(target["payload"])
@@ -1613,7 +1639,7 @@ def chain_setting(
     db = _open(org)
     try:
         rows = db.conn.execute(
-            "SELECT * FROM settings WHERE set_id = ? AND key = ? "
+            "SELECT rowid AS _rowid, * FROM settings WHERE set_id = ? AND key = ? "
             "  AND deprecated = 0",
             (set_id, key),
         ).fetchall()
@@ -1628,7 +1654,7 @@ def chain_setting(
         if peer_db is None:
             continue
         rows = peer_db.conn.execute(
-            f"SELECT * FROM settings WHERE set_id = ? AND key = ? "
+            f"SELECT rowid AS _rowid, * FROM settings WHERE set_id = ? AND key = ? "
             f"  AND deprecated = 0 "
             f"  AND publication_state IN ({placeholders})",
             (set_id, key, *PEER_VISIBLE_STATES),
@@ -1676,7 +1702,11 @@ def chain_setting(
     }]
 
     merged = dict(base_payload)
-    for ov_org, ov_row in overrides:
+    # Same ordering as read_set, so an explanation matches what actually
+    # resolves rather than describing a different merge order.
+    for ov_org, ov_row in sorted(
+        overrides, key=lambda om: (om[1]["created_at"] or "", om[1]["_rowid"]),
+    ):
         if ov_row["supersedes"] != chosen_row["id"]:
             continue
         ov_payload = json.loads(ov_row["payload"])
@@ -1699,6 +1729,36 @@ def chain_setting(
         "layers": layers,
         "final": merged,
     }
+
+
+def _base_and_tail_for(row: dict, org: str | None) -> tuple[str, str]:
+    """Walk ``row``'s supersedes chain to its base; return ``(base_id, tail_id)``.
+
+    ``tail_id`` is the newest live override on that base — the row a caller
+    means when they say "the current one" — and equals ``base_id`` when the
+    base carries no live overrides.
+
+    Used by :func:`override_setting` to decide whether an override aimed at
+    another override is a reasonable "patch the latest state" (retarget it to
+    the base, which is the only thing resolution honours) or an attempt to
+    edit a superseded revision (refuse).
+    """
+    seen: set[str] = set()
+    cur = row
+    while cur["supersedes"] and cur["id"] not in seen:
+        seen.add(cur["id"])
+        nxt = _fetch_setting_any_org(cur["supersedes"], org)
+        if nxt is None:
+            break
+        cur = nxt
+    base_id = str(cur["id"])
+    db = _open(org)
+    tail = db.conn.execute(
+        "SELECT id FROM settings WHERE supersedes = ? AND deprecated = 0 "
+        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        (base_id,),
+    ).fetchone()
+    return base_id, (str(tail["id"]) if tail else base_id)
 
 
 def _fetch_setting_any_org(
@@ -1873,7 +1933,7 @@ def read_set(
     db = _open(org)
     try:
         rows = db.conn.execute(
-            f"SELECT * FROM settings WHERE set_id = ? "
+            f"SELECT rowid AS _rowid, * FROM settings WHERE set_id = ? "
             f"  AND deprecated = 0"
             f"{prefix_clause}",
             (set_id, *prefix_params),
@@ -1902,7 +1962,7 @@ def read_set(
         placeholders = ",".join("?" for _ in PEER_VISIBLE_STATES)
         try:
             rows = peer_db.conn.execute(
-                f"SELECT * FROM settings WHERE set_id = ? "
+                f"SELECT rowid AS _rowid, * FROM settings WHERE set_id = ? "
                 f"  AND deprecated = 0 "
                 f"  AND publication_state IN ({placeholders})"
                 f"{prefix_clause}",
@@ -1974,9 +2034,15 @@ def read_set(
         )
         chosen_org, chosen_row = candidate_bases[0]
 
-        # Apply overrides whose supersedes targets this base.
+        # Apply overrides whose supersedes targets this base, oldest first so
+        # last-write-wins is guaranteed rather than incidental. Without an
+        # explicit order, two overrides patching the same key resolve by
+        # whatever order SQLite happened to return rows in.
         merged_payload = json.loads(chosen_row["payload"])
-        for (_, ov_row) in overrides.get(key, []):
+        for (_, ov_row) in sorted(
+            overrides.get(key, []),
+            key=lambda om: (om[1]["created_at"] or "", om[1]["_rowid"]),
+        ):
             if ov_row["supersedes"] == chosen_row["id"]:
                 ov_payload = json.loads(ov_row["payload"])
                 merged_payload = json_merge_patch(merged_payload, ov_payload)
