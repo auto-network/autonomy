@@ -566,6 +566,24 @@ class GraphDB:
             "CREATE INDEX IF NOT EXISTS idx_settings_schema "
             "ON settings(set_id, schema_revision)"
         )
+        # One live base row per composite key. Partial, so it constrains ONLY
+        # base rows: overrides (supersedes) and exclusions (excludes) are not
+        # in the index and stay unlimited, and deprecating a base frees the
+        # slot. publication_state is included because the resolver deliberately
+        # allows e.g. a raw draft beside a canonical row and picks by
+        # precedence.
+        #
+        # Without this, `add_setting` could append a second base for a key that
+        # already had one and the resolver would silently pick the newer,
+        # leaving the older shadowing it — which is how one workspace primer
+        # reached seven live bases and how overrides aimed at the "wrong" base
+        # went dead. The API now upserts, so this is the backstop that keeps it
+        # true for any future caller.
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_one_base "
+            "ON settings(set_id, schema_revision, key, publication_state) "
+            "WHERE supersedes IS NULL AND excludes IS NULL AND deprecated = 0"
+        )
         # Cache GC (auto-5ch66): cache-tagged schemas stamp an absolute
         # ``expires_at`` on every write. Non-cache rows leave it NULL
         # forever — the partial index keeps the index file tight on a
