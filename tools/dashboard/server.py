@@ -13539,7 +13539,16 @@ async def api_graph_setting_create(request):
         )
         return JSONResponse({"id": sid}, status_code=201)
     try:
-        sid = graph_ops.add_setting(
+        # Upsert, not append. ``add_setting`` creates a NEW base row on every
+        # call, so an agent revising a setting through `graph set add` — the
+        # only CLI verb that takes a full payload — silently produced a
+        # duplicate base each time. One workspace primer accumulated seven
+        # live bases that way on 2026-08-03. ``upsert_by_key`` updates the
+        # existing base in place (same id, same created_at) and inserts only
+        # when the key is genuinely new. Library callers that legitimately
+        # append (surface pings, keyed by uuid4) call settings_ops directly
+        # and are unaffected.
+        sid = graph_ops.upsert_by_key(
             body["set_id"],
             int(body["schema_revision"]),
             body["key"],
