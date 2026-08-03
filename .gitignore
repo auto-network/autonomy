@@ -72,6 +72,14 @@ data/*.pid
 # per-session launch-timeline traces (data/session-traces/) — all runtime.
 data/agent-runs/
 
+# Per-workspace image definitions (agents/projects/<name>/Dockerfile + startup.sh).
+# These are ORGANIZATION-SPECIFIC infrastructure — enterprise-ng, enterprise-v5,
+# scale-harness are Anchore's. They were purged from this repo's public history
+# on 2026-08-01 and must not return: this repo is public, and `git add -A` would
+# otherwise re-commit them silently. They live on disk only; agents/build.sh
+# reads the filesystem, not git, so ignoring them changes nothing about builds.
+/agents/projects/
+
 # Beads (Dolt local state — .beads/issues.jsonl IS tracked via git add -f)
 .beads/
 !.beads/issues.jsonl
