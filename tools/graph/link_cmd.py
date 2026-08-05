@@ -332,6 +332,15 @@ def cmd_link_publish(args) -> None:
         url = _join_url(url, invite_token)
     print(f"✓ share-link published: {url}")
     print(f"  token: {execution.get('token')}")
+    # Agents relaying this URL have pasted it with adjacent text attached; the
+    # operator's copy then picks up the trailing characters and the malformed
+    # token 404s at the registry (2026-08-05: a trailing parenthetical arrived
+    # as %0A%28…%29 and cost an investigation). Say so where it cannot be
+    # missed rather than hoping each agent learns it the hard way.
+    print("  Note to agents: give this URL to the operator bare, on its own "
+          "line, with nothing before or after it — no wrapping text, no "
+          "trailing punctuation or parentheses. Anything adjacent gets "
+          "selected with the link and breaks it.")
     if target_type == "org:join":
         from tools.network.invitation import (
             encode_invitation,
