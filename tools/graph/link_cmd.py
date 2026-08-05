@@ -331,7 +331,9 @@ def cmd_link_publish(args) -> None:
     if target_type == "org:join":
         url = _join_url(url, invite_token)
     print(f"✓ share-link published: {url}")
-    print(f"  token: {execution.get('token')}")
+    # The token is the last path segment of the URL above, so printing it on
+    # its own line just repeated it — and gave an agent one more thing to
+    # paste next to the link.
     # Agents relaying this URL have pasted it with adjacent text attached; the
     # operator's copy then picks up the trailing characters and the malformed
     # token 404s at the registry (2026-08-05: a trailing parenthetical arrived
