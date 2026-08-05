@@ -433,6 +433,55 @@ def test_stop_handler_reaches_dead_despite_step_errors(monkeypatch, tmp_path):
     assert row["startup_state"] is None
 
 
+def test_restart_handler_waits_after_ended_before_relaunch(monkeypatch, tmp_path):
+    """Restart must expose ENDED, settle, then start the same session."""
+    from tools.dashboard import server
+
+    _init_db(tmp_path)
+    dashboard_db.insert_session(
+        tmux_name="auto-life",
+        session_type="container",
+        project="autonomy",
+        harness="claude",
+    )
+    observed = []
+
+    def fake_stop(job, writer):
+        writer.set_state(job.tmux_name, "stopping")
+        writer.set_state(job.tmux_name, "dead")
+        observed.append(("stopped", dashboard_db.get_session(job.tmux_name)["state"]))
+
+    def fake_sleep(seconds):
+        observed.append(("settled", seconds, dashboard_db.get_session("auto-life")["state"]))
+
+    def fake_start(job, _writer):
+        observed.append(("started", dashboard_db.get_session(job.tmux_name)["state"]))
+
+    monkeypatch.setattr(server, "_run_session_stop", fake_stop)
+    monkeypatch.setattr(server, "_run_session_start", fake_start)
+    monkeypatch.setattr(server.time, "sleep", fake_sleep)
+
+    server._run_session_restart(
+        LifecycleJob(
+            "restart",
+            "auto-life",
+            {
+                "settle_seconds": 5.0,
+                "session_type": "container",
+                "register_project": "autonomy",
+                "harness": "claude",
+            },
+        ),
+        SessionLifecycleStateWriter(),
+    )
+
+    assert observed == [
+        ("stopped", "ENDED"),
+        ("settled", 5.0, "ENDED"),
+        ("started", "ENDED"),
+    ]
+
+
 def test_verify_container_started_fails_fast_with_pane_tail(monkeypatch):
     """docker run producing NO container must fail the launch within the
     verification window — not sit in phantom setup for the full 600s

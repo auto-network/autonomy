@@ -466,6 +466,27 @@ class TestNagIndicator:
         assert count >= 1, f"expected at least 1 active nag bell, got {count}"
 
 
+class TestLiveCardActionsMenu:
+    """Live cards expose Restart immediately above destructive Close."""
+
+    def test_restart_is_immediately_above_close(self, h):
+        labels = ab_eval("""
+            var card = document.querySelector('[data-session-id="auto-test-alpha"]');
+            var btn = card && card.querySelector('[data-testid="session-actions-btn"]');
+            if (!btn) return null;
+            btn.click();
+            var store = Alpine.store('actionSheet');
+            return store.actions.map(function(action) { return action.label; });
+        """)
+        try:
+            assert labels is not None, "Live session actions button was not found"
+            restart = labels.index("Restart Session")
+            close = labels.index("Close Session")
+            assert close == restart + 1, f"Unexpected live action order: {labels}"
+        finally:
+            ab_eval("window.actionSheet.dismiss(); return true;")
+
+
 class TestStatsRow:
     """Turn counts and context tokens appear in stats."""
 

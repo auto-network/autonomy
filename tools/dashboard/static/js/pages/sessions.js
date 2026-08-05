@@ -1262,6 +1262,21 @@
           }
 
           actions.push({
+            label: 'Restart Session',
+            handler: async function() {
+              if (!tmux) return;
+              var res = await fetch(
+                '/api/session/' + encodeURIComponent(tmux) + '/restart',
+                { method: 'POST' }
+              );
+              if (!res.ok) {
+                var err = await res.json().catch(function() { return {}; });
+                console.warn('[sessionsPage] restart failed', err.error || res.statusText);
+              }
+            },
+          });
+
+          actions.push({
             label: 'Close Session',
             style: 'destructive',
             handler: async function() {
