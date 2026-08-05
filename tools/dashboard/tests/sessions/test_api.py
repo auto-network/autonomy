@@ -269,3 +269,9 @@ class TestSessionsJSWiring:
 
     def test_session_store_has_topics_default(self):
         assert "topics: []" in self.store_js
+
+    def test_restart_action_precedes_close_and_calls_atomic_endpoint(self):
+        restart = self.sessions_js.index("label: 'Restart Session'")
+        close = self.sessions_js.index("label: 'Close Session'")
+        assert restart < close
+        assert "encodeURIComponent(tmux) + '/restart'" in self.sessions_js

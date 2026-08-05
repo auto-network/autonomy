@@ -17,7 +17,7 @@ from typing import Any, Callable, Literal
 
 logger = logging.getLogger(__name__)
 
-LifecycleAction = Literal["start", "stop", "retry"]
+LifecycleAction = Literal["start", "stop", "retry", "restart"]
 LifecycleState = Literal[
     "requested",
     "preparing",
