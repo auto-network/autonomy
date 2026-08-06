@@ -140,6 +140,15 @@ def _capability_primer_blocks(config: WorkspaceV1) -> list[dict]:
                 f"{primer_text}\n\n{queries_block}" if primer_text
                 else queries_block
             )
+        org_primer = getattr(cap, "org_primer", "").strip()
+        if org_primer:
+            org_block = (
+                f"#### Organization-specific guidance ({config.graph_project})"
+                f"\n\n{org_primer}"
+            )
+            primer_text = (
+                f"{primer_text}\n\n{org_block}" if primer_text else org_block
+            )
         rows.append({
             "implementation": cap.implementation,
             "contract": cap.contract,

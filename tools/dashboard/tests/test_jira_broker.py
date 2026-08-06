@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import subprocess
 
 import httpx
 import pytest
@@ -15,6 +16,20 @@ from tools.dashboard import approvals_routes, jira_routes
 from tools.dashboard.dao import approval_requests as ar
 
 CAPABILITY_DIR = Path(__file__).resolve().parents[3] / "agents" / "capabilities" / "jira"
+
+
+def _fake_curl(tmp_path: Path, payload: dict) -> tuple[Path, Path]:
+    """Install a PATH-first curl stub that emits *payload* and records argv."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "curl.log"
+    curl = bin_dir / "curl"
+    curl.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FAKE_CURL_LOG\"\n"
+        f"printf '%s\\n' '{json.dumps(payload)}'\n"
+    )
+    curl.chmod(0o755)
+    return bin_dir, log
 
 
 def test_capability_ships_no_credential_surface():
@@ -43,6 +58,59 @@ def test_capability_manifest_exposes_every_executable_tool():
     assert tool_target["source"] == "agents/capabilities/jira/tools"
     assert tool_target["target"] == "/opt/jira-tools"
     assert set(tool_target["expose_commands"]) == executable_tools
+
+
+def test_jira_fields_cli_filters_and_prints_allowed_values(tmp_path):
+    bin_dir, log = _fake_curl(tmp_path, {"fields": [
+        {"id": "summary", "name": "Summary", "type": "string",
+         "items": None, "required": True, "allowed": []},
+        {"id": "customfield_10172", "name": "Target Fix Versions",
+         "type": "option", "items": None, "required": False,
+         "allowed": ["Enterprise 6.1.0"]},
+    ]})
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "FAKE_CURL_LOG": str(log),
+        "GRAPH_ORG": "anchore",
+    }
+    result = subprocess.run(
+        [str(CAPABILITY_DIR / "tools" / "jira-fields"),
+         "ENTERPRISE-1", "Target Fix"],
+        env=env, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0
+    assert "Target Fix Versions (customfield_10172) [option]" in result.stdout
+    assert "allowed: Enterprise 6.1.0" in result.stdout
+    assert "Summary" not in result.stdout
+
+
+def test_jira_update_invalid_field_fails_before_approval(tmp_path):
+    bin_dir, log = _fake_curl(tmp_path, {"fields": [
+        {"id": "customfield_10172", "name": "Target Fix Versions",
+         "type": "option", "items": None, "required": False,
+         "allowed": ["Enterprise 6.1.0"]},
+    ]})
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "FAKE_CURL_LOG": str(log),
+        "GRAPH_ORG": "anchore",
+        "AUTONOMY_SESSION": "auto-test",
+    }
+    result = subprocess.run(
+        [str(CAPABILITY_DIR / "tools" / "jira-update"),
+         "ENTERPRISE-1", "--field", "Target Fix Version"],
+        input="Enterprise 6.1.0\n", env=env, text=True,
+        capture_output=True, check=False,
+    )
+    assert result.returncode == 1
+    assert "unknown editable field 'Target Fix Version'" in result.stderr
+    assert "close matches: Target Fix Versions (customfield_10172)" in result.stderr
+    assert "Nothing was staged for approval" in result.stderr
+    calls = log.read_text()
+    assert "/api/jira/fields/ENTERPRISE-1" in calls
+    assert "/api/approvals" not in calls
 
 
 # ── ADF conversion ──
@@ -371,6 +439,47 @@ def test_editmeta_discovers_field_id(jira_env, monkeypatch):
         "field 'No Such Field' is invalid for jira-update on ENT-1. "
         "Valid fields: Confirm Plan (customfield_10153), Summary (summary)"
     )
+
+
+def test_list_editable_fields_exposes_exact_names_schema_and_allowed_values(
+    jira_env, monkeypatch,
+):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/rest/api/3/issue/ENT-1/editmeta"
+        return httpx.Response(200, json={"fields": {
+            "summary": {
+                "name": "Summary", "required": True,
+                "schema": {"type": "string"},
+            },
+            "customfield_10172": {
+                "name": "Target Fix Versions",
+                "schema": {"type": "option"},
+                "allowedValues": [
+                    {"id": "1", "value": "Enterprise 6.1.0"},
+                    {"id": "2", "value": "Enterprise 6.2.0"},
+                ],
+            },
+            "assignee": {
+                "name": "Assignee", "schema": {"type": "user"},
+                "allowedValues": [{"accountId": "abc", "displayName": "Jane Doe"}],
+            },
+        }})
+
+    _mock(monkeypatch, handler)
+    fields = api.list_editable_fields(api.JiraConfig.resolve(), "ENT-1")
+    assert [field["name"] for field in fields] == [
+        "Assignee", "Summary", "Target Fix Versions",
+    ]
+    target = fields[2]
+    assert target == {
+        "id": "customfield_10172",
+        "name": "Target Fix Versions",
+        "required": False,
+        "type": "option",
+        "items": None,
+        "allowed": ["Enterprise 6.1.0", "Enterprise 6.2.0"],
+    }
+    assert fields[0]["allowed"] == ["Jane Doe"]
 
 
 def test_createmeta_shaping(jira_env, monkeypatch):
@@ -763,6 +872,32 @@ def test_read_route(jira_env, monkeypatch):
     client = TestClient(_app())
     t = client.get("/api/jira/issue/ENT-1").json()
     assert t["key"] == "ENT-1" and t["description"] == "d"
+
+
+def test_fields_route_is_read_only_and_returns_editmeta(jira_env, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/rest/api/3/issue/ENT-1/editmeta"
+        return httpx.Response(200, json={"fields": {
+            "customfield_10172": {
+                "name": "Target Fix Versions",
+                "schema": {"type": "option"},
+                "allowedValues": [{"value": "Enterprise 6.1.0"}],
+            },
+        }})
+
+    _mock(monkeypatch, handler)
+    client = TestClient(_app())
+    response = client.get("/api/jira/fields/ENT-1")
+    assert response.status_code == 200
+    assert response.json()["fields"] == [{
+        "id": "customfield_10172",
+        "name": "Target Fix Versions",
+        "required": False,
+        "type": "option",
+        "items": None,
+        "allowed": ["Enterprise 6.1.0"],
+    }]
 
 
 def test_search_route_runs_jql_read_only(jira_env, monkeypatch):

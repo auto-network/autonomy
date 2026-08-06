@@ -28,6 +28,8 @@ jira-read ENTERPRISE-8385          # cleaned ticket: summary, status, descriptio
                                    # comments, attachments — ADF already markdown
 jira-createmeta                    # ENTERPRISE/Bug creation metadata (defaults)
 jira-createmeta PROJ Story         # any project/issuetype
+jira-fields ENTERPRISE-8385        # editable names, ids, types, allowed values
+jira-fields ENTERPRISE-8385 'Target Fix'  # narrow to a field-name fragment
 jira-attachment 12345              # download an attachment by id (ids are in
                                    # jira-read's attachments list); -o FILE to name it
 ```
@@ -81,8 +83,10 @@ printf '%s\n' 'Jeremy Spilman' |
 ```
 
 Use Jira's editable field name. Invalid names fail with the complete valid-field
-list from Jira. In ENTERPRISE, the road-to-RC “Developer” requirement is the
-`Assignee` field.
+list from Jira during a read-only preflight, before an approval is staged.
+Never guess a custom field name or select value: run `jira-fields KEY [FILTER]`
+first. It reads the issue's live edit metadata and shows exact display names,
+field ids, schema types, and allowed values without requiring approval.
 
 `jira-confirm-plan` remains the idiomatic shortcut for Confirm Plan.
 
@@ -139,8 +143,11 @@ jira-transition ENTERPRISE-8385 'Pending RC' \
 ```
 
 Some validators (e.g. "Confirm Plan must be populated") have no transition
-screen field — those surface as a clear Jira error through the approval
-result; fix the ticket (e.g. `jira-confirm-plan`) and retry.
+screen field, so Jira does not expose them through `jira-transition --list`.
+When execution reports one, use `jira-fields KEY [FILTER]` to resolve its exact
+editable field name/id and allowed values, set it with `jira-update`, then
+retry the transition. Organization-specific guidance below may document known
+validator wording that differs from the actual editable field name.
 
 `jira-create` payload — the Jira fields object (bare or under `"fields"`);
 a plain-string `description` may be markdown (converted host-side):

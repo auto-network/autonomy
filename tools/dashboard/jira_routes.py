@@ -70,6 +70,22 @@ async def get_createmeta(request: Request) -> JSONResponse:
     return JSONResponse(meta)
 
 
+async def get_fields(request: Request) -> JSONResponse:
+    """GET /api/jira/fields/{key} -> editable field metadata.
+
+    This is intentionally a direct read route: agents can discover exact
+    display names, ids, schema types, and allowed values before staging a
+    write for operator approval.
+    """
+    key = request.path_params["key"]
+    try:
+        fields = await asyncio.to_thread(
+            api.list_editable_fields, _cfg(_org(request)), key)
+    except api.JiraError as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+    return JSONResponse({"fields": fields})
+
+
 async def get_attachment(request: Request) -> Response:
     """GET /api/jira/attachment/{id} -> the attachment bytes (download runs
     host-side; the signed media redirect never reaches the agent)."""
@@ -275,6 +291,7 @@ approvals_routes.EXECUTORS["jira_write"] = _execute_jira_write
 ROUTES = [
     Route("/api/jira/issue/{key}", get_issue, methods=["GET"]),
     Route("/api/jira/createmeta", get_createmeta, methods=["GET"]),
+    Route("/api/jira/fields/{key}", get_fields, methods=["GET"]),
     Route("/api/jira/attachment/{id}", get_attachment, methods=["GET"]),
     Route("/api/jira/transitions/{key}", get_transitions, methods=["GET"]),
     Route("/api/jira/issue-types/{key}", get_issue_types, methods=["GET"]),
