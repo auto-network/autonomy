@@ -63,6 +63,12 @@ from tools.graph.schemas.capability_impl import (
     SET_ID as CAPABILITY_IMPL_SET_ID,
     SCHEMA_REVISION as CAPABILITY_IMPL_REVISION,
 )
+from tools.graph.schemas.org_capability_primer import (
+    SET_ID as ORG_CAPABILITY_PRIMER_SET_ID,
+    SCHEMA_REVISION as ORG_CAPABILITY_PRIMER_REVISION,
+    resolve_markdown as resolve_capability_primer_markdown,
+    resolve_order as resolve_capability_primer_order,
+)
 from tools.graph.settings_ops import ResolvedSetting
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -102,6 +108,7 @@ _WORKSPACE_COMPOSITION_SET_IDS = frozenset({
     WORKSPACE_CAPABILITY_ENABLE_SET_ID,
     ORG_CAPABILITY_INSTALL_SET_ID,
     CAPABILITY_IMPL_SET_ID,
+    ORG_CAPABILITY_PRIMER_SET_ID,
 })
 
 
@@ -302,6 +309,11 @@ class MaterializedCapability:
     # data the projections layer on top of the org install (e.g. the
     # issue_tracker named queries the primer renders).
     workspace_overrides: dict = field(default_factory=dict)
+    # Additive organization-owned guidance composed from
+    # ``autonomy.org.capability.primer#1``. The implementation's checked-in
+    # primer/skill remains the portable base; this carries provider-instance
+    # field ids, workflow rules, and similar org-local context.
+    org_primer: str = ""
 
 
 @dataclass(frozen=True)
@@ -632,6 +644,7 @@ def _materialize_capability(
     enable_payload: dict,
     install_payload: dict,
     impl_payload: dict,
+    org_primer: str = "",
 ) -> MaterializedCapability:
     """Build a :class:`MaterializedCapability` from validated chain payloads."""
     contract_version = enable_payload.get("contract_version")
@@ -667,7 +680,51 @@ def _materialize_capability(
             if isinstance(enable_payload.get("workspace_overrides"), dict)
             else {}
         ),
+        org_primer=org_primer,
     )
+
+
+def _org_capability_primers(*, org: str | None) -> dict[str, str]:
+    """Return composed org guidance keyed by capability implementation.
+
+    Rows are read only from the workspace's owning organization.  A bare
+    implementation key and any ``<implementation>:<block>`` rows compose in
+    the same deterministic order as workspace/org primer blocks.
+    """
+    if get_schema(
+        ORG_CAPABILITY_PRIMER_SET_ID,
+        ORG_CAPABILITY_PRIMER_REVISION,
+    ) is None:
+        return {}
+    members = ops.read_set(
+        ORG_CAPABILITY_PRIMER_SET_ID,
+        org=org,
+        peers=[],
+        target_revision=ORG_CAPABILITY_PRIMER_REVISION,
+    ).members
+    grouped: dict[str, list[tuple[int, str, str]]] = {}
+    for member in members:
+        implementation = member.key.split(":", 1)[0]
+        # Implementation ids contain a slash but not a colon. Reject malformed
+        # keys rather than creating an unaddressable supplement.
+        if not implementation:
+            continue
+        body = resolve_capability_primer_markdown(
+            member.payload if isinstance(member.payload, dict) else None
+        ).rstrip()
+        if not body.strip():
+            continue
+        grouped.setdefault(implementation, []).append((
+            resolve_capability_primer_order(member.payload),
+            member.key,
+            body,
+        ))
+    return {
+        implementation: "\n\n".join(
+            body for _, _, body in sorted(blocks, key=lambda row: (row[0], row[1]))
+        )
+        for implementation, blocks in grouped.items()
+    }
 
 
 def resolve_capabilities(
@@ -718,8 +775,9 @@ def resolve_capabilities(
     }
 
     impls = _read_capability_impls(org=org)
+    org_primers = _org_capability_primers(org=org)
     return _resolve_capabilities_from_members(
-        workspace_id, enable_members, install_by_contract, impls,
+        workspace_id, enable_members, install_by_contract, impls, org_primers,
     )
 
 
@@ -728,6 +786,7 @@ def _resolve_capabilities_from_members(
     enable_members: list[ResolvedSetting] | tuple[ResolvedSetting, ...],
     install_by_contract: dict[str, dict],
     impls: dict[tuple[str, int], dict],
+    org_primers: dict[str, str] | None = None,
 ) -> tuple[MaterializedCapability, ...]:
     """Materialize one workspace from already-loaded capability Sets."""
     out: list[MaterializedCapability] = []
@@ -766,7 +825,11 @@ def _resolve_capabilities_from_members(
         if (contract_name, contract_version) not in declared:
             continue
         out.append(_materialize_capability(
-            contract_name, enable_payload, install, impl_payload,
+            contract_name,
+            enable_payload,
+            install,
+            impl_payload,
+            (org_primers or {}).get(impl_name, ""),
         ))
     out.sort(key=lambda c: c.contract)
     return tuple(out)
@@ -804,9 +867,10 @@ def _capabilities_by_workspace(
         ).members
     }
     impls = _read_capability_impls(org=org)
+    org_primers = _org_capability_primers(org=org)
     return {
         workspace_id: _resolve_capabilities_from_members(
-            workspace_id, members, install_by_contract, impls,
+            workspace_id, members, install_by_contract, impls, org_primers,
         )
         for workspace_id, members in grouped.items()
     }

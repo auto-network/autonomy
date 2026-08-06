@@ -372,6 +372,25 @@ def test_enabled_capability_renders_primer_section():
     assert "`gh` is on PATH" in out
 
 
+def test_capability_org_primer_appends_after_code_owned_base():
+    cap = MaterializedCapability(
+        **{
+            **_jira_cap().__dict__,
+            "org_primer": (
+                "`Target Fix Versions` is `customfield_10172`; run "
+                "`jira-fields KEY 'Target Fix'` for live values."
+            ),
+        }
+    )
+    out = render_workspace_primer(_cfg(
+        graph_project="anchore", capabilities=(cap,),
+    ))
+    base_at = out.index("## Jira capability")
+    org_at = out.index("#### Organization-specific guidance (anchore)")
+    assert base_at < org_at
+    assert "customfield_10172" in out
+
+
 def test_disabled_capability_does_not_render():
     """Disabled (or absent) capabilities produce no primer section."""
     out = render_workspace_primer(_cfg(capabilities=()))

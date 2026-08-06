@@ -20,6 +20,29 @@ if [ "${1:-}" = "--field" ]; then
 fi
 [ -n "$FIELD" ] || jira_fail "jira-update: --field NAME is required (e.g. --field Description)"
 
+# Read-only preflight before staging approval. A typo used to reach editmeta
+# only after approval, leaving a junk failed-write audit row. Validate against
+# the same authoritative field list that powers jira-fields instead.
+curl -sk "$DASH/api/jira/fields/$KEY?org=$ORG" \
+  | python3 -c 'import json, sys
+field = sys.argv[1]
+d = json.load(sys.stdin)
+if "error" in d: sys.exit("jira: " + str(d["error"]))
+rows = d.get("fields") or []
+want = field.strip().casefold()
+match = next((f for f in rows if str(f.get("id") or "") == field), None) \
+    or next((f for f in rows if str(f.get("name") or "").casefold() == want), None)
+if match is None:
+    close = [f for f in rows if want in str(f.get("name") or "").casefold()
+             or str(f.get("name") or "").casefold() in want]
+    hint = "; close matches: " + ", ".join(
+        str(f.get("name")) + " (" + str(f.get("id")) + ")" for f in close
+    ) if close else ""
+    sys.exit("jira-update: unknown editable field " + repr(field) + hint
+             + "\nRun jira-fields " + sys.argv[2]
+             + " [FILTER] to discover exact names, ids, and allowed values."
+             + " Nothing was staged for approval.")' "$FIELD" "$KEY" || exit 1
+
 body_file="$(mktemp)"; req_file="$(mktemp)"
 trap 'rm -f "$body_file" "$req_file"' EXIT
 jira_read_body "$@" > "$body_file"

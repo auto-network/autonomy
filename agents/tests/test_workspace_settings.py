@@ -33,6 +33,10 @@ from tools.graph.schemas.org_capability_install import (
     SET_ID as ORG_CAPABILITY_INSTALL_SET_ID,
     SCHEMA_REVISION as ORG_CAPABILITY_INSTALL_REVISION,
 )
+from tools.graph.schemas.org_capability_primer import (
+    SET_ID as ORG_CAPABILITY_PRIMER_SET_ID,
+    SCHEMA_REVISION as ORG_CAPABILITY_PRIMER_REVISION,
+)
 from tools.graph.schemas.workspace_capability_enable import (
     SET_ID as WORKSPACE_CAPABILITY_ENABLE_SET_ID,
     SCHEMA_REVISION as WORKSPACE_CAPABILITY_ENABLE_REVISION,
@@ -427,6 +431,42 @@ def test_resolve_capabilities_jira_carries_secret_file_binding(graph_db_env):
     }
     assert "JIRA_EMAIL" in cap.env_bindings
     assert "JIRA_BASE_URL" in cap.env_bindings
+
+
+def test_resolve_capabilities_composes_org_capability_primer_blocks(graph_db_env):
+    _seed_jira_install()
+    _enable_capability("ng", "issue_tracker")
+    ops.add_setting(
+        ORG_CAPABILITY_PRIMER_SET_ID,
+        ORG_CAPABILITY_PRIMER_REVISION,
+        key="autonomy/jira:workflow",
+        payload={"markdown": "Workflow guidance.", "order": 200},
+        org=ops.CALLER_ORG,
+    )
+    ops.add_setting(
+        ORG_CAPABILITY_PRIMER_SET_ID,
+        ORG_CAPABILITY_PRIMER_REVISION,
+        key="autonomy/jira:fields",
+        payload={"markdown": "Field mappings.", "order": 100},
+        org=ops.CALLER_ORG,
+    )
+
+    cap = resolve_capabilities("ng")[0]
+    assert cap.org_primer == "Field mappings.\n\nWorkflow guidance."
+
+
+def test_org_capability_primer_is_ignored_for_other_implementation(graph_db_env):
+    _seed_jira_install()
+    _enable_capability("ng", "issue_tracker")
+    ops.add_setting(
+        ORG_CAPABILITY_PRIMER_SET_ID,
+        ORG_CAPABILITY_PRIMER_REVISION,
+        key="autonomy/github:workflow",
+        payload={"markdown": "GitHub only."},
+        org=ops.CALLER_ORG,
+    )
+
+    assert resolve_capabilities("ng")[0].org_primer == ""
 
 
 def test_resolve_capabilities_workspace_disable_overrides_org_install(graph_db_env):

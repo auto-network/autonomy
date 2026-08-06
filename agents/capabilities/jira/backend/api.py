@@ -207,6 +207,51 @@ def createmeta(cfg: JiraConfig, project: str, issuetype: str,
     }
 
 
+def _allowed_value_label(value: Any) -> str | None:
+    """Return the most useful agent-facing label for an allowed value."""
+    if not isinstance(value, dict):
+        return str(value) if value is not None else None
+    for field in ("name", "value", "displayName", "key", "id"):
+        candidate = value.get(field)
+        if candidate not in (None, ""):
+            return str(candidate)
+    return None
+
+
+def list_editable_fields(cfg: JiraConfig, key: str) -> list[dict[str, Any]]:
+    """List fields editable on *key*, including schemas and allowed values.
+
+    Jira's editmeta endpoint is the authoritative read-only discovery surface
+    for existing-ticket updates.  Exposing it avoids the previous anti-pattern
+    of staging an intentionally invalid write merely to receive the valid-field
+    list after operator approval.
+    """
+    with _client(cfg) as c:
+        resp = c.get(f"/rest/api/3/issue/{key}/editmeta")
+        _check(resp, f"editmeta {key}")
+        fields = resp.json().get("fields", {})
+    out: list[dict[str, Any]] = []
+    for field_id, meta in fields.items():
+        if not isinstance(meta, dict):
+            continue
+        schema = meta.get("schema") or {}
+        allowed = [
+            label
+            for value in (meta.get("allowedValues") or [])
+            if (label := _allowed_value_label(value)) is not None
+        ]
+        out.append({
+            "id": field_id,
+            "name": meta.get("name") or field_id,
+            "required": bool(meta.get("required")),
+            "type": schema.get("type"),
+            "items": schema.get("items"),
+            "allowed": allowed,
+        })
+    out.sort(key=lambda field: (str(field["name"]).casefold(), field["id"]))
+    return out
+
+
 def editmeta_field(cfg: JiraConfig, key: str,
                    field_reference: str) -> dict[str, Any]:
     """Return an editable field's id, display name, and schema.
@@ -214,35 +259,16 @@ def editmeta_field(cfg: JiraConfig, key: str,
     ``field_reference`` may be either the Jira field id or its display name.
     Display-name matching is case-insensitive; ids win on an exact match.
     """
-    with _client(cfg) as c:
-        resp = c.get(f"/rest/api/3/issue/{key}/editmeta")
-        _check(resp, f"editmeta {key}")
-        fields = resp.json().get("fields", {})
-    if field_reference in fields and isinstance(fields[field_reference], dict):
-        field_id = field_reference
-        meta = fields[field_id]
-        schema = meta.get("schema") or {}
-        return {
-            "id": field_id,
-            "name": meta.get("name") or field_id,
-            "type": schema.get("type"),
-            "items": schema.get("items"),
-        }
+    fields = list_editable_fields(cfg, key)
+    by_id = {field["id"]: field for field in fields}
+    if field_reference in by_id:
+        return by_id[field_reference]
     wanted = field_reference.strip().casefold()
-    for field_id, meta in fields.items():
-        if (isinstance(meta, dict)
-                and str(meta.get("name") or "").casefold() == wanted):
-            schema = meta.get("schema") or {}
-            return {
-                "id": field_id,
-                "name": meta.get("name") or field_id,
-                "type": schema.get("type"),
-                "items": schema.get("items"),
-            }
+    for field in fields:
+        if str(field.get("name") or "").casefold() == wanted:
+            return field
     valid = sorted(
-        f"{meta.get('name') or field_id} ({field_id})"
-        for field_id, meta in fields.items()
-        if isinstance(meta, dict)
+        f"{field['name']} ({field['id']})" for field in fields
     )
     raise JiraError(
         f"field {field_reference!r} is invalid for jira-update on {key}. "

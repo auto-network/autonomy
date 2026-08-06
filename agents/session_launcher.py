@@ -223,6 +223,12 @@ def _capability_skill_surface(capabilities, run_dir: Path, harness: str) -> dict
             continue
         dst_dir = run_dir / "cap-skills" / name
         dst_dir.mkdir(parents=True, exist_ok=True)
+        org_primer = getattr(cap, "org_primer", "").strip()
+        if org_primer:
+            text = (
+                f"{text.rstrip()}\n\n## Organization-specific guidance\n\n"
+                f"{org_primer}\n"
+            )
         (dst_dir / "SKILL.md").write_text(text)
         mounts[str(dst_dir)] = f"/home/agent/.claude/skills/{name}:ro"
     return mounts

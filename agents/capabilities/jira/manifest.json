@@ -18,6 +18,7 @@
         "expose_commands": [
             "jira-read",
             "jira-createmeta",
+            "jira-fields",
             "jira-attachment",
             "jira-search",
             "jira-query",

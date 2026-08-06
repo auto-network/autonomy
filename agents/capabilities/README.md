@@ -45,6 +45,14 @@ supports them.
 `primer.md` is the short fallback projection used by harnesses without
 native skill support (see `agents/primer_renderer.py`).
 
+The checked-in `SKILL.md` and `primer.md` are the portable, code-owned base.
+Provider-instance guidance does not belong in this public package: an
+organization adds it through `autonomy.org.capability.primer#1`, keyed by the
+implementation id (for example `autonomy/jira`) with optional named blocks
+such as `autonomy/jira:workflow`. At session launch those blocks are appended
+to both the rendered workspace capability primer and the session-local skill
+copy; the package files themselves are never rewritten.
+
 ## Scope
 
 This bead establishes the directory layout and stable placeholder files

@@ -396,15 +396,21 @@ Update `set-topics` again whenever the phase shifts noticeably (e.g. "exploring 
 
 This file is **rendered, not stored**. `~/.claude/CLAUDE.md` is a read-only mount, regenerated from source every time a session starts — editing it in place changes nothing and the next session sees the old text. Change the source layer instead.
 
-Three layers compose this primer. Pick the one matching the scope of what you're adding:
+Four scopes compose this primer. Pick the one matching the content you're adding:
 
 | Scope of the content | Source to edit |
 |---|---|
 | This workspace only (`{{ config.id }}`) | `autonomy.workspace.primer#1` Setting, key `{{ config.id }}` |
 | Every workspace `{{ org }}` owns | `autonomy.org.primer#1` Setting, key `{{ org }}` |
+| One enabled capability across `{{ org }}` | `autonomy.org.capability.primer#1` Setting, key `<implementation>` |
 | Every workspace on the platform | `agents/primers/workspace.md.j2` in the repo — a code change, not a Setting |
 
-Either Setting layer is assembled from the bare key **plus any number of named blocks** keyed `<key>:<block-name>`. Every block has its own `enabled` flag defaulting to true, so one section can be switched off without disturbing the rest and without losing the text.
+Each Settings layer is assembled from the bare key **plus any number of named blocks** keyed `<key>:<block-name>`. Every block has its own `enabled` flag defaulting to true, so one section can be switched off without disturbing the rest and without losing the text.
+
+Capability supplements use the same named-block payload and ordering. They are
+additive: the implementation's checked-in `SKILL.md` / `primer.md` remains the
+portable base, while the owning org can add provider-instance field mappings,
+workflow conventions, and similar guidance without modifying package code.
 
 ```bash
 graph set members autonomy.workspace.primer          # which blocks exist

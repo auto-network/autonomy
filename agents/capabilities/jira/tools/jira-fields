@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Usage: jira-fields ISSUE_KEY [FILTER] [--json]
+# Read-only editmeta discovery: exact display names, ids, schema types, and
+# allowed values. FILTER is a case-insensitive substring of name or id.
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/_jira_lib.sh"
+
+KEY="${1:-}"
+[ -n "$KEY" ] || jira_fail "usage: jira-fields ISSUE_KEY [FILTER] [--json]"
+shift
+
+FILTER=""
+AS_JSON=false
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --json) AS_JSON=true; shift ;;
+    *) [ -z "$FILTER" ] || jira_fail "jira-fields: only one FILTER is accepted"
+       FILTER="$1"; shift ;;
+  esac
+done
+
+curl -sk "$DASH/api/jira/fields/$KEY?org=$ORG" \
+  | python3 -c 'import json, sys
+query, as_json = sys.argv[1], sys.argv[2] == "true"
+d = json.load(sys.stdin)
+if "error" in d: sys.exit("jira: " + str(d["error"]))
+rows = d.get("fields") or []
+if query:
+    needle = query.casefold()
+    rows = [f for f in rows if needle in str(f.get("name") or "").casefold()
+            or needle in str(f.get("id") or "").casefold()]
+if not rows:
+    sys.exit("jira-fields: no editable fields match " + repr(query))
+if as_json:
+    print(json.dumps({"fields": rows}, indent=2))
+    raise SystemExit
+for f in rows:
+    shape = str(f.get("type") or "unknown")
+    if f.get("items"): shape += "/" + str(f["items"])
+    required = " required" if f.get("required") else ""
+    print(str(f.get("name")) + " (" + str(f.get("id")) + ") [" + shape + "]" + required)
+    allowed = f.get("allowed") or []
+    if allowed: print("  allowed: " + ", ".join(str(v) for v in allowed))' "$FILTER" "$AS_JSON"

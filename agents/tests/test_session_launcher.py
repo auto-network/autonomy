@@ -531,6 +531,32 @@ def test_capability_skill_installed_at_claude_discovery_path(
     assert fm["name"] == "github" and fm["description"]
 
 
+def test_capability_skill_appends_org_primer_to_session_copy(tmp_path, monkeypatch):
+    import dataclasses
+
+    monkeypatch.setattr(session_launcher, "REPO_ROOT", tmp_path)
+    cap_dir = tmp_path / "cap"
+    cap_dir.mkdir()
+    (cap_dir / "SKILL.md").write_text(
+        "---\nname: jira\ndescription: Jira tools\n---\n\n# Base skill\n"
+    )
+    cap = dataclasses.replace(
+        _github_capability(),
+        implementation="autonomy/jira",
+        skill_path="cap/SKILL.md",
+        org_primer="Target Fix Versions is `customfield_10172`.",
+    )
+
+    mounts = session_launcher._capability_skill_surface(
+        [cap], tmp_path / "run", "claude",
+    )
+    installed = tmp_path / "run" / "cap-skills" / "jira" / "SKILL.md"
+    text = installed.read_text()
+    assert mounts[str(installed.parent)] == "/home/agent/.claude/skills/jira:ro"
+    assert text.index("# Base skill") < text.index("## Organization-specific guidance")
+    assert "customfield_10172" in text
+
+
 def test_capability_skill_requires_frontmatter_and_slug_name(tmp_path, monkeypatch):
     """A SKILL.md the harness would silently ignore is not installed: missing
     name/description frontmatter, an unterminated block, or a non-slug name

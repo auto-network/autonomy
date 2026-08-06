@@ -10,6 +10,8 @@ outcome or the decline).
   queries (standardized triage/sprint views, taught per-workspace as data)
 - `jira-search 'JQL'` — raw JQL search; terse rows, `--page TOKEN` to paginate
 - `jira-createmeta [PROJECT [ISSUETYPE]]` — valid components/versions/priorities/severity for creation
+- `jira-fields KEY [FILTER]` — read-only editable field names, ids, schema
+  types, and allowed values; use before guessing custom fields or select values
 - `jira-attachment ID [-o FILE]` — download an attachment (ids in `jira-read`)
 - `jira-comment KEY -f body.md` — post a comment *(operator approval)*
 - `jira-confirm-plan KEY -f plan.md` — set the Confirm Plan field *(operator approval)*
@@ -26,6 +28,12 @@ outcome or the decline).
   workflow transition; `--list` shows what's valid now + required fields.
   Preflight fails with the missing-fields list before staging approval
   *(operator approval)*
+
+`jira-transition --list` can only show required fields exposed on Jira's
+transition screen. A workflow validator may name an off-screen field only when
+execution fails. In that case, run `jira-fields KEY [FILTER]`, set the exact
+editable field with `jira-update`, and retry. `jira-update` now validates field
+names through this read-only surface before it opens an approval.
 
 **Which field for what:** the **Confirm Plan** custom field holds step-by-step
 QA instructions to reproduce the bug and prove the fix — command-by-command
