@@ -25,6 +25,27 @@ def test_get_mission_missing_returns_none(tmp_path):
     assert db.get_mission("does-not-exist", db_path=path) is None
 
 
+def test_read_paths_do_not_require_init_db_first(tmp_path):
+    """A fresh deployment's first-ever request can be a read (list/get).
+
+    Regression: only the write paths used to call the schema-ensure
+    helper, so a read against a DB file that had never been written to
+    raised sqlite3.OperationalError('no such table') instead of just
+    returning empty/None. Every DAO call must tolerate a db_path whose
+    file (and therefore table) doesn't exist yet — no db.init_db() call
+    here, deliberately.
+    """
+    path = _db_path(tmp_path)
+    assert not path.exists()
+    assert db.list_missions(db_path=path) == []
+    assert db.get_mission("nope", db_path=path) is None
+    assert db.get_current_site("nope", db_path=path) is None
+    assert db.list_site_revisions("nope", db_path=path) == []
+    assert db.get_site_revision("nope", "nope", db_path=path) is None
+    assert db.delete_mission("nope", db_path=path) is False
+    assert db.activate_site_revision("nope", "nope", db_path=path) is False
+
+
 def test_list_missions_orders_newest_first(tmp_path):
     path = _db_path(tmp_path)
     first = db.create_mission("First", db_path=path)

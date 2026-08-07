@@ -55,22 +55,25 @@ def _db_path(db_path: Path | str | None = None) -> Path:
 
 
 def _get_conn(db_path: Path | str | None = None) -> sqlite3.Connection:
+    """Open a connection with the schema guaranteed present.
+
+    Schema-ensure lives here, not just on write paths — a fresh deployment's
+    very first request can be a read (list/get), and a bare "no such table"
+    from sqlite3 surfaces to the caller as an unhandled 500. CREATE TABLE
+    IF NOT EXISTS is cheap enough to run on every connection.
+    """
     path = _db_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
+    conn.executescript(CREATE_TABLES)
     return conn
 
 
 def init_db(db_path: Path | str | None = None) -> None:
-    conn = _get_conn(db_path)
-    try:
-        conn.executescript(CREATE_TABLES)
-        conn.commit()
-    finally:
-        conn.close()
+    _get_conn(db_path).close()
 
 
 # ── Missions ─────────────────────────────────────────────────────
@@ -89,7 +92,6 @@ def create_mission(
     created_at = time.time()
     conn = _get_conn(db_path)
     try:
-        init_schema_on_connection(conn)
         conn.execute(
             "INSERT INTO missions (mission_id, name, coordinator_session, created_at, current_revision_id)"
             " VALUES (?, ?, ?, ?, NULL)",
@@ -165,7 +167,6 @@ def push_site_revision(
     created_at = time.time()
     conn = _get_conn(db_path)
     try:
-        init_schema_on_connection(conn)
         conn.execute("BEGIN IMMEDIATE")
         exists = conn.execute(
             "SELECT 1 FROM missions WHERE mission_id = ?", (mission_id,)
@@ -278,9 +279,3 @@ def activate_site_revision(
     finally:
         conn.close()
     return cur.rowcount > 0
-
-
-def init_schema_on_connection(conn: sqlite3.Connection) -> None:
-    """Idempotent inline schema-ensure so a stray fresh DB (e.g. under a
-    tmp_path in tests) never raises 'no such table' on first write."""
-    conn.executescript(CREATE_TABLES)

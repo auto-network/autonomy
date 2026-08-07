@@ -56,6 +56,19 @@ def test_create_mission_requires_name():
     assert resp.status_code == 400
 
 
+def test_list_missions_against_never_written_db_does_not_500(tmp_path, monkeypatch):
+    """Regression: production's very first Mission Control request was a
+    GET /api/missions against a DB file that had never been written to,
+    and it 500'd — only the write paths ensured the schema existed."""
+    fresh_path = tmp_path / "never_touched.db"
+    monkeypatch.setattr(db, "DB_PATH", fresh_path)
+    assert not fresh_path.exists()
+
+    resp = _client().get("/api/missions")
+    assert resp.status_code == 200
+    assert resp.json() == {"missions": []}
+
+
 def test_list_missions():
     client = _client()
     client.post("/api/missions", json={"name": "A"})
