@@ -85,6 +85,8 @@ def _build_app():
         Route("/beads", _page),
         Route("/pages/beads", _fragment),
         Route("/unlock", _unlock_page),
+        Route("/missions/{mission_id}", _page),
+        Route("/mission-control", _page),
         Route("/api/graph/search", _agent_api),
         Route("/api/worktrees", _agent_api, methods=["GET", "POST"]),
         WebSocketRoute("/ws/terminal", _ws_echo),
@@ -384,6 +386,26 @@ def test_agent_api_stays_open_under_enforcement(env, root):
     # no cookie, no redirect, plain 200s.
     assert env.get("/api/graph/search").status_code == 200
     assert env.post("/api/worktrees").status_code == 200
+
+
+def test_mission_site_route_stays_open_under_enforcement(env, root):
+    """/missions/<id> — operator-ratified parity with Present's high-entropy
+    deck links: the id itself is the access control until P2's identity
+    shim, so this route bypasses the gate like the agent /api/ surface."""
+    _store_identity(env, root)
+    env.cookies.clear()
+    assert env.get("/missions/33d6c481-4726-4777-a298-4b2f20398e61").status_code == 200
+
+
+def test_mission_control_management_page_stays_gated(env, root):
+    """The /missions/ exemption must not leak into /mission-control (no
+    trailing slash, hyphenated) — that's the plugin's own authenticated
+    management page, not a mission-site link."""
+    _store_identity(env, root)
+    env.cookies.clear()
+    r = env.get("/mission-control", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"].startswith("/unlock?next=%2Fmission-control")
 
 
 def test_websocket_refused_under_enforcement(env, root):

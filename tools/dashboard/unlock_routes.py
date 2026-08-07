@@ -845,7 +845,16 @@ _GATED_API_PATHS = frozenset({
 #: The agent/container surface (graph CLI, dispatcher — ``/api/...``)
 #: and the assets the Unlock page itself needs. Everything else is the
 #: human path.
-_OPEN_PREFIXES = ("/api/", "/static/")
+#:
+#: ``/missions/`` is the one deliberate exception to "everything else is
+#: the human path": Mission Control's chromeless site-serving route
+#: (``/missions/<mission_id>``), operator-ratified to bypass the gate the
+#: same way Present's high-entropy deck links do — the operator hands
+#: these URLs to team members outside the dashboard, and the id itself
+#: (a UUID4) is the access control until P2's identity shim exists. This
+#: does NOT cover ``/mission-control`` (no trailing slash, hyphenated) —
+#: that's the plugin's own management page and stays gated.
+_OPEN_PREFIXES = ("/api/", "/static/", "/missions/")
 
 
 def _path_is_gated(path: str) -> bool:
