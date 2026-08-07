@@ -1,9 +1,11 @@
 // Mission Control plugin — frontend Alpine factory.
 //
-// Plain REST fetches against Mission Control's own API — this plugin owns
-// its storage outright (tools/dashboard/dao/mission_control_db.py), so
-// unlike Nexus/Coordinator-board there is no Settings-schema proxy layer
-// to bind here.
+// Read-only monitoring surface. Missions and site revisions are created
+// and pushed by agent sessions calling the API directly (POST
+// /api/missions, POST /api/missions/<id>/site) — the same way the
+// coordinator session pushes OSS Insights updates. This page has no
+// create/push/delete/activate controls; it only lists what agents have
+// already published.
 //
 // IIFE wrapper: plugin pages load as classic scripts in alphabetical
 // order sharing one global lexical environment, so every plugin factory
@@ -16,11 +18,6 @@ function missionControlPage() {
     missions: [],
     revisions: {},
     expanded: '',
-    newMissionName: '',
-    newMissionCoordinator: '',
-    createError: '',
-    pushDrafts: {},
-    noteDrafts: {},
 
     async init() {
       await this.refreshMissions();
@@ -30,47 +27,21 @@ function missionControlPage() {
       try {
         const res = await fetch('/api/missions');
         const data = await res.json();
-        this.missions = (data && data.missions) || [];
+        const list = (data && data.missions) || [];
+        // The list endpoint doesn't include current_revision — fetch each
+        // mission's detail for the summary line. Small N (missions are a
+        // rare, coarse-grained entity), so no pagination/batching needed.
+        this.missions = await Promise.all(list.map(async (m) => {
+          try {
+            const detail = await fetch('/api/missions/' + encodeURIComponent(m.mission_id));
+            const body = await detail.json();
+            return (body && body.mission) || m;
+          } catch (_) {
+            return m;
+          }
+        }));
       } catch (_) {
         this.missions = [];
-      }
-    },
-
-    async createMission() {
-      this.createError = '';
-      const name = (this.newMissionName || '').trim();
-      if (!name) {
-        this.createError = 'Name is required';
-        return;
-      }
-      try {
-        const res = await fetch('/api/missions', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            name,
-            coordinator_session: (this.newMissionCoordinator || '').trim(),
-          }),
-        });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          this.createError = err.error || ('Create failed (' + res.status + ')');
-          return;
-        }
-        this.newMissionName = '';
-        this.newMissionCoordinator = '';
-        await this.refreshMissions();
-      } catch (err) {
-        this.createError = String(err);
-      }
-    },
-
-    async deleteMission(missionId) {
-      try {
-        await fetch('/api/missions/' + encodeURIComponent(missionId), {method: 'DELETE'});
-        await this.refreshMissions();
-      } catch (_) {
-        // Best-effort — refreshMissions on the next poll will reconcile.
       }
     },
 
@@ -90,42 +61,6 @@ function missionControlPage() {
         this.revisions = {...this.revisions, [missionId]: (data && data.revisions) || []};
       } catch (_) {
         this.revisions = {...this.revisions, [missionId]: []};
-      }
-    },
-
-    async pushRevision(missionId) {
-      const html = this.pushDrafts[missionId];
-      if (!html || !html.trim()) return;
-      try {
-        const res = await fetch('/api/missions/' + encodeURIComponent(missionId) + '/site', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            html,
-            note: this.noteDrafts[missionId] || '',
-          }),
-        });
-        if (!res.ok) return;
-        this.pushDrafts = {...this.pushDrafts, [missionId]: ''};
-        this.noteDrafts = {...this.noteDrafts, [missionId]: ''};
-        await this.refreshMissions();
-        await this.refreshRevisions(missionId);
-      } catch (_) {
-        // Leave the draft in place so the operator can retry.
-      }
-    },
-
-    async activateRevision(missionId, revisionId) {
-      try {
-        await fetch(
-          '/api/missions/' + encodeURIComponent(missionId) +
-            '/site/revisions/' + encodeURIComponent(revisionId) + '/activate',
-          {method: 'POST'},
-        );
-        await this.refreshMissions();
-        await this.refreshRevisions(missionId);
-      } catch (_) {
-        // Best-effort.
       }
     },
   };
