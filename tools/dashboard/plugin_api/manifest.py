@@ -91,3 +91,9 @@ class PluginManifest(BaseModel):
     # set this to false; the directory-name convention (``_``-prefix)
     # still applies as a fallback so existing samples keep working.
     default_enabled: Optional[bool] = None
+    # Optional agent-facing documentation, path relative to the plugin
+    # directory (convention: SKILL.md). When set, the file is embedded
+    # into the workspace primer's "Dashboard Apps" section for every
+    # session while the plugin is enabled, and served at
+    # GET /api/plugins/{id}/skill.
+    skill: Optional[str] = None

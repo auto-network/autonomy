@@ -46,6 +46,24 @@ def _cfg(**overrides) -> WorkspaceV1:
     return WorkspaceV1(**defaults)
 
 
+@pytest.fixture(autouse=True)
+def _no_plugin_skill_blocks(monkeypatch):
+    """Isolate primer rendering from real on-disk dashboard plugin state.
+
+    ``_plugin_skill_blocks()`` discovers real plugins from the repo's
+    ``tools/dashboard/plugins/`` directory and reads their enabled state.
+    Without this, every test in this file would depend on which plugins
+    currently ship a SKILL.md and are enabled — breaking closed-content
+    assertions (e.g. ``host.docker.internal`` not appearing) whenever an
+    unrelated plugin gains a skill doc. Patched at the ``discover()``
+    layer (not ``_plugin_skill_blocks`` itself) so the real function
+    stays under test — tests exercising it directly re-patch ``discover``
+    with their own fixture plugin.
+    """
+    from tools.dashboard.plugin_api import loader as plugin_loader
+    monkeypatch.setattr(plugin_loader, "discover", lambda plugins_dir=None: [])
+
+
 # ── Header / identity ────────────────────────────────────────────────
 
 def test_header_shows_workspace_name_and_image():
@@ -396,6 +414,122 @@ def test_disabled_capability_does_not_render():
     out = render_workspace_primer(_cfg(capabilities=()))
     assert "source_control@" not in out
     assert "issue_tracker@" not in out
+
+
+def test_no_dashboard_apps_section_when_no_plugin_blocks():
+    out = render_workspace_primer(_cfg())
+    assert "Dashboard Apps" not in out
+
+
+def test_dashboard_apps_section_renders_enabled_plugin_skill(monkeypatch):
+    monkeypatch.setattr(
+        "agents.primer_renderer._plugin_skill_blocks",
+        lambda config: [
+            {"id": "mission_control", "label": "Mission Control", "skill_text": "Push HTML here."},
+        ],
+    )
+    out = render_workspace_primer(_cfg())
+    assert "## Dashboard Apps" in out
+    assert "### Mission Control (`mission_control`)" in out
+    assert "Push HTML here." in out
+
+
+def test_dashboard_apps_section_renders_multiple_plugins_in_order(monkeypatch):
+    monkeypatch.setattr(
+        "agents.primer_renderer._plugin_skill_blocks",
+        lambda config: [
+            {"id": "mission_control", "label": "Mission Control", "skill_text": "Mission doc."},
+            {"id": "presentations", "label": "Present", "skill_text": "Present doc."},
+        ],
+    )
+    out = render_workspace_primer(_cfg())
+    mc_at = out.index("### Mission Control")
+    present_at = out.index("### Present")
+    assert mc_at < present_at
+
+
+def test_plugin_skill_blocks_reads_manifest_and_skill_file(tmp_path, monkeypatch):
+    """Unit test for _plugin_skill_blocks() itself against a fake plugin dir."""
+    from agents import primer_renderer
+    from tools.dashboard.plugin_api import loader as plugin_loader
+    from tools.dashboard.plugin_api.manifest import PluginManifest
+
+    plugin_dir = tmp_path / "sample_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "SKILL.md").write_text("How to use sample_plugin.\n")
+    manifest = PluginManifest.model_validate({
+        "id": "sample_plugin",
+        "api_version": 1,
+        "org": "autonomy",
+        "paths": ["/sample-plugin"],
+        "assets": {"template": "page.html", "script": "page.js"},
+        "nav": {"label": "Sample Plugin"},
+        "frontend": {"alpine_root": "samplePluginPage"},
+        "skill": "SKILL.md",
+    })
+    discovered = plugin_loader.DiscoveredPlugin(manifest=manifest, plugin_dir=plugin_dir)
+
+    monkeypatch.setattr(plugin_loader, "discover", lambda plugins_dir=None: [discovered])
+    monkeypatch.setattr(plugin_loader, "_read_plugin_settings", lambda org=None: {})
+    monkeypatch.setattr(plugin_loader, "is_enabled", lambda *a, **k: True)
+
+    blocks = primer_renderer._plugin_skill_blocks(_cfg())
+    assert blocks == [{
+        "id": "sample_plugin", "label": "Sample Plugin",
+        "skill_text": "How to use sample_plugin.",
+    }]
+
+
+def test_plugin_skill_blocks_skips_disabled_plugin(tmp_path, monkeypatch):
+    from agents import primer_renderer
+    from tools.dashboard.plugin_api import loader as plugin_loader
+    from tools.dashboard.plugin_api.manifest import PluginManifest
+
+    plugin_dir = tmp_path / "sample_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "SKILL.md").write_text("Should not appear.\n")
+    manifest = PluginManifest.model_validate({
+        "id": "sample_plugin",
+        "api_version": 1,
+        "org": "autonomy",
+        "paths": ["/sample-plugin"],
+        "assets": {"template": "page.html", "script": "page.js"},
+        "nav": {"label": "Sample Plugin"},
+        "frontend": {"alpine_root": "samplePluginPage"},
+        "skill": "SKILL.md",
+    })
+    discovered = plugin_loader.DiscoveredPlugin(manifest=manifest, plugin_dir=plugin_dir)
+
+    monkeypatch.setattr(plugin_loader, "discover", lambda plugins_dir=None: [discovered])
+    monkeypatch.setattr(plugin_loader, "_read_plugin_settings", lambda org=None: {})
+    monkeypatch.setattr(plugin_loader, "is_enabled", lambda *a, **k: False)
+
+    assert primer_renderer._plugin_skill_blocks(_cfg()) == []
+
+
+def test_plugin_skill_blocks_skips_plugin_without_skill_field(tmp_path, monkeypatch):
+    from agents import primer_renderer
+    from tools.dashboard.plugin_api import loader as plugin_loader
+    from tools.dashboard.plugin_api.manifest import PluginManifest
+
+    plugin_dir = tmp_path / "sample_plugin"
+    plugin_dir.mkdir()
+    manifest = PluginManifest.model_validate({
+        "id": "sample_plugin",
+        "api_version": 1,
+        "org": "autonomy",
+        "paths": ["/sample-plugin"],
+        "assets": {"template": "page.html", "script": "page.js"},
+        "nav": {"label": "Sample Plugin"},
+        "frontend": {"alpine_root": "samplePluginPage"},
+    })
+    discovered = plugin_loader.DiscoveredPlugin(manifest=manifest, plugin_dir=plugin_dir)
+
+    monkeypatch.setattr(plugin_loader, "discover", lambda plugins_dir=None: [discovered])
+    monkeypatch.setattr(plugin_loader, "_read_plugin_settings", lambda org=None: {})
+    monkeypatch.setattr(plugin_loader, "is_enabled", lambda *a, **k: True)
+
+    assert primer_renderer._plugin_skill_blocks(_cfg()) == []
 
 
 def test_multiple_capabilities_render_in_stable_order():

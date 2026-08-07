@@ -17,6 +17,11 @@ nav:
 frontend:
   alpine_root: presentationsPage
 
+# Agent-facing publishing doc. Embedded into every session's workspace
+# primer while this plugin is enabled; also served at
+# GET /api/plugins/presentations/skill.
+skill: SKILL.md
+
 entrypoints:
   api: tools.dashboard.plugins.presentations.entrypoints.api:routes
   schemas:

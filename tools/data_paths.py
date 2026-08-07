@@ -78,6 +78,8 @@ STORE_MANIFEST: tuple = (
           "approval-request store"),
     Store("commit_workflow", "commit_workflow.db", "COMMIT_WORKFLOW_DB", "db",
           "commit-workflow store"),
+    Store("mission_control", "mission_control.db", "MISSION_CONTROL_DB", "db",
+          "Mission Control store (missions + site revisions)"),
     Store("identity_sessions", "dashboard_identity_sessions.db",
           "DASHBOARD_IDENTITY_SESSION_DB", "db",
           "identity unlock-session store"),
