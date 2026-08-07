@@ -2,23 +2,23 @@
      data-testid="mission-control-root"
      class="mission-control-page bg-gray-900 text-gray-200 antialiased min-h-screen">
 
-  <header class="border-b border-gray-800 px-6 py-4">
+  <header class="border-b border-gray-800 px-4 sm:px-6 py-4">
     <h1 class="text-2xl font-bold text-white">Mission Control</h1>
     <p class="text-sm text-gray-400">Missions and their chromeless native sites.</p>
   </header>
 
-  <main class="max-w-5xl mx-auto px-6 py-6 space-y-6">
+  <main class="max-w-5xl mx-auto px-4 sm:px-6 py-6 space-y-6">
 
     <section data-testid="mc-create" class="rounded-md border border-gray-800 bg-gray-900/40 p-4">
       <h2 class="text-sm font-semibold text-white mb-2">New mission</h2>
-      <form @submit.prevent="createMission" class="flex gap-2">
+      <form @submit.prevent="createMission" class="flex flex-col sm:flex-row gap-2">
         <input type="text" x-model="newMissionName" placeholder="Mission name"
-               class="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-white"
+               class="w-full sm:flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-white"
                data-testid="mc-new-name" />
         <input type="text" x-model="newMissionCoordinator" placeholder="Coordinator session (optional)"
-               class="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-white"
+               class="w-full sm:flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-white"
                data-testid="mc-new-coordinator" />
-        <button type="submit" class="px-3 py-1.5 rounded bg-indigo-700 hover:bg-indigo-600 text-white text-sm"
+        <button type="submit" class="w-full sm:w-auto px-3 py-1.5 rounded bg-indigo-700 hover:bg-indigo-600 text-white text-sm"
                 data-testid="mc-create-submit">Create</button>
       </form>
       <p class="text-xs text-rose-400 mt-1" x-show="createError" x-text="createError" data-testid="mc-create-error"></p>
@@ -28,13 +28,13 @@
       <h2 class="text-sm font-semibold text-white mb-2">Missions</h2>
       <div class="space-y-3">
         <template x-for="m in missions" :key="m.mission_id">
-          <div class="rounded-md border border-gray-800 bg-gray-900/40 p-4" :data-testid="'mc-mission-' + m.mission_id">
-            <div class="flex items-baseline justify-between gap-2">
-              <div>
+          <div class="rounded-md border border-gray-800 bg-gray-900/40 p-4 min-w-0" :data-testid="'mc-mission-' + m.mission_id">
+            <div class="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-2">
+              <div class="min-w-0">
                 <span class="text-white font-semibold" x-text="m.name"></span>
-                <span class="text-gray-500 text-xs ml-2" x-text="m.mission_id"></span>
+                <span class="text-gray-500 text-xs sm:ml-2 break-all" x-text="m.mission_id"></span>
               </div>
-              <div class="flex items-center gap-2">
+              <div class="flex items-center gap-3 shrink-0">
                 <a :href="'/missions/' + m.mission_id" target="_blank"
                    class="text-indigo-400 text-xs hover:underline"
                    x-show="m.current_revision_id"
@@ -57,11 +57,11 @@
                 <textarea x-model="pushDrafts[m.mission_id]" rows="4" placeholder="Full self-contained HTML"
                           class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-white font-mono"
                           :data-testid="'mc-push-html-' + m.mission_id"></textarea>
-                <div class="flex gap-2 mt-1">
+                <div class="flex flex-col sm:flex-row gap-2 mt-1">
                   <input type="text" x-model="noteDrafts[m.mission_id]" placeholder="Revision note (optional)"
-                         class="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white"
+                         class="w-full sm:flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white"
                          :data-testid="'mc-push-note-' + m.mission_id" />
-                  <button @click="pushRevision(m.mission_id)" class="px-3 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-xs"
+                  <button @click="pushRevision(m.mission_id)" class="w-full sm:w-auto px-3 py-1 rounded bg-emerald-700 hover:bg-emerald-600 text-white text-xs"
                           :data-testid="'mc-push-submit-' + m.mission_id">Push revision</button>
                 </div>
               </div>
@@ -69,10 +69,10 @@
                 <div class="text-xs text-gray-500 mb-1">Revision history</div>
                 <div class="space-y-1 max-h-48 overflow-y-auto">
                   <template x-for="r in (revisions[m.mission_id] || [])" :key="r.revision_id">
-                    <div class="text-xs flex items-center gap-2 border-b border-gray-800/40 py-1"
+                    <div class="text-xs flex items-center flex-wrap gap-x-2 gap-y-1 border-b border-gray-800/40 py-1"
                          :data-testid="'mc-revision-' + r.revision_id">
                       <span class="font-mono text-amber-300" x-text="'#' + r.revision_seq"></span>
-                      <span class="text-gray-300 flex-1 truncate" x-text="r.note || '(no note)'"></span>
+                      <span class="text-gray-300 flex-1 min-w-[6rem] truncate" x-text="r.note || '(no note)'"></span>
                       <span class="text-gray-500" x-text="r.byte_size + 'B'"></span>
                       <span class="text-emerald-400 text-[10px] font-bold" x-show="r.revision_id === m.current_revision_id">CURRENT</span>
                       <button @click="activateRevision(m.mission_id, r.revision_id)"
