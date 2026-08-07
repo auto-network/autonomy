@@ -35,5 +35,13 @@ RUN curl -sL "https://github.com/tailwindlabs/tailwindcss/releases/download/v4.3
         -o /usr/local/bin/tailwindcss \
     && chmod +x /usr/local/bin/tailwindcss
 
+# ── Archive tooling ──
+# zip/unzip so sessions can handle archives directly instead of scripting
+# around Python's zipfile. Requested for the Idea Board workspace, which shares
+# this image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends zip unzip \
+    && rm -rf /var/lib/apt/lists/*
+
 USER agent
 ENTRYPOINT ["claude", "--dangerously-skip-permissions"]
