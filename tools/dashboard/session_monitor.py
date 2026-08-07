@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from tools.dashboard.session_lifecycle_worker import (
     REAPER_BELT_MARGIN_S,
@@ -93,6 +93,13 @@ _TURN_CORRECTION_TOKEN_RE = re.compile(r"(\s+|\S+)")
 # Bump when target identity/resolution changes so corrections whose transient
 # miss was cached under the previous resolver get one bounded warm-up retry.
 _TURN_CORRECTION_RESOLVER_REVISION = 2
+
+# A Codex rollout is created before its first (roughly 20 KiB in current
+# versions) ``session_meta`` line is guaranteed to be visible.  IN_CREATE can
+# therefore race the header write.  Keep retries short and non-blocking; the
+# inotify event remains the trigger, but identity — never timing — decides
+# whether the monitor may switch files.
+_CODEX_HEADER_RETRY_DELAYS_SECONDS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.4)
 
 # inotify — optional, falls back to polling if unavailable
 try:
@@ -151,6 +158,72 @@ def _publish_codex_harness_usage_setting(
     )
 
 
+@dataclass(frozen=True)
+class _CodexRolloutClassification:
+    """Identity decision for a rollout candidate.
+
+    ``unknown`` is intentionally distinct from ``main``.  Treating an empty or
+    partially-written file as "not a subagent" caused the monitor to persist a
+    spawned child as a parent-session rollover.
+    """
+
+    kind: Literal["main", "subagent", "unknown"]
+    reason: str
+    size_bytes: int | None
+
+
+def _classify_codex_rollout(jsonl_path: Path) -> _CodexRolloutClassification:
+    """Classify a Codex rollout without failing open on incomplete content."""
+
+    # Claude and other harnesses do not use the rollout filename contract.
+    if not jsonl_path.name.startswith("rollout-"):
+        return _CodexRolloutClassification("main", "not_codex_rollout", None)
+
+    try:
+        size_bytes = jsonl_path.stat().st_size
+    except OSError:
+        return _CodexRolloutClassification("unknown", "stat_failed", None)
+
+    try:
+        with open(jsonl_path, encoding="utf-8") as f:
+            line = f.readline().strip()
+    except OSError:
+        return _CodexRolloutClassification("unknown", "read_failed", size_bytes)
+    except UnicodeDecodeError:
+        return _CodexRolloutClassification("unknown", "decode_failed", size_bytes)
+    if not line:
+        return _CodexRolloutClassification("unknown", "empty", size_bytes)
+    try:
+        entry = json.loads(line)
+    except json.JSONDecodeError:
+        return _CodexRolloutClassification("unknown", "partial_json", size_bytes)
+    if not isinstance(entry, dict) or entry.get("type") != "session_meta":
+        return _CodexRolloutClassification(
+            "unknown", "missing_session_meta", size_bytes,
+        )
+    payload = entry.get("payload")
+    if not isinstance(payload, dict):
+        return _CodexRolloutClassification("unknown", "invalid_payload", size_bytes)
+    if payload.get("forked_from_id"):
+        return _CodexRolloutClassification(
+            "subagent", "forked_from_id", size_bytes,
+        )
+    source = payload.get("source")
+    if isinstance(source, dict) and "subagent" in source:
+        return _CodexRolloutClassification(
+            "subagent", "source.subagent", size_bytes,
+        )
+    return _CodexRolloutClassification("main", "session_meta_main", size_bytes)
+
+
+def _is_primary_jsonl(jsonl_path: Path) -> bool:
+    """True only for a path that is positively identified as a main trace."""
+
+    if "subagents" in jsonl_path.parts:
+        return False
+    return _classify_codex_rollout(jsonl_path).kind == "main"
+
+
 def _find_primary_jsonls(directory: Path) -> list[Path]:
     """Find a session's main-thread JSONL rollouts, excluding subagent traces.
 
@@ -162,9 +235,7 @@ def _find_primary_jsonls(directory: Path) -> list[Path]:
         ``session_meta`` header (``forked_from_id`` / ``source.subagent``) — see
         ``_is_codex_subagent_rollout``. The path check can't catch these.
     """
-    return [f for f in directory.rglob("*.jsonl")
-            if "subagents" not in f.parts
-            and not _is_codex_subagent_rollout(f)]
+    return [f for f in directory.rglob("*.jsonl") if _is_primary_jsonl(f)]
 
 
 def _is_codex_subagent_rollout(jsonl_path: Path) -> bool:
@@ -174,26 +245,7 @@ def _is_codex_subagent_rollout(jsonl_path: Path) -> bool:
     directory as the parent rollout. Those files must never be treated as
     parent-session rollovers by the session monitor.
     """
-    try:
-        with open(jsonl_path, encoding="utf-8") as f:
-            line = f.readline().strip()
-    except OSError:
-        return False
-    if not line:
-        return False
-    try:
-        entry = json.loads(line)
-    except json.JSONDecodeError:
-        return False
-    if entry.get("type") != "session_meta":
-        return False
-    payload = entry.get("payload") or {}
-    if not isinstance(payload, dict):
-        return False
-    if payload.get("forked_from_id"):
-        return True
-    source = payload.get("source")
-    return isinstance(source, dict) and "subagent" in source
+    return _classify_codex_rollout(jsonl_path).kind == "subagent"
 
 
 def _extract_message_text(entry: dict) -> str:
@@ -1395,10 +1447,9 @@ class SessionMonitor:
             sess_dir = run_dir / "sessions"
             if not sess_dir.exists():
                 continue
-            for jsonl in sess_dir.rglob("*.jsonl"):
-                if "subagents" in jsonl.parts:
-                    continue
-                return jsonl
+            primaries = _find_primary_jsonls(sess_dir)
+            if primaries:
+                return primaries[0]
         return None
 
     async def register_revived(
@@ -1811,9 +1862,9 @@ class SessionMonitor:
             if not dp.is_dir():
                 return
             for p in sorted(dp.glob("*.jsonl")):
-                if "subagents" in p.parts or _is_codex_subagent_rollout(p):
-                    continue
-                self._handle_jsonl_appeared(tmux_name, p)
+                self._handle_jsonl_appeared(
+                    tmux_name, p, source="watch_scan",
+                )
             for sub in sorted(dp.iterdir()):
                 if sub.is_dir() and sub.name != "subagents":
                     # Recurse — adds the subdir watch + scans its contents.
@@ -1821,7 +1872,13 @@ class SessionMonitor:
         except OSError:
             pass
 
-    def _handle_jsonl_appeared(self, tmux_name: str, jsonl_path: Path) -> bool:
+    def _handle_jsonl_appeared(
+        self,
+        tmux_name: str,
+        jsonl_path: Path,
+        *,
+        source: str = "discovery",
+    ) -> bool:
         """Idempotently link a newly-discovered JSONL to an existing session.
 
         Shared entry point used by:
@@ -1839,6 +1896,22 @@ class SessionMonitor:
             return False
         row = get_session(tmux_name)
         if row is None:
+            return False
+        classification = _classify_codex_rollout(jsonl_path)
+        if classification.kind != "main":
+            logger.info(
+                "session_monitor: candidate tmux=%s old_path=%s candidate=%s "
+                "classification=%s reason=%s size_bytes=%s action=%s "
+                "source=%s",
+                tmux_name,
+                row.get("jsonl_path"),
+                jsonl_path,
+                classification.kind,
+                classification.reason,
+                classification.size_bytes,
+                "skip" if classification.kind == "subagent" else "defer",
+                source,
+            )
             return False
         # Scan-on-add / fallback / reconciliation are first-resolution helpers
         # only — they do not handle rollovers. If the session already has a
@@ -1872,8 +1945,17 @@ class SessionMonitor:
         self._eager_create_source(tmux_name, Path(linked["jsonl_path"]))
 
         logger.info(
-            "session_monitor: discovered %s → %s (first file — resolved)",
-            tmux_name, jsonl_path.name,
+            "session_monitor: discovered %s → %s (first file — resolved) "
+            "candidate=%s classification=main reason=%s size_bytes=%s "
+            "action=link source=%s persisted_path=%s persisted_uuid=%s",
+            tmux_name,
+            jsonl_path.name,
+            jsonl_path,
+            classification.reason,
+            classification.size_bytes,
+            source,
+            linked["jsonl_path"],
+            Path(linked["jsonl_path"]).stem,
         )
 
         # (harness_phase — the two-column model vestige — is no longer
@@ -2771,13 +2853,53 @@ class SessionMonitor:
     ) -> None:
         """Handle IN_CREATE in an isolated container directory.
 
-        Any new JSONL in a container's resolution_dir belongs to this session.
+        Non-Codex JSONLs belong to the isolated session. Codex sibling
+        rollouts must first be positively identified from their complete
+        ``session_meta`` header; an incomplete header is deferred, never
+        treated as a main-thread rollover.
         """
-        if _is_codex_subagent_rollout(new_file):
+        old_path = row.get("jsonl_path")
+        classification = _classify_codex_rollout(new_file)
+        if classification.kind == "unknown":
+            logger.info(
+                "session_monitor: candidate tmux=%s old_path=%s candidate=%s "
+                "classification=unknown reason=%s size_bytes=%s action=defer "
+                "source=IN_CREATE",
+                tmux_name,
+                old_path,
+                new_file,
+                classification.reason,
+                classification.size_bytes,
+            )
+            for delay in _CODEX_HEADER_RETRY_DELAYS_SECONDS:
+                await asyncio.sleep(delay)
+                classification = _classify_codex_rollout(new_file)
+                if classification.kind != "unknown":
+                    break
+
+        if classification.kind == "unknown":
+            logger.warning(
+                "session_monitor: candidate tmux=%s old_path=%s candidate=%s "
+                "classification=unknown reason=%s size_bytes=%s action=abandon "
+                "source=IN_CREATE",
+                tmux_name,
+                old_path,
+                new_file,
+                classification.reason,
+                classification.size_bytes,
+            )
+            return
+
+        if classification.kind == "subagent":
             logger.info(
                 "session_monitor: IN_CREATE container %s → %s "
-                "(skipped — codex subagent fork)",
-                tmux_name, new_file.name,
+                "(skipped — codex subagent fork) old_path=%s "
+                "classification=subagent reason=%s size_bytes=%s action=skip",
+                tmux_name,
+                new_file.name,
+                old_path,
+                classification.reason,
+                classification.size_bytes,
             )
             return
 
@@ -2793,9 +2915,18 @@ class SessionMonitor:
         if linked is None:
             return
         logger.info(
-            "session_monitor: IN_CREATE container %s → %s%s",
-            tmux_name, new_file.name,
+            "session_monitor: IN_CREATE container %s → %s%s old_path=%s "
+            "candidate=%s classification=main reason=%s size_bytes=%s "
+            "action=link persisted_path=%s persisted_uuid=%s",
+            tmux_name,
+            new_file.name,
             " (first file — resolved)" if was_empty else " (rollover)",
+            old_path,
+            new_file,
+            classification.reason,
+            classification.size_bytes,
+            linked["jsonl_path"],
+            Path(linked["jsonl_path"]).stem,
         )
 
         harness.attach_live_monitoring(
@@ -3703,9 +3834,9 @@ class SessionMonitor:
                     if not dp.is_dir():
                         continue
                     for jsonl in sorted(dp.rglob("*.jsonl")):
-                        if "subagents" in jsonl.parts or _is_codex_subagent_rollout(jsonl):
-                            continue
-                        if self._handle_jsonl_appeared(tmux_name, jsonl):
+                        if self._handle_jsonl_appeared(
+                            tmux_name, jsonl, source="reconciliation",
+                        ):
                             resolved += 1
                             ts_obj = self._tail_states.get(tmux_name)
                             if ts_obj is not None:

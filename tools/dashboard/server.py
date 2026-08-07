@@ -4526,7 +4526,7 @@ async def api_session_tail(request):
             if db_row is not None and not db_row.get("jsonl_path"):
                 try:
                     session_monitor._handle_jsonl_appeared(
-                        db_row["tmux_name"], fallback,
+                        db_row["tmux_name"], fallback, source="tail_endpoint",
                     )
                     # Refresh db_row for the response so `resolved=True`
                     # reflects the freshly-persisted state.

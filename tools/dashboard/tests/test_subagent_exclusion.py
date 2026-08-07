@@ -12,17 +12,19 @@ Uses tmp_path with real filesystem. No real sessions.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from tools.dashboard.session_monitor import (
     SessionMonitor,
     _TailState,
+    _classify_codex_rollout,
     _find_primary_jsonls,
     _is_codex_subagent_rollout,
 )
@@ -206,3 +208,214 @@ class TestSubagentExclusion:
         }) + "\n")
 
         assert _is_codex_subagent_rollout(path) is True
+
+    @pytest.mark.parametrize(
+        ("contents", "reason"),
+        [
+            ("", "empty"),
+            ('{"type":"session_meta","payload":', "partial_json"),
+            ('{"type":"event_msg","payload":{}}\n', "missing_session_meta"),
+        ],
+    )
+    def test_incomplete_codex_rollout_is_unknown(self, tmp_path, contents, reason):
+        """Create-time content is UNKNOWN, never equivalent to a main rollout."""
+        path = tmp_path / "rollout-incomplete.jsonl"
+        path.write_text(contents)
+
+        classification = _classify_codex_rollout(path)
+
+        assert classification.kind == "unknown"
+        assert classification.reason == reason
+        assert path not in _find_primary_jsonls(tmp_path)
+
+    def test_partial_utf8_codex_header_is_unknown(self, tmp_path):
+        """A read racing a multibyte write must not escape the classifier."""
+        path = tmp_path / "rollout-partial-utf8.jsonl"
+        path.write_bytes(b'{"type":"session_meta","payload":{"text":"\xf0\x9f')
+
+        classification = _classify_codex_rollout(path)
+
+        assert classification.kind == "unknown"
+        assert classification.reason == "decode_failed"
+
+    @pytest.mark.asyncio
+    async def test_in_create_defers_until_child_header_is_complete(
+        self, tmp_path, caplog,
+    ):
+        """IN_CREATE on an empty child must not repoint the parent session."""
+        path = tmp_path / "rollout-racy-child.jsonl"
+        path.touch()
+        row = {
+            "jsonl_path": str(tmp_path / "rollout-parent.jsonl"),
+            "session_uuids": json.dumps(["rollout-parent"]),
+            "harness": "codex",
+        }
+        child_header = {
+            "type": "session_meta",
+            "payload": {
+                "forked_from_id": "parent",
+                "source": {"subagent": {"thread_spawn": {"depth": 1}}},
+                # Real Codex session_meta records are large enough for the
+                # create/write visibility race to be observable.
+                "base_instructions": {"text": "x" * 20_000},
+            },
+        }
+
+        async def finish_header():
+            await asyncio.sleep(0)
+            path.write_text(json.dumps(child_header) + "\n")
+
+        writer = asyncio.create_task(finish_header())
+        monitor = SessionMonitor()
+        with (
+            patch(
+                "tools.dashboard.session_monitor._CODEX_HEADER_RETRY_DELAYS_SECONDS",
+                (0.01,),
+            ),
+            patch(
+                "tools.dashboard.session_monitor.resolve_harness_for_session_row"
+            ) as resolve_harness,
+            caplog.at_level("INFO"),
+        ):
+            await monitor._handle_container_create("auto-race", row, path)
+        await writer
+
+        resolve_harness.assert_not_called()
+        assert "classification=unknown" in caplog.text
+        assert "action=defer" in caplog.text
+        assert "classification=subagent" in caplog.text
+        assert "action=skip" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_in_create_links_after_delayed_main_header(self, tmp_path):
+        """A genuine main rollover links once its complete header is visible."""
+        path = tmp_path / "rollout-racy-main.jsonl"
+        path.touch()
+        old_path = tmp_path / "rollout-parent.jsonl"
+        row = {
+            "jsonl_path": str(old_path),
+            "session_uuids": json.dumps(["rollout-parent"]),
+            "harness": "codex",
+        }
+        main_header = {
+            "type": "session_meta",
+            "payload": {"source": "cli", "id": "new-main"},
+        }
+
+        async def finish_header():
+            await asyncio.sleep(0)
+            path.write_text(json.dumps(main_header) + "\n")
+
+        writer = asyncio.create_task(finish_header())
+        monitor = SessionMonitor()
+        harness = MagicMock()
+        harness.resolve_session.return_value = {
+            "jsonl_path": path,
+            "resolution_dir": tmp_path,
+        }
+        with (
+            patch(
+                "tools.dashboard.session_monitor._CODEX_HEADER_RETRY_DELAYS_SECONDS",
+                (0.01,),
+            ),
+            patch(
+                "tools.dashboard.session_monitor.resolve_harness_for_session_row",
+                return_value=harness,
+            ),
+        ):
+            await monitor._handle_container_create("auto-race", row, path)
+        await writer
+
+        harness.resolve_session.assert_called_once_with(
+            tmux_name="auto-race",
+            row=row,
+            jsonl_path=path,
+        )
+        harness.attach_live_monitoring.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_in_create_never_links_when_header_stays_incomplete(
+        self, tmp_path, caplog,
+    ):
+        """Retry exhaustion must abandon an unknown file instead of failing open."""
+        path = tmp_path / "rollout-still-empty.jsonl"
+        path.touch()
+        row = {
+            "jsonl_path": str(tmp_path / "rollout-parent.jsonl"),
+            "session_uuids": json.dumps(["rollout-parent"]),
+            "harness": "codex",
+        }
+        monitor = SessionMonitor()
+
+        with (
+            patch(
+                "tools.dashboard.session_monitor._CODEX_HEADER_RETRY_DELAYS_SECONDS",
+                (0,),
+            ),
+            patch(
+                "tools.dashboard.session_monitor.resolve_harness_for_session_row"
+            ) as resolve_harness,
+            caplog.at_level("INFO"),
+        ):
+            await monitor._handle_container_create("auto-race", row, path)
+
+        resolve_harness.assert_not_called()
+        assert "classification=unknown" in caplog.text
+        assert "action=defer" in caplog.text
+        assert "action=abandon" in caplog.text
+
+    def test_watch_scan_logs_skipped_sibling_subagent(self, tmp_path, caplog):
+        """A scan-discovered sibling child leaves evidence with the old path."""
+        parent = tmp_path / "rollout-parent.jsonl"
+        parent.write_text(json.dumps({
+            "type": "session_meta",
+            "payload": {"source": "cli"},
+        }) + "\n")
+        child = tmp_path / "rollout-child.jsonl"
+        child.write_text(json.dumps({
+            "type": "session_meta",
+            "payload": {
+                "forked_from_id": "parent",
+                "source": {"subagent": {}},
+            },
+        }) + "\n")
+        monitor = SessionMonitor()
+
+        with (
+            patch(
+                "tools.dashboard.session_monitor.get_session",
+                return_value={"jsonl_path": str(parent)},
+            ),
+            caplog.at_level("INFO"),
+        ):
+            monitor._scan_dir_for_existing_jsonls("auto-race", str(tmp_path))
+
+        assert f"old_path={parent}" in caplog.text
+        assert f"candidate={child}" in caplog.text
+        assert "classification=subagent" in caplog.text
+        assert "action=skip" in caplog.text
+        assert "source=watch_scan" in caplog.text
+
+    def test_run_directory_fallback_excludes_sibling_subagent(
+        self, tmp_path, monkeypatch,
+    ):
+        """Fallback resolution for a tmux name returns the main Codex rollout."""
+        agent_runs = tmp_path / "agent-runs"
+        sessions = agent_runs / "auto-race-20260807" / "sessions" / "2026" / "08" / "07"
+        sessions.mkdir(parents=True)
+        child = sessions / "rollout-child.jsonl"
+        child.write_text(json.dumps({
+            "type": "session_meta",
+            "payload": {
+                "forked_from_id": "parent",
+                "source": {"subagent": {}},
+            },
+        }) + "\n")
+        main = sessions / "rollout-main.jsonl"
+        main.write_text(json.dumps({
+            "type": "session_meta",
+            "payload": {"source": "cli"},
+        }) + "\n")
+        monkeypatch.setenv("DASHBOARD_AGENT_RUNS_DIR", str(agent_runs))
+
+        assert SessionMonitor().resolve_session_file("auto-race") == main
