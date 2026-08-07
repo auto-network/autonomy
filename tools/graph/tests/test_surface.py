@@ -343,6 +343,22 @@ def test_presence_init_rejects_bad_kind():
         )
 
 
+def test_presence_validate_accepts_guest_kind():
+    """Operator-approved 2026-08-07: guest = shim-resolved external
+    visitor (Mission Control's identity shim is the first producer)."""
+    payload = _valid_presence_payload()
+    payload["participant_kind"] = "guest"
+    SurfacePresenceV1.validate(payload)
+
+
+def test_presence_init_accepts_guest_kind(graph_db_env):
+    with Presence(
+        surface_id="surf", participant_kind="guest",
+        participant_id="visitor:abc123", label="Anonymous",
+    ) as p:
+        assert p.participant_kind == "guest"
+
+
 def test_presence_acknowledge_ping_records_id(graph_db_env):
     with Presence(
         surface_id="surf", participant_kind="agent",
