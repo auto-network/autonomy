@@ -25,7 +25,7 @@
                 <span class="text-white font-semibold" x-text="m.name"></span>
                 <span class="text-gray-500 text-xs sm:ml-2 break-all" x-text="m.mission_id"></span>
               </div>
-              <a :href="'/missions/' + m.mission_id" target="_blank"
+              <a :href="'/missions/' + m.mission_id" target="_blank" data-hard-reload
                  class="text-indigo-400 text-xs hover:underline shrink-0"
                  x-show="m.current_revision_id"
                  :data-testid="'mc-view-site-' + m.mission_id">View site &rarr;</a>
