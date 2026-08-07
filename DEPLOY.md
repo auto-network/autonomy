@@ -210,6 +210,7 @@ persistent state:
 | `dispatch.db` | `DISPATCH_DB` | dispatch operational store |
 | `approval_requests.db` | `APPROVAL_REQUESTS_DB` | approval-request store |
 | `commit_workflow.db` | `COMMIT_WORKFLOW_DB` | commit-workflow store |
+| `mission_control.db` | `MISSION_CONTROL_DB` | Mission Control store (missions + site revisions) |
 | `dashboard_identity_sessions.db` | `DASHBOARD_IDENTITY_SESSION_DB` | identity unlock-session store |
 | `pending_joins.db` | `AUTONOMY_PENDING_JOINS_DB` | restart-safe invite-join progress (identifiers and counts only) |
 | `network`/ | `AUTONOMY_NETWORK_KEY_DIR` | mode-0600 auto.network tunnel-serving delegate keys |
@@ -343,6 +344,7 @@ no configuration is needed there either.
 | `DASHBOARD_IDENTITY_SESSION_DB` | `<repo>/data/dashboard_identity_sessions.db` | Local revocation and history store for human dashboard sessions. Keep this writable; verification fails closed if it is unavailable. |
 | `DISPATCH_DB` | `<repo>/data/dispatch.db` | Dispatch state DB. |
 | `APPROVAL_REQUESTS_DB` / `COMMIT_WORKFLOW_DB` | `<repo>/data/*.db` | Approval-request and commit-workflow DBs. |
+| `MISSION_CONTROL_DB` | `<repo>/data/mission_control.db` | Mission Control (missions + site revisions) DB. |
 | `DASHBOARD_AGENT_RUNS_DIR` | `<repo>/data/agent-runs` | Where agent-run session traces land (the container→host handoff dir). |
 | `DASHBOARD_TRACE_DIR` | `<repo>/data/session-traces` | Session trace output. |
 

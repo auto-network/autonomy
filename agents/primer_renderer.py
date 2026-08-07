@@ -160,6 +160,67 @@ def _capability_primer_blocks(config: WorkspaceV1) -> list[dict]:
     return rows
 
 
+def _plugin_skill_blocks(config: WorkspaceV1) -> list[dict]:
+    """Agent-facing docs for enabled dashboard plugins that declare ``skill``.
+
+    Mirrors :func:`_capability_primer_blocks` for the plugin framework: a
+    plugin whose ``plugin.yaml`` sets ``skill: <path relative to the plugin
+    dir>`` gets that file's contents embedded under a "Dashboard Apps"
+    heading, so a session sees how to work with a loaded app (its routes,
+    its publish flow) without reverse-engineering them from source or
+    rediscovering an undocumented second call by trial and error.
+
+    Manifest-only: this never imports plugin Python, only reads
+    ``plugin.yaml`` + the skill file, so a broken plugin entrypoint can't
+    break primer rendering.
+    """
+    try:
+        from tools.dashboard.plugin_api import loader as plugin_loader
+    except Exception:
+        return []
+    try:
+        discovered = plugin_loader.discover()
+    except Exception:
+        return []
+
+    blocks: list[dict] = []
+    settings_cache: dict[str, dict] = {}
+    for d in discovered:
+        manifest = d.manifest
+        if not manifest.skill:
+            continue
+        manifest_org = manifest.org
+        if manifest_org not in settings_cache:
+            try:
+                settings_cache[manifest_org] = plugin_loader._read_plugin_settings(
+                    org=manifest_org,
+                )
+            except Exception:
+                settings_cache[manifest_org] = {}
+        try:
+            enabled = plugin_loader.is_enabled(
+                manifest.id, d.plugin_dir, settings_cache[manifest_org],
+                manifest=manifest,
+            )
+        except Exception:
+            enabled = False
+        if not enabled:
+            continue
+        skill_file = d.plugin_dir / manifest.skill
+        if not skill_file.is_file():
+            continue
+        skill_text = skill_file.read_text().rstrip()
+        if not skill_text:
+            continue
+        blocks.append({
+            "id": manifest.id,
+            "label": manifest.nav.label,
+            "skill_text": skill_text,
+        })
+    blocks.sort(key=lambda b: b["id"])
+    return blocks
+
+
 # ── Turn-correction settings projection ──────────────────────
 
 
@@ -366,6 +427,7 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
         config.graph_project,
     )
     capability_blocks = _capability_primer_blocks(config)
+    plugin_blocks = _plugin_skill_blocks(config)
     turn_correction = _turn_correction_block(config)
     commit_policy = _commit_policy_block(config)
     return template.render(
@@ -376,6 +438,7 @@ def render_workspace_primer(config: WorkspaceV1) -> str:
         org_primer=org_primer,
         org=config.graph_project,
         capability_blocks=capability_blocks,
+        plugin_blocks=plugin_blocks,
         turn_correction=turn_correction,
         commit_policy=commit_policy,
         primer_customization_note=PRIMER_CUSTOMIZATION_NOTE,

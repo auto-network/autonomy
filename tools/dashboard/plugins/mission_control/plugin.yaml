@@ -1,0 +1,25 @@
+id: mission_control
+api_version: 1
+org: autonomy
+
+paths:
+  - /mission-control
+
+assets:
+  template: page.html
+  script: page.js
+  style: page.css
+
+nav:
+  label: Mission Control
+
+frontend:
+  alpine_root: missionControlPage
+
+# Agent-facing publishing doc for coordinator sessions pushing mission
+# content. Embedded into every session's workspace primer while this
+# plugin is enabled; also served at GET /api/plugins/mission_control/skill.
+skill: SKILL.md
+
+entrypoints:
+  api: tools.dashboard.plugins.mission_control.entrypoints.api:routes

@@ -15922,6 +15922,28 @@ async def api_plugins(request):
     return JSONResponse({"plugins": out})
 
 
+async def api_plugin_skill(request):
+    """GET /api/plugins/{plugin_id}/skill — a plugin's agent-facing doc, if any.
+
+    Serves the raw contents of the file ``manifest.skill`` points at
+    (convention: ``SKILL.md``), the same text embedded into every session's
+    workspace primer under "Dashboard Apps" while the plugin is enabled.
+    Lets a session already mid-conversation re-read it on demand rather
+    than needing a fresh primer. 404 when the plugin doesn't declare a
+    skill doc, isn't enabled, or the file is missing.
+    """
+    plugin_id = request.path_params["plugin_id"]
+    if not _plugin_enabled_map().get(plugin_id):
+        return PlainTextResponse("Not Found", status_code=404)
+    plugin = next((p for p in PLUGIN_REGISTRY if p.id == plugin_id), None)
+    if plugin is None or not plugin.manifest.skill:
+        return PlainTextResponse("Not Found", status_code=404)
+    skill_path = plugin.plugin_dir / plugin.manifest.skill
+    if not skill_path.is_file():
+        return PlainTextResponse("Not Found", status_code=404)
+    return PlainTextResponse(skill_path.read_text())
+
+
 def _build_plugin_routes() -> list:
     """Generate page shell, fragment, api, and static routes per plugin."""
     out: list = []
@@ -16237,6 +16259,7 @@ routes = [
 
     # Plugin substrate
     Route("/api/plugins", api_plugins),
+    Route("/api/plugins/{plugin_id}/skill", api_plugin_skill),
     *_build_plugin_routes(),
 
 

@@ -273,6 +273,19 @@ Capability package mounted at `{{ cap.mount_target }}`.
 {{ cap.primer_text }}
 {% endif %}
 {% endfor %}
+{% if plugin_blocks %}
+
+## Dashboard Apps
+
+Agent-facing docs for dashboard plugins currently enabled, so you don't have
+to reverse-engineer their routes from source.
+{% for plugin in plugin_blocks %}
+
+### {{ plugin.label }} (`{{ plugin.id }}`)
+
+{{ plugin.skill_text }}
+{% endfor %}
+{% endif %}
 
 ## Graph Scoping
 
