@@ -4657,11 +4657,15 @@ def cmd_attach(args):
         except FileNotFoundError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
         except _ops.CrossOrgWriteError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(2)
 
-    src_label = f" src:{source_id[:12]}" if source_id else ""
+    stored_source_id = att.get("source_id")
+    src_label = f" src:{stored_source_id[:12]}" if stored_source_id else ""
     print(
         f"  ✓ Attached {att['filename']} ({att['id'][:12]}{src_label}) — "
         f"{att['size_bytes']} bytes, {att['mime_type'] or 'unknown'}"

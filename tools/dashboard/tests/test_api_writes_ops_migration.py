@@ -603,6 +603,65 @@ def test_api_graph_attach_stores_file(dashboard_client, orgs_root):
         ac.close()
 
 
+def test_api_graph_attach_normalizes_short_source_id(dashboard_client, orgs_root):
+    """The HTTP path stores the canonical UUID, not its supplied prefix."""
+    source_id = _make_peer_note(
+        orgs_root / "anchore.db", title="API attachment owner",
+    )
+
+    resp = dashboard_client.post(
+        "/api/graph/attach",
+        data={"source_id": source_id[:12]},
+        files={"file": ("board.html", b"<main>board</main>", "text/html")},
+        headers={"X-Graph-Org": "anchore"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["source_id"] == source_id
+    ac = sqlite3.connect(str(orgs_root / "anchore.db"))
+    try:
+        row = ac.execute(
+            "SELECT source_id FROM attachments WHERE id = ?",
+            (body["attachment_id"],),
+        ).fetchone()
+        assert row == (source_id,)
+    finally:
+        ac.close()
+
+
+def test_api_source_attachments_reads_legacy_short_key(dashboard_client, orgs_root):
+    """A canonical API lookup finds rows written by the old prefix-key path."""
+    source_id = _make_peer_note(
+        orgs_root / "anchore.db", title="Legacy API attachment owner",
+    )
+    created = dashboard_client.post(
+        "/api/graph/attach",
+        data={"source_id": source_id},
+        files={"file": ("legacy-board.html", b"<main>legacy</main>", "text/html")},
+        headers={"X-Graph-Org": "anchore"},
+    ).json()
+
+    ac = sqlite3.connect(str(orgs_root / "anchore.db"))
+    try:
+        ac.execute(
+            "UPDATE attachments SET source_id = ? WHERE id = ?",
+            (source_id[:12], created["attachment_id"]),
+        )
+        ac.commit()
+    finally:
+        ac.close()
+
+    resp = dashboard_client.get(
+        f"/api/source/{source_id}/attachments",
+        headers={"X-Graph-Org": "anchore"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert [row["id"] for row in resp.json()["attachments"]] == [
+        created["attachment_id"],
+    ]
+
+
 # ── Grep-level guarantee: no graph-CLI shell-outs left in server.py ──
 
 

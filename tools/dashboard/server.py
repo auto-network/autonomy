@@ -13182,6 +13182,8 @@ async def api_graph_attach(request):
         )
     except graph_ops.CrossOrgWriteError as ex:
         return _cross_org_error_response(ex)
+    except ValueError as ex:
+        return JSONResponse({"error": str(ex)}, status_code=400)
     except FileNotFoundError as ex:
         return JSONResponse({"error": str(ex)}, status_code=400)
     finally:
