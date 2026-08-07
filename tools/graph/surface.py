@@ -59,7 +59,23 @@ OPERATOR_ACTIVITY_SET_ID = "dashboard.operator.activity"
 SCHEMA_REVISION = 1
 
 
-VALID_PARTICIPANT_KINDS = ("operator", "agent")
+#: "guest" (operator-approved 2026-08-07, program record: OSS Insights P2)
+#: is a shim-resolved external visitor — Mission Control's identity shim
+#: (``resolve_visitor(token) -> {participant_id, participant_label}``) is
+#: the first producer. A guest row's ``participant_id``/``participant_label``
+#: come from that resolver, NOT from a dashboard session or an enrolled
+#: operator identity. Consumers MUST NOT infer from ``participant_kind ==
+#: "guest"``:
+#:   * dashboard access — a guest has never unlocked the dashboard;
+#:   * session existence — there is no tmux/container session behind the
+#:     id, so anything keyed on session lookup (e.g. a "click to open
+#:     /session/<id>" affordance) does not apply;
+#:   * CrossTalk reachability — a browser tab has no CrossTalk endpoint,
+#:     so :meth:`Presence.summon` / :class:`SurfacePingV1` cannot reach a
+#:     guest. Consumers that filter summon targets by kind (e.g. Nexus's
+#:     ``participant_kind === 'agent'`` template guard) already exclude
+#:     guests by construction — keep that filter, don't widen it.
+VALID_PARTICIPANT_KINDS = ("operator", "agent", "guest")
 VALID_PRESENCE_STATES = ("present", "working")
 VALID_POSITION_KINDS_PRESENCE = ("none", "tile", "zone", "coord", "label")
 VALID_POSITION_KINDS_PING = ("tile", "zone", "coord", "label")
@@ -110,7 +126,12 @@ class SurfacePresenceV1(SettingSchema):
     participant_kind: str = field(
         required=True,
         enum=list(VALID_PARTICIPANT_KINDS),
-        description="Operator or agent",
+        description=(
+            "operator | agent | guest. A guest is a shim-resolved "
+            "external visitor (see VALID_PARTICIPANT_KINDS docs above) "
+            "-- never implies dashboard access, a session, or CrossTalk "
+            "reachability."
+        ),
     )
     participant_id: str = field(
         required=True,
@@ -358,7 +379,10 @@ class Presence:
 
     Args:
         surface_id: Page identifier (e.g. ``"settings-nexus"``).
-        participant_kind: ``"operator"`` or ``"agent"``.
+        participant_kind: ``"operator"``, ``"agent"``, or ``"guest"``
+            (shim-resolved external visitor — see
+            ``VALID_PARTICIPANT_KINDS`` for what consumers must not
+            infer about a guest row).
         participant_id: Session id (agent) or operator id — the
             explicit target for pings.
         label: Display name.

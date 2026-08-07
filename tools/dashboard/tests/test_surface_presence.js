@@ -318,6 +318,43 @@ describe('Presence.alpine — init() lifecycle', () => {
                  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
   });
 
+  it('writes a guest presence row for a shim-resolved external visitor', async () => {
+    // Operator-approved 2026-08-07 (program record: OSS Insights P2):
+    // "guest" is Mission Control's identity-shim visitor kind. The
+    // library itself does no kind-specific branching -- this pins that
+    // a guest row writes through exactly like operator/agent, so the
+    // surface's avatar stack picks it up without special-casing.
+    let captured = null;
+    const stub = makeFetchStub(defaultSchemaRoutes({
+      '/api/graph/settings/dashboard.surface.presence': {
+        ok: true, status: 200, json: async () => ({ members: [] }),
+      },
+      '/api/graph/setting': (path, opts) => {
+        captured = { path: path, opts: opts };
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      },
+    }));
+    Schema._setFetchOverride(stub);
+
+    const state = Presence.alpine(
+      {
+        surfaceId: 'test-mission',
+        participantId: 'visitor:abc123',
+        participantLabel: 'Anonymous',
+        participantKind: 'guest',
+        heartbeatMs: 0,
+      },
+      {},
+    );
+    await state.init();
+
+    assert.ok(captured, 'expected a write to /api/graph/setting');
+    const body = JSON.parse(captured.opts.body);
+    assert.equal(body.payload.participant_kind, 'guest');
+    assert.equal(body.payload.participant_id, 'visitor:abc123');
+    assert.equal(body.payload.participant_label, 'Anonymous');
+  });
+
   it('runs the user-supplied init() AFTER schema attachment', async () => {
     const events = [];
     const stub = makeFetchStub(defaultSchemaRoutes({

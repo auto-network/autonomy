@@ -591,3 +591,30 @@ class TestNexusPresence:
         assert out["phaseCount"] == 6
         assert out["hasParticipantsArray"] is True
         assert out["hasPingAgentMethod"] is True
+
+
+def test_summon_button_filter_excludes_guest_participants():
+    """Regression pin for the guest participant_kind (operator-approved
+    2026-08-07, tools/graph/surface.py::VALID_PARTICIPANT_KINDS).
+
+    A static-source assertion rather than a driven Node-subprocess run:
+    this repo's JS test harness (the ``_run`` helper above, and
+    tools/dashboard/tests/test_surface_presence.js) currently can't
+    execute in this environment -- static/js/schemas.js is an ES module
+    and Node's CommonJS require() refuses it (ERR_REQUIRE_ESM),
+    independent of this change. Confirmed pre-existing against a clean
+    checkout before this commit.
+
+    The summon-button template in page.html filters candidates with
+    ``.filter(x => x.participant_kind === 'agent')`` -- strict equality
+    against exactly 'agent', so a 'guest' row is excluded by construction
+    without needing any change: guests must never be pingable (no
+    CrossTalk endpoint behind a browser tab). This test pins the literal
+    filter expression so a future edit can't accidentally widen it (e.g.
+    to ``!== 'operator'``, which WOULD include guests).
+    """
+    html = PAGE_JS.parent.joinpath("page.html").read_text()
+    assert (
+        "x.participant_kind === 'agent' &amp;&amp; x.accepts_pings !== false"
+        in html
+    )
