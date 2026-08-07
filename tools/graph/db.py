@@ -2252,9 +2252,20 @@ class GraphDB:
 
     def list_attachments(self, source_id: str | None = None, limit: int = 50) -> list[dict]:
         if source_id:
+            # Canonical rows and version-paired rows (``<uuid>@N``) begin
+            # with the requested source ID.  The reverse-prefix clause keeps
+            # pre-normalization rows readable: ``graph attach --source`` used
+            # to persist the CLI's conventional 12-character source prefix
+            # verbatim, while readers resolve that prefix to the full UUID.
+            # Require at least the conventional display-prefix length so a
+            # malformed one-character legacy key cannot overmatch unrelated
+            # attachments.
             rows = self.conn.execute(
-                "SELECT * FROM attachments WHERE source_id LIKE ? ORDER BY created_at DESC LIMIT ?",
-                (f"{source_id}%", limit),
+                """SELECT * FROM attachments
+                   WHERE source_id LIKE ?
+                      OR (length(source_id) >= 12 AND ? LIKE source_id || '%')
+                   ORDER BY created_at DESC LIMIT ?""",
+                (f"{source_id}%", source_id, limit),
             ).fetchall()
         else:
             rows = self.conn.execute(

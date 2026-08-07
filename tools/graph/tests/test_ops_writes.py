@@ -644,6 +644,70 @@ def test_attach_file_lands_in_caller_org(orgs_root, tmp_path):
         pc.close()
 
 
+def test_attach_file_normalizes_source_prefix_to_canonical_id(orgs_root, tmp_path):
+    """All write surfaces persist one source-key shape, even for CLI prefixes."""
+    GraphDB.create_org_db("anchore").close()
+    source_id = _make_peer_note(
+        orgs_root / "anchore.db", title="attachment owner",
+    )
+    payload = tmp_path / "normalized.txt"
+    payload.write_text("canonical attachment key")
+
+    att = ops.attach_file(
+        str(payload), source_id=source_id[:12], org="anchore",
+    )
+
+    assert att["source_id"] == source_id
+    db = sqlite3.connect(str(orgs_root / "anchore.db"))
+    try:
+        stored = db.execute(
+            "SELECT source_id FROM attachments WHERE id = ?", (att["id"],),
+        ).fetchone()
+        assert stored == (source_id,)
+    finally:
+        db.close()
+
+
+def test_list_attachments_finds_legacy_prefix_key_from_canonical_id(
+    orgs_root, tmp_path,
+):
+    """Canonical reads remain compatible with pre-normalization short keys."""
+    GraphDB.create_org_db("anchore").close()
+    source_id = _make_peer_note(
+        orgs_root / "anchore.db", title="legacy attachment owner",
+    )
+    payload = tmp_path / "legacy.txt"
+    payload.write_text("legacy short-key attachment")
+    att = ops.attach_file(str(payload), source_id=source_id, org="anchore")
+
+    db = sqlite3.connect(str(orgs_root / "anchore.db"))
+    try:
+        db.execute(
+            "UPDATE attachments SET source_id = ? WHERE id = ?",
+            (source_id[:12], att["id"]),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    listed = ops.list_attachments(source_id=source_id, org="anchore")
+    assert [row["id"] for row in listed] == [att["id"]]
+
+    # Re-attaching the same deduplicated bytes also upgrades the legacy key.
+    rebound = ops.attach_file(
+        str(payload), source_id=source_id[:12], org="anchore",
+    )
+    assert rebound["id"] == att["id"]
+    db = sqlite3.connect(str(orgs_root / "anchore.db"))
+    try:
+        repaired = db.execute(
+            "SELECT source_id FROM attachments WHERE id = ?", (att["id"],),
+        ).fetchone()
+        assert repaired == (source_id,)
+    finally:
+        db.close()
+
+
 def test_attach_file_refuses_peer_source(orgs_root, tmp_path):
     GraphDB.create_org_db("anchore").close()
     GraphDB.create_org_db("autonomy").close()
@@ -663,6 +727,25 @@ def test_attach_file_missing_raises(orgs_root):
     GraphDB.create_org_db("personal", type_="personal").close()
     with pytest.raises(FileNotFoundError):
         ops.attach_file("/nonexistent/path.png")
+
+
+def test_attach_file_refuses_unknown_source_without_storing(orgs_root, tmp_path):
+    GraphDB.create_org_db("anchore").close()
+    payload = tmp_path / "orphan.txt"
+    payload.write_text("must not become an orphan attachment")
+
+    with pytest.raises(ValueError, match="no source found"):
+        ops.attach_file(
+            str(payload),
+            source_id="deadbeef-dead-beef-dead-beefdeadbeef",
+            org="anchore",
+        )
+
+    db = sqlite3.connect(str(orgs_root / "anchore.db"))
+    try:
+        assert db.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 0
+    finally:
+        db.close()
 
 
 def test_move_source_copies_live_row_and_leaves_origin_stub(orgs_root, tmp_path):

@@ -2506,7 +2506,15 @@ def _store_attachment_db(
     existing = db.get_attachment_by_hash(file_hash)
     if existing:
         updates, params = [], []
-        if source_id and not existing.get("source_id"):
+        existing_source_id = existing.get("source_id")
+        legacy_prefix_of_same_source = bool(
+            source_id
+            and existing_source_id
+            and len(existing_source_id) >= 12
+            and "@" not in existing_source_id
+            and source_id.startswith(existing_source_id)
+        )
+        if source_id and (not existing_source_id or legacy_prefix_of_same_source):
             updates.append("source_id = ?")
             params.append(source_id)
         if alt_text and not existing.get("alt_text"):
@@ -3289,6 +3297,11 @@ def attach_file(
     Cross-org: scopeless caller auto-derives to the source's home org;
     explicit caller mismatch raises :class:`CrossOrgWriteError`.
     Attachments travel with their source.
+
+    ``source_id`` may be a unique prefix for CLI ergonomics, but attachment
+    rows always store the source's canonical full ID.  Keeping that invariant
+    at the service boundary prevents writers using different prefix lengths
+    from creating attachment keys that later readers cannot address.
     """
     if source_id:
         write_org = _write_org_for_source(source_id, org=org)
@@ -3296,10 +3309,24 @@ def attach_file(
         write_org = org
     db = _open(write_org)
     try:
+        canonical_source_id = source_id
+        if source_id:
+            resolved = db.resolve_source_strict(source_id)
+            if resolved is None:
+                raise ValueError(
+                    f"no source found matching {source_id!r}; attachment not stored"
+                )
+            if isinstance(resolved, list):
+                candidates = ", ".join(row["id"][:12] for row in resolved[:5])
+                raise ValueError(
+                    f"multiple sources match {source_id!r} ({candidates}); "
+                    "use a longer prefix"
+                )
+            canonical_source_id = resolved["id"]
         att = _store_attachment_db(
             db,
             file_path,
-            source_id=source_id,
+            source_id=canonical_source_id,
             turn_number=turn_number,
             alt_text=alt_text,
             original_filename=original_filename,
