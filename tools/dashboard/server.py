@@ -13382,6 +13382,13 @@ async def api_graph_attachment_get(request):
     attachment_id = request.path_params["attachment_id"]
     if not _GRAPH_SOURCE_ID_RE.match(attachment_id):
         return JSONResponse({"error": f"malformed attachment_id: {attachment_id!r}"}, status_code=400)
+    if request.query_params.get("strict"):
+        resolved = graph_ops.resolve_attachment_strict(
+            attachment_id, org=_caller_org(request),
+        )
+        if isinstance(resolved, list):
+            return JSONResponse({"matches": resolved})
+        return JSONResponse({"attachment": resolved})
     att = graph_ops.get_attachment(attachment_id)
     if not att:
         return JSONResponse({"error": "not found"}, status_code=404)

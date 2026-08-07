@@ -859,6 +859,96 @@ def get_attachment(
     return None
 
 
+def resolve_attachment_strict(
+    attachment_id: str,
+    *,
+    org: str | None = None,
+    peers: list[str] | None = None,
+) -> dict | list[dict] | None:
+    """Resolve an attachment ID exact-first and preserve prefix ambiguity.
+
+    Visibility mirrors :func:`get_attachment`: the caller's own org has its
+    full surface, while peer candidates require a published/canonical parent.
+    """
+    resolved_org = _resolve_org(org)
+
+    def _tag(result, slug: str):
+        if isinstance(result, dict):
+            result.setdefault("org", slug)
+        elif isinstance(result, list):
+            for row in result:
+                row.setdefault("org", slug)
+        return result
+
+    if _global_scope_active(resolved_org, None):
+        from .cross_org import list_org_slugs
+
+        prefix_hits: list[dict] = []
+        for slug in sorted(list_org_slugs()):
+            slug_db = open_peer_db(slug)
+            if slug_db is None:
+                continue
+            hit = slug_db.resolve_attachment_strict(attachment_id)
+            if hit is None:
+                continue
+            _tag(hit, slug)
+            rows = [hit] if isinstance(hit, dict) else hit
+            for row in rows:
+                if row["id"] == attachment_id:
+                    return row
+            prefix_hits.extend(rows)
+        if len(prefix_hits) == 1:
+            return prefix_hits[0]
+        return prefix_hits or None
+
+    db = _open(org)
+    try:
+        own = db.resolve_attachment_strict(attachment_id)
+    finally:
+        db.close()
+    if own is not None:
+        return _tag(own, resolved_org or "")
+
+    for peer in sorted(resolve_peers(resolved_org, peers)):
+        peer_db = open_peer_db(peer)
+        if peer_db is None:
+            continue
+        hit = peer_db.resolve_attachment_strict(attachment_id)
+        if hit is None:
+            continue
+        rows = [hit] if isinstance(hit, dict) else hit
+        visible: list[dict] = []
+        for row in rows:
+            parent_id = row.get("source_id")
+            parent = peer_db.get_source(parent_id) if parent_id else None
+            if parent and parent.get("publication_state") in PEER_VISIBLE_STATES:
+                row["org"] = peer
+                visible.append(row)
+        if len(visible) == 1:
+            return visible[0]
+        if visible:
+            return visible
+    return None
+
+
+def download_attachment(
+    attachment_id: str,
+    *,
+    org: str | None = None,
+    peers: list[str] | None = None,
+) -> bytes:
+    """Read attachment bytes after the caller resolves a unique ID."""
+    att = get_attachment(attachment_id, org=org, peers=peers)
+    if att is None:
+        raise FileNotFoundError(f"attachment {attachment_id!r} not found")
+    file_path = Path(att["file_path"])
+    if not file_path.is_absolute():
+        file_path = Path(__file__).resolve().parents[2] / file_path
+    if not file_path.is_file():
+        raise FileNotFoundError(f"attachment file missing: {file_path}")
+    return file_path.read_bytes()
+
+
 def list_attachments(
     source_id: str | None = None,
     *,

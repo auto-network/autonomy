@@ -159,6 +159,7 @@ class HttpClient:
         raw_data: bytes | None = None,
         content_type: str | None = None,
         timeout: int = 30,
+        return_bytes: bool = False,
     ) -> Any:
         url = f"{self.base_url}{path}"
         if params:
@@ -186,6 +187,8 @@ class HttpClient:
                 req, timeout=timeout, context=self._ssl_ctx,
             )
             raw = resp.read()
+            if return_bytes:
+                return raw
             if not raw:
                 return None
             return _json.loads(raw)
@@ -202,6 +205,11 @@ class HttpClient:
 
     def _get(self, path, params=None, *, org=None):
         return self._request("GET", path, params=params, headers=self._headers(org))
+
+    def _get_bytes(self, path, *, org=None):
+        return self._request(
+            "GET", path, headers=self._headers(org), return_bytes=True,
+        )
 
     def _post(self, path, body, *, org=None):
         return self._request("POST", path, body=body, headers=self._headers(org))
@@ -327,6 +335,21 @@ class HttpClient:
             return self._get(f"/api/graph/attachment/{attachment_id}", org=org)
         except LookupError:
             return None
+
+    def resolve_attachment_strict(self, attachment_id, *, org=None, peers=None):
+        result = self._get(
+            f"/api/graph/attachment/{attachment_id}",
+            {"strict": "1"},
+            org=org,
+        )
+        if not isinstance(result, dict):
+            return None
+        if result.get("matches") is not None:
+            return result["matches"]
+        return result.get("attachment")
+
+    def download_attachment(self, attachment_id, *, org=None, peers=None):
+        return self._get_bytes(f"/api/attachment/{attachment_id}", org=org)
 
     def list_attachments(self, source_id=None, *, org=None, peers=None, limit=50):
         if not source_id:
