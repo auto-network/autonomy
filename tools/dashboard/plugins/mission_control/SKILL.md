@@ -33,7 +33,7 @@ reads it at message time).
 curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/site \
   -X POST -H 'Content-Type: application/json' \
   -d '{"html": "<full self-contained HTML>", "note": "rev11: code-verification pass folded in"}'
-# → 201 {"revision": {"revision_id": "<uuid>", "mission_id": "...", "revision_seq": 11, "note": "...", "created_at": ...}}
+# → 201 {"revision": {"revision_id": "<uuid>", "mission_id": "...", "revision_seq": 11, "note": "...", "created_at": ..., "byte_size": ...}}
 ```
 
 `note` is optional but recommended — it's the one-line description that
