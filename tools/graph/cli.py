@@ -4718,6 +4718,115 @@ def cmd_attachment(args):
         print(f"  metadata:    {json.dumps(meta)}")
 
 
+def cmd_attachment_download(args):
+    """Resolve an attachment prefix strictly and download its bytes."""
+    import hashlib
+
+    attachment_id = getattr(args, "attachment_id", None)
+    if not attachment_id:
+        print(
+            "Error: usage: graph attachment download <attachment-id> [-o FILE]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    org = os.environ.get("GRAPH_ORG")
+    client = get_client()
+    resolved = client.resolve_attachment_strict(attachment_id, org=org)
+    if resolved is None:
+        print(
+            f"Error: no attachment found matching {attachment_id!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if isinstance(resolved, list):
+        print(
+            f"Error: attachment prefix {attachment_id!r} is not unique; matches:",
+            file=sys.stderr,
+        )
+        for row in resolved[:20]:
+            print(
+                f"  {row['id']}  {row.get('filename') or '—'}",
+                file=sys.stderr,
+            )
+        if len(resolved) > 20:
+            print(f"  … and {len(resolved) - 20} more", file=sys.stderr)
+        print("Use a longer prefix.", file=sys.stderr)
+        sys.exit(1)
+
+    full_id = resolved["id"]
+    try:
+        payload = client.download_attachment(full_id, org=org)
+    except (FileNotFoundError, LookupError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    expected_hash = resolved.get("hash")
+    if isinstance(expected_hash, str) and expected_hash.startswith("sha256:"):
+        expected_hash = expected_hash.removeprefix("sha256:")
+    actual_hash = hashlib.sha256(payload).hexdigest()
+    if expected_hash and actual_hash != expected_hash:
+        print(
+            f"Error: downloaded bytes failed SHA-256 verification for {full_id}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    expected_size = resolved.get("size_bytes")
+    if expected_size is not None and len(payload) != int(expected_size):
+        print(
+            f"Error: downloaded byte count does not match metadata for {full_id}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    output_arg = getattr(args, "output", None)
+    filename = Path(resolved.get("filename") or full_id).name
+    output_path = Path(output_arg) if output_arg else Path.cwd() / filename
+    if output_path.exists() and not getattr(args, "force", False):
+        print(
+            f"Error: {output_path} already exists; pass --force to overwrite",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not output_path.parent.is_dir():
+        print(
+            f"Error: output directory does not exist: {output_path.parent}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        output_path.write_bytes(payload)
+    except OSError as exc:
+        print(f"Error: could not write {output_path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(
+        f"  ✓ Downloaded {resolved.get('filename') or full_id} "
+        f"({full_id[:12]}) → {output_path} — {len(payload)} bytes"
+    )
+
+
+def cmd_attachment_router(args):
+    """Preserve ``graph attachment ID`` and add the download sub-form."""
+    first = getattr(args, "id_or_action", None)
+    second = getattr(args, "attachment_id", None)
+    if first == "download":
+        cmd_attachment_download(args)
+        return
+    if second is not None:
+        print(
+            "Error: usage: graph attachment <id> | "
+            "graph attachment download <id> [-o FILE]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if getattr(args, "output", None) or getattr(args, "force", False):
+        print("Error: -o/--force require 'attachment download'", file=sys.stderr)
+        sys.exit(1)
+    args.id = first
+    cmd_attachment(args)
+
+
 def cmd_attachments(args):
     """List attachments, optionally filtered by source.
 
@@ -5778,10 +5887,27 @@ def main():
     p.add_argument("--alt-file", help="Read alt-text from file")
     p.set_defaults(func=cmd_attach)
 
-    # attachment (show single)
-    p = sub.add_parser("attachment", help="Show metadata for an attachment")
-    p.add_argument("id", help="Attachment ID or prefix")
-    p.set_defaults(func=cmd_attachment)
+    # attachment (show metadata or download bytes)
+    p = sub.add_parser(
+        "attachment",
+        help="Show metadata or download an attachment",
+        description=(
+            "Show metadata with 'graph attachment <id>', or download bytes "
+            "with 'graph attachment download <id>'. Prefixes are accepted; "
+            "downloads refuse ambiguous prefixes."
+        ),
+    )
+    p.add_argument("id_or_action", metavar="ID|download")
+    p.add_argument("attachment_id", nargs="?", help="Attachment ID or prefix")
+    p.add_argument(
+        "-o", "--output",
+        help="Download destination (default: stored filename)",
+    )
+    p.add_argument(
+        "--force", action="store_true",
+        help="Overwrite an existing destination",
+    )
+    p.set_defaults(func=cmd_attachment_router)
 
     # attachments (list)
     p = sub.add_parser("attachments", help="List attachments")

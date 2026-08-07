@@ -2246,6 +2246,23 @@ class GraphDB:
         row = self.conn.execute("SELECT * FROM attachments WHERE id LIKE ? LIMIT 1", (f"{att_id}%",)).fetchone()
         return dict(row) if row else None
 
+    def resolve_attachment_strict(self, value: str) -> dict | list[dict] | None:
+        """Resolve an attachment exact-first, surfacing ambiguous prefixes."""
+        row = self.conn.execute(
+            "SELECT * FROM attachments WHERE id = ?", (value,),
+        ).fetchone()
+        if row:
+            return dict(row)
+        rows = self.conn.execute(
+            "SELECT * FROM attachments WHERE id LIKE ? ORDER BY id",
+            (f"{value}%",),
+        ).fetchall()
+        if len(rows) == 1:
+            return dict(rows[0])
+        if rows:
+            return [dict(row) for row in rows]
+        return None
+
     def get_attachment_by_hash(self, hash: str) -> dict | None:
         row = self.conn.execute("SELECT * FROM attachments WHERE hash = ?", (hash,)).fetchone()
         return dict(row) if row else None

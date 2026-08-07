@@ -38,10 +38,11 @@ from starlette.testclient import TestClient
 
 from tools.graph import cli as graph_cli
 from tools.graph import db as graph_db_mod
+from tools.graph import ops
 from tools.graph import set_cmd
 from tools.graph.db import GraphDB, resolve_caller_db_path
 from tools.graph.ingest import ingest_claude_code_session
-from tools.graph.models import Source, Thought
+from tools.graph.models import Attachment, Source, Thought
 
 
 # ── HttpClient → TestClient plumbing ────────────────────────────
@@ -698,6 +699,74 @@ def test_cmd_attachments_requires_source_id_in_container(
     graph_cli.cmd_attachments(args)
     err = capsys.readouterr().err
     assert "only available on the host" in err
+
+
+def test_cmd_attachment_download_accepts_unique_prefix_via_api(
+    api_client, forbid_cli_sqlite, seeded_source_id, tmp_path,
+    capsys, monkeypatch,
+):
+    """The nested command resolves a prefix, streams bytes, and verifies hash."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    payload = tmp_path / "source-board.png"
+    payload.write_bytes(b"real attachment bytes")
+    attached = ops.attach_file(
+        str(payload), source_id=seeded_source_id, org="autonomy",
+    )
+    GraphDB.close_all_pooled()
+    destination = tmp_path / "downloaded-board.png"
+
+    args = _cli_args(
+        id_or_action="download",
+        attachment_id=attached["id"][:12],
+        output=str(destination),
+        force=False,
+    )
+    graph_cli.cmd_attachment_router(args)
+
+    assert destination.read_bytes() == b"real attachment bytes"
+    out = capsys.readouterr().out
+    assert "Downloaded" in out
+    assert attached["id"][:12] in out
+
+
+def test_cmd_attachment_download_refuses_ambiguous_prefix_via_api(
+    api_client, forbid_cli_sqlite, seeded_source_id, tmp_path,
+    capsys, monkeypatch,
+):
+    """An ambiguous prefix prints candidates and never chooses one silently."""
+    monkeypatch.setenv("GRAPH_ORG", "autonomy")
+    db = GraphDB.open_org_db("autonomy", mode="rw")
+    try:
+        for suffix, filename in (("0", "first.png"), ("1", "second.png")):
+            attachment_id = f"abcdefff-{suffix}000-4000-8000-000000000000"
+            db.insert_attachment(Attachment(
+                id=attachment_id,
+                hash=f"{suffix}" * 64,
+                filename=filename,
+                mime_type="image/png",
+                size_bytes=1,
+                file_path=str(tmp_path / filename),
+                source_id=seeded_source_id,
+            ))
+    finally:
+        db.close()
+    GraphDB.close_all_pooled()
+
+    args = _cli_args(
+        id_or_action="download",
+        attachment_id="abcdefff",
+        output=str(tmp_path / "must-not-exist.png"),
+        force=False,
+    )
+    with pytest.raises(SystemExit) as exc:
+        graph_cli.cmd_attachment_router(args)
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "is not unique" in err
+    assert "abcdefff-0000-4000-8000-000000000000" in err
+    assert "abcdefff-1000-4000-8000-000000000000" in err
+    assert not (tmp_path / "must-not-exist.png").exists()
 
 
 # ── Write-command smoke tests ─────────────────────────────────
