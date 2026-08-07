@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from tools.dashboard.dao import mission_control_db as db
 
 
@@ -170,3 +172,173 @@ def test_activate_site_revision_wrong_mission_returns_false(tmp_path):
     rev_a = db.push_site_revision(mission_a["mission_id"], "<html>a</html>", db_path=path)
 
     assert db.activate_site_revision(mission_b["mission_id"], rev_a["revision_id"], db_path=path) is False
+
+
+# ── Visitor identity shim (P2) ────────────────────────────────────
+
+
+def test_create_visitor_token_returns_token_and_stable_participant_id(tmp_path):
+    path = _db_path(tmp_path)
+    visitor = db.create_visitor_token("Alex", db_path=path)
+    assert visitor["token"]
+    assert visitor["participant_id"].startswith("guest:")
+    assert visitor["display_name"] == "Alex"
+
+
+def test_create_visitor_token_participant_id_independent_of_token(tmp_path):
+    path = _db_path(tmp_path)
+    visitor = db.create_visitor_token("Alex", db_path=path)
+    assert visitor["participant_id"] != visitor["token"]
+
+
+def test_resolve_visitor_returns_participant_id_and_label(tmp_path):
+    path = _db_path(tmp_path)
+    visitor = db.create_visitor_token("Alex", db_path=path)
+    resolved = db.resolve_visitor(visitor["token"], db_path=path)
+    assert resolved == {
+        "participant_id": visitor["participant_id"],
+        "participant_label": "Alex",
+    }
+
+
+def test_resolve_visitor_unknown_token_returns_none(tmp_path):
+    path = _db_path(tmp_path)
+    db.init_db(path)
+    assert db.resolve_visitor("nope", db_path=path) is None
+
+
+def test_resolve_visitor_never_leaks_the_token_itself(tmp_path):
+    """The token is the bearer secret; resolve_visitor's return shape
+    must never include it, only the display-safe participant_id/label."""
+    path = _db_path(tmp_path)
+    visitor = db.create_visitor_token("Alex", db_path=path)
+    resolved = db.resolve_visitor(visitor["token"], db_path=path)
+    assert "token" not in resolved
+
+
+# ── Mission conversation (P2 Q&A) ─────────────────────────────────
+
+
+def test_ask_question_returns_pending_entry(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    entry = db.ask_question(
+        mission["mission_id"], "What's the timeline?", "guest:abc", "Alex", db_path=path,
+    )
+    assert entry["question"] == "What's the timeline?"
+    assert entry["asked_by_participant_id"] == "guest:abc"
+    assert entry["asked_by_label"] == "Alex"
+    assert entry["answer"] is None
+    assert entry["relay_status"] == "pending"
+
+
+def test_ask_question_missing_mission_returns_none(tmp_path):
+    path = _db_path(tmp_path)
+    db.init_db(path)
+    assert db.ask_question("nope", "q", "guest:abc", "Alex", db_path=path) is None
+
+
+def test_ask_question_label_is_a_snapshot_not_a_live_join(tmp_path):
+    """If a visitor's display name is later reissued under the same
+    participant_id (or the token record otherwise changes), a past
+    question keeps showing what they were called when they asked."""
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    entry = db.ask_question(
+        mission["mission_id"], "q1", "guest:abc", "Alex", db_path=path,
+    )
+    # No live join exists in this schema -- list_conversation must
+    # continue returning the original snapshot regardless of anything
+    # else happening to visitor_tokens.
+    listed = db.list_conversation(mission["mission_id"], db_path=path)
+    assert listed[0]["asked_by_label"] == "Alex"
+    assert listed[0]["entry_id"] == entry["entry_id"]
+
+
+def test_get_question_returns_none_when_missing(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    assert db.get_question(mission["mission_id"], "nope", db_path=path) is None
+
+
+def test_list_conversation_orders_oldest_first(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    e1 = db.ask_question(mission["mission_id"], "q1", "guest:a", "A", db_path=path)
+    e2 = db.ask_question(mission["mission_id"], "q2", "guest:b", "B", db_path=path)
+    listed = db.list_conversation(mission["mission_id"], db_path=path)
+    assert [e["entry_id"] for e in listed] == [e1["entry_id"], e2["entry_id"]]
+
+
+def test_mark_question_relay_status_updates_status(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    entry = db.ask_question(mission["mission_id"], "q", "guest:a", "A", db_path=path)
+    db.mark_question_relay_status(mission["mission_id"], entry["entry_id"], "sent", db_path=path)
+    fetched = db.get_question(mission["mission_id"], entry["entry_id"], db_path=path)
+    assert fetched["relay_status"] == "sent"
+
+
+def test_mark_question_relay_status_rejects_invalid_status(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    entry = db.ask_question(mission["mission_id"], "q", "guest:a", "A", db_path=path)
+    with pytest.raises(AssertionError):
+        db.mark_question_relay_status(mission["mission_id"], entry["entry_id"], "nope", db_path=path)
+
+
+def test_answer_question_records_answer_and_answerer_snapshot(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", "auto-original-coordinator", db_path=path)
+    entry = db.ask_question(mission["mission_id"], "q", "guest:a", "A", db_path=path)
+
+    answered = db.answer_question(
+        mission["mission_id"], entry["entry_id"], "Q3 2026",
+        "auto-actual-answerer", db_path=path,
+    )
+    assert answered["answer"] == "Q3 2026"
+    assert answered["answered_by_session"] == "auto-actual-answerer"
+    assert answered["answered_at"] is not None
+
+
+def test_answer_question_missing_entry_returns_none(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    assert db.answer_question(
+        mission["mission_id"], "nope", "answer", "auto-x", db_path=path,
+    ) is None
+
+
+def test_answer_question_records_answerer_even_if_different_from_current_coordinator(tmp_path):
+    """coordinator_session on the mission row is mutable by design --
+    the answer must record who actually answered, not what the mission
+    row says now or later."""
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", "auto-coordinator-v1", db_path=path)
+    entry = db.ask_question(mission["mission_id"], "q", "guest:a", "A", db_path=path)
+
+    answered = db.answer_question(
+        mission["mission_id"], entry["entry_id"], "answer",
+        "auto-coordinator-v1", db_path=path,
+    )
+    assert answered["answered_by_session"] == "auto-coordinator-v1"
+
+    # Mission changes hands -- a NEW answer records the NEW answerer,
+    # the old answer's snapshot is untouched.
+    conn = db._get_conn(path)
+    conn.execute(
+        "UPDATE missions SET coordinator_session = ? WHERE mission_id = ?",
+        ("auto-coordinator-v2", mission["mission_id"]),
+    )
+    conn.commit()
+    conn.close()
+
+    entry2 = db.ask_question(mission["mission_id"], "q2", "guest:b", "B", db_path=path)
+    answered2 = db.answer_question(
+        mission["mission_id"], entry2["entry_id"], "answer2",
+        "auto-coordinator-v2", db_path=path,
+    )
+    assert answered2["answered_by_session"] == "auto-coordinator-v2"
+    # First answer's snapshot is unaffected by the mission's coordinator changing.
+    first_still = db.get_question(mission["mission_id"], entry["entry_id"], db_path=path)
+    assert first_still["answered_by_session"] == "auto-coordinator-v1"

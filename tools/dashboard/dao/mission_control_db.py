@@ -47,6 +47,34 @@ CREATE TABLE IF NOT EXISTS mission_site_revisions (
 
 CREATE INDEX IF NOT EXISTS idx_mission_site_revisions_mission
     ON mission_site_revisions(mission_id);
+
+-- P2 identity shim: a token is the bearer secret (never displayed back);
+-- participant_id is the independent, display-safe identifier used in
+-- conversation history and (future, additive) Presence rows. Keeping
+-- them distinct is what makes the cookie-vs-storage separation in
+-- mission_conversation below sound -- see ask_question()'s docstring.
+CREATE TABLE IF NOT EXISTS visitor_tokens (
+    token           TEXT PRIMARY KEY,
+    participant_id  TEXT NOT NULL UNIQUE,
+    display_name    TEXT NOT NULL,
+    created_at      REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mission_conversation (
+    entry_id                  TEXT PRIMARY KEY,
+    mission_id                 TEXT NOT NULL,
+    question                   TEXT NOT NULL,
+    asked_by_participant_id   TEXT NOT NULL,
+    asked_by_label             TEXT NOT NULL,
+    answer                     TEXT,
+    answered_by_session       TEXT,
+    answered_at                REAL,
+    relay_status                TEXT NOT NULL DEFAULT 'pending',
+    created_at                  REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_mission_conversation_mission
+    ON mission_conversation(mission_id);
 """
 
 
@@ -279,3 +307,215 @@ def activate_site_revision(
     finally:
         conn.close()
     return cur.rowcount > 0
+
+
+# ── Visitor identity shim (P2) ────────────────────────────────────
+#
+# resolve_visitor() is the one narrow interface: everything downstream
+# (Q&A attribution today, Presence integration if/when approved) calls
+# through it rather than knowing about tokens directly, so swapping the
+# shim for real multi-user identities later is one function deep.
+
+
+def create_visitor_token(
+    display_name: str, *, db_path: Path | str | None = None,
+) -> dict:
+    """Mint a token for a person the operator is handing a share link to.
+
+    Global, not mission-scoped: a person is a person regardless of which
+    mission site they're looking at. ``participant_id`` is minted
+    independently of the token -- safe to display/store (conversation
+    history, future Presence rows); the raw token is the bearer secret
+    and is returned here ONCE, never again.
+    """
+    token = uuid.uuid4().hex + uuid.uuid4().hex  # 256 bits, unguessable
+    participant_id = f"guest:{uuid.uuid4()}"
+    created_at = time.time()
+    conn = _get_conn(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO visitor_tokens (token, participant_id, display_name, created_at)"
+            " VALUES (?, ?, ?, ?)",
+            (token, participant_id, display_name, created_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "token": token,
+        "participant_id": participant_id,
+        "display_name": display_name,
+    }
+
+
+def resolve_visitor(
+    token: str, *, db_path: Path | str | None = None,
+) -> dict | None:
+    """token -> {participant_id, participant_label}, or None if unknown.
+
+    Never returns the token back. Callers (the cookie-setting flow, the
+    ask-question route) must not persist or display the raw token
+    anywhere outside this lookup -- it is the ONLY thing that
+    authenticates a visitor; participant_id is display/storage only.
+    """
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT participant_id, display_name FROM visitor_tokens WHERE token = ?",
+            (token,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return {
+        "participant_id": row["participant_id"],
+        "participant_label": row["display_name"],
+    }
+
+
+# ── Mission conversation (P2 Q&A) ─────────────────────────────────
+
+
+def ask_question(
+    mission_id: str,
+    question: str,
+    participant_id: str,
+    participant_label: str,
+    *,
+    db_path: Path | str | None = None,
+) -> dict | None:
+    """Record a visitor's question. Returns None if the mission doesn't exist.
+
+    Attribution is a LABEL SNAPSHOT at ask time (asked_by_label), not a
+    live join against visitor_tokens: this is a historical record of what
+    the asker was called when they asked, not a live view that changes
+    if a display name is edited later. relay_status starts 'pending' --
+    the caller is expected to attempt CrossTalk delivery as a background
+    step and update it via mark_question_relay_status.
+    """
+    entry_id = str(uuid.uuid4())
+    created_at = time.time()
+    conn = _get_conn(db_path)
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM missions WHERE mission_id = ?", (mission_id,)
+        ).fetchone()
+        if not exists:
+            return None
+        conn.execute(
+            "INSERT INTO mission_conversation"
+            " (entry_id, mission_id, question, asked_by_participant_id,"
+            "  asked_by_label, answer, answered_by_session, answered_at,"
+            "  relay_status, created_at)"
+            " VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 'pending', ?)",
+            (entry_id, mission_id, question, participant_id, participant_label, created_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "entry_id": entry_id,
+        "mission_id": mission_id,
+        "question": question,
+        "asked_by_participant_id": participant_id,
+        "asked_by_label": participant_label,
+        "answer": None,
+        "answered_by_session": None,
+        "answered_at": None,
+        "relay_status": "pending",
+        "created_at": created_at,
+    }
+
+
+def get_question(
+    mission_id: str, entry_id: str, *, db_path: Path | str | None = None,
+) -> dict | None:
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM mission_conversation WHERE mission_id = ? AND entry_id = ?",
+            (mission_id, entry_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def list_conversation(
+    mission_id: str, *, db_path: Path | str | None = None,
+) -> list[dict]:
+    conn = _get_conn(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM mission_conversation WHERE mission_id = ?"
+            " ORDER BY created_at ASC",
+            (mission_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def mark_question_relay_status(
+    mission_id: str, entry_id: str, status: str, *, db_path: Path | str | None = None,
+) -> None:
+    """Record whether CrossTalk delivery was attempted successfully.
+
+    'sent' means the send call completed without raising -- tmux_send
+    degrades silently for a dead/missing target session (see
+    tools.dashboard.surface_actions.CrosstalkService), so this is NOT
+    proof the coordinator session received or read the question. It
+    exists to make delivery failures observable rather than silent; the
+    durable source of truth is the conversation list itself (GET .../questions),
+    which the coordinator polls as the actual backstop.
+    """
+    assert status in ("pending", "sent", "failed"), status
+    conn = _get_conn(db_path)
+    try:
+        conn.execute(
+            "UPDATE mission_conversation SET relay_status = ?"
+            " WHERE mission_id = ? AND entry_id = ?",
+            (status, mission_id, entry_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def answer_question(
+    mission_id: str,
+    entry_id: str,
+    answer: str,
+    answered_by_session: str,
+    *,
+    db_path: Path | str | None = None,
+) -> dict | None:
+    """Record the coordinator's final answer. Returns None if the entry
+    doesn't exist.
+
+    answered_by_session is a snapshot of who actually answered, taken
+    fresh at answer time by the caller -- coordinator_session on the
+    mission row is mutable by design (a mission can change hands), so
+    history must record the real answerer, not whatever the mission row
+    says later.
+    """
+    answered_at = time.time()
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE mission_conversation"
+            " SET answer = ?, answered_by_session = ?, answered_at = ?"
+            " WHERE mission_id = ? AND entry_id = ?",
+            (answer, answered_by_session, answered_at, mission_id, entry_id),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return None
+        row = conn.execute(
+            "SELECT * FROM mission_conversation WHERE mission_id = ? AND entry_id = ?",
+            (mission_id, entry_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None

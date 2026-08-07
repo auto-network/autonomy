@@ -89,3 +89,65 @@ GET    /api/missions/<mission_id>/site/revisions/<revision_id>    # one historic
 No `GET .../status` vs `.../full` split, no membership-set indirection, no
 `graph set remove` needed for deletion — `DELETE /api/missions/<id>` is a
 real route.
+
+## 6. Q&A — visitors ask, you answer (P2)
+
+A person viewing the mission site can ask a question; you get notified over
+CrossTalk; you answer via the API; the question + your final answer become
+part of the mission's permanent conversation history. P2 scope is
+attribution only — no live presence integration yet.
+
+### Mint a share link for a person (you do this, once per person)
+
+```bash
+curl -sk https://host.docker.internal:8080/api/visitor-tokens \
+  -X POST -H 'Content-Type: application/json' -d '{"display_name": "Jamie"}'
+# → 201 {"visitor": {"token": "<64-hex-char secret>", "participant_id": "guest:<uuid>", "display_name": "Jamie"}}
+```
+
+Hand them `https://.../missions/<mission_id>?as=<token>`. `token` is a
+bearer secret — copy it into the link once and don't log it anywhere else;
+`participant_id` is safe to see in conversation history and isn't usable to
+impersonate them (the cookie authenticates by token, never by
+participant_id — see the schema note in
+`tools/dashboard/dao/mission_control_db.py::resolve_visitor` if you're
+touching this code). Global, not mission-scoped: the same token works
+across every mission's site.
+
+First visit resolves the token and sets an HttpOnly cookie so the URL
+doesn't need to keep carrying it; the token also still works as a live
+`?as=` query param on the ask-question API call itself, if your site's own
+JS wants to pass it explicitly rather than rely on the cookie.
+
+### Receiving a question
+
+You'll get a CrossTalk message from `mission:<mission_id>` when someone
+asks — delivery is fire-and-forget (their `POST` returns immediately;
+CrossTalk send happens after, so a slow/offline coordinator session never
+makes a visitor wait). If delivery itself fails (bad session, transport
+error), it's recorded on the entry as `relay_status: "failed"` — but the
+question is ALWAYS stored regardless of relay outcome, so poll
+`GET /api/missions/<id>/questions` periodically as your real backstop, not
+just the CrossTalk ping.
+
+```bash
+curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/questions
+# → {"questions": [{"entry_id", "question", "asked_by_label", "answer": null, "relay_status", "created_at", ...}]}
+```
+
+### Answering
+
+```bash
+curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/questions/<entry_id>/answer \
+  -X POST -H 'Content-Type: application/json' -d '{"answer": "Q3 2026."}'
+```
+
+Records the FINAL answer only — not your working/reasoning, matching how
+Present's library never showed raw session state either. `answered_by_session`
+is snapshotted from the mission's `coordinator_session` at the moment you
+answer, not whoever created the mission — if a mission changes hands,
+history correctly shows who actually answered each question.
+
+Attribution (`asked_by_label`) is a snapshot at ask time too — if you
+reissue someone a new display name later, their past questions still show
+what they were called when they asked.
