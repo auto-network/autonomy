@@ -91,7 +91,7 @@ async def push_site_revision(request: Request) -> JSONResponse:
     if revision is None:
         return JSONResponse({"error": "mission not found"}, status_code=404)
     return JSONResponse(
-        {"revision": _revision_payload({**revision, "html": html}, include_html=False)},
+        {"revision": _revision_payload({**revision, "byte_size": len(html)}, include_html=False)},
         status_code=201,
     )
 

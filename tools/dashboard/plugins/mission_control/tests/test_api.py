@@ -110,6 +110,9 @@ def test_push_site_revision_stores_and_publishes_in_one_call():
     revision = resp.json()["revision"]
     assert revision["revision_seq"] == 1
     assert revision["note"] == "first push"
+    # byte_size must be populated on push too, symmetric with the
+    # revisions-list route — not left null until the next history read.
+    assert revision["byte_size"] == len("<html>v1</html>")
 
     site = client.get(f"/api/missions/{mission_id}/site")
     assert site.status_code == 200
