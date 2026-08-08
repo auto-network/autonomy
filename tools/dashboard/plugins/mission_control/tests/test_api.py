@@ -108,6 +108,22 @@ def test_get_mission_includes_current_revision_after_push():
     assert "html" not in body["current_revision"]
 
 
+def test_get_mission_includes_open_question_count():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    client.post(f"/api/missions/{mission_id}/site", json={"html": "<html>v1</html>"})
+    visitor = _visitor(client)
+
+    assert client.get(f"/api/missions/{mission_id}").json()["mission"]["open_question_count"] == 0
+
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        client.post(
+            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            json={"question": "hi"},
+        )
+    assert client.get(f"/api/missions/{mission_id}").json()["mission"]["open_question_count"] == 1
+
+
 def test_delete_mission():
     client = _client()
     mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]

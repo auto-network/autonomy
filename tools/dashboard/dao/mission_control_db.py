@@ -457,6 +457,24 @@ def list_conversation(
     return [dict(r) for r in rows]
 
 
+def count_open_questions(
+    mission_id: str, *, db_path: Path | str | None = None,
+) -> int:
+    """Questions with no answer yet — the one activity signal worth a
+    home-page badge (graph://97ace518-788 §0: cheaply derivable from a
+    column already being written, not a new capability)."""
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM mission_conversation"
+            " WHERE mission_id = ? AND answer IS NULL",
+            (mission_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else 0
+
+
 def mark_question_relay_status(
     mission_id: str, entry_id: str, status: str, *, db_path: Path | str | None = None,
 ) -> None:

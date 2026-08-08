@@ -81,6 +81,7 @@ async def get_mission(request: Request) -> JSONResponse:
         current = db.get_current_site(mission_id)
         if current:
             payload["current_revision"] = _revision_payload(current, include_html=False)
+    payload["open_question_count"] = db.count_open_questions(mission_id)
     return JSONResponse({"mission": payload})
 
 
