@@ -270,6 +270,25 @@ def test_list_conversation_orders_oldest_first(tmp_path):
     assert [e["entry_id"] for e in listed] == [e1["entry_id"], e2["entry_id"]]
 
 
+def test_count_open_questions(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    assert db.count_open_questions(mission["mission_id"], db_path=path) == 0
+
+    e1 = db.ask_question(mission["mission_id"], "q1", "guest:a", "A", db_path=path)
+    db.ask_question(mission["mission_id"], "q2", "guest:b", "B", db_path=path)
+    assert db.count_open_questions(mission["mission_id"], db_path=path) == 2
+
+    db.answer_question(mission["mission_id"], e1["entry_id"], "ans", "auto-x", db_path=path)
+    assert db.count_open_questions(mission["mission_id"], db_path=path) == 1
+
+
+def test_count_open_questions_no_mission_returns_zero(tmp_path):
+    path = _db_path(tmp_path)
+    db.init_db(path)
+    assert db.count_open_questions("nope", db_path=path) == 0
+
+
 def test_mark_question_relay_status_updates_status(tmp_path):
     path = _db_path(tmp_path)
     mission = db.create_mission("OSS Insights", db_path=path)

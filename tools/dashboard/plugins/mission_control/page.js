@@ -13,11 +13,29 @@
 
 (function () {
 
+// Recency reads as "3h ago" / "2d ago", not a raw timestamp — the home
+// page's job is "is this alive?", not "what second was this written?"
+// (graph://97ace518-788 §0: recency over current-state precision.)
+function relativeTime(unixSeconds) {
+  if (!unixSeconds) return '';
+  const deltaS = Math.max(0, (Date.now() / 1000) - unixSeconds);
+  if (deltaS < 60) return 'just now';
+  const mins = Math.floor(deltaS / 60);
+  if (mins < 60) return mins + 'm ago';
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return hours + 'h ago';
+  const days = Math.floor(hours / 24);
+  if (days < 30) return days + 'd ago';
+  return Math.floor(days / 30) + 'mo ago';
+}
+
 function missionControlPage() {
   return {
     missions: [],
     revisions: {},
+    conversation: {},
     expanded: '',
+    relativeTime: relativeTime,
 
     async init() {
       await this.refreshMissions();
@@ -28,9 +46,10 @@ function missionControlPage() {
         const res = await fetch('/api/missions');
         const data = await res.json();
         const list = (data && data.missions) || [];
-        // The list endpoint doesn't include current_revision — fetch each
-        // mission's detail for the summary line. Small N (missions are a
-        // rare, coarse-grained entity), so no pagination/batching needed.
+        // The list endpoint doesn't include current_revision/open_question_count
+        // — fetch each mission's detail for the summary line. Small N
+        // (missions are a rare, coarse-grained entity), so no pagination/
+        // batching needed.
         this.missions = await Promise.all(list.map(async (m) => {
           try {
             const detail = await fetch('/api/missions/' + encodeURIComponent(m.mission_id));
@@ -51,7 +70,10 @@ function missionControlPage() {
         return;
       }
       this.expanded = missionId;
-      await this.refreshRevisions(missionId);
+      await Promise.all([
+        this.refreshRevisions(missionId),
+        this.refreshConversation(missionId),
+      ]);
     },
 
     async refreshRevisions(missionId) {
@@ -61,6 +83,16 @@ function missionControlPage() {
         this.revisions = {...this.revisions, [missionId]: (data && data.revisions) || []};
       } catch (_) {
         this.revisions = {...this.revisions, [missionId]: []};
+      }
+    },
+
+    async refreshConversation(missionId) {
+      try {
+        const res = await fetch('/api/missions/' + encodeURIComponent(missionId) + '/questions');
+        const data = await res.json();
+        this.conversation = {...this.conversation, [missionId]: (data && data.questions) || []};
+      } catch (_) {
+        this.conversation = {...this.conversation, [missionId]: []};
       }
     },
   };

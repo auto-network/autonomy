@@ -4,66 +4,87 @@
 
   <header class="border-b border-gray-800 px-4 sm:px-6 py-4">
     <h1 class="text-2xl font-bold text-white">Mission Control</h1>
-    <p class="text-sm text-gray-400">
-      Missions and their chromeless native sites — read-only. Missions are
-      created and updated by agent sessions via the API
-      (<code class="text-gray-300">POST /api/missions</code>,
-      <code class="text-gray-300">POST /api/missions/&lt;id&gt;/site</code>),
-      not from this page.
-    </p>
   </header>
 
-  <main class="max-w-5xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+  <main class="max-w-3xl mx-auto px-4 sm:px-6 py-6 space-y-3">
 
-    <section data-testid="mc-missions">
-      <h2 class="text-sm font-semibold text-white mb-2">Missions</h2>
-      <div class="space-y-3">
-        <template x-for="m in missions" :key="m.mission_id">
-          <div class="rounded-md border border-gray-800 bg-gray-900/40 p-4 min-w-0" :data-testid="'mc-mission-' + m.mission_id">
-            <div class="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-2">
-              <div class="min-w-0">
-                <span class="text-white font-semibold" x-text="m.name"></span>
-                <span class="text-gray-500 text-xs sm:ml-2 break-all" x-text="m.mission_id"></span>
-              </div>
-              <a :href="'/missions/' + m.mission_id" target="_blank" data-hard-reload
-                 class="text-indigo-400 text-xs hover:underline shrink-0"
-                 x-show="m.current_revision_id"
-                 :data-testid="'mc-view-site-' + m.mission_id">View site &rarr;</a>
-            </div>
-            <div class="text-xs text-gray-500 mt-1">
-              coordinator: <span x-text="m.coordinator_session || '(none)'"></span>
-            </div>
-            <div class="text-xs text-gray-500 mt-1" x-show="m.current_revision">
-              current: rev<span x-text="m.current_revision && m.current_revision.revision_seq"></span>
-              <span x-show="m.current_revision && m.current_revision.note">
-                &mdash; <span x-text="m.current_revision && m.current_revision.note"></span>
-              </span>
-            </div>
-            <div class="mt-3">
-              <button @click="toggleExpand(m.mission_id)" class="text-xs text-gray-400 hover:text-white"
-                      :data-testid="'mc-expand-' + m.mission_id">
-                <span x-text="expanded === m.mission_id ? 'Hide revision history' : 'Show revision history'"></span>
-              </button>
-            </div>
-            <div x-show="expanded === m.mission_id" class="mt-3" :data-testid="'mc-detail-' + m.mission_id">
-              <div class="space-y-1 max-h-48 overflow-y-auto">
-                <template x-for="r in (revisions[m.mission_id] || [])" :key="r.revision_id">
-                  <div class="text-xs flex items-center flex-wrap gap-x-2 gap-y-1 border-b border-gray-800/40 py-1"
-                       :data-testid="'mc-revision-' + r.revision_id">
-                    <span class="font-mono text-amber-300" x-text="'#' + r.revision_seq"></span>
-                    <span class="text-gray-300 flex-1 min-w-[6rem] truncate" x-text="r.note || '(no note)'"></span>
-                    <span class="text-gray-500" x-text="r.byte_size + 'B'"></span>
-                    <span class="text-emerald-400 text-[10px] font-bold" x-show="r.revision_id === m.current_revision_id">CURRENT</span>
-                  </div>
-                </template>
-                <p class="text-xs text-gray-500" x-show="(revisions[m.mission_id] || []).length === 0">No revisions yet.</p>
-              </div>
+    <template x-for="m in missions" :key="m.mission_id">
+      <div class="rounded-md border border-gray-800 bg-gray-900/40 p-4 min-w-0" :data-testid="'mc-mission-' + m.mission_id">
+
+        <!-- Headline row: identity + the one action + the one thing that needs you. -->
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <div class="text-white font-semibold text-base" x-text="m.name"></div>
+            <div class="text-xs text-gray-500 mt-0.5">
+              <span x-show="m.current_revision" x-text="'Updated ' + relativeTime(m.current_revision && m.current_revision.created_at)"></span>
+              <span x-show="!m.current_revision" class="text-amber-400">No site yet</span>
             </div>
           </div>
-        </template>
-        <p class="text-xs text-gray-500" x-show="missions.length === 0" data-testid="mc-empty">No missions yet.</p>
+          <div class="flex items-center gap-2 shrink-0">
+            <span x-show="m.open_question_count > 0"
+                  class="px-2 py-0.5 rounded-full bg-amber-900/40 text-amber-300 text-[11px] font-semibold whitespace-nowrap"
+                  :data-testid="'mc-open-questions-' + m.mission_id"
+                  x-text="m.open_question_count + (m.open_question_count === 1 ? ' open question' : ' open questions')"></span>
+            <a :href="'/missions/' + m.mission_id" target="_blank" data-hard-reload
+               x-show="m.current_revision_id"
+               class="px-3 py-1 rounded bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-medium whitespace-nowrap"
+               :data-testid="'mc-view-site-' + m.mission_id">View site &rarr;</a>
+          </div>
+        </div>
+
+        <!-- Latest change, plain -- no internal revision-number prefix next
+             to a note that may carry the author's own separate numbering. -->
+        <p class="text-xs text-gray-400 mt-2 leading-snug"
+           x-show="m.current_revision && m.current_revision.note"
+           x-text="m.current_revision && m.current_revision.note"></p>
+
+        <button @click="toggleExpand(m.mission_id)" class="text-xs text-gray-500 hover:text-gray-300 mt-3"
+                :data-testid="'mc-expand-' + m.mission_id">
+          <span x-text="expanded === m.mission_id ? 'Hide details' : 'Details'"></span>
+        </button>
+
+        <!-- Reference material: raw id, coordinator, full history. Behind
+             the click, never in the headline view (graph://97ace518-788 §0). -->
+        <div x-show="expanded === m.mission_id" class="mt-3 pt-3 border-t border-gray-800/60 space-y-3" :data-testid="'mc-detail-' + m.mission_id">
+          <div class="text-xs text-gray-500 space-y-0.5">
+            <div>id: <span class="break-all" x-text="m.mission_id"></span></div>
+            <div>coordinator: <span x-text="m.coordinator_session || '(none)'"></span></div>
+          </div>
+
+          <div>
+            <div class="text-xs text-gray-500 mb-1">Revision history</div>
+            <div class="space-y-1 max-h-48 overflow-y-auto">
+              <template x-for="r in (revisions[m.mission_id] || [])" :key="r.revision_id">
+                <div class="text-xs flex items-center flex-wrap gap-x-2 gap-y-1 border-b border-gray-800/40 py-1"
+                     :data-testid="'mc-revision-' + r.revision_id">
+                  <span class="font-mono text-amber-300" x-text="'#' + r.revision_seq"></span>
+                  <span class="text-gray-300 flex-1 min-w-[6rem] truncate" x-text="r.note || '(no note)'"></span>
+                  <span class="text-gray-500" x-text="r.byte_size + 'B'"></span>
+                  <span class="text-emerald-400 text-[10px] font-bold" x-show="r.revision_id === m.current_revision_id">CURRENT</span>
+                </div>
+              </template>
+              <p class="text-xs text-gray-500" x-show="(revisions[m.mission_id] || []).length === 0">No revisions yet.</p>
+            </div>
+          </div>
+
+          <div>
+            <div class="text-xs text-gray-500 mb-1">Questions</div>
+            <div class="space-y-1.5 max-h-48 overflow-y-auto">
+              <template x-for="q in (conversation[m.mission_id] || [])" :key="q.entry_id">
+                <div class="text-xs border-b border-gray-800/40 py-1" :data-testid="'mc-question-' + q.entry_id">
+                  <div class="text-gray-300"><span class="text-gray-500" x-text="q.asked_by_label + ':'"></span> <span x-text="q.question"></span></div>
+                  <div class="text-gray-500 mt-0.5" x-show="q.answer"><span class="text-emerald-400">Answered:</span> <span x-text="q.answer"></span></div>
+                  <div class="text-amber-400 mt-0.5" x-show="!q.answer">Awaiting answer</div>
+                </div>
+              </template>
+              <p class="text-xs text-gray-500" x-show="(conversation[m.mission_id] || []).length === 0">No questions yet.</p>
+            </div>
+          </div>
+        </div>
       </div>
-    </section>
+    </template>
+
+    <p class="text-xs text-gray-500" x-show="missions.length === 0" data-testid="mc-empty">No missions yet.</p>
 
   </main>
 </div>
