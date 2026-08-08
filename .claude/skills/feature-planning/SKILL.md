@@ -90,3 +90,7 @@ Hand it to a different engineer who knows the product but not this job. Could th
 - Appetite / "estimates vs appetites" / fixed-time-variable-scope — Shape Up (Basecamp), ch. 3 & 8.
 - Decision records — Nygard 2011; MADR 4 (adr.github.io/madr). Faking-it rationale — Parnas & Clements, IEEE TSE 1986.
 - Verification vs validation — NASA Systems Engineering Handbook.
+
+## Persisting edits to this skill
+
+`.claude/` is gitignored by default but this file is already tracked (`cee0bf03`) — edit it, then `git add -f .claude/skills/feature-planning/SKILL.md` and commit normally; bare `git add` will refuse it and that refusal is not a sign the edit is ephemeral.
