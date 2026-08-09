@@ -4,6 +4,7 @@ Runs the real server in a subprocess against a stubbed `graph` binary, so no
 graph database is touched.
 """
 
+import importlib.util
 import json
 import socket
 import subprocess
@@ -15,6 +16,53 @@ from pathlib import Path
 import pytest
 
 GATEWAY = Path(__file__).parent / "gateway.py"
+
+# Load gateway.py as a module for in-process unit tests of pure helpers.
+_spec = importlib.util.spec_from_file_location("gateway_mod", GATEWAY)
+gateway_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(gateway_mod)
+
+_TUNNEL_XFCC = ("By=spiffe://unified.prod.svc-global-kube.applied.mia.openai.org"
+                "/ns/tunnel-service/sa/tunnel-service;Hash=abc")
+
+
+def test_extract_identity_from_meta():
+    headers = {"X-Forwarded-Client-Cert": _TUNNEL_XFCC}
+    params = {"_meta": {"openai/session": "v1/sess", "openai/subject": "v1/subj",
+                        "openai/organization": "v1/org"}}
+    idn = gateway_mod.extract_identity(headers, params)
+    assert idn["openai_session"] == "v1/sess"
+    assert idn["openai_subject"] == "v1/subj"
+    assert idn["openai_org"] == "v1/org"
+    assert idn["tunnel_verified"] is True
+    assert gateway_mod.identity_trusted(idn) is True
+
+
+def test_extract_identity_header_fallback():
+    # no _meta -> fall back to X-Openai-* headers
+    headers = {"X-Openai-Session": "v1/hs", "X-Openai-Subject": "v1/hu",
+               "X-Forwarded-Client-Cert": _TUNNEL_XFCC}
+    idn = gateway_mod.extract_identity(headers, {})
+    assert idn["openai_session"] == "v1/hs"
+    assert idn["openai_subject"] == "v1/hu"
+    assert idn["tunnel_verified"] is True
+
+
+def test_identity_untrusted_without_tunnel_cert(monkeypatch):
+    monkeypatch.setattr(gateway_mod, "REQUIRE_TUNNEL_CERT", True)
+    # a real session id but NO tunnel cert -> not trustable
+    idn = gateway_mod.extract_identity({}, {"_meta": {"openai/session": "v1/x"}})
+    assert idn["tunnel_verified"] is False
+    assert gateway_mod.identity_trusted(idn) is False
+    # unless the cert requirement is disabled for local testing
+    monkeypatch.setattr(gateway_mod, "REQUIRE_TUNNEL_CERT", False)
+    assert gateway_mod.identity_trusted(idn) is True
+
+
+def test_identity_trusted_needs_a_session():
+    monkeypatch_free = gateway_mod.extract_identity({"X-Forwarded-Client-Cert": _TUNNEL_XFCC}, {})
+    assert monkeypatch_free["openai_session"] is None
+    assert gateway_mod.identity_trusted(monkeypatch_free) is False
 
 GRAPH_STUB = """#!/usr/bin/env bash
 case "$1" in

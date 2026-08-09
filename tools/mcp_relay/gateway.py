@@ -23,9 +23,12 @@ import json
 import os
 import re
 import secrets
+import ssl
 import subprocess
 import sys
 import threading
+import time
+import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -56,6 +59,44 @@ TOOL_SCOPES = {
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# ---------------------------------------------------------------- caller identity
+# Auth binds to identifiers OpenAI's tunnel stamps on every request — NOT to
+# anything the model types. Verified on the wire 2026-08-09 (design eeb23208-257):
+# openai/session is per-chat and turn-stable; openai/subject is the user. These
+# are trustworthy ONLY when the request arrives via OpenAI's tunnel, proven by the
+# tunnel-service mTLS client cert (X-Forwarded-Client-Cert spiffe id). With the
+# relay bound to loopback and fronted only by tunnel-client, that holds; set
+# MCP_RELAY_REQUIRE_TUNNEL_CERT=0 only for local testing.
+REQUIRE_TUNNEL_CERT = os.environ.get(
+    "MCP_RELAY_REQUIRE_TUNNEL_CERT", "1") not in ("0", "false", "no", "")
+_TUNNEL_SPIFFE_MARK = "/ns/tunnel-service/"
+
+
+def extract_identity(headers, params) -> dict:
+    """Pull OpenAI's tunnel-stamped identity from a request.
+
+    Returns {openai_session, openai_subject, openai_org, tunnel_verified}.
+    `_meta` is canonical; HTTP headers are the fallback. `tunnel_verified` is
+    True only when the tunnel-service mTLS client cert is present — callers must
+    refuse to trust the identity otherwise (unless REQUIRE_TUNNEL_CERT is off)."""
+    meta = (params or {}).get("_meta") or {}
+    xfcc = headers.get("X-Forwarded-Client-Cert") or ""
+    return {
+        "openai_session": meta.get("openai/session") or headers.get("X-Openai-Session"),
+        "openai_subject": meta.get("openai/subject") or headers.get("X-Openai-Subject"),
+        "openai_org": meta.get("openai/organization"),
+        "tunnel_verified": _TUNNEL_SPIFFE_MARK in xfcc and "openai" in xfcc.lower(),
+    }
+
+
+def identity_trusted(identity: dict) -> bool:
+    """Whether we can bind auth to this identity: a real session id, and (unless
+    disabled for testing) a verified tunnel mTLS cert."""
+    if not identity.get("openai_session"):
+        return False
+    return identity.get("tunnel_verified", False) or not REQUIRE_TUNNEL_CERT
 
 
 # ---------------------------------------------------------------- peer registry
@@ -644,15 +685,34 @@ class RelayHandler(BaseHTTPRequestHandler):
         if not isinstance(msg, dict):
             self._send_json(400, jsonrpc_error(None, -32600, "Batch requests not supported"))
             return
-        # request-level debug log (method + tool + response error-ness)
+        # request-level debug log (method + tool + response error-ness).
+        # Full-metadata capture (all headers + _meta, NEVER argument values which
+        # can carry peer_token) into a separate file, to answer: does ChatGPT
+        # send a stable per-conversation identifier we could bind approval to?
         try:
+            params = msg.get("params") or {}
             _dbg = {
                 "method": msg.get("method"),
-                "tool": (msg.get("params") or {}).get("name"),
+                "tool": params.get("name"),
                 "hdr_method": self.headers.get("Mcp-Method"),
                 "hdr_name": self.headers.get("Mcp-Name"),
                 "proto": self.headers.get("MCP-Protocol-Version"),
             }
+            try:
+                cap = {
+                    "method": msg.get("method"),
+                    "tool": params.get("name"),
+                    "headers": {k: v for k, v in self.headers.items()},
+                    "msg_meta": msg.get("_meta"),
+                    "params_meta": params.get("_meta"),
+                    "arg_keys": sorted((params.get("arguments") or {}).keys())
+                    if isinstance(params.get("arguments"), dict) else None,
+                }
+                with open(self.state.log_path.parent / "wire_capture.jsonl", "a") as f:
+                    cap["ts"] = now_iso()
+                    f.write(json.dumps(cap) + "\n")
+            except Exception:
+                pass
         except Exception:
             _dbg = {"method": "?"}
         response = handle_message(self.state, msg, self.headers)
