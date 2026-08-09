@@ -119,6 +119,7 @@ ENRICH = {
     "commit_sign": _enrich_commit_sign,
     **_link_approvals.ENRICH,
     **_dashboard_access.ENRICH,
+    **_mcp_peer.ENRICH,
 }
 
 

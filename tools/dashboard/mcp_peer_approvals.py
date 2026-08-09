@@ -44,8 +44,28 @@ def prepare_create_link(session: str, request: dict) -> tuple[dict, dict]:
     missing = _LINK_REQUIRED - set(request)
     if missing:
         raise ValueError(f"mcp_peer_link request missing: {sorted(missing)}")
+    if not str(request.get("intent") or "").strip():
+        raise ValueError("mcp_peer_link requires a non-empty intent")
     frozen = {k: str(request.get(k, "")) for k in _LINK_REQUIRED}
+    if request.get("handle"):  # short display handle (sess_tag), not the raw session
+        frozen["handle"] = str(request["handle"])
     return frozen, {}
+
+
+def enrich_link(row: dict) -> dict:
+    """Attach the operator's org list for the popup dropdown, at GET time so it's
+    always current. The org list is DASHBOARD-side only — the requester never sees
+    or names orgs; the operator picks. This is what makes the org <select> render."""
+    try:
+        from tools.graph import org_ops
+        orgs = []
+        for ref in org_ops.list_orgs():
+            slug = ref.get("slug") if isinstance(ref, dict) else getattr(ref, "slug", None)
+            if slug:
+                orgs.append(slug)
+    except Exception:
+        orgs = []
+    return {"orgs": orgs}
 
 
 def prepare_create_crosstalk(session: str, request: dict) -> tuple[dict, dict]:
@@ -53,6 +73,8 @@ def prepare_create_crosstalk(session: str, request: dict) -> tuple[dict, dict]:
     if missing:
         raise ValueError(f"mcp_crosstalk request missing: {sorted(missing)}")
     frozen = {k: str(request.get(k, "")) for k in _CROSSTALK_REQUIRED}
+    if request.get("handle"):
+        frozen["handle"] = str(request["handle"])
     return frozen, {}
 
 
@@ -113,4 +135,4 @@ async def execute_crosstalk(row: dict, decision: dict) -> dict:
 PREPARE_CREATE = {KIND_LINK: prepare_create_link, KIND_CROSSTALK: prepare_create_crosstalk}
 EXECUTORS = {KIND_LINK: execute_link, KIND_CROSSTALK: execute_crosstalk}
 AUTHORIZE_DECISION = {KIND_LINK: _require_operator, KIND_CROSSTALK: _require_operator}
-ENRICH: dict = {}  # request is self-describing; the popup reads r.request directly
+ENRICH = {KIND_LINK: enrich_link}  # attach the org list for the popup dropdown
