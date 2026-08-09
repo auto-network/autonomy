@@ -154,41 +154,77 @@ async def resolve_crosstalk(request: Request) -> JSONResponse:
     osession = str(body.get("openai_session") or "").strip()
     target = str(body.get("target_session") or "").strip()
     target_org = str(body.get("target_org") or "")
+    message = str(body.get("message") or "")
+    intent = str(body.get("intent") or "")
     if not osession or not target:
         return JSONResponse({"error": "openai_session and target_session required"},
                             status_code=400)
 
     # The chat must be a linked (approved) session before it can be granted
-    # per-session crosstalk.
+    # per-session crosstalk. Linking is a SEPARATE step — never raise a link
+    # dialog off a send; tell the caller to link first.
     if db.resolve_session(osession)["status"] != db.APPROVED:
         return JSONResponse({"status": "peer_not_linked"})
 
-    # Reconcile a decided crosstalk approval: a decline becomes 'denied' so we
-    # stop re-popping it.
-    grant = db.get_crosstalk_grant(osession, target)
-    if grant and grant.get("status") == db.PENDING and grant.get("approval_id"):
-        appr = ar.get(grant["approval_id"])
-        if appr and appr.get("result") is not None and not appr["result"].get("approved"):
-            db.set_crosstalk_status(osession, target, db.DENIED)
-            grant = db.get_crosstalk_grant(osession, target)
+    grant = _reconcile_crosstalk(osession, target)
 
     if db.crosstalk_allowed(osession, target):
         return JSONResponse({"status": db.APPROVED})
     if grant and grant.get("status") == db.DENIED:
         return JSONResponse({"status": db.DENIED})
 
+    # Open ONE approval carrying the actual message (that's what the operator
+    # authorizes). The relay holds the send pending this decision.
     db.upsert_pending_crosstalk(osession, target, target_org=target_org)
     current = db.get_crosstalk_grant(osession, target)
-    if not _has_open_approval(current.get("approval_id")):
+    rid = current.get("approval_id")
+    if not _has_open_approval(rid):
         rid = await _open_approval(kinds.KIND_CROSSTALK, _handle(osession), {
             "openai_session": osession, "target_session": target,
-            "target_org": target_org, "handle": _handle(osession)})
+            "target_org": target_org, "handle": _handle(osession),
+            "message": message, "intent": intent})
         db.set_crosstalk_approval_id(osession, target, rid)
-    return JSONResponse({"status": db.PENDING})
+    return JSONResponse({"status": db.PENDING, "approval_id": rid})
+
+
+def _reconcile_crosstalk(osession: str, target: str) -> dict | None:
+    """A declined crosstalk approval becomes 'denied' so it stops re-popping."""
+    grant = db.get_crosstalk_grant(osession, target)
+    if grant and grant.get("status") == db.PENDING and grant.get("approval_id"):
+        appr = ar.get(grant["approval_id"])
+        if appr and appr.get("result") is not None and not appr["result"].get("approved"):
+            db.set_crosstalk_status(osession, target, db.DENIED)
+            grant = db.get_crosstalk_grant(osession, target)
+    return grant
+
+
+async def crosstalk_status(request: Request) -> JSONResponse:
+    """Non-popping poll of a (session, target) grant — the relay calls this in a
+    loop while HOLDING a crosstalk_send, to learn approve/decline without opening
+    another popup."""
+    err = _relay_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    osession = str(body.get("openai_session") or "").strip()
+    target = str(body.get("target_session") or "").strip()
+    if not osession or not target:
+        return JSONResponse({"error": "openai_session and target_session required"},
+                            status_code=400)
+    grant = _reconcile_crosstalk(osession, target)
+    if db.crosstalk_allowed(osession, target):
+        return JSONResponse({"status": db.APPROVED})
+    if grant and grant.get("status") == db.DENIED:
+        return JSONResponse({"status": db.DENIED})
+    return JSONResponse({"status": db.PENDING if grant else "none"})
 
 
 ROUTES = [
     Route("/api/mcp/session/resolve", resolve_session, methods=["POST"]),
     Route("/api/mcp/session/status", session_status, methods=["POST"]),
     Route("/api/mcp/crosstalk/resolve", resolve_crosstalk, methods=["POST"]),
+    Route("/api/mcp/crosstalk/status", crosstalk_status, methods=["POST"]),
 ]

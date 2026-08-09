@@ -156,23 +156,32 @@ def test_declined_approval_becomes_denied(client):
     assert r.json()["status"] == "pending"
 
 
-def test_crosstalk_requires_linked_peer_then_grants(client):
-    # not linked yet -> peer_not_linked
+def test_crosstalk_requires_linked_peer_then_carries_message_and_grants(client):
+    # not linked yet -> peer_not_linked (linking is a separate step, never a send)
     r = client.post("/api/mcp/crosstalk/resolve", headers=AUTH,
-                    json={"openai_session": "v1/chatD", "target_session": "auto-x"})
+                    json={"openai_session": "v1/chatX", "target_session": "auto-x",
+                          "message": "hi"})
     assert r.json()["status"] == "peer_not_linked"
     # link the peer
-    db.upsert_pending_session("v1/chatD")
-    db.approve_session("v1/chatD", autonomy_org="autonomy", level="read", expires_at=None)
-    # now crosstalk resolve -> pending + opens a crosstalk approval
+    db.upsert_pending_session("v1/chatX")
+    db.approve_session("v1/chatX", autonomy_org="autonomy", level="read", expires_at=None)
+    # crosstalk resolve -> pending, and the approval CARRIES THE MESSAGE (that's what
+    # the operator authorizes) + returns the approval id for the relay to hold on.
     r = client.post("/api/mcp/crosstalk/resolve", headers=AUTH,
-                    json={"openai_session": "v1/chatD", "target_session": "auto-x",
-                          "target_org": "personal"})
-    assert r.json()["status"] == "pending"
-    xrid = [rid for rid, a in client.ar.rows.items() if a["kind"] == "mcp_crosstalk"][0]
-    # operator approves the crosstalk grant
+                    json={"openai_session": "v1/chatX", "target_session": "auto-x",
+                          "target_org": "personal", "message": "the actual payload",
+                          "intent": "coordinate the GIS pass"})
+    body = r.json()
+    assert body["status"] == "pending" and body["approval_id"]
+    xrid = body["approval_id"]
+    assert client.ar.rows[xrid]["request"]["message"] == "the actual payload"
+    # non-popping status poll (what the relay uses while holding) -> still pending
+    s = client.post("/api/mcp/crosstalk/status", headers=AUTH,
+                    json={"openai_session": "v1/chatX", "target_session": "auto-x"})
+    assert s.json()["status"] == "pending"
+    # operator approves -> grant live -> status flips to approved
     client.ar.decide(xrid, {"approved": True})
-    db.approve_crosstalk("v1/chatD", "auto-x", expires_at=None)
-    r = client.post("/api/mcp/crosstalk/resolve", headers=AUTH,
-                    json={"openai_session": "v1/chatD", "target_session": "auto-x"})
-    assert r.json()["status"] == "approved"
+    db.approve_crosstalk("v1/chatX", "auto-x", expires_at=None)
+    s = client.post("/api/mcp/crosstalk/status", headers=AUTH,
+                    json={"openai_session": "v1/chatX", "target_session": "auto-x"})
+    assert s.json()["status"] == "approved"
