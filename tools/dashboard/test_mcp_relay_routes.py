@@ -85,6 +85,23 @@ def test_new_session_goes_pending_and_opens_one_approval(client):
     assert len(client.ar.rows) == 1
 
 
+def test_approval_uses_a_short_handle_not_the_raw_session(client):
+    client.post("/api/mcp/session/resolve", headers=AUTH,
+                json={"openai_session": "v1/secretbearersession", "intent": "help"})
+    appr = next(iter(client.ar.rows.values()))
+    assert appr["session"] != "v1/secretbearersession"          # not the bearer-equiv session
+    assert len(appr["session"]) == 12                            # the sha256[:12] handle
+    assert appr["request"]["handle"] == appr["session"]
+    assert appr["request"]["openai_session"] == "v1/secretbearersession"  # raw kept for executor
+
+
+def test_enrich_link_attaches_the_org_list():
+    from tools.dashboard import mcp_peer_approvals as kinds
+    assert "mcp_peer_link" in kinds.ENRICH
+    out = kinds.ENRICH["mcp_peer_link"]({"request": {}})
+    assert "orgs" in out and isinstance(out["orgs"], list)  # dropdown source (empty in test env)
+
+
 def test_session_status_is_read_only_never_pops(client):
     body = {"openai_session": "v1/chatB", "intent": "x"}
     client.post("/api/mcp/session/resolve", headers=AUTH, json=body)

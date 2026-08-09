@@ -2256,28 +2256,26 @@
         mcp_peer_link: {
           async open(self, r) {
             const req = r.request || {};
-            // The operator picks from THEIR orgs — enumerate them (the model
-            // never needs the list). Fall back to a typed slug if this fails.
-            let orgs = [];
-            try {
-              const resp = await fetch('/api/orgs');
-              if (resp.ok) {
-                const d = await resp.json();
-                orgs = (d.orgs || []).map((o) => o.slug).filter(Boolean);
-              }
-            } catch (e) { /* typed fallback below */ }
+            // Orgs come from the server-side ENRICH (r.orgs) so the dropdown always
+            // populates; only fall back to a client fetch if that's somehow absent.
+            let orgs = Array.isArray(r.orgs) ? r.orgs.filter(Boolean) : [];
+            if (!orgs.length) {
+              try {
+                const resp = await fetch('/api/orgs');
+                if (resp.ok) {
+                  const d = await resp.json();
+                  orgs = (d.orgs || []).map((o) => o.slug).filter(Boolean);
+                }
+              } catch (e) { /* typed fallback in the template */ }
+            }
+            const handle = req.handle || r.session || 'unknown';
             self.approvalBusy = false;
             self.approvalRequest = {
-              id: r.id, kind: r.kind, session: r.session,
-              title: 'ChatGPT connector access', actionLabel: 'Approve access',
-              op: 'link', target: 'access',
-              bodyMarkdown: [
-                'A ChatGPT chat is requesting access to Autonomy.',
-                '',
-                'Intent: ' + (req.intent || '(none stated)'),
-                'OpenAI user: ' + (req.openai_subject || 'unknown'),
-                'OpenAI org: ' + (req.openai_org || 'unknown'),
-              ].join('\n'),
+              id: r.id, kind: r.kind, session: handle,
+              title: 'Approve ChatGPT access', actionLabel: 'Approve',
+              target: null,
+              // Lead with the reason — it's the whole basis for the decision.
+              bodyMarkdown: 'This ChatGPT chat wants to:\n\n' + (req.intent || '(no reason given)'),
               orgs,
               autonomyOrg: orgs[0] || '',
               level: 'read',
@@ -2296,17 +2294,15 @@
         mcp_crosstalk: {
           open(self, r) {
             const req = r.request || {};
+            const handle = req.handle || r.session || 'unknown';
             self.approvalBusy = false;
             self.approvalRequest = {
-              id: r.id, kind: r.kind, session: r.session,
-              title: 'Allow CrossTalk to a session', actionLabel: 'Allow',
-              op: 'crosstalk', target: req.target_session || 'session',
-              bodyMarkdown: [
-                'A ChatGPT chat wants to send CrossTalk messages to a session.',
-                '',
-                'Target session: ' + (req.target_session || 'unknown'),
-                'Target org: ' + (req.target_org || 'unknown'),
-              ].join('\n'),
+              id: r.id, kind: r.kind, session: handle,
+              title: 'Allow ChatGPT to message a session', actionLabel: 'Allow',
+              op: 'message', target: req.target_session || 'session',
+              bodyMarkdown: 'This ChatGPT chat wants to send CrossTalk to session '
+                + (req.target_session || 'unknown')
+                + (req.target_org ? ' (org ' + req.target_org + ')' : '') + '.',
               ttl: '2592000',
               awaitExecution: true,
               error: '',

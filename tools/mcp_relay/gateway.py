@@ -203,6 +203,10 @@ def hello_dashboard(identity: dict, args: dict, *, poster=dashboard_post) -> dic
         return {"structured": {"status": "untrusted"}, "is_error": True,
                 "text": "Could not establish a trusted OpenAI session identity — "
                         "this connector must be reached through OpenAI's tunnel."}
+    if not str(args.get("intent") or "").strip():
+        return {"structured": {"status": "needs_intent"}, "is_error": True,
+                "text": "Call hello again WITH an 'intent' — one specific sentence on what you "
+                        "want to do and why. The operator can't approve access without a reason."}
     resolved = poster("/api/mcp/session/resolve", {
         "openai_session": identity["openai_session"],
         "openai_subject": identity.get("openai_subject") or "",
@@ -538,14 +542,16 @@ TOOL_DEFS = [
             "properties": {
                 "intent": {
                     "type": "string",
-                    "description": "What you want to do and why, in plain language — the main "
-                                   "thing the operator reads on the approval prompt. Be specific.",
+                    "description": "REQUIRED. What you want to do and why, in plain language — this "
+                                   "is the ONLY thing that tells the operator why they're being asked "
+                                   "to approve, so it must be specific and non-empty.",
                 },
                 "peer_name": {
                     "type": "string",
                     "description": "Legacy only (registry mode); ignored when the dashboard authorizes.",
                 },
             },
+            "required": ["intent"],
         },
         "annotations": {"readOnlyHint": True},
     },
