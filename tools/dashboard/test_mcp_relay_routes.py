@@ -9,7 +9,9 @@ import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
+from tools.dashboard import mcp_peer_approvals as kinds
 from tools.dashboard import mcp_relay_routes as routes
+from tools.dashboard.dao import auth_db
 from tools.dashboard.dao import mcp_relay_db as db
 
 TOKEN = "test-service-token"
@@ -47,6 +49,7 @@ class _FakeBus:
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "mcp_relay.db")
+    auth_db.init_db(tmp_path / "auth.db")  # crosstalk_messages store for relay/collect
     monkeypatch.setenv(routes.SERVICE_TOKEN_ENV, TOKEN)
     fake_ar = _FakeApprovals()
     fake_bus = _FakeBus()
@@ -85,12 +88,13 @@ def test_new_session_goes_pending_and_opens_one_approval(client):
     assert len(client.ar.rows) == 1
 
 
-def test_approval_uses_a_short_handle_not_the_raw_session(client):
+def test_approval_uses_a_minted_handle_not_the_raw_session(client):
     client.post("/api/mcp/session/resolve", headers=AUTH,
                 json={"openai_session": "v1/secretbearersession", "intent": "help"})
     appr = next(iter(client.ar.rows.values()))
     assert appr["session"] != "v1/secretbearersession"          # not the bearer-equiv session
-    assert len(appr["session"]) == 12                            # the sha256[:12] handle
+    assert "secretbearersession" not in appr["session"]         # no leak of the raw session
+    assert appr["session"].startswith("ChatGPT-")               # the minted human-readable id
     assert appr["request"]["handle"] == appr["session"]
     assert appr["request"]["openai_session"] == "v1/secretbearersession"  # raw kept for executor
 
@@ -185,3 +189,89 @@ def test_crosstalk_requires_linked_peer_then_carries_message_and_grants(client):
     s = client.post("/api/mcp/crosstalk/status", headers=AUTH,
                     json={"openai_session": "v1/chatX", "target_session": "auto-x"})
     assert s.json()["status"] == "approved"
+
+
+# ── /api/mcp/crosstalk/relay — dashboard enforces AND delivers ─────────────
+
+def _link(client, osession):
+    """Link a chat to an org so it may message; returns its minted handle."""
+    db.upsert_pending_session(osession)
+    db.approve_session(osession, autonomy_org="autonomy", level="read", expires_at=None)
+    return db.get_session(osession)["handle"]
+
+
+def test_relay_rejects_an_unlinked_peer(client):
+    r = client.post("/api/mcp/crosstalk/relay", headers=AUTH,
+                    json={"openai_session": "v1/nope", "target_session": "auto-x",
+                          "message": "hi", "intent": "coordinate"})
+    assert r.json()["status"] == "peer_not_linked"  # link is a separate approval
+
+
+def test_relay_holds_the_message_on_one_approval_when_ungranted(client):
+    handle = _link(client, "v1/chatH")
+    r = client.post("/api/mcp/crosstalk/relay", headers=AUTH,
+                    json={"openai_session": "v1/chatH", "target_session": "auto-x",
+                          "message": "the payload", "intent": "coordinate GIS"})
+    body = r.json()
+    assert body["status"] == "pending" and body["from"] == handle
+    appr = client.ar.rows[body["approval_id"]]
+    assert appr["session"] == handle                       # popup shows ChatGPT-<datetime>
+    assert appr["request"]["message"] == "the payload"     # approval carries the message
+    # a second relay of the same undecided send does NOT open a second popup
+    client.post("/api/mcp/crosstalk/relay", headers=AUTH,
+                json={"openai_session": "v1/chatH", "target_session": "auto-x",
+                      "message": "the payload", "intent": "coordinate GIS"})
+    assert len([a for a in client.ar.rows.values()
+                if a["kind"] == "mcp_crosstalk"]) == 1
+
+
+def test_relay_with_a_live_grant_delivers_stamped_from_the_handle(client):
+    handle = _link(client, "v1/chatG")
+    db.upsert_pending_crosstalk("v1/chatG", "auto-x")            # channel...
+    db.approve_crosstalk("v1/chatG", "auto-x", expires_at=None)  # ...already open
+    r = client.post("/api/mcp/crosstalk/relay", headers=AUTH,
+                    json={"openai_session": "v1/chatG", "target_session": "auto-x",
+                          "message": "flowing message", "intent": "coordinate"})
+    body = r.json()
+    assert body["status"] == "delivered" and body["from"] == handle
+    # stored in the one message store, attributed to the handle (not any token)
+    rows = auth_db.get_messages(session="auto-x")
+    assert any(m["sender_session"] == handle and m["message"] == "flowing message"
+               for m in rows)
+
+
+def test_execute_crosstalk_delivers_the_held_message_from_the_handle(client):
+    import asyncio
+    handle = _link(client, "v1/chatE")
+    db.upsert_pending_crosstalk("v1/chatE", "auto-x")
+    row = {"request": {"openai_session": "v1/chatE", "target_session": "auto-x",
+                       "message": "held then sent", "handle": handle}}
+    out = asyncio.run(kinds.execute_crosstalk(row, {"ttl_seconds": 3600}))
+    assert out["ok"] and out["from"] == handle
+    rows = auth_db.get_messages(session="auto-x")
+    assert any(m["sender_session"] == handle and m["message"] == "held then sent"
+               for m in rows)
+
+
+# ── /api/mcp/crosstalk/collect — a chat drains its own inbox ───────────────
+
+def test_collect_returns_queued_replies_in_order_and_is_idempotent(client):
+    handle = _link(client, "v1/chatC2")
+    import time as _t
+    auth_db.insert_message("auto-s", "planner", handle, None, None, "reply-1", _t.time(), 0)
+    auth_db.insert_message("auto-s", "planner", handle, None, None, "reply-2", _t.time(), 0)
+    r = client.post("/api/mcp/crosstalk/collect", headers=AUTH,
+                    json={"openai_session": "v1/chatC2"})
+    body = r.json()
+    assert body["handle"] == handle
+    assert [m["message"] for m in body["messages"]] == ["reply-1", "reply-2"]
+    # collecting again returns nothing new (rows are now delivered)
+    again = client.post("/api/mcp/crosstalk/collect", headers=AUTH,
+                        json={"openai_session": "v1/chatC2"})
+    assert again.json()["messages"] == []
+
+
+def test_collect_unknown_session_is_empty_not_an_error(client):
+    r = client.post("/api/mcp/crosstalk/collect", headers=AUTH,
+                    json={"openai_session": "v1/never-helloed"})
+    assert r.status_code == 200 and r.json()["messages"] == []

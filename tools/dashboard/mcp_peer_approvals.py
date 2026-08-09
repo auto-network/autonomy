@@ -138,9 +138,18 @@ async def execute_link(row: dict, decision: dict) -> dict:
 
 
 async def execute_crosstalk(row: dict, decision: dict) -> dict:
+    """On approval: write the (chat, target) grant AND deliver the held message.
+
+    The message the operator saw is stored on the approval request; delivering it
+    here — rather than handing it back to the relay — is what lets the dashboard
+    stamp the source from the chat's minted handle (never the relay's launching
+    identity). The handle is read from the authoritative session record, not from
+    the request, so a stale/forged request handle cannot change attribution.
+    """
     req = row.get("request") or {}
     openai_session = req.get("openai_session")
     target_session = req.get("target_session")
+    message = req.get("message") or ""
     if not openai_session or not target_session:
         return {"ok": False, "error": "approval row missing openai_session/target_session"}
     granted = mcp_relay_db.approve_crosstalk(
@@ -148,8 +157,15 @@ async def execute_crosstalk(row: dict, decision: dict) -> dict:
         approved_by=str(decision.get("approved_by") or "operator"))
     if granted is None:
         return {"ok": False, "error": "no pending crosstalk grant to approve"}
-    return {"ok": True, "target_session": target_session,
-            "expires_at": granted.get("expires_at")}
+    sess = mcp_relay_db.get_session(openai_session)
+    handle = (sess or {}).get("handle") or openai_session
+    delivery = {}
+    if message.strip():
+        from tools.dashboard import crosstalk_delivery
+        delivery = await crosstalk_delivery.deliver_from_chat(
+            handle, target_session, message)
+    return {"ok": True, "target_session": target_session, "from": handle,
+            "expires_at": granted.get("expires_at"), **delivery}
 
 
 PREPARE_CREATE = {KIND_LINK: prepare_create_link, KIND_CROSSTALK: prepare_create_crosstalk}

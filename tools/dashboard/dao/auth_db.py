@@ -41,6 +41,9 @@ CREATE TABLE IF NOT EXISTS crosstalk_messages (
     timestamp       REAL NOT NULL,
     delivered       INTEGER DEFAULT 1
 );
+
+CREATE INDEX IF NOT EXISTS idx_crosstalk_target
+    ON crosstalk_messages(target_session, id);
 """
 
 
@@ -110,17 +113,49 @@ def insert_message(
     turn: int | None,
     message: str,
     timestamp: float,
+    delivered: int = 1,
 ) -> int:
-    """Insert a crosstalk message and return the row id."""
+    """Insert a crosstalk message and return the row id.
+
+    `delivered` is 1 for a message pasted into a live tmux target (the historical
+    case, still the default) and 0 for one queued for a non-session participant
+    (e.g. a ChatGPT chat) that will collect it later. A queued row flips to 1 when
+    its owner collects it.
+    """
     conn = get_conn()
     cur = conn.execute(
         "INSERT INTO crosstalk_messages"
-        " (sender_session, sender_label, target_session, source_id, turn, message, timestamp)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (sender_session, sender_label, target_session, source_id, turn, message, timestamp),
+        " (sender_session, sender_label, target_session, source_id, turn, message,"
+        " timestamp, delivered)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (sender_session, sender_label, target_session, source_id, turn, message,
+         timestamp, delivered),
     )
     conn.commit()
     return cur.lastrowid
+
+
+def collect_inbox(target_session: str, limit: int = 100) -> list[dict]:
+    """Return the undelivered (queued) messages for a non-session participant in
+    arrival order and mark them delivered, in one transaction. Idempotent: a
+    repeat call returns nothing new because the rows are now delivered. The rows
+    are kept (one copy, still visible in the log) — collection sets the flag, it
+    does not delete."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM crosstalk_messages"
+        " WHERE target_session = ? AND delivered = 0 ORDER BY id ASC LIMIT ?",
+        (target_session, limit),
+    ).fetchall()
+    if rows:
+        ids = [r["id"] for r in rows]
+        conn.execute(
+            "UPDATE crosstalk_messages SET delivered = 1 WHERE id IN (%s)"
+            % ",".join("?" * len(ids)),
+            ids,
+        )
+        conn.commit()
+    return [dict(r) for r in rows]
 
 
 def get_messages(
