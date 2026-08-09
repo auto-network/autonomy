@@ -1,3 +1,64 @@
 .mission-control-page textarea {
   resize: vertical;
 }
+
+/* Avatar-row presence style: absolute-position + left/transform instead
+ * of flex reflow, so the resting geometry never differs from what a tap
+ * momentarily displaces. Layered on top of the shared .nx-avatar base
+ * (surface-presence.css) the same way presentations/page.css extends it
+ * with plugin-local modifier classes, rather than forking the shared
+ * rule. See graph://dff97eec-c59 for the interaction writeup. */
+/* Every child of the avatar-row is absolutely positioned (deliberately --
+ * see the file-header comment), so the row has no in-flow content of its
+ * own. The shared .nx-avatar-stack's `display: inline-flex` (surface-
+ * presence.css) computes a degenerate zero-width containing block for an
+ * all-out-of-flow child set, corrupting every descendant's `left`/shrink-
+ * to-fit-width math. Overriding back to `display: block` here (higher
+ * specificity than the single-class shared rule) restores a well-defined
+ * containing block while still matching `.nx-avatar-stack > .nx-avatar`
+ * for the shared circular/color/border styling -- the class name stays,
+ * only its own `display` is overridden for this specific interaction. */
+.mc-presence-row.nx-avatar-stack {
+  display: block;
+}
+
+/* The shared `.nx-avatar-stack > .nx-avatar` rule (surface-presence.css)
+ * sets `position: relative` + `margin-left: -8px` for its own overlap
+ * model -- a single-class `.mc-presence-avatar` selector loses to that
+ * two-class descendant selector on specificity regardless of stylesheet
+ * order, so `position: absolute` here would silently never apply. Match
+ * the ancestor + both classes to unambiguously outrank it. */
+.nx-avatar-stack > .nx-avatar.mc-presence-avatar {
+  position: absolute;
+  top: 0;
+  margin-left: 0;
+  transition: left .32s cubic-bezier(.3, .9, .4, 1);
+}
+
+.mc-presence-name {
+  position: absolute;
+  top: 0;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: opacity .2s ease, left .32s cubic-bezier(.3, .9, .4, 1);
+}
+
+.mc-presence-hint {
+  position: absolute;
+  top: 0;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  /* The row container has no in-flow children (every child here is
+     absolutely positioned), so its own intrinsic width collapses to 0.
+     A position:absolute element with only `left` set shrink-to-fits
+     against the *containing block's* available width, which computes
+     negative against a 0-width container -- forcing this text to wrap
+     one character per line instead of sizing to its content. nowrap
+     sidesteps the collapsed-container width entirely. */
+  white-space: nowrap;
+  transition: opacity .2s ease, left .32s cubic-bezier(.3, .9, .4, 1);
+}

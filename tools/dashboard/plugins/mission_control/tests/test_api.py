@@ -564,3 +564,77 @@ def test_answer_question_missing_entry():
         f"/api/missions/{mission_id}/questions/nope/answer", json={"answer": "x"},
     )
     assert resp.status_code == 404
+
+
+# ── "Since last visit" watermark (P3) ─────────────────────────────
+
+
+def test_get_mission_since_last_visit_empty_before_any_seen_call():
+    """Never-seen defaults to empty, not the whole history -- a mission's
+    first-ever view showing its entire past as 'new' would be noisy and
+    misleading (see get_mission's docstring comment)."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    body = client.get(f"/api/missions/{mission_id}").json()["mission"]
+    assert body["since_last_visit"] == {"last_seen_at": None, "revisions": [], "questions": []}
+
+
+def test_mark_mission_seen_advances_watermark():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    resp = client.post(f"/api/missions/{mission_id}/seen")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert isinstance(body["seen_at"], float)
+
+
+def test_mark_mission_seen_missing_mission():
+    client = _client()
+    resp = client.post("/api/missions/nope/seen")
+    assert resp.status_code == 404
+
+
+def test_since_last_visit_reflects_activity_after_seen_and_clears_on_next_seen():
+    client = _client()
+    mission_id = _mission_with_site(client)  # revision #1, pre-watermark
+    visitor = _visitor(client)
+
+    client.post(f"/api/missions/{mission_id}/seen")
+
+    client.post(f"/api/missions/{mission_id}/site", json={"html": "<html>v2</html>", "note": "new rev"})
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        client.post(
+            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            json={"question": "what changed?"},
+        )
+
+    body = client.get(f"/api/missions/{mission_id}").json()["mission"]
+    delta = body["since_last_visit"]
+    assert delta["last_seen_at"] is not None
+    assert [r["note"] for r in delta["revisions"]] == ["new rev"]
+    assert [q["question"] for q in delta["questions"]] == ["what changed?"]
+
+    # Marking seen again consumes the delta -- a subsequent view is empty.
+    client.post(f"/api/missions/{mission_id}/seen")
+    cleared = client.get(f"/api/missions/{mission_id}").json()["mission"]["since_last_visit"]
+    assert cleared["revisions"] == []
+    assert cleared["questions"] == []
+
+
+def test_incidental_get_does_not_advance_the_watermark():
+    """The list page's refreshMissions() GETs every mission on every load
+    just to hydrate summary fields -- that must never silently erase the
+    delta before a deliberate POST .../seen (mirrors toggleExpand's
+    fire-only-on-expand contract in page.js)."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    client.post(f"/api/missions/{mission_id}/seen")
+    client.post(f"/api/missions/{mission_id}/site", json={"html": "<html>v2</html>", "note": "new rev"})
+
+    # Several incidental reads, no POST .../seen in between.
+    for _ in range(3):
+        client.get(f"/api/missions/{mission_id}")
+
+    delta = client.get(f"/api/missions/{mission_id}").json()["mission"]["since_last_visit"]
+    assert len(delta["revisions"]) == 1

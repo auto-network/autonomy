@@ -1,9 +1,10 @@
 # Mission Control — pushing a mission site from an agent session
 
 Mission Control (`/mission-control`) hosts chromeless native sites, one per
-mission, with immutable revision history. P1 scope: missions + site hosting
-only. Resources, Q&A, and live data feeds arrive with their own phases —
-if you're looking for those, they aren't here yet.
+mission, with immutable revision history. P1: missions + site hosting. P2
+(§6): visitor Q&A attribution. P3 (§7): presence and "what changed since you
+last looked." Live data feeds beyond that arrive with their own phase — if
+you're looking for those, they aren't here yet.
 
 Dashboard base URL: `https://localhost:8080` on host-network sessions,
 `https://host.docker.internal:8080` from bridge-network containers (`curl -sk`).
@@ -151,3 +152,50 @@ history correctly shows who actually answered each question.
 Attribution (`asked_by_label`) is a snapshot at ask time too — if you
 reissue someone a new display name later, their past questions still show
 what they were called when they asked.
+
+## 7. Presence and "what changed" (P3)
+
+The dashboard home page shows, per mission, who's currently aware of it and
+what happened since the operator last looked. Neither of these is
+Mission-Control-specific machinery — they're the plugin's first real
+consumer of platform-wide substrate other plugins already use, wired at the
+mission level rather than the whole-page level.
+
+**Presence.** One `Presence.alpine()` surface per mission —
+`surfaceId: "mission:" + mission_id` — not one shared surface for the whole
+plugin page (that's `coordinator_board`'s pattern; `presentations`'
+per-resource `presentations:<designId>` is the one Mission Control mirrors).
+If you're writing an agent-side presence row against a mission surface
+yourself (rather than relying on the dashboard page), see
+`graph://dff97eec-c59` for the substrate contract — this doc only covers the
+`mission:<id>` convention, not the presence write path itself.
+
+**"Since last visit."** A single, implicit watermark per mission — not
+per-viewer. There is no per-participant identity system yet (dashboard auth
+is a single-personal-root gate; real multi-user org-member identity is a
+separate, deferred epic), so whoever opens a mission's detail panel first
+consumes the delta for every other viewer. Revisit once real multi-viewer
+identity exists.
+
+```bash
+curl -sk https://host.docker.internal:8080/api/missions/<mission_id>
+# → {"mission": {..., "since_last_visit": {
+#     "last_seen_at": <unix ts, or null if never marked seen>,
+#     "revisions": [...],   # pushed after last_seen_at
+#     "questions": [...]}}} # asked after last_seen_at
+
+curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/seen -X POST
+# → {"ok": true, "seen_at": <unix ts>}
+```
+
+A mission that's never been marked seen returns an empty delta, not its
+whole history — a first-ever view showing the entire past as "new" would be
+noisy and misleading. `POST .../seen` is a deliberate action, not a side
+effect of `GET .../missions/<id>` — the dashboard's own list page already
+calls that GET incidentally on every load just to hydrate summary fields; if
+the watermark advanced there, the delta would be erased before anyone saw
+it.
+
+Handlers: `get_mission`/`mark_mission_seen` in
+`tools/dashboard/plugins/mission_control/entrypoints/api.py`, backed by
+`mission_last_seen` in `tools.dashboard.dao.mission_control_db`.

@@ -82,7 +82,37 @@ async def get_mission(request: Request) -> JSONResponse:
         if current:
             payload["current_revision"] = _revision_payload(current, include_html=False)
     payload["open_question_count"] = db.count_open_questions(mission_id)
+    last_seen = db.get_last_seen(mission_id)
+    if last_seen is None:
+        # Never seen before: baseline is established by the first POST
+        # .../seen, not "dump the whole history as new" -- that would be
+        # noisy and misleading on a mission's very first view.
+        payload["since_last_visit"] = {"last_seen_at": None, "revisions": [], "questions": []}
+    else:
+        payload["since_last_visit"] = {
+            "last_seen_at": last_seen,
+            "revisions": [
+                _revision_payload(r, include_html=False)
+                for r in db.list_site_revisions_since(mission_id, last_seen)
+            ],
+            "questions": [
+                _question_payload(q)
+                for q in db.list_conversation_since(mission_id, last_seen)
+            ],
+        }
     return JSONResponse({"mission": payload})
+
+
+async def mark_mission_seen(request: Request) -> JSONResponse:
+    """Advance a mission's last-seen watermark. A deliberate action, called
+    when a viewer opens a mission's detail panel -- never a side effect of
+    the incidental GET .../missions/<id> the list page fires just to
+    hydrate summary fields (see get_mission's since_last_visit comment)."""
+    mission_id = request.path_params["mission_id"]
+    if not db.get_mission(mission_id):
+        return JSONResponse({"error": "mission not found"}, status_code=404)
+    seen_at = db.mark_seen(mission_id)
+    return JSONResponse({"ok": True, "seen_at": seen_at})
 
 
 async def delete_mission(request: Request) -> JSONResponse:
@@ -357,6 +387,7 @@ routes: list[Route] = [
     Route("/api/missions", create_mission, methods=["POST"]),
     Route("/api/missions/{mission_id}", get_mission, methods=["GET"]),
     Route("/api/missions/{mission_id}", delete_mission, methods=["DELETE"]),
+    Route("/api/missions/{mission_id}/seen", mark_mission_seen, methods=["POST"]),
     Route("/api/missions/{mission_id}/site", push_site_revision, methods=["POST"]),
     Route("/api/missions/{mission_id}/site", get_current_site, methods=["GET"]),
     Route(

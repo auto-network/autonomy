@@ -46,6 +46,9 @@ def test_read_paths_do_not_require_init_db_first(tmp_path):
     assert db.get_site_revision("nope", "nope", db_path=path) is None
     assert db.delete_mission("nope", db_path=path) is False
     assert db.activate_site_revision("nope", "nope", db_path=path) is False
+    assert db.get_last_seen("nope", db_path=path) is None
+    assert db.list_site_revisions_since("nope", 0, db_path=path) == []
+    assert db.list_conversation_since("nope", 0, db_path=path) == []
 
 
 def test_list_missions_orders_newest_first(tmp_path):
@@ -64,6 +67,20 @@ def test_delete_mission_removes_mission_and_revisions(tmp_path):
     assert db.delete_mission(mission["mission_id"], db_path=path) is True
     assert db.get_mission(mission["mission_id"], db_path=path) is None
     assert db.list_site_revisions(mission["mission_id"], db_path=path) == []
+
+
+def test_delete_mission_removes_conversation_and_last_seen(tmp_path):
+    """Pre-existing gap fixed alongside the last-seen watermark: deleting
+    a mission left mission_conversation rows and the watermark orphaned,
+    keyed off a mission_id nothing else references anymore."""
+    path = _db_path(tmp_path)
+    mission = db.create_mission("Doomed", db_path=path)
+    db.ask_question(mission["mission_id"], "q", "guest:a", "A", db_path=path)
+    db.mark_seen(mission["mission_id"], db_path=path)
+
+    assert db.delete_mission(mission["mission_id"], db_path=path) is True
+    assert db.list_conversation(mission["mission_id"], db_path=path) == []
+    assert db.get_last_seen(mission["mission_id"], db_path=path) is None
 
 
 def test_delete_missing_mission_returns_false(tmp_path):
@@ -361,3 +378,62 @@ def test_answer_question_records_answerer_even_if_different_from_current_coordin
     # First answer's snapshot is unaffected by the mission's coordinator changing.
     first_still = db.get_question(mission["mission_id"], entry["entry_id"], db_path=path)
     assert first_still["answered_by_session"] == "auto-coordinator-v1"
+
+
+# ── "Since last visit" watermark (P3) ─────────────────────────────
+
+
+def test_get_last_seen_none_before_any_mark(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    assert db.get_last_seen(mission["mission_id"], db_path=path) is None
+
+
+def test_mark_seen_persists_watermark(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    seen_at = db.mark_seen(mission["mission_id"], db_path=path)
+    assert db.get_last_seen(mission["mission_id"], db_path=path) == seen_at
+
+
+def test_mark_seen_upserts_on_repeated_calls(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    first = db.mark_seen(mission["mission_id"], db_path=path)
+    second = db.mark_seen(mission["mission_id"], db_path=path)
+    assert second >= first
+    assert db.get_last_seen(mission["mission_id"], db_path=path) == second
+
+
+def test_list_site_revisions_since_only_returns_newer(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    db.push_site_revision(mission["mission_id"], "<html>v1</html>", "old", db_path=path)
+    watermark = db.mark_seen(mission["mission_id"], db_path=path)
+    rev2 = db.push_site_revision(mission["mission_id"], "<html>v2</html>", "new", db_path=path)
+
+    since = db.list_site_revisions_since(mission["mission_id"], watermark, db_path=path)
+    assert [r["revision_id"] for r in since] == [rev2["revision_id"]]
+    assert "html" not in since[0]
+
+
+def test_list_conversation_since_only_returns_newer(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    db.ask_question(mission["mission_id"], "old", "guest:a", "A", db_path=path)
+    watermark = db.mark_seen(mission["mission_id"], db_path=path)
+    new_entry = db.ask_question(mission["mission_id"], "new", "guest:b", "B", db_path=path)
+
+    since = db.list_conversation_since(mission["mission_id"], watermark, db_path=path)
+    assert [e["entry_id"] for e in since] == [new_entry["entry_id"]]
+
+
+def test_list_since_helpers_before_any_watermark_use_epoch_zero(tmp_path):
+    """A caller passing 0 (e.g. a mission that's never been marked seen,
+    if the API chose to treat that as 'everything is new') gets the full
+    history back -- the DAO itself doesn't special-case an absent
+    watermark, that policy choice lives in the API layer."""
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    db.push_site_revision(mission["mission_id"], "<html>v1</html>", db_path=path)
+    assert len(db.list_site_revisions_since(mission["mission_id"], 0, db_path=path)) == 1
