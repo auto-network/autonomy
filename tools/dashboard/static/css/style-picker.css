@@ -1,0 +1,71 @@
+/* Style Picker — substrate library CSS (substrate.C).
+ *
+ * Companion to `static/js/style-picker.js`. Any page that instantiates
+ * `StylePicker.alpine(icons)` gets these classes for free and should not
+ * duplicate the rules locally. See that file's header for the full
+ * {id,color,icon} in / `picker-change` event out contract.
+ *
+ * Signpost: graph://dff97eec-c59.
+ *
+ * A host page positions `.picker-zone` itself (it's just a flex
+ * container) — these rules are the picker's own visual chrome, not
+ * layout for the page around it.
+ */
+
+.picker-zone {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.picker {
+  position: relative;
+  height: 34px;
+  border-radius: 9999px;
+  overflow: hidden;
+  /* No backdrop-filter: combined with the child glows' own filter:blur(),
+     WebKit composites each into its own layer and shows the seam between
+     them as a visible rectangular band -- worse the faster you swipe,
+     since layers get recomputed mid-transition. A solid-enough gradient
+     gets the same visual weight without the cross-layer blur. */
+  background: linear-gradient(#181f30, #131826);
+  border: 1px solid rgba(255, 255, 255, .08);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .45), inset 0 1px 0 rgba(255, 255, 255, .04);
+  cursor: grab;
+  touch-action: none;
+  /* Structural (once per gesture): slow + a bit of bounce is fine here. */
+  transition: width .5s cubic-bezier(.34, 1.56, .64, 1), box-shadow .4s ease;
+}
+.picker:active { cursor: grabbing; }
+.picker.expanded { box-shadow: 0 10px 34px rgba(0, 0, 0, .55), inset 0 1px 0 rgba(255, 255, 255, .06); }
+
+.pdot {
+  position: absolute; top: 50%; left: 50%; width: 30px; height: 30px; margin: -15px 0 0 -15px;
+  display: flex; align-items: center; justify-content: center;
+  /* Repositioning between clustered <-> spread also happens once per
+     gesture -- keep the spring here. */
+  transition: transform .5s cubic-bezier(.34, 1.56, .64, 1);
+}
+.pdot-glow {
+  position: absolute; inset: 7px; border-radius: 9999px; filter: blur(4px); opacity: .9;
+  /* The resolve-from-blur is once-per-gesture (slow); the brighten-on-
+     select toggles rapidly during a fast drag, so THIS must be snappy
+     or repeated selection changes pile up mid-transition and read as
+     flicker/artifacts. */
+  transition: opacity .16s ease, filter .5s ease, inset .5s ease;
+}
+.picker.expanded .pdot-glow { opacity: .28; filter: blur(10px); inset: -3px; }
+.picker.expanded .pdot.selected .pdot-glow { opacity: .6; }
+.pdot-icon {
+  position: relative; opacity: 0; filter: blur(5px); transform: scale(.4);
+  transition: opacity .4s ease, filter .4s ease, transform .16s cubic-bezier(.25, .46, .45, .94);
+}
+.picker.expanded .pdot-icon { opacity: 1; filter: blur(0); transform: scale(1); }
+.picker.expanded .pdot.selected .pdot-icon { transform: scale(1.2); }
+.pdot-ring { position: absolute; inset: 0; border-radius: 9999px; border: 1.5px solid transparent; transition: border-color .16s ease; }
+.picker.expanded .pdot.selected .pdot-ring { border-color: currentColor; }
+
+.stem {
+  position: absolute; left: 50%; bottom: -9px; width: 1px; height: 9px; transform: translateX(-50%);
+  background: linear-gradient(#374151, transparent); opacity: .6;
+}

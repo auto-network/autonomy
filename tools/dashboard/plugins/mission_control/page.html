@@ -1,4 +1,5 @@
 <div x-data="missionControlPage()"
+     @picker-change="onPickerChange($event)"
      data-testid="mission-control-root"
      class="mission-control-page bg-gray-900 text-gray-200 antialiased min-h-screen">
 
@@ -7,6 +8,28 @@
   </header>
 
   <main class="max-w-3xl mx-auto px-4 sm:px-6 py-6 space-y-3">
+
+    <!-- One picker for the whole page, not one per card -- it chooses how
+         every mission's presence area renders below. Common control,
+         knows nothing about missions: tools/dashboard/static/js/style-picker.js. -->
+    <div class="picker-zone mb-2" x-show="missions.length">
+      <div x-data="StylePicker.alpine(presenceStyles)">
+        <div class="picker" x-ref="picker" :class="expanded ? 'expanded' : 'idle'"
+             :style="'width:' + pickerWidth + 'px'"
+             @pointerdown="onDown($event)"
+             data-testid="mc-style-picker">
+          <template x-for="(s, i) in icons" :key="s.id">
+            <div class="pdot" :class="i === active ? 'selected' : ''"
+                 :style="'transform:translateX(' + dotOffset(i) + 'px); transition-delay:' + (expanded ? i * 28 : (icons.length - 1 - i) * 22) + 'ms; color:' + s.color">
+              <div class="pdot-glow" :style="'background:' + s.color"></div>
+              <div class="pdot-ring"></div>
+              <div class="pdot-icon" x-html="s.icon"></div>
+            </div>
+          </template>
+          <div class="stem"></div>
+        </div>
+      </div>
+    </div>
 
     <template x-for="m in missions" :key="m.mission_id">
       <div class="rounded-md border border-gray-800 bg-gray-900/40 p-4 min-w-0" :data-testid="'mc-mission-' + m.mission_id">
@@ -37,6 +60,151 @@
         <p class="text-xs text-gray-400 mt-2 leading-snug"
            x-show="m.current_revision && m.current_revision.note"
            x-text="m.current_revision && m.current_revision.note"></p>
+
+        <!-- Presence: one Presence.alpine() surface per mission
+             (mission:<id>), not one for the whole page. The picker above
+             chooses which variant renders; all variants share this same
+             missionPresenceRow state so switching styles never
+             re-subscribes the surface. -->
+        <div x-data="missionPresenceRow(m.mission_id)" class="mt-3" :data-testid="'mc-presence-' + m.mission_id">
+
+          <div x-show="presenceStyle === 'avatar-row'" class="relative nx-avatar-stack mc-presence-row" style="height:28px">
+            <template x-for="(p, i) in participants" :key="p.participant_id">
+              <button @click="toggleIdentity(p.participant_id)"
+                      class="nx-avatar mc-presence-avatar" :title="p.participant_label"
+                      :style="'background:' + participantColor(p.participant_id) + '; left:' + avatarLeft(i) + 'px; z-index:' + (openId === p.participant_id ? 10 : (participants.length - i))"
+                      :data-testid="'mc-presence-avatar-' + p.participant_id">
+                <span x-text="participantInitial(p)"></span>
+              </button>
+            </template>
+            <div class="mc-presence-name"
+                 :style="'left:' + (avatarLeft(openIndex) + 34) + 'px; opacity:' + (openId ? 1 : 0)">
+              <span class="text-xs text-gray-200 font-medium whitespace-nowrap"
+                    x-text="openId ? (participants.find(p => p.participant_id === openId) || {}).participant_label : ''"></span>
+            </div>
+            <span class="mc-presence-hint text-xs text-gray-500"
+                  :style="'left:' + (rowWidth + 8) + 'px; opacity:' + (openId ? 0 : 1) + '; display:' + (participants.length ? 'flex' : 'none')"
+                  x-text="participants.length + ' here recently'"></span>
+            <span class="text-xs text-gray-600" x-show="!participants.length">No one here recently</span>
+          </div>
+
+          <div x-show="presenceStyle === 'pan-strip'" class="flex gap-2 overflow-x-auto pb-1" style="scrollbar-width:thin">
+            <template x-for="p in participants" :key="'strip' + p.participant_id">
+              <div class="flex items-center gap-1.5 shrink-0 bg-gray-800/60 rounded-full pl-1 pr-3 py-1 nx-avatar-stack">
+                <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><span x-text="participantInitial(p)"></span></span>
+                <span class="text-xs text-gray-200 font-medium" x-text="p.participant_label"></span>
+                <span class="text-[10px] text-gray-500" x-text="lastActive(p)"></span>
+              </div>
+            </template>
+            <span class="text-xs text-gray-600" x-show="!participants.length">No one here recently</span>
+          </div>
+
+          <div x-show="presenceStyle === 'grouped'">
+            <button @click="groupedOpen = !groupedOpen" class="flex items-center gap-2 text-xs text-gray-300 hover:text-white">
+              <span class="flex -space-x-1.5 nx-avatar-stack">
+                <template x-for="p in participants.slice(0,3)" :key="'g' + p.participant_id">
+                  <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><span x-text="participantInitial(p)"></span></span>
+                </template>
+              </span>
+              <span x-text="presenceHumans.length + ' human' + (presenceHumans.length===1?'':'s') + ' · ' + presenceAgents.length + ' agent' + (presenceAgents.length===1?'':'s') + ' here recently'"></span>
+              <span x-text="groupedOpen ? '▴' : '▾'" class="text-gray-500"></span>
+            </button>
+            <div x-show="groupedOpen" x-cloak class="mt-3 grid grid-cols-2 gap-3">
+              <div>
+                <div class="text-[10px] uppercase tracking-wide text-gray-500 mb-1.5">Human</div>
+                <template x-for="p in presenceHumans" :key="p.participant_id">
+                  <div class="flex items-center gap-1.5 py-1 nx-avatar-stack">
+                    <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><span x-text="participantInitial(p)"></span></span>
+                    <div class="text-xs text-gray-300" x-text="p.participant_label"></div>
+                    <div class="text-[10px] text-gray-500 ml-auto" x-text="lastActive(p)"></div>
+                  </div>
+                </template>
+                <p class="text-xs text-gray-600" x-show="!presenceHumans.length">None recently</p>
+              </div>
+              <div>
+                <div class="text-[10px] uppercase tracking-wide text-gray-500 mb-1.5">Agent</div>
+                <template x-for="p in presenceAgents" :key="p.participant_id">
+                  <div class="flex items-center gap-1.5 py-1 nx-avatar-stack">
+                    <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><span x-text="participantInitial(p)"></span></span>
+                    <div class="text-xs text-gray-300" x-text="p.participant_label"></div>
+                    <div class="text-[10px] text-gray-500 ml-auto" x-text="lastActive(p)"></div>
+                  </div>
+                </template>
+                <p class="text-xs text-gray-600" x-show="!presenceAgents.length">None recently</p>
+              </div>
+            </div>
+          </div>
+
+          <div x-show="presenceStyle === 'compact'">
+            <button @click="compactOpen = !compactOpen" class="text-xs text-gray-500 hover:text-gray-300 flex items-center gap-1.5">
+              <span class="relative flex h-1.5 w-1.5" x-show="participants.length">
+                <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span class="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-400"></span>
+              </span>
+              <span x-show="participants.length" x-text="participants.length + ' here · last seen ' + lastActive(participants[0])"></span>
+              <span x-show="!participants.length">No one here recently</span>
+              <span x-show="participants.length" x-text="compactOpen ? '▴' : '▾'"></span>
+            </button>
+            <div x-show="compactOpen && participants.length" x-cloak class="flex flex-wrap gap-2 mt-3">
+              <template x-for="p in participants" :key="'c' + p.participant_id">
+                <div class="flex items-center gap-1.5 bg-gray-800/60 rounded-full pl-1 pr-2.5 py-0.5 nx-avatar-stack">
+                  <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><span x-text="participantInitial(p)"></span></span>
+                  <span class="text-[11px] text-gray-300" x-text="p.participant_label + ' · ' + lastActive(p)"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- delta-feed replaces the badge footer below entirely. -->
+          <template x-if="presenceStyle === 'delta-feed'">
+            <div>
+              <div class="flex items-center gap-2" x-show="participants.length">
+                <span class="text-xs text-gray-500" x-text="participants.length + ' here'"></span>
+                <span class="flex -space-x-1.5 nx-avatar-stack">
+                  <template x-for="p in participants.slice(0,3)" :key="'df' + p.participant_id">
+                    <span class="nx-avatar" :style="'width:22px;height:22px;font-size:9px;background:' + participantColor(p.participant_id)"><span x-text="participantInitial(p)"></span></span>
+                  </template>
+                </span>
+              </div>
+              <div class="mt-3 space-y-2" x-show="m.since_last_visit && (m.since_last_visit.revisions.length || m.since_last_visit.questions.length)">
+                <div class="text-[10px] uppercase tracking-wide text-gray-500">Since you were last here</div>
+                <template x-for="r in (m.since_last_visit ? m.since_last_visit.revisions : [])" :key="'r' + r.revision_id">
+                  <div class="flex items-start gap-2 text-xs">
+                    <span class="mt-1 h-1.5 w-1.5 rounded-full shrink-0 bg-indigo-400"></span>
+                    <div class="min-w-0">
+                      <span class="text-gray-300" x-text="'Revision #' + r.revision_seq + (r.note ? ' — ' + r.note : '')"></span>
+                      <span class="text-gray-600 ml-1" x-text="relativeTime(r.created_at)"></span>
+                    </div>
+                  </div>
+                </template>
+                <template x-for="q in (m.since_last_visit ? m.since_last_visit.questions : [])" :key="'q' + q.entry_id">
+                  <div class="flex items-start gap-2 text-xs">
+                    <span class="mt-1 h-1.5 w-1.5 rounded-full shrink-0 bg-amber-400"></span>
+                    <div class="min-w-0">
+                      <span class="text-gray-300" x-text="q.asked_by_label + ' asked &quot;' + q.question + '&quot;'"></span>
+                      <span class="text-gray-600 ml-1" x-text="relativeTime(q.created_at)"></span>
+                    </div>
+                  </div>
+                </template>
+              </div>
+              <p class="text-xs text-gray-600"
+                 x-show="!(m.since_last_visit && (m.since_last_visit.revisions.length || m.since_last_visit.questions.length))">Nothing new since your last visit.</p>
+            </div>
+          </template>
+        </div>
+
+        <!-- Badge form for every style except delta-feed, which replaces
+             this footer with the full list above instead. -->
+        <div class="mt-3 pt-3 border-t border-gray-800/60"
+             x-show="presenceStyle !== 'delta-feed' && m.since_last_visit && (m.since_last_visit.revisions.length || m.since_last_visit.questions.length)">
+          <div class="text-[10px] uppercase tracking-wide text-gray-500 mb-2">Since you were last here</div>
+          <div class="flex flex-wrap gap-2">
+            <span x-show="m.since_last_visit.revisions.length" class="px-2 py-1 rounded-md bg-indigo-900/40 text-indigo-300 text-xs font-medium"
+                  x-text="m.since_last_visit.revisions.length + ' new revision' + (m.since_last_visit.revisions.length===1?'':'s')"></span>
+            <span x-show="m.since_last_visit.questions.length" class="px-2 py-1 rounded-md bg-amber-900/40 text-amber-300 text-xs font-medium"
+                  x-text="m.since_last_visit.questions.length + ' new question' + (m.since_last_visit.questions.length===1?'':'s')"></span>
+          </div>
+        </div>
 
         <button @click="toggleExpand(m.mission_id)" class="text-xs text-gray-500 hover:text-gray-300 mt-3"
                 :data-testid="'mc-expand-' + m.mission_id">

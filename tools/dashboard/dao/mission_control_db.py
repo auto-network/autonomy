@@ -75,6 +75,16 @@ CREATE TABLE IF NOT EXISTS mission_conversation (
 
 CREATE INDEX IF NOT EXISTS idx_mission_conversation_mission
     ON mission_conversation(mission_id);
+
+-- Single implicit "last seen" watermark per mission -- not per-viewer.
+-- There is no per-participant identity system yet (see
+-- SKILL.md "Presence and what changed"), so whoever expands a mission's
+-- detail panel first consumes the delta for every other viewer. Revisit
+-- once real multi-viewer identity exists.
+CREATE TABLE IF NOT EXISTS mission_last_seen (
+    mission_id      TEXT PRIMARY KEY,
+    last_seen_at    REAL NOT NULL
+);
 """
 
 
@@ -169,6 +179,15 @@ def delete_mission(mission_id: str, *, db_path: Path | str | None = None) -> boo
         cur = conn.execute("DELETE FROM missions WHERE mission_id = ?", (mission_id,))
         conn.execute(
             "DELETE FROM mission_site_revisions WHERE mission_id = ?", (mission_id,)
+        )
+        # Pre-existing gap, fixed opportunistically while touching this
+        # function's cleanup list: conversation rows and the last-seen
+        # watermark also key off mission_id and were never swept here.
+        conn.execute(
+            "DELETE FROM mission_conversation WHERE mission_id = ?", (mission_id,)
+        )
+        conn.execute(
+            "DELETE FROM mission_last_seen WHERE mission_id = ?", (mission_id,)
         )
         conn.commit()
     finally:
@@ -473,6 +492,71 @@ def count_open_questions(
     finally:
         conn.close()
     return row[0] if row else 0
+
+
+def get_last_seen(mission_id: str, *, db_path: Path | str | None = None) -> float | None:
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT last_seen_at FROM mission_last_seen WHERE mission_id = ?",
+            (mission_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row["last_seen_at"] if row else None
+
+
+def mark_seen(mission_id: str, *, db_path: Path | str | None = None) -> float:
+    """Advance the mission's implicit last-seen watermark to now(). Upsert.
+
+    Called deliberately (see the API's ``mark_mission_seen`` handler), never
+    as a side effect of an incidental read -- callers that read a mission
+    just to hydrate a list row must not silently consume its delta.
+    """
+    seen_at = time.time()
+    conn = _get_conn(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO mission_last_seen (mission_id, last_seen_at) VALUES (?, ?)"
+            " ON CONFLICT(mission_id) DO UPDATE SET last_seen_at = excluded.last_seen_at",
+            (mission_id, seen_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return seen_at
+
+
+def list_site_revisions_since(
+    mission_id: str, since_at: float, *, db_path: Path | str | None = None,
+) -> list[dict]:
+    conn = _get_conn(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT revision_id, mission_id, revision_seq, note, created_at,"
+            " LENGTH(html) AS byte_size"
+            " FROM mission_site_revisions WHERE mission_id = ? AND created_at > ?"
+            " ORDER BY revision_seq DESC",
+            (mission_id, since_at),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_conversation_since(
+    mission_id: str, since_at: float, *, db_path: Path | str | None = None,
+) -> list[dict]:
+    conn = _get_conn(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM mission_conversation WHERE mission_id = ? AND created_at > ?"
+            " ORDER BY created_at ASC",
+            (mission_id, since_at),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
 
 
 def mark_question_relay_status(
