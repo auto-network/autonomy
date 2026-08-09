@@ -2266,23 +2266,20 @@
                 orgs = (d.orgs || []).map((o) => o.slug).filter(Boolean);
               }
             } catch (e) { /* typed fallback below */ }
-            const requested = req.requested_org || '';
-            const defaultOrg = orgs.includes(requested) ? requested : (orgs[0] || requested);
             self.approvalBusy = false;
             self.approvalRequest = {
               id: r.id, kind: r.kind, session: r.session,
               title: 'ChatGPT connector access', actionLabel: 'Approve access',
-              op: 'link', target: requested || 'org',
+              op: 'link', target: 'access',
               bodyMarkdown: [
-                'A ChatGPT chat wants to use Autonomy.',
+                'A ChatGPT chat is requesting access to Autonomy.',
                 '',
                 'Intent: ' + (req.intent || '(none stated)'),
-                'Requested org (hint): ' + (requested || '(none)'),
                 'OpenAI user: ' + (req.openai_subject || 'unknown'),
                 'OpenAI org: ' + (req.openai_org || 'unknown'),
               ].join('\n'),
               orgs,
-              autonomyOrg: defaultOrg,
+              autonomyOrg: orgs[0] || '',
               level: 'read',
               ttl: '2592000',
               awaitExecution: true,

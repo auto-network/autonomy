@@ -72,39 +72,71 @@ def test_missing_token_env_is_fail_closed(client, monkeypatch):
 
 def test_new_session_goes_pending_and_opens_one_approval(client):
     body = {"openai_session": "v1/chatA", "openai_subject": "v1/subj",
-            "openai_org": "v1/oorg", "intent": "tunnel help", "requested_org": "autonomy"}
+            "openai_org": "v1/oorg", "intent": "tunnel help"}
     r = client.post("/api/mcp/session/resolve", headers=AUTH, json=body)
     assert r.status_code == 200 and r.json()["status"] == "pending"
     assert len(client.ar.rows) == 1  # one approval opened
     appr = next(iter(client.ar.rows.values()))
     assert appr["kind"] == "mcp_peer_link"
     assert appr["request"]["intent"] == "tunnel help"
+    assert "requested_org" not in appr["request"]  # model never names an org
     # polling again must NOT spawn a second popup while the first is undecided
     client.post("/api/mcp/session/resolve", headers=AUTH, json=body)
     assert len(client.ar.rows) == 1
 
 
+def test_session_status_is_read_only_never_pops(client):
+    body = {"openai_session": "v1/chatB", "intent": "x"}
+    client.post("/api/mcp/session/resolve", headers=AUTH, json=body)
+    assert len(client.ar.rows) == 1
+    # per-request status check must not open approvals
+    for _ in range(3):
+        r = client.post("/api/mcp/session/status", headers=AUTH,
+                        json={"openai_session": "v1/chatB"})
+        assert r.json()["status"] == "pending"
+    assert len(client.ar.rows) == 1
+
+
 def test_approved_binding_resolves_with_org_and_level(client):
-    body = {"openai_session": "v1/chatB", "requested_org": "autonomy"}
+    body = {"openai_session": "v1/chatC", "intent": "x"}
     client.post("/api/mcp/session/resolve", headers=AUTH, json=body)
     rid = next(iter(client.ar.rows))
-    # operator approves in the popup -> executor writes the binding
     client.ar.decide(rid, {"approved": True})
-    db.approve_session("v1/chatB", autonomy_org="autonomy", level="readwrite",
+    db.approve_session("v1/chatC", autonomy_org="autonomy", level="readwrite",
                        expires_at=None)
-    r = client.post("/api/mcp/session/resolve", headers=AUTH, json=body)
+    # per-request status now reflects the live binding
+    r = client.post("/api/mcp/session/status", headers=AUTH,
+                    json={"openai_session": "v1/chatC"})
     j = r.json()
     assert j["status"] == "approved"
     assert j["autonomy_org"] == "autonomy" and j["level"] == "readwrite"
 
 
+def test_rehello_reopens_a_fresh_approval_and_keeps_binding(client):
+    body = {"openai_session": "v1/chatR", "intent": "read please"}
+    client.post("/api/mcp/session/resolve", headers=AUTH, json=body)
+    rid = next(iter(client.ar.rows))
+    client.ar.decide(rid, {"approved": True})
+    db.approve_session("v1/chatR", autonomy_org="autonomy", level="read", expires_at=None)
+    # re-hello (needs different access) pops a NEW approval, keeps the live binding
+    r = client.post("/api/mcp/session/resolve", headers=AUTH,
+                    json={"openai_session": "v1/chatR", "intent": "now I need write"})
+    assert r.json()["status"] == "approved"  # existing access preserved
+    assert len([a for a in client.ar.rows.values() if a["kind"] == "mcp_peer_link"]) == 2
+
+
 def test_declined_approval_becomes_denied(client):
-    body = {"openai_session": "v1/chatC"}
+    body = {"openai_session": "v1/chatD", "intent": "x"}
     client.post("/api/mcp/session/resolve", headers=AUTH, json=body)
     rid = next(iter(client.ar.rows))
     client.ar.decide(rid, {"approved": False})  # operator declines
-    r = client.post("/api/mcp/session/resolve", headers=AUTH, json=body)
+    # the per-request status check reflects the decline as denied (blocks tools)
+    r = client.post("/api/mcp/session/status", headers=AUTH,
+                    json={"openai_session": "v1/chatD"})
     assert r.json()["status"] == "denied"
+    # ...but a re-hello is still allowed to request again (pops a fresh popup)
+    r = client.post("/api/mcp/session/resolve", headers=AUTH, json=body)
+    assert r.json()["status"] == "pending"
 
 
 def test_crosstalk_requires_linked_peer_then_grants(client):

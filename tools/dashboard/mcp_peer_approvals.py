@@ -25,7 +25,7 @@ from tools.dashboard.dao import mcp_relay_db
 KIND_LINK = "mcp_peer_link"
 KIND_CROSSTALK = "mcp_crosstalk"
 
-_LINK_REQUIRED = {"openai_session", "openai_subject", "openai_org", "intent", "requested_org"}
+_LINK_REQUIRED = {"openai_session", "openai_subject", "openai_org", "intent"}
 _CROSSTALK_REQUIRED = {"openai_session", "target_session", "target_org"}
 
 
