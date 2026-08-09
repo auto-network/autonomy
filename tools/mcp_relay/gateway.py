@@ -191,8 +191,6 @@ def tool_hello(registry, args, peer=None):
             "The operator must run: gateway.py approve " + name + " --scopes read,send  "
             "Then call hello again to receive your peer_token."
         )
-        if result.get("created"):
-            _notify_operator(name)
     else:
         text = (
             f"Peer '{name}' approved with scopes {result['scopes']}. "
@@ -201,11 +199,10 @@ def tool_hello(registry, args, peer=None):
     return result, text
 
 
-def _notify_operator(peer_name):
-    """Best-effort ping so a live session surfaces the pending approval."""
-    run_graph(["crosstalk", "broadcast",
-               f"MCP relay: new peer '{peer_name}' awaiting approval. "
-               f"Run: python3 tools/mcp_relay/gateway.py approve {peer_name} --scopes read,send"])
+# Pending peers are surfaced by polling `gateway.py peers` (and, later, a
+# dashboard approval view). The relay does NOT push any CrossTalk — a broadcast
+# per hello would inject into every live session's context and burn fleet-wide
+# tokens for a purely local event.
 
 
 def tool_search(registry, args, peer):
