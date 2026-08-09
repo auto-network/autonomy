@@ -2277,7 +2277,7 @@
               // Lead with the reason — it's the whole basis for the decision.
               bodyMarkdown: 'This ChatGPT chat wants to:\n\n' + (req.intent || '(no reason given)'),
               orgs,
-              autonomyOrg: orgs[0] || '',
+              autonomyOrg: '',  // NO default — a reflexive approve must not silently bind an org
               level: 'read',
               ttl: '2592000',
               awaitExecution: true,
@@ -2298,12 +2298,17 @@
             self.approvalBusy = false;
             self.approvalRequest = {
               id: r.id, kind: r.kind, session: handle,
-              title: 'Allow ChatGPT to message a session', actionLabel: 'Allow',
-              op: 'message', target: req.target_session || 'session',
-              bodyMarkdown: 'This ChatGPT chat wants to send CrossTalk to session '
-                + (req.target_session || 'unknown')
-                + (req.target_org ? ' (org ' + req.target_org + ')' : '') + '.',
-              ttl: '2592000',
+              title: 'CrossTalk Approval Request', actionLabel: 'Approve & send',
+              target: null,
+              // custom crosstalk layout (no bodyMarkdown, no org/level)
+              xtalk: {
+                handle: handle,
+                intent: req.intent || '',
+                targetSession: req.target_session || 'unknown',
+                targetLabel: r.target_label || '',
+                message: req.message || '(message unavailable)',
+              },
+              ttl: '86400', // default 1 day
               awaitExecution: true,
               error: '',
             };

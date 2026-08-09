@@ -779,6 +779,7 @@
               <template x-if="approvalRequest.orgs && approvalRequest.orgs.length">
                 <select x-model="approvalRequest.autonomyOrg" data-testid="approval-mcp-org"
                         class="mt-2 w-full rounded-2xl border border-slate-600 bg-slate-900/60 px-4 py-3 text-sm text-slate-100 focus:border-indigo-400 focus:outline-none">
+                  <option value="" disabled>Choose an org…</option>
                   <template x-for="o in approvalRequest.orgs" :key="o">
                     <option :value="o" x-text="o"></option>
                   </template>
@@ -812,15 +813,41 @@
           </div>
         </template>
         <template x-if="approvalRequest.kind === 'mcp_crosstalk'">
-          <div class="mt-4" data-testid="approval-mcp-crosstalk">
-            <label class="text-sm font-medium text-slate-200">Allow for</label>
-            <select x-model="approvalRequest.ttl" data-testid="approval-mcp-xtalk-ttl"
-                    class="mt-2 w-full rounded-2xl border border-slate-600 bg-slate-900/60 px-4 py-3 text-sm text-slate-100 focus:border-indigo-400 focus:outline-none">
-              <option value="86400">1 day</option>
-              <option value="604800">7 days</option>
-              <option value="2592000">30 days</option>
-              <option value="">Never</option>
-            </select>
+          <div class="mt-4 space-y-4" data-testid="approval-mcp-crosstalk">
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div class="rounded-2xl border border-white/10 bg-slate-900/60 p-4">
+                <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Requester</div>
+                <div class="mt-1 flex items-center gap-2 text-sm text-slate-100">
+                  <span aria-hidden="true">💬</span><span>ChatGPT</span>
+                  <span class="font-mono text-xs text-indigo-200" x-text="approvalRequest.xtalk.handle"></span>
+                </div>
+                <div class="mt-1 text-xs text-slate-400"
+                     x-text="approvalRequest.xtalk.intent || 'no stated intent'"></div>
+              </div>
+              <div class="rounded-2xl border border-white/10 bg-slate-900/60 p-4">
+                <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Target session</div>
+                <div class="mt-1 font-mono text-sm text-slate-100" x-text="approvalRequest.xtalk.targetSession"></div>
+                <template x-if="approvalRequest.xtalk.targetLabel">
+                  <div class="mt-1 text-xs text-slate-300" x-text="approvalRequest.xtalk.targetLabel"></div>
+                </template>
+              </div>
+            </div>
+            <div>
+              <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Message</div>
+              <blockquote data-testid="approval-mcp-xtalk-message"
+                          class="mt-1 whitespace-pre-wrap rounded-2xl border-l-4 border-indigo-500/60 bg-slate-900/60 p-4 text-sm leading-relaxed text-slate-100"
+                          x-text="approvalRequest.xtalk.message"></blockquote>
+            </div>
+            <div>
+              <label class="text-sm font-medium text-slate-200">Keep this channel open for</label>
+              <select x-model="approvalRequest.ttl" data-testid="approval-mcp-xtalk-ttl"
+                      class="mt-2 w-full rounded-2xl border border-slate-600 bg-slate-900/60 px-4 py-3 text-sm text-slate-100 focus:border-indigo-400 focus:outline-none">
+                <option value="3600">1 hour</option>
+                <option value="43200">12 hours</option>
+                <option value="86400">1 day</option>
+                <option value="604800">1 week</option>
+              </select>
+            </div>
           </div>
         </template>
         <template x-if="approvalRequest.needsPassword">
