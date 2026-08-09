@@ -18,6 +18,7 @@ All authorization state lives in ``mcp_relay_db``; approvals ride the generalize
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
 import time
@@ -57,6 +58,12 @@ async def _open_approval(kind: str, session: str, request_payload: dict) -> str:
     await event_bus.broadcast("approval:pending",
                               {"id": rid, "kind": kind, "session": session})
     return rid
+
+
+def _handle(osession: str) -> str:
+    """A short, comparable, non-reversible display handle for a chat — shown to the
+    operator instead of the raw (bearer-equivalent) openai/session."""
+    return hashlib.sha256(osession.encode()).hexdigest()[:12]
 
 
 def _has_open_approval(approval_id: str | None) -> bool:
@@ -110,9 +117,11 @@ async def resolve_session(request: Request) -> JSONResponse:
                                   openai_org=oorg, intent=intent)
     current = db.get_session(osession)
     if not _has_open_approval(current.get("approval_id")):
-        rid = await _open_approval(kinds.KIND_LINK, osession, {
+        # The approval's `session` field is the SHORT HANDLE (what the popup shows);
+        # the raw openai_session travels in the request for the executor to bind.
+        rid = await _open_approval(kinds.KIND_LINK, _handle(osession), {
             "openai_session": osession, "openai_subject": subject,
-            "openai_org": oorg, "intent": intent})
+            "openai_org": oorg, "intent": intent, "handle": _handle(osession)})
         db.set_session_approval_id(osession, rid)
     return JSONResponse(db.resolve_session(osession))
 
@@ -171,8 +180,9 @@ async def resolve_crosstalk(request: Request) -> JSONResponse:
     db.upsert_pending_crosstalk(osession, target, target_org=target_org)
     current = db.get_crosstalk_grant(osession, target)
     if not _has_open_approval(current.get("approval_id")):
-        rid = await _open_approval(kinds.KIND_CROSSTALK, osession, {
-            "openai_session": osession, "target_session": target, "target_org": target_org})
+        rid = await _open_approval(kinds.KIND_CROSSTALK, _handle(osession), {
+            "openai_session": osession, "target_session": target,
+            "target_org": target_org, "handle": _handle(osession)})
         db.set_crosstalk_approval_id(osession, target, rid)
     return JSONResponse({"status": db.PENDING})
 
