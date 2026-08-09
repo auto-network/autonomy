@@ -64,6 +64,72 @@ def test_identity_trusted_needs_a_session():
     assert monkeypatch_free["openai_session"] is None
     assert gateway_mod.identity_trusted(monkeypatch_free) is False
 
+
+# ---- dashboard-mode authorization (stubbed dashboard) ----
+
+_TRUSTED = {"openai_session": "v1/s", "openai_subject": "v1/u",
+            "openai_org": "v1/o", "tunnel_verified": True}
+
+
+def _poster(session_resp, crosstalk_resp=None):
+    def poster(path, body):
+        if path.endswith("/session/resolve"):
+            return session_resp
+        if path.endswith("/crosstalk/resolve"):
+            return crosstalk_resp
+        return None
+    return poster
+
+
+def test_authorize_untrusted_identity_denied():
+    a = gateway_mod.authorize({"openai_session": None}, "search", {},
+                              poster=_poster({"status": "approved"}))
+    assert a["allowed"] is False
+
+
+def test_authorize_pending_session_denied():
+    a = gateway_mod.authorize(_TRUSTED, "search", {},
+                              poster=_poster({"status": "pending"}))
+    assert a["allowed"] is False and a["status"] == "pending"
+
+
+def test_authorize_read_tool_allowed_and_scoped():
+    a = gateway_mod.authorize(_TRUSTED, "search", {},
+        poster=_poster({"status": "approved", "autonomy_org": "autonomy", "level": "read"}))
+    assert a["allowed"] is True and a["org"] == "autonomy"
+
+
+def test_authorize_write_requires_readwrite():
+    read_only = _poster({"status": "approved", "autonomy_org": "autonomy", "level": "read"})
+    assert gateway_mod.authorize(_TRUSTED, "note", {}, poster=read_only)["allowed"] is False
+    rw = _poster({"status": "approved", "autonomy_org": "autonomy", "level": "readwrite"})
+    assert gateway_mod.authorize(_TRUSTED, "note", {}, poster=rw)["allowed"] is True
+
+
+def test_authorize_crosstalk_needs_target_grant():
+    linked = {"status": "approved", "autonomy_org": "autonomy", "level": "readwrite"}
+    # session linked but crosstalk to target not yet granted -> denied
+    a = gateway_mod.authorize(_TRUSTED, "crosstalk_send", {"session": "auto-x"},
+                              poster=_poster(linked, {"status": "pending"}))
+    assert a["allowed"] is False and a["status"] == "pending"
+    # target granted -> allowed
+    a = gateway_mod.authorize(_TRUSTED, "crosstalk_send", {"session": "auto-x"},
+                              poster=_poster(linked, {"status": "approved"}))
+    assert a["allowed"] is True
+
+
+def test_hello_dashboard_pending_is_not_error():
+    res = gateway_mod.hello_dashboard(_TRUSTED, {"intent": "help"},
+                                      poster=_poster({"status": "pending"}))
+    assert res["is_error"] is False
+    assert "approve" in res["text"].lower()
+
+
+def test_hello_dashboard_untrusted_is_error():
+    res = gateway_mod.hello_dashboard({"openai_session": None}, {},
+                                      poster=_poster({"status": "pending"}))
+    assert res["is_error"] is True
+
 GRAPH_STUB = """#!/usr/bin/env bash
 case "$1" in
   search)    echo '[{"source_id": "abc-123", "source_title": "Stub hit", "source_type": "note", "content": "stub content body", "source_created_at": "2026-08-09T00:00:00Z"}]' ;;
