@@ -772,6 +772,47 @@
           <pre class="mt-4 whitespace-pre-wrap rounded-2xl border border-white/10 bg-slate-900/60 p-4 font-sans text-sm leading-relaxed text-slate-200"
                data-testid="approval-body" x-text="approvalRequest.bodyMarkdown"></pre>
         </template>
+        <template x-if="approvalRequest.kind === 'mcp_peer_link'">
+          <div class="mt-4 space-y-4" data-testid="approval-mcp-link">
+            <div>
+              <label class="text-sm font-medium text-slate-200">Autonomy org</label>
+              <input x-model="approvalRequest.autonomyOrg" type="text" placeholder="org slug"
+                     data-testid="approval-mcp-org"
+                     class="mt-2 w-full rounded-2xl border border-slate-600 bg-slate-900/60 px-4 py-3 text-sm text-slate-100 focus:border-indigo-400 focus:outline-none">
+            </div>
+            <div>
+              <label class="text-sm font-medium text-slate-200">Access level</label>
+              <select x-model="approvalRequest.level" data-testid="approval-mcp-level"
+                      class="mt-2 w-full rounded-2xl border border-slate-600 bg-slate-900/60 px-4 py-3 text-sm text-slate-100 focus:border-indigo-400 focus:outline-none">
+                <option value="read">Read only</option>
+                <option value="readwrite">Read &amp; write</option>
+              </select>
+            </div>
+            <div>
+              <label class="text-sm font-medium text-slate-200">Expires</label>
+              <select x-model="approvalRequest.ttl" data-testid="approval-mcp-ttl"
+                      class="mt-2 w-full rounded-2xl border border-slate-600 bg-slate-900/60 px-4 py-3 text-sm text-slate-100 focus:border-indigo-400 focus:outline-none">
+                <option value="86400">1 day</option>
+                <option value="604800">7 days</option>
+                <option value="2592000">30 days</option>
+                <option value="7776000">90 days</option>
+                <option value="">Never</option>
+              </select>
+            </div>
+          </div>
+        </template>
+        <template x-if="approvalRequest.kind === 'mcp_crosstalk'">
+          <div class="mt-4" data-testid="approval-mcp-crosstalk">
+            <label class="text-sm font-medium text-slate-200">Allow for</label>
+            <select x-model="approvalRequest.ttl" data-testid="approval-mcp-xtalk-ttl"
+                    class="mt-2 w-full rounded-2xl border border-slate-600 bg-slate-900/60 px-4 py-3 text-sm text-slate-100 focus:border-indigo-400 focus:outline-none">
+              <option value="86400">1 day</option>
+              <option value="604800">7 days</option>
+              <option value="2592000">30 days</option>
+              <option value="">Never</option>
+            </select>
+          </div>
+        </template>
         <template x-if="approvalRequest.needsPassword">
           <div class="mt-4">
             <label for="approval-revoke-password" data-testid="approval-password-label"
