@@ -106,16 +106,14 @@ def test_authorize_write_requires_readwrite():
     assert gateway_mod.authorize(_TRUSTED, "note", {}, poster=rw)["allowed"] is True
 
 
-def test_authorize_crosstalk_needs_target_grant():
+def test_authorize_does_not_gate_crosstalk_send():
+    # crosstalk_send is dispatched straight to /api/mcp/crosstalk/relay, which
+    # enforces the per-target grant; it never reaches authorize(). The per-target
+    # decision is covered by the crosstalk_send_dashboard tests above.
     linked = {"status": "approved", "autonomy_org": "autonomy", "level": "readwrite"}
-    # session linked but crosstalk to target not yet granted -> denied
     a = gateway_mod.authorize(_TRUSTED, "crosstalk_send", {"session": "auto-x"},
-                              poster=_poster(linked, {"status": "pending"}))
-    assert a["allowed"] is False and a["status"] == "pending"
-    # target granted -> allowed
-    a = gateway_mod.authorize(_TRUSTED, "crosstalk_send", {"session": "auto-x"},
-                              poster=_poster(linked, {"status": "approved"}))
-    assert a["allowed"] is True
+                              poster=_poster(linked))
+    assert a["allowed"] is True  # gating happens in the relay endpoint, not here
 
 
 def test_hello_dashboard_pending_is_not_error():
@@ -138,50 +136,98 @@ def test_hello_dashboard_requires_a_nonblank_intent():
     assert res["is_error"] is True and "intent" in res["text"].lower()
 
 
-def _xtalk_poster(session_status, resolve_status, status_seq):
-    seq = list(status_seq)
+class _State:
+    """Minimal stand-in for the relay's request state (only .log is used)."""
+    def log(self, *_a, **_k):
+        pass
 
+
+_STATE = _State()
+
+
+def _relay_poster(status, extra=None, collect=None):
     def poster(path, body):
-        if path.endswith("/session/status"):
-            return {"status": session_status}
-        if path.endswith("/crosstalk/resolve"):
-            return {"status": resolve_status, "approval_id": "x"}
-        if path.endswith("/crosstalk/status"):
-            return {"status": seq.pop(0)} if seq else {"status": "pending"}
+        if path.endswith("/api/mcp/crosstalk/relay"):
+            return {"status": status, **(extra or {})}
+        if path.endswith("/api/mcp/crosstalk/collect"):
+            return collect if collect is not None else {"messages": []}
         return None
     return poster
 
 
-def test_crosstalk_send_holds_then_delivers_on_approve(monkeypatch):
-    monkeypatch.setattr(gateway_mod.time, "sleep", lambda *_: None)
-    monkeypatch.setattr(gateway_mod, "_deliver_crosstalk",
-                        lambda *a, **k: {"structured": {"delivered": True}, "text": "sent",
-                                         "is_error": False})
-    # linked; resolve returns pending; the operator then approves on the poll
-    poster = _xtalk_poster("approved", "pending", ["pending", "approved"])
+def test_crosstalk_send_delivered_reports_the_stamped_source():
+    # dashboard authorized+delivered in one call; the relay never delivered itself
     res = gateway_mod.crosstalk_send_dashboard(
-        _TRUSTED, {"session": "auto-x", "message": "hi"}, None, poster=poster)
-    assert res["is_error"] is False and res["structured"]["delivered"] is True
+        _TRUSTED, {"session": "auto-x", "message": "hi", "intent": "coordinate GIS"},
+        _STATE, poster=_relay_poster("delivered", {"from": "ChatGPT-20260809-000000"}))
+    assert res["is_error"] is False
+    assert res["structured"]["status"] == "delivered"
+    assert res["structured"]["from"] == "ChatGPT-20260809-000000"
 
 
-def test_crosstalk_send_declined_never_delivers(monkeypatch):
-    monkeypatch.setattr(gateway_mod.time, "sleep", lambda *_: None)
-    delivered = {"n": 0}
-    monkeypatch.setattr(gateway_mod, "_deliver_crosstalk",
-                        lambda *a, **k: (delivered.__setitem__("n", delivered["n"] + 1),
-                                         {"structured": {}, "text": "", "is_error": False})[1])
-    poster = _xtalk_poster("approved", "pending", ["denied"])
+def test_crosstalk_send_pending_is_success_and_says_do_not_resend():
+    # a held message is queued on the approval and delivered on approve, so the
+    # model must NOT resend — pending is not an error.
     res = gateway_mod.crosstalk_send_dashboard(
-        _TRUSTED, {"session": "auto-x", "message": "hi"}, None, poster=poster)
+        _TRUSTED, {"session": "auto-x", "message": "hi", "intent": "coordinate GIS"},
+        _STATE, poster=_relay_poster("pending", {"from": "ChatGPT-x"}))
+    assert res["is_error"] is False and res["structured"]["status"] == "pending"
+    assert "resend" in res["text"].lower()
+
+
+def test_crosstalk_send_declined_never_delivers():
+    res = gateway_mod.crosstalk_send_dashboard(
+        _TRUSTED, {"session": "auto-x", "message": "hi", "intent": "coordinate GIS"},
+        _STATE, poster=_relay_poster("denied"))
     assert res["is_error"] is True and "declined" in res["text"].lower()
-    assert delivered["n"] == 0  # message never sent on decline
 
 
-def test_crosstalk_send_requires_a_linked_session(monkeypatch):
-    poster = _xtalk_poster("pending", "pending", [])  # session not linked
+def test_crosstalk_send_requires_a_linked_session():
     res = gateway_mod.crosstalk_send_dashboard(
-        _TRUSTED, {"session": "auto-x", "message": "hi"}, None, poster=poster)
+        _TRUSTED, {"session": "auto-x", "message": "hi", "intent": "coordinate GIS"},
+        _STATE, poster=_relay_poster("peer_not_linked"))
     assert res["is_error"] is True and "hello" in res["text"].lower()
+
+
+def test_crosstalk_send_requires_a_nonblank_intent():
+    # the operator answers "why is this chat messaging my agent?" from intent;
+    # an empty reason makes the prompt unanswerable, so reject before relaying.
+    res = gateway_mod.crosstalk_send_dashboard(
+        _TRUSTED, {"session": "auto-x", "message": "hi", "intent": "   "},
+        _STATE, poster=_relay_poster("delivered"))
+    assert res["is_error"] is True and "intent" in res["text"].lower()
+
+
+def test_crosstalk_inbox_drains_and_formats_replies():
+    res = gateway_mod.crosstalk_inbox_dashboard(
+        _TRUSTED, {}, _STATE, poster=_relay_poster("", collect={
+            "handle": "ChatGPT-x",
+            "messages": [{"from": "auto-s", "label": "planner",
+                          "message": "your merge point conflicts", "timestamp": 0}]}))
+    assert res["is_error"] is False and "your merge point conflicts" in res["text"]
+
+
+def test_crosstalk_inbox_empty_is_a_clear_message():
+    res = gateway_mod.crosstalk_inbox_dashboard(
+        _TRUSTED, {}, _STATE, poster=_relay_poster("", collect={"messages": []}))
+    assert res["is_error"] is False and "no new messages" in res["text"].lower()
+
+
+def test_dashboard_mode_strips_peer_token_from_the_advertised_schema(monkeypatch):
+    monkeypatch.setattr(gateway_mod, "DASHBOARD_MODE", True)
+    tools = {t["name"]: t for t in gateway_mod._advertised_tools()}
+    for name, tool in tools.items():
+        props = tool["inputSchema"].get("properties", {})
+        req = tool["inputSchema"].get("required", [])
+        for arg in ("peer_token", "peer_name"):  # registry-mode remnants
+            assert arg not in props, f"{name} still advertises {arg}"
+            assert arg not in req, f"{name} still requires {arg}"
+    # the real args survive the strip
+    assert "intent" in tools["crosstalk_send"]["inputSchema"]["required"]
+    # registry mode is untouched (peer_token still there)
+    monkeypatch.setattr(gateway_mod, "DASHBOARD_MODE", False)
+    reg = {t["name"]: t for t in gateway_mod._advertised_tools()}
+    assert "peer_token" in reg["crosstalk_send"]["inputSchema"]["properties"]
 
 
 def test_stdio_transport_is_its_own_trust_boundary(monkeypatch):

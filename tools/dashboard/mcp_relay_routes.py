@@ -18,6 +18,7 @@ All authorization state lives in ``mcp_relay_db``; approvals ride the generalize
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import os
@@ -27,8 +28,10 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from tools.dashboard import crosstalk_delivery
 from tools.dashboard import mcp_peer_approvals as kinds
 from tools.dashboard.dao import approval_requests as ar
+from tools.dashboard.dao import auth_db
 from tools.dashboard.dao import mcp_relay_db as db
 from tools.dashboard.event_bus import event_bus
 
@@ -116,12 +119,14 @@ async def resolve_session(request: Request) -> JSONResponse:
         db.upsert_pending_session(osession, openai_subject=subject,
                                   openai_org=oorg, intent=intent)
     current = db.get_session(osession)
+    handle = db.ensure_handle(osession) or _handle(osession)
     if not _has_open_approval(current.get("approval_id")):
-        # The approval's `session` field is the SHORT HANDLE (what the popup shows);
-        # the raw openai_session travels in the request for the executor to bind.
-        rid = await _open_approval(kinds.KIND_LINK, _handle(osession), {
+        # The approval's `session` field is the MINTED HANDLE (ChatGPT-<datetime>,
+        # what the popup shows); the raw openai_session travels in the request for
+        # the executor to bind.
+        rid = await _open_approval(kinds.KIND_LINK, handle, {
             "openai_session": osession, "openai_subject": subject,
-            "openai_org": oorg, "intent": intent, "handle": _handle(osession)})
+            "openai_org": oorg, "intent": intent, "handle": handle})
         db.set_session_approval_id(osession, rid)
     return JSONResponse(db.resolve_session(osession))
 
@@ -222,9 +227,98 @@ async def crosstalk_status(request: Request) -> JSONResponse:
     return JSONResponse({"status": db.PENDING if grant else "none"})
 
 
+async def relay_crosstalk(request: Request) -> JSONResponse:
+    """Single enforce-and-deliver endpoint for a chat messaging a session. The
+    relay forwards {openai_session (from), target_session (to), message, intent};
+    the dashboard authorizes and delivers, stamping the source from the chat's
+    minted handle — the relay never delivers and never sets the source.
+
+    - live (chat, target) grant  -> deliver now, return `delivered`
+    - declined earlier           -> return `denied`
+    - otherwise                  -> store the message on ONE approval and return
+      `pending`; the operator's approval delivers it (execute_crosstalk). The
+      relay does not resend — the held message is delivered on approval.
+    """
+    err = _relay_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    osession = str(body.get("openai_session") or "").strip()
+    to = str(body.get("target_session") or "").strip()
+    message = str(body.get("message") or "")
+    intent = str(body.get("intent") or "")
+    target_org = str(body.get("target_org") or "")
+    if not osession or not to or not message.strip():
+        return JSONResponse(
+            {"error": "openai_session, target_session and message required"},
+            status_code=400)
+
+    # The chat must be linked (a separate approval) before it can message anyone.
+    if db.get_session(osession) is None or \
+            db.resolve_session(osession)["status"] != db.APPROVED:
+        return JSONResponse({"status": "peer_not_linked"})
+    handle = db.ensure_handle(osession) or _handle(osession)
+
+    _reconcile_crosstalk(osession, to)
+    if db.crosstalk_allowed(osession, to):
+        result = await crosstalk_delivery.deliver_from_chat(handle, to, message)
+        return JSONResponse({"status": "delivered", "from": handle, **result})
+    grant = db.get_crosstalk_grant(osession, to)
+    if grant and grant.get("status") == db.DENIED:
+        return JSONResponse({"status": db.DENIED, "from": handle})
+
+    # Reuse an already-open approval (a re-relay of the same undecided send must
+    # not raise a second popup). Only when none is open do we (re)set the pending
+    # grant and open one — note upsert clears approval_id, so it must precede the
+    # set below, never run on the reuse path.
+    rid = grant.get("approval_id") if grant else None
+    if not _has_open_approval(rid):
+        db.upsert_pending_crosstalk(osession, to, target_org=target_org)
+        rid = await _open_approval(kinds.KIND_CROSSTALK, handle, {
+            "openai_session": osession, "target_session": to,
+            "target_org": target_org, "handle": handle,
+            "message": message, "intent": intent})
+        db.set_crosstalk_approval_id(osession, to, rid)
+    return JSONResponse({"status": db.PENDING, "approval_id": rid, "from": handle})
+
+
+async def collect_crosstalk(request: Request) -> JSONResponse:
+    """A chat drains its own inbox — the queued replies addressed to its handle.
+    Authorized by the relay's service token plus the chat's authenticated
+    openai_session; the dashboard maps that session to its handle and returns ONLY
+    that handle's messages, marking them delivered (idempotent: a repeat returns
+    nothing new)."""
+    err = _relay_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    osession = str(body.get("openai_session") or "").strip()
+    try:
+        limit = min(int(body.get("limit") or 100), 500)
+    except (TypeError, ValueError):
+        limit = 100
+    if not osession:
+        return JSONResponse({"error": "openai_session required"}, status_code=400)
+    handle = db.ensure_handle(osession)
+    if handle is None:
+        return JSONResponse({"messages": []})
+    msgs = await asyncio.to_thread(auth_db.collect_inbox, handle, limit)
+    return JSONResponse({"handle": handle, "messages": [
+        {"from": m["sender_session"], "label": m["sender_label"],
+         "message": m["message"], "timestamp": m["timestamp"]} for m in msgs]})
+
+
 ROUTES = [
     Route("/api/mcp/session/resolve", resolve_session, methods=["POST"]),
     Route("/api/mcp/session/status", session_status, methods=["POST"]),
     Route("/api/mcp/crosstalk/resolve", resolve_crosstalk, methods=["POST"]),
     Route("/api/mcp/crosstalk/status", crosstalk_status, methods=["POST"]),
+    Route("/api/mcp/crosstalk/relay", relay_crosstalk, methods=["POST"]),
+    Route("/api/mcp/crosstalk/collect", collect_crosstalk, methods=["POST"]),
 ]
