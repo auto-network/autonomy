@@ -143,13 +143,9 @@ def authorize(identity: dict, tool: str, args: dict, *, poster=dashboard_post) -
     if not identity_trusted(identity):
         return {"allowed": False, "reason": "no trusted OpenAI session identity"}
     osession = identity["openai_session"]
-    resolved = poster("/api/mcp/session/resolve", {
-        "openai_session": osession,
-        "openai_subject": identity.get("openai_subject") or "",
-        "openai_org": identity.get("openai_org") or "",
-        "intent": str(args.get("intent") or ""),
-        "requested_org": str(args.get("requested_org") or ""),
-    })
+    # Per-request check uses the NON-popping status endpoint — authorizing a tool
+    # call must never open an approval popup (only hello does that).
+    resolved = poster("/api/mcp/session/status", {"openai_session": osession})
     if resolved is None:
         return {"allowed": False, "reason": "dashboard unreachable"}
     if resolved.get("status") != "approved":
@@ -189,7 +185,6 @@ def hello_dashboard(identity: dict, args: dict, *, poster=dashboard_post) -> dic
         "openai_subject": identity.get("openai_subject") or "",
         "openai_org": identity.get("openai_org") or "",
         "intent": str(args.get("intent") or ""),
-        "requested_org": str(args.get("requested_org") or ""),
     })
     if resolved is None:
         return {"structured": {"status": "error"}, "is_error": True,
@@ -504,28 +499,24 @@ TOOL_DEFS = [
     {
         "name": "hello",
         "description": (
-            "Introduce this chat to the Autonomy relay to request access. State "
-            "your intent in plain language; the human operator then approves this "
-            "specific chat in the Autonomy dashboard and chooses which of THEIR "
-            "orgs to grant it, at read-only or read/write. You do not need to know "
-            "or list the orgs — that is the operator's decision. Call hello again "
-            "after approval. Your identity is established automatically — no name "
-            "or token is needed."
+            "Request access to Autonomy for this chat. State your intent in plain "
+            "language; the human operator approves this specific chat in the "
+            "Autonomy dashboard and chooses which of THEIR orgs to grant, at "
+            "read-only or read/write. You never choose or name an org — that is "
+            "the operator's decision. After calling hello, just try the tools: "
+            "they work once approved (and return a clear 'pending approval' "
+            "message before that). Call hello AGAIN only when you need different "
+            "or additional access (e.g. a tool was denied) — each call asks the "
+            "operator to approve. Your identity is established automatically; no "
+            "name or token is needed."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "intent": {
                     "type": "string",
-                    "description": "What you want to do and why, in plain language. This is the "
-                                   "main thing the operator reads on the approval prompt, so be specific.",
-                },
-                "requested_org": {
-                    "type": "string",
-                    "description": "Optional hint only. If the user already named a specific "
-                                   "Autonomy org in this conversation, pass it; otherwise omit it. "
-                                   "Do not guess — the operator sees this as a suggestion and picks "
-                                   "the actual org themselves.",
+                    "description": "What you want to do and why, in plain language — the main "
+                                   "thing the operator reads on the approval prompt. Be specific.",
                 },
                 "peer_name": {
                     "type": "string",

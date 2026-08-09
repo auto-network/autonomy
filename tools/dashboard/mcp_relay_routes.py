@@ -68,6 +68,20 @@ def _has_open_approval(approval_id: str | None) -> bool:
     return bool(row) and row.get("result") is None
 
 
+def _reconcile(osession: str) -> None:
+    """Reflect a decided approval into the binding. Approvals are applied by the
+    executor; a DECLINE denies the session unless it already holds a live binding
+    (a declined re-request must never revoke access the chat already has). Run by
+    both resolve (hello) and status (per-request) so either sees a fresh verdict."""
+    row = db.get_session(osession)
+    if not row or not row.get("approval_id"):
+        return
+    appr = ar.get(row["approval_id"])
+    if appr and appr.get("result") is not None and not appr["result"].get("approved"):
+        if db.resolve_session(osession)["status"] != db.APPROVED:
+            db.set_session_status(osession, db.DENIED)
+
+
 async def resolve_session(request: Request) -> JSONResponse:
     err = _relay_auth(request)
     if err:
@@ -82,48 +96,42 @@ async def resolve_session(request: Request) -> JSONResponse:
     subject = str(body.get("openai_subject") or "")
     oorg = str(body.get("openai_org") or "")
     intent = str(body.get("intent") or "")
-    requested_org = str(body.get("requested_org") or "")
 
-    # Reconcile a decided approval before resolving (executor applies approvals;
-    # declines must be reflected as denied here).
-    row = db.get_session(osession)
-    if row and row.get("status") == db.PENDING and row.get("approval_id"):
-        appr = ar.get(row["approval_id"])
-        if appr and appr.get("result") is not None and not appr["result"].get("approved"):
-            db.set_session_status(osession, db.DENIED)
+    _reconcile(osession)
 
-    resolved = db.resolve_session(osession)
-
-    if resolved["status"] == db.APPROVED:
-        # Re-hello asking for a DIFFERENT org supersedes the live binding: drop to
-        # pending and open a fresh approval for the new org (operator switches it).
-        if requested_org and requested_org != resolved.get("autonomy_org"):
-            db.set_session_status(osession, db.PENDING)
-            db.upsert_pending_session(osession, openai_subject=subject, openai_org=oorg,
-                                      intent=intent, requested_org=requested_org)
-            rid = await _open_approval(kinds.KIND_LINK, osession, {
-                "openai_session": osession, "openai_subject": subject,
-                "openai_org": oorg, "intent": intent, "requested_org": requested_org})
-            db.set_session_approval_id(osession, rid)
-            return JSONResponse({"status": db.PENDING, "relink": True})
-        return JSONResponse(resolved)
-
-    if resolved["status"] == db.DENIED:
-        return JSONResponse({"status": db.DENIED})
-
-    # unknown / expired / pending → ensure a pending record + exactly one live
-    # popup. Only (re)create the record on unknown/expired; an already-pending
-    # session must keep its approval_id so re-polls don't spawn duplicate popups.
-    if resolved["status"] in ("unknown", "expired"):
-        db.upsert_pending_session(osession, openai_subject=subject, openai_org=oorg,
-                                  intent=intent, requested_org=requested_org)
+    # A hello is always a request. There is no org here — the operator chooses.
+    # (Re)establish a pending record when there's no live binding, then ensure
+    # exactly one open approval popup (deduped while undecided). A live (approved)
+    # session KEEPS its binding; the popup is a re-request the operator can grant
+    # (to change org/level) or ignore.
+    status = db.resolve_session(osession)["status"]
+    if status in ("unknown", "denied", "expired"):
+        db.upsert_pending_session(osession, openai_subject=subject,
+                                  openai_org=oorg, intent=intent)
     current = db.get_session(osession)
     if not _has_open_approval(current.get("approval_id")):
         rid = await _open_approval(kinds.KIND_LINK, osession, {
             "openai_session": osession, "openai_subject": subject,
-            "openai_org": oorg, "intent": intent, "requested_org": requested_org})
+            "openai_org": oorg, "intent": intent})
         db.set_session_approval_id(osession, rid)
-    return JSONResponse({"status": db.PENDING})
+    return JSONResponse(db.resolve_session(osession))
+
+
+async def session_status(request: Request) -> JSONResponse:
+    """Non-popping per-request authorization check (the relay calls this on every
+    tool call). Pure read of the current binding — never opens an approval."""
+    err = _relay_auth(request)
+    if err:
+        return err
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    osession = str(body.get("openai_session") or "").strip()
+    if not osession:
+        return JSONResponse({"error": "openai_session required"}, status_code=400)
+    _reconcile(osession)
+    return JSONResponse(db.resolve_session(osession))
 
 
 async def resolve_crosstalk(request: Request) -> JSONResponse:
@@ -171,5 +179,6 @@ async def resolve_crosstalk(request: Request) -> JSONResponse:
 
 ROUTES = [
     Route("/api/mcp/session/resolve", resolve_session, methods=["POST"]),
+    Route("/api/mcp/session/status", session_status, methods=["POST"]),
     Route("/api/mcp/crosstalk/resolve", resolve_crosstalk, methods=["POST"]),
 ]

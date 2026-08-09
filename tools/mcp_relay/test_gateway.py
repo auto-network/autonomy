@@ -73,9 +73,9 @@ _TRUSTED = {"openai_session": "v1/s", "openai_subject": "v1/u",
 
 def _poster(session_resp, crosstalk_resp=None):
     def poster(path, body):
-        if path.endswith("/session/resolve"):
+        if "/session/" in path:       # resolve (hello) and status (per-request)
             return session_resp
-        if path.endswith("/crosstalk/resolve"):
+        if "/crosstalk/" in path:
             return crosstalk_resp
         return None
     return poster
