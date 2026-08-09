@@ -241,6 +241,86 @@ def authz_denial_text(tool: str, authz: dict) -> str:
     return f"Not authorized: {authz.get('reason', 'denied')}. Call hello to (re)request access."
 
 
+# How long a crosstalk_send is HELD waiting for the operator's decision before it
+# gives up and tells the model to retry (kept under typical MCP call timeouts).
+CROSSTALK_HOLD_SECONDS = int(os.environ.get("MCP_RELAY_CROSSTALK_HOLD", "55"))
+
+
+def _deliver_crosstalk(state, args: dict, identity: dict) -> dict:
+    """Actually send the held message once approved (delivery is cross-org, not
+    org-scoped)."""
+    dpeer = {"name": peer_label(identity), "scopes": []}
+    _req_ctx.org = None
+    try:
+        structured, text = tool_crosstalk_send(state.registry, args, dpeer)
+        state.log({"tool": "crosstalk_send", "sess": sess_tag(identity), "ok": True})
+        return {"structured": structured, "text": text, "is_error": False}
+    except ToolError as e:
+        state.log({"tool": "crosstalk_send", "sess": sess_tag(identity),
+                   "ok": False, "err": str(e)[:200]})
+        return {"structured": {"error": str(e)}, "text": str(e), "is_error": True}
+    finally:
+        _req_ctx.org = None
+
+
+def crosstalk_send_dashboard(identity: dict, args: dict, state, *, poster=dashboard_post) -> dict:
+    """HOLD a crosstalk_send pending the operator's decision. Opens an approval
+    carrying the MESSAGE, blocks until approve/decline/timeout, and delivers the
+    message only on approve (then the grant stays live for its TTL). The message is
+    never delivered on decline or discarded before the operator sees it."""
+    if not identity_trusted(identity):
+        return {"structured": {"status": "untrusted"}, "is_error": True,
+                "text": "No trusted OpenAI session identity."}
+    target = str(args.get("session") or "").strip()
+    message = str(args.get("message") or "").strip()
+    if not valid_ident(target):
+        return {"structured": {"error": "bad_target"}, "is_error": True,
+                "text": "A valid target 'session' is required."}
+    if not message:
+        return {"structured": {"error": "empty_message"}, "is_error": True,
+                "text": "A non-empty 'message' is required."}
+    osession = identity["openai_session"]
+    # Linking is a SEPARATE step — never conflate it with a send.
+    st = poster("/api/mcp/session/status", {"openai_session": osession})
+    if st is None:
+        return {"structured": {"status": "error"}, "is_error": True,
+                "text": "The Autonomy dashboard is unreachable; try again shortly."}
+    if st.get("status") != "approved":
+        return {"structured": {"status": st.get("status")}, "is_error": True,
+                "text": "This chat isn't linked to an org yet. Call hello to request "
+                        "access first; that's a separate approval from sending a message."}
+    body = {"openai_session": osession, "target_session": target, "target_org": "",
+            "message": message, "intent": str(args.get("intent") or "")}
+    res = poster("/api/mcp/crosstalk/resolve", body)
+    if res is None:
+        return {"structured": {"status": "error"}, "is_error": True,
+                "text": "The Autonomy dashboard is unreachable; try again shortly."}
+    status = res.get("status")
+    if status == "approved":
+        return _deliver_crosstalk(state, args, identity)
+    if status == "denied":
+        return {"structured": {"status": "denied"}, "is_error": True,
+                "text": "The operator declined to allow this message. It was not sent."}
+    # pending -> HOLD until decided or timeout, then deliver on approve
+    deadline = time.time() + CROSSTALK_HOLD_SECONDS
+    while time.time() < deadline:
+        time.sleep(2)
+        s = poster("/api/mcp/crosstalk/status",
+                   {"openai_session": osession, "target_session": target})
+        if not s:
+            continue
+        if s.get("status") == "approved":
+            return _deliver_crosstalk(state, args, identity)
+        if s.get("status") == "denied":
+            return {"structured": {"status": "denied"}, "is_error": True,
+                    "text": "The operator declined to allow this message. It was not sent."}
+    return {"structured": {"status": "pending"}, "is_error": True,
+            "text": "The message is held pending operator approval and was NOT sent yet. "
+                    "An approval popup is open on the operator's dashboard; send again in "
+                    "a moment. Once approved, this channel stays open and later messages "
+                    "send immediately."}
+
+
 # ---------------------------------------------------------------- peer registry
 
 class PeerRegistry:
@@ -776,6 +856,12 @@ def handle_message(state: RelayState, msg: dict, headers) -> dict | None:
                 res = hello_dashboard(identity, args)
                 state.log({"tool": "hello", "sess": sess_tag(identity),
                            "status": (res.get("structured") or {}).get("status")})
+                return tool_call_result(msg_id, res["structured"], res["text"],
+                                        is_error=res.get("is_error", False))
+            if name == "crosstalk_send":
+                # Held send: opens an approval carrying the message, blocks for the
+                # decision, delivers on approve. Not the generic authorize() path.
+                res = crosstalk_send_dashboard(identity, args, state)
                 return tool_call_result(msg_id, res["structured"], res["text"],
                                         is_error=res.get("is_error", False))
             authz = authorize(identity, name, args)

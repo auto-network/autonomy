@@ -26,7 +26,8 @@ KIND_LINK = "mcp_peer_link"
 KIND_CROSSTALK = "mcp_crosstalk"
 
 _LINK_REQUIRED = {"openai_session", "openai_subject", "openai_org", "intent"}
-_CROSSTALK_REQUIRED = {"openai_session", "target_session", "target_org"}
+_CROSSTALK_REQUIRED = {"openai_session", "target_session", "message"}
+_CROSSTALK_OPTIONAL = ("target_org", "handle", "intent")
 
 
 def _ttl_expires_at(decision: dict) -> float | None:
@@ -72,10 +73,29 @@ def prepare_create_crosstalk(session: str, request: dict) -> tuple[dict, dict]:
     missing = _CROSSTALK_REQUIRED - set(request)
     if missing:
         raise ValueError(f"mcp_crosstalk request missing: {sorted(missing)}")
+    if not str(request.get("message") or "").strip():
+        raise ValueError("mcp_crosstalk requires the message being sent")
     frozen = {k: str(request.get(k, "")) for k in _CROSSTALK_REQUIRED}
-    if request.get("handle"):
-        frozen["handle"] = str(request["handle"])
+    for k in _CROSSTALK_OPTIONAL:
+        if request.get(k):
+            frozen[k] = str(request[k])
     return frozen, {}
+
+
+def enrich_crosstalk(row: dict) -> dict:
+    """Attach the target session's human title so the operator recognises WHO the
+    message goes to (recognising the target is the whole decision). Rendered at
+    GET time from the live dashboard session row; empty if the target is unknown."""
+    target = (row.get("request") or {}).get("target_session") or ""
+    label = ""
+    try:
+        from tools.dashboard.dao import dashboard_db
+        sess = dashboard_db.get_session(target)
+        if sess:
+            label = sess.get("label") or ""
+    except Exception:
+        label = ""
+    return {"target_label": label}
 
 
 def _require_operator(request: Request, _row: dict, _decision: dict) -> str | None:
@@ -135,4 +155,4 @@ async def execute_crosstalk(row: dict, decision: dict) -> dict:
 PREPARE_CREATE = {KIND_LINK: prepare_create_link, KIND_CROSSTALK: prepare_create_crosstalk}
 EXECUTORS = {KIND_LINK: execute_link, KIND_CROSSTALK: execute_crosstalk}
 AUTHORIZE_DECISION = {KIND_LINK: _require_operator, KIND_CROSSTALK: _require_operator}
-ENRICH = {KIND_LINK: enrich_link}  # attach the org list for the popup dropdown
+ENRICH = {KIND_LINK: enrich_link, KIND_CROSSTALK: enrich_crosstalk}
