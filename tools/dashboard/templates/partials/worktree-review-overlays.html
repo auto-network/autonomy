@@ -776,9 +776,19 @@
           <div class="mt-4 space-y-4" data-testid="approval-mcp-link">
             <div>
               <label class="text-sm font-medium text-slate-200">Autonomy org</label>
-              <input x-model="approvalRequest.autonomyOrg" type="text" placeholder="org slug"
-                     data-testid="approval-mcp-org"
-                     class="mt-2 w-full rounded-2xl border border-slate-600 bg-slate-900/60 px-4 py-3 text-sm text-slate-100 focus:border-indigo-400 focus:outline-none">
+              <template x-if="approvalRequest.orgs && approvalRequest.orgs.length">
+                <select x-model="approvalRequest.autonomyOrg" data-testid="approval-mcp-org"
+                        class="mt-2 w-full rounded-2xl border border-slate-600 bg-slate-900/60 px-4 py-3 text-sm text-slate-100 focus:border-indigo-400 focus:outline-none">
+                  <template x-for="o in approvalRequest.orgs" :key="o">
+                    <option :value="o" x-text="o"></option>
+                  </template>
+                </select>
+              </template>
+              <template x-if="!approvalRequest.orgs || !approvalRequest.orgs.length">
+                <input x-model="approvalRequest.autonomyOrg" type="text" placeholder="org slug"
+                       data-testid="approval-mcp-org"
+                       class="mt-2 w-full rounded-2xl border border-slate-600 bg-slate-900/60 px-4 py-3 text-sm text-slate-100 focus:border-indigo-400 focus:outline-none">
+              </template>
             </div>
             <div>
               <label class="text-sm font-medium text-slate-200">Access level</label>
