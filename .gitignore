@@ -144,3 +144,4 @@ data/agent_runs/
 .beads/issues.jsonl
 data/chatgpt/
 data/claude/
+data/mcp_relay/
