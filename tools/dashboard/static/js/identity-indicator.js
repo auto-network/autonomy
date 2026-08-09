@@ -293,11 +293,32 @@
       var body = await response.json().catch(function () { return {}; });
       if (!response.ok) throw new Error(body.error || 'Identity status is unavailable');
       status = body;
+      applyOperatorIdentity(status);
     } catch (error) {
       loadError = (error && error.message) || String(error);
     }
     render();
     return status;
+  }
+
+  // Threads the already-known personal display_name into the globals
+  // surface-presence.js's _resolveOperatorId/_resolveOperatorLabel read
+  // (window.Autonomy.operatorId/operatorLabel) -- closing a wiring gap
+  // that today leaves every plugin's presence stack without the human
+  // viewer's own row, even though auth already knows a name. One stable
+  // literal id: this is a single-personal-root gate, not multi-user yet
+  // (that's the separate, deferred org-member-identity epic), so a
+  // constant is the honest representation, not a synthetic derived id.
+  // Gated on signed_in, not just personal_identity being present, so an
+  // unlocked-but-not-authenticated ('open'/'gate-off') session doesn't
+  // claim a live presence identity it hasn't actually proven.
+  function applyOperatorIdentity(value) {
+    if (!value || value.signed_in !== true) return;
+    var name = value.personal_identity && value.personal_identity.display_name;
+    if (typeof name !== 'string' || !name.trim()) return;
+    root.Autonomy = root.Autonomy || {};
+    root.Autonomy.operatorId = 'operator:personal';
+    root.Autonomy.operatorLabel = name.trim();
   }
 
   function init() {
