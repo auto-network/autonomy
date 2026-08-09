@@ -2253,6 +2253,69 @@
       // overlay state; the chrome and Decline are kind-agnostic (declining is
       // identical for every kind, so it lives in the shell).
       _approvalKinds: {
+        mcp_peer_link: {
+          async open(self, r) {
+            const req = r.request || {};
+            // The operator picks from THEIR orgs — enumerate them (the model
+            // never needs the list). Fall back to a typed slug if this fails.
+            let orgs = [];
+            try {
+              const resp = await fetch('/api/orgs');
+              if (resp.ok) {
+                const d = await resp.json();
+                orgs = (d.orgs || []).map((o) => o.slug).filter(Boolean);
+              }
+            } catch (e) { /* typed fallback below */ }
+            self.approvalBusy = false;
+            self.approvalRequest = {
+              id: r.id, kind: r.kind, session: r.session,
+              title: 'ChatGPT connector access', actionLabel: 'Approve access',
+              op: 'link', target: 'access',
+              bodyMarkdown: [
+                'A ChatGPT chat is requesting access to Autonomy.',
+                '',
+                'Intent: ' + (req.intent || '(none stated)'),
+                'OpenAI user: ' + (req.openai_subject || 'unknown'),
+                'OpenAI org: ' + (req.openai_org || 'unknown'),
+              ].join('\n'),
+              orgs,
+              autonomyOrg: orgs[0] || '',
+              level: 'read',
+              ttl: '2592000',
+              awaitExecution: true,
+              error: '',
+            };
+          },
+          decision(self, req) {
+            const org = (req.autonomyOrg || '').trim();
+            if (!org) throw new Error('Choose an Autonomy org to grant.');
+            return { autonomy_org: org, level: req.level || 'read',
+                     ttl_seconds: req.ttl === '' ? null : Number(req.ttl) };
+          },
+        },
+        mcp_crosstalk: {
+          open(self, r) {
+            const req = r.request || {};
+            self.approvalBusy = false;
+            self.approvalRequest = {
+              id: r.id, kind: r.kind, session: r.session,
+              title: 'Allow CrossTalk to a session', actionLabel: 'Allow',
+              op: 'crosstalk', target: req.target_session || 'session',
+              bodyMarkdown: [
+                'A ChatGPT chat wants to send CrossTalk messages to a session.',
+                '',
+                'Target session: ' + (req.target_session || 'unknown'),
+                'Target org: ' + (req.target_org || 'unknown'),
+              ].join('\n'),
+              ttl: '2592000',
+              awaitExecution: true,
+              error: '',
+            };
+          },
+          decision(self, req) {
+            return { ttl_seconds: req.ttl === '' ? null : Number(req.ttl) };
+          },
+        },
         jira_write: {
           open(self, r) {
             const req = r.request || {};
