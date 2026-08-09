@@ -131,6 +131,13 @@ def test_hello_dashboard_untrusted_is_error():
     assert res["is_error"] is True
 
 
+def test_hello_dashboard_requires_a_nonblank_intent():
+    # the operator cannot approve without a reason -> reject before opening a popup
+    res = gateway_mod.hello_dashboard(_TRUSTED, {"intent": "   "},
+                                      poster=_poster({"status": "pending"}))
+    assert res["is_error"] is True and "intent" in res["text"].lower()
+
+
 def test_stdio_transport_is_its_own_trust_boundary(monkeypatch):
     # Over stdio there is no TCP surface and no header to forge — the process
     # boundary is the trust boundary, so a session with no cert is still trusted.
