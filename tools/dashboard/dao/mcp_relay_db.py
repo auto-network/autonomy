@@ -45,9 +45,6 @@ CREATE TABLE IF NOT EXISTS mcp_sessions (
 CREATE INDEX IF NOT EXISTS idx_mcp_sessions_status
     ON mcp_sessions(status, expires_at);
 
-CREATE INDEX IF NOT EXISTS idx_mcp_sessions_handle
-    ON mcp_sessions(handle);
-
 CREATE TABLE IF NOT EXISTS mcp_crosstalk_grants (
     grant_id         TEXT PRIMARY KEY,
     openai_session   TEXT NOT NULL,
@@ -87,14 +84,20 @@ def _get_conn(db_path: Path | str | None = None) -> sqlite3.Connection:
 
 def _migrate(conn: sqlite3.Connection) -> None:
     """Add columns absent from older DBs. CREATE TABLE IF NOT EXISTS never adds a
-    column to an existing table, so a new column needs an explicit ALTER."""
+    column to an existing table, so a new column needs an explicit ALTER — and the
+    index on that column must be created HERE, after the ALTER, never in
+    CREATE_TABLES: on an existing DB the table pre-exists without the column, so a
+    CREATE INDEX ... ON mcp_sessions(handle) in the schema script would reference a
+    missing column and raise before this migration could ever add it."""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(mcp_sessions)")}
     if "handle" not in cols:
         conn.execute("ALTER TABLE mcp_sessions ADD COLUMN handle TEXT")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_mcp_sessions_handle ON mcp_sessions(handle)"
-        )
-        conn.commit()
+    # Idempotent for both a fresh DB (column created inline by CREATE_TABLES) and a
+    # migrated one; the column is guaranteed present by the time this runs.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mcp_sessions_handle ON mcp_sessions(handle)"
+    )
+    conn.commit()
 
 
 def init_db(db_path: Path | str | None = None) -> None:
