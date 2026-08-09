@@ -97,9 +97,15 @@ def test_health(relay):
 def test_server_discover(relay):
     _, resp = rpc(relay["port"], {"jsonrpc": "2.0", "id": 1, "method": "server/discover"})
     result = resp["result"]
-    assert "2026-07-28" in result["protocolVersions"]
-    assert result["serverInfo"]["name"] == "autonomy-mcp-relay"
+    # DiscoverResult required fields (2026-07-28): supportedVersions (NOT
+    # protocolVersions), capabilities, cacheScope, resultType, ttlMs.
+    assert "2026-07-28" in result["supportedVersions"]
+    assert "protocolVersions" not in result
+    assert result["cacheScope"] == "private"
+    assert isinstance(result["ttlMs"], int)
+    assert "tools" in result["capabilities"]
     assert result["resultType"] == "complete"
+    assert result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "autonomy-mcp-relay"
 
 
 def test_legacy_initialize(relay):
