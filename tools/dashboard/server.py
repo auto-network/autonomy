@@ -117,6 +117,7 @@ from tools.dashboard.worktree_monitor import worktree_monitor
 from tools.dashboard import session_trace
 from tools.dashboard.dao import auth_db, dashboard_db
 from tools.dashboard import approvals_routes
+from tools.dashboard import mcp_relay_routes
 from tools.dashboard import jira_routes
 from tools.dashboard import identity_routes
 from tools.dashboard import join_routes
@@ -16273,6 +16274,9 @@ routes = [
     # On-demand approval rendezvous (requester <-> operator browser),
     # e.g. commit signing
     *approvals_routes.ROUTES,
+
+    # ChatGPT MCP relay: session/crosstalk resolve + approval (service-token auth)
+    *mcp_relay_routes.ROUTES,
 
     # auto.network identity (C2 sign-on ceremony): encrypted org key,
     # binding record, revocation forwarding

@@ -98,6 +98,7 @@ def _enrich_commit_sign(row: dict) -> dict:
 # module; it exports plain dicts so this file stays the single registry.
 from tools.dashboard import link_approvals as _link_approvals
 from tools.dashboard import dashboard_access_approvals as _dashboard_access
+from tools.dashboard import mcp_peer_approvals as _mcp_peer
 
 # Optional per-kind request preparation. A handler returns the normalized
 # request plus a server-frozen staged context. Kinds absent here retain the
@@ -105,9 +106,11 @@ from tools.dashboard import dashboard_access_approvals as _dashboard_access
 PREPARE_CREATE = {
     "link_publish": _link_approvals.prepare_create,
     **_dashboard_access.PREPARE_CREATE,
+    **_mcp_peer.PREPARE_CREATE,
 }
 AUTHORIZE_DECISION = {
     **_dashboard_access.AUTHORIZE_DECISION,
+    **_mcp_peer.AUTHORIZE_DECISION,
 }
 
 # Per-kind GET enrichment — the only kind-specific hook on the server side of
@@ -137,6 +140,7 @@ _decision_waiters: dict[str, asyncio.Event] = {}
 EXECUTORS: dict = {
     **_link_approvals.EXECUTORS,
     **_dashboard_access.EXECUTORS,
+    **_mcp_peer.EXECUTORS,
 }
 
 # Requests whose executor is running: the verdict is committed but the result

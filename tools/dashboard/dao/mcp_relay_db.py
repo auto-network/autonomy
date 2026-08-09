@@ -199,6 +199,40 @@ def set_session_status(
         conn.close()
 
 
+def set_session_approval_id(
+    openai_session: str, approval_id: str, *, db_path: Path | str | None = None
+) -> bool:
+    """Point a session at its latest approval request (for poll-dedup +
+    decline reconciliation), without changing status."""
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE mcp_sessions SET approval_id=?, updated_at=? WHERE openai_session=?",
+            (approval_id, time.time(), openai_session),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def set_crosstalk_approval_id(
+    openai_session: str, target_session: str, approval_id: str,
+    *, db_path: Path | str | None = None
+) -> bool:
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE mcp_crosstalk_grants SET approval_id=?, updated_at=?"
+            " WHERE openai_session=? AND target_session=?",
+            (approval_id, time.time(), openai_session, target_session),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
 def resolve_session(openai_session: str, *, db_path: Path | str | None = None) -> dict:
     """The relay's per-request check: returns the effective authorization for a
     session — {status, autonomy_org, level, expires_at}. `status` is 'approved'
@@ -292,6 +326,25 @@ def approve_crosstalk(
     finally:
         conn.close()
     return get_crosstalk_grant(openai_session, target_session, db_path=db_path)
+
+
+def set_crosstalk_status(
+    openai_session: str, target_session: str, status: str,
+    *, db_path: Path | str | None = None
+) -> bool:
+    """deny/revoke a crosstalk grant."""
+    now = time.time()
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE mcp_crosstalk_grants SET status=?, expires_at=NULL, updated_at=?"
+            " WHERE openai_session=? AND target_session=?",
+            (status, now, openai_session, target_session),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
 
 
 def crosstalk_allowed(
