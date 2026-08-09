@@ -115,7 +115,7 @@ from tools.dashboard.session_lifecycle_worker import (
 )
 from tools.dashboard.worktree_monitor import worktree_monitor
 from tools.dashboard import session_trace
-from tools.dashboard.dao import auth_db, dashboard_db
+from tools.dashboard.dao import auth_db, dashboard_db, mcp_relay_db
 from tools.dashboard import approvals_routes
 from tools.dashboard import mcp_relay_routes
 from tools.dashboard import jira_routes
@@ -3258,9 +3258,27 @@ async def api_crosstalk_send(request):
     if error:
         return JSONResponse({"error": error}, status_code=400)
 
-    # Validate target exists
+    # Validate target. A live tmux session delivers normally (below). A target
+    # that is a known chat handle (ChatGPT-<datetime>) has no live pane; queue the
+    # message for that chat to collect — but only while an approved crosstalk grant
+    # links this sender to that chat (the same grant the chat's own send created;
+    # no new approval for the reply). Any other target is unknown → 404.
     if not target or not _tmux_session_exists(target):
-        return JSONResponse({"error": f"target session not found: {target}"}, status_code=404)
+        chat = mcp_relay_db.get_session_by_handle(target) if target else None
+        if chat is None:
+            return JSONResponse({"error": f"target session not found: {target}"},
+                                status_code=404)
+        if not mcp_relay_db.crosstalk_allowed(chat["openai_session"], sender):
+            return JSONResponse(
+                {"error": f"no approved crosstalk channel with {target}"},
+                status_code=403)
+        reply_row = dashboard_db.get_session(sender)
+        reply_label = (reply_row or {}).get("label", "") or sender
+        await asyncio.to_thread(
+            auth_db.insert_message, sender, reply_label, target,
+            None, None, message, time.time(), 0)
+        return JSONResponse({"delivered": False, "queued": True, "from": sender,
+                             "label": reply_label, "target": target})
 
     # Resolve sender metadata from dashboard_db. Reconcile-on-read so a
     # drifted graph_source_id never makes it into the envelope (auto-4nr14
