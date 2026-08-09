@@ -99,7 +99,7 @@ def test_api_managed_local_repo_round_trips_through_session_merge(tmp_path, monk
         repos_dir=repos_dir,
         worktrees_dir=worktrees_dir,
     )
-    first = worktrees_dir / "sess-one" / "idea-board"
+    first = wm._session_worktree_dir(worktrees_dir, "sess-one", "idea-board")
     assert subprocess.run(
         ["git", "-C", str(first), "config", "--get", "user.email"],
         capture_output=True, text=True, check=True,
@@ -133,7 +133,7 @@ def test_api_managed_local_repo_round_trips_through_session_merge(tmp_path, monk
         repos_dir=repos_dir,
         worktrees_dir=worktrees_dir,
     )
-    second = worktrees_dir / "sess-two" / "idea-board"
+    second = wm._session_worktree_dir(worktrees_dir, "sess-two", "idea-board")
     assert (second / "IDEAS.md").read_text() == "# Ideas\n\n- Durable local workspaces\n"
 
 @pytest.mark.parametrize(
@@ -199,7 +199,7 @@ def test_prepare_session_mounts_local_repo_no_remote(tmp_path):
         proj, "sess-db", repos_dir=repos_dir, worktrees_dir=worktrees_dir,
     )
 
-    worktree = worktrees_dir / "sess-db" / "local-checkout"
+    worktree = wm._session_worktree_dir(worktrees_dir, "sess-db", "local-checkout")
     clone = repos_dir / "local" / f"{url.strip('/')}.git"
     # Managed clone is self-contained under repos_dir/local/… and mounted rw.
     # (Non-bare clone, so its git dir is under .git/.)
@@ -278,7 +278,10 @@ def test_prepare_session_mounts_writable_and_readonly(tmp_path, monkeypatch):
     mounts_w = wm.prepare_session_mounts(
         proj_w, "sess-w", repos_dir=repos_dir, worktrees_dir=worktrees_dir,
     )
-    worktree = worktrees_dir / "sess-w" / "upstream"
+    # Fresh sessions get a session-unique basename so git never derives a
+    # colliding registration name (bead auto-jbz67).
+    worktree = worktrees_dir / "sess-w" / "upstream-sess-w"
+    assert worktree == wm._session_worktree_dir(worktrees_dir, "sess-w", "upstream")
     clone = repos_dir / "local" / "upstream.git"
     assert mounts_w[str(worktree)] == "/workspace/upstream"
     # Clone must be mounted rw (no ``:ro`` suffix) so ``git add``/``commit``
@@ -334,7 +337,7 @@ def test_git_add_and_commit_succeed_in_session_worktree(tmp_path, monkeypatch):
     wm.prepare_session_mounts(
         proj, session, repos_dir=repos_dir, worktrees_dir=worktrees_dir,
     )
-    worktree = worktrees_dir / session / "upstream"
+    worktree = wm._session_worktree_dir(worktrees_dir, session, "upstream")
     clone = repos_dir / "local" / "upstream.git"
     branch = f"session/{session}"
 
@@ -727,7 +730,7 @@ def test_prepare_session_mounts_syncs_clone_main_from_base_source(tmp_path, monk
         "managed clone's main should track the base_source host checkout"
     )
 
-    worktree = worktrees_dir / "sess-base-src" / "upstream"
+    worktree = wm._session_worktree_dir(worktrees_dir, "sess-base-src", "upstream")
     assert (worktree / "host-only.txt").exists(), (
         "fresh worktree should derive from the base_source-advanced main"
     )
@@ -1008,7 +1011,7 @@ def _make_writable_session_worktree(
         proj, session, repos_dir=repos_dir, worktrees_dir=worktrees_dir,
     )
     clone = repos_dir / "local" / "upstream.git"
-    worktree = worktrees_dir / session / repo_name
+    worktree = wm._session_worktree_dir(worktrees_dir, session, repo_name)
     return worktrees_dir, clone, worktree
 
 
@@ -1234,7 +1237,7 @@ def test_prune_orphan_worktrees_skips_live_sessions(tmp_path, monkeypatch):
         proj, session_dead,
         repos_dir=tmp_path / "repos", worktrees_dir=worktrees_dir,
     )
-    wt_dead = worktrees_dir / session_dead / "upstream"
+    wt_dead = wm._session_worktree_dir(worktrees_dir, session_dead, "upstream")
     assert wt_dead.exists()
     assert wt_live.exists()
 
@@ -1276,8 +1279,8 @@ def test_scan_all_worktrees_reports_state_per_session(tmp_path, monkeypatch):
         proj, session_clean,
         repos_dir=tmp_path / "repos", worktrees_dir=worktrees_dir,
     )
-    wt_dirty = worktrees_dir / session_dirty / "upstream"
-    wt_clean = worktrees_dir / session_clean / "upstream"
+    wt_dirty = wm._session_worktree_dir(worktrees_dir, session_dirty, "upstream")
+    wt_clean = wm._session_worktree_dir(worktrees_dir, session_clean, "upstream")
 
     subprocess.run(["git", "-C", str(wt_live), "config", "user.email", "t@t"], check=True)
     subprocess.run(["git", "-C", str(wt_live), "config", "user.name", "t"], check=True)
@@ -1351,7 +1354,7 @@ def test_scan_all_worktrees_suppresses_cross_worktree_duplicates(tmp_path, monke
         proj, session_review,
         repos_dir=tmp_path / "repos", worktrees_dir=worktrees_dir,
     )
-    wt_review = worktrees_dir / session_review / "upstream"
+    wt_review = wm._session_worktree_dir(worktrees_dir, session_review, "upstream")
 
     subprocess.run(["git", "-C", str(wt_author), "config", "user.email", "t@t"], check=True)
     subprocess.run(["git", "-C", str(wt_author), "config", "user.name", "t"], check=True)
@@ -1440,7 +1443,7 @@ def test_scan_all_worktrees_suppresses_rebased_copy_duplicates(tmp_path, monkeyp
         proj, session_copy,
         repos_dir=tmp_path / "repos", worktrees_dir=worktrees_dir,
     )
-    wt_copy = worktrees_dir / session_copy / "upstream"
+    wt_copy = wm._session_worktree_dir(worktrees_dir, session_copy, "upstream")
 
     for wt in (wt_author, wt_copy):
         subprocess.run(["git", "-C", str(wt), "config", "user.email", "t@t"], check=True)
@@ -2244,6 +2247,204 @@ def test_create_worktree_refuses_nonempty_husk(tmp_path):
 
     with pytest.raises(wm.WorkspaceError, match="without .git"):
         wm.create_worktree(clone, worktree, "session/sess-husk2")
+
+
+# ── Session-unique worktree basenames (bead auto-jbz67) ────────────────
+
+
+def _prepare_sessions(tmp_path, monkeypatch, sessions, *, repo_name="upstream"):
+    """Prepare mounts for several sessions against one shared managed clone."""
+    upstream = _make_upstream(tmp_path)
+    url = str(upstream)
+    repos_dir = tmp_path / "repos"
+    worktrees_dir = tmp_path / "worktrees"
+    monkeypatch.setattr(
+        wm, "managed_clone_path",
+        lambda u, *, repos_dir=repos_dir: repos_dir / "local" / "upstream.git",
+    )
+    monkeypatch.setattr(wm, "_worktree_basename", lambda u: repo_name)
+    proj = ProjectConfig(
+        id="w", name="w", description="", image="img", graph_project="gp",
+        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+    )
+    for session in sessions:
+        wm.prepare_session_mounts(
+            proj, session, repos_dir=repos_dir, worktrees_dir=worktrees_dir,
+        )
+    clone = repos_dir / "local" / "upstream.git"
+    return worktrees_dir, clone
+
+
+def test_worktrees_get_session_unique_registration_names(tmp_path, monkeypatch):
+    """N sessions in the same repo → N distinct git registration names,
+    none of which was allocated by git's suffix disambiguator."""
+    sessions = ["auto-a", "auto-b", "auto-c", "auto-d"]
+    worktrees_dir, _clone = _prepare_sessions(tmp_path, monkeypatch, sessions)
+
+    names = []
+    for session in sessions:
+        worktree = wm._session_worktree_dir(worktrees_dir, session, "upstream")
+        assert worktree.name == f"upstream-{session}"
+        name = wm._worktree_metadata_name(worktree)
+        # git took the basename verbatim — no ``upstream1``/``upstream2`` suffix.
+        assert name == f"upstream-{session}"
+        names.append(name)
+
+    assert len(set(names)) == len(sessions), "registration names must be unique"
+
+
+def test_metadata_rw_mount_resolves_to_own_registration(tmp_path, monkeypatch):
+    """The read-write metadata mount must target THIS session's registration
+    subdir, so ``prune``/``add``/``remove`` against siblings still hits EACCES."""
+    upstream = _make_upstream(tmp_path)
+    url = str(upstream)
+    repos_dir = tmp_path / "repos"
+    worktrees_dir = tmp_path / "worktrees"
+    monkeypatch.setattr(
+        wm, "managed_clone_path",
+        lambda u, *, repos_dir=repos_dir: repos_dir / "local" / "upstream.git",
+    )
+    monkeypatch.setattr(wm, "_worktree_basename", lambda u: "upstream")
+    proj = ProjectConfig(
+        id="w", name="w", description="", image="img", graph_project="gp",
+        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+    )
+    mounts_a = wm.prepare_session_mounts(
+        proj, "sess-a", repos_dir=repos_dir, worktrees_dir=worktrees_dir,
+    )
+    mounts_b = wm.prepare_session_mounts(
+        proj, "sess-b", repos_dir=repos_dir, worktrees_dir=worktrees_dir,
+    )
+    clone = repos_dir / "local" / "upstream.git"
+    wt_meta = clone / ".git" / "worktrees"
+
+    # The rw metadata mount (host==container, no ``:ro``) points at exactly
+    # this session's registration, and the two sessions never share it.
+    rw_a = wt_meta / "upstream-sess-a"
+    rw_b = wt_meta / "upstream-sess-b"
+    assert mounts_a[str(rw_a)] == str(rw_a)
+    assert mounts_b[str(rw_b)] == str(rw_b)
+    # Session A never gets a read-write mount over session B's registration.
+    assert str(rw_b) not in mounts_a
+    # The parent worktrees dir is mounted read-only in both.
+    assert mounts_a[str(wt_meta)] == f"{wt_meta}:ro"
+
+
+def test_legacy_bare_basename_worktree_still_resolves(tmp_path, monkeypatch):
+    """A worktree created under the old bare-``<repo>`` scheme keeps resolving
+    and launching — resume must never rename or recreate a live worktree."""
+    upstream = _make_upstream(tmp_path)
+    url = str(upstream)
+    repos_dir = tmp_path / "repos"
+    worktrees_dir = tmp_path / "worktrees"
+    monkeypatch.setattr(
+        wm, "managed_clone_path",
+        lambda u, *, repos_dir=repos_dir: repos_dir / "local" / "upstream.git",
+    )
+    monkeypatch.setattr(wm, "_worktree_basename", lambda u: "upstream")
+    session = "auto-legacy"
+
+    # Simulate a pre-existing legacy worktree at the bare basename.
+    clone = wm.ensure_managed_clone(url, repos_dir=repos_dir)
+    legacy = worktrees_dir / session / "upstream"
+    legacy.parent.mkdir(parents=True)
+    wm.create_worktree(clone, legacy, f"session/{session}")
+    assert (legacy / ".git").exists()
+
+    # The resolver keeps pointing at the legacy dir, not a new unique one.
+    assert wm._session_worktree_dir(worktrees_dir, session, "upstream") == legacy
+
+    # A resume launch reuses the legacy worktree in place.
+    proj = ProjectConfig(
+        id="w", name="w", description="", image="img", graph_project="gp",
+        repos=(RepoMount(url=url, mount="/workspace/upstream", writable=True),),
+    )
+    mounts = wm.prepare_session_mounts(
+        proj, session, repos_dir=repos_dir, worktrees_dir=worktrees_dir,
+    )
+    assert mounts[str(legacy)] == "/workspace/upstream"
+    assert not (worktrees_dir / session / f"upstream-{session}").exists()
+    # The scan reports the bare logical repo name, not the directory basename.
+    rows = wm.scan_all_worktrees(
+        worktrees_dir=worktrees_dir, live_session_names=[session],
+    )
+    legacy_rows = [r for r in rows if r.session_name == session]
+    assert legacy_rows and all(r.repo_name == "upstream" for r in legacy_rows)
+
+
+def test_scan_reports_logical_repo_name_for_unique_basename(tmp_path, monkeypatch):
+    """A new-scheme ``upstream-<session>`` directory reports repo_name
+    ``upstream`` so ``repo_name == 'autonomy'``-style logic keeps working."""
+    session = "auto-scan"
+    worktrees_dir, _clone = _prepare_sessions(tmp_path, monkeypatch, [session])
+    rows = wm.scan_all_worktrees(
+        worktrees_dir=worktrees_dir, live_session_names=[session],
+    )
+    scan_rows = [r for r in rows if r.session_name == session]
+    assert scan_rows, "expected a scan row for the prepared session"
+    assert all(r.repo_name == "upstream" for r in scan_rows)
+
+
+def test_detect_worktree_registration_collisions(tmp_path, monkeypatch):
+    """Two ``.git`` files pointing at one registration are surfaced, and a
+    healthy estate reports none."""
+    session = "auto-coll"
+    worktrees_dir, clone = _prepare_sessions(tmp_path, monkeypatch, [session])
+
+    # Healthy: no collisions.
+    assert wm.detect_worktree_registration_collisions(
+        worktrees_dir=worktrees_dir,
+    ) == {}
+
+    # Forge a second worktree dir whose ``.git`` points at the SAME
+    # registration as the real one — the exact failure this guards against.
+    real = wm._session_worktree_dir(worktrees_dir, session, "upstream")
+    reg_name = wm._worktree_metadata_name(real)
+    forged = worktrees_dir / "auto-forged" / "upstream-auto-forged"
+    forged.mkdir(parents=True)
+    (forged / ".git").write_text(
+        (real / ".git").read_text()
+    )
+
+    collisions = wm.detect_worktree_registration_collisions(
+        worktrees_dir=worktrees_dir,
+    )
+    key = (str(clone), reg_name)
+    assert key in collisions
+    assert {real.resolve(), forged.resolve()} == {
+        p.resolve() for p in collisions[key]
+    }
+
+
+def test_prepare_session_mounts_warns_on_metadata_collision(
+    tmp_path, monkeypatch, caplog,
+):
+    """When a sibling worktree already references the registration name this
+    session would mount read-write, setup logs loudly instead of proceeding
+    silently toward the eventual ``exit 128``."""
+    session = "auto-warn"
+    worktrees_dir, clone = _prepare_sessions(tmp_path, monkeypatch, [session])
+    real = wm._session_worktree_dir(worktrees_dir, session, "upstream")
+
+    # A stale sibling whose .git points at THIS session's registration.
+    forged = worktrees_dir / "auto-sib" / "upstream-auto-sib"
+    forged.mkdir(parents=True)
+    (forged / ".git").write_text((real / ".git").read_text())
+
+    others = wm._warn_on_metadata_collision(
+        clone, wm._worktree_metadata_name(real), real,
+        worktrees_dir=worktrees_dir,
+    )
+    assert forged.resolve() in {p.resolve() for p in others}
+
+    with caplog.at_level(logging.ERROR):
+        wm._warn_on_metadata_collision(
+            clone, wm._worktree_metadata_name(real), real,
+            worktrees_dir=worktrees_dir,
+        )
+    assert any(
+        "WORKTREE REGISTRATION COLLISION" in rec.message for rec in caplog.records
+    )
 
 
 # ── Sweep memoization (auto-0peos Phase 1) ─────────────────────────────
