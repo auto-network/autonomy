@@ -339,6 +339,32 @@ def test_plugin_asset_rev_changes_when_page_assets_change(tmp_path, monkeypatch)
     assert before != after
 
 
+def test_api_plugins_has_style_reflects_declared_style_asset(tmp_path, monkeypatch):
+    """`/api/plugins`'s `has_style` field is what the SPA shell
+    (`refreshPlugins()` in app.js) reads to decide whether to inject a
+    `<link rel="stylesheet">` for a plugin's `page.css` — until this
+    field existed, no plugin's page.css was ever linked into the page
+    at all (declared in the manifest, served as a static file, but
+    nothing consumed it). Regression coverage for that gap: a plugin
+    with no `style` in its manifest must not claim one.
+    """
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    _write_plugin(plugins_dir, "nostyle", _min_manifest_yaml("nostyle"))
+
+    styled_yaml = _min_manifest_yaml("styled").replace(
+        "  script: page.js\n", "  script: page.js\n  style: page.css\n",
+    )
+    styled_dir = _write_plugin(plugins_dir, "styled", styled_yaml)
+    (styled_dir / "page.css").write_text(".styled-plugin { color: red; }")
+
+    monkeypatch.setattr(loader, "_read_plugin_settings", lambda org=None: {})
+    loaded = {p.id: p for p in loader.load_enabled(plugins_dir=plugins_dir)}
+
+    assert bool(loaded["nostyle"].style) is False
+    assert bool(loaded["styled"].style) is True
+
+
 def test_pure_frontend_plugin_loads(tmp_path, monkeypatch):
     """A plugin with no `entrypoints` block loads cleanly; substrate
     registers page+fragment routes only, no API routes appended.
