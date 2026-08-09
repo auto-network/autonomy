@@ -88,7 +88,15 @@ WORKTREE_DIR="$REPO_ROOT/.worktrees/$BEAD_ID-$TIMESTAMP"
 
 echo "==> Creating worktree: $BRANCH"
 # Prune stale worktree records (directory deleted but git reference remains).
-git -C "$REPO_ROOT" worktree prune
+#
+# Safe by construction (bead auto-jbz67): `git worktree prune` only removes a
+# record whose *working tree is missing*. A live worktree's directory exists,
+# so its record is never pruned, and these dispatcher worktrees already carry
+# session-unique basenames (`.worktrees/<bead>-<timestamp>`) — git never has to
+# disambiguate identical basenames with a numeric suffix here, so a prune can
+# never free a suffix that another live `.git` file still references. `-v`
+# logs each pruned record into the launch log for an audit trail.
+git -C "$REPO_ROOT" worktree prune -v
 
 # Detect existing worktree for this branch and REUSE it. Supports the TDD
 # handoff pattern: host pre-commits failing tests to agent/BEAD_ID at

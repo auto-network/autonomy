@@ -279,6 +279,53 @@ def _worktree_basename(url: str) -> str:
     return path.rsplit("/", 1)[-1]
 
 
+def _session_worktree_dir(
+    worktrees_dir: Path, session_name: str, repo_name: str,
+) -> Path:
+    """Resolve the on-disk worktree directory for a ``(session, repo)`` pair.
+
+    New worktrees use a session-unique basename ``<repo>-<session>`` (bead
+    auto-jbz67). ``git worktree add`` derives a worktree's registration name
+    (``<clone>/.git/worktrees/<name>/``) from the path *basename* only, and
+    appends the first free numeric suffix when that basename is already taken.
+    Because every session's worktree for a repo previously shared the bare
+    ``<repo>`` basename, git's suffix allocator was the sole differentiator —
+    and a ``git worktree prune`` could free a suffix while a stale sibling
+    ``.git`` file still referenced it, letting a later ``add`` REUSE that name.
+    Two ``.git`` files then pointed at one registration and the first cleanup
+    of either destroyed the other's metadata (``exit 128`` on the survivor).
+    A session-unique basename removes the shared basename entirely, so git
+    never needs a suffix and can never reuse one.
+
+    Worktrees created before this scheme live at the bare ``<repo>`` basename.
+    We must never rename or recreate a live worktree, so when a *real* legacy
+    worktree (one with a ``.git`` pointer) already exists for this pair we keep
+    resolving to it — its name reads back off disk via
+    :func:`_worktree_metadata_name` and continues to work. Only genuinely new
+    worktrees get the unique basename.
+    """
+    session_dir = worktrees_dir / session_name
+    legacy = session_dir / repo_name
+    if (legacy / ".git").exists():
+        return legacy
+    return session_dir / f"{repo_name}-{session_name}"
+
+
+def _logical_repo_name(worktree_dir_name: str, session_name: str) -> str:
+    """Return the logical repo name for an on-disk worktree directory name.
+
+    Reverses :func:`_session_worktree_dir`'s ``<repo>-<session>`` naming so the
+    rest of the system (dashboard rows, ``repo_name == "autonomy"`` special
+    cases, review-binding keys) keeps seeing the bare repo name regardless of
+    the directory's physical basename. Legacy bare-``<repo>`` directories are
+    returned unchanged.
+    """
+    suffix = f"-{session_name}"
+    if worktree_dir_name.endswith(suffix) and len(worktree_dir_name) > len(suffix):
+        return worktree_dir_name[: -len(suffix)]
+    return worktree_dir_name
+
+
 def _worktree_metadata_name(worktree_dir: Path) -> str:
     """Return the bare clone's metadata-dir name for this worktree.
 
@@ -295,6 +342,112 @@ def _worktree_metadata_name(worktree_dir: Path) -> str:
         )
     gitdir = git_file.split(":", 1)[1].strip()
     return Path(gitdir).name
+
+
+def detect_worktree_registration_collisions(
+    *,
+    worktrees_dir: Path = WORKTREES_DIR,
+) -> dict[tuple[str, str], list[Path]]:
+    """Find registration names referenced by more than one worktree ``.git``.
+
+    A healthy estate maps each ``<clone>/.git/worktrees/<name>/`` registration
+    to exactly one worktree whose ``.git`` file points at it. When two
+    worktrees' ``.git`` files reference the same ``(clone, name)`` pair, the
+    first cleanup of either destroys the other's registration and the survivor
+    can no longer open its repo (``fatal: not a git repository`` / ``exit
+    128``). This scan surfaces those collisions so an operator (or a startup
+    hook) can repair them before they detonate, instead of discovering them
+    only as a failed session resume.
+
+    Returns ``{(clone, name): [worktree_dir, ...]}`` for every colliding pair.
+    An empty dict means the estate is clean.
+    """
+    if not worktrees_dir.exists():
+        return {}
+    seen: dict[tuple[str, str], list[Path]] = {}
+    try:
+        session_dirs = sorted(worktrees_dir.iterdir())
+    except OSError:
+        logger.exception("collision scan: failed to enumerate %s", worktrees_dir)
+        return {}
+    for session_dir in session_dirs:
+        if not session_dir.is_dir():
+            continue
+        try:
+            repo_dirs = sorted(session_dir.iterdir())
+        except OSError:
+            continue
+        for repo_dir in repo_dirs:
+            if not (repo_dir / ".git").is_file():
+                continue
+            try:
+                name = _worktree_metadata_name(repo_dir)
+            except (OSError, RuntimeError):
+                continue
+            clone = _find_managed_clone_for_worktree(repo_dir)
+            key = (str(clone) if clone else "?", name)
+            seen.setdefault(key, []).append(repo_dir)
+    return {key: paths for key, paths in seen.items() if len(paths) > 1}
+
+
+def _warn_on_metadata_collision(
+    clone: Path,
+    metadata_name: str,
+    own_worktree: Path,
+    *,
+    worktrees_dir: Path = WORKTREES_DIR,
+) -> list[Path]:
+    """Log loudly if another worktree already references ``metadata_name``.
+
+    Scoped, cheap counterpart to
+    :func:`detect_worktree_registration_collisions` — it only inspects the one
+    registration name this session is about to mount read-write, and reads the
+    tiny ``.git`` pointer files. Returns the list of *other* worktrees that
+    collide (empty when clean). Never raises: a collision is reported, not
+    fatal, because the whole point is to avoid failing setup at ``exit 128``.
+    """
+    clone_key = str(clone)
+    others: list[Path] = []
+    if not worktrees_dir.exists():
+        return others
+    own = own_worktree.resolve()
+    try:
+        session_dirs = list(worktrees_dir.iterdir())
+    except OSError:
+        return others
+    for session_dir in session_dirs:
+        if not session_dir.is_dir():
+            continue
+        try:
+            repo_dirs = list(session_dir.iterdir())
+        except OSError:
+            continue
+        for repo_dir in repo_dirs:
+            if repo_dir.resolve() == own:
+                continue
+            if not (repo_dir / ".git").is_file():
+                continue
+            try:
+                if _worktree_metadata_name(repo_dir) != metadata_name:
+                    continue
+            except (OSError, RuntimeError):
+                continue
+            other_clone = _find_managed_clone_for_worktree(repo_dir)
+            if (str(other_clone) if other_clone else "?") != clone_key:
+                continue
+            others.append(repo_dir)
+    if others:
+        logger.error(
+            "workspace: WORKTREE REGISTRATION COLLISION — %s/.git/worktrees/%s "
+            "is referenced by this session's worktree %s AND by %s. The "
+            "read-write metadata mount would hand this container control of a "
+            "sibling's registration; the next cleanup of either destroys the "
+            "other. Repair the registrations (recreate gitdir/commondir/HEAD "
+            "and rebuild the index) before this collision detonates.",
+            clone, metadata_name, own_worktree,
+            ", ".join(str(p) for p in others),
+        )
+    return others
 
 
 def _refresh_existing_worktree(
@@ -646,7 +799,9 @@ def prepare_session_mounts(
         )
         _sync_managed_clone_from_base_source(repo, clone, git_timeout=git_timeout)
         if repo.writable:
-            worktree = worktrees_dir / session_name / _worktree_basename(repo.url)
+            worktree = _session_worktree_dir(
+                worktrees_dir, session_name, _worktree_basename(repo.url),
+            )
             create_worktree(
                 clone,
                 worktree,
@@ -703,6 +858,18 @@ def prepare_session_mounts(
             # ``prune``/``add``/``remove`` against siblings fails with EACCES.
             git_worktrees_dir = clone / ".git" / "worktrees"
             own_metadata_name = _worktree_metadata_name(worktree)
+            # Guard the isolation boundary this mount pair establishes: the
+            # read-write metadata mount is keyed on the registration NAME, so
+            # if a sibling session's worktree resolves to the same name this
+            # container would receive read-write access to that sibling's
+            # registration while believing it is its own (bead auto-jbz67).
+            # Unique basenames make this impossible for new worktrees, but a
+            # legacy collision could still exist — detect and log it loudly
+            # here rather than letting the container fail 128 at git setup.
+            _warn_on_metadata_collision(
+                clone, own_metadata_name, worktree,
+                worktrees_dir=worktrees_dir,
+            )
             mounts[str(git_worktrees_dir)] = f"{git_worktrees_dir}:ro"
             mounts[str(git_worktrees_dir / own_metadata_name)] = str(
                 git_worktrees_dir / own_metadata_name
@@ -1233,7 +1400,7 @@ def worktree_target_branch_name(
     default_branch = target_branch or "main"
     if repo_name == "autonomy":
         return default_branch
-    worktree = worktrees_dir / session_name / repo_name
+    worktree = _session_worktree_dir(worktrees_dir, session_name, repo_name)
     clone = _find_managed_clone_for_worktree(worktree)
     local_target = _local_workspace_target_for_clone(clone) if clone else None
     if local_target is not None:
@@ -2156,6 +2323,13 @@ def scan_all_worktrees(
             # startup hook hangs forever. Skip non-worktree dirs.
             if not (repo_dir / ".git").exists():
                 continue
+            # The on-disk directory basename is session-unique
+            # (``<repo>-<session>``, bead auto-jbz67) but every consumer —
+            # dashboard rows, ``repo_name == "autonomy"`` special-casing,
+            # review-binding keys, and the ``_session_worktree_dir`` resolver
+            # that maps back to this path — expects the bare repo name. Recover
+            # it here; legacy bare-``<repo>`` directories pass through unchanged.
+            logical_name = _logical_repo_name(repo_dir.name, session_dir.name)
             clone = _find_managed_clone_for_worktree(repo_dir)
 
             # ── Fingerprint gate (auto-0peos Phase 1) ────────────────
@@ -2194,11 +2368,11 @@ def scan_all_worktrees(
                 _bump_scan_cache(hit=False)
             branch = _worktree_branch_name(repo_dir)
             base_ref = _worktree_dashboard_base_ref(
-                repo_dir, repo_dir.name,
+                repo_dir, logical_name,
                 target_branch_and_head=target_branch_and_head,
             )
             clone_stale = _worktree_clone_stale(
-                repo_dir.name, clone,
+                logical_name, clone,
                 target_branch_and_head=target_branch_and_head,
             )
             dirty_files_or_none = _worktree_dirty_files(repo_dir)
@@ -2212,7 +2386,7 @@ def scan_all_worktrees(
             # treat the worktree as dirty even though paths are unavailable.
             is_dirty = True if dirty_files_or_none is None else bool(tracked_dirty)
             raw_commits = _worktree_commits(
-                repo_dir, repo_dir.name, base_ref=base_ref,
+                repo_dir, logical_name, base_ref=base_ref,
             )
             net_empty = bool(raw_commits) and _worktree_net_empty(
                 repo_dir, base_ref=base_ref,
@@ -2222,12 +2396,12 @@ def scan_all_worktrees(
                 # revert) leave nothing to land; listing them as pending
                 # only asks the operator to merge a no-op.
                 raw_commits = []
-            commits = _workflow_resolved_commits(repo_dir.name, raw_commits)
+            commits = _workflow_resolved_commits(logical_name, raw_commits)
             commits_ahead = len(commits)
             raw_commits_ahead = _worktree_commits_ahead(repo_dir, base_ref=base_ref)
             rebase_required = _worktree_rebase_required(
                 repo_dir,
-                repo_dir.name,
+                logical_name,
                 has_pending_commits=bool(raw_commits),
                 clone_stale=clone_stale,
                 target_branch_and_head=target_branch_and_head,
@@ -2242,7 +2416,7 @@ def scan_all_worktrees(
             ff_eligible = git_ff_eligible and commits_ahead > 0
             cherry_pick_eligible, cherry_pick_commit = (
                 _compute_cherry_pick_eligibility(
-                    repo_name=repo_dir.name,
+                    repo_name=logical_name,
                     clone=clone,
                     commits=raw_commits,
                     commits_ahead=raw_commits_ahead,
@@ -2256,7 +2430,7 @@ def scan_all_worktrees(
                 cherry_pick_commit = None
             row = WorktreeState(
                 session_name=session_dir.name,
-                repo_name=repo_dir.name,
+                repo_name=logical_name,
                 worktree_path=repo_dir,
                 managed_clone=clone,
                 branch=branch,
@@ -2725,7 +2899,7 @@ def cleanup_session_worktree(
     _refuse_pytest_against_real_worktrees(worktrees_dir, "cleanup_session_worktree")
     result = CleanupResult()
     session_dir = worktrees_dir / session_name
-    entry = session_dir / repo_name
+    entry = _session_worktree_dir(worktrees_dir, session_name, repo_name)
     if not entry.exists():
         return result
     if not entry.is_dir():
@@ -2890,7 +3064,7 @@ def merge_session_worktree(
     worktrees_dir: Path = WORKTREES_DIR,
 ) -> dict[str, str]:
     """Fast-forward a local checkout from a session worktree's branch."""
-    worktree = worktrees_dir / session_name / repo_name
+    worktree = _session_worktree_dir(worktrees_dir, session_name, repo_name)
     if not worktree.exists() or not worktree.is_dir():
         raise WorkspaceError(f"worktree not found: {worktree}")
 
@@ -2995,7 +3169,7 @@ def cherry_pick_session_worktree(
     possible if state changed between dry-run and apply), the in-progress
     cherry-pick is aborted so the host repo is left in its prior state.
     """
-    worktree = worktrees_dir / session_name / repo_name
+    worktree = _session_worktree_dir(worktrees_dir, session_name, repo_name)
     if not worktree.exists() or not worktree.is_dir():
         raise WorkspaceError(f"worktree not found: {worktree}")
 
@@ -3149,7 +3323,7 @@ def _session_worktree_path(
     *,
     worktrees_dir: Path = WORKTREES_DIR,
 ) -> Path:
-    worktree = worktrees_dir / session_name / repo_name
+    worktree = _session_worktree_dir(worktrees_dir, session_name, repo_name)
     if not worktree.exists() or not worktree.is_dir():
         raise WorkspaceError(f"worktree not found: {worktree}")
     return worktree
