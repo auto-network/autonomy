@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -172,15 +173,9 @@ def authorize(identity: dict, tool: str, args: dict, *, poster=dashboard_post) -
     scope = TOOL_SCOPES.get(tool)
     if scope == "write" and level != "readwrite":
         return {"allowed": False, "reason": "peer is read-only in this org"}
-    if scope == "send":
-        target = str(args.get("session") or "")
-        xr = poster("/api/mcp/crosstalk/resolve",
-                    {"openai_session": osession, "target_session": target, "target_org": ""})
-        if xr is None:
-            return {"allowed": False, "reason": "dashboard unreachable"}
-        if xr.get("status") != "approved":
-            return {"allowed": False, "status": xr.get("status"),
-                    "reason": f"crosstalk to {target} is {xr.get('status')}"}
+    # crosstalk_send does NOT pass through here — it is dispatched to the
+    # dashboard's /api/mcp/crosstalk/relay endpoint, which enforces the per-target
+    # grant itself. authorize() gates only the read/write graph tools.
     return {"allowed": True, "org": org, "level": level}
 
 
@@ -241,33 +236,13 @@ def authz_denial_text(tool: str, authz: dict) -> str:
     return f"Not authorized: {authz.get('reason', 'denied')}. Call hello to (re)request access."
 
 
-# How long a crosstalk_send is HELD waiting for the operator's decision before it
-# gives up and tells the model to retry (kept under typical MCP call timeouts).
-CROSSTALK_HOLD_SECONDS = int(os.environ.get("MCP_RELAY_CROSSTALK_HOLD", "55"))
-
-
-def _deliver_crosstalk(state, args: dict, identity: dict) -> dict:
-    """Actually send the held message once approved (delivery is cross-org, not
-    org-scoped)."""
-    dpeer = {"name": peer_label(identity), "scopes": []}
-    _req_ctx.org = None
-    try:
-        structured, text = tool_crosstalk_send(state.registry, args, dpeer)
-        state.log({"tool": "crosstalk_send", "sess": sess_tag(identity), "ok": True})
-        return {"structured": structured, "text": text, "is_error": False}
-    except ToolError as e:
-        state.log({"tool": "crosstalk_send", "sess": sess_tag(identity),
-                   "ok": False, "err": str(e)[:200]})
-        return {"structured": {"error": str(e)}, "text": str(e), "is_error": True}
-    finally:
-        _req_ctx.org = None
-
-
 def crosstalk_send_dashboard(identity: dict, args: dict, state, *, poster=dashboard_post) -> dict:
-    """HOLD a crosstalk_send pending the operator's decision. Opens an approval
-    carrying the MESSAGE, blocks until approve/decline/timeout, and delivers the
-    message only on approve (then the grant stays live for its TTL). The message is
-    never delivered on decline or discarded before the operator sees it."""
+    """Forward a crosstalk_send to the dashboard's single enforce-and-deliver
+    endpoint. The dashboard authorizes (link + per-target grant) and delivers,
+    stamping the source from this chat's minted handle — the relay never delivers
+    and never sets the source. The relay does not hold: a message that needs
+    approval is stored on the approval and delivered when the operator approves,
+    so the model does NOT resend."""
     if not identity_trusted(identity):
         return {"structured": {"status": "untrusted"}, "is_error": True,
                 "text": "No trusted OpenAI session identity."}
@@ -285,46 +260,51 @@ def crosstalk_send_dashboard(identity: dict, args: dict, state, *, poster=dashbo
                         "sentence stating why you are messaging this session. The "
                         "operator sees it on the approval prompt and cannot answer "
                         "'should this chat message my agent?' without it."}
-    osession = identity["openai_session"]
-    # Linking is a SEPARATE step — never conflate it with a send.
-    st = poster("/api/mcp/session/status", {"openai_session": osession})
-    if st is None:
-        return {"structured": {"status": "error"}, "is_error": True,
-                "text": "The Autonomy dashboard is unreachable; try again shortly."}
-    if st.get("status") != "approved":
-        return {"structured": {"status": st.get("status")}, "is_error": True,
-                "text": "This chat isn't linked to an org yet. Call hello to request "
-                        "access first; that's a separate approval from sending a message."}
-    body = {"openai_session": osession, "target_session": target, "target_org": "",
-            "message": message, "intent": str(args.get("intent") or "")}
-    res = poster("/api/mcp/crosstalk/resolve", body)
+    res = poster("/api/mcp/crosstalk/relay", {
+        "openai_session": identity["openai_session"], "target_session": target,
+        "message": message, "intent": str(args.get("intent") or "")})
     if res is None:
         return {"structured": {"status": "error"}, "is_error": True,
                 "text": "The Autonomy dashboard is unreachable; try again shortly."}
     status = res.get("status")
-    if status == "approved":
-        return _deliver_crosstalk(state, args, identity)
+    if status == "delivered":
+        state.log({"tool": "crosstalk_send", "sess": sess_tag(identity), "ok": True})
+        return {"structured": {"status": "delivered", "from": res.get("from")},
+                "text": f"Delivered to {target}.", "is_error": False}
+    if status == "peer_not_linked":
+        return {"structured": {"status": "peer_not_linked"}, "is_error": True,
+                "text": "This chat isn't linked to an org yet. Call hello to request "
+                        "access first; that's a separate approval from sending a message."}
     if status == "denied":
         return {"structured": {"status": "denied"}, "is_error": True,
                 "text": "The operator declined to allow this message. It was not sent."}
-    # pending -> HOLD until decided or timeout, then deliver on approve
-    deadline = time.time() + CROSSTALK_HOLD_SECONDS
-    while time.time() < deadline:
-        time.sleep(2)
-        s = poster("/api/mcp/crosstalk/status",
-                   {"openai_session": osession, "target_session": target})
-        if not s:
-            continue
-        if s.get("status") == "approved":
-            return _deliver_crosstalk(state, args, identity)
-        if s.get("status") == "denied":
-            return {"structured": {"status": "denied"}, "is_error": True,
-                    "text": "The operator declined to allow this message. It was not sent."}
-    return {"structured": {"status": "pending"}, "is_error": True,
-            "text": "The message is held pending operator approval and was NOT sent yet. "
-                    "An approval popup is open on the operator's dashboard; send again in "
-                    "a moment. Once approved, this channel stays open and later messages "
-                    "send immediately."}
+    # pending: queued on the approval, delivered when the operator approves.
+    state.log({"tool": "crosstalk_send", "sess": sess_tag(identity), "status": "pending"})
+    return {"structured": {"status": "pending", "from": res.get("from")}, "is_error": False,
+            "text": "Held for the operator's approval. A prompt is open on their "
+                    "dashboard showing this exact message; it will be delivered as soon "
+                    "as they approve. Do NOT resend — it is already queued."}
+
+
+def crosstalk_inbox_dashboard(identity: dict, args: dict, state, *, poster=dashboard_post) -> dict:
+    """Drain this chat's own inbox — the replies queued for its handle. The
+    dashboard maps the chat's session to its handle and returns only that handle's
+    messages, marking them collected (a repeat call returns nothing new)."""
+    if not identity_trusted(identity):
+        return {"structured": {"status": "untrusted"}, "is_error": True,
+                "text": "No trusted OpenAI session identity."}
+    res = poster("/api/mcp/crosstalk/collect",
+                 {"openai_session": identity["openai_session"]})
+    if res is None:
+        return {"structured": {"status": "error"}, "is_error": True,
+                "text": "The Autonomy dashboard is unreachable; try again shortly."}
+    msgs = res.get("messages") or []
+    state.log({"tool": "crosstalk_log", "sess": sess_tag(identity), "n": len(msgs)})
+    if not msgs:
+        return {"structured": {"messages": []}, "is_error": False,
+                "text": "No new messages in your inbox."}
+    lines = [f'{m.get("label") or m.get("from")}: {m.get("message")}' for m in msgs]
+    return {"structured": {"messages": msgs}, "is_error": False, "text": "\n".join(lines)}
 
 
 # ---------------------------------------------------------------- peer registry
@@ -766,6 +746,34 @@ TOOL_DEFS = [
 ]
 
 
+# Registry-mode arguments that carry no meaning in dashboard mode: identity is the
+# tunnel-stamped openai/session, not a self-asserted token or name. peer_name in
+# particular was the original skeleton-key field (every chat asserted the same one)
+# — never advertise it to a dashboard-mode client.
+_REGISTRY_ONLY_ARGS = ("peer_token", "peer_name")
+
+
+def _advertised_tools() -> list:
+    """The tool list ChatGPT caches at connector-create time. In dashboard mode a
+    chat is identified by the tunnel-stamped openai/session, so the registry-mode
+    auth/name arguments are dead weight — strip them from every schema so the model
+    is never told to send a field the dashboard ignores."""
+    if not DASHBOARD_MODE:
+        return TOOL_DEFS
+    out = []
+    for tool in TOOL_DEFS:
+        tool = copy.deepcopy(tool)
+        schema = tool.get("inputSchema") or {}
+        props = schema.get("properties", {})
+        for arg in _REGISTRY_ONLY_ARGS:
+            props.pop(arg, None)
+        if schema.get("required"):
+            schema["required"] = [r for r in schema["required"]
+                                  if r not in _REGISTRY_ONLY_ARGS]
+        out.append(tool)
+    return out
+
+
 # ---------------------------------------------------------------- MCP plumbing
 
 def jsonrpc_error(msg_id, code, message):
@@ -847,7 +855,7 @@ def handle_message(state: RelayState, msg: dict, headers) -> dict | None:
 
     if method == "tools/list":
         return jsonrpc_result(msg_id, {
-            "tools": TOOL_DEFS,
+            "tools": _advertised_tools(),
             "ttlMs": 300000,
             "cacheScope": "private",
         })
@@ -873,9 +881,16 @@ def handle_message(state: RelayState, msg: dict, headers) -> dict | None:
                 return tool_call_result(msg_id, res["structured"], res["text"],
                                         is_error=res.get("is_error", False))
             if name == "crosstalk_send":
-                # Held send: opens an approval carrying the message, blocks for the
-                # decision, delivers on approve. Not the generic authorize() path.
+                # Forward to the dashboard's enforce-and-deliver endpoint; the
+                # dashboard authorizes, delivers, and stamps the source. Not the
+                # generic authorize() path.
                 res = crosstalk_send_dashboard(identity, args, state)
+                return tool_call_result(msg_id, res["structured"], res["text"],
+                                        is_error=res.get("is_error", False))
+            if name == "crosstalk_log":
+                # A chat's mailbox is its OWN queued replies (drain + mark), not a
+                # broad read of the org's crosstalk. Own-inbox only.
+                res = crosstalk_inbox_dashboard(identity, args, state)
                 return tool_call_result(msg_id, res["structured"], res["text"],
                                         is_error=res.get("is_error", False))
             authz = authorize(identity, name, args)
