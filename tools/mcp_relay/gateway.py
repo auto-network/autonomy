@@ -279,6 +279,12 @@ def crosstalk_send_dashboard(identity: dict, args: dict, state, *, poster=dashbo
     if not message:
         return {"structured": {"error": "empty_message"}, "is_error": True,
                 "text": "A non-empty 'message' is required."}
+    if not str(args.get("intent") or "").strip():
+        return {"structured": {"error": "empty_intent"}, "is_error": True,
+                "text": "Call crosstalk_send again WITH an 'intent' — one specific "
+                        "sentence stating why you are messaging this session. The "
+                        "operator sees it on the approval prompt and cannot answer "
+                        "'should this chat message my agent?' without it."}
     osession = identity["openai_session"]
     # Linking is a SEPARATE step — never conflate it with a send.
     st = poster("/api/mcp/session/status", {"openai_session": osession})
@@ -744,8 +750,16 @@ TOOL_DEFS = [
                 **_TOKEN_PROP,
                 "session": {"type": "string", "description": "tmux name from the sessions tool"},
                 "message": {"type": "string"},
+                "intent": {
+                    "type": "string",
+                    "description": (
+                        "One specific sentence stating why you are messaging this "
+                        "session. Shown to the operator on the approval prompt; the "
+                        "message is not delivered until they approve it."
+                    ),
+                },
             },
-            "required": ["peer_token", "session", "message"],
+            "required": ["peer_token", "session", "message", "intent"],
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False},
     },
