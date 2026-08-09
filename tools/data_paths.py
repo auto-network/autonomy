@@ -80,6 +80,8 @@ STORE_MANIFEST: tuple = (
           "commit-workflow store"),
     Store("mission_control", "mission_control.db", "MISSION_CONTROL_DB", "db",
           "Mission Control store (missions + site revisions)"),
+    Store("mcp_relay", "mcp_relay.db", "MCP_RELAY_DB", "db",
+          "MCP-relay peer store (per-openai-session org bindings + crosstalk grants)"),
     Store("identity_sessions", "dashboard_identity_sessions.db",
           "DASHBOARD_IDENTITY_SESSION_DB", "db",
           "identity unlock-session store"),
