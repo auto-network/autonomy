@@ -138,6 +138,52 @@ def test_hello_dashboard_requires_a_nonblank_intent():
     assert res["is_error"] is True and "intent" in res["text"].lower()
 
 
+def _xtalk_poster(session_status, resolve_status, status_seq):
+    seq = list(status_seq)
+
+    def poster(path, body):
+        if path.endswith("/session/status"):
+            return {"status": session_status}
+        if path.endswith("/crosstalk/resolve"):
+            return {"status": resolve_status, "approval_id": "x"}
+        if path.endswith("/crosstalk/status"):
+            return {"status": seq.pop(0)} if seq else {"status": "pending"}
+        return None
+    return poster
+
+
+def test_crosstalk_send_holds_then_delivers_on_approve(monkeypatch):
+    monkeypatch.setattr(gateway_mod.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(gateway_mod, "_deliver_crosstalk",
+                        lambda *a, **k: {"structured": {"delivered": True}, "text": "sent",
+                                         "is_error": False})
+    # linked; resolve returns pending; the operator then approves on the poll
+    poster = _xtalk_poster("approved", "pending", ["pending", "approved"])
+    res = gateway_mod.crosstalk_send_dashboard(
+        _TRUSTED, {"session": "auto-x", "message": "hi"}, None, poster=poster)
+    assert res["is_error"] is False and res["structured"]["delivered"] is True
+
+
+def test_crosstalk_send_declined_never_delivers(monkeypatch):
+    monkeypatch.setattr(gateway_mod.time, "sleep", lambda *_: None)
+    delivered = {"n": 0}
+    monkeypatch.setattr(gateway_mod, "_deliver_crosstalk",
+                        lambda *a, **k: (delivered.__setitem__("n", delivered["n"] + 1),
+                                         {"structured": {}, "text": "", "is_error": False})[1])
+    poster = _xtalk_poster("approved", "pending", ["denied"])
+    res = gateway_mod.crosstalk_send_dashboard(
+        _TRUSTED, {"session": "auto-x", "message": "hi"}, None, poster=poster)
+    assert res["is_error"] is True and "declined" in res["text"].lower()
+    assert delivered["n"] == 0  # message never sent on decline
+
+
+def test_crosstalk_send_requires_a_linked_session(monkeypatch):
+    poster = _xtalk_poster("pending", "pending", [])  # session not linked
+    res = gateway_mod.crosstalk_send_dashboard(
+        _TRUSTED, {"session": "auto-x", "message": "hi"}, None, poster=poster)
+    assert res["is_error"] is True and "hello" in res["text"].lower()
+
+
 def test_stdio_transport_is_its_own_trust_boundary(monkeypatch):
     # Over stdio there is no TCP surface and no header to forge — the process
     # boundary is the trust boundary, so a session with no cert is still trusted.
