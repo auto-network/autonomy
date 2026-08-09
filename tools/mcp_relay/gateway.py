@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -73,6 +74,15 @@ REQUIRE_TUNNEL_CERT = os.environ.get(
     "MCP_RELAY_REQUIRE_TUNNEL_CERT", "1") not in ("0", "false", "no", "")
 _TUNNEL_SPIFFE_MARK = "/ns/tunnel-service/"
 
+# STDIO transport: the relay runs as the tunnel-client's own child process and
+# speaks JSON-RPC over stdin/stdout — there is NO TCP port to reach, so the
+# process boundary (only the parent tunnel-client can write to our stdin) IS the
+# trust boundary. This is the secure deployment: it closes the forgeable-header /
+# shared-loopback hole that HTTP mode has in a host-networked estate, because an
+# X-Forwarded-Client-Cert header on a loopback socket is not a boundary. Set by
+# run_stdio(); when true we do not need (and do not read) HTTP identity headers.
+STDIO_TRANSPORT = False
+
 
 def extract_identity(headers, params) -> dict:
     """Pull OpenAI's tunnel-stamped identity from a request.
@@ -92,10 +102,17 @@ def extract_identity(headers, params) -> dict:
 
 
 def identity_trusted(identity: dict) -> bool:
-    """Whether we can bind auth to this identity: a real session id, and (unless
-    disabled for testing) a verified tunnel mTLS cert."""
+    """Whether we can bind auth to this identity. Requires a session id, and then
+    a trustworthy transport: STDIO (the process boundary — only the parent
+    tunnel-client can reach us) is authoritative; over HTTP we fall back to the
+    (weaker) tunnel mTLS header unless testing has disabled the requirement.
+
+    NOTE: the HTTP path's header check is not a real boundary in a host-networked
+    estate; STDIO is the supported secure deployment. See STDIO_TRANSPORT."""
     if not identity.get("openai_session"):
         return False
+    if STDIO_TRANSPORT:
+        return True
     return identity.get("tunnel_verified", False) or not REQUIRE_TUNNEL_CERT
 
 
@@ -169,8 +186,14 @@ def authorize(identity: dict, tool: str, args: dict, *, poster=dashboard_post) -
 
 def peer_label(identity: dict) -> str:
     """Display/attribution id for a dashboard-mode caller (not an auth input)."""
-    sess = identity.get("openai_session") or "unknown"
-    return "chatgpt:" + sess.replace("v1/", "")[:16]
+    return "chatgpt:" + sess_tag(identity)
+
+
+def sess_tag(identity: dict) -> str:
+    """A non-reversible correlation tag for logs/attribution — NEVER the raw
+    openai/session, which is bearer-equivalent in dashboard mode."""
+    sess = identity.get("openai_session") or ""
+    return hashlib.sha256(sess.encode()).hexdigest()[:12] if sess else "none"
 
 
 def hello_dashboard(identity: dict, args: dict, *, poster=dashboard_post) -> dict:
@@ -745,13 +768,13 @@ def handle_message(state: RelayState, msg: dict, headers) -> dict | None:
             identity = extract_identity(headers, params)
             if name == "hello":
                 res = hello_dashboard(identity, args)
-                state.log({"tool": "hello", "sess": identity.get("openai_session"),
+                state.log({"tool": "hello", "sess": sess_tag(identity),
                            "status": (res.get("structured") or {}).get("status")})
                 return tool_call_result(msg_id, res["structured"], res["text"],
                                         is_error=res.get("is_error", False))
             authz = authorize(identity, name, args)
             if not authz["allowed"]:
-                state.log({"tool": name, "sess": identity.get("openai_session"),
+                state.log({"tool": name, "sess": sess_tag(identity),
                            "ok": False, "err": authz.get("reason")})
                 return tool_call_result(
                     msg_id, {"error": "not_authorized", "status": authz.get("status")},
@@ -760,7 +783,7 @@ def handle_message(state: RelayState, msg: dict, headers) -> dict | None:
             dpeer = {"name": peer_label(identity), "scopes": []}
             try:
                 structured, text = TOOL_HANDLERS[name](state.registry, args, dpeer)
-                state.log({"tool": name, "sess": identity.get("openai_session"),
+                state.log({"tool": name, "sess": sess_tag(identity),
                            "org": authz.get("org"), "ok": True})
                 return tool_call_result(msg_id, structured, text)
             except ToolError as e:
@@ -847,10 +870,9 @@ class RelayHandler(BaseHTTPRequestHandler):
         if not isinstance(msg, dict):
             self._send_json(400, jsonrpc_error(None, -32600, "Batch requests not supported"))
             return
-        # request-level debug log (method + tool + response error-ness).
-        # Full-metadata capture (all headers + _meta, NEVER argument values which
-        # can carry peer_token) into a separate file, to answer: does ChatGPT
-        # send a stable per-conversation identifier we could bind approval to?
+        # request-level debug log (method + tool + response error-ness). We do NOT
+        # log identity headers or _meta: in dashboard mode openai/session is
+        # bearer-equivalent, so it must never hit disk.
         try:
             params = msg.get("params") or {}
             _dbg = {
@@ -860,21 +882,6 @@ class RelayHandler(BaseHTTPRequestHandler):
                 "hdr_name": self.headers.get("Mcp-Name"),
                 "proto": self.headers.get("MCP-Protocol-Version"),
             }
-            try:
-                cap = {
-                    "method": msg.get("method"),
-                    "tool": params.get("name"),
-                    "headers": {k: v for k, v in self.headers.items()},
-                    "msg_meta": msg.get("_meta"),
-                    "params_meta": params.get("_meta"),
-                    "arg_keys": sorted((params.get("arguments") or {}).keys())
-                    if isinstance(params.get("arguments"), dict) else None,
-                }
-                with open(self.state.log_path.parent / "wire_capture.jsonl", "a") as f:
-                    cap["ts"] = now_iso()
-                    f.write(json.dumps(cap) + "\n")
-            except Exception:
-                pass
         except Exception:
             _dbg = {"method": "?"}
         response = handle_message(self.state, msg, self.headers)
@@ -894,17 +901,62 @@ class RelayHandler(BaseHTTPRequestHandler):
 
 # ---------------------------------------------------------------- CLI
 
+def _is_loopback_url(url: str) -> bool:
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or "").lower()
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
 def cmd_run(args):
     data_dir = Path(args.data_dir)
+    # MEDIUM hardening: the dashboard call disables TLS verification (self-signed
+    # localhost cert), so it must ONLY ever target loopback — otherwise the relay
+    # would hand its service token to anything presenting any cert. Fail fast.
+    if DASHBOARD_MODE and not _is_loopback_url(DASHBOARD_URL):
+        print(f"refusing to run: MCP_RELAY_DASHBOARD_URL ({DASHBOARD_URL}) is not "
+              "loopback, but the dashboard call skips TLS verification. Point it at "
+              "127.0.0.1 or add cert pinning before using a remote dashboard.",
+              file=sys.stderr)
+        sys.exit(2)
     RelayHandler.state = RelayState(data_dir)
     server = ThreadingHTTPServer((args.host, args.port), RelayHandler)
-    print(f"autonomy-mcp-relay listening on http://{args.host}:{args.port}/mcp")
+    print(f"autonomy-mcp-relay listening on http://{args.host}:{args.port}/mcp "
+          f"({'DASHBOARD' if DASHBOARD_MODE else 'REGISTRY'} mode)")
     print(f"peer registry: {data_dir / 'peers.json'}")
     print(f"call log:      {data_dir / 'relay.jsonl'}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+def cmd_stdio(args):
+    """Run over stdin/stdout as the tunnel-client's child (no TCP surface). MCP
+    stdio framing: one JSON-RPC message per line, no embedded newlines."""
+    global STDIO_TRANSPORT
+    STDIO_TRANSPORT = True
+    state = RelayState(Path(args.data_dir))
+
+    def emit(obj):
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+
+    for raw in sys.stdin.buffer:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            msg = json.loads(raw)
+        except (ValueError, json.JSONDecodeError):
+            emit(jsonrpc_error(None, -32700, "Parse error"))
+            continue
+        if not isinstance(msg, dict):
+            emit(jsonrpc_error(None, -32600, "Batch requests not supported"))
+            continue
+        # No HTTP headers over stdio — identity comes from params._meta only.
+        response = handle_message(state, msg, {})
+        if response is not None:  # notifications (no id) get no reply
+            emit(response)
 
 
 def cmd_peers(args):
@@ -947,10 +999,15 @@ def main():
                         help=f"peer registry + log location (default {DEFAULT_DATA_DIR})")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_run = sub.add_parser("run", help="run the relay server")
+    p_run = sub.add_parser("run", help="run the relay over HTTP (loopback)")
     p_run.add_argument("--host", default="127.0.0.1")
     p_run.add_argument("--port", type=int, default=8787)
     p_run.set_defaults(func=cmd_run)
+
+    p_stdio = sub.add_parser(
+        "stdio", help="run over stdin/stdout as the tunnel-client child (no TCP; "
+                      "the secure deployment)")
+    p_stdio.set_defaults(func=cmd_stdio)
 
     p_peers = sub.add_parser("peers", help="list peers")
     p_peers.set_defaults(func=cmd_peers)
