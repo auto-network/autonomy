@@ -505,22 +505,27 @@ TOOL_DEFS = [
         "name": "hello",
         "description": (
             "Introduce this chat to the Autonomy relay to request access. State "
-            "your intent and, optionally, which Autonomy org you want to work in; "
-            "the operator approves this specific chat in the Autonomy dashboard, "
-            "binding it to one org at a read-only or read/write level. Call hello "
-            "again after approval. Your identity is established automatically — no "
-            "name or token is needed."
+            "your intent in plain language; the human operator then approves this "
+            "specific chat in the Autonomy dashboard and chooses which of THEIR "
+            "orgs to grant it, at read-only or read/write. You do not need to know "
+            "or list the orgs — that is the operator's decision. Call hello again "
+            "after approval. Your identity is established automatically — no name "
+            "or token is needed."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "intent": {
                     "type": "string",
-                    "description": "What you want to do — shown to the operator on the approval prompt.",
+                    "description": "What you want to do and why, in plain language. This is the "
+                                   "main thing the operator reads on the approval prompt, so be specific.",
                 },
                 "requested_org": {
                     "type": "string",
-                    "description": "Optional: the Autonomy org you'd like access to (operator confirms).",
+                    "description": "Optional hint only. If the user already named a specific "
+                                   "Autonomy org in this conversation, pass it; otherwise omit it. "
+                                   "Do not guess — the operator sees this as a suggestion and picks "
+                                   "the actual org themselves.",
                 },
                 "peer_name": {
                     "type": "string",

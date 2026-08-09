@@ -2254,22 +2254,35 @@
       // identical for every kind, so it lives in the shell).
       _approvalKinds: {
         mcp_peer_link: {
-          open(self, r) {
+          async open(self, r) {
             const req = r.request || {};
+            // The operator picks from THEIR orgs — enumerate them (the model
+            // never needs the list). Fall back to a typed slug if this fails.
+            let orgs = [];
+            try {
+              const resp = await fetch('/api/orgs');
+              if (resp.ok) {
+                const d = await resp.json();
+                orgs = (d.orgs || []).map((o) => o.slug).filter(Boolean);
+              }
+            } catch (e) { /* typed fallback below */ }
+            const requested = req.requested_org || '';
+            const defaultOrg = orgs.includes(requested) ? requested : (orgs[0] || requested);
             self.approvalBusy = false;
             self.approvalRequest = {
               id: r.id, kind: r.kind, session: r.session,
               title: 'ChatGPT connector access', actionLabel: 'Approve access',
-              op: 'link', target: req.requested_org || 'org',
+              op: 'link', target: requested || 'org',
               bodyMarkdown: [
                 'A ChatGPT chat wants to use Autonomy.',
                 '',
                 'Intent: ' + (req.intent || '(none stated)'),
-                'Requested org: ' + (req.requested_org || '(none)'),
+                'Requested org (hint): ' + (requested || '(none)'),
                 'OpenAI user: ' + (req.openai_subject || 'unknown'),
                 'OpenAI org: ' + (req.openai_org || 'unknown'),
               ].join('\n'),
-              autonomyOrg: req.requested_org || '',
+              orgs,
+              autonomyOrg: defaultOrg,
               level: 'read',
               ttl: '2592000',
               awaitExecution: true,
