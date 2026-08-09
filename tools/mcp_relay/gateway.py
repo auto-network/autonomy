@@ -99,6 +99,126 @@ def identity_trusted(identity: dict) -> bool:
     return identity.get("tunnel_verified", False) or not REQUIRE_TUNNEL_CERT
 
 
+# ---------------------------------------------------------------- authz mode
+# Two modes. DASHBOARD (secure): auth binds to openai/session, the dashboard owns
+# approval/org/audit, and the relay authorizes every call over an internal
+# service token — engaged automatically when both env vars below are set. REGISTRY
+# (legacy): the file-backed peer registry + peer_token. Default is REGISTRY so an
+# unconfigured relay keeps working; production runs DASHBOARD host-side.
+DASHBOARD_URL = os.environ.get("MCP_RELAY_DASHBOARD_URL", "").rstrip("/")
+SERVICE_TOKEN = os.environ.get("MCP_RELAY_SERVICE_TOKEN", "")
+DASHBOARD_MODE = bool(DASHBOARD_URL and SERVICE_TOKEN)
+
+_TLS_UNVERIFIED = ssl.create_default_context()
+_TLS_UNVERIFIED.check_hostname = False
+_TLS_UNVERIFIED.verify_mode = ssl.CERT_NONE
+
+# per-request Autonomy org for run_graph scoping (ThreadingHTTPServer → one
+# request per thread, so a threadlocal is safe).
+_req_ctx = threading.local()
+
+
+def dashboard_post(path: str, body: dict, timeout: int = 15):
+    """POST to the dashboard's internal API with the service token. Returns the
+    decoded JSON dict, or None on any transport/HTTP error (fail-closed at the
+    call site)."""
+    url = DASHBOARD_URL + path
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(
+        url, data=data, method="POST",
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {SERVICE_TOKEN}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_TLS_UNVERIFIED) as r:
+            raw = r.read()
+            return json.loads(raw) if raw else {}
+    except Exception:
+        return None
+
+
+def authorize(identity: dict, tool: str, args: dict, *, poster=dashboard_post) -> dict:
+    """Dashboard-mode per-request authorization. Resolves the session binding and
+    enforces level + per-target crosstalk grants. `poster` is injectable for
+    tests. Returns {allowed, org?, level?, status?, reason?}."""
+    if not identity_trusted(identity):
+        return {"allowed": False, "reason": "no trusted OpenAI session identity"}
+    osession = identity["openai_session"]
+    resolved = poster("/api/mcp/session/resolve", {
+        "openai_session": osession,
+        "openai_subject": identity.get("openai_subject") or "",
+        "openai_org": identity.get("openai_org") or "",
+        "intent": str(args.get("intent") or ""),
+        "requested_org": str(args.get("requested_org") or ""),
+    })
+    if resolved is None:
+        return {"allowed": False, "reason": "dashboard unreachable"}
+    if resolved.get("status") != "approved":
+        return {"allowed": False, "status": resolved.get("status"),
+                "reason": f"session {resolved.get('status')}"}
+    org, level = resolved.get("autonomy_org"), resolved.get("level")
+    scope = TOOL_SCOPES.get(tool)
+    if scope == "write" and level != "readwrite":
+        return {"allowed": False, "reason": "peer is read-only in this org"}
+    if scope == "send":
+        target = str(args.get("session") or "")
+        xr = poster("/api/mcp/crosstalk/resolve",
+                    {"openai_session": osession, "target_session": target, "target_org": ""})
+        if xr is None:
+            return {"allowed": False, "reason": "dashboard unreachable"}
+        if xr.get("status") != "approved":
+            return {"allowed": False, "status": xr.get("status"),
+                    "reason": f"crosstalk to {target} is {xr.get('status')}"}
+    return {"allowed": True, "org": org, "level": level}
+
+
+def peer_label(identity: dict) -> str:
+    """Display/attribution id for a dashboard-mode caller (not an auth input)."""
+    sess = identity.get("openai_session") or "unknown"
+    return "chatgpt:" + sess.replace("v1/", "")[:16]
+
+
+def hello_dashboard(identity: dict, args: dict, *, poster=dashboard_post) -> dict:
+    """hello in dashboard mode: resolve/create the session binding (opening the
+    operator popup when needed) and report status to ChatGPT."""
+    if not identity_trusted(identity):
+        return {"structured": {"status": "untrusted"}, "is_error": True,
+                "text": "Could not establish a trusted OpenAI session identity — "
+                        "this connector must be reached through OpenAI's tunnel."}
+    resolved = poster("/api/mcp/session/resolve", {
+        "openai_session": identity["openai_session"],
+        "openai_subject": identity.get("openai_subject") or "",
+        "openai_org": identity.get("openai_org") or "",
+        "intent": str(args.get("intent") or ""),
+        "requested_org": str(args.get("requested_org") or ""),
+    })
+    if resolved is None:
+        return {"structured": {"status": "error"}, "is_error": True,
+                "text": "The Autonomy dashboard is unreachable; try again shortly."}
+    status = resolved.get("status")
+    if status == "approved":
+        text = (f"Approved for org '{resolved.get('autonomy_org')}' "
+                f"({resolved.get('level')}). The tools are usable now.")
+    elif status == "pending":
+        text = ("Access requested. Approve this chat in the Autonomy dashboard "
+                "(an approval popup is waiting), then call hello again.")
+    elif status == "denied":
+        text = "This chat's access request was declined by the operator."
+    else:
+        text = f"Session status: {status}."
+    return {"structured": resolved, "text": text,
+            "is_error": status not in ("approved", "pending")}
+
+
+def authz_denial_text(tool: str, authz: dict) -> str:
+    status = authz.get("status")
+    if status == "pending":
+        return ("Access is pending operator approval in the Autonomy dashboard. "
+                "Retry after it's approved.")
+    if status == "peer_not_linked":
+        return "This chat isn't linked yet — call hello and get approved first."
+    return f"Not authorized: {authz.get('reason', 'denied')}. Call hello to (re)request access."
+
+
 # ---------------------------------------------------------------- peer registry
 
 class PeerRegistry:
@@ -195,11 +315,15 @@ class PeerRegistry:
 # ---------------------------------------------------------------- graph calls
 
 def run_graph(argv: list) -> tuple:
-    """Run a graph CLI command. Returns (ok, output)."""
+    """Run a graph CLI command. Returns (ok, output). In dashboard mode the
+    request's bound org (threadlocal) is applied via GRAPH_ORG so every call is
+    scoped to exactly the org the peer was approved for."""
+    org = getattr(_req_ctx, "org", None)
+    env = {**os.environ, "GRAPH_ORG": org} if org else None
     try:
         proc = subprocess.run(
             [GRAPH_BIN] + argv,
-            capture_output=True, text=True, timeout=GRAPH_TIMEOUT,
+            capture_output=True, text=True, timeout=GRAPH_TIMEOUT, env=env,
         )
     except FileNotFoundError:
         return False, f"graph CLI not found ({GRAPH_BIN})"
@@ -380,21 +504,29 @@ TOOL_DEFS = [
     {
         "name": "hello",
         "description": (
-            "Introduce yourself to the Autonomy relay and obtain your peer_token. "
-            "Call this once at the start of a conversation with a stable peer_name "
-            "(e.g. 'jeremy-chatgpt'). If the peer is not yet approved, the human "
-            "operator must approve it once; call hello again afterwards. Every "
-            "other tool requires the returned peer_token."
+            "Introduce this chat to the Autonomy relay to request access. State "
+            "your intent and, optionally, which Autonomy org you want to work in; "
+            "the operator approves this specific chat in the Autonomy dashboard, "
+            "binding it to one org at a read-only or read/write level. Call hello "
+            "again after approval. Your identity is established automatically — no "
+            "name or token is needed."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
+                "intent": {
+                    "type": "string",
+                    "description": "What you want to do — shown to the operator on the approval prompt.",
+                },
+                "requested_org": {
+                    "type": "string",
+                    "description": "Optional: the Autonomy org you'd like access to (operator confirms).",
+                },
                 "peer_name": {
                     "type": "string",
-                    "description": "Stable identifier for this ChatGPT peer, e.g. 'jeremy-chatgpt'.",
-                }
+                    "description": "Legacy only (registry mode); ignored when the dashboard authorizes.",
+                },
             },
-            "required": ["peer_name"],
         },
         "annotations": {"readOnlyHint": True},
     },
@@ -612,6 +744,40 @@ def handle_message(state: RelayState, msg: dict, headers) -> dict | None:
         if name not in TOOL_HANDLERS:
             return jsonrpc_error(msg_id, -32602, f"Unknown tool: {name}")
 
+        # --- DASHBOARD mode: identity = openai/session, authz + org via dashboard
+        if DASHBOARD_MODE:
+            identity = extract_identity(headers, params)
+            if name == "hello":
+                res = hello_dashboard(identity, args)
+                state.log({"tool": "hello", "sess": identity.get("openai_session"),
+                           "status": (res.get("structured") or {}).get("status")})
+                return tool_call_result(msg_id, res["structured"], res["text"],
+                                        is_error=res.get("is_error", False))
+            authz = authorize(identity, name, args)
+            if not authz["allowed"]:
+                state.log({"tool": name, "sess": identity.get("openai_session"),
+                           "ok": False, "err": authz.get("reason")})
+                return tool_call_result(
+                    msg_id, {"error": "not_authorized", "status": authz.get("status")},
+                    authz_denial_text(name, authz), is_error=True)
+            _req_ctx.org = authz.get("org")
+            dpeer = {"name": peer_label(identity), "scopes": []}
+            try:
+                structured, text = TOOL_HANDLERS[name](state.registry, args, dpeer)
+                state.log({"tool": name, "sess": identity.get("openai_session"),
+                           "org": authz.get("org"), "ok": True})
+                return tool_call_result(msg_id, structured, text)
+            except ToolError as e:
+                state.log({"tool": name, "ok": False, "err": str(e)[:200]})
+                return tool_call_result(msg_id, {"error": str(e)}, str(e), is_error=True)
+            except Exception as e:
+                state.log({"tool": name, "ok": False, "err": f"internal: {e}"})
+                return tool_call_result(msg_id, {"error": "internal"},
+                                        f"Internal relay error: {e}", is_error=True)
+            finally:
+                _req_ctx.org = None
+
+        # --- REGISTRY mode (legacy peer_token + file registry)
         scope = TOOL_SCOPES[name]
         peer = None
         if scope is not None:
