@@ -1,5 +1,6 @@
 """Unit tests for the MCP-relay peer store DAO (temp DB, no dashboard needed)."""
 
+import sqlite3
 import time
 
 import pytest
@@ -10,6 +11,49 @@ from tools.dashboard.dao import mcp_relay_db as db
 @pytest.fixture()
 def dbp(tmp_path):
     return tmp_path / "mcp_relay.db"
+
+
+# The pre-handle mcp_sessions schema — a real deployment created before the handle
+# column existed. Every column CREATE_TABLES has today except `handle`.
+_PRE_HANDLE_SCHEMA = """
+CREATE TABLE mcp_sessions (
+    openai_session   TEXT PRIMARY KEY,
+    openai_subject   TEXT NOT NULL DEFAULT '',
+    openai_org       TEXT NOT NULL DEFAULT '',
+    intent           TEXT NOT NULL DEFAULT '',
+    requested_org    TEXT NOT NULL DEFAULT '',
+    autonomy_org     TEXT,
+    level            TEXT,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    approval_id      TEXT,
+    expires_at       REAL,
+    approved_by      TEXT,
+    created_at       REAL NOT NULL,
+    updated_at       REAL NOT NULL
+);
+"""
+
+
+def test_migration_adds_handle_to_a_preexisting_db(dbp):
+    # A DB created before the handle column existed — the path a fresh-DB test
+    # never exercises (the ordering bug that shipped: a handle index in the schema
+    # script raised on this DB before the migration could add the column).
+    conn = sqlite3.connect(str(dbp))
+    conn.executescript(_PRE_HANDLE_SCHEMA)
+    conn.execute("INSERT INTO mcp_sessions (openai_session, status, created_at,"
+                 " updated_at) VALUES ('v1/old', 'approved', 0, 0)")
+    conn.commit()
+    conn.close()
+
+    # Opening through the DAO must migrate (add handle + its index) without raising.
+    fresh = db.upsert_pending_session("v1/new", db_path=dbp)
+    assert fresh["handle"].startswith("ChatGPT-")           # new row gets a handle
+    assert db.ensure_handle("v1/old", db_path=dbp).startswith("ChatGPT-")  # old row too
+    # the index exists after migration
+    conn = sqlite3.connect(str(dbp))
+    names = {r[1] for r in conn.execute("PRAGMA index_list(mcp_sessions)")}
+    conn.close()
+    assert "idx_mcp_sessions_handle" in names
 
 
 def test_hello_creates_pending_then_approve_binds(dbp):
