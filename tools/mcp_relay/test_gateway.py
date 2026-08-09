@@ -130,6 +130,40 @@ def test_hello_dashboard_untrusted_is_error():
                                       poster=_poster({"status": "pending"}))
     assert res["is_error"] is True
 
+
+def test_stdio_transport_is_its_own_trust_boundary(monkeypatch):
+    # Over stdio there is no TCP surface and no header to forge — the process
+    # boundary is the trust boundary, so a session with no cert is still trusted.
+    monkeypatch.setattr(gateway_mod, "REQUIRE_TUNNEL_CERT", True)
+    idn = gateway_mod.extract_identity({}, {"_meta": {"openai/session": "v1/x"}})
+    assert idn["tunnel_verified"] is False
+    monkeypatch.setattr(gateway_mod, "STDIO_TRANSPORT", True)
+    assert gateway_mod.identity_trusted(idn) is True
+    monkeypatch.setattr(gateway_mod, "STDIO_TRANSPORT", False)
+    assert gateway_mod.identity_trusted(idn) is False  # HTTP path, no cert -> untrusted
+
+
+def test_sess_tag_never_leaks_the_raw_session():
+    tag = gateway_mod.sess_tag({"openai_session": "v1/supersecretsession"})
+    assert "supersecret" not in tag and len(tag) == 12
+
+
+def test_stdio_loop_serves_tools_list(tmp_path):
+    proc = subprocess.Popen(
+        [sys.executable, str(GATEWAY), "--data-dir", str(tmp_path / "d"), "stdio"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env={"PATH": "/usr/bin:/bin", "MCP_RELAY_REQUIRE_TUNNEL_CERT": "0"})
+    try:
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n")
+        proc.stdin.flush()
+        resp = json.loads(proc.stdout.readline())
+        names = [t["name"] for t in resp["result"]["tools"]]
+        assert "hello" in names and "note" in names
+    finally:
+        proc.stdin.close()
+        proc.terminate()
+        proc.wait(timeout=5)
+
 GRAPH_STUB = """#!/usr/bin/env bash
 case "$1" in
   search)    echo '[{"source_id": "abc-123", "source_title": "Stub hit", "source_type": "note", "content": "stub content body", "source_created_at": "2026-08-09T00:00:00Z"}]' ;;
