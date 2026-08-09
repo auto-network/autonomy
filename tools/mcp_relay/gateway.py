@@ -528,10 +528,20 @@ def handle_message(state: RelayState, msg: dict, headers) -> dict | None:
         return None
 
     if method == "server/discover":
+        # DiscoverResult (2026-07-28) requires: supportedVersions, capabilities,
+        # cacheScope, resultType, ttlMs. Field is supportedVersions (NOT
+        # protocolVersions); missing cacheScope/ttlMs makes strict clients
+        # (e.g. ChatGPT connector create) reject the whole server.
         return jsonrpc_result(msg_id, {
-            "protocolVersions": PROTOCOL_VERSIONS,
+            "supportedVersions": PROTOCOL_VERSIONS,
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": SERVER_INFO,
+            "cacheScope": "private",
+            "ttlMs": 300000,
+            "instructions": (
+                "Autonomy knowledge-graph relay. Use it to search and read "
+                "Jeremy's Autonomy graph, tail live agent sessions, send "
+                "CrossTalk messages to sessions, and write notes."
+            ),
         })
 
     if method == "initialize":  # legacy pre-2026 handshake
@@ -637,7 +647,24 @@ class RelayHandler(BaseHTTPRequestHandler):
         if not isinstance(msg, dict):
             self._send_json(400, jsonrpc_error(None, -32600, "Batch requests not supported"))
             return
+        # request-level debug log (method + tool + response error-ness)
+        try:
+            _dbg = {
+                "method": msg.get("method"),
+                "tool": (msg.get("params") or {}).get("name"),
+                "hdr_method": self.headers.get("Mcp-Method"),
+                "hdr_name": self.headers.get("Mcp-Name"),
+                "proto": self.headers.get("MCP-Protocol-Version"),
+            }
+        except Exception:
+            _dbg = {"method": "?"}
         response = handle_message(self.state, msg, self.headers)
+        try:
+            _dbg["resp"] = "error" if (response and "error" in response) else (
+                "result" if response else "202")
+            self.state.log({"debug_request": _dbg})
+        except Exception:
+            pass
         if response is None:
             self.send_response(202)
             self.send_header("Content-Length", "0")
