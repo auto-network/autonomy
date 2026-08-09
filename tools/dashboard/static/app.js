@@ -1797,6 +1797,11 @@ function _pluginScriptSrc(plugin) {
   return `/static/plugins/${plugin.id}/page.js${rev}`;
 }
 
+function _pluginStyleHref(plugin) {
+  const rev = plugin && plugin.asset_rev ? `?v=${encodeURIComponent(plugin.asset_rev)}` : '';
+  return `/static/plugins/${plugin.id}/page.css${rev}`;
+}
+
 function _dropPluginFragmentCache(pluginId) {
   const prefix = `/pages/${pluginId}`;
   for (const key of _fragmentCache.keys()) {
@@ -1834,22 +1839,38 @@ window.Autonomy.refreshPlugins = async function () {
     const pending = [];
     for (const p of window.Autonomy.plugins) {
       const existing = document.querySelector(`script[data-plugin-id="${p.id}"]`);
-      if (existing && existing.dataset.assetRev === (p.asset_rev || '')) {
-        continue;
+      if (!(existing && existing.dataset.assetRev === (p.asset_rev || ''))) {
+        if (existing) {
+          existing.remove();
+          _dropPluginFragmentCache(p.id);
+        }
+        const script = document.createElement('script');
+        script.src = _pluginScriptSrc(p);
+        script.dataset.pluginId = p.id;
+        script.dataset.assetRev = p.asset_rev || '';
+        pending.push(new Promise(resolve => {
+          script.onload = resolve;
+          script.onerror = resolve;
+        }));
+        document.body.appendChild(script);
       }
-      if (existing) {
-        existing.remove();
-        _dropPluginFragmentCache(p.id);
+
+      // Plugins declare an optional page.css (manifest `assets.style`) —
+      // served as a static file, but nothing linked it into the page
+      // until now. Mirrors the script injection above: one <link> per
+      // plugin, keyed by data-plugin-id, refreshed when asset_rev changes.
+      const existingLink = document.querySelector(`link[data-plugin-id="${p.id}"]`);
+      if (!p.has_style) {
+        if (existingLink) existingLink.remove();
+      } else if (!existingLink || existingLink.dataset.assetRev !== (p.asset_rev || '')) {
+        if (existingLink) existingLink.remove();
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = _pluginStyleHref(p);
+        link.dataset.pluginId = p.id;
+        link.dataset.assetRev = p.asset_rev || '';
+        document.head.appendChild(link);
       }
-      const script = document.createElement('script');
-      script.src = _pluginScriptSrc(p);
-      script.dataset.pluginId = p.id;
-      script.dataset.assetRev = p.asset_rev || '';
-      pending.push(new Promise(resolve => {
-        script.onload = resolve;
-        script.onerror = resolve;
-      }));
-      document.body.appendChild(script);
     }
     if (pending.length) {
       await Promise.all(pending);
