@@ -37,12 +37,16 @@ CREATE TABLE IF NOT EXISTS mcp_sessions (
     approval_id      TEXT,
     expires_at       REAL,
     approved_by      TEXT,
+    handle           TEXT,
     created_at       REAL NOT NULL,
     updated_at       REAL NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_mcp_sessions_status
     ON mcp_sessions(status, expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_mcp_sessions_handle
+    ON mcp_sessions(handle);
 
 CREATE TABLE IF NOT EXISTS mcp_crosstalk_grants (
     grant_id         TEXT PRIMARY KEY,
@@ -77,7 +81,20 @@ def _get_conn(db_path: Path | str | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(CREATE_TABLES)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns absent from older DBs. CREATE TABLE IF NOT EXISTS never adds a
+    column to an existing table, so a new column needs an explicit ALTER."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(mcp_sessions)")}
+    if "handle" not in cols:
+        conn.execute("ALTER TABLE mcp_sessions ADD COLUMN handle TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mcp_sessions_handle ON mcp_sessions(handle)"
+        )
+        conn.commit()
 
 
 def init_db(db_path: Path | str | None = None) -> None:
@@ -92,6 +109,21 @@ def _live(row: dict | None, now: float | None = None) -> bool:
     return exp is None or exp > (now if now is not None else time.time())
 
 
+def _mint_handle(conn: sqlite3.Connection, now: float) -> str:
+    """A human-readable, stable CrossTalk identity for a chat: ChatGPT-<UTC
+    datetime>, with a -2/-3 suffix only on a same-second collision. Derived from
+    the stored record, never from the process that launched the relay, so it is
+    identical no matter who starts the relay."""
+    base = "ChatGPT-" + time.strftime("%Y%m%d-%H%M%S", time.gmtime(now))
+    candidate, n = base, 1
+    while conn.execute(
+        "SELECT 1 FROM mcp_sessions WHERE handle = ?", (candidate,)
+    ).fetchone() is not None:
+        n += 1
+        candidate = f"{base}-{n}"
+    return candidate
+
+
 # ── Sessions ─────────────────────────────────────────────────────
 
 def get_session(openai_session: str, *, db_path: Path | str | None = None) -> dict | None:
@@ -103,6 +135,46 @@ def get_session(openai_session: str, *, db_path: Path | str | None = None) -> di
     finally:
         conn.close()
     return dict(row) if row else None
+
+
+def get_session_by_handle(handle: str, *, db_path: Path | str | None = None) -> dict | None:
+    """Reverse the minted handle back to its chat record — used to validate a
+    session->chat reply target and to authorize a chat draining its own inbox."""
+    if not handle:
+        return None
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM mcp_sessions WHERE handle = ?", (handle,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def ensure_handle(openai_session: str, *, db_path: Path | str | None = None) -> str | None:
+    """Return the chat's stable handle, minting and persisting one if the row
+    lacks it (a row created before handles existed). Returns None for an unknown
+    session."""
+    now = time.time()
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT handle FROM mcp_sessions WHERE openai_session = ?", (openai_session,)
+        ).fetchone()
+        if row is None:
+            return None
+        if row["handle"]:
+            return row["handle"]
+        handle = _mint_handle(conn, now)
+        conn.execute(
+            "UPDATE mcp_sessions SET handle = ?, updated_at = ? WHERE openai_session = ?",
+            (handle, now, openai_session),
+        )
+        conn.commit()
+        return handle
+    finally:
+        conn.close()
 
 
 def upsert_pending_session(
@@ -130,12 +202,15 @@ def upsert_pending_session(
             "SELECT * FROM mcp_sessions WHERE openai_session = ?", (openai_session,)
         ).fetchone()
         if row is None:
+            # First contact: mint the chat's stable handle now (kept across
+            # every later re-hello — the identity must not change under the chat).
+            handle = _mint_handle(conn, now)
             conn.execute(
                 "INSERT INTO mcp_sessions (openai_session, openai_subject, openai_org,"
-                " intent, requested_org, status, approval_id, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " intent, requested_org, status, approval_id, handle, created_at,"
+                " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (openai_session, openai_subject, openai_org, intent, requested_org,
-                 PENDING, approval_id, now, now),
+                 PENDING, approval_id, handle, now, now),
             )
             conn.commit()
         elif not _live(dict(row), now):
