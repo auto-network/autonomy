@@ -115,33 +115,43 @@ def test_unknown_token_is_401(server_mod, monkeypatch):
     assert identity is None and err.status_code == 401
 
 
-def test_orgless_token_with_workspace_is_refused_not_local(server_mod, monkeypatch):
-    # The reject-NULL guard: a legacy/mis-minted CONTAINER token (no org, but its
-    # session maps to a workspace) is refused, never treated as a local caller.
+def test_orgless_agent_token_is_refused_not_local(server_mod, monkeypatch):
+    # The reject-NULL guard: a legacy/mis-minted AGENT token (no org, agent
+    # session type) is refused, never treated as a local caller.
     monkeypatch.setattr(server_mod.auth_db, "resolve_token",
                         lambda _h: ("auto-legacy", None))
-    monkeypatch.setattr(server_mod, "_session_has_workspace", lambda _s: True)
+    monkeypatch.setattr(server_mod, "_org_scoped_session", lambda _s: True)
     identity, err = server_mod.authenticate_session_request(_req("Bearer x"))
     assert identity is None
     assert err.status_code == 403
     assert "no organization" in _body(err)["error"]
 
 
-def test_orgless_token_without_workspace_is_local(server_mod, monkeypatch):
-    # A genuine host/local token (no org, no workspace) resolves as local.
+def test_orgless_host_token_is_local(server_mod, monkeypatch):
+    # A genuine host/local token (no org) resolves as local, even with the
+    # path-shaped project a host session carries.
     monkeypatch.setattr(server_mod.auth_db, "resolve_token",
                         lambda _h: ("host-1", None))
-    monkeypatch.setattr(server_mod, "_session_has_workspace", lambda _s: False)
+    monkeypatch.setattr(server_mod, "_org_scoped_session", lambda _s: False)
     identity, err = server_mod.authenticate_session_request(_req("Bearer x"))
     assert err is None
     assert identity == ("host-1", None)
 
 
-def test_session_has_workspace_reads_project(server_mod, monkeypatch):
+def test_org_scoped_session_discriminates_on_type_not_project(server_mod, monkeypatch):
     from tools.dashboard.dao import dashboard_db
-    monkeypatch.setattr(dashboard_db, "get_session",
-                        lambda s: {"project": "personal-finance"} if s == "c" else None)
-    assert server_mod._session_has_workspace("c") is True
-    assert server_mod._session_has_workspace("h") is False   # no row
-    monkeypatch.setattr(dashboard_db, "get_session", lambda s: {"project": ""})
-    assert server_mod._session_has_workspace("h") is False   # empty project
+    # A host session carries a path-shaped project but is NOT org-scoped.
+    rows = {
+        "host-1": {"type": "host", "project": "-home-jeremy-workspace-autonomy"},
+        "auto-c": {"type": "container", "project": "autonomy-developer"},
+        "auto-d": {"type": "dispatch", "project": "-workspace-repo"},
+        "auto-l": {"type": "librarian", "project": "-workspace-repo"},
+        "auto-a": {"type": "agentic", "project": "-workspace-repo"},
+        "auto-t": {"type": "terminal", "project": "-workspace-repo"},
+    }
+    monkeypatch.setattr(dashboard_db, "get_session", lambda s: rows.get(s))
+    # host + untracked -> local (allowed); every agent type -> org-scoped (refused).
+    assert server_mod._org_scoped_session("host-1") is False
+    assert server_mod._org_scoped_session("missing") is False   # no row -> local
+    for agent in ("auto-c", "auto-d", "auto-l", "auto-a", "auto-t"):
+        assert server_mod._org_scoped_session(agent) is True
