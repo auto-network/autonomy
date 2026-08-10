@@ -93,11 +93,20 @@ DELETE /api/missions/<mission_id>                                 # hard-delete 
 GET    /api/missions/<mission_id>/site                            # current revision, metadata AND content together
 GET    /api/missions/<mission_id>/site/revisions                  # history (no content — id, seq, note, byte size, created_at)
 GET    /api/missions/<mission_id>/site/revisions/<revision_id>    # one historical revision, full content
+POST   /api/missions/<mission_id>/status                          # set lifecycle status -- {"status": "active"|"paused"|"complete"}
 ```
 
-No `GET .../status` vs `.../full` split, no membership-set indirection, no
-`graph set remove` needed for deletion — `DELETE /api/missions/<id>` is a
-real route.
+No membership-set indirection, no `graph set remove` needed for deletion —
+`DELETE /api/missions/<id>` is a real route.
+
+Status is explicit and coordinator-set, never inferred — a mission that's
+genuinely done looks identical to one that's stalled, so guessing from
+staleness would be actively misleading. Defaults to `active` on creation.
+
+```bash
+curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/status \
+  -X POST -H 'Content-Type: application/json' -d '{"status": "paused"}'
+```
 
 ## 6. Q&A — visitors ask, you answer (P2)
 
@@ -177,6 +186,14 @@ If you're writing an agent-side presence row against a mission surface
 yourself (rather than relying on the dashboard page), see
 `graph://dff97eec-c59` for the substrate contract — this doc only covers the
 `mission:<id>` convention, not the presence write path itself.
+
+You don't need to do this manually for the common case: `push_site_revision`
+and `answer_question` already write a one-shot presence touch for
+`coordinator_session` on that mission's surface, so a coordinator who's
+actively pushing revisions or answering questions shows up in presence with
+zero integration on their side. It's best-effort and silent on failure —
+never blocks or fails your request. This only covers those two calls, not
+"coordinator is thinking/working" in general.
 
 **"Since last visit."** A single, implicit watermark per mission — not
 per-viewer. There is no per-participant identity system yet (dashboard auth

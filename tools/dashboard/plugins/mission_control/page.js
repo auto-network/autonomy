@@ -137,6 +137,24 @@ function missionControlPage() {
     expanded: '',
     relativeTime: relativeTime,
 
+    statusFilter: 'all',
+    get statusFilters() {
+      const counts = { active: 0, paused: 0, complete: 0 };
+      for (const m of this.missions) {
+        if (Object.prototype.hasOwnProperty.call(counts, m.status)) counts[m.status] += 1;
+      }
+      return [
+        { value: 'all', label: 'All', count: this.missions.length },
+        { value: 'active', label: 'Active', count: counts.active },
+        { value: 'paused', label: 'Paused', count: counts.paused },
+        { value: 'complete', label: 'Complete', count: counts.complete },
+      ];
+    },
+    get filteredMissions() {
+      if (this.statusFilter === 'all') return this.missions;
+      return this.missions.filter((m) => m.status === this.statusFilter);
+    },
+
     presenceStyles: MC_PRESENCE_STYLES,
     presenceStyle: loadPresenceStyle(),
     onPickerChange(e) {
