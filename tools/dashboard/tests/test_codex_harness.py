@@ -816,69 +816,6 @@ def test_codex_tool_output_metadata_ignores_process_markers_in_stdout_body():
     assert "Process running with session ID 64244" in entry["stdout"]
 
 
-def test_postprocess_codex_turn_correction_from_running_function_output(tmp_path):
-    session_dir = tmp_path / "turn-correction-output"
-    session_dir.mkdir()
-    tc_json = json.dumps({
-        "type": "turn_correction",
-        "version": 2,
-        "corrected_text": "Cleaned up dictation.",
-        "mode": "aggressive",
-        "reason": "dictation cleanup",
-        "confidence": 0.91,
-    })
-    parsed = []
-    for raw in (
-        {
-            "timestamp": "2026-05-24T20:10:00.000Z",
-            "type": "response_item",
-            "payload": {
-                "type": "function_call",
-                "name": "exec_command",
-                "arguments": json.dumps({
-                    "cmd": "graph turn-correction suggest 'Cleaned up dictation.' --json && graph set-topics x",
-                    "workdir": "/workspace/repo",
-                    "yield_time_ms": 1000,
-                }),
-                "call_id": "call_tc_running",
-            },
-        },
-        {
-            "timestamp": "2026-05-24T20:10:01.010Z",
-            "type": "response_item",
-            "payload": {
-                "type": "function_call_output",
-                "call_id": "call_tc_running",
-                "output": (
-                    "Chunk ID: running\n"
-                    "Wall time: 1.0010 seconds\n"
-                    "Process running with session ID 64123\n"
-                    "Original token count: 42\n"
-                    "Output:\n"
-                    f"{tc_json}\n"
-                    "✓ Label set: Debug missing turn correction\n"
-                    "✓ Role set: researcher\n"
-                ),
-            },
-        },
-    ):
-        parsed_entry = parse_codex_log_line(_line(raw))
-        if isinstance(parsed_entry, list):
-            parsed.extend(parsed_entry)
-        elif parsed_entry:
-            parsed.append(parsed_entry)
-
-    entries = CODEX_HARNESS.postprocess_entries(parsed, session_dir=session_dir)
-
-    tc = next((entry for entry in entries if entry["type"] == "turn_correction"), None)
-    assert tc is not None
-    assert tc["tool_id"] == "call_tc_running"
-    assert tc["corrected_text"] == "Cleaned up dictation."
-    assert tc["mode"] == "aggressive"
-    assert tc["reason"] == "dictation cleanup"
-    assert tc["confidence"] == pytest.approx(0.91)
-
-
 def test_postprocess_codex_graph_share_output_emits_viewer_attachment(tmp_path):
     session_dir = tmp_path / "graph-share-output"
     session_dir.mkdir()

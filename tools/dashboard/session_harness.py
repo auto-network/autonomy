@@ -548,82 +548,6 @@ def _parse_bd_setstate_cmd(command: str, timestamp: str) -> dict | None:
     }
 
 
-def _upconvert_turn_correction(content: str, timestamp: str, tool_id: str = "") -> dict | None:
-    """Upconvert ``graph turn-correction suggest --json`` output into a typed
-    parser entry the SessionMonitor can persist as a sparse overlay row.
-
-    Bead auto-edec1.1. The CLI prints a single JSON object whose ``type`` is
-    ``turn_correction``; we recognize that discriminator, validate the
-    replacement text, and emit a ``turn_correction`` entry instead of leaving
-    the result as opaque Bash text. Target resolution and hash derivation now
-    happen later in SessionMonitor so the agent-facing command can stay
-    one-shot and only remit the corrected text.
-    """
-    if not isinstance(content, str):
-        return None
-    stripped = content.strip()
-    if not stripped:
-        return None
-    # Cheap discriminator gate so we don't try to JSON-decode every Bash line.
-    if "turn_correction" not in stripped:
-        return None
-    # Prefer the canonical contract (one JSON object on stdout), but tolerate
-    # wrappers and a later command writing status lines around it. This matters
-    # for stdin-based suggestions: their corrected text cannot be recovered
-    # from the command argv when stdout is no longer a pristine JSON document.
-    candidates = [stripped]
-    if "\n" in stripped:
-        candidates.extend(line.strip() for line in stripped.splitlines())
-    for candidate in candidates:
-        if not candidate.startswith("{") or "turn_correction" not in candidate:
-            continue
-        try:
-            payload = json.loads(candidate)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        entry = _build_turn_correction_entry(payload, timestamp, tool_id=tool_id)
-        if entry:
-            return entry
-    return None
-
-
-def _build_turn_correction_entry(
-    payload: dict,
-    timestamp: str,
-    *,
-    tool_id: str = "",
-) -> dict | None:
-    if not isinstance(payload, dict) or payload.get("type") != "turn_correction":
-        return None
-    corrected = payload.get("corrected_text")
-    if not isinstance(corrected, str):
-        return None
-    entry: dict[str, Any] = {
-        "type": "turn_correction",
-        "role": "tool",
-        "timestamp": timestamp,
-        "corrected_text": corrected,
-    }
-    target = payload.get("target_message_id")
-    if isinstance(target, str) and target:
-        entry["target_message_id"] = target
-    sha = payload.get("original_sha256")
-    if isinstance(sha, str) and sha:
-        entry["original_sha256"] = sha
-    if tool_id:
-        entry["tool_id"] = tool_id
-    mode = payload.get("mode")
-    if isinstance(mode, str) and mode:
-        entry["mode"] = mode
-    reason = payload.get("reason")
-    if isinstance(reason, str) and reason:
-        entry["reason"] = reason
-    confidence = payload.get("confidence")
-    if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
-        entry["confidence"] = float(confidence)
-    return entry
-
-
 def _upconvert_viewer_attachment(
     content: str, timestamp: str, tool_id: str = ""
 ) -> dict | None:
@@ -716,142 +640,6 @@ def _extract_read_images(
             "timestamp": timestamp,
         })
     return out
-
-
-def _upconvert_turn_correction_command(
-    command: str,
-    timestamp: str,
-    *,
-    tool_id: str = "",
-) -> dict | None:
-    """Fallback for blank exec_command completions.
-
-    Some live Codex ``exec_command_end`` envelopes arrive with empty captured
-    output even though the immediate tool return contained the JSON payload.
-    For a positional invocation, the corrected replacement string and optional
-    metadata are already present in the command text, so we can synthesize the
-    same typed event without depending on stdout capture.  Only inspect the
-    first shell command: agents commonly put a redirection, pipe, or later
-    metadata command after the emitter, and none of those tokens belong to the
-    turn-correction argv.
-    """
-    if not isinstance(command, str) or not command.strip():
-        return None
-    try:
-        lexer = shlex.shlex(
-            command,
-            posix=True,
-            punctuation_chars=";&|<>\n",
-        )
-        # Preserve newlines as tokens so a following command cannot be
-        # mistaken for another positional argument. Quoted newlines remain
-        # inside their quoted token, as desired.
-        lexer.whitespace = " \t\r"
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        tokens = list(lexer)
-    except ValueError:
-        return None
-    if not tokens:
-        return None
-    while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", tokens[0]):
-        tokens = tokens[1:]
-    if not tokens:
-        return None
-    for idx, token in enumerate(tokens):
-        if not re.fullmatch(r"[;&|<>\n]+", token):
-            continue
-        # A numeric fd immediately before a redirection (``2>/dev/null``)
-        # belongs to the redirect, not to the CLI's positional arguments.
-        cut = idx
-        if "<" in token or ">" in token:
-            if idx > 0 and tokens[idx - 1].isdigit():
-                cut -= 1
-        tokens = tokens[:cut]
-        break
-    if not tokens:
-        return None
-    prefix_len = 0
-    if tokens[0] == "graph":
-        prefix_len = 1
-    elif (
-        len(tokens) >= 3
-        and tokens[0].startswith("python")
-        and tokens[1] == "-m"
-        and tokens[2] == "tools.graph"
-    ):
-        prefix_len = 3
-    else:
-        return None
-    if tokens[prefix_len:prefix_len + 2] != ["turn-correction", "suggest"]:
-        return None
-    args = tokens[prefix_len + 2:]
-    corrected_text: str | None = None
-    mode: str | None = None
-    reason: str | None = None
-    confidence: float | None = None
-    uses_stdin = False
-    saw_json = False
-    idx = 0
-    while idx < len(args):
-        token = args[idx]
-        if token == "--json":
-            saw_json = True
-            idx += 1
-            continue
-        if token == "--stdin":
-            uses_stdin = True
-            idx += 1
-            continue
-        if token == "--mode" and idx + 1 < len(args):
-            mode = args[idx + 1]
-            idx += 2
-            continue
-        if token.startswith("--mode="):
-            mode = token.split("=", 1)[1]
-            idx += 1
-            continue
-        if token == "--reason" and idx + 1 < len(args):
-            reason = args[idx + 1]
-            idx += 2
-            continue
-        if token.startswith("--reason="):
-            reason = token.split("=", 1)[1]
-            idx += 1
-            continue
-        if token == "--confidence" and idx + 1 < len(args):
-            try:
-                confidence = float(args[idx + 1])
-            except (TypeError, ValueError):
-                return None
-            idx += 2
-            continue
-        if token.startswith("--confidence="):
-            try:
-                confidence = float(token.split("=", 1)[1])
-            except (TypeError, ValueError):
-                return None
-            idx += 1
-            continue
-        if token.startswith("--"):
-            return None
-        if corrected_text is not None:
-            return None
-        corrected_text = token
-        idx += 1
-    if not saw_json or uses_stdin or corrected_text is None:
-        return None
-    payload: dict[str, Any] = {
-        "type": "turn_correction",
-        "corrected_text": corrected_text,
-    }
-    if mode:
-        payload["mode"] = mode
-    if reason:
-        payload["reason"] = reason
-    if confidence is not None:
-        payload["confidence"] = confidence
-    return _build_turn_correction_entry(payload, timestamp, tool_id=tool_id)
 
 
 def _upconvert_graph_result(content: str, timestamp: str, tool_id: str = "") -> dict | None:
@@ -1092,11 +880,6 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
                     tool_results.extend(
                         _extract_read_images(result_content_raw, timestamp, tool_id=tool_use_id)
                     )
-                    tc = _upconvert_turn_correction(
-                        result_content, timestamp, tool_id=tool_use_id,
-                    )
-                    if tc:
-                        tool_results.append(tc)
                     va = _upconvert_viewer_attachment(
                         result_content, timestamp, tool_id=tool_use_id,
                     )
@@ -1229,12 +1012,9 @@ def parse_claude_log_line(line: str) -> dict | list[dict] | None:
             "is_error": raw.get("is_error", False),
             "timestamp": timestamp,
         }
-        tc = _upconvert_turn_correction(result_content, timestamp, tool_id=tool_id)
         va = _upconvert_viewer_attachment(result_content, timestamp, tool_id=tool_id)
         sem = _upconvert_graph_result(result_content, timestamp, tool_id=tool_id)
         out = [base_result]
-        if tc:
-            out.append(tc)
         if va:
             out.append(va)
         if sem:
@@ -2428,16 +2208,13 @@ def _append_codex_exec_sidecars(out: list[dict], progress: dict) -> None:
 
     Codex often reports short exec results as ``function_call_output`` rather
     than a later ``exec_command_end`` envelope. Keep the raw tool_result, but
-    also surface graph mutations, graph-share attachments, and turn
-    corrections so viewer overlays do not depend on the provider choosing the
-    final-envelope path (or exposing a nested tools.exec_command directly).
+    also surface graph mutations and graph-share attachments so viewer tiles
+    do not depend on the provider choosing the final-envelope path (or
+    exposing a nested tools.exec_command directly).
     """
     content = str(progress.get("stdout") or progress.get("content") or "")
     timestamp = str(progress.get("timestamp") or "")
     tool_id = str(progress.get("tool_id") or "")
-    tc = _upconvert_turn_correction(content, timestamp, tool_id=tool_id)
-    if tc:
-        out.append(tc)
     va = _upconvert_viewer_attachment(content, timestamp, tool_id=tool_id)
     if va:
         out.append(va)
@@ -2500,17 +2277,9 @@ def _parse_codex_exec_end(payload: dict, timestamp: str) -> dict | list[dict] | 
         "stderr": payload.get("stderr") or "",
         "process_id": payload.get("process_id") or "",
     }
-    tc = _upconvert_turn_correction(output, timestamp, tool_id=tool_id)
-    # Command-text recovery is only evidence of intent. A non-zero completion
-    # means the CLI did not successfully emit a valid event, even if stdout was
-    # redirected and its error text is unavailable.
-    if tc is None and exit_code in (None, 0):
-        tc = _upconvert_turn_correction_command(command, timestamp, tool_id=tool_id)
     va = _upconvert_viewer_attachment(output, timestamp, tool_id=tool_id)
     sem = _upconvert_graph_result(output, timestamp, tool_id=tool_id)
     out = [result]
-    if tc:
-        out.append(tc)
     if va:
         out.append(va)
     if sem:

@@ -5120,13 +5120,19 @@ _TURN_CORRECTION_MODES = ("off", "conservative", "balanced", "aggressive")
 
 
 def cmd_turn_correction_suggest(args):
-    """Emit a typed turn-correction suggestion payload for the parser.
+    """Submit a turn-correction suggestion via the authenticated dashboard API.
 
-    Bead auto-edec1.1. The session parser upconverts ``--json`` output of this
-    command into a ``turn_correction`` dashboard event. The SessionMonitor
-    then resolves that suggestion onto the most likely nearby user turn,
-    computes the target ``message_id`` and raw-text ``sha256`` server-side,
-    and persists the sparse overlay row.
+    Bead auto-hmow2. Delivery is one authenticated ``POST`` to
+    ``/api/session/turn-corrections/suggest`` using ``GRAPH_API`` and the
+    session bearer token. The command sends only the corrected replacement
+    text (plus optional metadata); the server derives the caller's session
+    from the token, resolves the target user turn, computes the original hash,
+    persists the sparse overlay row, and broadcasts it live.
+
+    This command's stdout is a *receipt only*. It may be redirected, piped, or
+    discarded (``>/dev/null``) without affecting delivery — the transcript is
+    no longer the transport. There is no direct-DB fallback and no success
+    output when the dashboard cannot be reached.
     """
     stdin_compat = getattr(args, "content_stdin", None)
     read_from_stdin = args.stdin or stdin_compat == "-"
@@ -5164,11 +5170,7 @@ def cmd_turn_correction_suggest(args):
         )
         sys.exit(2)
 
-    payload = {
-        "type": "turn_correction",
-        "version": 2,
-        "corrected_text": corrected,
-    }
+    payload = {"corrected_text": corrected}
     if args.mode is not None:
         payload["mode"] = args.mode
     if args.reason is not None:
@@ -5176,10 +5178,51 @@ def cmd_turn_correction_suggest(args):
     if args.confidence is not None:
         payload["confidence"] = args.confidence
 
-    # One JSON object on a single line so the session parser can scan
-    # tool_result content and upconvert without fuzzy matching. There
-    # is no "pretty" alternative — see the argparse comment for why.
-    print(json.dumps(payload))
+    # Authenticated POST — the only delivery path. The session identity comes
+    # from the bearer token (never sent in the body); the server resolves the
+    # target and hash. No transcript/stdout upconversion, no direct-DB write.
+    token = _resolve_crosstalk_token()
+
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    api_base = os.environ.get("GRAPH_API", "https://localhost:8080")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    url = f"{api_base}/api/session/turn-corrections/suggest"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=30, context=ctx)
+        result = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            error_msg = json.loads(e.read()).get("error", str(e))
+        except Exception:
+            error_msg = str(e)
+        print(f"  ✗ Turn correction rejected: {error_msg}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"  ✗ Cannot reach dashboard: {e.reason}", file=sys.stderr)
+        sys.exit(1)
+
+    # Receipt only — safe to redirect or discard. Delivery already happened.
+    correction = (result or {}).get("correction") or {}
+    print(
+        "  ✓ Turn correction submitted"
+        f" → {(result or {}).get('session_id', '?')}"
+        f" target={correction.get('target_message_id', '?')}"
+        f" status={correction.get('status', '?')}"
+    )
 
 
 _SHARE_OUTPUT_ROOT = Path("/workspace/output")
@@ -6091,14 +6134,10 @@ def main():
         default=None,
         help="Compatibility alias: use '-c -' to read corrected text from stdin",
     )
-    # Deliberately no --pretty / mode-switching flags. The output is
-    # always the JSON contract the session parser upconverts. A human-only
-    # "pretty" mode would just be a footgun: agents that forgot to opt-in
-    # would get a misleading ✓ tick on output the parser ignores.
-    #
-    # `--json` accepted as a silent no-op for back-compat with agents in
-    # the wild that still pass it explicitly. Hidden from help so new
-    # callers don't learn to repeat it.
+    # `--json` accepted as a silent no-op for back-compat with already-running
+    # sessions whose frozen primers still pass it. Delivery is the authenticated
+    # POST, never stdout, so this flag no longer selects an output contract —
+    # it is hidden from help so new callers don't learn to repeat it.
     p_tc_suggest.add_argument(
         "--json", dest="json_output", action="store_true",
         help=argparse.SUPPRESS,

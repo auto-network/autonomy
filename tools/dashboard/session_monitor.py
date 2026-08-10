@@ -25,17 +25,14 @@ Usage::
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
-import re
 import subprocess
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Literal
 
@@ -67,10 +64,6 @@ from tools.dashboard.dao.dashboard_db import (
     update_tail_state,
     update_nag_last_sent,
     update_todos,
-    get_turn_correction,
-    upsert_turn_correction,
-    correction_attempt_seen,
-    mark_correction_attempt,
     count_live,
 )
 
@@ -81,18 +74,6 @@ from agents.workspace_manager import (
 )
 
 logger = logging.getLogger(__name__)
-
-_TURN_CORRECTION_HISTORY_WINDOW_SECONDS = 5 * 60
-_TURN_CORRECTION_RECENT_USER_MSG_LIMIT = 5
-_TURN_CORRECTION_SEED_LINE_LIMIT = 200
-_TURN_CORRECTION_HISTORY_LINE_LIMIT = 2_000
-_TURN_CORRECTION_HISTORY_USER_LIMIT = 100
-_TURN_CORRECTION_ACCEPT_SIMILARITY = 0.55
-_TURN_CORRECTION_HISTORY_SIMILARITY = 0.85
-_TURN_CORRECTION_TOKEN_RE = re.compile(r"(\s+|\S+)")
-# Bump when target identity/resolution changes so corrections whose transient
-# miss was cached under the previous resolver get one bounded warm-up retry.
-_TURN_CORRECTION_RESOLVER_REVISION = 2
 
 # A Codex rollout is created before its first (roughly 20 KiB in current
 # versions) ``session_meta`` line is guaranteed to be visible.  IN_CREATE can
@@ -503,107 +484,6 @@ def _format_pause_duration(paused_at: str | None) -> str:
         return ""
 
 
-def _parse_iso_timestamp(ts: str | None) -> float | None:
-    if not ts:
-        return None
-    try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
-    except Exception:
-        return None
-
-
-def _turn_correction_tokenize(text: str) -> list[str]:
-    if not text:
-        return []
-    return _TURN_CORRECTION_TOKEN_RE.findall(text)
-
-
-def _turn_correction_lcs(a: list[str], b: list[str]) -> list[list[int]]:
-    n, m = len(a), len(b)
-    dp = [[0] * (m + 1) for _ in range(n + 1)]
-    for i in range(1, n + 1):
-        for j in range(1, m + 1):
-            if a[i - 1] == b[j - 1]:
-                dp[i][j] = dp[i - 1][j - 1] + 1
-            else:
-                dp[i][j] = dp[i - 1][j] if dp[i - 1][j] >= dp[i][j - 1] else dp[i][j - 1]
-    return dp
-
-
-def _turn_correction_fragments(raw_text: str, corrected_text: str) -> list[dict[str, str]]:
-    if raw_text == corrected_text:
-        return [{"kind": "same", "text": raw_text}] if raw_text else []
-    if not raw_text:
-        return [{"kind": "insert", "text": corrected_text}] if corrected_text else []
-    if not corrected_text:
-        return [{"kind": "delete", "text": raw_text}]
-    a = _turn_correction_tokenize(raw_text)
-    b = _turn_correction_tokenize(corrected_text)
-    dp = _turn_correction_lcs(a, b)
-    ops: list[dict[str, str]] = []
-    i, j = len(a), len(b)
-    while i > 0 and j > 0:
-        if a[i - 1] == b[j - 1]:
-            ops.append({"kind": "same", "text": a[i - 1]})
-            i -= 1
-            j -= 1
-        elif dp[i - 1][j] >= dp[i][j - 1]:
-            ops.append({"kind": "delete", "text": a[i - 1]})
-            i -= 1
-        else:
-            ops.append({"kind": "insert", "text": b[j - 1]})
-            j -= 1
-    while i > 0:
-        ops.append({"kind": "delete", "text": a[i - 1]})
-        i -= 1
-    while j > 0:
-        ops.append({"kind": "insert", "text": b[j - 1]})
-        j -= 1
-    ops.reverse()
-    merged: list[dict[str, str]] = []
-    for op in ops:
-        if merged and merged[-1]["kind"] == op["kind"]:
-            merged[-1]["text"] += op["text"]
-        else:
-            merged.append(dict(op))
-    return merged
-
-
-def _turn_correction_metrics(raw_text: str, corrected_text: str) -> dict[str, Any]:
-    fragments = _turn_correction_fragments(raw_text, corrected_text)
-    same_chars = sum(len(f["text"]) for f in fragments if f["kind"] == "same")
-    delete_chars = sum(len(f["text"]) for f in fragments if f["kind"] == "delete")
-    insert_chars = sum(len(f["text"]) for f in fragments if f["kind"] == "insert")
-    edit_fragments = sum(1 for f in fragments if f["kind"] != "same")
-    char_similarity = SequenceMatcher(
-        None,
-        raw_text.lower(),
-        corrected_text.lower(),
-        autojunk=False,
-    ).ratio()
-    total_len = max(len(raw_text) + len(corrected_text), 1)
-    edit_chars = delete_chars + insert_chars
-    edit_ratio = edit_chars / total_len
-    acceptable = char_similarity >= _TURN_CORRECTION_ACCEPT_SIMILARITY
-    return {
-        "fragments": fragments,
-        "same_chars": same_chars,
-        "delete_chars": delete_chars,
-        "insert_chars": insert_chars,
-        "edit_chars": edit_chars,
-        "edit_fragments": edit_fragments,
-        "char_similarity": char_similarity,
-        "edit_ratio": edit_ratio,
-        "acceptable": acceptable,
-        "score_key": (
-            -int(round(char_similarity * 1000)),
-            edit_chars,
-            edit_fragments,
-            abs(len(raw_text) - len(corrected_text)),
-        ),
-    }
-
-
 @dataclass
 class _TaskInfo:
     """Per-task state tracked by TaskStateTracker."""
@@ -803,17 +683,6 @@ class _TailState:
     last_enqueue_dedup_ts: float = 0.0
     last_full_rescan_ts: float = 0.0  # wall-clock ts of last reconciliation hit
     full_rescan_count: int = 0  # times reconciliation promoted this session
-    # Live-only lookback deque for one-shot turn-correction resolution.
-    recent_user_turns: deque = field(
-        default_factory=lambda: deque(maxlen=_TURN_CORRECTION_RECENT_USER_MSG_LIMIT)
-    )
-    # auto-edec1.4: the deque above is in-process and resets on every
-    # uvicorn --reload (or any other restart). Without a seed, corrections
-    # that fire in the cold-start window find no candidates and get
-    # silently dropped. We lazy-seed once per state from the JSONL tail
-    # the first time we see a turn-correction; this flag prevents
-    # re-scanning when the JSONL has no user entries yet.
-    recent_user_turns_seeded: bool = False
 
 
 def _entry_identity(entry: dict) -> str:
@@ -875,10 +744,6 @@ def _apply_activity_entries(ts: _TailState, entries: list[dict]) -> str:
 # Entry kinds that count as operator input — typed user messages and
 # CrossTalk pings (which wake an agent the same way a typed message does).
 _OPERATOR_INPUT_TYPES = frozenset({"user", "crosstalk"})
-
-
-def _sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _record_operator_input(timestamp_iso: str) -> None:
@@ -947,86 +812,6 @@ def _read_harness_token_from_meta(
         if isinstance(token, str) and token.strip():
             return token.strip()
     return None
-
-
-def _user_turns_from_jsonl_tail(
-    jsonl_path: str | None,
-    *,
-    line_limit: int,
-    user_limit: int | None = None,
-) -> list[dict[str, Any]]:
-    if not jsonl_path:
-        return []
-    try:
-        path = Path(jsonl_path)
-        lines = path.read_text(errors="replace").splitlines()[-line_limit:]
-    except OSError:
-        return []
-
-    try:
-        harness = resolve_harness_for_path(path)
-    except Exception:
-        harness = CLAUDE_HARNESS
-
-    users: list[dict[str, Any]] = []
-    for raw in lines:
-        try:
-            parsed = harness.parse_line(raw)
-        except Exception:
-            parsed = None
-        parsed_entries = parsed if isinstance(parsed, list) else [parsed] if parsed else []
-        for entry in parsed_entries:
-            if not isinstance(entry, dict) or entry.get("type") != "user":
-                continue
-            message_id = entry.get("message_id")
-            content = entry.get("content")
-            if not isinstance(message_id, str) or not message_id:
-                continue
-            if not isinstance(content, str) or not content:
-                continue
-            users.append({
-                "message_id": message_id,
-                "content": content,
-                "timestamp": entry.get("timestamp", "") or "",
-            })
-
-    if user_limit is not None and len(users) > user_limit:
-        return users[-user_limit:]
-    return users
-
-
-def _seed_recent_user_turns_from_jsonl(
-    ts: _TailState,
-    jsonl_path: str | None,
-) -> None:
-    """Pre-populate ``ts.recent_user_turns`` by tail-scanning the JSONL.
-
-    auto-edec1.4: the matcher's lookback deque (``_TailState.recent_user_turns``)
-    lives in-process. Any restart — uvicorn ``--reload``, crash, manual
-    stop — wipes it. Without a seed, turn-corrections issued in the
-    cold-start window find an empty deque and get silently dropped
-    despite emitting valid JSON.
-
-    Re-reading the JSONL on demand is the durable solution: the file is
-    always present (it's how the agent persists every turn), doesn't
-    require shutdown-time bookkeeping, and survives every restart type.
-
-    Best-effort by design. Any failure leaves the deque empty, which is
-    exactly the pre-fix behavior — the matcher will still skip and log
-    the skip. We never raise out of this function.
-
-    Field-shape note: the matcher reads normalized ``user`` entries
-    (``message_id`` / ``content`` / ``timestamp``). JSONL shape differs
-    by harness, so this goes through the session harness parser instead
-    of decoding Claude-only or Codex-only wire fields here.
-    """
-    for user in _user_turns_from_jsonl_tail(
-        jsonl_path,
-        line_limit=_TURN_CORRECTION_SEED_LINE_LIMIT,
-    ):
-        # Append in chronological order; deque maxlen handles eviction.
-        # Mirrors _remember_user_entry's stored shape exactly.
-        ts.recent_user_turns.append(user)
 
 
 class SessionMonitor:
@@ -2373,10 +2158,9 @@ class SessionMonitor:
             self._event_bus.update_cache("session:registry", self.get_registry())
 
         self._enrich_agent_entries(row, ts, new_entries)
-        self._persist_turn_corrections(row, ts, new_entries)
-        # Warm-up rehydrates correction overlay state from history even when
-        # the task-tracker enricher is not wired. Run it unconditionally so
-        # the overlay survives restarts on minimal harness configurations.
+        # Warm-up rehydrates task-tracker state from history even when the
+        # enricher is not wired. Run it unconditionally so overlays survive
+        # restarts on minimal harness configurations.
         try:
             await self._warm_task_tracker_if_needed(tmux_name, row, ts)
         except Exception:
@@ -3081,10 +2865,7 @@ class SessionMonitor:
         """Replay prior JSONL entries through the enricher once per session.
 
         Guarantees post-restart Task* tiles resolve against a complete
-        taskId→subject map. Also re-persists any ``turn_correction`` events
-        that were already in the history, so the dashboard rehydrates
-        overlay state even when the JSONL is older than dashboard.db.
-        No broadcast; state only.
+        taskId→subject map. No broadcast; state only.
         """
         if ts.task_tracker_warmed:
             return
@@ -3117,10 +2898,6 @@ class SessionMonitor:
                 prior.extend(parsed)
             else:
                 prior.append(parsed)
-        # Persist any turn_correction events from history regardless of whether
-        # the task-tracker enricher is wired — the correction overlay must
-        # rehydrate even on a minimal harness.
-        self._persist_turn_corrections(row, ts, prior, remember_users=False)
         if self._entry_enricher is None:
             return
         if prior:
@@ -3165,266 +2942,6 @@ class SessionMonitor:
         ts.last_todos_json = encoded
         if self._event_bus:
             await self._broadcast_registry()
-
-    @staticmethod
-    def _persist_turn_corrections(
-        row: dict,
-        ts: _TailState,
-        entries: list,
-        *,
-        remember_users: bool = True,
-    ) -> None:
-        """Upsert any ``turn_correction`` parser events into dashboard.db.
-
-        The parser (auto-edec1.1) upconverts valid ``graph turn-correction
-        suggest`` output into a typed ``turn_correction`` entry. The
-        agent-facing command only emits the corrected replacement text, so
-        we score the last few live user turns seen by this monitor process,
-        choose the cleanest inline diff match, compute the raw-text sha256
-        server-side, and persist the sparse row so refresh/reconnect can
-        rehydrate the overlay without rewriting JSONL. Historical replay may
-        re-persist already-targeted rows, but it must not repopulate the
-        live lookback deque.
-
-        Sessions without a ``session_uuid`` silently skip. In the current
-        session-monitor flow the tailer only reads a concrete JSONL after the
-        session has been linked, so this is a defensive guard rather than an
-        expected live path. Already-terminal rows are preserved by
-        ``upsert_turn_correction`` itself.
-        """
-        if not entries:
-            return
-        # auto-edec1.4: lazy-seed the matcher's lookback deque from the
-        # JSONL tail when this is the first turn-correction we've seen
-        # on this _TailState. The deque is in-memory and resets on
-        # every uvicorn --reload (or any other restart); without a seed
-        # the cold-start window silently drops every correction. Bounded
-        # cost (one 200-line tail read), idempotent (the flag prevents
-        # re-scanning), and a no-op when the batch carries no
-        # turn_correction entries — so unrelated entry processing pays
-        # nothing.
-        if (
-            not ts.recent_user_turns_seeded
-            and any(e.get("type") == "turn_correction" for e in entries)
-        ):
-            ts.recent_user_turns_seeded = True
-            _seed_recent_user_turns_from_jsonl(ts, row.get("jsonl_path"))
-        session_uuid = row.get("session_uuid")
-        claimed_targets: set[str] = set()
-        existing_rows: dict[str, dict | None] = {}
-
-        def _existing_for(message_id: str) -> dict | None:
-            if message_id not in existing_rows:
-                existing_rows[message_id] = get_turn_correction(session_uuid, message_id)
-            return existing_rows[message_id]
-
-        def _candidate_available(user: dict[str, Any]) -> bool:
-            message_id = str(user.get("message_id") or "")
-            if not message_id or message_id in claimed_targets:
-                return False
-            return _existing_for(message_id) is None
-
-        def _candidate_is_recent(
-            correction_epoch: float | None,
-            candidate_epoch: float | None,
-        ) -> bool:
-            if correction_epoch is None or candidate_epoch is None:
-                return True
-            return abs(correction_epoch - candidate_epoch) <= _TURN_CORRECTION_HISTORY_WINDOW_SECONDS
-
-        def _remember_user_entry(entry: dict[str, Any]) -> None:
-            if entry.get("type") != "user":
-                return
-            message_id = entry.get("message_id")
-            content = entry.get("content")
-            if not isinstance(message_id, str) or not message_id:
-                return
-            if not isinstance(content, str) or not content:
-                return
-            if (
-                ts.recent_user_turns
-                and ts.recent_user_turns[-1].get("message_id") == message_id
-            ):
-                return
-            ts.recent_user_turns.append({
-                "message_id": message_id,
-                "content": content,
-                "timestamp": entry.get("timestamp", "") or "",
-            })
-
-        def _resolve_candidate(corrected_text: str, correction_ts: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-            correction_epoch = _parse_iso_timestamp(correction_ts)
-            recent_users = list(ts.recent_user_turns)
-            evaluated: list[dict[str, Any]] = []
-            winner: dict[str, Any] | None = None
-
-            def _consider_users(
-                users: list[dict[str, Any]],
-                *,
-                source: str,
-                require_recent: bool,
-                min_similarity: float,
-                order_offset: int = 0,
-            ) -> None:
-                nonlocal winner
-                for order, user in enumerate(reversed(users), start=order_offset):
-                    if not _candidate_available(user):
-                        continue
-                    candidate_epoch = _parse_iso_timestamp(str(user.get("timestamp") or ""))
-                    if require_recent and not _candidate_is_recent(correction_epoch, candidate_epoch):
-                        continue
-                    candidate = dict(user)
-                    candidate["source"] = source
-                    candidate["candidate_epoch"] = candidate_epoch
-                    metrics = _turn_correction_metrics(
-                        str(candidate.get("content") or ""),
-                        corrected_text,
-                    )
-                    age_seconds = None
-                    if (
-                        correction_epoch is not None
-                        and candidate.get("candidate_epoch") is not None
-                    ):
-                        age_seconds = round(correction_epoch - float(candidate["candidate_epoch"]), 3)
-                    rec = {
-                        **candidate,
-                        "order": order,
-                        "age_seconds": age_seconds,
-                        "metrics": metrics,
-                    }
-                    evaluated.append(rec)
-                    if (
-                        not metrics["acceptable"]
-                        or float(metrics["char_similarity"]) < min_similarity
-                    ):
-                        continue
-                    if winner is None:
-                        winner = rec
-                        continue
-                    winner_key = winner["metrics"]["score_key"] + (winner["order"],)
-                    candidate_key = metrics["score_key"] + (order,)
-                    if candidate_key < winner_key:
-                        winner = rec
-
-            _consider_users(
-                recent_users,
-                source="recent_user_deque",
-                require_recent=True,
-                min_similarity=_TURN_CORRECTION_ACCEPT_SIMILARITY,
-            )
-
-            if winner is None:
-                history_users = _user_turns_from_jsonl_tail(
-                    row.get("jsonl_path"),
-                    line_limit=_TURN_CORRECTION_HISTORY_LINE_LIMIT,
-                    user_limit=_TURN_CORRECTION_HISTORY_USER_LIMIT,
-                )
-                _consider_users(
-                    history_users,
-                    source="jsonl_history_tail",
-                    require_recent=False,
-                    min_similarity=_TURN_CORRECTION_HISTORY_SIMILARITY,
-                    order_offset=len(recent_users),
-                )
-
-            debug_payload = {
-                "correction_ts": correction_ts,
-                "recent_user_count": len(recent_users),
-                "candidate_count": len(evaluated),
-                "candidates": [
-                    {
-                        "message_id": rec.get("message_id"),
-                        "source": rec.get("source"),
-                        "timestamp": rec.get("timestamp", ""),
-                        "age_seconds": rec.get("age_seconds"),
-                        "acceptable": rec["metrics"]["acceptable"],
-                        "edit_fragments": rec["metrics"]["edit_fragments"],
-                        "edit_chars": rec["metrics"]["edit_chars"],
-                        "char_similarity": round(float(rec["metrics"]["char_similarity"]), 4),
-                        "score_key": rec["metrics"]["score_key"],
-                        "content_preview": str(rec.get("content") or "")[:120],
-                    }
-                    for rec in evaluated
-                ],
-                "winner": {
-                    "message_id": winner.get("message_id"),
-                    "source": winner.get("source"),
-                    "score_key": winner["metrics"]["score_key"],
-                    "char_similarity": round(float(winner["metrics"]["char_similarity"]), 4),
-                } if winner else None,
-            }
-            return winner, debug_payload
-
-        for entry in entries:
-            if entry.get("type") == "user":
-                if remember_users:
-                    _remember_user_entry(entry)
-                continue
-            if entry.get("type") != "turn_correction":
-                continue
-            if not session_uuid:
-                continue
-            corrected = entry.get("corrected_text")
-            if not isinstance(corrected, str):
-                continue
-            target = entry.get("target_message_id")
-            sha = entry.get("original_sha256")
-            if not isinstance(target, str) or not target or not isinstance(sha, str) or not sha:
-                # Resolving a correction to its target turn is an expensive
-                # difflib LCS. Do it at most once per correction (whatever the
-                # outcome) and cache the attempt, so history warm-ups on every
-                # dashboard restart skip it instead of re-running the LCS.
-                correction_key = _sha256_text(
-                    f"v{_TURN_CORRECTION_RESOLVER_REVISION}|"
-                    f"{session_uuid}|{corrected}|{entry.get('timestamp', '')}"
-                )
-                if correction_attempt_seen(session_uuid, correction_key):
-                    continue
-                candidate, debug_payload = _resolve_candidate(
-                    corrected,
-                    str(entry.get("timestamp", "") or ""),
-                )
-                mark_correction_attempt(session_uuid, correction_key)
-                logger.debug(
-                    "session_monitor: turn_correction resolve session=%s recent_user_count=%d corrected_preview=%r debug=%s",
-                    session_uuid,
-                    len(ts.recent_user_turns),
-                    corrected[:160],
-                    debug_payload,
-                )
-                if candidate is None:
-                    logger.info(
-                        "session_monitor: turn_correction skipped session=%s recent_user_count=%d corrected_preview=%r debug=%s",
-                        session_uuid,
-                        len(ts.recent_user_turns),
-                        corrected[:160],
-                        debug_payload,
-                    )
-                    continue
-                target = candidate["message_id"]
-                sha = _sha256_text(candidate["content"])
-                entry["target_message_id"] = target
-                entry["original_sha256"] = sha
-            if not target or not sha:
-                continue
-            try:
-                upsert_turn_correction(
-                    session_uuid,
-                    target,
-                    original_sha256=sha,
-                    corrected_text=corrected,
-                    mode=entry.get("mode"),
-                    reason=entry.get("reason"),
-                    confidence=entry.get("confidence"),
-                )
-                claimed_targets.add(target)
-                existing_rows[target] = {"status": "pending"}
-            except Exception:
-                logger.exception(
-                    "session_monitor: turn_correction persist failed"
-                    " session=%s target=%s",
-                    session_uuid, target,
-                )
 
     @staticmethod
     def _enrich_agent_entries(row: dict, ts: _TailState, entries: list) -> None:

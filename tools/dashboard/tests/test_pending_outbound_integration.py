@@ -90,11 +90,9 @@ async def test_tailer_attaches_client_id_to_user_turn_broadcast(temp_db):
     ]
 
     # _process_tail_entries calls _enrich_agent_entries +
-    # _persist_turn_corrections + _warm_task_tracker_if_needed +
-    # _persist_todos_if_changed. Patch them so the test focuses on
-    # the broadcast path.
+    # _warm_task_tracker_if_needed + _persist_todos_if_changed. Patch
+    # them so the test focuses on the broadcast path.
     with patch.object(monitor, "_enrich_agent_entries"), \
-         patch.object(monitor, "_persist_turn_corrections"), \
          patch.object(
              monitor, "_warm_task_tracker_if_needed", new=AsyncMock()
          ), \
@@ -143,7 +141,6 @@ async def test_tailer_skips_unmatched_user_turns(temp_db):
     ]
 
     with patch.object(monitor, "_enrich_agent_entries"), \
-         patch.object(monitor, "_persist_turn_corrections"), \
          patch.object(monitor, "_warm_task_tracker_if_needed", new=AsyncMock()), \
          patch.object(monitor, "_persist_todos_if_changed", new=AsyncMock()):
         await monitor._process_tail_entries("auto-int", row, ts, new_entries)
@@ -174,7 +171,6 @@ async def test_tailer_does_not_attach_to_non_user_turn_types(temp_db):
     ]
 
     with patch.object(monitor, "_enrich_agent_entries"), \
-         patch.object(monitor, "_persist_turn_corrections"), \
          patch.object(monitor, "_warm_task_tracker_if_needed", new=AsyncMock()), \
          patch.object(monitor, "_persist_todos_if_changed", new=AsyncMock()):
         await monitor._process_tail_entries("auto-int", row, ts, new_entries)
@@ -207,7 +203,6 @@ async def test_tailer_matches_content_field_for_claude_user_shape(temp_db):
     ]
 
     with patch.object(monitor, "_enrich_agent_entries"), \
-         patch.object(monitor, "_persist_turn_corrections"), \
          patch.object(monitor, "_warm_task_tracker_if_needed", new=AsyncMock()), \
          patch.object(monitor, "_persist_todos_if_changed", new=AsyncMock()):
         await monitor._process_tail_entries("auto-int", row, ts, new_entries)
@@ -242,7 +237,6 @@ async def test_tailer_extracts_text_from_content_blocks(temp_db):
     ]
 
     with patch.object(monitor, "_enrich_agent_entries"), \
-         patch.object(monitor, "_persist_turn_corrections"), \
          patch.object(monitor, "_warm_task_tracker_if_needed", new=AsyncMock()), \
          patch.object(monitor, "_persist_todos_if_changed", new=AsyncMock()):
         await monitor._process_tail_entries("auto-int", row, ts, new_entries)
@@ -273,7 +267,6 @@ async def test_two_identical_sends_match_in_fifo_order(temp_db):
     ]
 
     with patch.object(monitor, "_enrich_agent_entries"), \
-         patch.object(monitor, "_persist_turn_corrections"), \
          patch.object(monitor, "_warm_task_tracker_if_needed", new=AsyncMock()), \
          patch.object(monitor, "_persist_todos_if_changed", new=AsyncMock()):
         await monitor._process_tail_entries("auto-int", row, ts, new_entries)
