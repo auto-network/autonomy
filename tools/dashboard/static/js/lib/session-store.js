@@ -394,16 +394,35 @@ window.getSessionStore = function(sessionId) {
       harnessState: {},
       // auto-ja51w: transient per-session sub-phase progress; null when none.
       phaseProgress: null,
-      olderBefore: null,           // reverse-tail cursor for older-history paging
+      // auto-16g9t canonical identity state. chain = ordered rollover
+      // file stems (server-authoritative); committed = the span
+      // high-water {file, off} advanced ONLY by contiguous spans/cursors
+      // — never by entry counts, so dedup can't fake progress;
+      // olderCursor = the (file, off) scroll-back pair cursor.
+      chain: [],
+      committed: null,
+      olderCursor: null,
       hasMoreHistory: false,       // whether older-history paging can continue
+      // Client-local tiles (uploads) — no entry_ref, display interleaves
+      // them by timestamp; never part of the server-truth buffer.
+      localEntries: [],
+      _mergeRev: 0,
+      _structureRev: 0,
+      _localRefSeq: 0,
       loaded: false,
       _loading: false,   // true during initial fetch — buffers SSE
       _pendingSSE: [],
-      _displayDirty: false,
+      // Efficiency counters (auto-16g9t) — cheap increments, published
+      // through the /api/diag snapshot; never read on the hot path.
+      _counters: {
+        merge_inserted: 0,
+        merge_merged: 0,
+        merge_dropped_duplicate: 0,
+        span_gaps_detected: 0,
+      },
       // /api/diag depth fields — never read on the hot path.
       _entriesViaFetchCount: 0,
       _entriesViaSSECount: 0,
-      _dedupCollisionsCount: 0,
       _lastRenderTs: 0,
     };
     setTimeout(function() {
@@ -425,47 +444,73 @@ function _emitSessionRegistryChanged() {
   window.dispatchEvent(new CustomEvent('sessions:registry-changed'));
 }
 
-/**
- * Compute a stable identity key for an entry. Used to dedup entries when SSE
- * gap-replay re-delivers payloads whose per-session seq is "behind" store.seq
- * (e.g. iOS native EventSource Last-Event-ID reconnect, or _fetchBacklog
- * re-running on page re-init during app-resume).
- *
- *   tool_use   → "tu:<tool_id>"
- *   tool_result → "tr:<tool_id>"
- *   anything else → "<type>:<timestamp>:<content-slice>"
- */
-function _entryIdentity(entry) {
-  if (!entry) return null;
-  if (entry.type === 'tool_use' && entry.tool_id) return 'tu:' + entry.tool_id;
-  if (entry.type === 'tool_result' && entry.tool_id) return 'tr:' + entry.tool_id;
-  if (entry.type === 'viewer_attachment') {
-    return [
-      'att',
-      entry.session || '',
-      entry.rel_path || '',
-      entry.filename || '',
-      entry.timestamp || '',
-    ].join(':');
+// ── The one merge (auto-16g9t) ─────────────────────────────────────────
+//
+// Every server entry carries entry_ref = {file, off, sub}: the transcript
+// file's stem, the raw line's byte offset, and the index among entries
+// parsed from that line. store.entries is kept sorted by the tuple
+// (chain position of file, off, sub) — store.chain is the server's
+// ordered rollover chain. ONE function merges every batch from every
+// path (cold-open fetch, scroll-up page, SSE push, wake catch-up):
+// present → field-merge, absent → insert in place. This replaced two
+// order-assuming paths (append/prepend), an invented
+// type+timestamp+content identity, and the _displayDirty flag handshake
+// whose clear-before-watcher race duplicated the tail after every
+// scroll-up. Harness ids (tool_id) are metadata for the tool maps below,
+// never the buffer key.
+
+function _adoptChain(store, chain) {
+  var next = chain.slice();
+  for (var i = 0; i < store.chain.length; i++) {
+    if (next.indexOf(store.chain[i]) === -1) next.push(store.chain[i]);
   }
-  var t = entry.type || '?';
-  var ts = entry.timestamp || '';
-  var c = '';
-  if (typeof entry.content === 'string') {
-    c = entry.content.length > 200 ? entry.content.slice(0, 200) : entry.content;
-  } else if (entry.content !== undefined && entry.content !== null) {
-    try { c = JSON.stringify(entry.content).slice(0, 200); } catch (_) { c = ''; }
+  var changed = next.length !== store.chain.length;
+  if (!changed) {
+    for (var j = 0; j < next.length; j++) {
+      if (next[j] !== store.chain[j]) { changed = true; break; }
+    }
   }
-  return t + ':' + ts + ':' + c;
+  if (!changed) return;
+  store.chain = next;
+  // Chain adoption can re-rank files (a scroll-up just revealed an older
+  // predecessor). Re-verify sortedness; stable-resort only when broken.
+  for (var k = 1; k < store.entries.length; k++) {
+    if (_refCompare(store, store.entries[k - 1].entry_ref, store.entries[k].entry_ref) > 0) {
+      var indexed = store.entries.map(function(e, n) { return [e, n]; });
+      indexed.sort(function(a, b) {
+        return _refCompare(store, a[0].entry_ref, b[0].entry_ref) || (a[1] - b[1]);
+      });
+      store.entries = indexed.map(function(p) { return p[0]; });
+      break;
+    }
+  }
 }
 
-function _ensureSeenIdentities(store) {
-  if (store._seenIdentities) return;
-  store._seenIdentities = {};
-  for (var i = 0; i < store.entries.length; i++) {
-    var seedKey = _entryIdentity(store.entries[i]);
-    if (seedKey) store._seenIdentities[seedKey] = true;
-  }
+function _chainIndex(store, file) {
+  var idx = store.chain.indexOf(file);
+  if (idx !== -1) return idx;
+  // Unknown file — a rollover successor seen before its chain arrived.
+  // Place it after everything known; the catch-up fetch this triggers
+  // (session-viewer wake/gap path) delivers the authoritative chain.
+  store.chain = store.chain.concat([file]);
+  return store.chain.length - 1;
+}
+
+function _refCompare(store, a, b) {
+  var fa = _chainIndex(store, a.file);
+  var fb = _chainIndex(store, b.file);
+  if (fa !== fb) return fa - fb;
+  if (a.off !== b.off) return a.off - b.off;
+  return (a.sub || 0) - (b.sub || 0);
+}
+
+// Synthetic ref for payloads without one (mock fixtures, stray sources):
+// the '~local' pseudo-file sorts after every real chain file and keeps
+// arrival order, so refless batches degrade to append semantics.
+function _syntheticRef(store, entry) {
+  store._localRefSeq = (store._localRefSeq || 0) + 1;
+  entry.entry_ref = { file: '~local', off: store._localRefSeq, sub: 0 };
+  return entry.entry_ref;
 }
 
 function _registerToolUse(store, entry) {
@@ -485,28 +530,10 @@ function _registerToolResult(store, entry) {
   }
 }
 
-function _findToolUseEntry(store, toolId) {
-  var mapped = store.toolMap[toolId];
-  if (mapped && mapped.entry) return mapped.entry;
-  for (var i = store.entries.length - 1; i >= 0; i--) {
-    var entry = store.entries[i];
-    if (entry.type === 'tool_use' && entry.tool_id === toolId) return entry;
-  }
-  return null;
-}
-
-function _findToolResultEntry(store, toolId) {
-  var mapped = store.resultMap[toolId];
-  if (mapped) return mapped;
-  for (var i = store.entries.length - 1; i >= 0; i--) {
-    var entry = store.entries[i];
-    if (entry.type === 'tool_result' && entry.tool_id === toolId) return entry;
-  }
-  return null;
-}
-
-function _mergeExistingEntry(store, existing, incoming) {
-  if (!existing || !incoming) return false;
+// Field-merge an incoming duplicate into the entry already at its ref.
+// Returns {changed, structural} — structural means the display shape
+// (grouping) may have changed, not just a field the tile re-reads.
+function _mergeEntryFields(store, existing, incoming) {
   if (
     existing.type === 'tool_result' &&
     incoming.type === 'tool_result' &&
@@ -514,14 +541,17 @@ function _mergeExistingEntry(store, existing, incoming) {
     existing.status !== 'running' &&
     incoming.status === 'running'
   ) {
-    return false;
+    return { changed: false, structural: false };
   }
-  var displayChanged = false;
-  if (existing.type === 'tool_use' && incoming.type === 'tool_use') {
-    if ((existing.tool_name || '') !== (incoming.tool_name || '')) displayChanged = true;
+  var structural = false;
+  var changed = false;
+  if (existing.type === 'tool_use' && incoming.type === 'tool_use' &&
+      (existing.tool_name || '') !== (incoming.tool_name || '')) {
+    structural = true;
   }
   for (var key in incoming) {
     if (!Object.prototype.hasOwnProperty.call(incoming, key)) continue;
+    if (key === 'entry_ref') continue;
     if (
       incoming.semantic_from_exec &&
       key === 'timestamp' &&
@@ -530,53 +560,29 @@ function _mergeExistingEntry(store, existing, incoming) {
     ) {
       continue;
     }
-    existing[key] = incoming[key];
+    if (existing[key] !== incoming[key]) {
+      existing[key] = incoming[key];
+      changed = true;
+    }
   }
   if (existing.type === 'tool_use' && existing.tool_id) _registerToolUse(store, existing);
   if (existing.type === 'tool_result' && existing.tool_id) _registerToolResult(store, existing);
-  if (displayChanged) store._displayDirty = true;
-  return displayChanged;
+  return { changed: changed, structural: structural };
 }
 
-function _chronologicalInsertIndex(store, entry) {
-  var ts = entry && entry.timestamp ? entry.timestamp : '';
-  if (!ts) return store.entries.length;
-  for (var i = store.entries.length - 1; i >= 0; i--) {
-    var existingTs = store.entries[i] && store.entries[i].timestamp ? store.entries[i].timestamp : '';
-    if (!existingTs || existingTs <= ts) return i + 1;
+// Lowest index whose entry ref is >= ref (binary search over the sorted buffer).
+function _refInsertIndex(store, ref) {
+  var lo = 0;
+  var hi = store.entries.length;
+  while (lo < hi) {
+    var mid = (lo + hi) >> 1;
+    if (_refCompare(store, store.entries[mid].entry_ref, ref) < 0) lo = mid + 1;
+    else hi = mid;
   }
-  return 0;
+  return lo;
 }
 
-function _appendUniqueEntry(store, entry, insertAt) {
-  _ensureSeenIdentities(store);
-  var key = _entryIdentity(entry);
-  if (key && store._seenIdentities[key]) {
-    store._dedupCollisionsCount = (store._dedupCollisionsCount || 0) + 1;
-    var existing = null;
-    if (entry.type === 'tool_use' && entry.tool_id) existing = _findToolUseEntry(store, entry.tool_id);
-    if (entry.type === 'tool_result' && entry.tool_id) existing = _findToolResultEntry(store, entry.tool_id);
-    if (existing) {
-      _mergeExistingEntry(store, existing, entry);
-      return false;
-    }
-    if (entry.type === 'tool_use' && entry.tool_id) _registerToolUse(store, entry);
-    if (entry.type === 'tool_result' && entry.tool_id) _registerToolResult(store, entry);
-    return false;
-  }
-  if (key) store._seenIdentities[key] = true;
-  if (entry.type === 'tool_use' && entry.tool_id) _registerToolUse(store, entry);
-  if (entry.type === 'tool_result' && entry.tool_id) _registerToolResult(store, entry);
-  if (insertAt === undefined || insertAt === null || insertAt >= store.entries.length) {
-    store.entries.push(entry);
-  } else {
-    store._displayDirty = true;
-    store.entries.splice(insertAt, 0, entry);
-  }
-  return true;
-}
-
-function _noteEntriesAdded(store, added, provenance) {
+function _noteEntriesAdded(store, added, provenance, reason) {
   if (added <= 0) return;
   if (provenance === 'fetch') {
     store._entriesViaFetchCount = (store._entriesViaFetchCount || 0) + added;
@@ -584,99 +590,135 @@ function _noteEntriesAdded(store, added, provenance) {
     store._entriesViaSSECount = (store._entriesViaSSECount || 0) + added;
   }
   store._lastRenderTs = Date.now();
-  _emitSessionStoreChanged(provenance === 'fetch' ? 'fetch' : 'message');
+  if (window.tryReconcileOutbox) window.tryReconcileOutbox(store.sessionId || '');
+  _emitSessionStoreChanged(reason || (provenance === 'fetch' ? 'fetch' : 'message'));
 }
 
+/**
+ * THE merge: fold one server batch into the store, keyed by entry_ref.
+ *
+ * Works identically for every source — order of batches never matters,
+ * because each entry lands at its tuple position. Display coordination is
+ * race-free by monotonic revisions (never a clearable flag):
+ *   store._mergeRev      — bumped on any visible change
+ *   store._structureRev  — set to _mergeRev when the change was NOT a
+ *                          pure tail-append (insert mid-buffer, resort,
+ *                          grouping-relevant field change)
+ * The viewer's watcher compares revisions it has handled against these;
+ * two racing paths can only ever repeat idempotent work, never skip it.
+ *
+ * Returns the number of entries inserted (0 = all duplicates/merges).
+ */
+window.mergeSessionEntries = function(store, data, provenance) {
+  if (!store) return 0;
+  if (data.is_live !== undefined) store.isLive = data.is_live;
+  if (Array.isArray(data.chain) && data.chain.length) _adoptChain(store, data.chain);
+  var incoming = data.entries;
+  if (!incoming || incoming.length === 0) return 0;
+
+  var inserted = 0;
+  var merged = 0;
+  var droppedDup = 0;
+  var structural = false;
+  var minInsertRef = null;
+  for (var i = 0; i < incoming.length; i++) {
+    var entry = incoming[i];
+    if (!entry) continue;
+    var ref = entry.entry_ref;
+    if (!ref || typeof ref.off !== 'number') ref = _syntheticRef(store, entry);
+    var at = _refInsertIndex(store, ref);
+    var existing = store.entries[at];
+    if (existing && _refCompare(store, existing.entry_ref, ref) === 0) {
+      var out = _mergeEntryFields(store, existing, entry);
+      if (out.changed || out.structural) merged++; else droppedDup++;
+      if (out.structural) structural = true;
+    } else {
+      store.entries.splice(at, 0, entry);
+      if (entry.type === 'tool_use' && entry.tool_id) _registerToolUse(store, entry);
+      if (entry.type === 'tool_result' && entry.tool_id) _registerToolResult(store, entry);
+      inserted++;
+      if (at !== store.entries.length - 1) structural = true;
+      if (minInsertRef === null || _refCompare(store, ref, minInsertRef) < 0) {
+        minInsertRef = ref;
+      }
+    }
+  }
+
+  var c = store._counters;
+  if (c) {
+    c.merge_inserted += inserted;
+    c.merge_merged += merged;
+    c.merge_dropped_duplicate += droppedDup;
+  }
+  if (inserted > 0 || merged > 0) {
+    store._mergeRev = (store._mergeRev || 0) + 1;
+    if (structural) store._structureRev = store._mergeRev;
+  }
+  store._lastMinInsertRef = minInsertRef;
+  _noteEntriesAdded(store, inserted, provenance);
+  return inserted;
+};
+
+/**
+ * Advance the committed span high-water from one batch's raw byte span.
+ *
+ * committed = {file, off} means "every byte of this file up to off (and
+ * every predecessor file entirely) has been applied to the buffer". It
+ * advances ONLY on contiguity — a span that starts past it is a GAP
+ * (something was dropped between server and us), a span in a different
+ * file is a rollover-or-gap; both are returned to the caller (the
+ * viewer's catch-up path fetches the range and advances via the fetch
+ * cursor instead). Never advanced past dropped data.
+ *
+ * Returns 'init' | 'advanced' | 'stale' | 'gap' | 'file_switch'.
+ */
+window.advanceCommittedSpan = function(store, span) {
+  if (!store || !span || typeof span.to !== 'number') return 'stale';
+  if (!store.committed) {
+    store.committed = { file: span.file, off: span.to };
+    return 'init';
+  }
+  if (span.file === store.committed.file) {
+    if (span.from > store.committed.off) {
+      if (store._counters) store._counters.span_gaps_detected += 1;
+      return 'gap';
+    }
+    if (span.to > store.committed.off) {
+      store.committed = { file: span.file, off: span.to };
+      return 'advanced';
+    }
+    return 'stale';
+  }
+  return 'file_switch';
+};
+
+// Client-local tiles (upload attachments) never enter the server-truth
+// buffer — they carry no entry_ref, so they live in store.localEntries
+// and the display layer interleaves them by timestamp at build time.
 window.flushPendingSessionAttachments = function(store, provenance) {
   if (!store || !store._pendingAttachments || store._pendingAttachments.length === 0) return 0;
   var pending = store._pendingAttachments;
   store._pendingAttachments = [];
   var added = 0;
   for (var i = 0; i < pending.length; i++) {
-    if (_appendUniqueEntry(store, pending[i], _chronologicalInsertIndex(store, pending[i]))) added++;
-  }
-  _noteEntriesAdded(store, added, provenance);
-  return added;
-};
-
-/**
- * Append entries to store with entry-identity dedup.
- *
- * store.seq is still advanced from data.seq, but it does NOT gate appending —
- * gap-replay payloads whose seq is below store.seq must still land if their
- * entries are new. Server-restart detection (seq halved) still resets store.seq.
- *
- * Returns number of entries actually added (0 if all are duplicates).
- *
- * ``provenance`` ('fetch' | 'sse') tracks where the entries came from for
- * /api/diag — defaults to 'sse' since that's the streaming path.
- */
-window.appendSessionEntries = function(store, data, provenance) {
-  // Advance store.seq, with server-restart detection.
-  if (data.seq !== undefined) {
-    if (data.seq > store.seq) {
-      store.seq = data.seq;
-    } else if (store.seq > 1 && data.seq * 2 < store.seq) {
-      // Seq regression — significantly lower → server restart.
-      store.seq = data.seq;
+    var p = pending[i];
+    var dup = false;
+    for (var j = 0; j < store.localEntries.length; j++) {
+      var l = store.localEntries[j];
+      if (l.rel_path === p.rel_path && l.filename === p.filename &&
+          l.timestamp === p.timestamp) { dup = true; break; }
     }
-    // Otherwise data.seq <= store.seq (replay/duplicate): leave store.seq alone
-    // and fall through to entry-identity dedup.
-  }
-
-  if (data.is_live !== undefined) store.isLive = data.is_live;
-
-  if (!data.entries || data.entries.length === 0) return 0;
-
-  var pa = store._pendingAttachments;
-  var added = 0;
-  for (var i = 0; i < data.entries.length; i++) {
-    var entry = data.entries[i];
-    while (pa && pa.length && (pa[0].timestamp || '') <= (entry.timestamp || '')) {
-      var pendingAttachment = pa.shift();
-      if (_appendUniqueEntry(store, pendingAttachment, _chronologicalInsertIndex(store, pendingAttachment))) added++;
-    }
-    if (_appendUniqueEntry(store, entry)) added++;
-  }
-  while (pa && pa.length) {
-    var remainingAttachment = pa.shift();
-    if (_appendUniqueEntry(store, remainingAttachment, _chronologicalInsertIndex(store, remainingAttachment))) added++;
-  }
-  if (added > 0 && window.tryReconcileOutbox) window.tryReconcileOutbox(store.sessionId || data.session_id || data.tmux_name || '');
-  _noteEntriesAdded(store, added, provenance);
-  return added;
-};
-
-window.prependSessionEntries = function(store, data, provenance) {
-  if (data.seq !== undefined) {
-    if (data.seq > store.seq) {
-      store.seq = data.seq;
-    } else if (store.seq > 1 && data.seq * 2 < store.seq) {
-      store.seq = data.seq;
-    }
-  }
-
-  if (data.is_live !== undefined) store.isLive = data.is_live;
-
-  if (!data.entries || data.entries.length === 0) return 0;
-
-  var added = 0;
-  var insertAt = 0;
-  for (var i = 0; i < data.entries.length; i++) {
-    if (_appendUniqueEntry(store, data.entries[i], insertAt)) {
-      added++;
-      insertAt++;
-    }
+    if (dup) continue;
+    store.localEntries.push(p);
+    added++;
   }
   if (added > 0) {
-    if (provenance === 'fetch') {
-      store._entriesViaFetchCount = (store._entriesViaFetchCount || 0) + added;
-    } else {
-      store._entriesViaSSECount = (store._entriesViaSSECount || 0) + added;
-    }
-    store._lastRenderTs = Date.now();
-    if (window.tryReconcileOutbox) window.tryReconcileOutbox(store.sessionId || data.session_id || data.tmux_name || '');
-    _emitSessionStoreChanged(provenance === 'fetch' ? 'fetch-prepend' : 'prepend');
+    store.localEntries.sort(function(a, b) {
+      return (a.timestamp || '').localeCompare(b.timestamp || '');
+    });
+    store._mergeRev = (store._mergeRev || 0) + 1;
+    store._structureRev = store._mergeRev;
+    _noteEntriesAdded(store, added, provenance);
   }
   return added;
 };
@@ -705,7 +747,20 @@ window.ensureSessionMessages = function() {
       return;
     }
 
-    window.appendSessionEntries(store, data, 'sse');
+    // seq survives only as transport telemetry (diag store_seq) — it
+    // gates nothing and the halved-seq "server restart" heuristic is
+    // gone with the old append paths.
+    if (data.seq !== undefined && data.seq > store.seq) store.seq = data.seq;
+
+    var spanState = data.span ? window.advanceCommittedSpan(store, data.span) : null;
+    window.mergeSessionEntries(store, data, 'sse');
+    // A span that exposes a hole (or a rollover file switch) triggers the
+    // viewer's ranged catch-up — registered via onSessionSpanGap by the
+    // wake/catch-up layer.
+    if ((spanState === 'gap' || spanState === 'file_switch') &&
+        typeof window._onSessionSpanGap === 'function') {
+      try { window._onSessionSpanGap(id, spanState, data.span); } catch (e) { /* best-effort */ }
+    }
 
     // Update metadata
     if (data.context_tokens !== undefined) store.contextTokens = data.context_tokens;
@@ -869,10 +924,11 @@ window._diagSnapshotSessions = function(ids) {
     }
     var tail10Source = entries.slice(-10);
     var tail10 = tail10Source.map(function(e) {
+      var ref = (e && e.entry_ref) || null;
       return {
         type: (e && e.type) || '',
         timestamp: (e && e.timestamp) || '',
-        identity: _entryIdentity(e) || '',
+        identity: ref ? (ref.file + ':' + ref.off + ':' + (ref.sub || 0)) : '',
       };
     });
     var nullSeq = 0;
@@ -883,7 +939,6 @@ window._diagSnapshotSessions = function(ids) {
     var lastActivitySec = s.lastActivity || 0;
     var lastActivityMs = lastActivitySec ? Math.max(0, nowMs - lastActivitySec * 1000) : null;
     var lastRenderMs = s._lastRenderTs ? Math.max(0, nowMs - s._lastRenderTs) : null;
-    var seenSize = (s._seenIdentities && Object.keys(s._seenIdentities).length) || 0;
     out[id] = {
       store_seq: s.seq || 0,
       tile_count: entries.length,
@@ -905,9 +960,12 @@ window._diagSnapshotSessions = function(ids) {
       entries_with_null_seq_count: nullSeq,
       gap_replays_count: (window._diagGapReplaysCount && window._diagGapReplaysCount()) || 0,
       last_gap_replay_ts: (window._diagLastGapReplayTs && window._diagLastGapReplayTs()) || 0,
-      dedup_collisions: s._dedupCollisionsCount || 0,
+      dedup_collisions: (s._counters && s._counters.merge_dropped_duplicate) || 0,
       last_render_ms: lastRenderMs,
-      seen_identities_size: seenSize,
+      // auto-16g9t identity/merge/catch-up state + counters.
+      chain: Array.isArray(s.chain) ? s.chain : [],
+      committed: s.committed || null,
+      counters: s._counters || {},
     };
   }
   return out;

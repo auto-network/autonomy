@@ -1477,6 +1477,7 @@ def postprocess_codex_entries(
     exec_sessions = state["exec_sessions"]
     write_calls = state["write_calls"]
     completed_tools = state["completed_tools"]
+    use_refs = state.setdefault("use_refs", {})
 
     normalized: list[dict] = []
     patch_results: dict[str, dict] = {}
@@ -1486,6 +1487,8 @@ def postprocess_codex_entries(
             tool_id = entry.get("tool_id") or ""
             tool_name = str(entry.get("tool_name") or "")
             tool_names[tool_id] = tool_name
+            if entry.get("entry_ref") is not None:
+                use_refs[tool_id] = entry["entry_ref"]
             if tool_name == "write_stdin":
                 session_id = (entry.get("input") or {}).get("session_id")
                 if session_id not in (None, ""):
@@ -1625,17 +1628,22 @@ def postprocess_codex_entries(
             and transform is not None
         ):
             if not transform["use_in_entries"]:
+                # Split live batch: the tool_use published earlier, in a
+                # previous window. Stamp these synthetic upgrades with the
+                # remembered CALL-line ref so they merge over the existing
+                # raw tile instead of inserting a duplicate.
+                call_ref = use_refs.get(tool_id)
                 ops = transform["ops"]
-                out.append(
+                upgrades = [
                     _build_codex_semantic_tool_use(
                         entry,
                         ops[0],
                         tool_id,
                         preserve_timestamp=False,
                     ),
-                )
+                ]
                 for idx, op in enumerate(ops[1:], start=2):
-                    out.append(
+                    upgrades.append(
                         _build_codex_semantic_tool_use(
                             entry,
                             op,
@@ -1643,6 +1651,10 @@ def postprocess_codex_entries(
                             preserve_timestamp=False,
                         ),
                     )
+                for upgrade in upgrades:
+                    if call_ref is not None:
+                        upgrade["entry_ref"] = call_ref
+                out.extend(upgrades)
             out.extend(transform["results"])
             continue
         out.append(entry)
@@ -2276,6 +2288,11 @@ def new_codex_progress_state() -> dict[str, dict[str, str] | set[str]]:
         "exec_sessions": {},
         "write_calls": {},
         "completed_tools": set(),
+        # tool_id → the tool_use's entry_ref. Split live batches synthesize
+        # the semantic tool_use from the RESULT line; stamping it with the
+        # remembered CALL-line ref makes it merge in place over the raw
+        # Bash tile client-side — identical identity on live and cold paths.
+        "use_refs": {},
     }
 
 
