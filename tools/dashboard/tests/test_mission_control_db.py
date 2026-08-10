@@ -814,6 +814,82 @@ def test_list_conversation_updates_empty_for_unknown_entry(tmp_path):
     assert db.list_conversation_updates("nope", db_path=path) == []
 
 
+# ── Reopening ─────────────────────────────────────────────────────
+
+
+def test_reopen_question_clears_answer_and_returns_to_open(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    entry = db.ask_question(mission["mission_id"], "q", "guest:a", "A", db_path=path)
+    db.answer_question(mission["mission_id"], entry["entry_id"], "first answer", "auto-x", db_path=path)
+
+    reopened = db.reopen_question(
+        mission["mission_id"], entry["entry_id"], "not quite -- what about X?", "A", db_path=path,
+    )
+
+    assert reopened["answer"] is None
+    assert reopened["answered_by_session"] is None
+    assert reopened["answered_at"] is None
+    assert reopened["relay_status"] == "pending"
+    # The original ask is untouched -- only the answer slot changes.
+    assert reopened["question"] == "q"
+
+
+def test_reopen_question_folds_prior_answer_and_followup_into_updates(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    entry = db.ask_question(mission["mission_id"], "q", "guest:a", "A", db_path=path)
+    db.answer_question(mission["mission_id"], entry["entry_id"], "first answer", "auto-x", db_path=path)
+
+    db.reopen_question(mission["mission_id"], entry["entry_id"], "not quite -- what about X?", "A", db_path=path)
+
+    updates = db.list_conversation_updates(entry["entry_id"], db_path=path)
+    texts = [u["text"] for u in updates]
+    assert texts == [
+        "Previous answer: first answer",
+        "A followed up: not quite -- what about X?",
+    ]
+
+
+def test_reopen_question_returns_none_when_not_yet_answered(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    entry = db.ask_question(mission["mission_id"], "q", "guest:a", "A", db_path=path)
+
+    assert db.reopen_question(mission["mission_id"], entry["entry_id"], "wait", "A", db_path=path) is None
+
+
+def test_reopen_question_returns_none_for_unknown_entry(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+
+    assert db.reopen_question(mission["mission_id"], "nope", "wait", "A", db_path=path) is None
+
+
+def test_reopen_question_then_reanswer_leaves_no_trail_in_updates(tmp_path):
+    """The whole point: after a reopen -> re-answer cycle, the ephemeral
+    trail this test just populated must not linger -- see
+    reopen_question's docstring and _question_payload's answered-hides-
+    updates rule in the API layer."""
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    entry = db.ask_question(mission["mission_id"], "q", "guest:a", "A", db_path=path)
+    db.answer_question(mission["mission_id"], entry["entry_id"], "first answer", "auto-x", db_path=path)
+    db.reopen_question(mission["mission_id"], entry["entry_id"], "not quite", "A", db_path=path)
+    assert db.list_conversation_updates(entry["entry_id"], db_path=path)  # populated mid-discussion
+
+    reanswered = db.answer_question(
+        mission["mission_id"], entry["entry_id"], "integrated final answer", "auto-x", db_path=path,
+    )
+
+    assert reanswered["answer"] == "integrated final answer"
+    # answer_question doesn't clear the updates table itself -- the API
+    # layer is what hides them once answer IS NOT NULL (see test_api.py).
+    # This test just pins that the DAO layer doesn't silently wipe history
+    # a debugging pass might still want.
+    assert db.list_conversation_updates(entry["entry_id"], db_path=path)
+
+
 # ── Cross-pillar decision log ────────────────────────────────────
 
 

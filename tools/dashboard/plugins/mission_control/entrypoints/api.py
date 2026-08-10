@@ -545,6 +545,17 @@ def _update_payload(update: dict) -> dict:
 
 
 def _question_payload(entry: dict) -> dict:
+    # Updates are working-in-progress noise, not part of the record: once
+    # an entry is answered, its update trail (including anything a reopen
+    # folded in -- the prior answer, the follow-up text) is dropped from
+    # what guests see. The answer itself is the only thing meant to
+    # persist. See reopen_question's docstring for the same call on the
+    # write side.
+    updates = (
+        []
+        if entry["answer"] is not None
+        else [_update_payload(u) for u in db.list_conversation_updates(entry["entry_id"])]
+    )
     return {
         "entry_id": entry["entry_id"],
         "mission_id": entry["mission_id"],
@@ -558,7 +569,7 @@ def _question_payload(entry: dict) -> dict:
         "answered_at": entry["answered_at"],
         "relay_status": entry["relay_status"],
         "created_at": entry["created_at"],
-        "updates": [_update_payload(u) for u in db.list_conversation_updates(entry["entry_id"])],
+        "updates": updates,
     }
 
 
@@ -615,6 +626,20 @@ async def _relay_question(*, mission_id: str, entry_id: str) -> None:
         return
 
     anchor_note = f" (re: {entry['anchor']})" if entry.get("anchor") else ""
+    # Non-empty only after a reopen (see reopen_question) -- a first-round
+    # relay always fires before any update could exist. Its presence is
+    # what distinguishes "new question" framing from "this was reopened."
+    discussion = db.list_conversation_updates(entry_id)
+    context_block = ""
+    if discussion:
+        lines = "\n".join(f"- {u['text']}" for u in discussion)
+        context_block = (
+            f"\n\nThis question was reopened -- prior context:\n{lines}\n\n"
+            f"Write ONE new answer that integrates the whole discussion above, "
+            f"not just a reply to the latest line in isolation. Don't reference "
+            f"the earlier rounds (\"as I mentioned\", \"following up on\") -- "
+            f"the guest only ever sees this one final answer, never the history."
+        )
     primary_envelope = build_envelope(
         from_id=primary_from_id,
         kind="mission-question",
@@ -625,13 +650,23 @@ async def _relay_question(*, mission_id: str, entry_id: str) -> None:
         },
         body=(
             f"New message on \"{primary_label}\"{anchor_note} from {entry['asked_by_label']}:\n\n"
-            f"{entry['question']}\n\n"
+            f"{entry['question']}"
+            f"{context_block}\n\n"
             f"A reply is expected -- but only once it's actually correct, not "
             f"provisionally. If this will take a while, post interim progress "
-            f"visibility any number of times first:\n"
+            f"visibility any number of times first -- one short, present-tense "
+            f"line each (e.g. \"checking the acquisition log\"). Updates are "
+            f"ephemeral and disappear once you answer, so don't put anything in "
+            f"one that the answer itself needs:\n"
             f"POST {reply_route}/update {{\"text\": \"still working...\"}}\n"
-            f"Then file exactly one concise closing answer:\n"
-            f"POST {reply_route}/answer {{\"answer\": \"...\"}}"
+            f"Then file exactly one concise closing answer that stands alone -- "
+            f"state the current conclusion and its rationale, not the steps you "
+            f"took to get there or references to earlier back-and-forth:\n"
+            f"POST {reply_route}/answer {{\"answer\": \"...\"}}\n"
+            f"If the guest pushes back later, they may reopen this with a "
+            f"follow-up -- you'll get a fresh relay like this one with the "
+            f"prior context folded in, and should file a new answer that "
+            f"replaces this one entirely."
         ),
     )
 
@@ -657,7 +692,8 @@ async def _relay_question(*, mission_id: str, entry_id: str) -> None:
             body=(
                 f"Copied for tracking -- no reply expected from you. New message on "
                 f"\"{primary_label}\"{anchor_note} from {entry['asked_by_label']}:\n\n"
-                f"{entry['question']}\n\n"
+                f"{entry['question']}"
+                f"{context_block}\n\n"
                 f"\"{primary_label}\"'s own session ({primary_session}) is expected to reply."
             ),
         )
@@ -781,6 +817,59 @@ async def answer_pillar_question(request: Request) -> JSONResponse:
     )
 
 
+async def _reopen_question_impl(
+    request: Request, *, mission_id: str, pillar_id: str | None, entry_id: str,
+) -> JSONResponse:
+    """Guest-side follow-up on an already-answered entry -- pushback after
+    not liking the answer, or a natural next round of the same discussion.
+    Reuses the entry_id (see reopen_question's docstring): the record ends
+    up as one integrated question/answer pair, not a growing thread.
+    """
+    body = await request.json()
+    followup = body.get("followup")
+    if not isinstance(followup, str) or not followup.strip():
+        return JSONResponse({"error": "followup is required"}, status_code=400)
+
+    visitor = _resolve_visitor_identity(request)
+    if not visitor:
+        return JSONResponse(
+            {"error": "visitor identity required — missing or unresolved token"},
+            status_code=401,
+        )
+
+    entry = db.reopen_question(mission_id, entry_id, followup, visitor["participant_label"])
+    if entry is None:
+        return JSONResponse(
+            {"error": "question not found, or not yet answered"}, status_code=404,
+        )
+
+    return JSONResponse(
+        {"question": _question_payload(entry)},
+        background=BackgroundTask(_relay_question, mission_id=mission_id, entry_id=entry_id),
+    )
+
+
+async def reopen_question(request: Request) -> JSONResponse:
+    mission_id = request.path_params["mission_id"]
+    entry_id = request.path_params["entry_id"]
+    if not db.get_mission(mission_id):
+        return JSONResponse({"error": "mission not found"}, status_code=404)
+    return await _reopen_question_impl(
+        request, mission_id=mission_id, pillar_id=None, entry_id=entry_id,
+    )
+
+
+async def reopen_pillar_question(request: Request) -> JSONResponse:
+    pillar_id = request.path_params["pillar_id"]
+    entry_id = request.path_params["entry_id"]
+    pillar = db.get_pillar(pillar_id)
+    if not pillar:
+        return JSONResponse({"error": "pillar not found"}, status_code=404)
+    return await _reopen_question_impl(
+        request, mission_id=pillar["mission_id"], pillar_id=pillar_id, entry_id=entry_id,
+    )
+
+
 async def _add_update_impl(
     request: Request, *, lookup_mission_id: str, entry_id: str,
 ) -> JSONResponse:
@@ -841,6 +930,10 @@ routes: list[Route] = [
         "/api/missions/{mission_id}/questions/{entry_id}/update",
         add_question_update, methods=["POST"],
     ),
+    Route(
+        "/api/missions/{mission_id}/questions/{entry_id}/reopen",
+        reopen_question, methods=["POST"],
+    ),
     Route("/api/missions/{mission_id}/decision-log", get_decision_log, methods=["GET"]),
     Route("/missions/{mission_id}", serve_mission_site, methods=["GET"]),
 
@@ -874,6 +967,10 @@ routes: list[Route] = [
     Route(
         "/api/pillars/{pillar_id}/questions/{entry_id}/update",
         add_pillar_question_update, methods=["POST"],
+    ),
+    Route(
+        "/api/pillars/{pillar_id}/questions/{entry_id}/reopen",
+        reopen_pillar_question, methods=["POST"],
     ),
     Route("/missions/{mission_id}/pillars/{pillar_id}", serve_pillar_site, methods=["GET"]),
 ]

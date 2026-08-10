@@ -1121,6 +1121,69 @@ def list_conversation_updates(
     return [dict(r) for r in rows]
 
 
+def reopen_question(
+    mission_id: str,
+    entry_id: str,
+    followup: str,
+    participant_label: str,
+    *,
+    db_path: Path | str | None = None,
+) -> dict | None:
+    """Reopen an already-answered entry with a follow-up -- same entry_id,
+    not a new row. Clears `answer`/`answered_by_session`/`answered_at` back
+    to open (relay_status -> 'pending' so the API layer re-delivers) and
+    folds the prior answer plus the new follow-up into the update trail as
+    context for the responder's next, integrated answer.
+
+    `question` is deliberately left untouched -- it stays the original ask;
+    only the record's one `answer` slot changes as the discussion resolves.
+    The prior answer and every update are ephemeral (see
+    mission_conversation_updates' own docstring and the API layer's
+    _question_payload, which drops `updates` once an entry is answered
+    again) -- a reopened entry that gets re-answered leaves no trail of the
+    intermediate back-and-forth, only the final question/answer pair. That
+    is deliberate: the record is meant to read as the current, integrated
+    decision, not a story of how the discussion got there.
+
+    Returns None if the entry doesn't exist or isn't currently answered --
+    reopening an already-open entry is meaningless; the caller should just
+    rely on the still-open question (or post a plain update onto it).
+    """
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM mission_conversation WHERE mission_id = ? AND entry_id = ?",
+            (mission_id, entry_id),
+        ).fetchone()
+        if not row or row["answer"] is None:
+            return None
+        conn.execute(
+            "INSERT INTO mission_conversation_updates (update_id, entry_id, text, created_at)"
+            " VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), entry_id, f"Previous answer: {row['answer']}", time.time()),
+        )
+        conn.execute(
+            "INSERT INTO mission_conversation_updates (update_id, entry_id, text, created_at)"
+            " VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), entry_id, f"{participant_label} followed up: {followup}", time.time()),
+        )
+        conn.execute(
+            "UPDATE mission_conversation"
+            " SET answer = NULL, answered_by_session = NULL, answered_at = NULL,"
+            "     relay_status = 'pending'"
+            " WHERE mission_id = ? AND entry_id = ?",
+            (mission_id, entry_id),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM mission_conversation WHERE mission_id = ? AND entry_id = ?",
+            (mission_id, entry_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
 # ── Cross-pillar decision log ────────────────────────────────────
 
 

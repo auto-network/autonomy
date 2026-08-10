@@ -2,10 +2,11 @@
 
 Mission Control (`/mission-control`) hosts chromeless native sites, one per
 mission, with immutable revision history. P1: missions + site hosting. P2
-(§6): visitor Q&A attribution. P3 (§7): presence and "what changed since you
-last looked." P4 (§8): pillars — a mission split into dedicated
-sub-coordinators, each with its own site, presence surface, and anchored
-conversation.
+(§6): visitor Q&A attribution, including reopening an answered question for
+a follow-up round. P3 (§7): presence and "what changed since you last
+looked." P4 (§8): pillars — a mission split into dedicated sub-coordinators,
+each with its own site, presence surface, and anchored conversation. §9:
+how to actually write what goes in the record.
 
 Dashboard base URL: `https://localhost:8080` on host-network sessions,
 `https://host.docker.internal:8080` from bridge-network containers (`curl -sk`).
@@ -171,6 +172,25 @@ Attribution (`asked_by_label`) is a snapshot at ask time too — if you
 reissue someone a new display name later, their past questions still show
 what they were called when they asked.
 
+### Reopening — if the asker isn't satisfied
+
+A visitor who doesn't like your answer can push back:
+
+```bash
+curl -sk "https://host.docker.internal:8080/api/missions/<mission_id>/questions/<entry_id>/reopen?as=<token>" \
+  -X POST -H 'Content-Type: application/json' -d '{"followup": "That does not match what I saw in the logs -- can you check the retry path too?"}'
+```
+
+Same `entry_id` — this is not a new question thread stacking up under the
+old one. Reopening clears `answer` back to open and folds your previous
+answer plus the new follow-up into working context you'll see on the next
+CrossTalk relay; write ONE new answer that integrates the whole discussion,
+not a reply to just the latest line. Once you re-answer, the intermediate
+back-and-forth is gone — `GET .../questions` and the decision log (§8) both
+only ever show the current question/answer pair, never the rounds it took
+to get there. This can repeat any number of times; the record stays one
+row regardless.
+
 ## 7. Presence and "what changed" (P3)
 
 The dashboard home page shows, per mission, who's currently aware of it and
@@ -304,11 +324,18 @@ curl -sk "https://host.docker.internal:8080/api/pillars/<pillar_id>/questions?as
 GET    /api/pillars/<pillar_id>/questions
 POST   /api/pillars/<pillar_id>/questions/<entry_id>/answer          # {"answer": "..."} -- exactly one, final
 POST   /api/pillars/<pillar_id>/questions/<entry_id>/update          # {"text": "..."} -- any number, doesn't close it
+POST   /api/pillars/<pillar_id>/questions/<entry_id>/reopen          # {"followup": "..."} -- guest pushback, see §6
 ```
 
 There's no `kind` field (question/proposal/comment) — a message is a
 message, tracked with a reply. Don't invent a taxonomy the API doesn't
 have; typing it would just be a place to be wrong for no benefit.
+
+**Reopened questions arrive the same way, with context attached.** If a
+guest wasn't satisfied and reopened (§6), your CrossTalk relay looks like a
+brand-new question but includes a "prior context" block with the old
+answer and the follow-up. File one new answer that replaces the old one —
+see §9 for how to actually write it.
 
 **Delivery.** A message on a pillar screen goes to **both** that pillar's
 `coordinator_session` (you — a reply is expected) **and** the mission's
@@ -451,3 +478,45 @@ is an Alpine.js-specific wrapper; if your site doesn't run Alpine, poll
 the surface directly or ask for a plain-JS presence reader when you build
 against this — flag it as a gap if you need it, don't reverse-engineer
 `surface-presence.js` yourself.
+
+## 9. Writing the record — no story-telling
+
+This applies to every field meant to persist: an `answer` (§6/§8), a site
+revision's `note` (§2), anything that ends up in the decision log (§8).
+The platform enforces the mechanics (one current answer, updates dropped
+once you file it, a computed decision log); it can't enforce good writing.
+That's on you, and it matters because the record is what everyone else —
+the operator, other pillars, a guest who scrolls back — actually reads.
+Write it like the operator will only ever see this one line, never the
+session transcript behind it.
+
+**Progress updates** (`POST .../update`) are scratch, not a diary. One
+short, present-tense line — "checking the acquisition log", "capturing the
+new screenshot" — only when a task is genuinely going to take a while and
+you want to give visibility while it does. They vanish the moment you
+answer (§6/§8's "Only answer once it's actually correct"), so never put
+information in one that the answer itself needs; if it matters, it belongs
+in the answer.
+
+**Answers** are a conclusion, not a transcript. State the current fact or
+decision and its rationale as it stands right now. Don't narrate the steps
+you took ("first I checked X, then I tried Y, then..."), don't reference
+your own earlier attempts or the back-and-forth that led here ("as I
+mentioned", "following up on my last message", "to summarize the
+discussion above"). If the question was reopened (§6) and this is your
+second, third, Nth answer on the same entry, write it exactly as if it
+were the first and only answer — it will be read as exactly that, since
+nothing else survives to give it away.
+
+**Revision notes** (§2) get the same treatment: one line, what the current
+push actually is, not a log of everything you tried before landing on it.
+"Switch to acquisition-run partitioning" — not "iterated a few times,
+tried per-ecosystem first, settled on acquisition-run after discussing with
+Jeremy."
+
+**Why this matters more here than it might elsewhere:** the decision log
+(§8) is computed straight from these fields — there is no separate
+editorial pass that cleans them up before anyone reads them. Whatever you
+write is, verbatim, what lands in the permanent cross-pillar record. Write
+the version you'd want to read cold, six months from now, with no memory
+of the conversation that produced it.
