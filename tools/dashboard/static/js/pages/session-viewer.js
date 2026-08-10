@@ -1985,24 +1985,52 @@
           }
           store.pendingToolIds = ptids;
         }
+        // APPLY BEFORE ACK (review B7): merge the served batch first; the
+        // committed high-water and scroll cursor advance only when the
+        // application succeeded. Ack-before-apply marks progress past
+        // unapplied content — the loss invariant.
+        var applied = true;
+        if (data.entries && data.entries.length > 0) {
+          try {
+            window.mergeSessionEntries(store, data, 'fetch');
+          } catch (e) {
+            applied = false;
+            console.warn('[sessionViewer] merge failed; cursors not committed', e);
+          }
+        } else if (Array.isArray(data.chain) && data.chain.length && store.chain.length === 0) {
+          store.chain = data.chain.slice();
+        }
+        if (!applied) return;
         if (data.older_cursor !== undefined) store.olderCursor = data.older_cursor;
         if (data.has_more !== undefined) store.hasMoreHistory = !!data.has_more;
         // Forward-delta cursor advances the committed high-water — a
         // fetch's cursor is complete-line-aligned server truth for
-        // "everything up to here has been served to this client".
+        // "everything up to here has been served AND applied".
+        // MONOTONIC (round-1 addendum item 2): two racing catch-ups can
+        // resolve out of order; a stale response's cursor must never
+        // regress committed (executed race: 900 → 700, self-healing but
+        // wasteful). Advance only forward in (chain position, off) order.
         if (data.cursor && data.cursor.file) {
-          store.committed = { file: data.cursor.file, off: data.cursor.off };
+          var curC = store.committed;
+          var advance = !curC;
+          if (curC) {
+            if (data.cursor.file === curC.file) {
+              advance = data.cursor.off >= curC.off;
+            } else {
+              var ci = store.chain.indexOf(curC.file);
+              var ni = store.chain.indexOf(data.cursor.file);
+              advance = ci !== -1 && ni !== -1 && ni > ci;
+            }
+          }
+          if (advance) {
+            store.committed = { file: data.cursor.file, off: data.cursor.off };
+          }
         } else if (Array.isArray(data.window_spans) && data.window_spans.length &&
                    !store.committed) {
           // Cold-open reverse window: anchor committed at the newest
           // span's end so the first SSE span has a contiguity baseline.
           var lastSpan = data.window_spans[data.window_spans.length - 1];
           store.committed = { file: lastSpan.file, off: lastSpan.to };
-        }
-        if (data.entries && data.entries.length > 0) {
-          window.mergeSessionEntries(store, data, 'fetch');
-        } else if (Array.isArray(data.chain) && data.chain.length && store.chain.length === 0) {
-          store.chain = data.chain.slice();
         }
       },
 
@@ -2606,10 +2634,16 @@
           }
           hasMore = !!data.has_more_forward;
           // Progress guard: a capped response that failed to advance the
-          // cursor must not spin.
+          // cursor must not spin (the server guarantees whole-line
+          // progress now; this is defense in depth).
           if (hasMore && prevCommitted && store.committed &&
               store.committed.file === prevCommitted.file &&
-              store.committed.off <= prevCommitted.off) break;
+              store.committed.off <= prevCommitted.off) {
+            store._catchupStall = (store._catchupStall || 0) + 1;
+            if (c) c.catchup_stalls += 1;
+            break;
+          }
+          store._catchupStall = 0;
           rounds++;
         } while (hasMore && rounds < MAX_ROUNDS);
 
@@ -2625,13 +2659,23 @@
         }
         if (hasMore) {
           // Reschedule the remainder — never block this task on a huge
-          // backlog (the server caps each response's bytes).
+          // backlog (the server caps each response's bytes). Review B2:
+          // a stalled cursor must NOT hot-loop at zero delay — back off
+          // exponentially and, past the attempt bound, hand responsibility
+          // back to the wake triggers (heartbeat fires within 15s) rather
+          // than chaining forever.
+          var stalls = store._catchupStall || 0;
+          if (stalls > 6) {
+            console.warn('[sessionViewer] catch-up stalled repeatedly; deferring to next wake');
+            return fetchedEntries;
+          }
+          var delay = stalls > 0 ? Math.min(500 * Math.pow(2, stalls - 1), 15000) : 0;
           var self = this;
           setTimeout(function () {
             self._catchUp(store, 'continuation').catch(function (e) {
               console.warn('[sessionViewer] catch-up continuation failed', e);
             });
-          }, 0);
+          }, delay);
         }
         return fetchedEntries;
       },

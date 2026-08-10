@@ -839,6 +839,31 @@ async def test_b4_purity_read_workers_never_write_or_broadcast(env):
 
 
 @pytest.mark.asyncio
+async def test_publish_unlinked_segment_survives_mid_read_deregister(env):
+    """auto-16g9t round-1 addendum item 3: a deregister landing during the
+    shielded segment read pops the session's tail state — the post-await
+    guard must re-create it rather than KeyError into the crash path
+    (degrade-not-lockup). The guard predates commit A's pre-executor
+    creation and both are load-bearing."""
+    name = "auto-midderegs"
+    m1 = _link_single(env, name, "midderegs-line")
+    mon = env.make_monitor()
+    await _settle(mon)
+
+    real_read = mon._read_segment_window
+
+    def popping_read(row, path, start_offset, expect_generation, parse_ctx=None):
+        # Simulate the deregister racing the shielded read.
+        mon._tail_states.pop(name, None)
+        return real_read(row, path, 0, None, parse_ctx)
+
+    mon._read_segment_window = popping_read
+    progressed = await mon._publish_unlinked_segment(name, str(m1))
+    assert progressed, "publication must proceed after a mid-read deregister"
+    assert name in mon._tail_states, "tail state re-created by the guard"
+
+
+@pytest.mark.asyncio
 async def test_b5_teardown_purges_tracks_gates_and_watches(env):
     """B5: session death purges FileTracks, inode/wd mappings, dir epochs,
     and retires the gate; post-death MODIFY dispatches nothing and the

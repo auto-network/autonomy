@@ -418,7 +418,12 @@ window.getSessionStore = function(sessionId) {
         merge_inserted: 0,
         merge_merged: 0,
         merge_dropped_duplicate: 0,
+        // Lower-fidelity reverse-page duplicates blocked from
+        // overwriting richer live entries (the snapshot-vs-reconstruct
+        // trade, measurable in production).
+        merge_downgrades_blocked: 0,
         span_gaps_detected: 0,
+        catchup_stalls: 0,
         // Wake/catch-up protocol counters (commit C).
         wakeups_by_trigger: {},      // trigger reason → count
         wake_happy: 0,               // caught-up wakes (no entries fetched)
@@ -473,7 +478,20 @@ function _emitSessionRegistryChanged() {
 // scroll-up. Harness ids (tool_id) are metadata for the tool maps below,
 // never the buffer key.
 
+function _isSubsequence(needle, haystack) {
+  var j = 0;
+  for (var i = 0; i < haystack.length && j < needle.length; i++) {
+    if (haystack[i] === needle[j]) j++;
+  }
+  return j === needle.length;
+}
+
 function _adoptChain(store, chain) {
+  // Review S2: if the server's chain is an order-compatible subsequence
+  // of ours, we know MORE than the server (it prunes dead predecessors)
+  // — adopting would push retained history files to the end and reverse
+  // their order. Keep ours.
+  if (store.chain.length && _isSubsequence(chain, store.chain)) return;
   var next = chain.slice();
   for (var i = 0; i < store.chain.length; i++) {
     if (next.indexOf(store.chain[i]) === -1) next.push(store.chain[i]);
@@ -544,17 +562,54 @@ function _registerToolResult(store, entry) {
   }
 }
 
+// Fidelity ladder for tool_result payload shapes. Reverse/scroll-back
+// pages are enriched from a state snapshot rather than full cursor
+// reconstruction (the cold-open latency trade the review adjudicated), so
+// a window-edge replay can arrive LOWER-fidelity than what the live
+// stream delivered — e.g. a wrapper output parsed without its pending
+// call comes back as a generic custom_tool_call_output where live had
+// exec_command results. A degraded duplicate may NEVER overwrite a
+// higher-fidelity entry.
+var _RESULT_KIND_FIDELITY = {
+  custom_tool_call_output: 0,
+  function_call_output: 1,
+  exec_command: 2,
+  patch_apply_end: 2,
+};
+
+// Is the incoming duplicate a lower-fidelity rendering of `existing`?
+// Guarded downgrades (each counted via merge_downgrades_blocked):
+//   - tool_result.result_kind moving DOWN the fidelity ladder
+//   - a terminal tool_result regressing to status 'running'
+//   - a semantic tool_use (Read/Grep/Patch upgrade) reverting to the raw
+//     exec_command/Bash rendering
+function _isDowngrade(existing, incoming) {
+  if (existing.type === 'tool_result' && incoming.type === 'tool_result') {
+    if (existing.status && existing.status !== 'running' &&
+        incoming.status === 'running') {
+      return true;
+    }
+    var ek = _RESULT_KIND_FIDELITY[existing.result_kind];
+    var ik = _RESULT_KIND_FIDELITY[incoming.result_kind];
+    if (ek !== undefined && ik !== undefined && ik < ek) return true;
+  }
+  if (existing.type === 'tool_use' && incoming.type === 'tool_use' &&
+      existing.semantic_from_exec && !incoming.semantic_from_exec &&
+      (incoming.tool_name === 'exec_command' || incoming.tool_name === 'Bash')) {
+    return true;
+  }
+  return false;
+}
+
 // Field-merge an incoming duplicate into the entry already at its ref.
 // Returns {changed, structural} — structural means the display shape
 // (grouping) may have changed, not just a field the tile re-reads.
 function _mergeEntryFields(store, existing, incoming) {
-  if (
-    existing.type === 'tool_result' &&
-    incoming.type === 'tool_result' &&
-    existing.status &&
-    existing.status !== 'running' &&
-    incoming.status === 'running'
-  ) {
+  if (_isDowngrade(existing, incoming)) {
+    if (store._counters) {
+      store._counters.merge_downgrades_blocked =
+        (store._counters.merge_downgrades_blocked || 0) + 1;
+    }
     return { changed: false, structural: false };
   }
   var structural = false;
@@ -766,15 +821,30 @@ window.ensureSessionMessages = function() {
     // gone with the old append paths.
     if (data.seq !== undefined && data.seq > store.seq) store.seq = data.seq;
 
-    var spanState = data.span ? window.advanceCommittedSpan(store, data.span) : null;
-    window.mergeSessionEntries(store, data, 'sse');
+    // APPLY BEFORE ACK (review B7): the merge must succeed before the
+    // committed high-water may advance — an exception mid-merge with the
+    // ack already taken would mark progress past unapplied content, the
+    // exact loss invariant B1 broke server-side.
+    var merged = false;
+    try {
+      window.mergeSessionEntries(store, data, 'sse');
+      merged = true;
+    } catch (e) {
+      console.warn('[session-store] merge failed; span not committed', e);
+    }
+    var spanState = (merged && data.span)
+      ? window.advanceCommittedSpan(store, data.span) : null;
     // The "first event exposes the gap" path: a span starting past the
     // committed high-water (or a rollover file switch) triggers the
-    // viewer's ranged catch-up immediately — no waiting for a wake.
-    if (spanState === 'gap' || spanState === 'file_switch') {
+    // viewer's ranged catch-up immediately — no waiting for a wake. A
+    // failed merge takes the same path: the catch-up refetches the range
+    // and the tuple merge makes the replay idempotent.
+    if (spanState === 'gap' || spanState === 'file_switch' || !merged) {
       var gapHandler = window._sessionGapHandlers && window._sessionGapHandlers[id];
       if (typeof gapHandler === 'function') {
-        try { gapHandler(spanState, data.span); } catch (e) { /* best-effort */ }
+        try {
+          gapHandler(merged ? spanState : 'merge_failure', data.span);
+        } catch (e2) { /* best-effort */ }
       }
     }
 

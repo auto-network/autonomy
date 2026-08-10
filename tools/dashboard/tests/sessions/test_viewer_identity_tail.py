@@ -64,6 +64,7 @@ def _insert_session(
     session_uuids: list[str] | None = None,
     state: str = "ACTIVE",
     session_type: str = "container",
+    harness: str = "claude",
 ) -> None:
     stems = session_uuids if session_uuids is not None else [Path(jsonl_path).stem]
     conn = sqlite3.connect(str(db_path))
@@ -71,12 +72,12 @@ def _insert_session(
         "INSERT INTO tmux_sessions"
         " (tmux_name, type, project, jsonl_path, session_uuid,"
         "  resolution_dir, session_uuids, curr_jsonl_file, created_at,"
-        "  state, ended_at)"
-        " VALUES (?, ?, 'autonomy', ?, ?, ?, ?, ?, ?, ?, ?)",
+        "  state, ended_at, harness)"
+        " VALUES (?, ?, 'autonomy', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (tmux_name, session_type, jsonl_path, Path(jsonl_path).stem,
          str(Path(jsonl_path).parent), json.dumps(stems),
          jsonl_path, time.time(), state,
-         time.time() if state in ("ENDED", "FAILED") else None),
+         time.time() if state in ("ENDED", "FAILED") else None, harness),
     )
     conn.commit()
     conn.close()
@@ -479,6 +480,254 @@ class TestReadPathIsolation:
                        for e in follow), (
             "live continuation lost its completed_tools suppression"
         )
+
+
+# ── Round-1 review regressions (codex report, all reproduced pre-fix) ──
+
+
+def _codex_line(payload: dict, ts: str = "2026-08-10T01:00:00Z") -> str:
+    return json.dumps({"timestamp": ts, "type": "response_item", "payload": payload})
+
+
+class TestRound1Blockers:
+
+    def test_b1_partial_line_cold_open_never_commits_into_it(self, tail_client):
+        """B1: a cold-open taken mid-write must anchor at the last COMPLETE
+        newline; after the line completes, the forward fetch from that
+        anchor must deliver it (pre-fix: committed at physical EOF → the
+        completed line was skipped forever)."""
+        client, tmp_path, db_path = tail_client
+        d = tmp_path / "b1"
+        d.mkdir()
+        jsonl = d / "part-1111.jsonl"
+        line_a = _claude_text_line("complete A")
+        line_b = _claude_text_line("late B")
+        with open(jsonl, "w") as fh:
+            fh.write(line_a + "\n")
+            fh.write(line_b[: len(line_b) // 2])   # writer mid-line
+        _insert_session(db_path, tmux_name="auto-b1", jsonl_path=str(jsonl))
+
+        cold = client.get(
+            "/api/session/autonomy/auto-b1/tail?tail_entries=10").json()
+        complete_off = len(line_a) + 1
+        assert [e["content"] for e in cold["entries"]] == ["complete A"]
+        spans = cold["window_spans"]
+        assert spans[-1]["to"] == complete_off, (
+            f"window span must end at the last complete newline, got {spans}"
+        )
+
+        # The writer finishes line B (plus newline) while SSE is missed.
+        with open(jsonl, "a") as fh:
+            fh.write(line_b[len(line_b) // 2:] + "\n")
+
+        wake = client.get(
+            "/api/session/autonomy/auto-b1/tail"
+            f"?after_file=part-1111&after={spans[-1]['to']}").json()
+        assert [e["content"] for e in wake["entries"]] == ["late B"], (
+            "the completed line must be recoverable from the cold anchor"
+        )
+
+    def test_b2_forward_cap_never_strands_bytes(self, tail_client, monkeypatch):
+        """B2a: a newline-clipped capped response must keep has_more_forward
+        true until the cursor really reaches the complete end."""
+        client, tmp_path, db_path = tail_client
+        from tools.dashboard import server as server_mod
+        import sys
+        srv = sys.modules[server_mod.__name__]
+        monkeypatch.setattr(srv, "_FORWARD_CAP_BYTES", 4096)
+
+        d = tmp_path / "b2"
+        d.mkdir()
+        jsonl = d / "cap-2222.jsonl"
+        _write_lines(jsonl, [_claude_text_line(f"line {i} " + "x" * 100)
+                             for i in range(60)])
+        _insert_session(db_path, tmux_name="auto-b2", jsonl_path=str(jsonl))
+
+        got: list = []
+        cursor = {"file": "cap-2222", "off": 0}
+        rounds = 0
+        while rounds < 30:
+            resp = client.get(
+                "/api/session/autonomy/auto-b2/tail"
+                f"?after_file={cursor['file']}&after={cursor['off']}").json()
+            got.extend(resp["entries"])
+            assert resp["cursor"]["off"] > cursor["off"] or not resp["entries"], (
+                "every non-empty response must advance the cursor"
+            )
+            cursor = resp["cursor"]
+            rounds += 1
+            if not resp["has_more_forward"]:
+                break
+        assert rounds > 1, "cap must have forced multiple rounds"
+        assert len(got) == 60, f"stranded entries: got {len(got)}/60"
+        assert cursor["off"] == os.path.getsize(jsonl)
+
+    def test_b2_single_over_cap_line_still_progresses(self, tail_client, monkeypatch):
+        """B2b: one complete line larger than the cap is served whole —
+        the cursor always moves (pre-fix: has_more with an unmoved cursor
+        → client hot-loop)."""
+        client, tmp_path, db_path = tail_client
+        from tools.dashboard import server as server_mod
+        import sys
+        srv = sys.modules[server_mod.__name__]
+        monkeypatch.setattr(srv, "_FORWARD_CAP_BYTES", 2048)
+
+        d = tmp_path / "b2b"
+        d.mkdir()
+        jsonl = d / "mono-3333.jsonl"
+        _write_lines(jsonl, [_claude_text_line("y" * 5000)])
+        _insert_session(db_path, tmux_name="auto-b2b", jsonl_path=str(jsonl))
+
+        resp = client.get(
+            "/api/session/autonomy/auto-b2b/tail?after_file=mono-3333&after=0").json()
+        assert len(resp["entries"]) == 1
+        assert resp["cursor"]["off"] == os.path.getsize(jsonl)
+        assert resp["has_more_forward"] is False
+
+    def test_b3_forward_replay_preserves_progress_entries(self, tail_client):
+        """B3: a catch-up over a range containing a running progress line
+        must serve it exactly as the live stream did — cursor-state
+        reconstruction, not the EOF snapshot that suppressed it."""
+        client, tmp_path, db_path = tail_client
+        d = tmp_path / "b3"
+        d.mkdir()
+        jsonl = d / "rollout-2026-08-10T01-00-00-b3b3.jsonl"
+        lines = [
+            _codex_line({"type": "function_call", "name": "exec_command",
+                         "call_id": "T1",
+                         "arguments": json.dumps({"cmd": "sleep 5"})}),
+            _codex_line({"type": "function_call_output", "call_id": "T1",
+                         "output": "Process running with session ID 7\nOutput:\npartial"}),
+            json.dumps({"timestamp": "2026-08-10T01:00:02Z", "type": "event_msg",
+                        "payload": {"type": "exec_command_end", "call_id": "T1",
+                                    "stdout": "done", "stderr": "",
+                                    "exit_code": 0, "duration": {"secs": 2, "nanos": 0}}}),
+        ]
+        offsets = _write_lines(jsonl, lines)
+        _insert_session(db_path, tmux_name="auto-b3", jsonl_path=str(jsonl), harness="codex")
+
+        # Cursor sits after the call line; running + final were missed.
+        resp = client.get(
+            "/api/session/autonomy/auto-b3/tail"
+            f"?after_file={jsonl.stem}&after={offsets[1]}").json()
+        results = [e for e in resp["entries"] if e.get("type") == "tool_result"]
+        statuses = [(r["entry_ref"]["off"], r.get("status")) for r in results]
+        assert (offsets[1], "running") in statuses, (
+            f"running progress entry must survive the replay, got {statuses}"
+        )
+
+    def test_b4_forward_replay_reconstructs_wrapper_pairing(self, tail_client):
+        """B4: an output line fetched after its wrapper call line (cursor
+        between them) must parse against the reconstructed pending pair —
+        never mint the same ref with degraded content."""
+        client, tmp_path, db_path = tail_client
+        d = tmp_path / "b4"
+        d.mkdir()
+        jsonl = d / "rollout-2026-08-10T02-00-00-b4b4.jsonl"
+        lines = [
+            _codex_line({"type": "custom_tool_call", "name": "exec",
+                         "call_id": "W1",
+                         "input": 'const r = await tools.exec_command({"cmd":"ls"});\ntext(r);'}),
+            _codex_line({"type": "custom_tool_call_output", "call_id": "W1",
+                         "output": "Exit code: 0\nWall time: 0.1 seconds\nOutput:\nok"},
+                        ts="2026-08-10T02:00:01Z"),
+        ]
+        offsets = _write_lines(jsonl, lines)
+        _insert_session(db_path, tmux_name="auto-b4", jsonl_path=str(jsonl), harness="codex")
+
+        resp = client.get(
+            "/api/session/autonomy/auto-b4/tail"
+            f"?after_file={jsonl.stem}&after={offsets[1]}").json()
+        kinds = {e.get("result_kind") for e in resp["entries"]
+                 if e.get("type") == "tool_result"}
+        assert "exec_command" in kinds, (
+            f"wrapper pairing must be reconstructed through the cursor, got {kinds}"
+        )
+
+    def test_b5_split_vs_combined_semantic_refs_equal(self, tmp_path):
+        """B5: the semantic tool_use upgrade carries the CALL line's ref on
+        BOTH the combined-cold and split-live paths (pre-fix: cold left it
+        refless → client-synthetic ref → duplicate tile)."""
+        from tools.dashboard import session_harness as sh
+
+        def mk_call():
+            return {"type": "tool_use", "role": "assistant",
+                    "tool_name": "exec_command", "tool_id": "C1",
+                    "input": {"command": "sed -n '1,2p' a.py", "cmd": "sed -n '1,2p' a.py"},
+                    "timestamp": "t0", "entry_ref": {"file": "f", "off": 500, "sub": 0}}
+
+        def mk_result():
+            return {"type": "tool_result", "role": "tool", "tool_id": "C1",
+                    "content": "l1\nl2\n", "is_error": False, "timestamp": "t1",
+                    "result_kind": "exec_command", "status": "completed",
+                    "parsed_cmd": [{"type": "read", "name": "a.py"}], "cwd": "",
+                    "command": "sed -n '1,2p' a.py", "stdout": "l1\nl2\n",
+                    "stderr": "", "process_id": "", "exit_code": 0,
+                    "entry_ref": {"file": "f", "off": 600, "sub": 0}}
+
+        cold = sh.postprocess_codex_entries(
+            [mk_call(), mk_result()], state=sh.new_codex_progress_state())
+        sh.finalize_entry_refs(cold)
+        cold_use = [e for e in cold if e.get("type") == "tool_use"][0]
+
+        st = sh.new_codex_progress_state()
+        b1 = sh.postprocess_codex_entries([mk_call()], state=st)
+        sh.finalize_entry_refs(b1)
+        b2 = sh.postprocess_codex_entries([mk_result()], state=st)
+        sh.finalize_entry_refs(b2)
+        live_uses = [e for e in b1 + b2
+                     if e.get("type") == "tool_use" and e.get("semantic_from_exec")]
+
+        want = {"file": "f", "off": 500, "sub": 0}
+        assert cold_use.get("entry_ref") == want, cold_use.get("entry_ref")
+        assert any(u.get("entry_ref") == want for u in live_uses), live_uses
+
+    def test_b6_bead_dispatch_tail_stamps_refs(self, tail_client, monkeypatch):
+        """B6: the bead-style dispatch branch serves canonical refs and a
+        complete-line-clamped cursor like every other path."""
+        client, tmp_path, db_path = tail_client
+        from tools.dashboard import server as server_mod
+        import sys
+        srv = sys.modules[server_mod.__name__]
+        runs = tmp_path / "agent-runs"
+        monkeypatch.setattr(srv, "AGENT_RUNS_DIR", runs)
+
+        run_name = "auto-bead-0810-121212"
+        sess_dir = runs / run_name / "sessions" / "autonomy"
+        sess_dir.mkdir(parents=True)
+        jsonl = sess_dir / "beadsess-7777.jsonl"
+        offsets = _write_lines(jsonl, [_claude_text_line(f"d{i}") for i in range(2)])
+        with open(jsonl, "a") as fh:
+            fh.write('{"partial":')   # trailing partial line
+
+        resp = client.get(f"/api/dispatch/tail/{run_name}?after=0")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert _refs(data["entries"]) == [("beadsess-7777", offsets[0], 0),
+                                          ("beadsess-7777", offsets[1], 0)]
+        assert data["cursor"] == {"file": "beadsess-7777",
+                                  "off": offsets[1] + len(_claude_text_line("d1")) + 1}
+
+    def test_s1_blank_lines_never_corrupt_offsets(self, tail_client):
+        """S1: a blank line inside the window must not shift the stamped
+        offsets (pre-fix: compaction moved every earlier ref by the blank
+        bytes)."""
+        client, tmp_path, db_path = tail_client
+        d = tmp_path / "s1"
+        d.mkdir()
+        jsonl = d / "blank-8888.jsonl"
+        l1 = _claude_text_line("first")
+        l2 = _claude_text_line("second")
+        with open(jsonl, "w") as fh:
+            fh.write(l1 + "\n\n" + l2 + "\n")
+        _insert_session(db_path, tmux_name="auto-s1", jsonl_path=str(jsonl))
+
+        resp = client.get(
+            "/api/session/autonomy/auto-s1/tail?tail_entries=10").json()
+        assert _refs(resp["entries"]) == [
+            ("blank-8888", 0, 0),
+            ("blank-8888", len(l1) + 2, 0),
+        ]
 
 
 # ── Acceptance: cold-open of a very long session is one cheap request ──
