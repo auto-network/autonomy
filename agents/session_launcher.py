@@ -37,22 +37,6 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_IMAGE = "autonomy-agent:dashboard"
 
-#: Container path the platform is mounted at. A workspace may mount its own repo
-#: here instead; either way this is the container-side root that a repo-relative
-#: path resolves against.
-CONTAINER_REPO_ROOT = "/workspace/repo"
-
-
-def container_repo_path(rel: str | Path) -> Path:
-    """Translate a repo-relative path to its absolute path INSIDE the container.
-
-    ``REPO_ROOT / rel`` is a host path and does not resolve in the container:
-    ``/workspace/repo`` is a mount of a git snapshot living elsewhere on the
-    host, so a host-rooted path names a file the container cannot see. Before
-    that change the two happened to coincide, which is why callers built host
-    paths and nothing failed.
-    """
-    return Path(CONTAINER_REPO_ROOT) / Path(str(rel))
 DEFAULT_OPUS_MODEL = "claude-opus-4-8[1m]"
 
 

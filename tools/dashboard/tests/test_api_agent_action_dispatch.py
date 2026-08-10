@@ -567,8 +567,10 @@ def test_dispatch_explicit_workspace_materializes_workspace_settings(
     assert call["mounts"] == {"/tmp/operator-worktree": "/workspace/repo"}
     assert call["working_dir"] == "/workspace/repo/tools/dashboard"
     assert call["extra_env"] == {"FEATURE_FLAG": "1"}
+    # HOST path: the launcher passes it to `docker run -v <src>:/startup.sh:ro`
+    # and a -v source resolves on the host, never inside the container.
     assert call["startup_script"] == (
-        Path("/workspace/repo") / "scripts/bootstrap.sh"
+        Path(__file__).resolve().parents[3] / "scripts/bootstrap.sh"
     )
     assert call["needs_nested_docker"] is True
     assert call["runtime"] == "privileged"
