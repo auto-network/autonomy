@@ -6522,7 +6522,9 @@ def _run_project_session_start(job: LifecycleJob, writer: SessionLifecycleStateW
         meta: dict = {
             "tmux_session": tmux_name,
             "project": proj.id,
-            "graph_project": proj.graph_project,
+            # Canonical org key — the launcher stamps the session token from
+            # metadata["org"] alone and refuses to mint without it.
+            "org": proj.graph_project,
         }
         if proj.default_tags:
             meta["graph_tags"] = list(proj.default_tags)
@@ -6777,7 +6779,9 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
             meta: dict = {
                 "tmux_session": tmux_name,
                 "project": proj.id,
-                "graph_project": proj.graph_project,
+                # Canonical org key — the launcher stamps the session token from
+                # metadata["org"] alone and refuses to mint without it.
+                "org": proj.graph_project,
             }
             if proj.default_tags:
                 meta["graph_tags"] = list(proj.default_tags)
@@ -6818,7 +6822,7 @@ def _run_session_resume_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 prompt=None,
                 detach=False,
                 image="autonomy-agent:dashboard",
-                metadata={"tmux_session": tmux_name},
+                metadata={"tmux_session": tmux_name, "org": "autonomy"},
                 harness=cfg.get("harness"),
                 output_dir=str(run_dir),
                 model=cfg.get("model"),
@@ -6972,7 +6976,7 @@ def _run_simple_session_start(job: LifecycleJob, writer: SessionLifecycleStateWr
                 prompt=None,
                 detach=False,
                 image="autonomy-agent:dashboard",
-                metadata={"tmux_session": tmux_name, "graph_project": "autonomy"},
+                metadata={"tmux_session": tmux_name, "org": "autonomy"},
                 output_dir=str(run_dir),
                 global_claude_md=_REPO_ROOT / "agents/shared/terminal/CLAUDE.md",
             )
