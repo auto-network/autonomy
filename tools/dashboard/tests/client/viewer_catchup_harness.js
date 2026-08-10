@@ -77,6 +77,18 @@ class FixtureSession {
     return { stem: f.stem, idx: f.lines.length - 1 };
   }
 
+  // A fully-typed entry line (tool_use / tool_result / user …) — the
+  // agent-transcript shape (tool-heavy, long carrier runs) the anchor
+  // rule is exercised against.
+  appendTyped(payload) {
+    const f = this.current;
+    const start = f.completeSize;
+    const len = JSON.stringify(payload).length + 1;
+    f.lines.push({ content: undefined, typed: payload, start, len });
+    f.completeSize = start + len;
+    return { stem: f.stem, idx: f.lines.length - 1 };
+  }
+
   // A writer mid-line: bytes exist past completeSize with no newline.
   appendPartial(content) {
     this.current.partial = { content, bytes: Math.floor(JSON.stringify(content).length / 2) };
@@ -93,6 +105,12 @@ class FixtureSession {
 
   entryFor(stem, line) {
     if (line.content === null) return null;
+    if (line.typed) {
+      return Object.assign({}, line.typed, {
+        timestamp: line.typed.timestamp || '2026-08-10T12:00:00Z',
+        entry_ref: { file: stem, off: line.start, sub: 0 },
+      });
+    }
     return {
       type: 'assistant_text',
       role: 'assistant',
@@ -837,6 +855,84 @@ async function testJ_racingCatchupsMonotonic() {
   viewer.destroy();
 }
 
+// (k) auto-64nx3 acceptance — the anchor rule over an agent-transcript
+//     shape (tool-heavy, long carrier runs; the IMG_2110 window class):
+//     a mobile-small cold-open window landing mid-carrier-run renders
+//     NOTHING above its first anchor — no dangling fragment can appear
+//     as an empty USER tile or as ASSISTANT prose — and scroll-up makes
+//     the held entries render exactly once under their owning flow,
+//     with attribution identical to a full-buffer build.
+async function testK_anchorRuleAgentTranscript() {
+  console.log('\n── (k) anchor rule: agent-transcript scroll-back (auto-64nx3) ──');
+  const fixture = new FixtureSession();
+  fixture.appendTyped({ type: 'user', role: 'user', content: 'kick off the review' });
+  fixture.appendLine('starting the sweep');           // assistant_text anchor
+  const carrierIds = [];
+  for (let i = 0; i < 6; i++) {
+    fixture.appendTyped({ type: 'tool_use', role: 'assistant', tool_name: 'Bash',
+      tool_id: 'T' + i, input: { command: 'run ' + i } });
+    fixture.appendTyped({ type: 'tool_result', role: 'tool', tool_id: 'T' + i,
+      content: 'TLC suite results chunk ' + i, result_kind: 'exec_command',
+      status: 'completed' });
+    carrierIds.push('T' + i);
+  }
+  fixture.appendLine('verdict: green');               // later anchor
+  fixture.appendTyped({ type: 'tool_use', role: 'assistant', tool_name: 'Read',
+    tool_id: 'T9', input: { file_path: '/x' } });
+  fixture.appendTyped({ type: 'tool_result', role: 'tool', tool_id: 'T9',
+    content: 'tail read', result_kind: 'exec_command', status: 'completed' });
+
+  const client = makeClient(fixture);
+  const viewer = client.makeViewer();
+  // Mobile-small window: the page boundary lands mid-carrier-run,
+  // ABOVE the 'verdict' anchor.
+  viewer._initialTailUrl = function () { return TAIL + '?tail_entries=6'; };
+  await viewer.configure({ sessionId: SID, project: 'autonomy' });
+  await client.flush();
+  const store = client.win.getSessionStore(SID);
+  check(store.entries.length >= 6, 'cold window holds the mid-run fragments');
+
+  function resolvedTypes() {
+    return client.win.SessionDisplay
+      .buildAll(store.entries, store.localEntries)
+      .map((d) => {
+        const e = client.win.SessionDisplay.resolve(d, store.entries, store.localEntries);
+        return e && (d.type === 'group' ? 'tool_group' : e.type);
+      });
+  }
+  const page1 = resolvedTypes();
+  check(page1.indexOf('user') === -1,
+    'no dangling fragment renders as a USER tile', page1);
+  const firstRendered = client.win.SessionDisplay
+    .buildAll(store.entries, store.localEntries)[0];
+  const firstEntry = client.win.SessionDisplay
+    .resolve(firstRendered, store.entries, store.localEntries);
+  checkEqual(firstEntry && firstEntry.content, 'verdict: green',
+    'rendering starts at the window\'s first anchor');
+  const fetchesBefore = client.fetchLog.length;
+  await client.flush(2);
+  checkEqual(client.fetchLog.length, fetchesBefore,
+    'held entries trigger NO fetch of their own');
+
+  // Scroll up: the owning flow arrives; held entries render exactly once.
+  while (store.hasMoreHistory) { await viewer.loadOlder(); await client.flush(2); }
+  const fullDisplay = client.win.SessionDisplay.buildAll(store.entries, store.localEntries);
+  const keys = fullDisplay.map((d) => d.key);
+  checkEqual(keys.length, new Set(keys).size, 'every entry renders exactly once');
+  const types = resolvedTypes();
+  checkEqual(types[0], 'user', 'full flow renders from the true first anchor');
+  checkEqual(bufferRefs(client), fixture.expectedRefs(),
+    'buffer equals the file-set oracle');
+  // Attribution identity: the merged scroll-back display equals a
+  // fresh full-buffer build entry-for-entry (byte-identical attribution
+  // to the live rendering of the same lines).
+  const oracleDisplay = client.win.SessionDisplay.buildAll(store.entries, store.localEntries);
+  checkEqual(fullDisplay.map((d) => d.key), oracleDisplay.map((d) => d.key),
+    'scroll-back display identical to the full-buffer build');
+  assertNoLies(client, '(k)');
+  viewer.destroy();
+}
+
 (async () => {
   try {
     await testA_withheldBroadcasts();
@@ -849,6 +945,7 @@ async function testJ_racingCatchupsMonotonic() {
     await testH_stalledContinuationBacksOff();
     await testI_prunedPredecessorChain();
     await testJ_racingCatchupsMonotonic();
+    await testK_anchorRuleAgentTranscript();
   } catch (e) {
     console.error('HARNESS ERROR:', e);
     process.exit(2);
