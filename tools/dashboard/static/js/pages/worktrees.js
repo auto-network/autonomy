@@ -2574,15 +2574,22 @@
           open(self, r) {
             const staged = r.staged;
             const req = r.request || {};
+            const workspaces = staged && staged.workspaces;
             if (!staged || !Array.isArray(staged.fields) || !staged.fields.length ||
-                !staged.recipient_pub || !staged.nonce || !staged.purpose) {
+                !staged.recipient_pub || !staged.nonce ||
+                !Array.isArray(workspaces) || !workspaces.length ||
+                !staged.purposes ||
+                workspaces.some((ws) => typeof staged.purposes[ws] !== 'string')) {
               throw new Error('secure setting request has no server-frozen sealing context');
             }
             const lines = [req.description || ''];
             lines.push('', 'For: ' + (req.origin || 'unknown'),
               'Stored as: ' + (staged.target_key || '?') + ' (org ' + (staged.org || '?') + ')',
+              'Decryptable ONLY by workspace' + (workspaces.length > 1 ? 's' : '') +
+                ': ' + workspaces.join(', '),
               'Recipient key: ' + (staged.key_id || '?'),
-              '', 'Values are sealed in your browser — the server stores only ciphertext.');
+              '', 'Values are sealed in your browser — the server stores only ciphertext.',
+              'Widening the workspace list later requires re-provisioning here.');
             self.approvalBusy = false;
             self.approvalRequest = {
               id: r.id, kind: r.kind, session: r.session,
@@ -2596,7 +2603,8 @@
                   placeholder: f.placeholder || '', value: '', show: false,
                 })),
                 recipientPub: staged.recipient_pub,
-                purpose: staged.purpose,
+                purposes: staged.purposes,
+                workspaces,
                 nonce: staged.nonce,
               },
               awaitExecution: true,
@@ -2611,12 +2619,15 @@
               payload[f.key] = f.value;
             }
             const sealing = await import('../ceremony/sealing.js');
-            const record = await sealing.sealToEncapsulationKey(
-              new TextEncoder().encode(JSON.stringify(payload)),
-              s.recipientPub, s.purpose);
-            const sealedHex = Array.from(record)
-              .map((b) => b.toString(16).padStart(2, '0')).join('');
-            return { nonce: s.nonce, sealed_payload: sealedHex };
+            const plaintext = new TextEncoder().encode(JSON.stringify(payload));
+            const sealedPayloads = {};
+            for (const ws of s.workspaces) {
+              const record = await sealing.sealToEncapsulationKey(
+                plaintext, s.recipientPub, s.purposes[ws]);
+              sealedPayloads[ws] = Array.from(record)
+                .map((b) => b.toString(16).padStart(2, '0')).join('');
+            }
+            return { nonce: s.nonce, sealed_payloads: sealedPayloads };
           },
         },
         commit_sign: {

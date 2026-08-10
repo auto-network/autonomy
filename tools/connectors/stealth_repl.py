@@ -6,6 +6,14 @@ its own profile directory and TCP port so trusted-device state is never shared
 between providers.  The command surface intentionally resembles agent-browser:
 agents can take a semantic snapshot, use temporary element refs, or locate by
 role/label/text when a provider makes a small DOM change.
+
+Reachability is not authorization: agent containers run with
+``--network=host``, so every request — driving the browser as much as the
+login action — must authenticate with the caller's per-session
+``Authorization: Bearer $CROSSTALK_TOKEN``. Identity is resolved host-side
+from that token and the launcher-stamped session row (``repl_auth.py``);
+the caller never supplies a session or workspace. Unauthenticated callers
+get a liveness-only ``/health`` with no browsing state.
 """
 
 from __future__ import annotations
@@ -22,6 +30,13 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+# The host launches this file directly from the connector worktree (its own
+# directory on sys.path); tests import it as a package module.
+try:
+    import repl_auth
+except ImportError:  # pragma: no cover — package-import path
+    from tools.connectors import repl_auth
 
 
 INTERACTIVE_SNAPSHOT_JS = r"""
@@ -184,8 +199,14 @@ class BrowserController:
                     "error": str(exc),
                 }
 
-    def secure_login(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Fill a bounded login form using a host-decrypted secure Setting."""
+    def secure_login(self, request: dict[str, Any],
+                     caller: "repl_auth.ReplCaller") -> dict[str, Any]:
+        """Fill a bounded login form using a host-decrypted secure Setting.
+
+        ``caller`` is the authenticated identity the handler derived — its
+        workspace feeds the reconstructed HPKE label, so a credential not
+        sealed for that workspace does not decrypt.
+        """
         with self.lock:
             if not self.autonomy_root or not self.login_key_file:
                 raise CommandError("secure login is not configured for this REPL")
@@ -206,12 +227,14 @@ class BrowserController:
                     return {"authenticated": True, "already_authenticated": True,
                             "url": page.url, "title": page.title(),
                             "target_key": target_key}
-            # The host launches this file directly from the connector worktree,
-            # so its directory (not the worktree parent) is on sys.path.
-            from repl_login import load_credentials
+            try:
+                from repl_login import load_credentials
+            except ImportError:  # pragma: no cover — package-import path
+                from tools.connectors.repl_login import load_credentials
             credentials = load_credentials(
                 autonomy_root=self.autonomy_root, key_file=self.login_key_file,
-                org=org, target_key=target_key, expected_origin=origin)
+                org=org, target_key=target_key, expected_origin=origin,
+                caller_workspace=caller.workspace_id)
             start_url = page.url
             password_locator = None
             try:
@@ -470,19 +493,55 @@ class ReplHandler(BaseHTTPRequestHandler):
             # authoritative; a disconnected response is not a server fault.
             return
 
+    def _authenticate(self) -> "repl_auth.ReplCaller | None":
+        """Resolve the caller from the bearer token, or respond with the
+        refusal and return None. Any resolution failure fails closed."""
+        try:
+            return repl_auth.authenticate(
+                autonomy_root=self.controller.autonomy_root,
+                authorization=self.headers.get("Authorization"))
+        except repl_auth.ReplAuthError as exc:
+            self._json(exc.status, {"ok": False, "error": str(exc)})
+            return None
+        except Exception as exc:
+            traceback.print_exc()
+            self._json(403, {"ok": False,
+                             "error": f"caller authentication failed: {exc}"})
+            return None
+
     def do_GET(self) -> None:
         if self.path in {"/", "/health"}:
-            self._json(200, {"ok": True, **self.controller.status()})
+            # Liveness needs no identity, but browsing state (URL, title,
+            # profile paths) of an authenticated provider session must not
+            # leak to anyone who can merely open the socket.
+            try:
+                repl_auth.authenticate(
+                    autonomy_root=self.controller.autonomy_root,
+                    authorization=self.headers.get("Authorization"))
+            except Exception:
+                self._json(200, {
+                    "ok": True,
+                    "provider": self.controller.provider,
+                    "started_at": self.controller.started_at,
+                    "page_ready": self.controller.page is not None,
+                    "authenticated": False,
+                })
+                return
+            self._json(200, {"ok": True, "authenticated": True,
+                             **self.controller.status()})
             return
         self._json(404, {"ok": False, "error": "not found"})
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length)
+        caller = self._authenticate()
+        if caller is None:
+            return
         if self.path == "/api/login":
             try:
                 payload = json.loads(raw or b"{}")
-                result = self.controller.secure_login(payload)
+                result = self.controller.secure_login(payload, caller)
                 self._json(200, {"ok": True, "result": result})
             except Exception as exc:
                 self._json(400, {"ok": False, "error": str(exc)})
