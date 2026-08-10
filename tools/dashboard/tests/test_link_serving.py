@@ -773,12 +773,19 @@ class TestMissionResolver:
         mdb.init_db(tmp_path / "mission_control.db")
         self.mdb = mdb
 
+    # A mission grant's schema now REQUIRES meta.participant_id
+    # (auto-xwamk) -- every put_grant(..., "mission") call below carries
+    # one. It's not exercised by these serving-layer tests (that's
+    # auto-u0kxw's job, once the write op reads it), just present because
+    # a mission grant without one is no longer a valid grant to construct.
+    _PARTICIPANT = "guest:22222222-2222-4222-8222-222222222222"
+
     def test_mission_serves_current_revision_not_pinned(self):
         mission = self.mdb.create_mission("OSS Insights")
         mission_id = mission["mission_id"]
         self.mdb.push_site_revision(mission_id, "<html>rev one</html>", "first")
         token = _token(50)
-        put_grant(token, mission_id, "mission")
+        put_grant(token, mission_id, "mission", meta={"participant_id": self._PARTICIPANT})
         header, body = parse(serve(token))
         assert header["kind"] == "mission" and "content" not in header
         assert sliced(body, header["viewer"]) == b"<html>rev one</html>"
@@ -794,12 +801,12 @@ class TestMissionResolver:
     def test_mission_with_no_revision_yet_refused(self):
         mission = self.mdb.create_mission("Empty Mission")
         token = _token(51)
-        put_grant(token, mission["mission_id"], "mission")
+        put_grant(token, mission["mission_id"], "mission", meta={"participant_id": self._PARTICIPANT})
         assert serve(token) == link_serving.REFUSED
 
     def test_unknown_mission_refused(self):
         token = _token(52)
-        put_grant(token, str(uuid.uuid4()), "mission")
+        put_grant(token, str(uuid.uuid4()), "mission", meta={"participant_id": self._PARTICIPANT})
         assert serve(token) == link_serving.REFUSED
 
     def test_mission_forbids_content_field(self):
