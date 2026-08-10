@@ -45,6 +45,7 @@ from tools.network.idkit import DelegationCert, KeyPair
 
 from .channel import ChannelCrypto, build_server_hello, parse_client_hello
 from .frames import (
+    CHANNEL_ID_LEN,
     CTRL_CHANNEL_ID,
     FRAME_CLOSE,
     FRAME_CTRL,
@@ -197,6 +198,85 @@ def file_handler(path: str, content_type: str):
     return handler
 
 
+class Publisher:
+    """The push seam (auto-albp6.8): the one object that knows both which
+    tokens currently have listeners AND how to emit on the live tunnel.
+
+    The handler seam (``handler(token, message) -> response``) is invoked
+    only by an inbound record and never holds a reference to ``send``, so
+    there is no path for the serving side to emit anything unsolicited.
+    This closes that gap without changing the request/response loop: the
+    connector reports channel attach/detach here, hands over its shared
+    tunnel ``send_frame`` while a tunnel is up, and the application side
+    (``link_serving``) registers a stream key per token when a viewer
+    subscribes.
+
+    A publish is addressed BY TOKEN, not by channel: one sealed frame
+    leaves the tunnel per batch regardless of audience size, and the
+    relay's own Stream (auto-albp6.7) fans it out. That is the whole
+    point -- the connector's outbound cost must not scale with viewers.
+
+    The stream key never reaches this class or the relay. It is held by
+    the application side, which seals a frame before handing it here;
+    ``Publisher`` moves opaque bytes only.
+    """
+
+    def __init__(self):
+        #: token -> number of channels currently open against it. The
+        #: connector does no work for a token nobody is watching, so an
+        #: org holding many quiet published links costs nothing.
+        self._attached: dict[str, int] = {}
+        #: Live only while a tunnel is up; cleared in the serve loop's
+        #: finally so a publish between tunnels fails closed rather than
+        #: emitting into a dead socket.
+        self._send_frame = None
+
+    # -- connector side ------------------------------------------------
+
+    def bind(self, send_frame) -> None:
+        self._send_frame = send_frame
+
+    def unbind(self) -> None:
+        self._send_frame = None
+
+    def attached(self, token: str) -> None:
+        self._attached[token] = self._attached.get(token, 0) + 1
+
+    def detached(self, token: str) -> None:
+        remaining = self._attached.get(token, 0) - 1
+        if remaining > 0:
+            self._attached[token] = remaining
+        else:
+            self._attached.pop(token, None)
+
+    # -- application side ----------------------------------------------
+
+    def has_listeners(self, token: str) -> bool:
+        """Whether any channel is open against *token* right now. The
+        publish side checks this before doing any work at all."""
+        return token in self._attached
+
+    async def publish(self, token: str, sealed: bytes) -> bool:
+        """Emit one already-sealed frame for *token*, once. False means
+        it was not sent -- no tunnel, or nobody is listening -- and is
+        not an error: the live stream is best-effort by design and a
+        viewer recovers a gap through history on its own channel."""
+        send_frame = self._send_frame
+        if send_frame is None or not self.has_listeners(token):
+            return False
+        try:
+            token_bytes = bytes.fromhex(token)
+        except ValueError:
+            return False
+        if len(token_bytes) != CHANNEL_ID_LEN:
+            return False
+        try:
+            await send_frame(FRAME_DATA, token_bytes, sealed)
+        except Exception:
+            return False  # a dropped frame is recoverable through history
+        return True
+
+
 class TunnelConnector:
     def __init__(
         self,
@@ -208,12 +288,16 @@ class TunnelConnector:
         *,
         min_backoff: float = 0.2,
         max_backoff: float = 5.0,
+        publisher: "Publisher | None" = None,
     ):
         self._url = f"{relay_url.rstrip('/')}/t/{org}"
         self._org = org
         self._key = key
         self._cert = cert
         self._handler = handler
+        #: Optional push seam (auto-albp6.8). None leaves the connector's
+        #: behaviour byte-identical to before it existed.
+        self._publisher = publisher
         self._min_backoff = min_backoff
         self._max_backoff = max_backoff
         self._stop = asyncio.Event()
@@ -309,6 +393,10 @@ class TunnelConnector:
         # Publish the send hook so control() can emit on this live tunnel;
         # cleared in the finally so a call between tunnels fails closed.
         self._ctrl_send = send_frame
+        # Same lifetime for the push seam: one shared send_frame per
+        # tunnel, so a publish addressed by token leaves exactly once.
+        if self._publisher is not None:
+            self._publisher.bind(send_frame)
 
         def drop(channel_id: bytes) -> None:
             queue = channels.pop(channel_id, None)
@@ -334,6 +422,8 @@ class TunnelConnector:
                         continue
                     queue: asyncio.Queue = asyncio.Queue()
                     channels[frame.channel_id] = queue
+                    if self._publisher is not None:
+                        self._publisher.attached(token)
                     tasks[frame.channel_id] = asyncio.create_task(
                         self._serve_channel(frame.channel_id, token, queue, send_frame, drop)
                     )
@@ -345,6 +435,8 @@ class TunnelConnector:
                     drop(frame.channel_id)
         finally:
             self._ctrl_send = None
+            if self._publisher is not None:
+                self._publisher.unbind()
             # Fail any in-flight control calls rather than let them hang to
             # timeout — the tunnel that would carry their reply is gone.
             for correlation, future in list(self._pending.items()):
@@ -374,6 +466,10 @@ class TunnelConnector:
             with contextlib.suppress(Exception):
                 await send_frame(FRAME_CLOSE, channel_id)
         finally:
+            # Always deregister, on every exit path, so no publish ever
+            # targets a token whose last channel is gone.
+            if self._publisher is not None:
+                self._publisher.detached(token)
             drop(channel_id)
 
 

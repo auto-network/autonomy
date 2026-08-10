@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import Callable, Coroutine, Dict, Optional
+from collections import deque
+from typing import Callable, Coroutine, Dict, List, NamedTuple, Optional, Tuple
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
@@ -60,6 +61,17 @@ CLOSE_UNKNOWN_LINK = 4404  # unknown token or no serving tunnel
 CLOSE_REPLACED = 4409
 CLOSE_VIEWER_QUEUE_OVERFLOW = 4413
 CLOSE_TUNNEL_CHANNELS_EXCEEDED = 4429  # per-tunnel concurrent viewer cap hit
+# Resumable, not an error: this listener fell behind a stream's retention
+# window. The viewer reconnects and requests its own offset through history
+# (auto-albp6.7) -- distinct from every other close code above, none of
+# which are true for it.
+CLOSE_LISTENER_FELL_BEHIND = 4416
+
+# Stream (auto-albp6.7) retention, in precedence order -- the order is
+# load-bearing, see Stream._apply_retention.
+STREAM_EXPIRY_SECONDS = 60
+STREAM_BUFFER_CAP_BYTES = 1024 * 1024
+STREAM_MIN_RETAINED_FRAMES = 10
 
 # A single org tunnel may carry at most this many concurrent viewer channels.
 # Each channel is independently bounded to VIEWER_QUEUE_MAX_BYTES of relay
@@ -95,6 +107,11 @@ class _ViewerRelayChannel:
     ):
         self.ws = ws
         self.max_queued_bytes = max_queued_bytes
+        #: token of the Stream (auto-albp6.7) this channel is a listener
+        #: of, if any -- set by viewer_endpoint after attaching, read by
+        #: Tunnel to detach the listener wherever this channel is torn
+        #: down. None for every ordinary (non-session) channel.
+        self.stream_token: Optional[str] = None
         self._on_writer_failure = on_writer_failure
         self._queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._queued_bytes = 0
@@ -177,6 +194,108 @@ class _ViewerRelayChannel:
         await _close_quietly(self.ws, code)
 
 
+class _StreamFrame(NamedTuple):
+    """One buffered fan-out frame (auto-albp6.7). ``seq`` is a buffer-
+    position index internal to the relay -- never shown to a viewer, not
+    part of any wire protocol, and carries no ordering meaning to the
+    viewer, whose ordering comes from the byte ranges the connector puts
+    in the content."""
+    seq: int
+    written_at: float
+    payload: bytes
+
+
+class Listener:
+    """One channel's membership in a Stream's audience (auto-albp6.7).
+
+    Delivery reuses the channel's own already-existing bounded writer
+    (``_ViewerRelayChannel.try_enqueue``) instead of a second queue and
+    writer task on the same socket: two independent writers racing to
+    call ``send_bytes`` on one WebSocket could interleave and corrupt
+    frames, and there is already exactly one writer per socket, which is
+    the invariant worth keeping. ``cursor`` is the next buffer seq this
+    listener still needs; it only advances when a hand-off actually
+    succeeds, so a listener whose own queue is currently full falls
+    behind rather than silently losing frames.
+    """
+
+    def __init__(self, channel_id: bytes, viewer_channel: _ViewerRelayChannel, cursor: int):
+        self.channel_id = channel_id
+        self.viewer_channel = viewer_channel
+        self.cursor = cursor
+
+
+class Stream:
+    """One link's shared live buffer, fanned out to every attached
+    listener so publisher cost does not scale with audience size
+    (auto-albp6.7, drivers D1 and D6). Created when its first listener
+    attaches and destroyed when its last detaches -- publishing to a
+    token with no stream discards the frame rather than creating one;
+    streams are demand-driven by viewers, never by publishers.
+    """
+
+    def __init__(self, token: str):
+        self.token = token
+        self.buffer: "deque[_StreamFrame]" = deque()
+        self.listeners: Dict[bytes, Listener] = {}
+        self.retained_bytes = 0
+        self._next_seq = 0
+
+    def attach(self, channel_id: bytes, viewer_channel: _ViewerRelayChannel) -> None:
+        self.listeners[channel_id] = Listener(channel_id, viewer_channel, cursor=self._next_seq)
+
+    def detach(self, channel_id: bytes) -> None:
+        self.listeners.pop(channel_id, None)
+
+    def publish(self, payload: bytes, now: float) -> List[Tuple[bytes, _ViewerRelayChannel]]:
+        """Fan *payload* out to every attached listener. Returns the
+        ``(channel_id, viewer_channel)`` pairs evicted for falling
+        behind retention, for the caller (Tunnel) to close and account
+        for the same way any other channel closure is handled -- this
+        class only manages its own buffer/listener state, never touches
+        Tunnel.channels directly."""
+        frame = _StreamFrame(self._next_seq, now, bytes(payload))
+        self._next_seq += 1
+        self.buffer.append(frame)
+        self.retained_bytes += len(frame.payload)
+        for listener in list(self.listeners.values()):
+            if listener.viewer_channel.try_enqueue(frame.payload):
+                listener.cursor = frame.seq + 1
+        return self._apply_retention(now)
+
+    def _apply_retention(self, now: float) -> List[Tuple[bytes, _ViewerRelayChannel]]:
+        # Rule 1 (outermost, applied first): nothing older than the expiry
+        # window survives, regardless of consumption -- without this a
+        # listener that attaches and never advances would pin retention
+        # indefinitely at no ongoing cost.
+        while self.buffer and now - self.buffer[0].written_at > STREAM_EXPIRY_SECONDS:
+            dropped = self.buffer.popleft()
+            self.retained_bytes -= len(dropped.payload)
+        # Rule 2: once every current listener's cursor is past a frame, it
+        # is fully delivered -- discard it immediately, not just eventually.
+        if self.listeners:
+            min_cursor = min(listener.cursor for listener in self.listeners.values())
+            while self.buffer and self.buffer[0].seq < min_cursor:
+                dropped = self.buffer.popleft()
+                self.retained_bytes -= len(dropped.payload)
+        # Rule 3: size cap, but never below the floor -- one oversized turn
+        # must not evict the whole audience. This is the only rule that can
+        # drop a frame a listener still needs, so it is the only one that
+        # produces fallen-behind evictions.
+        fallen_behind: List[Tuple[bytes, _ViewerRelayChannel]] = []
+        while (
+            self.retained_bytes > STREAM_BUFFER_CAP_BYTES
+            and len(self.buffer) > STREAM_MIN_RETAINED_FRAMES
+        ):
+            dropped = self.buffer.popleft()
+            self.retained_bytes -= len(dropped.payload)
+            for channel_id, listener in list(self.listeners.items()):
+                if listener.cursor <= dropped.seq:
+                    del self.listeners[channel_id]
+                    fallen_behind.append((channel_id, listener.viewer_channel))
+        return fallen_behind
+
+
 class Tunnel:
     """A live dashboard connection plus its open viewer channels."""
 
@@ -184,6 +303,7 @@ class Tunnel:
         self.ws = ws
         self.org = org
         self.channels: Dict[bytes, _ViewerRelayChannel] = {}
+        self.streams: Dict[str, Stream] = {}
         self._send_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task] = set()
 
@@ -226,9 +346,44 @@ class Tunnel:
         del self.channels[channel_id]
         return True
 
+    def attach_listener(
+        self, token: str, channel_id: bytes, channel: _ViewerRelayChannel
+    ) -> None:
+        """*channel* becomes a listener of *token*'s stream, creating it
+        if this is the first listener (auto-albp6.7)."""
+        self.streams.setdefault(token, Stream(token)).attach(channel_id, channel)
+
+    def detach_listener(self, token: str, channel_id: bytes) -> None:
+        """Remove *channel_id* from *token*'s stream, destroying the
+        stream once its last listener is gone."""
+        stream = self.streams.get(token)
+        if stream is None:
+            return
+        stream.detach(channel_id)
+        if not stream.listeners:
+            del self.streams[token]
+
+    def publish_stream(self, token: str, payload: bytes, now: float) -> bool:
+        """Fan *payload* out to every listener of *token*'s stream.
+        Returns False (frame discarded) if no stream exists -- publishing
+        never creates one; only a listener attaching does."""
+        stream = self.streams.get(token)
+        if stream is None:
+            return False
+        fallen_behind = stream.publish(payload, now)
+        for channel_id, channel in fallen_behind:
+            if self.channels.get(channel_id) is channel:
+                del self.channels[channel_id]
+            channel.start_close(CLOSE_LISTENER_FELL_BEHIND)
+            self._notify_dashboard_closed(channel_id)
+        if not stream.listeners:
+            del self.streams[token]
+        return True
+
     async def close_all_viewers(self, code: int) -> None:
         channels = list(self.channels.values())
         self.channels.clear()
+        self.streams.clear()
         if channels:
             await asyncio.gather(
                 *(channel.close(code) for channel in channels),
@@ -247,6 +402,8 @@ class Tunnel:
         if self.channels.get(channel_id) is not failed:
             return
         del self.channels[channel_id]
+        if failed.stream_token is not None:
+            self.detach_listener(failed.stream_token, channel_id)
         self._notify_dashboard_closed(channel_id)
 
     def _notify_dashboard_closed(self, channel_id: bytes) -> None:
@@ -487,6 +644,18 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
                     break
                 continue
             if frame.channel_id not in tunnel.channels:
+                if frame.type == FRAME_DATA:
+                    # Not a live viewer channel -- try the same 16 bytes
+                    # as a stream token instead (auto-albp6.7): a relay
+                    # link token is a 128-bit CSPRNG value (idkit I2),
+                    # raw-byte-identical in length to a channel id, so a
+                    # publish reuses FRAME_DATA's existing shape rather
+                    # than adding a second frame type. A token naming no
+                    # stream is discarded, matching the existing
+                    # stale-frame behavior below.
+                    tunnel.publish_stream(
+                        frame.channel_id.hex(), frame.payload, now_fn()
+                    )
                 continue  # viewer already gone; stale frame
             if frame.type == FRAME_DATA:
                 tunnel.enqueue_viewer(frame.channel_id, frame.payload)
@@ -534,11 +703,20 @@ async def viewer_endpoint(websocket: WebSocket, token: str, hub: TunnelHub,
 
     channel_id = new_channel_id()
     relay_channel = tunnel.add_viewer(channel_id, websocket)
+    # Every channel is a candidate stream listener (auto-albp6.7) -- the
+    # relay cannot see target_type (it never parses grants, I5), so it
+    # cannot know here whether this token names a session/mission. That
+    # is fine: an un-published-to stream costs one empty buffer and one
+    # idle listener entry, and only auto-albp6.8's connector-side
+    # publisher ever decides which tokens actually receive frames.
+    relay_channel.stream_token = token
+    tunnel.attach_listener(token, channel_id, relay_channel)
     try:
         await tunnel.send_frame(FRAME_OPEN, channel_id,
                                 canonical_json({"token": token}))
     except Exception:
         tunnel.detach_viewer(channel_id, relay_channel)
+        tunnel.detach_listener(token, channel_id)
         await relay_channel.close(CLOSE_UNKNOWN_LINK)
         return
 
@@ -558,6 +736,7 @@ async def viewer_endpoint(websocket: WebSocket, token: str, hub: TunnelHub,
                 break  # tunnel died mid-channel
     finally:
         if tunnel.detach_viewer(channel_id, relay_channel):
+            tunnel.detach_listener(token, channel_id)
             await relay_channel.close(1001)
             with contextlib.suppress(Exception):
                 await tunnel.send_frame(FRAME_CLOSE, channel_id)

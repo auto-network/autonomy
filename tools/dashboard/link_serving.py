@@ -58,6 +58,7 @@ import contextlib
 import json
 import mimetypes
 import re
+import secrets
 import time
 import uuid as uuid_mod
 from pathlib import Path
@@ -774,6 +775,58 @@ async def _serve_write(token: str, org: str | None, request: dict, clock) -> byt
         return REFUSED
 
 
+#: Ops that hand a viewer the key to a fan-out stream (auto-albp6.8).
+SUBSCRIBE_OPS = ("subscribe",)
+
+#: target_types whose channels may subscribe to a live stream. Same
+#: default-off discipline as WRITE_ENABLED_TARGET_TYPES: a target_type
+#: not listed here gets the uniform refusal, so no stream key is ever
+#: minted for content nobody publishes.
+STREAM_ENABLED_TARGET_TYPES = frozenset({"mission"})
+
+#: token -> 32-byte stream key, for the life of this process. NOT the
+#: per-channel key: this one is shared by every viewer of a link, which
+#: is exactly what lets one sealed frame be fanned out by the relay
+#: instead of re-sealed per viewer. It is minted on first subscribe,
+#: never sent to the relay, and never appears in a published frame.
+#: Revocation needs no key machinery: check_grant runs BEFORE the key is
+#: handed over, so a revoked token never obtains it, and a viewer already
+#: holding it simply receives no further frames.
+_STREAM_KEYS: dict[str, bytes] = {}
+
+
+def _stream_key(token: str) -> bytes:
+    key = _STREAM_KEYS.get(token)
+    if key is None:
+        key = secrets.token_bytes(32)
+        _STREAM_KEYS[token] = key
+    return key
+
+
+def forget_stream_key(token: str) -> None:
+    """Drop a link's stream key -- called when a grant is revoked, so a
+    later republish of the same token cannot reuse a key old viewers
+    hold."""
+    _STREAM_KEYS.pop(token, None)
+
+
+async def _serve_subscribe(token: str, org: str | None, clock) -> bytes:
+    """One ``subscribe`` request → this link's stream key, or the uniform
+    refusal. The grant check happens FIRST and the key is handed over
+    only after it passes."""
+    grant = await asyncio.to_thread(check_grant, token, org=org, now=clock())
+    if grant is None:
+        return REFUSED
+    if grant["target_type"] not in STREAM_ENABLED_TARGET_TYPES:
+        return REFUSED  # byte-identical to the unknown-token refusal
+    try:
+        return canonical_json({
+            "v": 1, "status": "ok", "stream_key": _stream_key(token).hex(),
+        }) + b"\n"
+    except Exception:
+        return REFUSED
+
+
 def make_grant_handler(org: str | None = None, *, now=None):
     """Build the ``handler(token, message)`` the B2 connector serves with.
 
@@ -828,6 +881,8 @@ def make_grant_handler(org: str | None = None, *, now=None):
             return await asyncio.to_thread(_join, token, request)
         if op in WRITE_OPS:
             return await _serve_write(token, org, request, clock)
+        if op in SUBSCRIBE_OPS:
+            return await _serve_subscribe(token, org, clock)
         if op == "attachment.fetch":
             # A well-formed fetch returns a bounded async stream of body
             # frames (or a single error message); the connector streams it
