@@ -225,6 +225,69 @@ def test_resolve_mission_target_fails_clean_on_404(monkeypatch):
         link_cmd._resolve_mission_target(MISSION_TARGET)
 
 
+PARTICIPANT_ID = "guest:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+
+
+def test_resolve_mission_participant_confirms_existence(monkeypatch, capsys):
+    calls = []
+
+    def fake_api(method, path, **kwargs):
+        calls.append((method, path))
+        return {"visitor": {"participant_id": PARTICIPANT_ID, "display_name": "Priya (data partner)"}}
+
+    monkeypatch.setattr(link_cmd, "_api_request", fake_api)
+    assert link_cmd._resolve_mission_participant(PARTICIPANT_ID) == PARTICIPANT_ID
+    assert calls == [("GET", "/api/visitor-tokens/" + PARTICIPANT_ID)]
+    assert "Priya" in capsys.readouterr().out
+
+
+def test_resolve_mission_participant_fails_clean_on_404(monkeypatch):
+    def fake_api(method, path, **kwargs):
+        raise urllib.error.HTTPError(path, 404, "not found", {}, io.BytesIO(b""))
+
+    monkeypatch.setattr(link_cmd, "_api_request", fake_api)
+    with pytest.raises(SystemExit):
+        link_cmd._resolve_mission_participant(PARTICIPANT_ID)
+
+
+def test_publish_mission_requires_participant_flag(monkeypatch):
+    monkeypatch.setattr(link_cmd, "_resolve_mission_target", lambda t: MISSION_TARGET)
+    monkeypatch.setattr(
+        link_cmd, "_resolve_mission_participant",
+        lambda p: pytest.fail("should never reach participant resolution -- no --participant given"),
+    )
+    with pytest.raises(SystemExit):
+        link_cmd.cmd_link_publish(_publish_args(target=MISSION_TARGET, target_type="mission"))
+
+
+def test_publish_non_mission_rejects_participant_flag(monkeypatch):
+    monkeypatch.setattr(link_cmd, "_resolve_uuid_target", lambda t, ty: t)
+    with pytest.raises(SystemExit):
+        link_cmd.cmd_link_publish(_publish_args(
+            target=NOTE_TARGET, target_type="note", participant=PARTICIPANT_ID,
+        ))
+
+
+def test_publish_mission_binds_resolved_participant_into_meta(monkeypatch):
+    monkeypatch.setattr(link_cmd, "_resolve_mission_target", lambda t: MISSION_TARGET)
+    monkeypatch.setattr(link_cmd, "_resolve_mission_participant", lambda p: p)
+    captured = {}
+
+    def fake_post_approval(kind, request):
+        captured.update(request)
+        return "approval-id"
+
+    monkeypatch.setattr(link_cmd, "_post_approval", fake_post_approval)
+    monkeypatch.setattr(
+        link_cmd, "_await_decision",
+        lambda approval_id, verb: {"url": "https://relay.auto.network/l/deadbeef"},
+    )
+    link_cmd.cmd_link_publish(_publish_args(
+        target=MISSION_TARGET, target_type="mission", participant=PARTICIPANT_ID,
+    ))
+    assert captured["meta"]["participant_id"] == PARTICIPANT_ID
+
+
 def test_mission_target_type_does_not_fall_through_to_uuid_resolver(monkeypatch):
     """Regression: mission must not silently hit _resolve_uuid_target's
     note/file-shaped type check, which knows nothing about mission_id."""
@@ -247,7 +310,16 @@ def test_mission_target_type_does_not_fall_through_to_uuid_resolver(monkeypatch)
         link_cmd, "_await_decision",
         lambda approval_id, verb: {"url": "https://relay.auto.network/l/deadbeef"},
     )
-    link_cmd.cmd_link_publish(_publish_args(target=MISSION_TARGET, target_type="mission"))
+    # A mission grant now requires a resolved participant (auto-tp1v9) --
+    # mocked here since this test is about the target-resolution dispatch
+    # above it, not participant resolution (covered separately below).
+    monkeypatch.setattr(
+        link_cmd, "_resolve_mission_participant",
+        lambda participant_id: participant_id,
+    )
+    link_cmd.cmd_link_publish(_publish_args(
+        target=MISSION_TARGET, target_type="mission", participant="guest:test-1",
+    ))
 
 
 def test_publish_prints_url(operator_env, capsys):

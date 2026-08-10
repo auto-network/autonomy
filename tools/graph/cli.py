@@ -5612,7 +5612,8 @@ def main():
         "link",
         help="Share-links (publish/revoke/list) or create edge between two graph nodes",
         epilog="Share-links (operator-approved, spec graph://a17c8657-939):\n"
-               "  graph link publish <target-id> --type present|design|note|file|mission [--ttl 7d] [--label text]\n"
+               "  graph link publish <target-id> --type present|design|note|file [--ttl 7d] [--label text]\n"
+               "  graph link publish <mission-id> --type mission --participant <participant_id> [--ttl 7d]\n"
                "  graph link publish <invite-event-id> --type org:join --invite-token-fd <fd>\n"
                "  graph link revoke <token>\n"
                "  graph link list\n"
@@ -5629,6 +5630,12 @@ def main():
                    help="publish: what kind of artifact the target id names")
     p.add_argument("--ttl", help="publish: link lifetime (e.g. 3600, 24h, 7d); default no expiry")
     p.add_argument("--label", help="publish: human label carried on the grant")
+    p.add_argument(
+        "--participant",
+        help="publish --type mission (required): participant_id of an already-minted "
+             "Mission Control visitor (graph mission visitor-token) this personalized "
+             "link is bound to",
+    )
     p.add_argument(
         "--invite-token-fd",
         type=int,

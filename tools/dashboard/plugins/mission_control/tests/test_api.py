@@ -363,6 +363,25 @@ def test_create_visitor_token_requires_display_name():
     assert resp.status_code == 400
 
 
+def test_get_visitor_by_participant_id():
+    client = _client()
+    visitor = client.post(
+        "/api/visitor-tokens", json={"display_name": "Priya (data partner)"},
+    ).json()["visitor"]
+    resp = client.get(f"/api/visitor-tokens/{visitor['participant_id']}")
+    assert resp.status_code == 200
+    found = resp.json()["visitor"]
+    assert found["participant_id"] == visitor["participant_id"]
+    assert found["display_name"] == "Priya (data partner)"
+    assert "token" not in found
+
+
+def test_get_visitor_by_participant_id_missing_returns_404():
+    client = _client()
+    resp = client.get("/api/visitor-tokens/guest:nope")
+    assert resp.status_code == 404
+
+
 # ── Mission conversation (P2 Q&A) ─────────────────────────────────
 
 
