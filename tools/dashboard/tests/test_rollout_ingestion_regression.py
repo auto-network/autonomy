@@ -11,8 +11,11 @@ stale ``last_message`` while the transcript endpoint served the answer.
 Timeline reproduced here (empty-create → burst → quiet):
 
   1. a Codex container session registers over an EMPTY sessions dir
-  2. Codex creates an EMPTY rollout; the IN_CREATE handler classifies it
-     ``unknown`` and abandons after its bounded header retries
+  2. Codex creates an EMPTY rollout; on the pre-fix code the IN_CREATE
+     handler classifies it ``unknown`` and gives up (after ITS bounded
+     header retries — note the incident's ``watch_scan`` path never
+     retried at all: it logged ``action=defer`` and returned with no
+     object retaining responsibility, which is the same gap sooner)
   3. Codex writes its full startup burst (session_meta + first assistant
      message) and goes quiet — NO further write ever happens
   4. the reconciliation tick runs and links the now-classifiable file

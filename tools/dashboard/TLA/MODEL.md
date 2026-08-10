@@ -88,8 +88,8 @@ no await" clauses are modeled as single atomic actions — they are
 | `ObserveOutcome` | `observe_rollout` (bead design; today `_handle_jsonl_appeared`, 1875) |
 | `Promote` (CAS, close-superseded, broadcast suppression) | bead `promote_to_streaming`; today `resolve_session` + `_link_session_file` + broadcast at 1966-1971 |
 | `ClaimDrain` / `ClaimContended` / dirty | bead `request_drain` (design; no equivalent today — the absence is CalNoDrainGate) |
-| `WkReadRow`..`WkFinal` | bead `drain_as_owner`; today `_tail_one` (3449) + `_process_tail_entries` (2282) |
-| `WkPersist` order switch | `update_tail_state` call inside `_tail_one` at 3545/3566 — **persist-before-process is the shipped order** (A4) |
+| `WkReadRow`..`WkFinal` | `_drain_as_owner` → `_read_tail_window` (pure worker read) → `_publish_tail_window` → `_persist_tail_window` (the pre-fix `_tail_one` is deleted) |
+| `WkPersist` order switch | `_persist_tail_window` → `persist_tail_state` (path+generation CAS) — **publish-then-persist is the shipped order**; persist-before-process was the pre-fix `_tail_one` order (A4/CalOffsetAckFirst) |
 | `ReconLateObserve` / `ReconRecheck` / `ReconExpire` | `reconciliation_tick` (3796); the unrestricted scan is finding N3's fix — today's code gates on `jsonl_path IS NULL` |
 | `Restart` / `RecoverLinked` | `_on_startup` -> `_init_inotify` (1749, sync `def`) / `_recover_unresolved_sessions` (1662, `async def`) |
 | `PollerSet` | `_screen_poll_loop` writing `harness_state.composer_ready` |
