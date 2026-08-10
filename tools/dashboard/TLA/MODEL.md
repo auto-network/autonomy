@@ -132,6 +132,10 @@ Recorded so nobody mistakes model silence for a checked guarantee:
   dao code: no `state`/`startup_state` parameters), so lifecycle
   non-interference is by construction and not modeled at all.
   `STATE_AUTHORITY` does not appear in this model.
+- **Late flush.**  A superseded main may receive `LateFlushBudget`
+  further writes (nothing proves the old file goes quiet when the
+  successor opens).  `sealedSet`/`sealedAt` are ghost observer
+  variables — specification history, so they survive restart.
 - **Budgets bound the environment**: at most one restart, one crash,
   one cancellation, one poller write per behavior (per config).  Every
   found violation needs at most one of each; raising budgets grows the
@@ -143,7 +147,12 @@ Recorded so nobody mistakes model silence for a checked guarantee:
   three-file chain only for rollover races (a CAS race needs
   loser + winner + a superseded row).  `MaxLines = 2` (1 for rollover
   configs): duplicate/lost-byte phenomena need one boundary between
-  "some" and "more"; symmetry beyond that adds nothing.
+  "some" and "more"; symmetry beyond that adds nothing.  Config split:
+  the rollover configs run with `CancelBudget = 0` — cancellation
+  mechanics are chain-agnostic and fully exercised in the two-file
+  configs, and their one chain interaction (continuation retargeting)
+  is also exercised by the crash budget; the cross-product would
+  multiply the seal/late-flush state space for no new phenomena.
 
 ## Model-discovered findings (fed back into the design)
 
@@ -163,9 +172,14 @@ Recorded so nobody mistakes model silence for a checked guarantee:
   file win last and the newest file close as superseded — a permanent
   wrong-file link with no recovery signal (`EventuallyLinked`
   violation).  Fix modeled: a late/ambiguous main promotes only if no
-  successor exists (`NoNewerExists`); a characterized main with an
-  existing successor closes as superseded.  In production the
+  VIABLE newer file exists (`NoNewerExists`); a characterized main
+  with a viable newer file closes as superseded.  In production the
   succession order is available from rollout filename timestamps.
+  **Refinement (second counterexample, found under the no-loss
+  properties): "newer" must mean a chain-later file WITH CONTENT.**
+  An empty successor may be quarantined and never linkable; treating
+  its mere existence as supersession closes the contentful file and
+  strands its lines forever (`PublishedUpToSeal` violation).
 - **N3 — the reconciliation pending-scan must not be gated on
   unresolved rows.**  A restart between a rollover's CREATE and its
   link leaves a linked row, a lost kernel queue, and a successor file
@@ -210,6 +224,18 @@ Recorded so nobody mistakes model silence for a checked guarantee:
   what prevents this; implementers should treat that clause as
   essential, not defensive boilerplate.  (Also a demonstration that the
   green suite catches model-fidelity errors, not just design errors.)
+- **N5 — promoting the already-linked path is ALWAYS a re-attach.**
+  The first-resolution/rollover CAS rightly refuses `rowPath = f`, so
+  any path that leaves the linked file's own track in CHARACTERIZING
+  (a deferred handover racing a direct promotion of the same file; a
+  reconciliation re-observation) would churn that CAS forever — the
+  linked file ends up permanently unpromotable while linked
+  (green-liveness counterexample, 31 states).  Rule fed back into the
+  design: every promotion of the file the row already links takes
+  persisted-identity re-attach semantics (offset preserved, catch-up
+  drain requested), in `observe_rollout`, in the handover commit's
+  stale branch, and anywhere else a verified-main track can meet its
+  own row.
 - **A4 adjudication (design question left open by the review).**
   `CalOffsetAckFirst` (persist-then-process, the shipped order)
   violates `EventuallyDrained` under one crash: the offset is acked
@@ -219,6 +245,41 @@ Recorded so nobody mistakes model silence for a checked guarantee:
   (dedup by line index/offset before persist) satisfies both — the
   green configs run `PersistOrder = "idempotent"`, which is therefore
   a REQUIREMENT on the implementation, not a free choice.
+
+
+## Ordered handover (operator decision, 2026-08-09)
+
+Operator ruling: losing a superseded rollout's unread tail is NOT
+acceptable (today's code and the bead as written both cede it), and the
+guarantee must be proven.  The model now includes the required design:
+a verified successor defers its link (`pendingLink`); predecessors are
+made READY oldest-first — published to current end-of-file AND
+final-checked ("sealed") — and the link commits only through a guard
+that re-reads the filesystem, so the pre-advance final check is
+structural.  Checked properties: `OrderedDelivery` (safety: nothing
+publishes from a successor while any predecessor is neither fully
+published nor sealed) and `PublishedUpToSeal` (liveness: every existing
+main publishes up to its seal; the linked file in full).  `CalCedeTail`
+restores the link-immediately/cede-the-tail behavior and must fail.
+
+**Impossibility result (model-proven):** strict no-loss AND strict
+global order are jointly unsatisfiable once a superseded file can
+receive a late-flushed write (`LateFlushBudget` models this): TLC
+produced the trace — a late flush landing on an earlier file after a
+later file already published.  Nothing can prove a file won't be
+written after its successor opens.  What IS proven: every byte present
+at a file's final pre-advance check is published; checks happen in
+chain order before anything later publishes; bytes arriving after a
+file's check are the explicit residual (`consumed >= sealedAt`, not
+`= fLines`).  The operator's tick-reselect backstop suggestion was
+separately rejected as over-design; kernel-queue overflow remains a
+documented abstraction.
+
+Implementation consequences for the bead: promotion of a rollover
+successor performs (inside the serialized finalization, before the
+link) a final catch-up drain of every not-yet-checked predecessor in
+chain order, then advances; the drain is idempotent-by-line-index so
+crash/restart re-walks are safe.
 
 ## Calibration switches
 
@@ -244,6 +305,7 @@ adversarial review, and must FAIL its config (see `calibration/`):
 | CalNoEpochBarrier | A7 watch-level continuity | NoChildAdoption |
 | CalPerPathGates | A1 per-(s,f) gates, no gen CAS | OffsetCoherent |
 | CalRolloverCAS | B4 CAS loser terminal | EventuallyLinked (newest closed) |
+| CalCedeTail | today's rollover: link immediately, cede the old tail | OrderedDelivery |
 
 Green configurations: `GreenCore` / `GreenLive` (main + sibling, all
 budgets on), `GreenRollover` / `GreenRolloverLive` (three-file chain,

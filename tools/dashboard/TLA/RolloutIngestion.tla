@@ -45,9 +45,11 @@ CONSTANTS
     EpochBarrier,       \* TRUE  | FALSE: A7 no registration-epoch snapshot
     MergeHarnessAtWrite,\* TRUE  | FALSE: B7 harness_state RMW clobber
     GateReleaseOnCancel,\* "guarded" | "finally" (A5) | "none" (B5)
+    OrderedHandover,    \* TRUE  | FALSE: rollover cedes the old file's tail
     WORKERS,            \* drain worker slots per session, e.g. {"wA","wB"}
     \* ---- environment budgets -------------------------------------------
-    RestartBudget, CrashBudget, CancelBudget, PollerBudget
+    RestartBudget, CrashBudget, CancelBudget, PollerBudget,
+    LateFlushBudget     \* writes landing on a SUPERSEDED main (late flush)
 
 NoFile    == "none"
 MaxPasses == 2                  \* bounded consecutive dirty passes
@@ -75,21 +77,32 @@ VARIABLES
     \* -- drain workers (own processes; the awaiter is separate) --
     wk,             \* [SESSIONS \X WORKERS -> [pc, file, snap, upTo, hs,
                     \*                          passes, cancelled]]
+    \* -- ordered handover (in-memory): a verified successor whose
+    \*    predecessors still have unpublished lines waits here --
+    pendingLink,    \* [SESSIONS -> FILES \cup {NoFile}]
+    pendingExp,     \* [SESSIONS -> FILES \cup {NoFile}] CAS expectation
     \* -- persisted DB row (tmux_sessions) --
     rowPath, rowOffset, rowComposer, composerEverSet,
     \* -- operator-visible outcomes --
     consumed,       \* [FILES -> Nat] line-processings delivered downstream
     regLinked, regCount,
+    \* -- ghost history (specification observers, survive restart) --
+    sealedSet,      \* files whose pre-advance final check has happened
+    sealedAt,       \* [FILES -> 0..MaxLines] lines present at that check
     \* -- environment budgets --
-    restartsLeft, crashesLeft, cancelsLeft, pollsLeft
+    restartsLeft, crashesLeft, cancelsLeft, pollsLeft, lateFlushLeft
 
 vars == << fExists, fLines, wActive, registered, epochSnap, createSeen,
            evCreate, evMod, track, busyS, dirtyS, busyF, dirtyF, drainReq,
-           pubAfter, cancelRel, wk, rowPath, rowOffset, rowComposer,
+           pubAfter, cancelRel, pendingLink, pendingExp, wk,
+           rowPath, rowOffset, rowComposer,
            composerEverSet, consumed, regLinked, regCount,
-           restartsLeft, crashesLeft, cancelsLeft, pollsLeft >>
+           sealedSet, sealedAt,
+           restartsLeft, crashesLeft, cancelsLeft, pollsLeft,
+           lateFlushLeft >>
 
-envVars  == << restartsLeft, crashesLeft, cancelsLeft, pollsLeft >>
+envVars  == << restartsLeft, crashesLeft, cancelsLeft, pollsLeft,
+               lateFlushLeft >>
 fsVars   == << fExists, fLines, wActive >>
 chanVars == << registered, epochSnap, createSeen, evCreate, evMod >>
 rowVars  == << rowPath, rowOffset, rowComposer, composerEverSet >>
@@ -129,6 +142,34 @@ TrackArmed(s, f) == track[<<s, f>>].st \in {"char", "stream"}
 \* per-session gate — the claimed file may have been superseded meanwhile.
 ContinueTarget(s, f0) ==
     IF PerSessionGate /\ rowPath[s] # NoFile THEN rowPath[s] ELSE f0
+
+\* Chain order: g strictly precedes f in a session's rollover succession
+\* (bounded to three-file chains, matching the scenarios).
+ChainBefore(g, f) ==
+    /\ g # f
+    /\ \/ FSucc[g] = f
+       \/ FSucc[g] # NoFile /\ FSucc[FSucc[g]] = f
+
+\* Predecessors of f that exist on disk with unpublished lines.
+HasIncompletePred(f) ==
+    \E g \in FILES :
+        g \in fExists /\ ChainBefore(g, f) /\ consumed[g] < fLines[g]
+
+\* A predecessor is READY once it is published to its current end-of-file
+\* AND its final check has been recorded (sealed).  The handover walk
+\* makes predecessors ready oldest-first, so no later file publishes
+\* before every earlier file's check.
+PredReady(g) == consumed[g] = fLines[g] /\ g \in sealedSet
+
+HasUnreadyPred(f) ==
+    \E g \in FILES :
+        g \in fExists /\ ChainBefore(g, f) /\ ~PredReady(g)
+
+OldestUnreadyPred(f) ==
+    CHOOSE g \in FILES :
+        /\ g \in fExists /\ ChainBefore(g, f) /\ ~PredReady(g)
+        /\ \A q \in FILES :
+             (q \in fExists /\ ChainBefore(q, g)) => PredReady(q)
 AnyArmed(f)      == \E s \in SESSIONS : TrackArmed(s, f)
 Max(a, b)        == IF a >= b THEN a ELSE b
 FreeSlot(s)      == \E w \in WORKERS : wk[<<s, w>>].pc = "idle"
@@ -139,11 +180,15 @@ PickSlot(s)      == CHOOSE w \in WORKERS : wk[<<s, w>>].pc = "idle"
 DirWatched(f) == FSession[f] \in registered
 
 \* Finding N2 (model-discovered): a late-provenance main may promote only
-\* if no successor rollout exists — otherwise late multi-main resolution
-\* can settle the row on a superseded file and strand the newest one
-\* (writers create successors in chain order, so checking the direct
-\* successor suffices).
-NoNewerExists(f) == FSucc[f] = NoFile \/ FSucc[f] \notin fExists
+\* if no VIABLE newer rollout exists — otherwise late multi-main
+\* resolution can settle the row on a superseded file and strand the
+\* newest one.  Refinement (second counterexample): "newer" must mean a
+\* chain-later file WITH CONTENT — an empty successor is not yet viable
+\* (it may be quarantined and never linkable), and treating it as a
+\* superseder strands the contentful file's lines forever.
+NoNewerExists(f) ==
+    ~\E g \in FILES :
+        ChainBefore(f, g) /\ g \in fExists /\ fLines[g] > 0
 
 \* Can (s, f) be (re-)observed?  Terminal tracks re-open only per
 \* ReobserveMode; live tracks are idempotently skipped by the callers.
@@ -176,6 +221,8 @@ Init ==
     /\ drainReq = [p \in SESSIONS \X FILES |-> FALSE]
     /\ pubAfter = [s \in SESSIONS |-> FALSE]
     /\ cancelRel = [s \in SESSIONS |-> FALSE]
+    /\ pendingLink = [s \in SESSIONS |-> NoFile]
+    /\ pendingExp = [s \in SESSIONS |-> NoFile]
     /\ wk = [p \in SESSIONS \X WORKERS |-> WkInit]
     /\ rowPath = [s \in SESSIONS |-> NoFile]
     /\ rowOffset = [s \in SESSIONS |-> 0]
@@ -184,10 +231,13 @@ Init ==
     /\ consumed = [f \in FILES |-> 0]
     /\ regLinked = [s \in SESSIONS |-> FALSE]
     /\ regCount = [s \in SESSIONS |-> 0]
+    /\ sealedSet = {}
+    /\ sealedAt = [f \in FILES |-> 0]
     /\ restartsLeft = RestartBudget
     /\ crashesLeft = CrashBudget
     /\ cancelsLeft = CancelBudget
     /\ pollsLeft = PollerBudget
+    /\ lateFlushLeft = LateFlushBudget
 
 (***************************************************************************)
 (* Core: promotion (serialized finalization) and observation.              *)
@@ -198,7 +248,8 @@ Init ==
 
 CoreUnchanged ==
     UNCHANGED << track, rowPath, rowOffset, regLinked, regCount, pubAfter,
-                 busyS, busyF, dirtyS, dirtyF, drainReq >>
+                 busyS, busyF, dirtyS, dirtyF, drainReq,
+                 pendingLink, pendingExp, sealedSet, sealedAt >>
 
 \* Rollover / first-resolution compare-and-set:
 \*   persisted provenance re-attaches the already-linked file;
@@ -212,9 +263,8 @@ CASOk(s, f, prv, exp) ==
 \* models entry points with no running event loop (_init_inotify, startup
 \* recovery): under the broken design the busy claim happens but the drain
 \* task is never scheduled (B2).
-Promote(s, f, prv, exp, sync) ==
-    IF CASOk(s, f, prv, exp)
-    THEN LET old == rowPath[s] IN
+LinkEffect(s, f, prv, sync, exp) ==
+    LET old == rowPath[s] IN
          /\ rowPath' = [rowPath EXCEPT ![s] = f]
          /\ rowOffset' = IF prv = "persisted" THEN rowOffset
                          ELSE [rowOffset EXCEPT ![s] = 0]
@@ -248,13 +298,57 @@ Promote(s, f, prv, exp, sync) ==
                  /\ busyF' = busyF
                  /\ drainReq' = drainReq
          /\ UNCHANGED << dirtyS, dirtyF >>
+         \* Ghost: advancing past the predecessors IS their pre-advance
+         \* final check — seal each not-yet-sealed one at the line count
+         \* present right now.  (In the green design the handover/commit
+         \* guard guarantees consumed = fLines here; in the cede design
+         \* this seals unpublished lines, which the OrderedDelivery
+         \* invariant then exposes.)
+         /\ LET newPreds == {g \in FILES :
+                               g \in fExists /\ ChainBefore(g, f)
+                               /\ g \notin sealedSet}
+            IN /\ sealedSet' = sealedSet \cup newPreds
+               /\ sealedAt' = [g \in FILES |->
+                                 IF g \in newPreds THEN fLines[g]
+                                 ELSE sealedAt[g]]
+
+\* Promote (s, f): CAS, then either link directly, or — when predecessors
+\* still hold unpublished lines (operator requirement: no content loss,
+\* in order) — defer the link into the ordered handover: predecessors are
+\* published oldest-first (HandoverDrain) and the link commits afterwards
+\* (CommitLink).
+Promote(s, f, prv, exp, sync) ==
+    IF prv # "persisted" /\ rowPath[s] = f
+    THEN \* Promoting the file the row ALREADY links is a re-attach
+         \* (persisted-identity semantics), never a first-resolution or
+         \* rollover CAS — that CAS rightly refuses rowPath = f, and a
+         \* track left in CHARACTERIZING for its own linked file would
+         \* churn the CAS forever (TLC counterexample: a deferred
+         \* handover racing a direct promotion of the same file).
+         /\ LinkEffect(s, f, "persisted", sync, f)
+         /\ UNCHANGED << pendingLink, pendingExp >>
+    ELSE
+    IF CASOk(s, f, prv, exp)
+    THEN IF OrderedHandover /\ prv # "persisted" /\ HasIncompletePred(f)
+         THEN \* defer: no link, no broadcast, no offset reset yet
+              /\ pendingLink' = [pendingLink EXCEPT ![s] = f]
+              /\ pendingExp' = [pendingExp EXCEPT ![s] = exp]
+              /\ track' = [track EXCEPT ![<<s, f>>] =
+                             [st |-> "char", prov |-> prv, expPrev |-> exp,
+                              dl |-> FALSE, closeL |-> 0]]
+              /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
+                              pubAfter, busyS, busyF, dirtyS, dirtyF,
+                              drainReq, sealedSet, sealedAt >>
+         ELSE /\ LinkEffect(s, f, prv, sync, exp)
+              /\ UNCHANGED << pendingLink, pendingExp >>
     ELSE \* CAS lost: never overwrite the newer association
          /\ track' = [track EXCEPT ![<<s, f>>] =
                 IF CASRetry
                 THEN [@ EXCEPT !.st = "char", !.expPrev = rowPath[s]]
                 ELSE [@ EXCEPT !.st = "closed", !.closeL = fLines[f]]]
          /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount, pubAfter,
-                         busyS, busyF, dirtyS, dirtyF, drainReq >>
+                         busyS, busyF, dirtyS, dirtyF, drainReq,
+                         pendingLink, pendingExp, sealedSet, sealedAt >>
 
 \* Observe (s, f) with provenance p.  Trusted provenance (birth continuity
 \* or persisted identity) promotes WITHOUT content classification — that is
@@ -281,20 +375,23 @@ ObserveOutcome(s, f, p, sync) ==
                              [chr EXCEPT !.st = "ign", !.closeL = fLines[f]]]
               /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
                               pubAfter, busyS, busyF, dirtyS, dirtyF,
-                              drainReq >>
+                              drainReq,
+                              pendingLink, pendingExp, sealedSet, sealedAt >>
          ELSE IF cls = "main"
          THEN \* ambiguous provenance: characterize; verification promotes
               \* on the next recheck/event step (never skips CHARACTERIZING)
               /\ track' = [track EXCEPT ![<<s, f>>] = chr]
               /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
                               pubAfter, busyS, busyF, dirtyS, dirtyF,
-                              drainReq >>
+                              drainReq,
+                              pendingLink, pendingExp, sealedSet, sealedAt >>
          ELSE \* unknown
               IF RetainUnknown
               THEN /\ track' = [track EXCEPT ![<<s, f>>] = chr]
                    /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
                                    pubAfter, busyS, busyF, dirtyS, dirtyF,
-                                   drainReq >>
+                                   drainReq,
+                                   pendingLink, pendingExp, sealedSet, sealedAt >>
               ELSE \* defer without an owner (watch_scan path): no track,
                    \* no retry, responsibility dropped
                    CoreUnchanged
@@ -329,18 +426,24 @@ WCreateSub(f) ==
     /\ UNCHANGED obsVars /\ UNCHANGED envVars
 
 \* Append one complete line.  Edge-triggered: a MODIFY is queued only if
-\* some track is armed at write time.
+\* some track is armed at write time.  A SUPERSEDED main may still receive
+\* a bounded number of late-flushed lines (the operator's point: nothing
+\* proves the old file goes quiet when the successor opens).
 WWrite(f) ==
+    LET late == FKind[f] = "main" /\ wActive[FSession[f]] # f IN
     /\ f \in fExists
     /\ fLines[f] < MaxLines
-    /\ (FKind[f] = "sub" \/ wActive[FSession[f]] = f)
+    /\ (FKind[f] = "sub" \/ wActive[FSession[f]] = f
+        \/ (late /\ lateFlushLeft > 0))
     /\ fLines' = [fLines EXCEPT ![f] = @ + 1]
     /\ evMod' = IF AnyArmed(f) THEN evMod \cup {f} ELSE evMod
+    /\ lateFlushLeft' = IF late THEN lateFlushLeft - 1 ELSE lateFlushLeft
     /\ UNCHANGED << fExists, wActive, registered, epochSnap, createSeen,
                     evCreate >>
     /\ CoreUnchanged
     /\ UNCHANGED << cancelRel, wk, rowComposer, composerEverSet >>
-    /\ UNCHANGED obsVars /\ UNCHANGED envVars
+    /\ UNCHANGED obsVars
+    /\ UNCHANGED << restartsLeft, crashesLeft, cancelsLeft, pollsLeft >>
 
 WRollover(s) ==
     /\ wActive[s] # NoFile
@@ -366,7 +469,7 @@ PollerSet(s) ==
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars /\ CoreUnchanged
     /\ UNCHANGED << cancelRel, wk, rowPath, rowOffset >>
     /\ UNCHANGED obsVars
-    /\ UNCHANGED << restartsLeft, crashesLeft, cancelsLeft >>
+    /\ UNCHANGED << restartsLeft, crashesLeft, cancelsLeft, lateFlushLeft >>
 
 (***************************************************************************)
 (* Event delivery and registration (the asyncio inotify loop).             *)
@@ -431,7 +534,8 @@ DeliverModify(f) ==
                                               !.closeL = fLines[f]]]
                      /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
                                      pubAfter, busyS, busyF, dirtyS, dirtyF,
-                                     drainReq >>
+                                     drainReq,
+                                     pendingLink, pendingExp, sealedSet, sealedAt >>
                 ELSE IF EffClassify(f) = "main" /\ NoNewerExists(f)
                 THEN Promote(s, f, tr.prov, tr.expPrev, FALSE)
                 ELSE IF EffClassify(f) = "main"
@@ -441,7 +545,8 @@ DeliverModify(f) ==
                                               !.closeL = fLines[f]]]
                      /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
                                      pubAfter, busyS, busyF, dirtyS, dirtyF,
-                                     drainReq >>
+                                     drainReq,
+                                     pendingLink, pendingExp, sealedSet, sealedAt >>
                 ELSE \* still unknown: the event-driven deadline check —
                      \* under the broken design this is the ONLY place the
                      \* deadline is ever evaluated (T110)
@@ -451,13 +556,15 @@ DeliverModify(f) ==
                                                    !.closeL = fLines[f]]]
                           /\ UNCHANGED << rowPath, rowOffset, regLinked,
                                           regCount, pubAfter, busyS, busyF,
-                                          dirtyS, dirtyF, drainReq >>
+                                          dirtyS, dirtyF, drainReq,
+                                          pendingLink, pendingExp, sealedSet, sealedAt >>
                      ELSE CoreUnchanged
            ELSE \* streaming: request the common drain
                 /\ drainReq' = [drainReq EXCEPT ![<<s, f>>] = TRUE]
                 /\ UNCHANGED << track, rowPath, rowOffset, regLinked,
                                 regCount, pubAfter, busyS, busyF,
-                                dirtyS, dirtyF >>
+                                dirtyS, dirtyF, pendingLink, pendingExp,
+                                sealedSet, sealedAt >>
     /\ UNCHANGED << fExists, fLines, wActive, registered, epochSnap,
                     createSeen, evCreate >>
     /\ UNCHANGED << cancelRel, wk, rowComposer, composerEverSet >>
@@ -484,7 +591,8 @@ ClaimDrain(s, f) ==
     /\ wk' = [wk EXCEPT ![<<s, PickSlot(s)>>] =
                 [WkInit EXCEPT !.pc = "readRow", !.file = f]]
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
-    /\ UNCHANGED << track, dirtyS, dirtyF, pubAfter, cancelRel >>
+    /\ UNCHANGED << track, dirtyS, dirtyF, pubAfter, cancelRel,
+                    pendingLink, pendingExp, sealedSet, sealedAt >>
     /\ UNCHANGED rowVars /\ UNCHANGED obsVars /\ UNCHANGED envVars
 
 \* A request meeting a held gate: transfer through dirty (fixed) or drop
@@ -500,7 +608,8 @@ ClaimContended(s, f) ==
        ELSE /\ dirtyS' = dirtyS
             /\ dirtyF' = dirtyF
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
-    /\ UNCHANGED << track, busyS, busyF, pubAfter, cancelRel, wk >>
+    /\ UNCHANGED << track, busyS, busyF, pubAfter, cancelRel, wk,
+                    pendingLink, pendingExp, sealedSet, sealedAt >>
     /\ UNCHANGED rowVars /\ UNCHANGED obsVars /\ UNCHANGED envVars
 
 \* A cancelled worker finishes its current step and then stops; under the
@@ -560,7 +669,8 @@ WkPersist(s, w) ==
                              THEN "process" ELSE "final")]]
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
     /\ UNCHANGED << track, rowPath, regLinked, regCount, pubAfter,
-                    busyS, busyF, dirtyS, dirtyF, drainReq >>
+                    busyS, busyF, dirtyS, dirtyF, drainReq,
+                    pendingLink, pendingExp, sealedSet, sealedAt >>
     /\ UNCHANGED << cancelRel, composerEverSet >>
     /\ UNCHANGED << consumed >>
     /\ UNCHANGED envVars
@@ -620,7 +730,8 @@ WkFinal(s, w) ==
                                       IF rowPath[s] # NoFile
                                       THEN consumed[rowPath[s]] ELSE 0]
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
-    /\ UNCHANGED << track, cancelRel >>
+    /\ UNCHANGED << track, cancelRel, pendingLink, pendingExp,
+                    sealedSet, sealedAt >>
     /\ UNCHANGED rowVars
     /\ UNCHANGED << consumed >>
     /\ UNCHANGED envVars
@@ -642,7 +753,8 @@ WkStopped(s, w) ==
             /\ busyF' = busyF
             /\ drainReq' = drainReq
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
-    /\ UNCHANGED << track, dirtyS, dirtyF, pubAfter, cancelRel >>
+    /\ UNCHANGED << track, dirtyS, dirtyF, pubAfter, cancelRel,
+                    pendingLink, pendingExp, sealedSet, sealedAt >>
     /\ UNCHANGED rowVars /\ UNCHANGED obsVars /\ UNCHANGED envVars
 
 \* Drain failure: the worker dies mid-flight.  The fixed design retains
@@ -659,9 +771,10 @@ WkCrash(s, w) ==
                    [drainReq EXCEPT ![<<s, tgt>>] =
                       track[<<s, tgt>>].st = "stream"]
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
-    /\ UNCHANGED << track, dirtyS, dirtyF, pubAfter, cancelRel >>
+    /\ UNCHANGED << track, dirtyS, dirtyF, pubAfter, cancelRel,
+                    pendingLink, pendingExp, sealedSet, sealedAt >>
     /\ UNCHANGED rowVars /\ UNCHANGED obsVars
-    /\ UNCHANGED << restartsLeft, cancelsLeft, pollsLeft >>
+    /\ UNCHANGED << restartsLeft, cancelsLeft, pollsLeft, lateFlushLeft >>
 
 \* Cancellation of the drain AWAITER.  The to_thread worker keeps running:
 \* it completes its current step and then stops (pc = "stopped").
@@ -681,9 +794,10 @@ WkCancel(s, w) ==
        ELSE /\ busyS' = busyS
             /\ busyF' = busyF
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
-    /\ UNCHANGED << track, dirtyS, dirtyF, drainReq, pubAfter, cancelRel >>
+    /\ UNCHANGED << track, dirtyS, dirtyF, drainReq, pubAfter, cancelRel,
+                    pendingLink, pendingExp, sealedSet, sealedAt >>
     /\ UNCHANGED rowVars /\ UNCHANGED obsVars
-    /\ UNCHANGED << restartsLeft, crashesLeft, pollsLeft >>
+    /\ UNCHANGED << restartsLeft, crashesLeft, pollsLeft, lateFlushLeft >>
 
 (***************************************************************************)
 (* Reconciliation (level-triggered, reliable; carries the fairness that    *)
@@ -728,7 +842,8 @@ ReconRecheck(s, f) ==
                            [@ EXCEPT !.st = "ign", !.closeL = fLines[f]]]
             /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
                             pubAfter, busyS, busyF, dirtyS, dirtyF,
-                            drainReq >>
+                            drainReq,
+                            pendingLink, pendingExp, sealedSet, sealedAt >>
        ELSE IF NoNewerExists(f)
        THEN Promote(s, f, track[<<s, f>>].prov, track[<<s, f>>].expPrev,
                     FALSE)
@@ -738,7 +853,8 @@ ReconRecheck(s, f) ==
                            [@ EXCEPT !.st = "closed", !.closeL = fLines[f]]]
             /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
                             pubAfter, busyS, busyF, dirtyS, dirtyF,
-                            drainReq >>
+                            drainReq,
+                            pendingLink, pendingExp, sealedSet, sealedAt >>
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
     /\ UNCHANGED << cancelRel, wk, rowComposer, composerEverSet >>
     /\ UNCHANGED << consumed >>
@@ -755,7 +871,8 @@ ReconExpire(s, f) ==
                     [@ EXCEPT !.st = "closed", !.closeL = fLines[f]]]
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
     /\ UNCHANGED << busyS, dirtyS, busyF, dirtyF, drainReq, pubAfter,
-                    cancelRel, wk >>
+                    cancelRel, wk, pendingLink, pendingExp,
+                    sealedSet, sealedAt >>
     /\ UNCHANGED rowVars /\ UNCHANGED obsVars /\ UNCHANGED envVars
 
 \* Guarded post-cancel release is folded into WkStopped.  The environment:
@@ -767,8 +884,71 @@ DeadlinePass(s, f) ==
     /\ track' = [track EXCEPT ![<<s, f>>] = [@ EXCEPT !.dl = TRUE]]
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
     /\ UNCHANGED << busyS, dirtyS, busyF, dirtyF, drainReq, pubAfter,
-                    cancelRel, wk >>
+                    cancelRel, wk, pendingLink, pendingExp,
+                    sealedSet, sealedAt >>
     /\ UNCHANGED rowVars /\ UNCHANGED obsVars /\ UNCHANGED envVars
+
+(***************************************************************************)
+(* Ordered handover: a verified successor waits while predecessors hold    *)
+(* unpublished lines; predecessors publish oldest-first; the link commits  *)
+(* only through a guard that re-reads the filesystem — the pre-advance     *)
+(* final check the operator required.  Bytes arriving after that check    *)
+(* are the documented residual (nothing can prove a file won't be written  *)
+(* after its successor opens).                                             *)
+(***************************************************************************)
+
+\* Make the oldest unready predecessor ready: publish it to EOF as
+\* currently visible AND record its final check (seal), in one walk step.
+\* Sealing oldest-first is what guarantees chain order: no later file is
+\* touched before every earlier file's check.  Publication is idempotent-
+\* by-line-index (the A4 requirement), so re-publication after a crash or
+\* restart cannot inflate counts.
+HandoverDrain(s) ==
+    /\ pendingLink[s] # NoFile
+    /\ HasUnreadyPred(pendingLink[s])
+    /\ LET p == OldestUnreadyPred(pendingLink[s]) IN
+       /\ consumed' = [consumed EXCEPT ![p] = Max(@, fLines[p])]
+       /\ sealedSet' = sealedSet \cup {p}
+       /\ sealedAt' = [sealedAt EXCEPT ![p] = Max(@, fLines[p])]
+    /\ UNCHANGED fsVars /\ UNCHANGED chanVars
+    /\ UNCHANGED << track, rowPath, rowOffset, regLinked, regCount,
+                    pubAfter, busyS, busyF, dirtyS, dirtyF, drainReq,
+                    pendingLink, pendingExp >>
+    /\ UNCHANGED << cancelRel, wk, rowComposer, composerEverSet >>
+    /\ UNCHANGED envVars
+
+\* The final check and the advance, in one guarded step: the link commits
+\* only when NO predecessor has unpublished lines at this instant (the
+\* guard re-reads fLines, so a late flush landing before the check blocks
+\* the advance and gets drained first).  The CAS expectation captured at
+\* defer time is re-verified; a stale commit re-arms the candidate.
+CommitLink(s) ==
+    /\ pendingLink[s] # NoFile
+    /\ ~HasUnreadyPred(pendingLink[s])
+    /\ IF rowPath[s] = pendingExp[s]
+       THEN /\ LinkEffect(s, pendingLink[s],
+                          track[<<s, pendingLink[s]>>].prov, FALSE,
+                          pendingExp[s])
+            /\ pendingLink' = [pendingLink EXCEPT ![s] = NoFile]
+            /\ pendingExp' = [pendingExp EXCEPT ![s] = NoFile]
+       ELSE IF rowPath[s] = pendingLink[s]
+       THEN \* the pending file got linked by another path meanwhile:
+            \* re-attach (persisted semantics), never demote to char
+            /\ LinkEffect(s, pendingLink[s], "persisted", FALSE,
+                          pendingLink[s])
+            /\ pendingLink' = [pendingLink EXCEPT ![s] = NoFile]
+            /\ pendingExp' = [pendingExp EXCEPT ![s] = NoFile]
+       ELSE /\ track' = [track EXCEPT ![<<s, pendingLink[s]>>] =
+                           [@ EXCEPT !.st = "char", !.expPrev = rowPath[s]]]
+            /\ pendingLink' = [pendingLink EXCEPT ![s] = NoFile]
+            /\ pendingExp' = [pendingExp EXCEPT ![s] = NoFile]
+            /\ UNCHANGED << rowPath, rowOffset, regLinked, regCount,
+                            pubAfter, busyS, busyF, dirtyS, dirtyF,
+                            drainReq, sealedSet, sealedAt >>
+    /\ UNCHANGED fsVars /\ UNCHANGED chanVars
+    /\ UNCHANGED << cancelRel, wk, rowComposer, composerEverSet >>
+    /\ UNCHANGED << consumed >>
+    /\ UNCHANGED envVars
 
 (***************************************************************************)
 (* Dashboard restart: in-memory state is lost; the DB row and the files    *)
@@ -788,6 +968,8 @@ Restart ==
     /\ drainReq' = [p \in SESSIONS \X FILES |-> FALSE]
     /\ pubAfter' = [s \in SESSIONS |-> FALSE]
     /\ cancelRel' = [s \in SESSIONS |-> FALSE]
+    /\ pendingLink' = [s \in SESSIONS |-> NoFile]
+    /\ pendingExp' = [s \in SESSIONS |-> NoFile]
     /\ wk' = [p \in SESSIONS \X WORKERS |-> WkInit]
     /\ evCreate' = << >>
     /\ evMod' = {}
@@ -795,7 +977,8 @@ Restart ==
     /\ epochSnap' = [s \in SESSIONS |-> fExists]  \* everything pre-existing
     /\ createSeen' = [s \in SESSIONS |-> FALSE]   \* fresh watch epoch
     /\ UNCHANGED fsVars /\ UNCHANGED rowVars /\ UNCHANGED obsVars
-    /\ UNCHANGED << crashesLeft, cancelsLeft, pollsLeft >>
+    /\ UNCHANGED << sealedSet, sealedAt >>
+    /\ UNCHANGED << crashesLeft, cancelsLeft, pollsLeft, lateFlushLeft >>
 
 \* Startup recovery of a linked row (sync context): persisted-identity
 \* re-attach, which under the fixed design promotes and drains.
@@ -819,6 +1002,7 @@ WriterActs ==
 
 MonitorActs ==
     \/ \E s \in SESSIONS : Register(s) \/ RecoverLinked(s)
+                           \/ HandoverDrain(s) \/ CommitLink(s)
     \/ DeliverCreate
     \/ \E f \in FILES : DeliverModify(f)
     \/ \E s \in SESSIONS, f \in FILES :
@@ -844,6 +1028,8 @@ FairSpec ==
     /\ \A s \in SESSIONS :
          /\ WF_vars(Register(s))
          /\ WF_vars(RecoverLinked(s))
+         /\ WF_vars(HandoverDrain(s))
+         /\ WF_vars(CommitLink(s))
     /\ WF_vars(DeliverCreate)
     /\ \A f \in FILES : WF_vars(DeliverModify(f))
     /\ \A s \in SESSIONS, f \in FILES :
@@ -936,5 +1122,28 @@ NoDurableStartingCard ==
     <>[] (\A s \in SESSIONS :
             ~(rowPath[s] # NoFile /\ regLinked[s] /\ regCount[s] = 0
               /\ fLines[rowPath[s]] > 0))
+
+\* Operator requirement (safety half): nothing publishes from a successor
+\* file until every existing predecessor has been through its pre-advance
+\* final check and everything that check saw is published.
+OrderedDelivery ==
+    \A f \in FILES :
+        consumed[f] > 0 =>
+            \A g \in FILES :
+                (g \in fExists /\ ChainBefore(g, f)) =>
+                    \/ consumed[g] = fLines[g]
+                    \/ (g \in sealedSet /\ consumed[g] >= sealedAt[g])
+
+\* Operator requirement (liveness half): for a resolved session every
+\* existing main file eventually publishes up to its seal — in full for
+\* the linked file; up to the final pre-advance check for superseded
+\* files (bytes landing after that check are the documented residual).
+PublishedUpToSeal ==
+    <>[] (\A s \in SESSIONS :
+            rowPath[s] # NoFile =>
+                \A f \in FILES :
+                    (FSession[f] = s /\ FKind[f] = "main" /\ f \in fExists)
+                        => consumed[f] >= (IF f \in sealedSet
+                                           THEN sealedAt[f] ELSE fLines[f]))
 
 ================================================================================
