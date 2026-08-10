@@ -2844,6 +2844,17 @@ def _link_session_file(
 
     project = project or jsonl_path.parent.name
     session_uuid = jsonl_path.stem
+    # auto-suvcp B6: the generation identity is written IN THE SAME UPDATE
+    # as jsonl_path — every path writer establishes matching
+    # generation+cursor atomically, so no reader can observe a link whose
+    # generation belongs to a different inode.
+    generation = None
+    try:
+        st = jsonl_path.stat()
+        seq = dashboard_db.next_link_seq(tmux_name)
+        generation = f"{st.st_dev}:{st.st_ino}:{seq}"
+    except OSError:
+        pass
     # W4 (auto-gah4g): link only — no ENRICH subprocess. This path is
     # always followed by SessionMonitor._eager_create_source (called from
     # _handle_jsonl_appeared right after resolve_session() returns), which
@@ -2857,6 +2868,7 @@ def _link_session_file(
         session_uuid=session_uuid,
         jsonl_path=str(jsonl_path),
         project=project,
+        generation=generation,
     )
     return {
         "tmux_name": tmux_name,
@@ -2979,6 +2991,16 @@ async def _watch_for_claude_host_jsonl(
                 jsonl_path=new_jsonl,
                 resolution_dir=projects_dir,
             )
-            await monitor._broadcast_registry()
+            # auto-suvcp B6: activation goes through the unified machine —
+            # the persisted re-attach requests the catch-up drain (a burst
+            # already on disk becomes visible with no further write) and
+            # the registry publishes AFTER that drain (invariant 9), never
+            # here at link time (a durable linked-but-zero card is the
+            # CalStartupStall broadcast leg, host edition).
+            observe = getattr(monitor, "observe_rollout", None)
+            if callable(observe):
+                observe(tmux_name, new_jsonl, source="host_watch")
+            else:
+                await monitor._broadcast_registry()
             return
         logger.warning("JSONL watcher timed out after %.0fs  tmux=%s", timeout, tmux_name)

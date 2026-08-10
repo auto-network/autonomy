@@ -768,14 +768,24 @@ class _SessionGate:
     # the defer was decided.
     pending_link: str | None = None
     pending_expected: str | None = None
-    # A5/D4: the executor future of the in-flight blocking read. The gate
-    # is released only when this worker actually stops (done-callback),
-    # never in a `finally` on the awaiter.
+    # A5/D4: the UNCANCELLABLE inner executor future of the in-flight
+    # blocking read. The awaiter waits on asyncio.shield(inflight_future),
+    # so cancelling the owner task never cancels this future — it resolves
+    # only when the worker thread actually returns, which makes
+    # ``inflight_future.done()`` a truthful "worker stopped" signal. The
+    # gate is released only on that signal (done-callback), never in a
+    # ``finally`` on the awaiter.
     inflight_future: Any = None
+    # The current owner task (set by the pump) — held so teardown (B5) and
+    # stop() (S2) can cancel the owner under the same release contract.
+    owner_task: Any = None
     # Set when the owner task failed with an exception: the continuation is
     # delayed by a short backoff so a deterministic crash can't hot-spin
     # the loop (responsibility still retained — never dropped).
     crashed: bool = False
+    # B5: a retired gate belongs to a dead/deregistered session — requests
+    # are refused and the release path removes it instead of rescheduling.
+    retired: bool = False
 
 
 def _entry_identity(entry: dict) -> str:
@@ -969,9 +979,16 @@ class SessionMonitor:
         # `busy` would break SingleOwner.
         self._tracks: dict[tuple[str, str], _FileTrack] = {}
         self._session_gates: dict[str, _SessionGate] = {}
-        # Characterizing-track file watches: wd → (tmux_name, path, epoch).
-        # Dispatch validates the track still owns (wd, epoch) — Rule 8.
-        self._wd_to_track: dict[int, tuple[str, str, int]] = {}
+        # Characterizing-track file watches, owned PER INODE (Rule 8/D3):
+        # the kernel dedups watches by inode per inotify instance, so two
+        # tracks on one file share one wd — ownership must be the inode's,
+        # with a subscriber set, or one track's release drops the other's
+        # watch. _inode_watches: (st_dev, st_ino) → {"wd": int,
+        # "subscribers": set[(tmux_name, path)]}; _wd_to_inode is the
+        # dispatch-side reverse map. Handlers act only after the lookup
+        # matches the track's recorded generation.
+        self._inode_watches: dict[tuple[int, int], dict] = {}
+        self._wd_to_inode: dict[int, tuple[int, int]] = {}
         # Registration-epoch snapshots per (tmux_name, dir): A7/N1 birth
         # trust needs "armed over an EMPTY directory" + "first CREATE of
         # this registration epoch".
@@ -1563,6 +1580,16 @@ class SessionMonitor:
                         self._reconciliation_task, self._screen_poll_task)
             if t and not t.done()
         ]
+        # S2: drain owners are tracked work — cancel them and wait for
+        # their shielded workers to actually stop (B4 contract), so no
+        # executor thread outlives the monitor into loop teardown.
+        drain_waits: list = []
+        for gate in list(self._session_gates.values()):
+            if gate.owner_task is not None and not gate.owner_task.done():
+                gate.owner_task.cancel()
+                tasks.append(gate.owner_task)
+            if gate.inflight_future is not None and not gate.inflight_future.done():
+                drain_waits.append(gate.inflight_future)
         for t in tasks:
             try:
                 t.cancel()
@@ -1571,6 +1598,8 @@ class SessionMonitor:
         try:
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            if drain_waits:
+                await asyncio.gather(*drain_waits, return_exceptions=True)
         except RuntimeError:
             pass  # cross-loop gather — tasks will be GC'd with their loop
         self._tailer_task = None
@@ -1885,9 +1914,12 @@ class SessionMonitor:
         *,
         source: str = "discovery",
         create_event: bool = False,
+        row: dict | None = None,
     ) -> bool:
         """[model: ObserveOutcome / DeliverCreate] — the single entry point.
 
+        ``row`` is an optional read optimization for tick-driven callers
+        that already hold a fresh row; promotion and drains always re-read.
         Returns True when the observation left the file's track STREAMING.
         """
         path = Path(jsonl_path)
@@ -1909,7 +1941,7 @@ class SessionMonitor:
             # observable progress (B3+A6).
             if not self._observable_progress(track):
                 return False
-            row = get_session(tmux_name)
+            row = row or get_session(tmux_name)
             if row is None:
                 return False
             try:
@@ -1919,6 +1951,13 @@ class SessionMonitor:
             track.generation = (st.st_dev, st.st_ino)
             track.state = TRACK_CHARACTERIZING
             track.characterize_deadline = time.time() + _CHARACTERIZE_DEADLINE_S
+            # B3: the published level survives the reopen — it was folded
+            # into the tombstone at close, and losing it here is exactly
+            # how a re-observation turns into a failure-free re-publish.
+            if track.tombstone is not None and len(track.tombstone) >= 5:
+                track.published_up_to = max(
+                    track.published_up_to, track.tombstone[4],
+                )
             track.tombstone = None
             track.close_reason = None
             track.expected_previous = row.get("jsonl_path")
@@ -1926,8 +1965,21 @@ class SessionMonitor:
                 "session_monitor: track reopened on progress tmux=%s path=%s source=%s",
                 tmux_name, path.name, source,
             )
-        row = get_session(tmux_name)
+        row = row or get_session(tmux_name)
         if row is None:
+            return False
+        # B1: ambient (non-create) observation of a file in a HOST row's
+        # SHARED directory has no ownership evidence — the file is very
+        # likely another session's transcript. Host first-resolution goes
+        # through positive-ownership channels only (launch watcher, meta
+        # files, handshake, parentUuid rollover); the row's own linked
+        # path still re-attaches below. Skip EARLY, before any track or
+        # stat churn — a shared project dir can hold years of history.
+        if (
+            row.get("type") == "host"
+            and not create_event
+            and row.get("jsonl_path") != str(path)
+        ):
             return False
         if track is None:
             try:
@@ -2081,11 +2133,15 @@ class SessionMonitor:
         )
         old_path = row.get("jsonl_path")
         if provenance == "persisted" and old_path == str(path):
-            # Re-attach (N5/N3): PRESERVE the persisted offset; only
-            # backfill a missing generation and re-arm monitoring.
+            # Re-attach (N5/N3): PRESERVE the persisted offset; backfill a
+            # missing generation, and REPAIR a stale one (B6).
+            row_generation = str(row.get("jsonl_generation") or "")
+            generation_current = row_generation.startswith(
+                f"{st.st_dev}:{st.st_ino}:"
+            )
             if (
                 track.state == TRACK_STREAMING
-                and row.get("jsonl_generation")
+                and generation_current
                 and (self._tail_states.get(tmux_name) is not None
                      and self._tail_states[tmux_name].watch_descriptor is not None)
             ):
@@ -2093,12 +2149,26 @@ class SessionMonitor:
                 if st.st_size > (row.get("file_offset", 0) or 0):
                     self.request_drain(tmux_name)
                 return
-            if not row.get("jsonl_generation"):
+            if not row_generation or not generation_current:
+                # B6: a stale TRUTHY generation (inode changed while the
+                # path stayed) must be repaired, not just a falsy one
+                # backfilled — otherwise every read re-stats, mismatches,
+                # and rejects the new inode forever. Offset survives when
+                # the content is plausibly the same-or-grown file (a
+                # renumbered device across a container restart); a SHRUNK
+                # file is a replacement and restarts from byte 0.
                 seq = next_link_seq(tmux_name)
+                repaired = f"{st.st_dev}:{st.st_ino}:{seq}"
                 set_jsonl_generation(
-                    tmux_name, f"{st.st_dev}:{st.st_ino}:{seq}",
-                    expect_path=str(path),
+                    tmux_name, repaired, expect_path=str(path),
                 )
+                if row_generation and not generation_current:
+                    if st.st_size < (row.get("file_offset", 0) or 0):
+                        update_tail_state(tmux_name, file_offset=0)
+                    logger.info(
+                        "session_monitor: repaired stale generation for %s "
+                        "(%s → %s)", tmux_name, row_generation, repaired,
+                    )
         else:
             # First resolution or rollover advance.
             if old_path and old_path != str(path):
@@ -2153,14 +2223,37 @@ class SessionMonitor:
         """Terminal transition — records the D6 tombstone, releases the wd
         (A8), and logs the late-flush residual (the theorem's explicit
         cession) when a superseded file holds bytes past its checked level.
+
+        B3 (failure-free dup route #3): while a file is LINKED its
+        publication progress lives only in the row's ``file_offset``; that
+        level is folded into ``published_up_to`` here — BEFORE the link
+        advances and rewrites the row — and rides the tombstone, so a
+        later handover walk (or a progress-gated reopen) never mistakes a
+        fully-drained predecessor for an unpublished one and re-reads it
+        from byte 0.
         """
+        row = get_session(track.tmux_name)
+        if row is not None and row.get("jsonl_path") == track.path:
+            row_generation = str(row.get("jsonl_generation") or "")
+            gen_matches = True
+            if row_generation and track.generation is not None:
+                gen_matches = row_generation.startswith(
+                    f"{track.generation[0]}:{track.generation[1]}:"
+                )
+            if gen_matches:
+                track.published_up_to = max(
+                    track.published_up_to, row.get("file_offset", 0) or 0,
+                )
         track.state = state
         track.close_reason = reason
         track.characterize_deadline = None
         self._release_track_watch(track)
         try:
             st = os.stat(track.path)
-            track.tombstone = (st.st_size, st.st_mtime_ns, st.st_dev, st.st_ino)
+            track.tombstone = (
+                st.st_size, st.st_mtime_ns, st.st_dev, st.st_ino,
+                track.published_up_to,
+            )
         except OSError:
             track.tombstone = None
         if reason == "superseded" and track.checked_size is not None:
@@ -2190,40 +2283,71 @@ class SessionMonitor:
         self._close_track(track, state=TRACK_CLOSED, reason="quarantined")
 
     def _observable_progress(self, track: _FileTrack) -> bool:
-        """B3+A6: terminal tracks re-open only on dev/ino/size/mtime change."""
+        """B3+A6: terminal tracks re-open only on dev/ino/size/mtime change.
+
+        Only the stat prefix of the tombstone participates — its trailing
+        published-level element (B3) is bookkeeping, not progress.
+        """
         try:
             st = os.stat(track.path)
         except OSError:
             return False
         if track.tombstone is None:
             return True
-        return (st.st_size, st.st_mtime_ns, st.st_dev, st.st_ino) != track.tombstone
+        return (
+            (st.st_size, st.st_mtime_ns, st.st_dev, st.st_ino)
+            != tuple(track.tombstone[:4])
+        )
 
     def _arm_track_watch(self, track: _FileTrack) -> None:
         """IN_MODIFY watch for a CHARACTERIZING track (classification
-        re-runs on MODIFY — Rule 2)."""
+        re-runs on MODIFY — Rule 2). Ownership is per inode (D3): the
+        kernel returns the SAME wd for every add_watch on one inode, so
+        the track subscribes to the inode's watch entry rather than
+        claiming the wd for itself.
+        """
         if not self._inotify or track.wd is not None:
             return
         try:
-            wd = self._inotify.add_watch(track.path, _iflags.MODIFY)
+            st = os.stat(track.path)
         except OSError:
             return
+        inode_key = (st.st_dev, st.st_ino)
+        entry = self._inode_watches.get(inode_key)
+        if entry is None:
+            try:
+                wd = self._inotify.add_watch(track.path, _iflags.MODIFY)
+            except OSError:
+                return
+            entry = {"wd": wd, "subscribers": set()}
+            self._inode_watches[inode_key] = entry
+            self._wd_to_inode[wd] = inode_key
+        entry["subscribers"].add((track.tmux_name, track.path))
+        track.generation = inode_key
         track.wd_epoch += 1
-        track.wd = wd
-        self._wd_to_track[wd] = (track.tmux_name, track.path, track.wd_epoch)
+        track.wd = entry["wd"]
 
     def _release_track_watch(self, track: _FileTrack) -> None:
-        """Release a track wd and invalidate its dispatch epoch (Rule 8)."""
+        """Unsubscribe a track from its inode watch (Rule 8/D3). The
+        kernel watch is removed only when the LAST subscriber leaves —
+        releasing one track never drops another's watch."""
         if track.wd is None:
             return
         wd, track.wd = track.wd, None
-        track.wd_epoch += 1
-        self._wd_to_track.pop(wd, None)
-        if self._inotify:
-            try:
-                self._inotify.rm_watch(wd)
-            except OSError:
-                pass
+        track.wd_epoch += 1   # invalidate any queued dispatch for this track
+        inode_key = self._wd_to_inode.get(wd)
+        entry = self._inode_watches.get(inode_key) if inode_key else None
+        if entry is None:
+            return
+        entry["subscribers"].discard((track.tmux_name, track.path))
+        if not entry["subscribers"]:
+            self._inode_watches.pop(inode_key, None)
+            self._wd_to_inode.pop(wd, None)
+            if self._inotify:
+                try:
+                    self._inotify.rm_watch(wd)
+                except OSError:
+                    pass
 
     # ── Succession ordering (Rule 3 / D5) ─────────────────────────────
 
@@ -2374,6 +2498,8 @@ class SessionMonitor:
         one those bytes get).
         """
         gate = self._gate(tmux_name)
+        if gate.retired:
+            return   # B5: dead session — no new work is ever accepted
         if gate.busy:
             gate.dirty = True
             return
@@ -2390,7 +2516,7 @@ class SessionMonitor:
         forever).
         """
         gate = self._gate(tmux_name)
-        if gate.busy or not gate.needs_drain:
+        if gate.retired or gate.busy or not gate.needs_drain:
             return
         try:
             loop = asyncio.get_running_loop()
@@ -2404,6 +2530,7 @@ class SessionMonitor:
             return
         gate.needs_drain = False
         gate.busy = True
+        gate.owner_task = task
         task.add_done_callback(
             lambda t, s=tmux_name: self._on_drain_task_done(s, t)
         )
@@ -2415,15 +2542,25 @@ class SessionMonitor:
                 self._pump_drain(tmux_name)
 
     def _on_drain_task_done(self, tmux_name: str, task: asyncio.Task) -> None:
-        """Worker-completion callback (D4) — runs on the loop, await-free.
+        """Owner-task-completion callback (D4) — runs on the loop, await-free.
 
-        Cancellation of the awaiter does NOT stop a to_thread/executor
-        worker (A5): when a blocking read is still in flight, the gate is
-        released only when that worker actually finishes, via a callback on
-        the executor future — never in a ``finally`` on the awaiter (B5:
-        finally-release admits a double-tail; no release pins forever).
+        Cancellation of the awaiter does NOT stop an executor worker (A5).
+        The owner awaits ``asyncio.shield(inflight_future)``, so the inner
+        executor future is UNCANCELLABLE from the awaiter side and resolves
+        only when the worker thread actually returns — which makes
+        ``inflight_future.done()`` a truthful "worker stopped" signal (the
+        unshielded wrapper reports done-cancelled the moment the awaiter is
+        cancelled, while the thread runs on — the exact early-release bug
+        this replaces). When a read is still in flight, the release is
+        deferred to that future's own done-callback; never a ``finally`` on
+        the awaiter (finally-release admits a double-tail; no release pins
+        forever).
         """
-        gate = self._gate(tmux_name)
+        gate = self._session_gates.get(tmux_name)
+        if gate is None:
+            return   # gate already retired and removed (B5)
+        if gate.owner_task is task:
+            gate.owner_task = None
         if task.cancelled():
             gate.dirty = True   # responsibility retained
         else:
@@ -2446,10 +2583,18 @@ class SessionMonitor:
     def _release_drain_gate(self, tmux_name: str) -> None:
         """[model: WkFinal] — the final dirty-check / release / reschedule
         sequence. Await-free (bead invariant 7); runs on the event loop."""
-        gate = self._gate(tmux_name)
+        gate = self._session_gates.get(tmux_name)
+        if gate is None:
+            return   # gate already retired and removed (B5)
         gate.inflight_future = None
-        needs_continuation = gate.dirty or gate.pending_link is not None
         gate.busy = False
+        if gate.retired:
+            # B5: the session is gone — drop the gate instead of
+            # rescheduling; any bytes the dead session never published
+            # are the final-graph-catchup path's business, not a drain's.
+            self._session_gates.pop(tmux_name, None)
+            return
+        needs_continuation = gate.dirty or gate.pending_link is not None
         if needs_continuation:
             # Continuation targets the row's CURRENT path (N4 corollary) —
             # the next owner re-reads the row at every pass.
@@ -2498,7 +2643,7 @@ class SessionMonitor:
                     None, self._read_tail_window, dict(row),
                 )
                 gate.inflight_future = fut
-                window = await fut
+                window = await asyncio.shield(fut)
                 gate.inflight_future = None
                 if window is not None:
                     await self._publish_tail_window(tmux_name, row, window)
@@ -2539,7 +2684,7 @@ class SessionMonitor:
                         None, self._read_tail_window, dict(row),
                     )
                     gate.inflight_future = fut
-                    window = await fut
+                    window = await asyncio.shield(fut)
                     gate.inflight_future = None
                     if window is not None:
                         await self._publish_tail_window(tmux_name, row, window)
@@ -2608,10 +2753,10 @@ class SessionMonitor:
         loop = asyncio.get_running_loop()
         fut = loop.run_in_executor(
             None, self._read_segment_window,
-            dict(row), path, track.published_up_to,
+            dict(row), path, track.published_up_to, track.generation,
         )
         gate.inflight_future = fut
-        window = await fut
+        window = await asyncio.shield(fut)
         gate.inflight_future = None
         if window is None:
             return False
@@ -2642,10 +2787,17 @@ class SessionMonitor:
     def _read_tail_window(self, row: dict) -> dict | None:
         """Blocking read of the linked file's next complete-line window.
 
-        Pure read — NO DB writes, NO broadcasts (a cancelled worker thread
-        finishing late therefore has no effect). Returns None when there is
-        nothing new or the file's identity no longer matches the row's
-        generation (re-stat equality, Rule 6)."""
+        WORKER-PURITY INVARIANT (pinned by
+        test_rollout_ingestion.py::test_read_workers_are_pure): this
+        function and :meth:`_read_segment_window` run on executor threads
+        that CANNOT be stopped by cancelling their awaiter (A5). They must
+        therefore never write the DB, never broadcast, never mutate
+        monitor state — purity is the only thing that makes a cancelled
+        worker finishing late harmless. Publication and persistence happen
+        on the loop task, after the shielded await.
+
+        Returns None when there is nothing new or the file's identity no
+        longer matches the row's generation (re-stat equality, Rule 6)."""
         jsonl_path_str = row.get("jsonl_path")
         if not jsonl_path_str:
             return None
@@ -2687,14 +2839,22 @@ class SessionMonitor:
 
     def _read_segment_window(
         self, row: dict, path: str, start_offset: int,
+        expect_generation: tuple[int, int] | None = None,
     ) -> dict | None:
         """Blocking read of a NON-linked file's next complete-line window
-        (handover publication). Same pure-read discipline as
-        :meth:`_read_tail_window`."""
+        (handover publication). Same WORKER-PURITY INVARIANT as
+        :meth:`_read_tail_window` — pure read, no writes/broadcasts/state.
+        ``expect_generation`` (S1) is the track's recorded
+        (st_dev, st_ino): a swapped inode returns None instead of
+        publishing another file's bytes under this identity."""
         p = Path(path)
         try:
             st = p.stat()
         except OSError:
+            return None
+        if expect_generation is not None and (
+            (st.st_dev, st.st_ino) != expect_generation
+        ):
             return None
         if st.st_size <= start_offset:
             return None
@@ -3107,7 +3267,33 @@ class SessionMonitor:
             db.close()
 
     def _remove_watches(self, tmux_name: str) -> None:
-        """Remove all inotify watches for a session."""
+        """Remove all inotify watches for a session, and retire its
+        rollout-ingestion state (B5): FileTracks, inode-watch
+        subscriptions, dir epochs, and the drain gate. A running owner is
+        cancelled and its gate is released under the A5 contract (the
+        shielded worker finishes, the release callback sees ``retired``
+        and drops the gate) — post-death events must dispatch nothing.
+        """
+        # Rollout-ingestion teardown first — track/inode maps exist even
+        # when inotify itself is unavailable.
+        for key in [k for k in self._tracks if k[0] == tmux_name]:
+            self._release_track_watch(self._tracks[key])
+            del self._tracks[key]
+        for key in [k for k in self._dir_epochs if k[0] == tmux_name]:
+            del self._dir_epochs[key]
+        gate = self._session_gates.get(tmux_name)
+        if gate is not None:
+            gate.retired = True
+            gate.dirty = False
+            gate.needs_drain = False
+            gate.pending_link = None
+            gate.pending_expected = None
+            gate.publish_registry_after_drain = False
+            task = gate.owner_task
+            if task is not None and not task.done():
+                task.cancel()   # release arrives via the B4 done-callbacks
+            if not gate.busy:
+                self._session_gates.pop(tmux_name, None)
         if not self._inotify:
             return
         ts = self._tail_states.get(tmux_name)
@@ -3565,16 +3751,23 @@ class SessionMonitor:
                                 ts_for_event.inotify_events_received += 1
                                 ts_for_event.last_inotify_event_ts = time.time()
                         else:
-                            tk = self._wd_to_track.get(event.wd)
-                            if tk is not None:
-                                t_name, t_path, t_epoch = tk
-                                track = self._tracks.get((t_name, t_path))
-                                if (
-                                    track is not None
-                                    and track.wd == event.wd
-                                    and track.wd_epoch == t_epoch
-                                ):
-                                    self._classify_and_step(track)
+                            # D3 dispatch: wd → inode → subscriber tracks;
+                            # act only where the track's recorded
+                            # generation matches the owning inode.
+                            inode_key = self._wd_to_inode.get(event.wd)
+                            entry = (
+                                self._inode_watches.get(inode_key)
+                                if inode_key else None
+                            )
+                            if entry is not None:
+                                for sub in list(entry["subscribers"]):
+                                    track = self._tracks.get(sub)
+                                    if (
+                                        track is not None
+                                        and track.wd == event.wd
+                                        and track.generation == inode_key
+                                    ):
+                                        self._classify_and_step(track)
                     if event.mask & _iflags.CREATE:
                         await self._handle_in_create(event)
                     if event.mask & _iflags.IGNORED:
@@ -3584,12 +3777,17 @@ class SessionMonitor:
                             ts = self._tail_states.get(gone)
                             if ts and ts.watch_descriptor == event.wd:
                                 ts.watch_descriptor = None
-                        tk = self._wd_to_track.pop(event.wd, None)
-                        if tk is not None:
-                            track = self._tracks.get((tk[0], tk[1]))
-                            if track is not None and track.wd == event.wd:
-                                track.wd = None
-                                track.wd_epoch += 1   # invalidate queued events
+                        inode_key = self._wd_to_inode.pop(event.wd, None)
+                        entry = (
+                            self._inode_watches.pop(inode_key, None)
+                            if inode_key else None
+                        )
+                        if entry is not None:
+                            for sub in entry["subscribers"]:
+                                track = self._tracks.get(sub)
+                                if track is not None and track.wd == event.wd:
+                                    track.wd = None
+                                    track.wd_epoch += 1   # invalidate queued events
 
                 # Request a drain for each modified session — the gate
                 # serializes owners; the drain re-reads the row's current
@@ -3826,13 +4024,24 @@ class SessionMonitor:
         from tools.dashboard.dao.dashboard_db import (
             link_and_enrich,
             next_link_seq,
-            update_jsonl_link,
         )
+        # B6 atomicity: generation + reset cursor land in the SAME UPDATE
+        # as the link — no window where the link points at the new file
+        # while generation/cursor still describe the old one.
+        generation = None
+        try:
+            st = new_file.stat()
+            seq = next_link_seq(owner)
+            generation = f"{st.st_dev}:{st.st_ino}:{seq}"
+        except OSError:
+            st = None
         link_and_enrich(
             owner,
             session_uuid=new_uuid,
             jsonl_path=str(new_file),
             project=new_file.parent.name,
+            generation=generation,
+            file_offset=0,
         )
         logger.info(
             "session_monitor: IN_CREATE host rollover %s → %s (predecessor %s)",
@@ -3842,23 +4051,10 @@ class SessionMonitor:
         # Swap IN_MODIFY watch to new file
         self._add_file_watch(owner, str(new_file))
 
-        # Reset file_offset + stamp the new file's generation in one UPDATE
-        # (auto-suvcp Rule 6: generation written wherever jsonl_path is).
-        try:
-            st = new_file.stat()
-            seq = next_link_seq(owner)
-            update_jsonl_link(
-                owner,
-                session_uuid=new_uuid,
-                jsonl_path=str(new_file),
-                generation=f"{st.st_dev}:{st.st_ino}:{seq}",
-                file_offset=0,
-            )
+        if st is not None:
             track = self._get_track(owner, str(new_file))
             track.generation = (st.st_dev, st.st_ino)
             track.state = TRACK_STREAMING
-        except OSError:
-            update_tail_state(owner, file_offset=0)
 
         # Reset ephemeral tail state, preserving resolution_dir
         ts = self._tail_states.get(owner)

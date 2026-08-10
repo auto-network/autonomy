@@ -604,10 +604,20 @@ def set_jsonl_generation(tmux_name: str, generation: str, *, expect_path: str) -
     return cur.rowcount > 0
 
 
-def link_and_enrich(tmux_name: str, session_uuid: str, jsonl_path: str, project: str | None = None) -> None:
+def link_and_enrich(
+    tmux_name: str,
+    session_uuid: str,
+    jsonl_path: str,
+    project: str | None = None,
+    *,
+    generation: str | None = None,
+    file_offset: int | None = None,
+) -> None:
     """LINK + ENRICH in one shot: set session_uuid, jsonl_path, and graph_source_id.
 
-    1. Updates dashboard.db with session_uuid and jsonl_path
+    1. Updates dashboard.db with session_uuid and jsonl_path (plus, when
+       provided, the generation identity and cursor in the SAME UPDATE —
+       auto-suvcp B6 atomicity)
     2. Runs `graph ingest-session` to ingest the JSONL and get the graph source ID
     3. Updates dashboard.db with graph_source_id
 
@@ -616,8 +626,11 @@ def link_and_enrich(tmux_name: str, session_uuid: str, jsonl_path: str, project:
     """
     import subprocess
 
-    # LINK: write session_uuid and jsonl_path
-    update_jsonl_link(tmux_name, session_uuid, jsonl_path, project)
+    # LINK: write session_uuid and jsonl_path (+ generation/cursor atomically)
+    update_jsonl_link(
+        tmux_name, session_uuid, jsonl_path, project,
+        generation=generation, file_offset=file_offset,
+    )
     logger.info("dashboard_db: LINK  %s → uuid=%s  path=%s", tmux_name, session_uuid[:12], jsonl_path)
 
     # ENRICH: ingest into graph and capture source ID

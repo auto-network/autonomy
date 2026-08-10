@@ -402,8 +402,8 @@ class TestContainerFirstFileToSSE:
             from tools.dashboard.dao.dashboard_db import update_jsonl_link
             with patch(
                 "tools.dashboard.dao.dashboard_db.link_and_enrich",
-                side_effect=lambda tn, session_uuid, jsonl_path, project=None:
-                    update_jsonl_link(tn, session_uuid, jsonl_path, project),
+                side_effect=lambda tn, session_uuid, jsonl_path, project=None, **kw:
+                    update_jsonl_link(tn, session_uuid, jsonl_path, project, **kw),
             ):
                 new_jsonl = sess_dir / "first-uuid.jsonl"
                 new_jsonl.touch()
@@ -636,8 +636,8 @@ class TestRolloverToSSE:
             from tools.dashboard.dao.dashboard_db import update_jsonl_link
             with patch(
                 "tools.dashboard.dao.dashboard_db.link_and_enrich",
-                side_effect=lambda tn, session_uuid, jsonl_path, project=None:
-                    update_jsonl_link(tn, session_uuid, jsonl_path, project),
+                side_effect=lambda tn, session_uuid, jsonl_path, project=None, **kw:
+                    update_jsonl_link(tn, session_uuid, jsonl_path, project, **kw),
             ):
                 file_b = sess_dir / "uuid-b.jsonl"
                 file_b.touch()
@@ -713,8 +713,8 @@ class TestRolloverToSSE:
             from tools.dashboard.dao.dashboard_db import update_jsonl_link
             with patch(
                 "tools.dashboard.dao.dashboard_db.link_and_enrich",
-                side_effect=lambda tn, session_uuid, jsonl_path, project=None:
-                    update_jsonl_link(tn, session_uuid, jsonl_path, project),
+                side_effect=lambda tn, session_uuid, jsonl_path, project=None, **kw:
+                    update_jsonl_link(tn, session_uuid, jsonl_path, project, **kw),
             ):
                 _write_jsonl_entry(file_b, first_entry_b)
 
