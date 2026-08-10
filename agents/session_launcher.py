@@ -1098,10 +1098,6 @@ def launch_session(
         # zero consumers). Mask it with an empty read-only bind so the rw
         # mount doesn't hand every container a shared secret (auto-j3oj3).
         "/dev/null": "/data/.beads/.beads-credential-key:ro",
-        # File handoff: POST /api/upload writes host data/uploads and sessions
-        # read it at this container path. The one deliberate in-container view
-        # of host data/ — read-only, this directory only.
-        str(REPO_ROOT / "data" / "uploads"): "/workspace/repo/data/uploads:ro",
         str(run_dir): "/workspace/output",
         str(sessions_dir): transcript_mount,
     }
@@ -1130,6 +1126,31 @@ def launch_session(
         snapshot = _ensure_platform_snapshot()
         if snapshot is not None:
             default_mounts[snapshot] = "/workspace/repo:ro"
+
+    # File handoff: POST /api/upload writes host data/uploads and sessions
+    # read it at /workspace/repo/data/uploads — the one deliberate
+    # in-container view of host data/, read-only, this directory only.
+    # The nested bind needs its mount point to EXIST inside whatever is
+    # mounted at /workspace/repo: runc must mkdir the target and a read-only
+    # parent makes that an OCI launch failure, fleet-wide (the platform
+    # snapshot materializes it via the tracked data/uploads/.gitkeep).
+    # Deciding host-side keeps a missing mount point a skipped mount, never
+    # a dead container.
+    repo_mount_host = next(
+        (hp for hp, spec in default_mounts.items()
+         if spec.split(":")[0] == "/workspace/repo"),
+        None,
+    )
+    uploads_target = "/workspace/repo/data/uploads"
+    if (
+        repo_mount_host is not None
+        and (Path(repo_mount_host) / "data" / "uploads").is_dir()
+        and not any(
+            spec.split(":")[0] == uploads_target
+            for spec in default_mounts.values()
+        )
+    ):
+        default_mounts[str(REPO_ROOT / "data" / "uploads")] = f"{uploads_target}:ro"
 
     # Capability mounts: package roots, tool subtrees, and secret files for
     # every enabled MaterializedCapability. Caller-supplied mounts for the
