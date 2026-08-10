@@ -1189,6 +1189,7 @@
           // buffer — the reset just guarantees a clean cold-open.)
           store.entries = [];
           store.localEntries = [];
+          store._byRef = {};
           store.toolMap = {};
           store.resultMap = {};
           store._pendingSSE = [];

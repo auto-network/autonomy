@@ -189,25 +189,60 @@
     return display;
   }
 
+  // Paint-safe placeholder for a descriptor whose target shifted out
+  // from under it (a merge landed between descriptor build and this
+  // paint). Every template branch skips it — the transient failure mode
+  // is a MISSING tile for one frame, never a WRONG one. The rebuild
+  // that follows the merge replaces the descriptor set.
+  var STALE = Object.freeze({ type: '__stale__', internal: true, hidden: true });
+
   /**
    * Resolve a descriptor to the actual entry or group object.
-   * Single: returns entries[d.idx] (same reference).
-   * Local:  returns locals[d.local] (same reference).
-   * Group:  returns { type: 'tool_group', tool_name, items, timestamp }.
+   *
+   * Identity-checked (the transient-desync fix): descriptors carry their
+   * entry's ref key; resolution verifies the indexed slot still holds
+   * that ref and otherwise falls back to the byRef map — O(1) either
+   * way, no scans on the paint path. A stale descriptor therefore
+   * resolves to the CORRECT entry wherever it moved, or to STALE
+   * (missing-not-wrong) when it is gone entirely.
+   *
+   * Single: returns the entry (same reference).
+   * Local:  returns locals[d.local] (key-checked).
+   * Group:  returns { type: 'tool_group', tool_name, items, timestamp }
+   *         with items membership-checked (same tool, groupable).
    */
-  function resolve(d, entries, locals) {
+  function resolve(d, entries, locals, byRef) {
     if (d.type === 'group') {
+      var anchor = entries[d.start];
+      if (!anchor || 'g:' + refKey(anchor, d.start) !== d.key) {
+        anchor = byRef ? byRef[(d.key || '').slice(2)] : undefined;
+        if (!anchor) return STALE;
+      }
+      // Membership check: only same-tool groupable entries may render
+      // inside this group tile — an interior shift drops the interloper
+      // (missing-not-wrong) rather than painting it under a wrong chip.
+      var items = [];
+      for (var i = d.start; i <= d.end && i < entries.length; i++) {
+        var it = entries[i];
+        if (it && isGroupable(it) && it.tool_name === d.tool_name) items.push(it);
+      }
+      if (!items.length) return STALE;
       return {
         type: 'tool_group',
         tool_name: d.tool_name,
-        items: entries.slice(d.start, d.end + 1),
-        timestamp: entries[d.start] ? entries[d.start].timestamp : undefined
+        items: items,
+        timestamp: items[0].timestamp
       };
     }
     if (d.local !== undefined) {
-      return (locals || [])[d.local];
+      var loc = (locals || [])[d.local];
+      if (!loc || localKey(loc, d.local) !== d.key) return STALE;
+      return loc;
     }
-    return entries[d.idx];
+    var e = entries[d.idx];
+    if (e && refKey(e, d.idx) === d.key) return e;
+    e = byRef ? byRef[d.key] : undefined;
+    return e || STALE;
   }
 
   var SessionDisplay = {

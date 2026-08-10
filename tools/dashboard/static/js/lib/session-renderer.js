@@ -574,7 +574,9 @@
       const sessions = Alpine.store('sessions');
       const store = sessions && this.sessionKey ? sessions[this.sessionKey] : null;
       return window.SessionDisplay.resolve(
-        dEntry, this.entries, store ? store.localEntries : null);
+        dEntry, this.entries,
+        store ? store.localEntries : null,
+        store ? store._byRef : null);
     },
 
     _rebuildDisplay() {

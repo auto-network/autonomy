@@ -933,6 +933,98 @@ async function testK_anchorRuleAgentTranscript() {
   viewer.destroy();
 }
 
+// (l) forced descriptor race — the transient display desync
+//     (operator screenshots IMG_2111-2114): a mid-buffer merge lands
+//     BETWEEN descriptor build and paint. Paint-time resolution must be
+//     identity-checked: every stale descriptor resolves BY REF to the
+//     CORRECT entry wherever it moved (never the entry that slid into
+//     its index), and any unresolvable target paints as MISSING, never
+//     wrong — including group-slice membership.
+async function testL_forcedDescriptorRace() {
+  console.log('\n── (l) forced race: merge between descriptor build and paint ──');
+  const fixture = new FixtureSession();
+  fixture.appendTyped({ type: 'user', role: 'user', content: 'start' });
+  fixture.appendLine('assistant flow');
+  for (let i = 0; i < 3; i++) {
+    fixture.appendTyped({ type: 'tool_use', role: 'assistant', tool_name: 'Bash',
+      tool_id: 'L' + i, input: { command: 'x' + i } });
+  }
+  fixture.appendLine('tail message');
+
+  const client = makeClient(fixture);
+  const viewer = await mountViewer(client);
+  const store = client.win.getSessionStore(SID);
+  const SD = client.win.SessionDisplay;
+
+  // Paint 1: descriptors built against the current buffer.
+  const display = SD.buildAll(store.entries, store.localEntries);
+  const expectByKey = {};
+  for (const d of display) {
+    const e = SD.resolve(d, store.entries, store.localEntries, store._byRef);
+    expectByKey[d.key] = d.type === 'group' ? 'tool_group' : (e && e.type);
+  }
+
+  // THE RACE: a mid-buffer merge (an older page arriving) shifts every
+  // index under the already-built descriptors — no rebuild yet.
+  const older = [];
+  for (let i = 0; i < 4; i++) {
+    older.push({ type: 'assistant_text', role: 'assistant',
+      content: 'older-' + i, timestamp: '2026-08-10T11:00:0' + i + 'Z',
+      entry_ref: { file: 'A', off: -1000 + i * 10, sub: 0 } });
+  }
+  client.win.mergeSessionEntries(store, { chain: ['A'], entries: older }, 'fetch');
+
+  // Paint 2: the STALE descriptors paint against the shifted buffer.
+  // Singles must resolve BY REF to their exact entry; groups may degrade
+  // to MISSING (their index window shifted) but never to WRONG.
+  let wrong = 0, singleMissing = 0, groupMissing = 0;
+  for (const d of display) {
+    const e = SD.resolve(d, store.entries, store.localEntries, store._byRef);
+    if (!e || e.type === '__stale__') {
+      if (d.type === 'group') groupMissing++; else singleMissing++;
+      continue;
+    }
+    const got = e.type;
+    if (got !== expectByKey[d.key]) {
+      wrong++;
+      if (wrong <= 3) console.log('   WRONG TILE:', d.key, 'expected', expectByKey[d.key], 'got', got);
+    }
+    if (d.type !== 'group' && e.entry_ref) {
+      const k = e.entry_ref.file + ':' + e.entry_ref.off + ':' + (e.entry_ref.sub || 0);
+      if (k !== d.key) wrong++;
+    }
+  }
+  checkEqual(wrong, 0,
+    'stale descriptors resolve to their CORRECT entries after the mid-buffer shift');
+  checkEqual(singleMissing, 0,
+    'no single tile goes missing while its entry exists (byRef fallback)');
+  console.log('   group descriptors degraded to missing-not-wrong:', groupMissing);
+
+  // Group membership (condition 2): shove an interloper INSIDE a stale
+  // group's index range — it must be DROPPED from the group's items
+  // (missing-not-wrong), never painted under the Bash chip.
+  const groupD = display.find((d) => d.type === 'group');
+  check(!!groupD, 'fixture produced a tool group');
+  if (groupD) {
+    // Simulate the shift: the group's index range now spans an
+    // assistant_text (the merge above already shifted indices by 4).
+    const resolved = SD.resolve(groupD, store.entries, store.localEntries, store._byRef);
+    if (resolved.type === 'tool_group') {
+      const bad = resolved.items.filter((it) => !(it.type === 'tool_use' && it.tool_name === groupD.tool_name));
+      checkEqual(bad.length, 0, 'group slice never paints a non-member (missing-not-wrong)');
+    } else {
+      check(resolved.type === '__stale__', 'unresolvable group paints as MISSING, not wrong');
+    }
+  }
+
+  // Unknown-key descriptor (target gone entirely) → STALE sentinel.
+  const phantom = SD.resolve({ idx: 2, key: 'A:999999:0' }, store.entries, store.localEntries, store._byRef);
+  checkEqual(phantom.type, '__stale__', 'a vanished target paints as MISSING, never as whatever holds its index');
+
+  assertNoLies(client, '(l)');
+  viewer.destroy();
+}
+
 (async () => {
   try {
     await testA_withheldBroadcasts();
@@ -946,6 +1038,7 @@ async function testK_anchorRuleAgentTranscript() {
     await testI_prunedPredecessorChain();
     await testJ_racingCatchupsMonotonic();
     await testK_anchorRuleAgentTranscript();
+    await testL_forcedDescriptorRace();
   } catch (e) {
     console.error('HARNESS ERROR:', e);
     process.exit(2);

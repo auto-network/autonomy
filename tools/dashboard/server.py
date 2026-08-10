@@ -11941,6 +11941,73 @@ async def api_diag_sessions(request):
     return JSONResponse(payload)
 
 
+async def api_diag_store_dump(request):
+    """Range-dump one session's CLIENT-SIDE entry buffer from live tabs.
+
+    GET /api/diag/store-dump?session=<id>[&from=N][&limit=M]
+
+    auto-64nx3: the incident instrumentation the diag chase proved we
+    needed — emits a ``diag:request`` with request_type
+    ``session_store_dump``; connected tabs reply with a bounded slice of
+    their in-memory store buffer ({type, tool_name, timestamp,
+    content_len, entry_ref} per entry), so a phone-only rendering report
+    can be byte-diffed against server truth remotely.
+    """
+    session_id = request.query_params.get("session")
+    if not session_id:
+        return JSONResponse({"error": "session required"}, status_code=400)
+    try:
+        from_idx = max(0, int(request.query_params.get("from", "0")))
+        limit = min(max(1, int(request.query_params.get("limit", "200"))), 500)
+    except ValueError:
+        return JSONResponse({"error": "invalid from/limit"}, status_code=400)
+
+    import uuid as _uuid_mod
+    req_id = str(_uuid_mod.uuid4())
+    request_type = "session_store_dump"
+    emit_ts = time.time()
+    params = {"session": session_id, "from": from_idx, "limit": limit}
+    _DIAG_AGGREGATORS[req_id] = {
+        "emit_ts": emit_ts,
+        "request_type": request_type,
+        "deadline_ts": emit_ts + _DIAG_COLLECTION_WINDOW_SECONDS,
+        "params": params,
+        "clients": {},
+    }
+    await event_bus.broadcast(
+        "diag:request",
+        {
+            "req_id": req_id,
+            "request_type": request_type,
+            "params": params,
+            "deadline_ms": int(_DIAG_COLLECTION_WINDOW_SECONDS * 1000),
+            "emit_ts": emit_ts,
+            "emit_ts_ms": int(emit_ts * 1000),
+        },
+        dedup=False,
+    )
+    await asyncio.sleep(_DIAG_COLLECTION_WINDOW_SECONDS)
+
+    aggregator = _DIAG_AGGREGATORS.pop(req_id, {})
+    clients = []
+    for client_id, (recv_ts, body, request_meta) in aggregator.get("clients", {}).items():
+        payload = body.get("payload") or {}
+        clients.append({
+            "client_id": client_id,
+            "user_agent": request_meta.get("user_agent"),
+            "client_state": payload.get("client_state", {}),
+            "dump": {k: v for k, v in payload.items() if k != "client_state"},
+        })
+    return JSONResponse({
+        "req_id": req_id,
+        "session": session_id,
+        "from": from_idx,
+        "limit": limit,
+        "clients_responded": len(clients),
+        "clients": clients,
+    })
+
+
 async def api_diag_client(request):
     """Receive a per-tab diag reply and stash it in the live aggregator.
 
@@ -16945,6 +17012,7 @@ routes = [
     # Diag round-trip — file/server/bus/client alignment
     Route("/api/diag/sessions", api_diag_sessions),
     Route("/api/diag/client", api_diag_client, methods=["POST"]),
+    Route("/api/diag/store-dump", api_diag_store_dump),
     Route("/api/diag/eventbus/snapshot", api_diag_eventbus_snapshot, methods=["POST"]),
     Route("/api/diag/settings", api_diag_settings),
     Route("/api/diag/settings/sets", api_diag_settings_sets),
