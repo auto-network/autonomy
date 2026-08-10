@@ -20,8 +20,44 @@ from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from tools.dashboard.dao import mission_control_db as db
+from tools.dashboard.event_bus import event_bus
 
 logger = logging.getLogger(__name__)
+
+#: Topic for every conversation write (ask/answer/reopen/update) -- one
+#: topic, not one per event kind, matching the existing "setting.changed"
+#: convention of a small number of topics distinguished by payload fields
+#: rather than a proliferating topic namespace. A live viewer subscribes
+#: once and filters client-side on mission_id/pillar_id, the same "one
+#: unfiltered subscription plus a comparison" shape already settled for
+#: live session sharing (graph://248d2e36-4cc).
+MISSION_CONVERSATION_TOPIC = "mission_control:conversation"
+
+
+async def _publish_conversation_event(
+    event: str, mission_id: str, pillar_id: str | None, entry_id: str,
+    *, question: dict | None = None, update: dict | None = None,
+) -> None:
+    """Best-effort live-update publish -- never blocks or fails the
+    caller's response. The payload already carries the parsed entry (the
+    caller already built it for the HTTP response), so a subscriber never
+    needs a refetch to render it -- same principle the live-session-sharing
+    design settled on for its own connector (graph://248d2e36-4cc).
+    """
+    try:
+        await event_bus.broadcast(MISSION_CONVERSATION_TOPIC, {
+            "event": event,
+            "mission_id": mission_id,
+            "pillar_id": pillar_id,
+            "entry_id": entry_id,
+            "question": question,
+            "update": update,
+        }, dedup=False)
+    except Exception:
+        logger.warning(
+            "mission_control conversation event publish failed for %s/%s",
+            mission_id, entry_id, exc_info=True,
+        )
 
 #: Cookie carrying the visitor's bearer TOKEN (never the display-safe
 #: participant_id -- see resolve_visitor()'s docstring for why that
@@ -731,8 +767,12 @@ async def _ask_question_impl(
     if entry is None:
         return JSONResponse({"error": "not found"}, status_code=404)
 
+    entry_payload = _question_payload(entry)
+    await _publish_conversation_event(
+        "asked", mission_id, pillar_id, entry["entry_id"], question=entry_payload,
+    )
     response = JSONResponse(
-        {"question": _question_payload(entry)},
+        {"question": entry_payload},
         status_code=201,
         background=BackgroundTask(_relay_question, mission_id=mission_id, entry_id=entry["entry_id"]),
     )
@@ -786,7 +826,11 @@ async def _answer_question_impl(
         return JSONResponse({"error": "question not found"}, status_code=404)
     surface_id = f"pillar:{pillar_id}" if pillar_id else f"mission:{mission_id}"
     _heartbeat_coordinator_presence(surface_id, responder_session)
-    return JSONResponse({"question": _question_payload(entry)})
+    entry_payload = _question_payload(entry)
+    await _publish_conversation_event(
+        "answered", mission_id, pillar_id, entry_id, question=entry_payload,
+    )
+    return JSONResponse({"question": entry_payload})
 
 
 async def answer_question(request: Request) -> JSONResponse:
@@ -843,8 +887,12 @@ async def _reopen_question_impl(
             {"error": "question not found, or not yet answered"}, status_code=404,
         )
 
+    entry_payload = _question_payload(entry)
+    await _publish_conversation_event(
+        "reopened", mission_id, pillar_id, entry_id, question=entry_payload,
+    )
     return JSONResponse(
-        {"question": _question_payload(entry)},
+        {"question": entry_payload},
         background=BackgroundTask(_relay_question, mission_id=mission_id, entry_id=entry_id),
     )
 
@@ -877,10 +925,16 @@ async def _add_update_impl(
     text = (body.get("text") or "").strip()
     if not text:
         return JSONResponse({"error": "text is required"}, status_code=400)
-    if not db.get_question(lookup_mission_id, entry_id):
+    existing = db.get_question(lookup_mission_id, entry_id)
+    if not existing:
         return JSONResponse({"error": "question not found"}, status_code=404)
     update = db.add_conversation_update(entry_id, text)
-    return JSONResponse({"update": _update_payload(update)}, status_code=201)
+    update_payload = _update_payload(update)
+    await _publish_conversation_event(
+        "update", lookup_mission_id, existing.get("pillar_id"), entry_id,
+        update=update_payload,
+    )
+    return JSONResponse({"update": update_payload}, status_code=201)
 
 
 async def add_question_update(request: Request) -> JSONResponse:
