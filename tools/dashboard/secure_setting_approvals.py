@@ -4,12 +4,14 @@ system.
 
 An agent asks the operator for a secret (connector credentials, an API
 token) by describing a small form: ``schema`` maps each form-field label
-to the dict key it fills in the sealed payload. The server freezes the
-recipient public key, its fingerprint, a single-use nonce, and the HPKE
-purpose label at create time; the operator's browser renders the form,
-seals the completed dict to the staged public key
+to the dict key it fills in the sealed payload, and ``workspaces`` names
+the workspace allowlist that may decrypt the result. The server freezes
+the recipient public key, its fingerprint, a single-use nonce, and one
+HPKE purpose label PER ALLOWLISTED WORKSPACE at create time; the
+operator's browser renders the form (allowlist displayed), seals the
+completed dict once per workspace label
 (``static/js/ceremony/sealing.js`` :: ``sealToEncapsulationKey``), and the
-decision carries ONLY ``approved``, ``nonce``, and ``sealed_payload``.
+decision carries ONLY ``approved``, ``nonce``, and ``sealed_payloads``.
 The executor validates the binding and upserts the ciphertext into the
 ``autonomy.secure.setting#1`` Setting — the plaintext exists nowhere on
 the server, in the approval store, or in any log; only the holder of the
@@ -33,15 +35,18 @@ from tools.dashboard import secure_setting_keys
 from tools.graph.schemas import secure_setting as _secure_setting_schema
 
 KIND = "secure_setting"
-PURPOSE_PREFIX = "autonomy.secure-setting.v1"
+PURPOSE_PREFIX = "autonomy.secure-setting.v2"
 
-_REQUIRED = {"target_key", "origin", "schema", "title", "description", "org"}
+_REQUIRED = {"target_key", "origin", "schema", "title", "description", "org",
+             "workspaces"}
 _TARGET_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _ORG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+_WORKSPACE_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _NONCE_RE = re.compile(r"^[0-9a-f]{64}$")
 _HEX_RE = re.compile(r"^[0-9a-f]*$")
 
 MAX_FIELDS = 16
+MAX_WORKSPACES = 8
 #: suite byte + 32-byte KEM enc + 16-byte AEAD tag — the smallest record
 #: the sealing wire format can produce.
 MIN_SEALED_BYTES = 1 + 32 + 16
@@ -109,11 +114,46 @@ def _normalize_fields(schema: object) -> list[dict]:
     return fields
 
 
-def purpose_for(org: str, target_key: str, nonce: str) -> str:
-    """The HPKE purpose label — binds org, target key, and the single-use
-    nonce into the encryption context, so a sealed record can never be
-    replayed into another setting, org, or request."""
-    return f"{PURPOSE_PREFIX}|{org}|{target_key}|{nonce}"
+def purpose_for(org: str, target_key: str, nonce: str, workspace: str) -> str:
+    """The HPKE purpose label — binds org, target key, the single-use
+    nonce, AND one allowed workspace into the encryption context. A sealed
+    record can never be replayed into another setting, org, or request —
+    and never opens for a workspace other than the one named in its label.
+    The consuming REPL reconstructs this label from its own host-derived
+    view of the caller's workspace (``tools/connectors/repl_login.py``),
+    so the allowlist is enforced by decryption, not by a check anyone with
+    Setting write access could edit around."""
+    return f"{PURPOSE_PREFIX}|{org}|{target_key}|{nonce}|workspace={workspace}"
+
+
+def _normalize_workspaces(value: object) -> list[str]:
+    """Validate the requested workspace allowlist against the platform's
+    known workspaces. Unknown ids are refused at request time — a typo'd
+    allowlist would otherwise seal records nobody can ever open."""
+    if not isinstance(value, list) or not value:
+        raise ValueError(
+            "secure_setting request field 'workspaces' must be a non-empty "
+            "list of workspace ids allowed to decrypt this credential"
+        )
+    if len(value) > MAX_WORKSPACES:
+        raise ValueError(
+            f"secure_setting allows at most {MAX_WORKSPACES} workspaces")
+    seen: list[str] = []
+    for ws in value:
+        if not isinstance(ws, str) or not _WORKSPACE_RE.fullmatch(ws):
+            raise ValueError(f"invalid workspace id in allowlist: {ws!r}")
+        if ws in seen:
+            raise ValueError(f"duplicate workspace in allowlist: {ws!r}")
+        seen.append(ws)
+    from agents.workspace_settings import get_workspace
+
+    for ws in seen:
+        try:
+            get_workspace(ws)
+        except KeyError as exc:
+            raise ValueError(
+                f"allowlist names an unknown workspace: {ws!r}") from exc
+    return sorted(seen)
 
 
 def prepare_create(session: str, request: dict) -> tuple[dict, dict]:
@@ -136,6 +176,7 @@ def prepare_create(session: str, request: dict) -> tuple[dict, dict]:
     title = _require_short_str(request, "title", max_len=160)
     description = _require_short_str(request, "description", max_len=2000)
     fields = _normalize_fields(request.get("schema"))
+    workspaces = _normalize_workspaces(request.get("workspaces"))
     try:
         recipient_pub, key_id = secure_setting_keys.recipient_public_key()
     except (OSError, ValueError) as exc:
@@ -145,13 +186,16 @@ def prepare_create(session: str, request: dict) -> tuple[dict, dict]:
         "target_key": target_key, "org": org, "origin": origin,
         "title": title, "description": description,
         "schema": request["schema"],
+        "workspaces": workspaces,
     }
     staged = {
-        "v": 1,
+        "v": 2,
         "nonce": nonce,
         "recipient_pub": recipient_pub,
         "key_id": key_id,
-        "purpose": purpose_for(org, target_key, nonce),
+        "purposes": {ws: purpose_for(org, target_key, nonce, ws)
+                     for ws in workspaces},
+        "workspaces": workspaces,
         "fields": fields,
         "target_key": target_key,
         "org": org,
@@ -200,22 +244,31 @@ async def execute(row: dict, decision: dict) -> dict:
     approval row, and the rendezvous executes an approved row at most once
     (first-writer-wins result + the in-flight guard in approvals_routes).
     """
-    if set(decision) != {"approved", "nonce", "sealed_payload"}:
+    if set(decision) != {"approved", "nonce", "sealed_payloads"}:
         return {"ok": False, "error": (
             "secure_setting approval must carry only approved, nonce, "
-            "and sealed_payload"
+            "and sealed_payloads"
         )}
     staged = row.get("staged")
     req = row.get("request") or {}
     if not isinstance(staged, dict) or not _NONCE_RE.fullmatch(
             str(staged.get("nonce", ""))):
         return {"ok": False, "error": "this request has no server-frozen sealing context"}
-    # The staged purpose must still be derivable from the frozen request —
+    # The staged purposes must still be derivable from the frozen request —
     # a staged blob that disagrees with the request it was frozen for is
     # tampering, not drift.
-    expected_purpose = purpose_for(
-        req.get("org", ""), req.get("target_key", ""), staged["nonce"])
-    if staged.get("purpose") != expected_purpose \
+    workspaces = req.get("workspaces")
+    if not isinstance(workspaces, list) or not workspaces \
+            or not all(isinstance(ws, str) for ws in workspaces):
+        return {"ok": False,
+                "error": "the frozen request has no workspace allowlist"}
+    expected_purposes = {
+        ws: purpose_for(req.get("org", ""), req.get("target_key", ""),
+                        staged["nonce"], ws)
+        for ws in workspaces
+    }
+    if staged.get("purposes") != expected_purposes \
+            or staged.get("workspaces") != workspaces \
             or staged.get("target_key") != req.get("target_key") \
             or staged.get("org") != req.get("org"):
         return {"ok": False,
@@ -223,10 +276,20 @@ async def execute(row: dict, decision: dict) -> dict:
     nonce = decision.get("nonce")
     if not isinstance(nonce, str) or not hmac.compare_digest(nonce, staged["nonce"]):
         return {"ok": False, "error": "the decision nonce does not match this request"}
-    try:
-        ciphertext_hex = _validate_sealed_payload(decision.get("sealed_payload"))
-    except ValueError as exc:
-        return {"ok": False, "error": str(exc)}
+    sealed_payloads = decision.get("sealed_payloads")
+    if not isinstance(sealed_payloads, dict) \
+            or set(sealed_payloads) != set(workspaces):
+        return {"ok": False, "error": (
+            "sealed_payloads must carry exactly one record per allowlisted "
+            "workspace"
+        )}
+    ciphertexts_hex: dict[str, str] = {}
+    for ws in workspaces:
+        try:
+            ciphertexts_hex[ws] = _validate_sealed_payload(sealed_payloads[ws])
+        except ValueError as exc:
+            return {"ok": False,
+                    "error": f"sealed record for workspace {ws!r}: {exc}"}
     try:
         _current_pub, current_key_id = secure_setting_keys.recipient_public_key()
     except (OSError, ValueError) as exc:
@@ -238,10 +301,14 @@ async def execute(row: dict, decision: dict) -> dict:
         )}
     from tools.graph import settings_ops
 
+    # No stored purpose string — the consumer reconstructs each label from
+    # its own derived view of the caller's workspace, so a widened
+    # ``workspaces``/``ciphertexts_hex`` edit yields labels that don't open.
     payload = {
-        "ciphertext_hex": ciphertext_hex,
+        "ciphertexts_hex": ciphertexts_hex,
+        "workspaces": workspaces,
+        "nonce": staged["nonce"],
         "key_id": staged["key_id"],
-        "purpose": staged["purpose"],
         "origin": req.get("origin", ""),
         "title": req.get("title", ""),
         "description": req.get("description", ""),
@@ -253,7 +320,7 @@ async def execute(row: dict, decision: dict) -> dict:
     try:
         setting_id = settings_ops.upsert_by_key(
             _secure_setting_schema.SECURE_SETTING_SET_ID,
-            _secure_setting_schema.SECURE_SETTING_REVISION,
+            _secure_setting_schema.SECURE_SETTING_V2_REVISION,
             staged["target_key"], payload, org=staged["org"],
         )
     except Exception as exc:

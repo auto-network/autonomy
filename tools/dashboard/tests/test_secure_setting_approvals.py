@@ -25,6 +25,7 @@ from tools.network.idkit import seal, seal_open
 
 ORG = "acme"
 SECRET_VALUE = "hunter2-super-secret-password"
+WORKSPACES = ["finance-ws", "ops-ws"]
 
 REQUEST = {
     "target_key": "connector.eversource.login",
@@ -36,6 +37,7 @@ REQUEST = {
     "title": "Eversource login",
     "description": "Credentials for the Eversource usage connector.",
     "org": ORG,
+    "workspaces": WORKSPACES,
 }
 
 
@@ -57,6 +59,17 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approvals.db")
     monkeypatch.setenv("REPL_LOGIN_KEY_FILE", str(tmp_path / "repl-login.key"))
     monkeypatch.setenv("DASHBOARD_AUTH", "off")
+
+    # The allowlist is validated against known workspaces at request time;
+    # this suite runs without workspace Settings, so stand in for the map.
+    import agents.workspace_settings as workspace_settings
+
+    def fake_get_workspace(workspace_id):
+        if workspace_id not in WORKSPACES:
+            raise KeyError(f"unknown workspace: {workspace_id!r}")
+        return object()
+
+    monkeypatch.setattr(workspace_settings, "get_workspace", fake_get_workspace)
     client = TestClient(_app(), base_url="https://localhost:8080")
     yield client, tmp_path
     GraphDB.close_all_pooled()
@@ -75,11 +88,13 @@ def _queue(client: TestClient, request: dict | None = None,
     return rid, rendered.json()["staged"]
 
 
-def _seal_form(staged: dict, values: dict) -> str:
-    """What the browser does: JSON-encode the form dict, seal to the staged
-    recipient key under the staged purpose."""
+def _seal_form(staged: dict, values: dict) -> dict[str, str]:
+    """What the browser does: JSON-encode the form dict once, then seal it
+    to the staged recipient key under each workspace's staged purpose."""
     plaintext = json.dumps(values).encode()
-    return seal(plaintext, staged["recipient_pub"], staged["purpose"]).hex()
+    return {ws: seal(plaintext, staged["recipient_pub"],
+                     staged["purposes"][ws]).hex()
+            for ws in staged["workspaces"]}
 
 
 def _approve(client: TestClient, rid: str, body: dict) -> dict:
@@ -96,14 +111,16 @@ def test_full_provisioning_round_trip(env):
     rid, staged = _queue(client)
 
     # The staged sealing context is complete and server-frozen.
-    assert set(staged) == {"v", "nonce", "recipient_pub", "key_id", "purpose",
-                           "fields", "target_key", "org"}
+    assert set(staged) == {"v", "nonce", "recipient_pub", "key_id", "purposes",
+                           "workspaces", "fields", "target_key", "org"}
     assert len(staged["nonce"]) == 64
     assert len(staged["recipient_pub"]) == 64
-    assert staged["purpose"] == (
-        f"autonomy.secure-setting.v1|{ORG}|connector.eversource.login|"
-        f"{staged['nonce']}"
-    )
+    assert staged["workspaces"] == sorted(WORKSPACES)
+    assert staged["purposes"] == {
+        ws: (f"autonomy.secure-setting.v2|{ORG}|connector.eversource.login|"
+             f"{staged['nonce']}|workspace={ws}")
+        for ws in WORKSPACES
+    }
     assert staged["fields"] == [
         {"label": "Username", "key": "username", "secret": False, "placeholder": ""},
         {"label": "Password", "key": "password", "secret": True, "placeholder": ""},
@@ -112,30 +129,44 @@ def test_full_provisioning_round_trip(env):
     values = {"username": "alex@example.com", "password": SECRET_VALUE}
     execution = _approve(client, rid, {
         "nonce": staged["nonce"],
-        "sealed_payload": _seal_form(staged, values),
+        "sealed_payloads": _seal_form(staged, values),
     })
     assert execution["ok"] is True, execution
     assert execution["set_id"] == SECURE_SETTING_SET_ID
     assert execution["key"] == "connector.eversource.login"
     assert execution["org"] == ORG
 
-    # The stored member holds ciphertext + binding metadata, no plaintext.
+    # The stored member holds ciphertexts + binding metadata: no plaintext
+    # and — deliberately — no stored purpose string to trust.
     members = settings_ops.read_set(SECURE_SETTING_SET_ID, org=ORG).members
     assert len(members) == 1
     payload = members[0].payload
     assert payload["key_id"] == staged["key_id"]
-    assert payload["purpose"] == staged["purpose"]
+    assert "purpose" not in payload
+    assert payload["nonce"] == staged["nonce"]
+    assert payload["workspaces"] == sorted(WORKSPACES)
+    assert set(payload["ciphertexts_hex"]) == set(WORKSPACES)
     assert payload["origin"] == "eversource.com"
     assert payload["payload_keys"] == ["username", "password"]
     assert payload["approval_id"] == rid
     assert payload["requested_by_session"] == "auto-0806-165334"
     assert SECRET_VALUE not in json.dumps(payload)
 
-    # Only the host key file opens it, and only under the exact purpose.
+    # Each record opens only under a RECONSTRUCTED label naming its own
+    # workspace — and does not open under a different workspace's label.
     private_hex = (tmp_path / "repl-login.key").read_text().strip()
-    opened = seal_open(bytes.fromhex(payload["ciphertext_hex"]),
-                       private_hex, payload["purpose"])
-    assert json.loads(opened) == values
+    for ws in WORKSPACES:
+        purpose = (f"autonomy.secure-setting.v2|{ORG}|"
+                   f"connector.eversource.login|{payload['nonce']}|workspace={ws}")
+        opened = seal_open(bytes.fromhex(payload["ciphertexts_hex"][ws]),
+                           private_hex, purpose)
+        assert json.loads(opened) == values
+    with pytest.raises(Exception):
+        seal_open(
+            bytes.fromhex(payload["ciphertexts_hex"][WORKSPACES[0]]),
+            private_hex,
+            f"autonomy.secure-setting.v2|{ORG}|connector.eversource.login|"
+            f"{payload['nonce']}|workspace={WORKSPACES[1]}")
 
     # The plaintext appears nowhere in either durable store.
     for db_file in [tmp_path / "approvals.db", tmp_path / "orgs" / f"{ORG}.db"]:

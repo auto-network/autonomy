@@ -36,6 +36,7 @@ def _request_json(url: str, body: dict[str, Any] | None = None,
 def request_secure_setting(*, session: str, target_key: str, origin: str,
                            schema: dict[str, Any], title: str,
                            description: str, org: str,
+                           workspaces: list[str],
                            dashboard: str = DEFAULT_DASHBOARD,
                            wait: bool = True) -> dict[str, Any]:
     created = _request_json(f"{dashboard.rstrip('/')}/api/approvals", {
@@ -48,6 +49,7 @@ def request_secure_setting(*, session: str, target_key: str, origin: str,
             "title": title,
             "description": description,
             "org": org,
+            "workspaces": workspaces,
         },
     })
     approval_id = created.get("id")
@@ -74,6 +76,10 @@ def main() -> int:
     parser.add_argument("origin")
     parser.add_argument("--field", action="append", default=[],
                         help="FORM_NAME=DICT_KEY; repeat for each secure field")
+    parser.add_argument("--workspace", action="append", default=[],
+                        help="workspace id allowed to decrypt this credential; "
+                             "repeat to allowlist several. Bound into the HPKE "
+                             "label — widening later means re-provisioning.")
     parser.add_argument("--title", required=True)
     parser.add_argument("--description", default="")
     parser.add_argument("--org", default=os.environ.get("GRAPH_ORG", "personal"))
@@ -91,10 +97,13 @@ def main() -> int:
         schema[form_name] = dict_key
     if not schema:
         parser.error("at least one --field is required")
+    if not args.workspace:
+        parser.error("at least one --workspace is required")
     result = request_secure_setting(
         session=args.session, target_key=args.target_key, origin=args.origin,
         schema=schema, title=args.title, description=args.description,
-        org=args.org, dashboard=args.dashboard, wait=not args.no_wait)
+        org=args.org, workspaces=args.workspace,
+        dashboard=args.dashboard, wait=not args.no_wait)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result.get("ok", True) else 1
 

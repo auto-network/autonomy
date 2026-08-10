@@ -18,6 +18,9 @@ from .registry import (
 
 SECURE_SETTING_SET_ID = "autonomy.secure.setting"
 SECURE_SETTING_REVISION = 1
+#: Revision 2 — workspace-bound records: one ciphertext per allowed
+#: workspace, purpose label reconstructed by the consumer, never stored.
+SECURE_SETTING_V2_REVISION = 2
 
 
 SYNOPSIS = {
@@ -69,6 +72,97 @@ class SecureSettingV1(SettingSchema):
             "The exact HPKE purpose label bound into the seal "
             "(autonomy.secure-setting.v1|<org>|<target_key>|<nonce>). "
             "Required verbatim to open the record."
+        ),
+    )
+    origin: str = field(
+        required=True,
+        description=(
+            "What the secret authenticates against (e.g. the service "
+            "hostname) — display/audit metadata, not part of the seal."
+        ),
+    )
+    title: str = field(
+        default="",
+        description="Human title the operator saw when approving.",
+    )
+    description: str = field(
+        default="",
+        description="Requester-supplied description shown at approval time.",
+    )
+    payload_keys: list = field(
+        default_factory=list,
+        element=str,
+        description=(
+            "The dict keys present in the sealed JSON payload, in form "
+            "order — the payload's shape without its values."
+        ),
+    )
+    provisioned_at: float = field(
+        required=True,
+        description="Unix time the approval executor stored this row.",
+    )
+    approval_id: str = field(
+        default="",
+        description="The approval-rendezvous request id that produced this row.",
+    )
+    requested_by_session: str = field(
+        default="",
+        description="The agent session that requested provisioning.",
+    )
+
+
+@keyed_per_entity
+class SecureSettingV2(SettingSchema):
+    """One sealed secret payload, bound to a workspace allowlist.
+
+    Key: the requester-chosen ``target_key`` — one evolving row per key
+    via ``upsert_by_key`` at this revision. Unlike revision 1, the HPKE
+    purpose label is deliberately NOT stored: each allowed workspace has
+    its own ciphertext sealed under
+    ``autonomy.secure-setting.v2|<org>|<target_key>|<nonce>|workspace=<ws>``
+    and the consumer (``tools/connectors/repl_login.py``) reconstructs
+    that label from its OWN host-derived view of the caller's workspace.
+    Editing ``workspaces``/``ciphertexts_hex`` cannot widen access — a
+    record moved under a different workspace name simply fails to
+    decrypt. Widening an allowlist therefore always means re-sealing the
+    plaintext through a fresh operator approval ceremony.
+    """
+
+    set_id = SECURE_SETTING_SET_ID
+    schema_revision = SECURE_SETTING_V2_REVISION
+
+    ciphertexts_hex: dict = field(
+        required=True,
+        description=(
+            "One HPKE wire record (suite byte || enc || ciphertext, "
+            "lowercase hex) per allowed workspace, keyed by workspace id. "
+            "Each opens only with the host recipient private key under the "
+            "reconstructed v2 purpose label naming that same workspace."
+        ),
+    )
+    workspaces: list = field(
+        required=True,
+        element=str,
+        description=(
+            "The workspace allowlist as shown to the operator at approval "
+            "time — display/audit copy of the ciphertext map's keys. The "
+            "consumer never trusts this field; the binding is the seal."
+        ),
+    )
+    nonce: str = field(
+        required=True,
+        description=(
+            "The single-use 64-hex approval nonce, needed to reconstruct "
+            "the purpose label. Public once provisioned; it was already "
+            "part of the stored purpose string in revision 1."
+        ),
+    )
+    key_id: str = field(
+        required=True,
+        description=(
+            "Fingerprint of the recipient public key the records were "
+            "sealed to (first 16 hex of SHA-256 over the raw public key "
+            "bytes)."
         ),
     )
     origin: str = field(
