@@ -485,9 +485,11 @@ class TestCrossTalkEnvelope:
         real DB and writing rows to it.
         """
         raw = "test-token"
+        # resolve_token now returns (session, org); a non-None org keeps the
+        # caller-org guard from firing on this synthetic sender.
         monkeypatch.setattr(
             server_mod.auth_db, "resolve_token",
-            lambda token_hash: sender,
+            lambda token_hash: (sender, "autonomy"),
         )
         monkeypatch.setattr(
             server_mod.auth_db, "insert_message",

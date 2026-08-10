@@ -3106,20 +3106,73 @@ async def api_terminal_rename(request):
 
 # ── CrossTalk API ────────────────────────────────────────────────────────────
 
-def _crosstalk_auth(request) -> tuple[str | None, JSONResponse | None]:
-    """Extract and verify a CrossTalk bearer token.
+def _session_has_workspace(session: str) -> bool:
+    """True when *session* maps to a workspace — i.e. is a container session.
 
-    Returns (sender_tmux_name, None) on success, or (None, error_response) on failure.
+    Used only to classify an org-less token: a workspace session whose token
+    carries no org is a legacy or mis-minted CONTAINER token, not a local
+    caller. Best-effort and cache-independent (reads only the session row's
+    project field, never the org-resolving workspace map).
+    """
+    try:
+        from tools.dashboard.dao import dashboard_db
+        row = dashboard_db.get_session(session)
+    except Exception:
+        return False
+    return bool(((row or {}).get("project") or "").strip())
+
+
+def authenticate_session_request(
+    request,
+) -> tuple[tuple[str, str | None] | None, JSONResponse | None]:
+    """Authenticate a request's bearer session token — the shared request-auth
+    primitive for every restricted dashboard route (CrossTalk, settings-org
+    scoping, turn-correction, …).
+
+    Returns ``((session, org), None)`` on success, or ``(None, error_response)``.
+    ``org`` is the organization stamped on the token at mint: a slug for a
+    container, ``None`` for a local/host caller.
+
+    Fail-closed guard: a token whose org is absent but whose session maps to a
+    workspace is a container token minted before the org column existed (there
+    is no backfill) or by a future mint site that forgot to stamp it. It is
+    REFUSED, never treated as a local caller — a forgotten org locks a session
+    out rather than escalating it to full dashboard authority. Callers may then
+    trust ``org is None`` to mean "genuine local caller."
     """
     auth = request.headers.get("authorization", "")
     if not auth.startswith("Bearer "):
-        return None, JSONResponse({"error": "missing or invalid Authorization header"}, status_code=401)
+        return None, JSONResponse(
+            {"error": "missing or invalid Authorization header"}, status_code=401)
     raw_token = auth[7:]
     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
-    sender = auth_db.resolve_token(token_hash)
-    if sender is None:
-        return None, JSONResponse({"error": "invalid or revoked token"}, status_code=401)
-    return sender, None
+    resolved = auth_db.resolve_token(token_hash)
+    if resolved is None:
+        return None, JSONResponse(
+            {"error": "invalid or revoked token"}, status_code=401)
+    session, org = resolved
+    if org is None and _session_has_workspace(session):
+        return None, JSONResponse(
+            {"error": (
+                "session token carries no organization; relaunch the session "
+                "to mint an org-stamped token"
+            )},
+            status_code=403)
+    return (session, org), None
+
+
+def _crosstalk_auth(request) -> tuple[str | None, JSONResponse | None]:
+    """Extract and verify a bearer session token for CrossTalk routes.
+
+    Thin wrapper over :func:`authenticate_session_request`; CrossTalk needs only
+    the sender identity, so it discards org. Returns (sender_tmux_name, None) on
+    success, or (None, error_response) on failure.
+    """
+    identity, err = authenticate_session_request(request)
+    if err is not None:
+        return None, err
+    session, _org = identity
+    return session, None
 
 
 async def api_resources(request):

@@ -71,7 +71,7 @@ class TestCrossTalkLogAPI:
     def test_returns_messages_from_auth_db(self, monkeypatch):
         from tools.dashboard import server as server_mod
 
-        monkeypatch.setattr(server_mod.auth_db, "resolve_token", lambda _h: "auto-sender")
+        monkeypatch.setattr(server_mod.auth_db, "resolve_token", lambda _h: ("auto-sender", "autonomy"))
         captured: dict = {}
 
         def fake_get_messages(*, limit, since, session):
@@ -106,7 +106,7 @@ class TestCrossTalkLogAPI:
     def test_rejects_invalid_since(self, monkeypatch):
         from tools.dashboard import server as server_mod
 
-        monkeypatch.setattr(server_mod.auth_db, "resolve_token", lambda _h: "auto-sender")
+        monkeypatch.setattr(server_mod.auth_db, "resolve_token", lambda _h: ("auto-sender", "autonomy"))
 
         with TestClient(server_mod.app) as client:
             r = client.get(

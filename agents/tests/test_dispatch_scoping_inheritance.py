@@ -362,6 +362,7 @@ class TestLaunchSessionMetaAndEnv:
             output_dir=str(run_dir),
             metadata={
                 "bead_id": "auto-xyz",
+                "org": "autonomy",
                 "graph_project": "autonomy",
                 "graph_tags": ["dashboard", "ui"],
             },

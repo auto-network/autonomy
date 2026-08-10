@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS session_tokens (
     token_hash      TEXT PRIMARY KEY,
     tmux_name       TEXT NOT NULL,
     created_at      REAL NOT NULL,
-    revoked_at      REAL
+    revoked_at      REAL,
+    org             TEXT
 );
 
 CREATE TABLE IF NOT EXISTS crosstalk_messages (
@@ -57,6 +58,15 @@ def init_db(db_path: Path | None = None) -> None:
     _conn.execute("PRAGMA journal_mode=WAL")
     _conn.execute("PRAGMA busy_timeout=5000")
     _conn.executescript(_SCHEMA)
+    # Add the org column to a session_tokens table that predates it. The column
+    # is only ADDED here; existing rows are deliberately NOT backfilled — a token
+    # minted before the column existed reads back org=NULL and, if its session
+    # has a workspace, is refused by the caller-org guard (a locked-out stale
+    # session is the correct outcome; it re-mints with an org on relaunch).
+    cols = {r["name"] for r in _conn.execute(
+        "PRAGMA table_info(session_tokens)").fetchall()}
+    if "org" not in cols:
+        _conn.execute("ALTER TABLE session_tokens ADD COLUMN org TEXT")
     _conn.commit()
     logger.info("auth_db: initialised at %s", path)
 
@@ -72,24 +82,39 @@ def get_conn() -> sqlite3.Connection:
 # -- Token operations ----------------------------------------------------------
 
 
-def insert_token(token_hash: str, tmux_name: str) -> None:
-    """Store a hashed session token."""
+def insert_token(token_hash: str, tmux_name: str, org: str | None) -> None:
+    """Store a hashed session token stamped with its owning organization.
+
+    ``org`` is required at the call site (no default) so both minters decide it
+    explicitly: the container launcher passes the canonical org and refuses to
+    mint without one; the host CLI passes ``None`` (a local caller, unscoped).
+    ``None`` is a deliberate value here, never an accidental omission.
+    """
     conn = get_conn()
     conn.execute(
-        "INSERT INTO session_tokens (token_hash, tmux_name, created_at) VALUES (?, ?, ?)",
-        (token_hash, tmux_name, time.time()),
+        "INSERT INTO session_tokens (token_hash, tmux_name, created_at, org)"
+        " VALUES (?, ?, ?, ?)",
+        (token_hash, tmux_name, time.time(), org),
     )
     conn.commit()
 
 
-def resolve_token(token_hash: str) -> str | None:
-    """Look up tmux_name for a non-revoked token hash. Returns None if invalid."""
+def resolve_token(token_hash: str) -> tuple[str, str | None] | None:
+    """Resolve a non-revoked token hash to ``(tmux_name, org)``.
+
+    ``org`` is the organization stamped at mint: a slug for a container token,
+    ``None`` for a host/local token (or for a token minted before the org column
+    existed). Returns ``None`` when the token is unknown or revoked. Callers that
+    use ``org`` for authority must not treat ``None`` as local without first
+    checking the session has no workspace — see the guard in server.py.
+    """
     conn = get_conn()
     row = conn.execute(
-        "SELECT tmux_name FROM session_tokens WHERE token_hash=? AND revoked_at IS NULL",
+        "SELECT tmux_name, org FROM session_tokens"
+        " WHERE token_hash=? AND revoked_at IS NULL",
         (token_hash,),
     ).fetchone()
-    return row["tmux_name"] if row else None
+    return (row["tmux_name"], row["org"]) if row else None
 
 
 def revoke_token(tmux_name: str) -> None:

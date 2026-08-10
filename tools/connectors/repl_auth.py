@@ -109,9 +109,13 @@ def authenticate(*, autonomy_root: Path | None,
 
     from tools.dashboard.dao import auth_db, dashboard_db
 
-    session = auth_db.resolve_token(token_hash)
-    if session is None:
+    resolved = auth_db.resolve_token(token_hash)
+    if resolved is None:
         raise ReplAuthError("invalid or revoked token", status=401)
+    # resolve_token now returns (session, org); the REPL gates on the derived
+    # WORKSPACE (below), not the token's org, so the org is intentionally
+    # unused here.
+    session, _org = resolved
 
     row = dashboard_db.get_session(session)
     project = ((row or {}).get("project") or "").strip()
