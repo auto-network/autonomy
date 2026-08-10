@@ -262,9 +262,11 @@ published nor sealed) and `PublishedUpToSeal` (liveness: every existing
 main publishes up to its seal; the linked file in full).  `CalCedeTail`
 restores the link-immediately/cede-the-tail behavior and must fail.
 
-**Impossibility result (model-proven):** strict no-loss AND strict
-global order are jointly unsatisfiable once a superseded file can
-receive a late-flushed write (`LateFlushBudget` models this): TLC
+**Impossibility result (model-proven — the precondition IS the
+theorem):** UNDER late flushes (a superseded file receiving a further
+write, which this channel permits and nothing can fence), strict
+no-loss AND strict global order are jointly unsatisfiable
+(`LateFlushBudget` models the precondition): TLC
 produced the trace — a late flush landing on an earlier file after a
 later file already published.  Nothing can prove a file won't be
 written after its successor opens.  What IS proven: every byte present
@@ -310,3 +312,11 @@ adversarial review, and must FAIL its config (see `calibration/`):
 Green configurations: `GreenCore` / `GreenLive` (main + sibling, all
 budgets on), `GreenRollover` / `GreenRolloverLive` (three-file chain,
 restart enabled — the N2/N3 regression pin).
+
+A note on applying the impossibility result: it is conditional.  On a
+channel where late flushes are actually fenced (e.g. the writer
+provably closes the old file before creating the successor), both
+properties are simultaneously achievable and this theorem does not
+apply.  Codex rollouts give no such fence, so seal-ordered delivery is
+the strongest guarantee available here — do not spend a revision trying
+to recover both.
