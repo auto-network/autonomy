@@ -289,6 +289,34 @@ link) a final catch-up drain of every not-yet-checked predecessor in
 chain order, then advances; the drain is idempotent-by-line-index so
 crash/restart re-walks are safe.
 
+
+## Implementation-review audit (operator-ordered, 2026-08-10)
+
+Every gap found by the two review rounds of the auto-suvcp implementation,
+classified against this model.  Headline: **zero design errors** — no fix
+contradicts a modeled action or a bead rule; the design held.  The
+failures were refinement violations (code not honoring semantics the
+model/spec already stated) and bites at the model's declared edges.
+
+| Finding | Design correct? | Model's relation | Class | Action taken |
+|---|---|---|---|---|
+| B1 host shared-dir adoption | yes (host paths fenced; legacy gate was load-bearing) | shared-dir layout is a DECLARED edge (one-dir-per-session) | edge + impl. error (gate dropped in unification) | code fixed + pinned; shared-dir model extension remains the agreed joint follow-up |
+| B2/R2 inode watch ownership | yes (design D3 specified it) | kernel wd layer is below the model (documented) | impl. omission | code fixed + pinned; ledger entry strengthened below |
+| B3 mortal watermark republish | yes | model ALWAYS read the durable ledger (PredReady over `consumed`); code substituted per-track mortal state | refinement violation | **now machine-pinned: `CalMortalWatermark`** (a closed track's belief is 0 ⇒ failure-free republish ⇒ BoundedDuplicates violated) |
+| B4 release-before-worker-stop | yes | modeled as GateReleaseOnCancel="guarded"; code used the wrong done-signal | refinement violation (benign only via worker purity) | code fixed + pinned; worker-purity added to the assumption ledger |
+| B5 teardown leak | yes (bead L1 required release) | session teardown is not modeled | documented boundary | code fixed + pinned; boundary recorded below (single-actor cleanup; no interleaving beyond the B4 contract) |
+| B6/R3 host activation + generation atomicity | yes (Rule 6) | host layer out of scope; generation is the CAS refinement layer | edge + refinement violation | code fixed + pinned; ledger entry added |
+| R1 replacement-inode cursor | yes | model: a new identity IS a new file, linked at its published level (0) — the fix matches model semantics exactly | refinement violation (two identities conflated) | code fixed + pinned; ledger note added |
+| S2 stop-without-death | yes | model's Restart is an atomic stop+start; a live-process stop is a half-restart it does not contain | documented boundary | code fixed + pinned; boundary recorded below |
+| vacuous/weak tests (both rounds) | — | — | test-layer | rewritten; caught by the dual-review protocol |
+
+Deliberately deferred model extensions, with rationale: (1) the shared-dir
+second-session scenario (B1's world) — agreed as a co-authored follow-up
+with the implementer after landing; it is the only finding class whose
+model absence has now bitten twice (A7 review, B1 implementation).  (2)
+Teardown modeling — single-actor cleanup with no cross-actor interleaving
+beyond the already-modeled cancellation contract; pinned by tests.
+
 ## Calibration switches
 
 Every entry restores a design that failed in production or in
@@ -314,6 +342,7 @@ adversarial review, and must FAIL its config (see `calibration/`):
 | CalPerPathGates | A1 per-(s,f) gates, no gen CAS | OffsetCoherent |
 | CalRolloverCAS | B4 CAS loser terminal | EventuallyLinked (newest closed) |
 | CalCedeTail | today's rollover: link immediately, cede the old tail | OrderedDelivery |
+| CalMortalWatermark | impl. review B3: handover reads a per-track belief that dies with the track | BoundedDuplicates (failure-free republish) |
 
 Green configurations: `GreenCore` / `GreenLive` (main + sibling, all
 budgets on), `GreenRollover` / `GreenRolloverLive` (three-file chain,
@@ -326,3 +355,20 @@ properties are simultaneously achievable and this theorem does not
 apply.  Codex rollouts give no such fence, so seal-ordered delivery is
 the strongest guarantee available here — do not spend a revision trying
 to recover both.
+
+Assumption-ledger additions (implementation-review lessons, 2026-08-10):
+- **Read-window workers are PURE** (no DB writes, no broadcasts, no
+  monitor-state mutation): the only reason an early gate release was ever
+  benign.  Pinned by test; any future write inside a worker voids the
+  cancellation safety argument.
+- **The handover walk reads DURABLE publication state** (file_offset for
+  the linked file; the tombstone for closed tracks), never in-memory-only
+  belief (CalMortalWatermark).
+- **Generation is established atomically wherever jsonl_path is written**
+  (derived by default inside link_and_enrich; no caller can opt out).
+- **Path is not identity**: a (st_dev, st_ino) mismatch at the same path
+  is a NEW file — cursor resets to 0 with the generation write; restart/
+  replacement is a failure event (duplicates accepted, loss never).
+- **Monitor stop() is a half-restart** the model does not contain: it must
+  quiesce gates (retain needs_drain, no pumping) rather than rely on
+  process death; start() resumes retained work.

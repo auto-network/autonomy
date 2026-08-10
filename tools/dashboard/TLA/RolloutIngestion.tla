@@ -46,6 +46,9 @@ CONSTANTS
     MergeHarnessAtWrite,\* TRUE  | FALSE: B7 harness_state RMW clobber
     GateReleaseOnCancel,\* "guarded" | "finally" (A5) | "none" (B5)
     OrderedHandover,    \* TRUE  | FALSE: rollover cedes the old file's tail
+    MortalWatermark,    \* FALSE | TRUE: handover readiness reads a per-track
+                        \*   belief that dies with the track (review B3) instead
+                        \*   of the durable publication ledger
     WORKERS,            \* drain worker slots per session, e.g. {"wA","wB"}
     \* ---- environment budgets -------------------------------------------
     RestartBudget, CrashBudget, CancelBudget, PollerBudget,
@@ -154,7 +157,17 @@ ChainBefore(g, f) ==
 \* AND its final check has been recorded (sealed).  The handover walk
 \* makes predecessors ready oldest-first, so no later file publishes
 \* before every earlier file's check.
-PredReady(g) == consumed[g] >= fLines[g] /\ g \in sealedSet
+\* The publication level the handover walk believes.  The DESIGN reads the
+\* durable ledger (consumed).  Review finding B3: the first implementation
+\* read a per-track watermark that dies when the track closes — a closed
+\* track "knows" level 0, so a later walk republishes the whole file with
+\* zero failures.  CalMortalWatermark restores that broken belief.
+PubLevelOf(g) ==
+    IF MortalWatermark
+       /\ (\A s \in SESSIONS : track[<<s, g>>].st \in {"closed", "ign", "none"})
+    THEN 0 ELSE consumed[g]
+
+PredReady(g) == PubLevelOf(g) >= fLines[g] /\ g \in sealedSet
 
 HasUnreadyPred(f) ==
     \E g \in FILES :
@@ -920,7 +933,12 @@ HandoverDrain(s) ==
                                    \* never concurrently with a drain owner
     /\ HasUnreadyPred(pendingLink[s])
     /\ LET p == OldestUnreadyPred(pendingLink[s]) IN
-       /\ consumed' = [consumed EXCEPT ![p] = Max(@, fLines[p])]
+       \* Publish the remainder above the BELIEVED level.  With the durable
+       \* ledger this equals Max(consumed, fLines) — no re-delivery; with
+       \* the mortal belief (B3) it re-publishes from zero, failure-free.
+       /\ consumed' = [consumed EXCEPT ![p] =
+                         @ + (IF fLines[p] > PubLevelOf(p)
+                              THEN fLines[p] - PubLevelOf(p) ELSE 0)]
        /\ sealedSet' = sealedSet \cup {p}
        /\ sealedAt' = [sealedAt EXCEPT ![p] = Max(@, fLines[p])]
        \* When the predecessor is the CURRENTLY LINKED file, this walk

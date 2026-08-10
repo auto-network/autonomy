@@ -56,6 +56,7 @@ CALIBRATION = [
     ("calibration/CalPerPathGates.cfg", "Scen3M"),
     ("calibration/CalRolloverCAS.cfg", "Scen3M"),
     ("calibration/CalCedeTail.cfg", "Scen3M"),
+    ("calibration/CalMortalWatermark.cfg", "Scen3M"),
     # Guard-branch reachability probe (must fail = branch is live):
     ("calibration/ProbeBirthCASFail.cfg", "Scen3M"),
 ]
