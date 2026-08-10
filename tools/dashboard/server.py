@@ -15174,8 +15174,12 @@ async def api_agent_action_dispatch(request):
         "prompt": rendered_prompt,
         "mounts": None,
         "metadata": {
-            "graph_project": target_org,
-            "graph_org": target_org,
+            # Canonical org key: the launcher stamps the session token from
+            # metadata["org"] ONLY and refuses to mint without it. The legacy
+            # graph_project/graph_org keys it used to read are gone — they fed
+            # a fallback chain that let this call site look correct while
+            # setting nothing the launcher would honour (auto-23d9m).
+            "org": target_org,
             "agentic_source_id": src["id"],
             "set_id": set_id,
             "member_key": member_key,
@@ -15238,8 +15242,8 @@ async def api_agent_action_dispatch(request):
         primer_path = output_dir_path / ".claude_md"
         primer_path.write_text(render_workspace_primer(workspace))
         launch_metadata = dict(launch_kwargs["metadata"])
-        launch_metadata["graph_project"] = workspace.graph_project
-        launch_metadata["graph_org"] = workspace.graph_project
+        # Canonical org key only — see the launch_kwargs metadata above.
+        launch_metadata["org"] = workspace.graph_project
         if workspace.default_tags:
             launch_metadata["graph_tags"] = list(workspace.default_tags)
         launch_kwargs.update({
