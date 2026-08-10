@@ -887,7 +887,9 @@ class TestDiagServerBlockExtensions:
             assert key in s, f"server missing {key}"
 
     def test_parse_errors_count_increments_on_corrupt_jsonl(self, diag_env):
-        """Writing a malformed line bumps parse_errors_count via _tail_one."""
+        """A malformed line bumps parse_errors_count via the drain path."""
+        import asyncio
+
         server_mod, tmp_path, db_path = diag_env
         from tools.dashboard import session_monitor as monitor_mod
 
@@ -905,9 +907,15 @@ class TestDiagServerBlockExtensions:
 
         ts = monitor_mod._TailState()
         monitor_mod.session_monitor._tail_states["auto-1"] = ts
-        # Drive _tail_one directly so we don't need the inotify loop.
+        # Drive the read → publish steps directly (no inotify loop): the
+        # drain owner reads a window off-thread, then publishes it, which
+        # is where the diag counters are stamped.
         row = monitor_mod.get_session("auto-1")
-        ok, _ = monitor_mod.session_monitor._tail_one(row, ts)
+        window = monitor_mod.session_monitor._read_tail_window(row)
+        assert window is not None
+        asyncio.run(
+            monitor_mod.session_monitor._publish_tail_window("auto-1", row, window)
+        )
         assert ts.parse_errors_count >= 1
         assert ts.last_parse_error is not None
         assert "json" in (ts.last_parse_error or "").lower() or \

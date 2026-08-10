@@ -242,105 +242,65 @@ class TestSubagentExclusion:
     async def test_in_create_defers_until_child_header_is_complete(
         self, tmp_path, caplog,
     ):
-        """IN_CREATE on an empty child must not repoint the parent session."""
+        """IN_CREATE on an empty child must not repoint the parent session.
+
+        auto-suvcp semantics: the empty file's track goes CHARACTERIZING
+        (responsibility retained — no retry loop, no abandon); once the
+        header is complete the recheck classifies it subagent → IGNORED.
+        """
         path = tmp_path / "rollout-racy-child.jsonl"
         path.touch()
+        parent = tmp_path / "rollout-parent.jsonl"
         row = {
-            "jsonl_path": str(tmp_path / "rollout-parent.jsonl"),
+            "tmux_name": "auto-race",
+            "jsonl_path": str(parent),
             "session_uuids": json.dumps(["rollout-parent"]),
             "harness": "codex",
         }
-        child_header = {
-            "type": "session_meta",
-            "payload": {
-                "forked_from_id": "parent",
-                "source": {"subagent": {"thread_spawn": {"depth": 1}}},
-                # Real Codex session_meta records are large enough for the
-                # create/write visibility race to be observable.
-                "base_instructions": {"text": "x" * 20_000},
-            },
-        }
-
-        async def finish_header():
-            await asyncio.sleep(0)
-            path.write_text(json.dumps(child_header) + "\n")
-
-        writer = asyncio.create_task(finish_header())
         monitor = SessionMonitor()
         with (
             patch(
-                "tools.dashboard.session_monitor._CODEX_HEADER_RETRY_DELAYS_SECONDS",
-                (0.01,),
+                "tools.dashboard.session_monitor.get_session",
+                return_value=row,
             ),
             patch(
-                "tools.dashboard.session_monitor.resolve_harness_for_session_row"
-            ) as resolve_harness,
+                "tools.dashboard.dao.dashboard_db.update_jsonl_link",
+            ) as link_write,
             caplog.at_level("INFO"),
         ):
             await monitor._handle_container_create("auto-race", row, path)
-        await writer
+            track = monitor._tracks[("auto-race", str(path))]
+            assert track.state == "CHARACTERIZING"
+            assert "classification=unknown" in caplog.text
+            assert "action=characterize" in caplog.text
 
-        resolve_harness.assert_not_called()
-        assert "classification=unknown" in caplog.text
-        assert "action=defer" in caplog.text
+            # Header lands — the MODIFY/recheck path classifies it.
+            path.write_text(json.dumps({
+                "type": "session_meta",
+                "payload": {
+                    "forked_from_id": "parent",
+                    "source": {"subagent": {"thread_spawn": {"depth": 1}}},
+                    "base_instructions": {"text": "x" * 20_000},
+                },
+            }) + "\n")
+            monitor._classify_and_step(track)
+
+        assert track.state == "IGNORED"
+        link_write.assert_not_called()
         assert "classification=subagent" in caplog.text
         assert "action=skip" in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_in_create_links_after_delayed_main_header(self, tmp_path):
-        """A genuine main rollover links once its complete header is visible."""
-        path = tmp_path / "rollout-racy-main.jsonl"
-        path.touch()
-        old_path = tmp_path / "rollout-parent.jsonl"
-        row = {
-            "jsonl_path": str(old_path),
-            "session_uuids": json.dumps(["rollout-parent"]),
-            "harness": "codex",
-        }
-        main_header = {
-            "type": "session_meta",
-            "payload": {"source": "cli", "id": "new-main"},
-        }
-
-        async def finish_header():
-            await asyncio.sleep(0)
-            path.write_text(json.dumps(main_header) + "\n")
-
-        writer = asyncio.create_task(finish_header())
-        monitor = SessionMonitor()
-        harness = MagicMock()
-        harness.resolve_session.return_value = {
-            "jsonl_path": path,
-            "resolution_dir": tmp_path,
-        }
-        with (
-            patch(
-                "tools.dashboard.session_monitor._CODEX_HEADER_RETRY_DELAYS_SECONDS",
-                (0.01,),
-            ),
-            patch(
-                "tools.dashboard.session_monitor.resolve_harness_for_session_row",
-                return_value=harness,
-            ),
-        ):
-            await monitor._handle_container_create("auto-race", row, path)
-        await writer
-
-        harness.resolve_session.assert_called_once_with(
-            tmux_name="auto-race",
-            row=row,
-            jsonl_path=path,
-        )
-        harness.attach_live_monitoring.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_in_create_never_links_when_header_stays_incomplete(
         self, tmp_path, caplog,
     ):
-        """Retry exhaustion must abandon an unknown file instead of failing open."""
+        """An unknown file must never fail open — it characterizes and
+        stays unlinked (expiry is the reconciliation tick's time-driven
+        quarantine, covered in test_rollout_ingestion.py)."""
         path = tmp_path / "rollout-still-empty.jsonl"
         path.touch()
         row = {
+            "tmux_name": "auto-race",
             "jsonl_path": str(tmp_path / "rollout-parent.jsonl"),
             "session_uuids": json.dumps(["rollout-parent"]),
             "harness": "codex",
@@ -349,20 +309,24 @@ class TestSubagentExclusion:
 
         with (
             patch(
-                "tools.dashboard.session_monitor._CODEX_HEADER_RETRY_DELAYS_SECONDS",
-                (0,),
+                "tools.dashboard.session_monitor.get_session",
+                return_value=row,
             ),
             patch(
-                "tools.dashboard.session_monitor.resolve_harness_for_session_row"
-            ) as resolve_harness,
+                "tools.dashboard.dao.dashboard_db.update_jsonl_link",
+            ) as link_write,
             caplog.at_level("INFO"),
         ):
             await monitor._handle_container_create("auto-race", row, path)
+            # Recheck with the file still empty: stays CHARACTERIZING.
+            track = monitor._tracks[("auto-race", str(path))]
+            monitor._classify_and_step(track)
 
-        resolve_harness.assert_not_called()
+        assert track.state == "CHARACTERIZING"
+        assert track.characterize_deadline is not None
+        link_write.assert_not_called()
         assert "classification=unknown" in caplog.text
-        assert "action=defer" in caplog.text
-        assert "action=abandon" in caplog.text
+        assert "action=characterize" in caplog.text
 
     def test_watch_scan_logs_skipped_sibling_subagent(self, tmp_path, caplog):
         """A scan-discovered sibling child leaves evidence with the old path."""
@@ -384,8 +348,12 @@ class TestSubagentExclusion:
         with (
             patch(
                 "tools.dashboard.session_monitor.get_session",
-                return_value={"jsonl_path": str(parent)},
+                return_value={"tmux_name": "auto-race", "jsonl_path": str(parent)},
             ),
+            # The parent re-observes as a persisted re-attach; keep its
+            # generation backfill out of any real DB.
+            patch("tools.dashboard.dao.dashboard_db.next_link_seq", return_value=1),
+            patch("tools.dashboard.dao.dashboard_db.set_jsonl_generation"),
             caplog.at_level("INFO"),
         ):
             monitor._scan_dir_for_existing_jsonls("auto-race", str(tmp_path))

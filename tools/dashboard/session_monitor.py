@@ -75,13 +75,6 @@ from agents.workspace_manager import (
 
 logger = logging.getLogger(__name__)
 
-# A Codex rollout is created before its first (roughly 20 KiB in current
-# versions) ``session_meta`` line is guaranteed to be visible.  IN_CREATE can
-# therefore race the header write.  Keep retries short and non-blocking; the
-# inotify event remains the trigger, but identity — never timing — decides
-# whether the monitor may switch files.
-_CODEX_HEADER_RETRY_DELAYS_SECONDS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.4)
-
 # inotify — optional, falls back to polling if unavailable
 try:
     from inotify_simple import INotify, flags as _iflags
@@ -685,6 +678,106 @@ class _TailState:
     full_rescan_count: int = 0  # times reconciliation promoted this session
 
 
+# ── Rollout-ingestion state machine (bead auto-suvcp) ───────────────
+#
+# One `_FileTrack` per (tmux_name, path) — the sole authority for that
+# rollout's discovery, characterization, promotion, streaming, and
+# cleanup — plus ONE `_SessionGate` per session for drain ownership.
+# Formal model: tools/dashboard/TLA/RolloutIngestion.tla (change rule in
+# TLA/README.md — observation/dispatch/drain/persistence order changes
+# edit the model in the same commit).
+
+# Track states (model: trackState domain).
+TRACK_DISCOVERED = "DISCOVERED"
+TRACK_CHARACTERIZING = "CHARACTERIZING"
+TRACK_STREAMING = "STREAMING"
+TRACK_IGNORED = "IGNORED"
+TRACK_CLOSED = "CLOSED"
+
+# Characterization deadline (Rule 7 / T110): enforced by the TIME-driven
+# reconciliation tick, so worst-case expiry is deadline + one tick
+# interval. Sized against container-under-load startup (B3), not local
+# tests — a slow Codex boot can take tens of seconds to write its header.
+_CHARACTERIZE_DEADLINE_S = float(
+    os.environ.get("DASHBOARD_CHARACTERIZE_DEADLINE_S", 120.0)
+)
+
+# Rule 5: dirty passes per gate claim are bounded; exhaustion releases the
+# gate and schedules a continuation (responsibility retained, never dropped).
+_MAX_CONSECUTIVE_DIRTY_PASSES = 10
+
+# Rule 4: handover steps per gate claim are bounded the same way — a
+# predecessor being actively written could otherwise pin the owner; the
+# reconciliation tick re-enters (WF backstop).
+_MAX_HANDOVER_STEPS = 20
+
+
+@dataclass
+class _FileTrack:
+    """Per-(session, rollout-file) ingestion track [model: tracks]."""
+
+    tmux_name: str
+    path: str
+    state: str = TRACK_DISCOVERED
+    provenance: str | None = None          # birth | persisted | late
+    generation: tuple[int, int] | None = None   # (st_dev, st_ino) at observation
+    expected_previous: str | None = None   # captured at observation, for the CAS
+    characterize_deadline: float | None = None
+    # Watch identity (Rule 8/D3): dispatch is keyed by (wd, epoch) jointly —
+    # wds are kernel-recycled, so a stale queued event must never dispatch
+    # into whichever track now holds the number.
+    wd: int | None = None
+    wd_epoch: int = 0
+    # Rule 4 bookkeeping: bytes of THIS file published through the ordered
+    # handover (for files the row never linked), and the seal — the
+    # complete-line size at the final pre-advance check (None = unchecked).
+    published_up_to: int = 0
+    checked_size: int | None = None
+    # D6: terminal tombstone (size, mtime_ns, st_dev, st_ino) — the periodic
+    # scan is stat-only against this; classification re-runs only on
+    # observable progress (B3+A6).
+    tombstone: tuple | None = None
+    close_reason: str | None = None
+    # Whether this file may REPLACE an existing link. True for CREATE
+    # events in the session's own directory and for rollout-chain files
+    # (succession ordering applies — N2/N3). False for ambient
+    # scan/reconciliation observations of non-chain files: in a SHARED
+    # directory (Claude host layout) those are other sessions' files, and
+    # promoting one over an existing link is cross-session adoption
+    # (NoChildAdoption; the pre-fix scans' linked-row guard). First
+    # resolution of an UNLINKED row is always allowed regardless.
+    supersede_candidate: bool = False
+
+
+@dataclass
+class _SessionGate:
+    """ONE drain gate per session (Rule 5 / A1), event-loop-owned.
+
+    ``busy`` is claimed synchronously with no await between check and
+    claim; ``dirty`` transfers a contended request's responsibility (T87);
+    ``needs_drain`` is the D4 scheduling flag sync-context entry points set
+    without ever touching ``busy`` — the loop-start pump claims ``busy``
+    only after task creation succeeds (B2).
+    """
+
+    busy: bool = False
+    dirty: bool = False
+    needs_drain: bool = False
+    publish_registry_after_drain: bool = False
+    # Rule 4: deferred successor link + the CAS expectation captured when
+    # the defer was decided.
+    pending_link: str | None = None
+    pending_expected: str | None = None
+    # A5/D4: the executor future of the in-flight blocking read. The gate
+    # is released only when this worker actually stops (done-callback),
+    # never in a `finally` on the awaiter.
+    inflight_future: Any = None
+    # Set when the owner task failed with an exception: the continuation is
+    # delayed by a short backoff so a deterministic crash can't hot-spin
+    # the loop (responsibility still retained — never dropped).
+    crashed: bool = False
+
+
 def _entry_identity(entry: dict) -> str:
     """Stable identity key for an entry — mirrors the JS _entryIdentity."""
     etype = entry.get("type", "?") or "?"
@@ -870,6 +963,19 @@ class SessionMonitor:
         self._dir_wd_sessions: dict[int, set[str]] = {}  # dir wd → set of tmux_names
         self._dir_path_to_wd: dict[str, int] = {}        # dir path → wd (dedup)
         self._wd_to_dir_path: dict[int, str] = {}        # reverse: wd → dir path
+        # ── Rollout-ingestion state machine (auto-suvcp) ──────────────
+        # One track per (tmux_name, path); one gate per session. Gates are
+        # NEVER reset by attach/re-attach — a reset while a worker owns
+        # `busy` would break SingleOwner.
+        self._tracks: dict[tuple[str, str], _FileTrack] = {}
+        self._session_gates: dict[str, _SessionGate] = {}
+        # Characterizing-track file watches: wd → (tmux_name, path, epoch).
+        # Dispatch validates the track still owns (wd, epoch) — Rule 8.
+        self._wd_to_track: dict[int, tuple[str, str, int]] = {}
+        # Registration-epoch snapshots per (tmux_name, dir): A7/N1 birth
+        # trust needs "armed over an EMPTY directory" + "first CREATE of
+        # this registration epoch".
+        self._dir_epochs: dict[tuple[str, str], dict] = {}
         # W6 reliability: reconciliation_tick failure-streak tracking.
         # Incremented when ANY step of a tick raises; reset to 0 on a tick
         # where every step completes cleanly. degraded_since is the
@@ -1018,6 +1124,11 @@ class SessionMonitor:
                 self._add_file_watch(tmux_name, path_str)
             if res_dir:
                 self._add_dir_watch(tmux_name, str(res_dir))
+
+        # An explicit-file registration is a persisted-identity observation
+        # (auto-suvcp Rule 1): stream it and catch up any existing bytes.
+        if path_str:
+            self.observe_rollout(tmux_name, Path(path_str), source="register")
 
         logger.info(
             "session_monitor: registered %s  type=%s  project=%s  jsonl=%s",
@@ -1293,6 +1404,11 @@ class SessionMonitor:
             if res_dir:
                 self._add_dir_watch(tmux_name, str(res_dir))
 
+        # A revive with a known file is a persisted-identity observation
+        # (auto-suvcp Rule 1): re-attach and catch up existing bytes.
+        if path_str:
+            self.observe_rollout(tmux_name, Path(path_str), source="revive")
+
         logger.info(
             "session_monitor: revived %s  jsonl=%s",
             tmux_name,
@@ -1431,6 +1547,9 @@ class SessionMonitor:
         logger.info("session_monitor: background tasks started (mode=inotify)")
         # Re-scan unresolved container sessions from prior server lifetime
         await self._recover_unresolved_sessions()
+        # B2 loop-start pump: drains requested from sync contexts before
+        # the loop ran (needs_drain set, busy untouched) get their task now.
+        self._pump_pending_drains()
         # Broadcast registry for any sessions that exist in DB
         if count_live() > 0:
             await self._broadcast_registry()
@@ -1476,7 +1595,11 @@ class SessionMonitor:
         for row in sessions:
             tmux_name = row["tmux_name"]
             if row.get("jsonl_path"):
-                # Already resolved — ensure dir watch exists for rollover detection
+                # Already resolved — ensure dir watch exists for rollover
+                # detection, then re-observe the linked path as a persisted
+                # re-attach (auto-suvcp Rule 1): offset preserved, catch-up
+                # drain requested, so bytes written while the dashboard was
+                # down become visible with no further write.
                 res_dir = row.get("resolution_dir") or str(Path(row["jsonl_path"]).parent)
                 if self._use_inotify and res_dir:
                     if tmux_name not in self._tail_states:
@@ -1484,6 +1607,10 @@ class SessionMonitor:
                             resolution_dir=Path(res_dir),
                         )
                     self._add_dir_watch(tmux_name, res_dir)
+                self.observe_rollout(
+                    tmux_name, Path(row["jsonl_path"]),
+                    source="startup_recovery",
+                )
                 continue
             if row.get("type") == "host":
                 harness = resolve_harness_for_session_row(row)
@@ -1633,6 +1760,7 @@ class SessionMonitor:
             ts = self._tail_states.get(tmux_name)
             if ts:
                 ts.dir_watch_descriptor = wd
+            self._record_dir_epoch(tmux_name, dir_path)
             self._scan_dir_for_existing_jsonls(tmux_name, dir_path)
             return
         try:
@@ -1646,7 +1774,30 @@ class SessionMonitor:
         ts = self._tail_states.get(tmux_name)
         if ts:
             ts.dir_watch_descriptor = wd
+        self._record_dir_epoch(tmux_name, dir_path)
         self._scan_dir_for_existing_jsonls(tmux_name, dir_path)
+
+    def _record_dir_epoch(self, tmux_name: str, dir_path: str) -> None:
+        """Snapshot the registration epoch for birth trust (Rule 1, N1+A7).
+
+        The epoch belongs to THIS registration, not the wd's lifetime (A7).
+        A directory that already contained any rollout at arming can never
+        birth-trust a later CREATE (N1: "armed before this file existed" +
+        "first CREATE" is NOT sufficient — a subagent forked after a late
+        arming satisfies both). An existing epoch is left alone: re-scans
+        of an already-registered watch are not a new registration.
+        """
+        key = (tmux_name, dir_path)
+        if key in self._dir_epochs:
+            return
+        try:
+            snapshot_empty = not any(Path(dir_path).glob("*.jsonl"))
+        except OSError:
+            snapshot_empty = False
+        self._dir_epochs[key] = {
+            "snapshot_empty": snapshot_empty,
+            "create_seen": False,
+        }
 
     def _scan_dir_for_existing_jsonls(self, tmux_name: str, dir_path: str) -> None:
         """Discover JSONLs that already exist in a newly-watched directory.
@@ -1683,16 +1834,12 @@ class SessionMonitor:
         *,
         source: str = "discovery",
     ) -> bool:
-        """Idempotently link a newly-discovered JSONL to an existing session.
+        """Idempotently observe a discovered JSONL for an existing session.
 
-        Shared entry point used by:
-          - scan-on-watch-add (``_scan_dir_for_existing_jsonls``)
-          - tail-endpoint fallback persistence (``api_session_tail``)
-          - periodic reconciliation (``reconciliation_tick``)
-
-        Returns True if the call performed a new link (was_empty → resolved),
-        False if the session was already resolved or could not be resolved
-        from this path.
+        Thin compatibility wrapper over :meth:`observe_rollout` (the one
+        ingestion entry point — bead auto-suvcp Rule 1). Shared by
+        scan-on-watch-add, the tail-endpoint fallback, and reconciliation.
+        Returns True iff this call moved the row's link onto *jsonl_path*.
         """
         if "subagents" in jsonl_path.parts:
             return False
@@ -1701,80 +1848,991 @@ class SessionMonitor:
         row = get_session(tmux_name)
         if row is None:
             return False
-        classification = _classify_codex_rollout(jsonl_path)
-        if classification.kind != "main":
+        before = row.get("jsonl_path")
+        self.observe_rollout(tmux_name, jsonl_path, source=source)
+        after = (get_session(tmux_name) or {}).get("jsonl_path")
+        return after == str(jsonl_path) and before != after
+
+    # ── Rollout-ingestion state machine (bead auto-suvcp) ─────────────
+    #
+    # observe_rollout is the ONE entry point every discovery mechanism
+    # calls; provenance selects only the next state (Rule 1). The methods
+    # below mirror the model's actions — action names cited per block.
+    # Everything through promotion runs synchronously on the event loop
+    # (or on the startup thread before the loop runs), so promotion is
+    # serialized per session by construction.
+
+    def _gate(self, tmux_name: str) -> _SessionGate:
+        return self._session_gates.setdefault(tmux_name, _SessionGate())
+
+    def _get_track(self, tmux_name: str, path: str | Path) -> _FileTrack:
+        key = (tmux_name, str(path))
+        track = self._tracks.get(key)
+        if track is None:
+            track = _FileTrack(tmux_name=tmux_name, path=str(path))
+            try:
+                st = os.stat(str(path))
+                track.generation = (st.st_dev, st.st_ino)
+            except OSError:
+                pass
+            self._tracks[key] = track
+        return track
+
+    def observe_rollout(
+        self,
+        tmux_name: str,
+        jsonl_path: Path | str,
+        *,
+        source: str = "discovery",
+        create_event: bool = False,
+    ) -> bool:
+        """[model: ObserveOutcome / DeliverCreate] — the single entry point.
+
+        Returns True when the observation left the file's track STREAMING.
+        """
+        path = Path(jsonl_path)
+        if "subagents" in path.parts or path.suffix != ".jsonl":
+            return False
+        key = (tmux_name, str(path))
+        track = self._tracks.get(key)
+
+        # Birth-trust bookkeeping: ANY create observation on this epoch
+        # consumes "first CREATE" (A7 — epoch = registration).
+        epoch = self._dir_epochs.get((tmux_name, str(path.parent)))
+        birth_candidate = False
+        if create_event and epoch is not None:
+            birth_candidate = epoch["snapshot_empty"] and not epoch["create_seen"]
+            epoch["create_seen"] = True
+
+        if track is not None and track.state in (TRACK_IGNORED, TRACK_CLOSED):
+            # D6: stat-only tombstone gate; terminal tracks re-open ONLY on
+            # observable progress (B3+A6).
+            if not self._observable_progress(track):
+                return False
+            row = get_session(tmux_name)
+            if row is None:
+                return False
+            try:
+                st = os.stat(track.path)
+            except OSError:
+                return False
+            track.generation = (st.st_dev, st.st_ino)
+            track.state = TRACK_CHARACTERIZING
+            track.characterize_deadline = time.time() + _CHARACTERIZE_DEADLINE_S
+            track.tombstone = None
+            track.close_reason = None
+            track.expected_previous = row.get("jsonl_path")
+            logger.info(
+                "session_monitor: track reopened on progress tmux=%s path=%s source=%s",
+                tmux_name, path.name, source,
+            )
+        row = get_session(tmux_name)
+        if row is None:
+            return False
+        if track is None:
+            try:
+                st = os.stat(str(path))
+            except OSError:
+                return False
+            track = _FileTrack(
+                tmux_name=tmux_name,
+                path=str(path),
+                generation=(st.st_dev, st.st_ino),
+                expected_previous=row.get("jsonl_path"),
+            )
+            self._tracks[key] = track
+
+        if create_event or path.name.startswith("rollout-"):
+            track.supersede_candidate = True
+        if row.get("jsonl_path") == str(path):
+            # N5 / N3 refinement: the row's own linked path ALWAYS
+            # re-observes as a persisted re-attach, never through the CAS.
+            self._promote(track, "persisted")
+            return track.state == TRACK_STREAMING
+        if track.state == TRACK_STREAMING:
+            # Streaming but no longer the linked path: the link moved on
+            # without closing this track (shouldn't happen — defensive).
+            track.state = TRACK_CHARACTERIZING
+            track.expected_previous = row.get("jsonl_path")
+        if birth_candidate:
+            # Rule 1 birth trust (N1+A7); the CAS inside _promote compares
+            # against NULL (V1).
+            self._promote(track, "birth")
+            return track.state == TRACK_STREAMING
+        self._classify_and_step(track, source=source)
+        return track.state == TRACK_STREAMING
+
+    def _classify_and_step(self, track: _FileTrack, *, source: str = "recheck") -> None:
+        """[model: EffClassify + recheck paths] — tri-state, never fails open."""
+        if track.state in (TRACK_IGNORED, TRACK_CLOSED, TRACK_STREAMING):
+            return
+        path = Path(track.path)
+        classification = _classify_codex_rollout(path)
+        if classification.kind == "unknown":
+            # Retain the watch and responsibility; no bytes released.
+            track.state = TRACK_CHARACTERIZING
+            if track.characterize_deadline is None:
+                track.characterize_deadline = time.time() + _CHARACTERIZE_DEADLINE_S
+            self._arm_track_watch(track)
             logger.info(
                 "session_monitor: candidate tmux=%s old_path=%s candidate=%s "
-                "classification=%s reason=%s size_bytes=%s action=%s "
-                "source=%s",
-                tmux_name,
-                row.get("jsonl_path"),
-                jsonl_path,
-                classification.kind,
-                classification.reason,
-                classification.size_bytes,
-                "skip" if classification.kind == "subagent" else "defer",
-                source,
+                "classification=unknown reason=%s size_bytes=%s "
+                "action=characterize source=%s",
+                track.tmux_name, track.expected_previous, track.path,
+                classification.reason, classification.size_bytes, source,
             )
-            return False
-        # Scan-on-add / fallback / reconciliation are first-resolution helpers
-        # only — they do not handle rollovers. If the session already has a
-        # jsonl_path linked, leave rollover logic to IN_CREATE events, which
-        # carry the timing needed to decide whether a new file is a rollover
-        # or a stray file for a different session sharing the directory.
-        if row.get("jsonl_path"):
-            return False
+            return
+        if classification.kind == "subagent":
+            self._close_track(track, state=TRACK_IGNORED,
+                              reason=f"subagent:{classification.reason}")
+            logger.info(
+                "session_monitor: candidate tmux=%s old_path=%s candidate=%s "
+                "classification=subagent reason=%s size_bytes=%s action=skip "
+                "source=%s",
+                track.tmux_name, track.expected_previous, track.path,
+                classification.reason, classification.size_bytes, source,
+            )
+            return
+        # A verified main that is NOT a supersede candidate (an ambient
+        # scan's sighting of a non-chain file) may only FIRST-resolve an
+        # unlinked row — in a shared directory it is another session's
+        # file, and replacing an existing link with it is cross-session
+        # adoption (NoChildAdoption; the pre-fix scans' linked-row guard).
+        if not track.supersede_candidate:
+            row = get_session(track.tmux_name)
+            if row is not None and row.get("jsonl_path") and \
+                    row.get("jsonl_path") != track.path:
+                self._close_track(
+                    track, state=TRACK_IGNORED, reason="nonchain_not_ours",
+                )
+                return
+        # Verified main — Rule 3: ordering among mains (N2 + refinement).
+        if self._viable_newer_exists(track.tmux_name, track.path):
+            self._close_track(track, state=TRACK_CLOSED, reason="superseded")
+            logger.info(
+                "session_monitor: candidate tmux=%s old_path=%s candidate=%s "
+                "classification=main action=superseded source=%s (viable "
+                "newer exists; content publishes via ordered handover)",
+                track.tmux_name, track.expected_previous, track.path, source,
+            )
+            return
+        self._promote(track, "late")
 
-        harness = resolve_harness_for_session_row(row)
-        linked = harness.resolve_session(
-            tmux_name=tmux_name,
-            row=row,
-            jsonl_path=jsonl_path,
+    def _promote(self, track: _FileTrack, provenance: str) -> None:
+        """[model: Promote] — serialized per session (event-loop-synchronous)."""
+        tmux_name = track.tmux_name
+        row = get_session(tmux_name)
+        if row is None:
+            return
+        current = row.get("jsonl_path")
+        if provenance != "persisted" and current == track.path:
+            provenance = "persisted"   # N5, all paths
+        if provenance == "persisted":
+            self._link_and_stream(track, "persisted")
+            return
+        # First-resolution / rollover CAS [model: CASOk]. Birth compares
+        # against NULL (V1 — never the current row); late compares against
+        # the row value captured at observation.
+        expected = None if provenance == "birth" else track.expected_previous
+        if current != expected:
+            # CAS-retry (B4): the loser is never terminal.
+            track.state = TRACK_CHARACTERIZING
+            track.expected_previous = current
+            if track.characterize_deadline is None:
+                track.characterize_deadline = time.time() + _CHARACTERIZE_DEADLINE_S
+            self._arm_track_watch(track)
+            return
+        if self._unready_predecessors(tmux_name, track.path):
+            # Rule 4: DEFER the link until every predecessor is ready.
+            gate = self._gate(tmux_name)
+            gate.pending_link = track.path
+            gate.pending_expected = track.expected_previous
+            self.request_drain(tmux_name)   # the handover pump runs under the gate
+            return
+        self._link_and_stream(track, provenance)
+
+    def _link_and_stream(self, track: _FileTrack, provenance: str) -> None:
+        """[model: LinkEffect] — commit the link, arm streaming, request drain."""
+        tmux_name = track.tmux_name
+        path = Path(track.path)
+        row = get_session(tmux_name)
+        if row is None:
+            return
+        gate = self._gate(tmux_name)
+        try:
+            st = os.stat(track.path)
+        except OSError:
+            track.state = TRACK_CHARACTERIZING
+            track.expected_previous = row.get("jsonl_path")
+            return
+        # Re-stat identity equality between classification and promotion
+        # (Rule 6): a swapped inode re-characterizes instead of linking.
+        if track.generation is not None and track.generation != (st.st_dev, st.st_ino):
+            track.generation = (st.st_dev, st.st_ino)
+            track.state = TRACK_CHARACTERIZING
+            track.expected_previous = row.get("jsonl_path")
+            if track.characterize_deadline is None:
+                track.characterize_deadline = time.time() + _CHARACTERIZE_DEADLINE_S
+            return
+        from tools.dashboard.dao.dashboard_db import (
+            next_link_seq,
+            set_jsonl_generation,
+            update_jsonl_link,
         )
-        if linked is None:
+        old_path = row.get("jsonl_path")
+        if provenance == "persisted" and old_path == str(path):
+            # Re-attach (N5/N3): PRESERVE the persisted offset; only
+            # backfill a missing generation and re-arm monitoring.
+            if (
+                track.state == TRACK_STREAMING
+                and row.get("jsonl_generation")
+                and (self._tail_states.get(tmux_name) is not None
+                     and self._tail_states[tmux_name].watch_descriptor is not None)
+            ):
+                # Healthy steady state — catch up only when bytes are unread.
+                if st.st_size > (row.get("file_offset", 0) or 0):
+                    self.request_drain(tmux_name)
+                return
+            if not row.get("jsonl_generation"):
+                seq = next_link_seq(tmux_name)
+                set_jsonl_generation(
+                    tmux_name, f"{st.st_dev}:{st.st_ino}:{seq}",
+                    expect_path=str(path),
+                )
+        else:
+            # First resolution or rollover advance.
+            if old_path and old_path != str(path):
+                old_track = self._tracks.get((tmux_name, old_path))
+                if old_track is not None:
+                    self._close_track(
+                        old_track, state=TRACK_CLOSED, reason="superseded",
+                    )
+            seq = next_link_seq(tmux_name)
+            generation = f"{st.st_dev}:{st.st_ino}:{seq}"
+            update_jsonl_link(
+                tmux_name,
+                session_uuid=path.stem,
+                jsonl_path=str(path),
+                project=row.get("project"),
+                generation=generation,
+                # Linking never rewinds publication (Rule 6, forbidden
+                # route 2): start at the file's already-published level.
+                file_offset=track.published_up_to,
+            )
+            logger.info(
+                "session_monitor: linked %s → %s provenance=%s generation=%s "
+                "init_offset=%d old_path=%s",
+                tmux_name, path.name, provenance, generation,
+                track.published_up_to, old_path,
+            )
+            # Stream-derived ephemeral state belongs to the old file.
+            old_ts = self._tail_states.get(tmux_name)
+            self._tail_states[tmux_name] = _TailState(
+                resolution_dir=(old_ts.resolution_dir if old_ts else None)
+                or path.parent,
+                needs_resolution=False,
+            )
+            # W2: eager-create the graph source row at link time.
+            self._eager_create_source(tmux_name, path)
+        track.state = TRACK_STREAMING
+        track.provenance = provenance
+        track.generation = (st.st_dev, st.st_ino)
+        track.characterize_deadline = None
+        # The streaming file is watched through the session file watch.
+        self._release_track_watch(track)
+        if self._use_inotify:
+            self._add_file_watch(tmux_name, str(path))
+            self._add_dir_watch(tmux_name, str(path.parent))
+        # Invariant 9: NO registry broadcast at link time — the registry
+        # publishes AFTER the catch-up drain, so a linked-but-zero card is
+        # never durable (CalStartupStall's third leg).
+        gate.publish_registry_after_drain = True
+        self.request_drain(tmux_name)
+
+    def _close_track(self, track: _FileTrack, *, state: str, reason: str) -> None:
+        """Terminal transition — records the D6 tombstone, releases the wd
+        (A8), and logs the late-flush residual (the theorem's explicit
+        cession) when a superseded file holds bytes past its checked level.
+        """
+        track.state = state
+        track.close_reason = reason
+        track.characterize_deadline = None
+        self._release_track_watch(track)
+        try:
+            st = os.stat(track.path)
+            track.tombstone = (st.st_size, st.st_mtime_ns, st.st_dev, st.st_ino)
+        except OSError:
+            track.tombstone = None
+        if reason == "superseded" and track.checked_size is not None:
+            lco = self._last_complete_offset(track.path)
+            if lco > track.checked_size:
+                logger.warning(
+                    "session_monitor: late-flush residual ceded for %s — "
+                    "%d bytes past checked level %d (%s); by the ordered-"
+                    "handover theorem these bytes are the explicit residual",
+                    track.tmux_name, lco - track.checked_size,
+                    track.checked_size, track.path,
+                )
+
+    def _quarantine_track(self, track: _FileTrack) -> None:
+        """[model: DeadlinePass] — time-driven expiry with a terminal
+        diagnostic. The caller's still-CHARACTERIZING check and this call
+        are await-free as a pair (a track that promoted meanwhile must not
+        be quarantined under it)."""
+        classification = _classify_codex_rollout(Path(track.path))
+        logger.warning(
+            "session_monitor: characterization deadline expired tmux=%s "
+            "path=%s reason=%s size_bytes=%s — quarantined (re-opens only "
+            "on observable progress)",
+            track.tmux_name, track.path,
+            classification.reason, classification.size_bytes,
+        )
+        self._close_track(track, state=TRACK_CLOSED, reason="quarantined")
+
+    def _observable_progress(self, track: _FileTrack) -> bool:
+        """B3+A6: terminal tracks re-open only on dev/ino/size/mtime change."""
+        try:
+            st = os.stat(track.path)
+        except OSError:
             return False
+        if track.tombstone is None:
+            return True
+        return (st.st_size, st.st_mtime_ns, st.st_dev, st.st_ino) != track.tombstone
 
-        harness.attach_live_monitoring(
-            monitor=self,
-            tmux_name=tmux_name,
-            jsonl_path=linked["jsonl_path"],
-            resolution_dir=Path(row["resolution_dir"]) if row.get("resolution_dir") else linked["resolution_dir"],
-            reset_offset=True,
-            reset_state=True,
-        )
+    def _arm_track_watch(self, track: _FileTrack) -> None:
+        """IN_MODIFY watch for a CHARACTERIZING track (classification
+        re-runs on MODIFY — Rule 2)."""
+        if not self._inotify or track.wd is not None:
+            return
+        try:
+            wd = self._inotify.add_watch(track.path, _iflags.MODIFY)
+        except OSError:
+            return
+        track.wd_epoch += 1
+        track.wd = wd
+        self._wd_to_track[wd] = (track.tmux_name, track.path, track.wd_epoch)
 
-        # W2: eager-create the graph source row the instant the JSONL is
-        # linked — don't wait for an ingest sweep tick. Best-effort; never
-        # blocks resolution.
-        self._eager_create_source(tmux_name, Path(linked["jsonl_path"]))
+    def _release_track_watch(self, track: _FileTrack) -> None:
+        """Release a track wd and invalidate its dispatch epoch (Rule 8)."""
+        if track.wd is None:
+            return
+        wd, track.wd = track.wd, None
+        track.wd_epoch += 1
+        self._wd_to_track.pop(wd, None)
+        if self._inotify:
+            try:
+                self._inotify.rm_watch(wd)
+            except OSError:
+                pass
 
-        logger.info(
-            "session_monitor: discovered %s → %s (first file — resolved) "
-            "candidate=%s classification=main reason=%s size_bytes=%s "
-            "action=link source=%s persisted_path=%s persisted_uuid=%s",
-            tmux_name,
-            jsonl_path.name,
-            jsonl_path,
-            classification.reason,
-            classification.size_bytes,
-            source,
-            linked["jsonl_path"],
-            Path(linked["jsonl_path"]).stem,
-        )
+    # ── Succession ordering (Rule 3 / D5) ─────────────────────────────
 
-        # (harness_phase — the two-column model vestige — is no longer
-        # written. The columns remain for one release for stray readers;
-        # the unified startup_state FSM on the lifecycle worker is the
-        # only launch-progress signal.)
+    @staticmethod
+    def _chain_ts_normalize(ts_text: str) -> str:
+        """Normalize a timestamp (header ISO or filename form) to a
+        digits-only, second-granularity sortable key."""
+        digits = re.sub(r"[^0-9T]", "", ts_text or "")
+        return digits[:15]  # YYYYMMDDThhmmss
 
-        # Schedule a registry broadcast if we're inside a running loop.
-        # Sync startup paths (_init_inotify, _recover_unresolved_sessions)
-        # don't have a loop; their callers broadcast after they return.
+    def _chain_key(self, path: Path) -> tuple[str, str] | None:
+        """D5: (session_meta header timestamp, rollout UUID tiebreak) —
+        total order over verified mains with ≥1 complete line. Returns
+        None when the file has no complete first line yet."""
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                first = fh.readline()
+            if not first.endswith("\n"):
+                return None
+            entry = json.loads(first)
+        except (OSError, json.JSONDecodeError):
+            return None
+        payload = entry.get("payload") if isinstance(entry, dict) else None
+        ts_text = ""
+        uuid_text = path.stem
+        if isinstance(payload, dict):
+            ts_text = str(payload.get("timestamp") or "")
+            uuid_text = str(payload.get("id") or path.stem)
+        if not ts_text:
+            ts_text = str(entry.get("timestamp") or "") if isinstance(entry, dict) else ""
+        if not ts_text:
+            # Fallback: the rollout filename embeds the same clock.
+            m = re.match(r"rollout-(.+?)-[0-9a-f]{8}-", path.name)
+            ts_text = m.group(1) if m else ""
+        return (self._chain_ts_normalize(ts_text), uuid_text)
+
+    def _succession_chain(self, tmux_name: str, sibling_of: Path) -> list[tuple[tuple[str, str], str]]:
+        """The session's rollover chain: verified mains with at least one
+        complete line, in (header ts, uuid) order. Non-rollout files (the
+        Claude layout) have no chain."""
+        directory = sibling_of.parent
+        out: list[tuple[tuple[str, str], str]] = []
+        try:
+            candidates = sorted(directory.glob("rollout-*.jsonl"))
+        except OSError:
+            return out
+        for f in candidates:
+            if "subagents" in f.parts:
+                continue
+            if _classify_codex_rollout(f).kind != "main":
+                continue
+            key = self._chain_key(f)
+            if key is None:
+                continue  # no complete line — not viable (N2 refinement)
+            out.append((key, str(f)))
+        out.sort()
+        return out
+
+    def _target_chain_position(self, target: Path) -> tuple[str, str]:
+        """Chain position for the promotion target itself. Falls back to
+        the filename timestamp when the file is still empty (a birth-
+        trusted empty rollout has no header yet)."""
+        key = self._chain_key(target)
+        if key is not None:
+            return key
+        m = re.match(r"rollout-(.+?)-([0-9a-f]{8}-[0-9a-f-]+)\.jsonl", target.name)
+        if m:
+            return (self._chain_ts_normalize(m.group(1)), m.group(2))
+        return (self._chain_ts_normalize(""), target.stem)
+
+    def _viable_newer_exists(self, tmux_name: str, path: str) -> bool:
+        """Rule 3 (N2): viable = exists AND has content; an EMPTY successor
+        does not supersede."""
+        target = Path(path)
+        if not target.name.startswith("rollout-"):
+            return False
+        pos = self._target_chain_position(target)
+        for key, f in self._succession_chain(tmux_name, target):
+            if f != str(target) and key > pos:
+                return True
+        return False
+
+    def _predecessors(self, tmux_name: str, target: str) -> list[str]:
+        """Chain-earlier viable mains, OLDEST FIRST (Rule 4 walk order)."""
+        target_path = Path(target)
+        if not target_path.name.startswith("rollout-"):
+            return []
+        pos = self._target_chain_position(target_path)
+        return [
+            f for key, f in self._succession_chain(tmux_name, target_path)
+            if f != target and key < pos
+        ]
+
+    @staticmethod
+    def _last_complete_offset(path: str | Path) -> int:
+        """Byte offset just past the last newline — the complete-line size."""
+        try:
+            size = os.stat(str(path)).st_size
+        except OSError:
+            return 0
+        if size == 0:
+            return 0
+        try:
+            with open(str(path), "rb") as fh:
+                pos = size
+                while pos > 0:
+                    start = max(0, pos - 65536)
+                    fh.seek(start)
+                    chunk = fh.read(pos - start)
+                    nl = chunk.rfind(b"\n")
+                    if nl != -1:
+                        return start + nl + 1
+                    pos = start
+        except OSError:
+            return 0
+        return 0
+
+    def _published_level(self, tmux_name: str, path: str, row: dict | None) -> int:
+        """Bytes of *path* already published for this session — the row's
+        offset when *path* is the linked file, else the track's handover
+        watermark."""
+        if row and row.get("jsonl_path") == path:
+            return row.get("file_offset", 0) or 0
+        return self._get_track(tmux_name, path).published_up_to
+
+    def _unready_predecessors(self, tmux_name: str, target: str) -> list[str]:
+        """Rule 4 readiness: a predecessor is READY iff it is published to
+        its current complete-line EOF AND final-checked at that level. This
+        re-reads the filesystem on every call — the pre-advance final check
+        is structural, not procedural."""
+        row = get_session(tmux_name)
+        out: list[str] = []
+        for p in self._predecessors(tmux_name, target):
+            lco = self._last_complete_offset(p)
+            track = self._get_track(tmux_name, p)
+            published = self._published_level(tmux_name, p, row)
+            if published < lco or track.checked_size != lco:
+                out.append(p)
+        return out
+
+    # ── Drain ownership (Rule 5 / D4 / A5 / N4) ───────────────────────
+
+    def request_drain(self, tmux_name: str) -> None:
+        """[model: ClaimDrain / ClaimContended] — synchronous, await-free.
+
+        A contended request transfers responsibility through the session
+        dirty flag (T87: never skip — the skipped signal may be the only
+        one those bytes get).
+        """
+        gate = self._gate(tmux_name)
+        if gate.busy:
+            gate.dirty = True
+            return
+        gate.needs_drain = True
+        self._pump_drain(tmux_name)
+
+    def _pump_drain(self, tmux_name: str) -> None:
+        """D4 pump — claims ``busy`` only AFTER task creation succeeds.
+
+        Sync-context callers (no running loop — e.g. tests driving
+        ``_init_inotify`` directly) leave ``needs_drain`` set; the
+        loop-start pump / reconciliation tick picks it up (B2: a
+        synchronous busy-claim whose schedule() no-ops would pin the gate
+        forever).
+        """
+        gate = self._gate(tmux_name)
+        if gate.busy or not gate.needs_drain:
+            return
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self._broadcast_registry())
         except RuntimeError:
-            pass
+            return
+        coro = self._drain_as_owner(tmux_name)
+        try:
+            task = loop.create_task(coro)
+        except RuntimeError:
+            coro.close()
+            return
+        gate.needs_drain = False
+        gate.busy = True
+        task.add_done_callback(
+            lambda t, s=tmux_name: self._on_drain_task_done(s, t)
+        )
+
+    def _pump_pending_drains(self) -> None:
+        """Loop-start pump (B2): drains requested from sync contexts."""
+        for tmux_name, gate in list(self._session_gates.items()):
+            if gate.needs_drain and not gate.busy:
+                self._pump_drain(tmux_name)
+
+    def _on_drain_task_done(self, tmux_name: str, task: asyncio.Task) -> None:
+        """Worker-completion callback (D4) — runs on the loop, await-free.
+
+        Cancellation of the awaiter does NOT stop a to_thread/executor
+        worker (A5): when a blocking read is still in flight, the gate is
+        released only when that worker actually finishes, via a callback on
+        the executor future — never in a ``finally`` on the awaiter (B5:
+        finally-release admits a double-tail; no release pins forever).
+        """
+        gate = self._gate(tmux_name)
+        if task.cancelled():
+            gate.dirty = True   # responsibility retained
+        else:
+            exc = task.exception()
+            if exc is not None:
+                gate.dirty = True   # worker failure: retain responsibility
+                gate.crashed = True
+                logger.error(
+                    "session_monitor: drain worker failed for %s: %r",
+                    tmux_name, exc,
+                )
+        inflight = gate.inflight_future
+        if inflight is not None and not inflight.done():
+            inflight.add_done_callback(
+                lambda _f, s=tmux_name: self._release_drain_gate(s)
+            )
+        else:
+            self._release_drain_gate(tmux_name)
+
+    def _release_drain_gate(self, tmux_name: str) -> None:
+        """[model: WkFinal] — the final dirty-check / release / reschedule
+        sequence. Await-free (bead invariant 7); runs on the event loop."""
+        gate = self._gate(tmux_name)
+        gate.inflight_future = None
+        needs_continuation = gate.dirty or gate.pending_link is not None
+        gate.busy = False
+        if needs_continuation:
+            # Continuation targets the row's CURRENT path (N4 corollary) —
+            # the next owner re-reads the row at every pass.
+            gate.needs_drain = True
+            if gate.crashed:
+                # Backoff after a worker exception so a deterministic crash
+                # can't hot-spin; the tick remains the level-triggered
+                # backstop if the loop is gone.
+                gate.crashed = False
+                try:
+                    asyncio.get_running_loop().call_later(
+                        1.0, self._pump_drain, tmux_name,
+                    )
+                except RuntimeError:
+                    pass
+            else:
+                self._pump_drain(tmux_name)
+        elif gate.publish_registry_after_drain:
+            gate.publish_registry_after_drain = False
+            try:
+                asyncio.get_running_loop().create_task(self._broadcast_registry())
+            except RuntimeError:
+                pass
+
+    async def _drain_as_owner(self, tmux_name: str) -> None:
+        """[model: WkReadRow..WkFinal] — the owner drains the SESSION, not
+        the track (N4): every pass re-reads the row and drains the row's
+        CURRENT path. Publication order is publish-then-persist (Rule 6):
+        broadcast the read range, THEN persist the offset — a crash between
+        the two re-delivers at most this one in-flight window (the accepted
+        BoundedDuplicates residual); persist-first would silently lose the
+        startup burst (CalOffsetAckFirst)."""
+        gate = self._gate(tmux_name)
+        loop = asyncio.get_running_loop()
+        passes = 0
+        while passes < _MAX_CONSECUTIVE_DIRTY_PASSES:
+            passes += 1
+            gate.dirty = False
+            if gate.pending_link is not None:
+                await self._handover_step(tmux_name)
+            row = get_session(tmux_name)   # fresh row AND path (N4)
+            if row is None:
+                return
+            if row.get("jsonl_path"):
+                fut = loop.run_in_executor(
+                    None, self._read_tail_window, dict(row),
+                )
+                gate.inflight_future = fut
+                window = await fut
+                gate.inflight_future = None
+                if window is not None:
+                    await self._publish_tail_window(tmux_name, row, window)
+                    self._persist_tail_window(tmux_name, row, window)
+                    gate.dirty = True   # re-check: more may have landed mid-read
+                    continue
+            if not gate.dirty and gate.pending_link is None:
+                return
+        # Bounded-pass exhaustion: leave dirty set — the release path
+        # schedules the continuation (responsibility never dropped).
+        gate.dirty = True
+
+    # ── Ordered handover (Rule 4) ─────────────────────────────────────
+
+    async def _handover_step(self, tmux_name: str) -> None:
+        """[model: HandoverDrain / CommitLink] — runs under the session
+        drain gate. Predecessors are made ready OLDEST FIRST; the link
+        commits only through a guard that re-reads the filesystem."""
+        gate = self._gate(tmux_name)
+        loop = asyncio.get_running_loop()
+        steps = 0
+        while gate.pending_link is not None and steps < _MAX_HANDOVER_STEPS:
+            steps += 1
+            target = gate.pending_link
+            row = get_session(tmux_name)
+            if row is None:
+                gate.pending_link = None
+                gate.pending_expected = None
+                return
+            unready = self._unready_predecessors(tmux_name, target)
+            if unready:
+                p = unready[0]   # oldest first
+                if p == row.get("jsonl_path"):
+                    # The currently linked predecessor drains through the
+                    # ORDINARY path, advancing the session's persisted
+                    # file_offset (Rule 6, forbidden dup route 1).
+                    fut = loop.run_in_executor(
+                        None, self._read_tail_window, dict(row),
+                    )
+                    gate.inflight_future = fut
+                    window = await fut
+                    gate.inflight_future = None
+                    if window is not None:
+                        await self._publish_tail_window(tmux_name, row, window)
+                        self._persist_tail_window(tmux_name, row, window)
+                    else:
+                        self._mark_predecessor_checked(tmux_name, p)
+                else:
+                    progressed = await self._publish_unlinked_segment(
+                        tmux_name, p,
+                    )
+                    if not progressed:
+                        self._mark_predecessor_checked(tmux_name, p)
+                continue
+            # CommitLink: every predecessor passed the structural final
+            # check (readiness above re-stats the filesystem).
+            current = (get_session(tmux_name) or {}).get("jsonl_path")
+            track = self._get_track(tmux_name, target)
+            expected = gate.pending_expected
+            gate.pending_link = None
+            gate.pending_expected = None
+            if current == expected:
+                self._link_and_stream(track, "late")
+            elif current == target:
+                self._link_and_stream(track, "persisted")   # N5 again
+            else:
+                # Genuinely stale (the row moved elsewhere) — re-arm.
+                track.state = TRACK_CHARACTERIZING
+                track.expected_previous = current
+                track.characterize_deadline = (
+                    time.time() + _CHARACTERIZE_DEADLINE_S
+                )
+            logger.info(
+                "session_monitor: handover commit tmux=%s target=%s "
+                "expected=%s row=%s outcome=%s",
+                tmux_name, Path(target).name, expected, current,
+                self._get_track(tmux_name, target).state,
+            )
+
+    def _mark_predecessor_checked(self, tmux_name: str, path: str) -> None:
+        """Seal a predecessor at its current complete-line EOF once it is
+        fully published there. A later grow reopens it: the readiness check
+        compares ``checked_size`` against a fresh stat, so a grown file is
+        drained again before the advance."""
+        row = get_session(tmux_name)
+        lco = self._last_complete_offset(path)
+        published = self._published_level(tmux_name, path, row)
+        track = self._get_track(tmux_name, path)
+        if published >= lco:
+            track.checked_size = lco
+            logger.info(
+                "session_monitor: handover sealed %s at %d bytes (%s)",
+                tmux_name, lco, Path(path).name,
+            )
+
+    async def _publish_unlinked_segment(self, tmux_name: str, path: str) -> bool:
+        """Publish a never-linked predecessor's next window through the
+        common publication path with EXPLICIT file identity (D2 — the batch
+        never assumes the DB row links the file being published). Advances
+        the session's cumulative entry_count but never file_offset.
+        Returns True when new bytes were published."""
+        gate = self._gate(tmux_name)
+        row = get_session(tmux_name)
+        if row is None:
+            return False
+        track = self._get_track(tmux_name, path)
+        loop = asyncio.get_running_loop()
+        fut = loop.run_in_executor(
+            None, self._read_segment_window,
+            dict(row), path, track.published_up_to,
+        )
+        gate.inflight_future = fut
+        window = await fut
+        gate.inflight_future = None
+        if window is None:
+            return False
+        if tmux_name not in self._tail_states:
+            self._tail_states[tmux_name] = _TailState()
+        ts = self._tail_states[tmux_name]
+        await self._process_tail_entries(
+            tmux_name, row, ts, window["entries"], source_path=Path(path),
+        )
+        await self._graph_appender_tick(tmux_name, Path(path))
+        from tools.dashboard.dao.dashboard_db import increment_entry_count
+        increment_entry_count(
+            tmux_name,
+            window["raw_count"],
+            last_message=window["last_message"],
+            last_activity=window["mtime"],
+        )
+        track.published_up_to = window["new_offset"]
+        logger.info(
+            "session_monitor: handover published %s bytes %d..%d of %s",
+            tmux_name, window["start_offset"], window["new_offset"],
+            Path(path).name,
+        )
+        return True
+
+    # ── Read / publish / persist (Rule 6) ─────────────────────────────
+
+    def _read_tail_window(self, row: dict) -> dict | None:
+        """Blocking read of the linked file's next complete-line window.
+
+        Pure read — NO DB writes, NO broadcasts (a cancelled worker thread
+        finishing late therefore has no effect). Returns None when there is
+        nothing new or the file's identity no longer matches the row's
+        generation (re-stat equality, Rule 6)."""
+        jsonl_path_str = row.get("jsonl_path")
+        if not jsonl_path_str:
+            return None
+        jsonl_path = Path(jsonl_path_str)
+        try:
+            st = jsonl_path.stat()
+        except OSError:
+            return None
+        expect_generation = row.get("jsonl_generation") or ""
+        if expect_generation:
+            try:
+                dev_s, ino_s = expect_generation.split(":")[:2]
+                if (st.st_dev, st.st_ino) != (int(dev_s), int(ino_s)):
+                    return None
+            except ValueError:
+                pass
+        file_offset = row.get("file_offset", 0) or 0
+        if st.st_size <= file_offset:
+            return None
+        try:
+            with open(jsonl_path, "rb") as fh:
+                fh.seek(file_offset)
+                data = fh.read()
+        except OSError:
+            return None
+        last_nl = data.rfind(b"\n")
+        if last_nl == -1:
+            return None
+        window = self._parse_window(row, data[:last_nl + 1])
+        window.update({
+            "path": jsonl_path_str,
+            "expect_generation": expect_generation,
+            "start_offset": file_offset,
+            "new_offset": file_offset + last_nl + 1,
+            "mtime": st.st_mtime,
+            "size": st.st_size,
+        })
+        return window
+
+    def _read_segment_window(
+        self, row: dict, path: str, start_offset: int,
+    ) -> dict | None:
+        """Blocking read of a NON-linked file's next complete-line window
+        (handover publication). Same pure-read discipline as
+        :meth:`_read_tail_window`."""
+        p = Path(path)
+        try:
+            st = p.stat()
+        except OSError:
+            return None
+        if st.st_size <= start_offset:
+            return None
+        try:
+            with open(p, "rb") as fh:
+                fh.seek(start_offset)
+                data = fh.read()
+        except OSError:
+            return None
+        last_nl = data.rfind(b"\n")
+        if last_nl == -1:
+            return None
+        window = self._parse_window(row, data[:last_nl + 1])
+        window.update({
+            "path": path,
+            "start_offset": start_offset,
+            "new_offset": start_offset + last_nl + 1,
+            "mtime": st.st_mtime,
+            "size": st.st_size,
+        })
+        return window
+
+    def _parse_window(self, row: dict, complete: bytes) -> dict:
+        """Parse a complete-line byte window into publication material."""
+        harness = resolve_harness_for_session_row(row)
+        raw_count = 0
+        parsed_entries: list = []
+        last_message: str | None = None
+        context_tokens = row.get("context_tokens", 0)
+        prior_model = row.get("model") or None
+        model = prior_model
+        prior_harness_state_raw = row.get("harness_state") or "{}"
+        try:
+            prior_harness_state = json.loads(prior_harness_state_raw)
+            if not isinstance(prior_harness_state, dict):
+                prior_harness_state = {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            prior_harness_state = {}
+        harness_state = dict(prior_harness_state)
+        parse_errors: list[str] = []
+        for raw_line in complete.splitlines():
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError as exc:
+                parse_errors.append(f"json: {str(exc)[:160]} | line: {line[:160]}")
+                continue
+            raw_count += 1
+            text = harness.extract_message_text(entry)
+            if text:
+                last_message = text
+            context_tokens = harness.extract_context_tokens(entry, context_tokens)
+            model = harness.extract_model(entry, model)
+            harness_state = harness.extract_harness_state(entry, harness_state) or {}
+            try:
+                parsed = harness.parse_line(line)
+            except Exception as exc:
+                parse_errors.append(
+                    f"harness.parse_line: {str(exc)[:160]} | line: {line[:160]}"
+                )
+                parsed = None
+            if isinstance(parsed, list):
+                parsed_entries.extend(parsed)
+            elif parsed is not None:
+                parsed_entries.append(parsed)
+        # B7: the persist patch carries ONLY the keys this window itself
+        # changed, merged into the row inside the UPDATE statement — a
+        # concurrent poller write (composer_ready) survives.
+        patch = {
+            k: v for k, v in (harness_state or {}).items()
+            if prior_harness_state.get(k) != v
+        }
+        return {
+            "raw_count": raw_count,
+            "entries": parsed_entries,
+            "last_message": last_message,
+            "context_tokens": context_tokens,
+            "model_to_write": model if (model and model != prior_model) else None,
+            "harness_state_patch": (
+                json.dumps(patch, sort_keys=True) if patch else None
+            ),
+            "harness_state_full": harness_state,
+            "parse_errors": parse_errors,
+        }
+
+    async def _publish_tail_window(
+        self, tmux_name: str, row: dict, window: dict,
+    ) -> None:
+        """Publish (broadcast + graph append) BEFORE the offset persists."""
+        if tmux_name not in self._tail_states:
+            self._tail_states[tmux_name] = _TailState()
+        ts = self._tail_states[tmux_name]
+        ts.lines_processed_total += window["raw_count"] + len(window["parse_errors"])
+        for err in window["parse_errors"]:
+            ts.parse_errors_count += 1
+            ts.last_parse_error = err
+            ts.last_parse_error_ts = time.time()
+        await self._process_tail_entries(tmux_name, row, ts, window["entries"])
+        await self._graph_appender_tick(tmux_name, Path(window["path"]))
+
+    def _persist_tail_window(
+        self, tmux_name: str, row: dict, window: dict,
+    ) -> bool:
+        """[model: WkPersist] — acknowledge the published window under the
+        path+generation CAS. A stale write (rollover/re-link since the
+        read) is dropped, never applied (OffsetCoherent)."""
+        from tools.dashboard.dao.dashboard_db import persist_tail_state
+        ok = persist_tail_state(
+            tmux_name,
+            expect_path=window["path"],
+            expect_generation=window["expect_generation"],
+            file_offset=window["new_offset"],
+            last_activity=window["mtime"],
+            last_message=window["last_message"],
+            entry_count_add=window["raw_count"],
+            context_tokens=window["context_tokens"],
+            model=window["model_to_write"],
+            harness_state_patch=window["harness_state_patch"],
+        )
+        if not ok:
+            logger.info(
+                "session_monitor: stale drain ack dropped for %s "
+                "(path/generation moved since read)",
+                tmux_name,
+            )
+            return False
+        if str(row.get("harness") or "claude").strip().lower() == "codex":
+            try:
+                _publish_codex_harness_usage_setting(
+                    row, window["harness_state_full"],
+                )
+            except Exception:
+                logger.exception(
+                    "session_monitor: failed to publish codex harness usage for %s",
+                    tmux_name,
+                )
         return True
 
     def _eager_create_source(self, tmux_name: str, jsonl_path: Path) -> bool:
@@ -2085,8 +3143,16 @@ class SessionMonitor:
 
     async def _process_tail_entries(
         self, tmux_name: str, row: dict, ts: _TailState, new_entries: list,
+        *,
+        source_path: Path | None = None,
     ) -> None:
-        """Dedup, enrich, and broadcast parsed entries from a session tail read."""
+        """Dedup, enrich, and broadcast parsed entries from a session tail read.
+
+        ``source_path`` (D2, auto-suvcp) carries the batch's explicit file
+        identity for publications that do NOT come from the row's linked
+        file (ordered-handover predecessor segments) — the batch never
+        assumes the DB row links the file being published.
+        """
         if not new_entries:
             return
         # (The legacy clear-startup_state-on-first-assistant-turn hook lived
@@ -2113,9 +3179,11 @@ class SessionMonitor:
 
         harness = resolve_harness_for_session_row(row)
         session_dir = None
-        if row.get("jsonl_path"):
-            jsonl_path = Path(row["jsonl_path"])
-            session_dir = jsonl_path.parent / jsonl_path.stem
+        batch_path = source_path or (
+            Path(row["jsonl_path"]) if row.get("jsonl_path") else None
+        )
+        if batch_path is not None:
+            session_dir = batch_path.parent / batch_path.stem
         new_entries = harness.postprocess_entries(
             new_entries,
             session_dir=session_dir,
@@ -2225,7 +3293,10 @@ class SessionMonitor:
                     ),
                     "seq": ts.broadcast_seq,
                     "context_tokens": updated["context_tokens"] if updated else 0,
-                    "size_bytes": Path(row["jsonl_path"]).stat().st_size if row.get("jsonl_path") else 0,
+                    "size_bytes": (
+                        batch_path.stat().st_size
+                        if batch_path is not None and batch_path.exists() else 0
+                    ),
                     "activity_state": activity_state,
                     "pending_tool_ids": sorted(ts.pending_tool_ids),
                 },
@@ -2469,13 +3540,20 @@ class SessionMonitor:
     # ── inotify tailer ────────────────────────────────────────────
 
     async def _inotify_tailer_loop(self) -> None:
-        """inotify-driven tailer — instant delivery on IN_MODIFY, 1s fallback tick."""
+        """inotify-driven tailer — instant delivery on IN_MODIFY, 1s fallback tick.
+
+        MODIFY on a linked file requests a drain through the per-session
+        gate (auto-suvcp Rule 5) — never a direct read, so at most one
+        owner reads at a time and a contended signal transfers instead of
+        racing. MODIFY on a CHARACTERIZING track re-runs classification
+        (Rule 2); dispatch validates (wd, epoch) jointly (Rule 8/D3).
+        """
         while True:
             try:
                 # Block up to 1 s waiting for inotify events
                 events = await asyncio.to_thread(self._inotify.read, timeout=1000)
 
-                # Collect sessions whose JONLs were modified
+                # Collect sessions whose JSONLs were modified
                 modified: set[str] = set()
                 for event in events:
                     if event.mask & _iflags.MODIFY:
@@ -2486,6 +3564,17 @@ class SessionMonitor:
                             if ts_for_event is not None:
                                 ts_for_event.inotify_events_received += 1
                                 ts_for_event.last_inotify_event_ts = time.time()
+                        else:
+                            tk = self._wd_to_track.get(event.wd)
+                            if tk is not None:
+                                t_name, t_path, t_epoch = tk
+                                track = self._tracks.get((t_name, t_path))
+                                if (
+                                    track is not None
+                                    and track.wd == event.wd
+                                    and track.wd_epoch == t_epoch
+                                ):
+                                    self._classify_and_step(track)
                     if event.mask & _iflags.CREATE:
                         await self._handle_in_create(event)
                     if event.mask & _iflags.IGNORED:
@@ -2495,18 +3584,18 @@ class SessionMonitor:
                             ts = self._tail_states.get(gone)
                             if ts and ts.watch_descriptor == event.wd:
                                 ts.watch_descriptor = None
+                        tk = self._wd_to_track.pop(event.wd, None)
+                        if tk is not None:
+                            track = self._tracks.get((tk[0], tk[1]))
+                            if track is not None and track.wd == event.wd:
+                                track.wd = None
+                                track.wd_epoch += 1   # invalidate queued events
 
-                # Read + broadcast for each modified session
+                # Request a drain for each modified session — the gate
+                # serializes owners; the drain re-reads the row's current
+                # path (N4), so a stale wd routing is harmless.
                 for tmux_name in modified:
-                    row = get_session(tmux_name)
-                    if not row or not row.get("jsonl_path"):
-                        continue
-                    if tmux_name not in self._tail_states:
-                        self._tail_states[tmux_name] = _TailState()
-                    ts = self._tail_states[tmux_name]
-                    _, new_entries = await asyncio.to_thread(self._tail_one, row, ts)
-                    await self._process_tail_entries(tmux_name, row, ts, new_entries)
-                    await self._graph_appender_tick(tmux_name, Path(row["jsonl_path"]))
+                    self.request_drain(tmux_name)
 
             except Exception:
                 logger.exception("session_monitor: inotify tailer error")
@@ -2631,118 +3720,67 @@ class SessionMonitor:
         ts.recent_processed.clear()
         ts.pending_tool_ids.clear()
         ts.completed_tool_ids.clear()
-        # File offset on disk must reset so the new file is read from byte 0.
-        update_tail_state(tmux_name, file_offset=0)
+
+        # Same path, new inode = a new generation (auto-suvcp Rule 6):
+        # stamp it in the same UPDATE that resets the cursor so a stale
+        # drain of the old inode CAS-fails instead of acking bytes the new
+        # file never delivered.
+        row = get_session(tmux_name)
+        if row and row.get("jsonl_path") == str(new_path):
+            from tools.dashboard.dao.dashboard_db import (
+                next_link_seq,
+                update_jsonl_link,
+            )
+            try:
+                st_dev = new_path.stat().st_dev
+            except OSError:
+                st_dev = 0
+            seq = next_link_seq(tmux_name)
+            update_jsonl_link(
+                tmux_name,
+                session_uuid=new_path.stem,
+                jsonl_path=str(new_path),
+                generation=f"{st_dev}:{new_inode}:{seq}",
+                file_offset=0,
+            )
+            track = self._get_track(tmux_name, str(new_path))
+            track.generation = (st_dev, new_inode)
+            track.state = TRACK_STREAMING
+            track.published_up_to = 0
+            track.checked_size = None
+        else:
+            # File offset must still reset so the new file reads from byte 0.
+            update_tail_state(tmux_name, file_offset=0)
 
         logger.info(
             "session_monitor: rewatched %s %s → %s after %s",
             tmux_name, old_inode, new_inode, source,
         )
 
-        # Tail the new content immediately so the first post-replacement
-        # entries broadcast without waiting for the next IN_MODIFY event.
-        row = get_session(tmux_name)
-        if row and row.get("jsonl_path"):
-            _, new_entries = await asyncio.to_thread(self._tail_one, row, ts)
-            await self._process_tail_entries(tmux_name, row, ts, new_entries)
-            # W3: new inode -> new jsonl_path -> _graph_appender_tick sees
-            # appender.file_path no longer matches and rebuilds against the
-            # new file (a genuinely new source by path, per "codex rollover
-            # creates new source").
-            await self._graph_appender_tick(tmux_name, Path(row["jsonl_path"]))
+        # Drain the new content through the session gate so the first
+        # post-replacement entries broadcast without waiting for the next
+        # IN_MODIFY event — and without a second reader racing the owner.
+        # (W3: new generation → _graph_appender_tick rebuilds the appender
+        # against the new file inside the drain's publish step.)
+        self.request_drain(tmux_name)
 
     async def _handle_container_create(
         self, tmux_name: str, row: dict, new_file: Path,
     ) -> None:
         """Handle IN_CREATE in an isolated container directory.
 
-        Non-Codex JSONLs belong to the isolated session. Codex sibling
-        rollouts must first be positively identified from their complete
-        ``session_meta`` header; an incomplete header is deferred, never
-        treated as a main-thread rollover.
+        One entry point (auto-suvcp Rule 1): ``observe_rollout`` decides
+        birth trust (empty registration snapshot + first CREATE of the
+        epoch + CAS against NULL) or characterization. An incomplete header
+        is never abandoned — the file's track retains the watch and
+        responsibility until classification resolves or the time-driven
+        deadline quarantines it (the pre-fix retry-then-abandon here is the
+        exact responsibility gap of incident auto-0807-225218).
         """
-        old_path = row.get("jsonl_path")
-        classification = _classify_codex_rollout(new_file)
-        if classification.kind == "unknown":
-            logger.info(
-                "session_monitor: candidate tmux=%s old_path=%s candidate=%s "
-                "classification=unknown reason=%s size_bytes=%s action=defer "
-                "source=IN_CREATE",
-                tmux_name,
-                old_path,
-                new_file,
-                classification.reason,
-                classification.size_bytes,
-            )
-            for delay in _CODEX_HEADER_RETRY_DELAYS_SECONDS:
-                await asyncio.sleep(delay)
-                classification = _classify_codex_rollout(new_file)
-                if classification.kind != "unknown":
-                    break
-
-        if classification.kind == "unknown":
-            logger.warning(
-                "session_monitor: candidate tmux=%s old_path=%s candidate=%s "
-                "classification=unknown reason=%s size_bytes=%s action=abandon "
-                "source=IN_CREATE",
-                tmux_name,
-                old_path,
-                new_file,
-                classification.reason,
-                classification.size_bytes,
-            )
-            return
-
-        if classification.kind == "subagent":
-            logger.info(
-                "session_monitor: IN_CREATE container %s → %s "
-                "(skipped — codex subagent fork) old_path=%s "
-                "classification=subagent reason=%s size_bytes=%s action=skip",
-                tmux_name,
-                new_file.name,
-                old_path,
-                classification.reason,
-                classification.size_bytes,
-            )
-            return
-
-        uuids = json.loads(row.get("session_uuids") or "[]")
-        was_empty = len(uuids) == 0
-
-        harness = resolve_harness_for_session_row(row)
-        linked = harness.resolve_session(
-            tmux_name=tmux_name,
-            row=row,
-            jsonl_path=new_file,
+        _ = row  # the observation path re-reads the row (N4 discipline)
+        self.observe_rollout(
+            tmux_name, new_file, source="IN_CREATE", create_event=True,
         )
-        if linked is None:
-            return
-        logger.info(
-            "session_monitor: IN_CREATE container %s → %s%s old_path=%s "
-            "candidate=%s classification=main reason=%s size_bytes=%s "
-            "action=link persisted_path=%s persisted_uuid=%s",
-            tmux_name,
-            new_file.name,
-            " (first file — resolved)" if was_empty else " (rollover)",
-            old_path,
-            new_file,
-            classification.reason,
-            classification.size_bytes,
-            linked["jsonl_path"],
-            Path(linked["jsonl_path"]).stem,
-        )
-
-        harness.attach_live_monitoring(
-            monitor=self,
-            tmux_name=tmux_name,
-            jsonl_path=linked["jsonl_path"],
-            resolution_dir=Path(row["resolution_dir"]) if row.get("resolution_dir") else linked["resolution_dir"],
-            reset_offset=True,
-            reset_state=True,
-        )
-
-        if was_empty:
-            await self._broadcast_registry()
 
     async def _handle_host_create(
         self, tmux_name: str, row: dict, new_file: Path, dir_path: str,
@@ -2785,7 +3823,11 @@ class SessionMonitor:
             return
 
         new_uuid = new_file.stem
-        from tools.dashboard.dao.dashboard_db import link_and_enrich
+        from tools.dashboard.dao.dashboard_db import (
+            link_and_enrich,
+            next_link_seq,
+            update_jsonl_link,
+        )
         link_and_enrich(
             owner,
             session_uuid=new_uuid,
@@ -2800,13 +3842,32 @@ class SessionMonitor:
         # Swap IN_MODIFY watch to new file
         self._add_file_watch(owner, str(new_file))
 
-        # Reset file_offset for new file
-        update_tail_state(owner, file_offset=0)
+        # Reset file_offset + stamp the new file's generation in one UPDATE
+        # (auto-suvcp Rule 6: generation written wherever jsonl_path is).
+        try:
+            st = new_file.stat()
+            seq = next_link_seq(owner)
+            update_jsonl_link(
+                owner,
+                session_uuid=new_uuid,
+                jsonl_path=str(new_file),
+                generation=f"{st.st_dev}:{st.st_ino}:{seq}",
+                file_offset=0,
+            )
+            track = self._get_track(owner, str(new_file))
+            track.generation = (st.st_dev, st.st_ino)
+            track.state = TRACK_STREAMING
+        except OSError:
+            update_tail_state(owner, file_offset=0)
 
         # Reset ephemeral tail state, preserving resolution_dir
         ts = self._tail_states.get(owner)
         old_resolution_dir = ts.resolution_dir if ts else None
         self._tail_states[owner] = _TailState(resolution_dir=old_resolution_dir)
+
+        # Catch up any bytes already present in the new file (the attach-
+        # without-catch-up gap is CalStartupStall's second leg).
+        self.request_drain(owner)
 
     @staticmethod
     def _read_parent_uuid(jsonl_path: Path) -> str | None:
@@ -2981,126 +4042,6 @@ class SessionMonitor:
                             if count > 0:
                                 entry["tool_calls"] = count
                         break
-
-    def _tail_one(self, row: dict, ts: _TailState) -> tuple[bool, list]:
-        """Incremental read of one session's JSONL. Updates DB with new state."""
-        jsonl_path_str = row.get("jsonl_path")
-        if not jsonl_path_str:
-            return False, []
-
-        jsonl_path = Path(jsonl_path_str)
-        if not jsonl_path.exists():
-            return False, []
-
-        try:
-            st = jsonl_path.stat()
-        except OSError:
-            return False, []
-
-        file_offset = row.get("file_offset", 0)
-        last_activity = row.get("last_activity", 0) or 0
-
-        # No growth since last check
-        if st.st_size <= file_offset and st.st_mtime <= last_activity:
-            return False, []
-
-        if st.st_size <= file_offset:
-            return False, []
-
-        # Read new data from offset
-        try:
-            with open(jsonl_path, "rb") as fh:
-                fh.seek(file_offset)
-                data = fh.read()
-        except OSError:
-            return False, []
-
-        # Only process complete lines
-        last_nl = data.rfind(b"\n")
-        if last_nl == -1:
-            return False, []
-
-        complete = data[:last_nl + 1]
-        new_offset = file_offset + last_nl + 1
-        new_entry_count = 0
-        parsed_entries: list = []
-        last_message = row.get("last_message", "")
-        context_tokens = row.get("context_tokens", 0)
-        prior_model = row.get("model") or None
-        model = prior_model
-        prior_harness_state_raw = row.get("harness_state") or "{}"
-        try:
-            harness_state = json.loads(prior_harness_state_raw)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            harness_state = {}
-        harness = resolve_harness_for_session_row(row)
-
-        for raw_line in complete.splitlines():
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-            ts.lines_processed_total += 1
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError as exc:
-                ts.parse_errors_count += 1
-                ts.last_parse_error = f"json: {str(exc)[:160]} | line: {line[:160]}"
-                ts.last_parse_error_ts = time.time()
-                continue
-
-            new_entry_count += 1
-            text = harness.extract_message_text(entry)
-            if text:
-                last_message = text
-
-            context_tokens = harness.extract_context_tokens(entry, context_tokens)
-            model = harness.extract_model(entry, model)
-            harness_state = harness.extract_harness_state(entry, harness_state)
-
-            # Parse full entry for SSE broadcast
-            try:
-                parsed = harness.parse_line(line)
-            except Exception as exc:
-                ts.parse_errors_count += 1
-                ts.last_parse_error = f"harness.parse_line: {str(exc)[:160]} | line: {line[:160]}"
-                ts.last_parse_error_ts = time.time()
-                parsed = None
-            if isinstance(parsed, list):
-                parsed_entries.extend(parsed)
-            elif parsed is not None:
-                parsed_entries.append(parsed)
-
-        tmux_name = row["tmux_name"]
-        if new_entry_count > 0:
-            # Only push model when it changed; the column is sticky once set.
-            model_to_write = model if (model and model != prior_model) else None
-            harness_state_raw = json.dumps(harness_state or {}, sort_keys=True)
-            harness_state_to_write = (
-                harness_state_raw if harness_state_raw != prior_harness_state_raw else None
-            )
-            update_tail_state(
-                tmux_name,
-                file_offset=new_offset,
-                last_activity=st.st_mtime,
-                last_message=last_message,
-                entry_count=(row.get("entry_count", 0) + new_entry_count),
-                context_tokens=context_tokens,
-                model=model_to_write,
-                harness_state=harness_state_to_write,
-            )
-            if str(row.get("harness") or "claude").strip().lower() == "codex":
-                try:
-                    _publish_codex_harness_usage_setting(row, harness_state)
-                except Exception:
-                    logger.exception(
-                        "session_monitor: failed to publish codex harness usage for %s",
-                        tmux_name,
-                    )
-            return True, parsed_entries
-
-        # Update offset even if no entries parsed (whitespace lines)
-        update_tail_state(tmux_name, file_offset=new_offset)
-        return False, parsed_entries
 
     # ── Liveness Checker ──────────────────────────────────────────
 
@@ -3361,50 +4302,78 @@ class SessionMonitor:
         resolved = 0
         tick_ok = True
 
-        # Step 1: pending-session resolution scan. Isolated (W6) so a bug
-        # here can't prevent step 3's graph_source_id backfill from running —
-        # that backfill is the one thing that keeps the Recent-sessions list
-        # honest, and it must run every tick regardless of what else breaks.
+        # Step 1: level-triggered observation backstop (auto-suvcp Rule 7,
+        # finding N3): scan EVERY live session's resolution dir and observe
+        # ANY rollout — NOT just rows with jsonl_path IS NULL. The old
+        # pending-only gate was itself a responsibility gap: a restart
+        # between a rollover's CREATE and its link left a linked row and a
+        # successor file no mechanism ever observed (bead auto-ok297).
+        # Terminal tracks are a stat-only tombstone compare (D6); the row's
+        # own linked path re-observes as a persisted re-attach (N3
+        # refinement). Isolated (W6) so a bug here can't prevent step 3's
+        # graph_source_id backfill from running.
         try:
-            # DB-authoritative view: anything live with jsonl_path IS NULL.
-            from tools.dashboard.dao.dashboard_db import get_sessions_needing_resolution
-            pending_rows = get_sessions_needing_resolution()
-            for row in pending_rows:
+            now = time.time()
+            for row in get_live_sessions():
                 tmux_name = row["tmux_name"]
-                res_dir = row.get("resolution_dir")
+                res_dir = row.get("resolution_dir") or (
+                    str(Path(row["jsonl_path"]).parent)
+                    if row.get("jsonl_path") else None
+                )
                 if not res_dir:
                     continue
-                # Ensure a TailState exists so _handle_jsonl_appeared can track it.
                 if tmux_name not in self._tail_states:
                     self._tail_states[tmux_name] = _TailState(
-                        needs_resolution=True,
+                        needs_resolution=not row.get("jsonl_path"),
                         resolution_dir=Path(res_dir),
                     )
-                # Prefer a fresh directory scan over `resolve_session_file`
-                # because the pending session may not have a session_uuids
-                # entry yet to drive the by-uuid search.
+                was_linked = bool(row.get("jsonl_path"))
                 try:
                     dp = Path(res_dir)
-                    if not dp.is_dir():
-                        continue
-                    for jsonl in sorted(dp.rglob("*.jsonl")):
-                        if self._handle_jsonl_appeared(
-                            tmux_name, jsonl, source="reconciliation",
-                        ):
-                            resolved += 1
-                            ts_obj = self._tail_states.get(tmux_name)
-                            if ts_obj is not None:
-                                ts_obj.full_rescan_count += 1
-                                ts_obj.last_full_rescan_ts = time.time()
-                            logger.info(
-                                "session_monitor: reconciliation resolved %s → %s",
-                                tmux_name, jsonl.name,
+                    if dp.is_dir():
+                        for jsonl in sorted(dp.rglob("*.jsonl")):
+                            if "subagents" in jsonl.parts:
+                                continue
+                            self.observe_rollout(
+                                tmux_name, jsonl, source="reconciliation",
                             )
-                            break
                 except OSError as exc:
                     logger.warning(
                         "session_monitor: reconciliation scan failed for %s: %s",
                         tmux_name, exc,
+                    )
+                # Characterization rechecks + TIME-driven deadlines (T110:
+                # a deadline evaluated only inside on_file_event never
+                # fires when no more events come). The still-CHARACTERIZING
+                # check and the quarantine are an await-free pair.
+                for track in [
+                    t for t in self._tracks.values()
+                    if t.tmux_name == tmux_name
+                    and t.state == TRACK_CHARACTERIZING
+                ]:
+                    self._classify_and_step(track)
+                    if (
+                        track.state == TRACK_CHARACTERIZING
+                        and track.characterize_deadline is not None
+                        and now >= track.characterize_deadline
+                    ):
+                        self._quarantine_track(track)
+                # Handover pump (Rule 4 WF backstop) + B2 loop-start pump.
+                gate = self._session_gates.get(tmux_name)
+                if gate is not None and (
+                    gate.pending_link is not None or gate.needs_drain
+                ):
+                    self.request_drain(tmux_name)
+                after = get_session(tmux_name)
+                if not was_linked and after and after.get("jsonl_path"):
+                    resolved += 1
+                    ts_obj = self._tail_states.get(tmux_name)
+                    if ts_obj is not None:
+                        ts_obj.full_rescan_count += 1
+                        ts_obj.last_full_rescan_ts = time.time()
+                    logger.info(
+                        "session_monitor: reconciliation resolved %s → %s",
+                        tmux_name, after["jsonl_path"],
                     )
         except Exception:
             tick_ok = False
