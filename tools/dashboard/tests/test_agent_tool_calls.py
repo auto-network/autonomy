@@ -8,7 +8,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from tools.dashboard.session_monitor import SessionState, count_tool_uses
+from tools.dashboard.session_monitor import _TailState, count_tool_uses
 from tools.dashboard.session_harness import enrich_claude_entries as _enrich_entries
 
 
@@ -262,29 +262,27 @@ def test_session_state_enrichment():
         _write_meta_json(subagents / "agent-001.meta.json", "Explore code")
         _write_subagent_jsonl(subagents / "agent-001.jsonl", [3, 4])  # 7
 
-        state = SessionState(
-            session_id="abc123",
-            tmux_name="auto-t1",
-            session_type="terminal",
-            project="project",
-            jsonl_path=jsonl_file,
-        )
+        # Current API (post-ingestion-rework): a row dict carrying
+        # jsonl_path + the ephemeral _TailState holding the cross-batch
+        # description/claim maps.
+        row = {"jsonl_path": str(jsonl_file)}
+        ts = _TailState()
 
         from tools.dashboard.session_monitor import SessionMonitor
 
         # Batch 1: tool_use arrives
         batch1 = [_make_tool_use_entry("tid_1", "Explore code")]
-        SessionMonitor._enrich_agent_entries(state, batch1)
+        SessionMonitor._enrich_agent_entries(row, ts, batch1)
 
         # State should have recorded the description
-        assert state.agent_descriptions.get("tid_1") == "Explore code"
+        assert ts.agent_descriptions.get("tid_1") == "Explore code"
 
         # Batch 2: tool_result arrives later
         batch2 = [_make_tool_result_entry("tid_1")]
-        SessionMonitor._enrich_agent_entries(state, batch2)
+        SessionMonitor._enrich_agent_entries(row, ts, batch2)
 
         assert batch2[0].get("tool_calls") == 7
-        assert len(state.claimed_subagents) == 1
+        assert len(ts.claimed_subagents) == 1
 
 
 if __name__ == "__main__":

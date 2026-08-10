@@ -730,6 +730,125 @@ class TestRound1Blockers:
         ]
 
 
+# ── Round-2 review regressions (both reproduced pre-fix) ───────────────
+
+
+class TestRound2Blockers:
+
+    def test_rb1_over_64k_partial_after_complete_line(self, tail_client):
+        """RB1: an unterminated trailing line >64KiB must not be mapped to
+        'complete at physical EOF' — that re-opened the B1 permanent-loss
+        timeline at production line sizes (executed pre-fix: helper
+        returned 140,014 for a file whose true complete offset is 8)."""
+        client, tmp_path, db_path = tail_client
+        from tools.dashboard import server as server_mod
+        import sys
+        srv = sys.modules[server_mod.__name__]
+
+        d = tmp_path / "rb1"
+        d.mkdir()
+        jsonl = d / "rb1-aaaa.jsonl"
+        line_a = _claude_text_line("complete A")
+        with open(jsonl, "w") as fh:
+            fh.write(line_a + "\n")
+            fh.write('{"b":"' + "x" * 140_000)   # >64KiB, no newline
+        _insert_session(db_path, tmux_name="auto-rb1", jsonl_path=str(jsonl))
+
+        true_complete = len(line_a) + 1
+        assert srv._last_complete_offset_in(jsonl) == true_complete
+
+        cold = client.get(
+            "/api/session/autonomy/auto-rb1/tail?tail_entries=10").json()
+        assert [e["content"] for e in cold["entries"]] == ["complete A"]
+        assert cold["window_spans"][-1]["to"] == true_complete, (
+            "cold-open must anchor before the giant partial line"
+        )
+
+        # The giant line completes off-screen; the anchor must recover it.
+        with open(jsonl, "a") as fh:
+            fh.write('"}\n')
+        wake = client.get(
+            "/api/session/autonomy/auto-rb1/tail"
+            f"?after_file=rb1-aaaa&after={true_complete}").json()
+        assert wake["cursor"]["off"] == os.path.getsize(jsonl)
+
+    def test_rb1_sole_over_64k_partial_file(self, tail_client):
+        """RB1 second shape: a file that is ONLY a >64KiB partial line has
+        complete offset 0 — never its physical size."""
+        client, tmp_path, db_path = tail_client
+        from tools.dashboard import server as server_mod
+        import sys
+        srv = sys.modules[server_mod.__name__]
+
+        d = tmp_path / "rb1b"
+        d.mkdir()
+        jsonl = d / "rb1b-bbbb.jsonl"
+        jsonl.write_text('{"c":"' + "y" * 140_000)
+        _insert_session(db_path, tmux_name="auto-rb1b", jsonl_path=str(jsonl))
+
+        assert srv._last_complete_offset_in(jsonl) == 0
+        cold = client.get(
+            "/api/session/autonomy/auto-rb1b/tail?tail_entries=10").json()
+        assert cold["entries"] == []
+        assert cold["has_more"] is False
+
+    def test_rb2_replay_claims_match_live_for_repeated_descriptions(self, tail_client):
+        """RB2 (the execution reviewer's fixture shape): two Agent calls
+        with the SAME description; the cursor sits between them. The
+        replay must attach the SECOND subagent's tool_calls to the second
+        Agent — reconstruction replays the claim allocation through the
+        prefix (pre-fix: claimed_subagents arrived empty, the replay
+        re-claimed subagent #1 and reported 1 instead of 3)."""
+        client, tmp_path, db_path = tail_client
+        d = tmp_path / "rb2"
+        d.mkdir()
+        jsonl = d / "rb2-cccc.jsonl"
+
+        def agent_use_line(tid):
+            return json.dumps({"type": "assistant", "timestamp": "t",
+                               "message": {"role": "assistant", "content": [
+                                   {"type": "tool_use", "name": "Agent", "id": tid,
+                                    "input": {"description": "explore repo",
+                                              "prompt": "go"}}]}})
+
+        def agent_result_line(tid):
+            return json.dumps({"type": "user", "timestamp": "t",
+                               "message": {"role": "user", "content": [
+                                   {"type": "tool_result", "tool_use_id": tid,
+                                    "content": "done"}]}})
+
+        lines = [agent_use_line("A1"), agent_result_line("A1"),
+                 agent_use_line("A2"), agent_result_line("A2")]
+        offsets = _write_lines(jsonl, lines)
+        _insert_session(db_path, tmux_name="auto-rb2", jsonl_path=str(jsonl))
+
+        sub = d / "rb2-cccc" / "subagents"
+        sub.mkdir(parents=True)
+        (sub / "01.meta.json").write_text(json.dumps({"description": "explore repo"}))
+        (sub / "01.jsonl").write_text(json.dumps(
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash", "id": "x1", "input": {}}]}}) + "\n")
+        (sub / "02.meta.json").write_text(json.dumps({"description": "explore repo"}))
+        with open(sub / "02.jsonl", "w") as fh:
+            for i in range(3):
+                fh.write(json.dumps(
+                    {"type": "assistant", "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "name": "Bash", "id": f"y{i}",
+                         "input": {}}]}}) + "\n")
+
+        # Cursor between the two Agent calls: the replay covers A2 only.
+        resp = client.get(
+            "/api/session/autonomy/auto-rb2/tail"
+            f"?after_file=rb2-cccc&after={offsets[2]}").json()
+        a2_results = [e for e in resp["entries"]
+                      if e.get("type") == "tool_result" and e.get("tool_id") == "A2"]
+        assert a2_results, resp["entries"]
+        assert a2_results[0].get("tool_calls") == 3, (
+            f"A2 must claim the SECOND subagent (3 tool calls), got "
+            f"{a2_results[0].get('tool_calls')} — the prefix claim was not replayed"
+        )
+
+
 # ── Acceptance: cold-open of a very long session is one cheap request ──
 
 

@@ -625,6 +625,43 @@ async function testF_partialLineColdOpen() {
     ['done-0', 'done-1', 'finished-later', 'after'], 'contents complete');
   assertNoLies(client, '(f)');
   viewer.destroy();
+
+  // Round-2 RB1 shape 1: the partial line is HUGE (>64KiB — production
+  // tool-result sizes). The anchor must still sit before it.
+  const fx2 = new FixtureSession();
+  fx2.appendLine('small-complete');
+  fx2.appendPartial('X'.repeat(140000));
+  const c2 = makeClient(fx2);
+  const v2 = await mountViewer(c2);
+  const s2 = c2.win.getSessionStore(SID);
+  checkEqual({ ...s2.committed }, { file: 'A', off: fx2.files[0].completeSize },
+    '>64KiB partial: committed still anchors at the last complete newline');
+  fx2.completePartial();
+  v2._setupResumeRecovery();
+  c2.emitDocument('visibilitychange');
+  await c2.flush();
+  checkEqual(bufferRefs(c2), fx2.expectedRefs(),
+    '>64KiB once-partial line recovered on wake');
+  assertNoLies(c2, '(f/rb1a)');
+  v2.destroy();
+
+  // Round-2 RB1 shape 2: the file is ONLY a giant partial line.
+  const fx3 = new FixtureSession();
+  fx3.appendPartial('Y'.repeat(140000));
+  const c3 = makeClient(fx3);
+  const v3 = await mountViewer(c3);
+  const s3 = c3.win.getSessionStore(SID);
+  checkEqual(s3.entries.length, 0, 'sole >64KiB partial: cold-open serves nothing');
+  check(!s3.committed || s3.committed.off === 0,
+    'sole partial: committed never anchors at physical EOF');
+  fx3.completePartial();
+  v3._setupResumeRecovery();
+  c3.emitDocument('visibilitychange');
+  await c3.flush();
+  checkEqual(bufferRefs(c3), fx3.expectedRefs(),
+    'sole once-partial line recovered on wake');
+  assertNoLies(c3, '(f/rb1b)');
+  v3.destroy();
 }
 
 // (g) B7 shape: forced merge failure — the ack must NOT advance past
