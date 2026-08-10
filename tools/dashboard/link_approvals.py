@@ -78,6 +78,7 @@ MAX_LINK_TTL_S = 365 * 24 * 60 * 60
 _TYPE_LABELS = {
     "present": "Present deck",
     "design": "Design",
+    "mission": "Mission",
     "note": "Note",
     "file": "File",
     "org:join": "Invitation",
@@ -279,6 +280,12 @@ def _resolve_target(
                 "error": None,
                 "preview": {"title": title, "content": content},
             }
+        if target_type == "mission":
+            from tools.dashboard.dao import mission_control_db
+            mission = mission_control_db.get_mission(target_uuid)
+            if not mission:
+                return {"title": None, "error": f"mission {target_uuid} not found"}
+            return {"title": mission.get("name") or target_uuid, "error": None}
         if target_type == "file":
             from tools.graph import ops as graph_ops
             att = None

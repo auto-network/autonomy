@@ -477,7 +477,7 @@ const autonet = (() => {
     }
     if (!hasOnlyKeys(header, ["v", "status", "kind", "viewer", "content", "branding"])
         || header.v !== 1 || header.status !== "ok"
-        || !["note", "design", "present"].includes(header.kind)) {
+        || !["note", "design", "present", "mission"].includes(header.kind)) {
       throw new Error("invalid artifact header");
     }
 

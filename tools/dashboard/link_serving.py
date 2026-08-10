@@ -230,6 +230,27 @@ def _resolve_design(target_uuid: str):
     return {"kind": "design", "viewer": html_text.encode("utf-8")}
 
 
+def _resolve_mission(target_uuid: str):
+    """Self-contained HTML, like design/present -- the coordinator already
+    fully authors and controls the page via push_site_revision. Unlike
+    design (pinned to the exact approved revision, see _resolve_design's
+    docstring), this always serves the CURRENT revision on every open,
+    matching note's reload-shows-latest behavior: a mission page reflects
+    the live state of the work, not a frozen snapshot from whenever the
+    link was approved. Deliberately not repeating the design bug where
+    the resolver pins to whatever revision existed at grant time.
+    """
+    from tools.dashboard.dao import mission_control_db
+
+    current = mission_control_db.get_current_site(target_uuid)
+    if not current:
+        return None
+    html_text = current.get("html")
+    if not html_text:
+        return None
+    return {"kind": "mission", "viewer": html_text.encode("utf-8")}
+
+
 _GRAPH_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(graph://([^)]+)\)")
 # raw_sha256 is a SHA-256 of the file bytes: 64 lowercase hex chars (wire
 # protocol v1). It is load-bearing for the client's whole-file verification
@@ -450,7 +471,7 @@ def _serialize_artifact(artifact: dict) -> tuple[dict, bytes]:
     if not isinstance(artifact, dict):
         raise TypeError("artifact must be an object")
     kind = artifact.get("kind")
-    if kind not in ("note", "design", "present"):
+    if kind not in ("note", "design", "present", "mission"):
         raise ValueError("unsupported artifact kind")
     if not set(artifact).issubset({"kind", "viewer", "content", "branding"}):
         raise ValueError("artifact carries unknown fields")
@@ -470,7 +491,7 @@ def _serialize_artifact(artifact: dict) -> tuple[dict, bytes]:
     content = artifact.get("content")
     if kind != "note":
         if content is not None:
-            raise ValueError("design and present forbid content")
+            raise ValueError("design, present, and mission forbid content")
     else:
         if not isinstance(content, dict):
             raise ValueError("note requires content")
@@ -613,6 +634,8 @@ def resolve_target(grant: dict, *, org: str | None = None):
             return _resolve_design(target_uuid)
         if target_type == "note":
             return _resolve_note(target_uuid, org)
+        if target_type == "mission":
+            return _resolve_mission(target_uuid)
         # file is deliberately deferred from the rich-render v1 grammar.
     except Exception:
         return None  # resolver errors serve nothing, not stack traces
