@@ -86,8 +86,9 @@
            class="absolute right-0 mt-1 w-72 bg-gray-800 border border-gray-700
                   rounded-lg shadow-lg overflow-hidden z-30">
 
-        <!-- Workspace groups (grouped by org; group.org is a resolved identity object) -->
-        <template x-for="group in orgGroups" :key="group.org.slug">
+        <!-- Workspace groups follow the page-level org filter. Host Terminal
+             stays outside this loop so it is available for every filter. -->
+        <template x-for="group in visibleOrgGroups" :key="group.org.slug">
           <div class="py-1" :data-testid="'org-group-' + group.org.slug">
             <div class="px-3 py-1.5 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider"
                  :style="`color:${group.org.color}`"
