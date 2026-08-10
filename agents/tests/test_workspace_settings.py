@@ -542,3 +542,41 @@ def test_impl_mount_target_replaces_slash_with_dash():
     assert _impl_mount_target("autonomy/github") == (
         f"{CAPABILITIES_MOUNT_DIR}/autonomy-github"
     )
+
+
+def test_workspace_from_setting_parses_host_root_mount_reason():
+    workspace = _workspace_from_setting(
+        {
+            "name": "Ops",
+            "image": "img",
+            "host_root_mount": {"reason": "reads live dashboard state"},
+        },
+        workspace_id="ops",
+        graph_project="autonomy",
+        artifacts=(),
+        mounts={},
+    )
+    assert workspace.host_root_mount_reason == "reads live dashboard state"
+
+
+def test_workspace_from_setting_defaults_to_no_host_root_mount():
+    workspace = _workspace_from_setting(
+        {"name": "Ops", "image": "img"},
+        workspace_id="ops",
+        graph_project="autonomy",
+        artifacts=(),
+        mounts={},
+    )
+    assert workspace.host_root_mount_reason is None
+
+
+@pytest.mark.parametrize("bad", [{}, {"reason": ""}, {"reason": "   "}, "yes"])
+def test_workspace_from_setting_rejects_reasonless_host_root_mount(bad):
+    with pytest.raises(WorkspaceSettingsError, match="reason"):
+        _workspace_from_setting(
+            {"name": "Ops", "image": "img", "host_root_mount": bad},
+            workspace_id="ops",
+            graph_project="autonomy",
+            artifacts=(),
+            mounts={},
+        )

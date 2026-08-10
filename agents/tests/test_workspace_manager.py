@@ -2547,3 +2547,48 @@ class TestScanFingerprintCache:
         # Second pass: still no crash, still flagged.
         rows2 = wm.scan_all_worktrees(worktrees_dir=worktrees_dir, live_session_names=set())
         assert rows2[0].orphaned is True
+
+
+# ── explicit live-host-root opt-in (auto-j3oj3) ──────────────────────
+
+def test_host_root_opt_in_mounts_live_root_read_only(tmp_path):
+    project = ProjectConfig(
+        id="ops", name="ops", description="", image="img",
+        graph_project="autonomy",
+        host_root_mount_reason="reads live dashboard state",
+    )
+    mounts = wm.prepare_session_mounts(
+        project, "sess-ops",
+        repos_dir=tmp_path / "repos", worktrees_dir=tmp_path / "worktrees",
+    )
+    assert mounts == {str(wm.REPO_ROOT): "/workspace/repo:ro"}
+
+
+def test_no_opt_in_yields_no_platform_mount_here(tmp_path):
+    """Without the opt-in, prepare_session_mounts adds nothing at
+    /workspace/repo — the launcher's snapshot default owns that path."""
+    project = ProjectConfig(
+        id="ops", name="ops", description="", image="img",
+        graph_project="autonomy",
+    )
+    mounts = wm.prepare_session_mounts(
+        project, "sess-ops",
+        repos_dir=tmp_path / "repos", worktrees_dir=tmp_path / "worktrees",
+    )
+    assert mounts == {}
+
+
+def test_host_root_opt_in_conflicts_with_repo_at_platform_path(tmp_path, monkeypatch):
+    checkout = _make_local_checkout(tmp_path)
+    project = ProjectConfig(
+        id="ops", name="ops", description="", image="img",
+        graph_project="autonomy",
+        repos=(RepoMount(url=str(checkout), base_source=str(checkout),
+                         mount="/workspace/repo", writable=False),),
+        host_root_mount_reason="contradiction",
+    )
+    with pytest.raises(wm.WorkspaceError, match="host_root_mount conflicts"):
+        wm.prepare_session_mounts(
+            project, "sess-ops",
+            repos_dir=tmp_path / "repos", worktrees_dir=tmp_path / "worktrees",
+        )

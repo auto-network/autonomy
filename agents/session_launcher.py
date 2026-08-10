@@ -3,7 +3,8 @@
 All four launch paths (dispatch, librarian, chatwith, terminal) go through
 launch_session(), which handles:
 - Credential resolution (one implementation)
-- Default volume mounts: repo (ro), graph.db (ro), .beads (rw), per-run sessions dir
+- Default volume mounts: platform snapshot (ro), data/uploads (ro),
+  .beads (rw, credential key masked), per-run sessions dir
 - Session directory creation
 - Writing .session_meta.json with type + metadata + timestamp
 - Building and executing the docker run command
@@ -749,6 +750,35 @@ def _codex_git_root(worktree_host: Path) -> str | None:
         return None
 
 
+def _ensure_platform_snapshot() -> str | None:
+    """The host path to mount at ``/workspace/repo`` when nothing else claims it.
+
+    A read-only git snapshot of the platform checkout — the managed clone
+    mechanism the workspace layer already uses for read-only repos: clone
+    (or fetch) ``REPO_ROOT`` under ``data/repos/local/``, then detach-checkout
+    its integration tip so the working tree is current. The snapshot carries
+    ``tools/``, ``agents/`` and everything PYTHONPATH/graph/bd need, and none
+    of the live root's ``data/`` (org DBs, private keys, session secrets) —
+    gitignored state does not survive a clone (auto-j3oj3).
+
+    Returns ``None`` on failure (logged loudly). Callers must launch without
+    a platform mount in that case, never fall back to the live root.
+    """
+    try:
+        from agents import workspace_manager
+
+        clone = workspace_manager.ensure_managed_clone(str(REPO_ROOT))
+        workspace_manager._update_readonly_clone(clone)
+        return str(clone)
+    except Exception as exc:
+        print(
+            "  ERROR: could not prepare the platform snapshot for "
+            f"/workspace/repo — launching without it ({exc})",
+            file=sys.stderr,
+        )
+        return None
+
+
 def _generate_codex_config(base_config: Path, git_root: str, run_dir: Path) -> Path | None:
     """Write a per-session Codex ``config.toml`` that pre-trusts ``git_root``.
 
@@ -1042,15 +1072,36 @@ def launch_session(
     # ── Build default volume mount table ──────────────────────
     # Key: host path.  Value: container_path[:mode]
     # The table is ordered; callers can override any entry by matching container path.
+    #
+    # The mount table IS the permission list: container ``agent`` and the host
+    # operator share uid 1000, so file modes inside a mounted tree are
+    # decoration. Anything mounted is fully readable. That is why the platform
+    # mount is a git snapshot (code only — a checkout reproduces no gitignored
+    # key, org DB, or secret) and never the live host root (auto-j3oj3), and
+    # why host ``data/`` is exposed only as the single deliberate
+    # ``data/uploads`` read-only mount below.
     transcript_mount = (
         "/home/agent/.codex/sessions"
         if harness == "codex"
         else "/home/agent/.claude/projects"
     )
+    try:
+        # Pre-create so docker binds the operator-owned directory instead of
+        # manufacturing a root-owned one inside the live repo.
+        (REPO_ROOT / "data" / "uploads").mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
     default_mounts: dict[str, str] = {
-        str(REPO_ROOT): "/workspace/repo:ro",
-        str(REPO_ROOT / "data" / "graph.db"): "/home/agent/graph.db:ro",
         str(REPO_ROOT / ".beads"): "/data/.beads",
+        # ``.beads`` must be read-write for bd, but the dolt-remote credential
+        # inside it is host-only material no session reads (repo-wide grep:
+        # zero consumers). Mask it with an empty read-only bind so the rw
+        # mount doesn't hand every container a shared secret (auto-j3oj3).
+        "/dev/null": "/data/.beads/.beads-credential-key:ro",
+        # File handoff: POST /api/upload writes host data/uploads and sessions
+        # read it at this container path. The one deliberate in-container view
+        # of host data/ — read-only, this directory only.
+        str(REPO_ROOT / "data" / "uploads"): "/workspace/repo/data/uploads:ro",
         str(run_dir): "/workspace/output",
         str(sessions_dir): transcript_mount,
     }
@@ -1065,6 +1116,20 @@ def launch_session(
                 if default_mounts[dk].split(":")[0] == container_path:
                     del default_mounts[dk]
             default_mounts[str(host_path)] = container_spec
+
+    # Platform mount: when no caller mount claims /workspace/repo, provide the
+    # platform as a read-only git snapshot of the host checkout — never the
+    # live root, which carries data/ (org DBs, private keys, session secrets)
+    # into the container. Failure to prepare the snapshot launches WITHOUT a
+    # platform mount: graph/bd tooling breaks loudly for that session, which
+    # beats silently re-exposing host data/ or stopping the fleet.
+    if not any(
+        spec.split(":")[0] == "/workspace/repo"
+        for spec in default_mounts.values()
+    ):
+        snapshot = _ensure_platform_snapshot()
+        if snapshot is not None:
+            default_mounts[snapshot] = "/workspace/repo:ro"
 
     # Capability mounts: package roots, tool subtrees, and secret files for
     # every enabled MaterializedCapability. Caller-supplied mounts for the

@@ -261,10 +261,15 @@ def main() -> int:
             if auth_args is None:
                 return 1
 
+        # Same table shape as launch_session's defaults: the platform is a
+        # read-only git snapshot, never the live host root (its data/ carries
+        # org DBs and private keys, and container uid == host uid so a mount
+        # is fully readable — auto-j3oj3). The .beads dolt credential is
+        # masked; data/uploads is the one deliberate host-data view.
         mounts = {
-            str(REPO_ROOT): "/workspace/repo:ro",
-            str(REPO_ROOT / "data" / "graph.db"): "/home/agent/graph.db",
             str(REPO_ROOT / ".beads"): "/data/.beads",
+            "/dev/null": "/data/.beads/.beads-credential-key:ro",
+            str(REPO_ROOT / "data" / "uploads"): "/workspace/repo/data/uploads:ro",
             str(run_dir): "/workspace/output",
             str(sessions_dir): (
                 "/home/agent/.codex/sessions"
@@ -273,11 +278,13 @@ def main() -> int:
             ),
         }
         if args.worktree:
-            # Remove default repo mount, add writable worktree
-            for k in list(mounts):
-                if mounts[k].split(":")[0] == "/workspace/repo":
-                    del mounts[k]
             mounts[args.worktree] = "/workspace/repo"
+        else:
+            from agents.session_launcher import _ensure_platform_snapshot
+
+            snapshot = _ensure_platform_snapshot()
+            if snapshot is not None:
+                mounts[snapshot] = "/workspace/repo:ro"
         if args.git_dir:
             mounts[args.git_dir] = args.git_dir
         host_socket = "/var/run/docker.sock"

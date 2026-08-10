@@ -119,6 +119,7 @@ class WorkspaceV1(SettingSchema):
         "session_runtime": str,
         "network_host": bool,
         "repos": list,
+        "host_root_mount": dict,
         "env": dict,
         "env_from_host": list,
         "tags": list,
@@ -210,6 +211,20 @@ class WorkspaceV1(SettingSchema):
                 },
             },
         },
+        "host_root_mount": {
+            "type": "object",
+            "description": (
+                "Explicit opt-in to mount the LIVE host platform checkout "
+                "(including data/ — org DBs, keys, secrets) read-only at "
+                "/workspace/repo instead of the default git snapshot. "
+                "Requires a stated reason; never inferred from workspace "
+                "name or org. Almost no workspace should set this."
+            ),
+            "element": {
+                "reason": {"type": "string", "required": True,
+                           "description": "Why this workspace needs live host state"},
+            },
+        },
         "env": {
             "type": "object",
             "description": "Environment variables (string -> string) passed into the container",
@@ -282,6 +297,20 @@ class WorkspaceV1(SettingSchema):
         if "repos" in payload:
             for i, repo in enumerate(payload["repos"]):
                 _validate_repo(repo, i)
+        if "host_root_mount" in payload:
+            hrm = payload["host_root_mount"]
+            reason = hrm.get("reason")
+            if not isinstance(reason, str) or not reason.strip():
+                raise SchemaValidationError(
+                    f"{cls.__name__}: host_root_mount requires a non-empty "
+                    "'reason' string stating why live host state is needed"
+                )
+            extra_hrm = set(hrm) - {"reason"}
+            if extra_hrm:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: host_root_mount has unknown field(s): "
+                    f"{sorted(extra_hrm)}"
+                )
         if "harness" in payload:
             harness = payload["harness"]
             if harness not in _VALID_HARNESSES:
