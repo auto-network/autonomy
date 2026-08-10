@@ -86,6 +86,72 @@ CREATE TABLE IF NOT EXISTS mission_last_seen (
     mission_id      TEXT PRIMARY KEY,
     last_seen_at    REAL NOT NULL
 );
+
+-- A pillar is a sub-mission: its own dedicated coordinator_session, its
+-- own site-revision history, its own presence surface (pillar:<id>). A
+-- structural copy of `missions` one level down -- same entity shape, same
+-- lifecycle model -- not a new abstraction. mission_id is a plain FK, not
+-- enforced (this store has never used foreign keys -- see missions/
+-- mission_site_revisions above), cleaned up by delete_mission's cascade.
+CREATE TABLE IF NOT EXISTS pillars (
+    pillar_id             TEXT PRIMARY KEY,
+    mission_id             TEXT NOT NULL,
+    name                    TEXT NOT NULL,
+    coordinator_session     TEXT NOT NULL DEFAULT '',
+    color                    TEXT NOT NULL DEFAULT '',
+    created_at               REAL NOT NULL,
+    current_revision_id     TEXT,
+    status                   TEXT NOT NULL DEFAULT 'active'
+);
+
+CREATE INDEX IF NOT EXISTS idx_pillars_mission
+    ON pillars(mission_id);
+
+CREATE TABLE IF NOT EXISTS pillar_site_revisions (
+    revision_id     TEXT PRIMARY KEY,
+    pillar_id       TEXT NOT NULL,
+    revision_seq    INTEGER NOT NULL,
+    html            TEXT NOT NULL,
+    note            TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL,
+    UNIQUE (pillar_id, revision_seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pillar_site_revisions_pillar
+    ON pillar_site_revisions(pillar_id);
+
+-- Same single-implicit-watermark posture as mission_last_seen, one level
+-- down.
+CREATE TABLE IF NOT EXISTS pillar_last_seen (
+    pillar_id       TEXT PRIMARY KEY,
+    last_seen_at    REAL NOT NULL
+);
+
+-- Interim visibility on a still-open conversation entry ("still working --
+-- capturing the new screenshot") without closing it out. Deliberately NOT
+-- part of mission_conversation itself: an entry has exactly one `answer`
+-- (or none yet); it can have any number of updates on the way there.
+CREATE TABLE IF NOT EXISTS mission_conversation_updates (
+    update_id    TEXT PRIMARY KEY,
+    entry_id     TEXT NOT NULL,
+    text         TEXT NOT NULL,
+    created_at   REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_updates_entry
+    ON mission_conversation_updates(entry_id);
+
+-- Idle-nag cooldown tracking for "you have outstanding Mission Control
+-- questions", keyed by coordinator_session -- deliberately separate from
+-- tmux_sessions' own nag_enabled/nag_message/nag_interval/nag_last_sent
+-- columns (dashboard_db.py), which are a single session-owned slot for a
+-- human-configured general check-in nag (`graph set-nag`). Writing this
+-- feature's message into that slot would silently clobber whatever a
+-- session already configured for itself.
+CREATE TABLE IF NOT EXISTS coordinator_nag_state (
+    coordinator_session    TEXT PRIMARY KEY,
+    last_nagged_at          REAL NOT NULL
+);
 """
 
 #: Explicit lifecycle state, coordinator-set (never inferred from staleness --
@@ -120,6 +186,15 @@ def _get_conn(db_path: Path | str | None = None) -> sqlite3.Connection:
         conn.execute("SELECT status FROM missions LIMIT 0")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE missions ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+        conn.commit()
+    # Migrate: add pillar_id/anchor columns if missing (for databases
+    # created before pillars existed). NULL on every pre-existing row --
+    # pillar_id IS NULL is exactly "mission-level", today's only meaning.
+    try:
+        conn.execute("SELECT pillar_id, anchor FROM mission_conversation LIMIT 0")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE mission_conversation ADD COLUMN pillar_id TEXT")
+        conn.execute("ALTER TABLE mission_conversation ADD COLUMN anchor TEXT")
         conn.commit()
     return conn
 
@@ -226,10 +301,285 @@ def delete_mission(mission_id: str, *, db_path: Path | str | None = None) -> boo
         conn.execute(
             "DELETE FROM mission_last_seen WHERE mission_id = ?", (mission_id,)
         )
+        # Cascade to pillars -- a pillar has no independent existence
+        # outside its parent mission.
+        pillar_ids = [
+            r[0] for r in conn.execute(
+                "SELECT pillar_id FROM pillars WHERE mission_id = ?", (mission_id,)
+            ).fetchall()
+        ]
+        for pillar_id in pillar_ids:
+            conn.execute("DELETE FROM pillar_site_revisions WHERE pillar_id = ?", (pillar_id,))
+            conn.execute("DELETE FROM pillar_last_seen WHERE pillar_id = ?", (pillar_id,))
+        conn.execute("DELETE FROM pillars WHERE mission_id = ?", (mission_id,))
         conn.commit()
     finally:
         conn.close()
     return cur.rowcount > 0
+
+
+# ── Pillars ──────────────────────────────────────────────────────
+#
+# A pillar is a sub-mission: same entity shape as `missions` above (id,
+# name, coordinator_session, created_at, current_revision_id, status),
+# scoped under a parent mission_id instead of standing alone. Every
+# function here is a structural mirror of its mission-level counterpart --
+# same pattern, one level down -- not a new abstraction.
+
+
+def create_pillar(
+    mission_id: str,
+    name: str,
+    coordinator_session: str = "",
+    color: str = "",
+    *,
+    db_path: Path | str | None = None,
+) -> dict:
+    """Create a pillar under a mission. Does not verify the mission exists
+    -- mirrors create_mission's own lack of existence-checking (there is no
+    parent to check at the mission level); callers that need the guarantee
+    check via get_mission first, as the API layer does."""
+    pillar_id = str(uuid.uuid4())
+    created_at = time.time()
+    conn = _get_conn(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO pillars"
+            " (pillar_id, mission_id, name, coordinator_session, color, created_at, current_revision_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, NULL)",
+            (pillar_id, mission_id, name, coordinator_session, color, created_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "pillar_id": pillar_id,
+        "mission_id": mission_id,
+        "name": name,
+        "coordinator_session": coordinator_session,
+        "color": color,
+        "created_at": created_at,
+        "current_revision_id": None,
+        "status": "active",
+    }
+
+
+def get_pillar(pillar_id: str, *, db_path: Path | str | None = None) -> dict | None:
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM pillars WHERE pillar_id = ?", (pillar_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def list_pillars(mission_id: str, *, db_path: Path | str | None = None) -> list[dict]:
+    conn = _get_conn(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM pillars WHERE mission_id = ? ORDER BY created_at ASC",
+            (mission_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def set_pillar_status(
+    pillar_id: str, status: str, *, db_path: Path | str | None = None,
+) -> bool:
+    """Same lifecycle values as a mission (VALID_MISSION_STATUSES) -- one
+    shared vocabulary, not a parallel enum."""
+    assert status in VALID_MISSION_STATUSES, status
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE pillars SET status = ? WHERE pillar_id = ?",
+            (status, pillar_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return cur.rowcount > 0
+
+
+def delete_pillar(pillar_id: str, *, db_path: Path | str | None = None) -> bool:
+    """Hard-delete one pillar and its own revision history. For deleting a
+    whole mission (which cascades to all its pillars), see delete_mission."""
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute("DELETE FROM pillars WHERE pillar_id = ?", (pillar_id,))
+        conn.execute("DELETE FROM pillar_site_revisions WHERE pillar_id = ?", (pillar_id,))
+        conn.execute("DELETE FROM pillar_last_seen WHERE pillar_id = ?", (pillar_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return cur.rowcount > 0
+
+
+# ── Pillar site revisions ───────────────────────────────────────
+
+
+def push_pillar_site_revision(
+    pillar_id: str,
+    html: str,
+    note: str = "",
+    *,
+    db_path: Path | str | None = None,
+) -> dict | None:
+    """Mirrors push_site_revision exactly, one level down: append + make
+    current, atomically, in one call. Returns None if the pillar doesn't
+    exist."""
+    revision_id = str(uuid.uuid4())
+    created_at = time.time()
+    conn = _get_conn(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        exists = conn.execute(
+            "SELECT 1 FROM pillars WHERE pillar_id = ?", (pillar_id,)
+        ).fetchone()
+        if not exists:
+            conn.rollback()
+            return None
+        row = conn.execute(
+            "SELECT MAX(revision_seq) FROM pillar_site_revisions WHERE pillar_id = ?",
+            (pillar_id,),
+        ).fetchone()
+        revision_seq = (row[0] or 0) + 1
+        conn.execute(
+            "INSERT INTO pillar_site_revisions"
+            " (revision_id, pillar_id, revision_seq, html, note, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (revision_id, pillar_id, revision_seq, html, note, created_at),
+        )
+        conn.execute(
+            "UPDATE pillars SET current_revision_id = ? WHERE pillar_id = ?",
+            (revision_id, pillar_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "revision_id": revision_id,
+        "pillar_id": pillar_id,
+        "revision_seq": revision_seq,
+        "note": note,
+        "created_at": created_at,
+    }
+
+
+def get_current_pillar_site(pillar_id: str, *, db_path: Path | str | None = None) -> dict | None:
+    conn = _get_conn(db_path)
+    try:
+        pillar = conn.execute(
+            "SELECT current_revision_id FROM pillars WHERE pillar_id = ?",
+            (pillar_id,),
+        ).fetchone()
+        if not pillar or not pillar["current_revision_id"]:
+            return None
+        row = conn.execute(
+            "SELECT * FROM pillar_site_revisions WHERE revision_id = ?",
+            (pillar["current_revision_id"],),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def list_pillar_site_revisions(pillar_id: str, *, db_path: Path | str | None = None) -> list[dict]:
+    conn = _get_conn(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT revision_id, pillar_id, revision_seq, note, created_at,"
+            " LENGTH(html) AS byte_size"
+            " FROM pillar_site_revisions WHERE pillar_id = ?"
+            " ORDER BY revision_seq DESC",
+            (pillar_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_pillar_site_revision(
+    pillar_id: str, revision_id: str, *, db_path: Path | str | None = None
+) -> dict | None:
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM pillar_site_revisions WHERE pillar_id = ? AND revision_id = ?",
+            (pillar_id, revision_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def activate_pillar_site_revision(
+    pillar_id: str, revision_id: str, *, db_path: Path | str | None = None
+) -> bool:
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM pillar_site_revisions WHERE pillar_id = ? AND revision_id = ?",
+            (pillar_id, revision_id),
+        ).fetchone()
+        if not row:
+            return False
+        cur = conn.execute(
+            "UPDATE pillars SET current_revision_id = ? WHERE pillar_id = ?",
+            (revision_id, pillar_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return cur.rowcount > 0
+
+
+def get_pillar_last_seen(pillar_id: str, *, db_path: Path | str | None = None) -> float | None:
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT last_seen_at FROM pillar_last_seen WHERE pillar_id = ?",
+            (pillar_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row["last_seen_at"] if row else None
+
+
+def mark_pillar_seen(pillar_id: str, *, db_path: Path | str | None = None) -> float:
+    seen_at = time.time()
+    conn = _get_conn(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO pillar_last_seen (pillar_id, last_seen_at) VALUES (?, ?)"
+            " ON CONFLICT(pillar_id) DO UPDATE SET last_seen_at = excluded.last_seen_at",
+            (pillar_id, seen_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return seen_at
+
+
+def list_pillar_site_revisions_since(
+    pillar_id: str, since_at: float, *, db_path: Path | str | None = None,
+) -> list[dict]:
+    conn = _get_conn(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT revision_id, pillar_id, revision_seq, note, created_at,"
+            " LENGTH(html) AS byte_size"
+            " FROM pillar_site_revisions WHERE pillar_id = ? AND created_at > ?"
+            " ORDER BY revision_seq DESC",
+            (pillar_id, since_at),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
 
 
 # ── Site revisions ───────────────────────────────────────────────
@@ -439,9 +789,20 @@ def ask_question(
     participant_id: str,
     participant_label: str,
     *,
+    pillar_id: str | None = None,
+    anchor: str | None = None,
     db_path: Path | str | None = None,
 ) -> dict | None:
-    """Record a visitor's question. Returns None if the mission doesn't exist.
+    """Record a message -- no `kind` (question/proposal/comment): a message
+    is a message, tracked along with a reply. Returns None if the target
+    (the pillar, when pillar_id is given; else the mission) doesn't exist.
+
+    mission_id is always required and always stored, even for a
+    pillar-scoped entry -- denormalized on purpose so a mission-wide read
+    (the decision log, in particular) never needs a join through pillars.
+    pillar_id is NULL for mission-level entries -- today's only shape,
+    unchanged. anchor is a free-text artifact id the pillar's own HTML
+    defines (e.g. "table:oss_purl_resolution"); NULL means unanchored.
 
     Attribution is a LABEL SNAPSHOT at ask time (asked_by_label), not a
     live join against visitor_tokens: this is a historical record of what
@@ -455,7 +816,9 @@ def ask_question(
     conn = _get_conn(db_path)
     try:
         exists = conn.execute(
-            "SELECT 1 FROM missions WHERE mission_id = ?", (mission_id,)
+            "SELECT 1 FROM pillars WHERE pillar_id = ?" if pillar_id
+            else "SELECT 1 FROM missions WHERE mission_id = ?",
+            (pillar_id if pillar_id else mission_id,),
         ).fetchone()
         if not exists:
             return None
@@ -463,9 +826,10 @@ def ask_question(
             "INSERT INTO mission_conversation"
             " (entry_id, mission_id, question, asked_by_participant_id,"
             "  asked_by_label, answer, answered_by_session, answered_at,"
-            "  relay_status, created_at)"
-            " VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 'pending', ?)",
-            (entry_id, mission_id, question, participant_id, participant_label, created_at),
+            "  relay_status, created_at, pillar_id, anchor)"
+            " VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 'pending', ?, ?, ?)",
+            (entry_id, mission_id, question, participant_id, participant_label,
+             created_at, pillar_id, anchor),
         )
         conn.commit()
     finally:
@@ -473,6 +837,8 @@ def ask_question(
     return {
         "entry_id": entry_id,
         "mission_id": mission_id,
+        "pillar_id": pillar_id,
+        "anchor": anchor,
         "question": question,
         "asked_by_participant_id": participant_id,
         "asked_by_label": participant_label,
@@ -501,12 +867,30 @@ def get_question(
 def list_conversation(
     mission_id: str, *, db_path: Path | str | None = None,
 ) -> list[dict]:
+    """Mission-level conversation only (pillar_id IS NULL) -- unchanged
+    behavior from before pillars existed. For a specific pillar's
+    conversation, see list_pillar_conversation."""
     conn = _get_conn(db_path)
     try:
         rows = conn.execute(
-            "SELECT * FROM mission_conversation WHERE mission_id = ?"
+            "SELECT * FROM mission_conversation WHERE mission_id = ? AND pillar_id IS NULL"
             " ORDER BY created_at ASC",
             (mission_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_pillar_conversation(
+    pillar_id: str, *, db_path: Path | str | None = None,
+) -> list[dict]:
+    conn = _get_conn(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM mission_conversation WHERE pillar_id = ?"
+            " ORDER BY created_at ASC",
+            (pillar_id,),
         ).fetchall()
     finally:
         conn.close()
@@ -516,15 +900,31 @@ def list_conversation(
 def count_open_questions(
     mission_id: str, *, db_path: Path | str | None = None,
 ) -> int:
-    """Questions with no answer yet — the one activity signal worth a
+    """Mission-level open questions only (pillar_id IS NULL) -- unchanged
+    behavior from before pillars existed. The one activity signal worth a
     home-page badge (graph://97ace518-788 §0: cheaply derivable from a
     column already being written, not a new capability)."""
     conn = _get_conn(db_path)
     try:
         row = conn.execute(
             "SELECT COUNT(*) FROM mission_conversation"
-            " WHERE mission_id = ? AND answer IS NULL",
+            " WHERE mission_id = ? AND pillar_id IS NULL AND answer IS NULL",
             (mission_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else 0
+
+
+def count_open_pillar_questions(
+    pillar_id: str, *, db_path: Path | str | None = None,
+) -> int:
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM mission_conversation"
+            " WHERE pillar_id = ? AND answer IS NULL",
+            (pillar_id,),
         ).fetchone()
     finally:
         conn.close()
@@ -584,12 +984,31 @@ def list_site_revisions_since(
 def list_conversation_since(
     mission_id: str, since_at: float, *, db_path: Path | str | None = None,
 ) -> list[dict]:
+    """Mission-level only (pillar_id IS NULL) -- matches list_conversation's
+    scoping so a mission's since_last_visit never double-counts pillar
+    activity that pillar's own since_last_visit already reports."""
     conn = _get_conn(db_path)
     try:
         rows = conn.execute(
-            "SELECT * FROM mission_conversation WHERE mission_id = ? AND created_at > ?"
+            "SELECT * FROM mission_conversation"
+            " WHERE mission_id = ? AND pillar_id IS NULL AND created_at > ?"
             " ORDER BY created_at ASC",
             (mission_id, since_at),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_pillar_conversation_since(
+    pillar_id: str, since_at: float, *, db_path: Path | str | None = None,
+) -> list[dict]:
+    conn = _get_conn(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM mission_conversation WHERE pillar_id = ? AND created_at > ?"
+            " ORDER BY created_at ASC",
+            (pillar_id, since_at),
         ).fetchall()
     finally:
         conn.close()
@@ -658,3 +1077,187 @@ def answer_question(
     finally:
         conn.close()
     return dict(row) if row else None
+
+
+# ── Progress updates ─────────────────────────────────────────────
+#
+# Interim visibility on a still-open conversation entry -- "still working,
+# capturing the new screenshot" -- without closing it out. Any number of
+# these per entry; exactly one `answer` (or none yet) ultimately closes it.
+
+
+def add_conversation_update(
+    entry_id: str, text: str, *, db_path: Path | str | None = None,
+) -> dict:
+    """Does not verify the entry exists -- mirrors mark_question_relay_status's
+    lack of existence-checking; the API layer checks via get_question first,
+    same as it does before calling answer_question."""
+    update_id = str(uuid.uuid4())
+    created_at = time.time()
+    conn = _get_conn(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO mission_conversation_updates (update_id, entry_id, text, created_at)"
+            " VALUES (?, ?, ?, ?)",
+            (update_id, entry_id, text, created_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"update_id": update_id, "entry_id": entry_id, "text": text, "created_at": created_at}
+
+
+def list_conversation_updates(
+    entry_id: str, *, db_path: Path | str | None = None,
+) -> list[dict]:
+    conn = _get_conn(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM mission_conversation_updates WHERE entry_id = ? ORDER BY created_at ASC",
+            (entry_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+# ── Cross-pillar decision log ────────────────────────────────────
+
+
+def list_decision_log(
+    mission_id: str, *, limit: int = 50, db_path: Path | str | None = None,
+) -> list[dict]:
+    """Every revision pushed (mission-level or by any pillar of this
+    mission) plus every answered conversation entry, newest first.
+    Computed on read, not a separate write path -- deliberately
+    "everything that landed," not an editorial "these were the decisions"
+    judgment the platform can't make on the coordinator's behalf. See the
+    plan note (mission_control pillars design) for why a dedicated
+    `decisions` table was left out of v1.
+
+    pillar_id is NULL on mission-level entries -- the API layer resolves
+    it to a pillar name via list_pillars, not baked in here.
+    """
+    conn = _get_conn(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT 'rev:' || revision_id AS log_id, mission_id, NULL AS pillar_id,
+                   'revision' AS kind, revision_seq, note AS text, created_at
+            FROM mission_site_revisions WHERE mission_id = ?
+            UNION ALL
+            SELECT 'prev:' || psr.revision_id AS log_id, p.mission_id, psr.pillar_id,
+                   'revision' AS kind, psr.revision_seq, psr.note AS text, psr.created_at
+            FROM pillar_site_revisions psr JOIN pillars p ON p.pillar_id = psr.pillar_id
+            WHERE p.mission_id = ?
+            UNION ALL
+            SELECT 'ans:' || entry_id AS log_id, mission_id, pillar_id,
+                   'answer' AS kind, NULL AS revision_seq, answer AS text, answered_at AS created_at
+            FROM mission_conversation WHERE mission_id = ? AND answer IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (mission_id, mission_id, mission_id, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+# ── Idle-nag support for outstanding questions ───────────────────
+#
+# Deliberately separate from tmux_sessions' own nag_enabled/nag_message/
+# nag_interval/nag_last_sent (dashboard_db.py) -- see coordinator_nag_state's
+# schema comment for why reusing that slot would be wrong.
+
+
+def get_coordinator_nag_state(
+    coordinator_session: str, *, db_path: Path | str | None = None,
+) -> float | None:
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT last_nagged_at FROM coordinator_nag_state WHERE coordinator_session = ?",
+            (coordinator_session,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return row["last_nagged_at"] if row else None
+
+
+def mark_coordinator_nagged(
+    coordinator_session: str, *, db_path: Path | str | None = None,
+) -> float:
+    nagged_at = time.time()
+    conn = _get_conn(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO coordinator_nag_state (coordinator_session, last_nagged_at) VALUES (?, ?)"
+            " ON CONFLICT(coordinator_session) DO UPDATE SET last_nagged_at = excluded.last_nagged_at",
+            (coordinator_session, nagged_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return nagged_at
+
+
+def list_open_questions_for_session(
+    coordinator_session: str, *, db_path: Path | str | None = None,
+) -> list[dict]:
+    """Every open (unanswered) question across every mission and pillar
+    this session coordinates -- both the condition session_monitor.py's
+    idle-nag branch checks before firing, and the actual nag message body."""
+    conn = _get_conn(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT mc.* FROM mission_conversation mc
+            WHERE mc.answer IS NULL AND (
+                (mc.pillar_id IS NULL AND mc.mission_id IN (
+                    SELECT mission_id FROM missions WHERE coordinator_session = ?
+                ))
+                OR mc.pillar_id IN (
+                    SELECT pillar_id FROM pillars WHERE coordinator_session = ?
+                )
+            )
+            ORDER BY mc.created_at ASC
+            """,
+            (coordinator_session, coordinator_session),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def list_coordinators_with_open_questions(
+    *, db_path: Path | str | None = None,
+) -> dict[str, list[dict]]:
+    """Every coordinator_session (mission- or pillar-level) with at least
+    one open question, mapped to its open entries -- ONE query for
+    session_monitor.py's whole per-tick idle-nag sweep, not one query per
+    live session (most sessions coordinate nothing in Mission Control at
+    all; querying each of them individually every 10s would be pure
+    waste)."""
+    conn = _get_conn(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT mc.*, COALESCE(p.coordinator_session, m.coordinator_session) AS coordinator_session
+            FROM mission_conversation mc
+            LEFT JOIN pillars p ON mc.pillar_id = p.pillar_id
+            LEFT JOIN missions m ON mc.pillar_id IS NULL AND mc.mission_id = m.mission_id
+            WHERE mc.answer IS NULL
+            ORDER BY mc.created_at ASC
+            """,
+        ).fetchall()
+    finally:
+        conn.close()
+    result: dict[str, list[dict]] = {}
+    for r in rows:
+        entry = dict(r)
+        session = entry.pop("coordinator_session")
+        if not session:
+            continue
+        result.setdefault(session, []).append(entry)
+    return result

@@ -430,6 +430,25 @@ def _send_nag_crosstalk(tmux_name: str, message: str) -> None:
         logger.warning("session_monitor: nag send failed for %s", tmux_name, exc_info=True)
 
 
+def _build_mission_control_nag_message(entries: list[dict]) -> str:
+    """entries: open (unanswered) mission_conversation rows for one
+    coordinator_session, as returned by
+    mission_control_db.list_coordinators_with_open_questions."""
+    n = len(entries)
+    lines = [f"You have {n} outstanding Mission Control question{'s' if n != 1 else ''}:"]
+    for entry in entries[:5]:
+        question = entry["question"]
+        preview = question if len(question) <= 120 else question[:117] + "..."
+        lines.append(f"- {preview}")
+    if n > 5:
+        lines.append(f"...and {n - 5} more.")
+    lines.append(
+        "Only file an answer once it's actually correct -- see the "
+        "reply route in the original relay message for each question."
+    )
+    return "\n".join(lines)
+
+
 def _get_dispatch_pause_message() -> str | None:
     """Build a human-readable pause nag message, or None if not paused.
 
@@ -3757,6 +3776,15 @@ class SessionMonitor:
                     else:
                         logger.debug("session_monitor: nag skip %s (idle=%ds interval=%ds since_nag=%ds)", tmux_name, int(idle_secs), nag_interval, int(now - nag_last_sent))
 
+                # Mission Control outstanding-questions nag — independent of
+                # the general nag_enabled slot above (see coordinator_nag_state's
+                # schema comment in mission_control_db.py for why: writing
+                # this feature's message into a session's own general
+                # check-in nag slot would silently clobber it). One bulk
+                # query for the whole sweep, not one per session -- most
+                # live sessions coordinate nothing in Mission Control.
+                await self._check_mission_control_nag(sessions, now)
+
                 # Dispatch pause nag — alert dispatch_nag subscribers when queue is stuck
                 await self._check_dispatch_pause_nag(now)
 
@@ -3773,6 +3801,15 @@ class SessionMonitor:
             await asyncio.sleep(10)
 
     _PAUSE_NAG_INTERVAL = 15 * 60  # 15 minutes between dispatch-pause nags
+
+    # Idle threshold before nagging a coordinator about outstanding Mission
+    # Control questions. Deliberately short (60s, not the general nag
+    # system's default 15 MINUTES) per the operator's explicit preference
+    # ("1 is better if it doesn't false positive") -- flagged as needing
+    # real-world observation to confirm 60s doesn't false-positive against
+    # normal thinking/tool-call pauses before treating it as settled; it's
+    # a threshold constant, cheap to retune, not a schema commitment.
+    _MC_NAG_IDLE_THRESHOLD = 60
 
     # ── Periodic reconciliation (backstop) ───────────────────────
 
@@ -3993,6 +4030,55 @@ class SessionMonitor:
 
         if sent:
             self._last_pause_nag_sent = now
+
+    async def _check_mission_control_nag(self, sessions: list, now: float) -> None:
+        """Nag a mission or pillar coordinator that's gone idle while it has
+        outstanding Mission Control questions -- models sometimes finish
+        their turn but forget to file the answer. Independent of the
+        general nag_enabled slot checked just above (see
+        coordinator_nag_state's schema comment in mission_control_db.py).
+        """
+        try:
+            from tools.dashboard.dao import mission_control_db
+            open_by_session = await asyncio.to_thread(
+                mission_control_db.list_coordinators_with_open_questions,
+            )
+        except Exception:
+            logger.exception("session_monitor: mission_control nag query failed")
+            return
+        if not open_by_session:
+            return
+
+        sessions_by_name = {row["tmux_name"]: row for row in sessions}
+        for tmux_name, entries in open_by_session.items():
+            row = sessions_by_name.get(tmux_name)
+            if not row or derive_lifecycle_state(row) in ("ENDED", "FAILED"):
+                continue
+            last_act = row.get("last_activity") or row["created_at"]
+            idle_secs = now - last_act
+            if idle_secs < self._MC_NAG_IDLE_THRESHOLD:
+                continue
+            try:
+                last_nagged = await asyncio.to_thread(
+                    mission_control_db.get_coordinator_nag_state, tmux_name,
+                ) or 0
+            except Exception:
+                logger.exception("session_monitor: mission_control nag state read failed for %s", tmux_name)
+                continue
+            if (now - last_nagged) < self._MC_NAG_IDLE_THRESHOLD:
+                continue
+            alive = await asyncio.to_thread(self._check_tmux, tmux_name)
+            if not alive:
+                continue
+            logger.info(
+                "session_monitor: mission_control nag firing for %s (idle %ds, %d open)",
+                tmux_name, int(idle_secs), len(entries),
+            )
+            await asyncio.to_thread(_send_nag_crosstalk, tmux_name, _build_mission_control_nag_message(entries))
+            try:
+                await asyncio.to_thread(mission_control_db.mark_coordinator_nagged, tmux_name)
+            except Exception:
+                logger.exception("session_monitor: mission_control nag state write failed for %s", tmux_name)
 
     @staticmethod
     def _check_tmux(name: str) -> bool | None:

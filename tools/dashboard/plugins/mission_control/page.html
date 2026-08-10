@@ -227,6 +227,41 @@
           </div>
         </div>
 
+        <!-- Pillars: a mission with none renders nothing extra here --
+             exactly today's card, unchanged. A pillar is a sub-mission
+             with its own coordinator_session and site history; this is a
+             compact overview (name, status, open questions, who's there,
+             a link to its own site) -- the rich anchored-conversation
+             pillar experience lives in the guest-facing embeddable
+             widget (SKILL.md), not this operator dashboard. -->
+        <div class="mt-3 grid grid-cols-2 gap-2" x-show="(pillars[m.mission_id] || []).length"
+             :data-testid="'mc-pillars-' + m.mission_id">
+          <template x-for="p in (pillars[m.mission_id] || [])" :key="p.pillar_id">
+            <div class="rounded border border-gray-800 bg-gray-900/60 p-2.5 min-w-0"
+                 :data-testid="'mc-pillar-' + p.pillar_id" x-data="missionPresenceRow(p.pillar_id, 'pillar')">
+              <div class="flex items-center justify-between gap-1.5">
+                <div class="flex items-center gap-1.5 min-w-0">
+                  <span class="h-2 w-2 rounded-full shrink-0" :style="'background:' + (p.color || '#6b7280')"></span>
+                  <span class="text-xs font-medium text-gray-200 truncate" x-text="p.name"></span>
+                </div>
+                <span class="px-1 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide shrink-0"
+                      x-show="p.status !== 'active'"
+                      :class="p.status === 'paused' ? 'bg-amber-900/40 text-amber-300' : 'bg-gray-700/60 text-gray-400'"
+                      x-text="p.status"></span>
+              </div>
+              <div class="flex items-center justify-between gap-1.5 mt-1.5">
+                <span class="text-[10px] text-gray-500" x-text="participants.length ? participants.length + ' here' : 'no one here'"></span>
+                <span class="text-[10px] text-amber-300" x-show="p.open_question_count > 0"
+                      x-text="p.open_question_count + (p.open_question_count === 1 ? ' q' : ' qs')"></span>
+              </div>
+              <a :href="'/missions/' + m.mission_id + '/pillars/' + p.pillar_id" target="_blank" data-hard-reload
+                 x-show="p.current_revision_id"
+                 class="block mt-1.5 text-[10px] text-indigo-400 hover:text-indigo-300"
+                 :data-testid="'mc-pillar-view-' + p.pillar_id">View site &rarr;</a>
+            </div>
+          </template>
+        </div>
+
         <button @click="toggleExpand(m.mission_id)" class="text-xs text-gray-500 hover:text-gray-300 mt-3"
                 :data-testid="'mc-expand-' + m.mission_id">
           <span x-text="expanded === m.mission_id ? 'Hide details' : 'Details'"></span>

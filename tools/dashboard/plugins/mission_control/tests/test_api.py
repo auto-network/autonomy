@@ -718,3 +718,427 @@ def test_incidental_get_does_not_advance_the_watermark():
 
     delta = client.get(f"/api/missions/{mission_id}").json()["mission"]["since_last_visit"]
     assert len(delta["revisions"]) == 1
+
+
+# ── Pillars (P4) ───────────────────────────────────────────────────
+
+
+def _pillar(client, mission_id, name="P", coordinator_session="auto-pillar", color="#34d399") -> dict:
+    return client.post(
+        f"/api/missions/{mission_id}/pillars",
+        json={"name": name, "coordinator_session": coordinator_session, "color": color},
+    ).json()["pillar"]
+
+
+def _pillar_with_site(client, mission_id, **kwargs) -> dict:
+    pillar = _pillar(client, mission_id, **kwargs)
+    client.post(f"/api/pillars/{pillar['pillar_id']}/site", json={"html": "<html>v1</html>"})
+    return pillar
+
+
+def test_create_pillar():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    resp = client.post(
+        f"/api/missions/{mission_id}/pillars",
+        json={"name": "Dataset & Schema", "coordinator_session": "auto-schema", "color": "#34d399"},
+    )
+    assert resp.status_code == 201
+    pillar = resp.json()["pillar"]
+    assert pillar["mission_id"] == mission_id
+    assert pillar["name"] == "Dataset & Schema"
+    assert pillar["coordinator_session"] == "auto-schema"
+    assert pillar["color"] == "#34d399"
+    assert pillar["status"] == "active"
+
+
+def test_create_pillar_requires_name():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    resp = client.post(f"/api/missions/{mission_id}/pillars", json={})
+    assert resp.status_code == 400
+
+
+def test_create_pillar_missing_mission():
+    client = _client()
+    resp = client.post("/api/missions/nope/pillars", json={"name": "P"})
+    assert resp.status_code == 404
+
+
+def test_list_pillars_includes_open_question_count():
+    """list_pillars (unlike list_missions) enriches server-side -- a
+    pillar grid shows several pillars per mission, so N+1-fetching each
+    one's detail from the client would multiply across missions x pillars."""
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar_with_site(client, mission_id)
+    visitor = _visitor(client)
+    client.post(
+        f"/api/pillars/{pillar['pillar_id']}/questions?as={visitor['token']}",
+        json={"question": "hi"},
+    )
+
+    listed = client.get(f"/api/missions/{mission_id}/pillars").json()["pillars"]
+    assert listed[0]["open_question_count"] == 1
+
+
+def test_list_pillars_missing_mission():
+    client = _client()
+    resp = client.get("/api/missions/nope/pillars")
+    assert resp.status_code == 404
+
+
+def test_get_pillar_includes_current_revision_and_since_last_visit():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar_with_site(client, mission_id)
+
+    body = client.get(f"/api/pillars/{pillar['pillar_id']}").json()["pillar"]
+    assert body["current_revision"]["revision_seq"] == 1
+    assert body["since_last_visit"] == {"last_seen_at": None, "revisions": [], "questions": []}
+
+
+def test_get_pillar_not_found():
+    client = _client()
+    resp = client.get("/api/pillars/nope")
+    assert resp.status_code == 404
+
+
+def test_set_pillar_status():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar(client, mission_id)
+    resp = client.post(f"/api/pillars/{pillar['pillar_id']}/status", json={"status": "paused"})
+    assert resp.status_code == 200
+    assert resp.json()["pillar"]["status"] == "paused"
+
+
+def test_set_pillar_status_rejects_invalid_value():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar(client, mission_id)
+    resp = client.post(f"/api/pillars/{pillar['pillar_id']}/status", json={"status": "nope"})
+    assert resp.status_code == 400
+
+
+def test_delete_pillar():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar(client, mission_id)
+    resp = client.delete(f"/api/pillars/{pillar['pillar_id']}")
+    assert resp.status_code == 200
+    assert client.get(f"/api/pillars/{pillar['pillar_id']}").status_code == 404
+
+
+def test_delete_pillar_not_found():
+    client = _client()
+    resp = client.delete("/api/pillars/nope")
+    assert resp.status_code == 404
+
+
+def test_push_pillar_site_revision():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar(client, mission_id)
+
+    resp = client.post(
+        f"/api/pillars/{pillar['pillar_id']}/site",
+        json={"html": "<html>v1</html>", "note": "first push"},
+    )
+    assert resp.status_code == 201
+    revision = resp.json()["revision"]
+    assert revision["revision_seq"] == 1
+    assert revision["pillar_id"] == pillar["pillar_id"]
+    assert "mission_id" not in revision
+
+    site = client.get(f"/api/pillars/{pillar['pillar_id']}/site")
+    assert site.json()["revision"]["html"] == "<html>v1</html>"
+
+
+def test_push_pillar_site_revision_missing_pillar():
+    client = _client()
+    resp = client.post("/api/pillars/nope/site", json={"html": "<html></html>"})
+    assert resp.status_code == 404
+
+
+def test_pillar_site_revisions_list_and_activate():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar(client, mission_id)
+    rev1 = client.post(f"/api/pillars/{pillar['pillar_id']}/site", json={"html": "<html>good</html>"}).json()["revision"]
+    client.post(f"/api/pillars/{pillar['pillar_id']}/site", json={"html": "<html>bad</html>"})
+
+    listed = client.get(f"/api/pillars/{pillar['pillar_id']}/site/revisions").json()["revisions"]
+    assert [r["revision_seq"] for r in listed] == [2, 1]
+
+    activated = client.post(f"/api/pillars/{pillar['pillar_id']}/site/revisions/{rev1['revision_id']}/activate")
+    assert activated.status_code == 200
+    current = client.get(f"/api/pillars/{pillar['pillar_id']}/site").json()["revision"]
+    assert current["html"] == "<html>good</html>"
+
+
+def test_serve_pillar_site_chromeless():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar(client, mission_id)
+    client.post(f"/api/pillars/{pillar['pillar_id']}/site", json={"html": "<html><body>pillar content</body></html>"})
+
+    resp = client.get(f"/missions/{mission_id}/pillars/{pillar['pillar_id']}")
+    assert resp.status_code == 200
+    assert resp.text == "<html><body>pillar content</body></html>"
+
+
+def test_serve_pillar_site_wrong_mission_is_404():
+    """A pillar served under a mission_id that isn't its actual parent
+    must 404, not silently serve it -- the URL's mission_id is part of
+    the address, not decoration."""
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    other_mission_id = client.post("/api/missions", json={"name": "B"}).json()["mission"]["mission_id"]
+    pillar = _pillar_with_site(client, mission_id)
+
+    resp = client.get(f"/missions/{other_mission_id}/pillars/{pillar['pillar_id']}")
+    assert resp.status_code == 404
+
+
+def test_serve_pillar_site_before_any_push_is_404():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar(client, mission_id)
+    resp = client.get(f"/missions/{mission_id}/pillars/{pillar['pillar_id']}")
+    assert resp.status_code == 404
+
+
+def test_delete_mission_cascades_to_pillars_via_api():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar_with_site(client, mission_id)
+    client.delete(f"/api/missions/{mission_id}")
+    assert client.get(f"/api/pillars/{pillar['pillar_id']}").status_code == 404
+
+
+# ── Anchored conversation: mission-level vs pillar-level, delivery routing ──
+
+
+@patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock)
+def test_pillar_question_relays_to_both_pillar_and_mission_coordinator(mock_send):
+    client = _client()
+    mission_id = client.post(
+        "/api/missions", json={"name": "A", "coordinator_session": "auto-top"},
+    ).json()["mission"]["mission_id"]
+    pillar = _pillar_with_site(client, mission_id, coordinator_session="auto-pillar")
+    visitor = _visitor(client)
+
+    client.post(
+        f"/api/pillars/{pillar['pillar_id']}/questions?as={visitor['token']}",
+        json={"question": "why 3 triggers?", "anchor": "table:x"},
+    )
+
+    assert mock_send.call_count == 2
+    targets = {call.args[0] for call in mock_send.call_args_list}
+    assert targets == {"auto-pillar", "auto-top"}
+
+    envelopes = {call.args[0]: call.args[1] for call in mock_send.call_args_list}
+    # Primary (pillar) is told a reply is expected; the mission is told
+    # it's copied for tracking only.
+    assert "reply is expected" in envelopes["auto-pillar"]
+    assert "Copied for tracking" in envelopes["auto-top"]
+    assert "no reply expected from you" in envelopes["auto-top"]
+    # Anchor surfaces in the relay body.
+    assert "table:x" in envelopes["auto-pillar"]
+
+
+@patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock)
+def test_pillar_question_skips_cc_when_pillar_and_mission_share_a_session(mock_send):
+    """A coordinator running both the mission and one of its pillars must
+    not get the same question relayed to itself twice."""
+    client = _client()
+    mission_id = client.post(
+        "/api/missions", json={"name": "A", "coordinator_session": "auto-same"},
+    ).json()["mission"]["mission_id"]
+    pillar = _pillar_with_site(client, mission_id, coordinator_session="auto-same")
+    visitor = _visitor(client)
+
+    client.post(
+        f"/api/pillars/{pillar['pillar_id']}/questions?as={visitor['token']}",
+        json={"question": "hi"},
+    )
+    assert mock_send.call_count == 1
+
+
+@patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock)
+def test_mission_level_question_relay_unchanged_by_pillars_existing(mock_send):
+    """A plain mission-level question (no pillar_id) still relays to the
+    mission's own coordinator only, exactly as before pillars existed --
+    regression coverage for the _relay_question rewrite."""
+    client = _client()
+    mission_id = client.post(
+        "/api/missions", json={"name": "A", "coordinator_session": "auto-top"},
+    ).json()["mission"]["mission_id"]
+    visitor = _visitor(client)
+
+    client.post(
+        f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+        json={"question": "hi"},
+    )
+    assert mock_send.call_count == 1
+    assert mock_send.call_args.args[0] == "auto-top"
+
+
+def test_ask_pillar_question_requires_visitor_identity():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar_with_site(client, mission_id)
+    resp = client.post(f"/api/pillars/{pillar['pillar_id']}/questions", json={"question": "hi"})
+    assert resp.status_code == 401
+
+
+def test_ask_pillar_question_missing_pillar():
+    client = _client()
+    visitor = _visitor(client)
+    resp = client.post(
+        f"/api/pillars/nope/questions?as={visitor['token']}", json={"question": "hi"},
+    )
+    assert resp.status_code == 404
+
+
+def test_list_pillar_conversation():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar_with_site(client, mission_id)
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        client.post(
+            f"/api/pillars/{pillar['pillar_id']}/questions?as={visitor['token']}",
+            json={"question": "pillar q"},
+        )
+
+    listed = client.get(f"/api/pillars/{pillar['pillar_id']}/questions").json()["questions"]
+    assert len(listed) == 1
+    assert listed[0]["question"] == "pillar q"
+    assert listed[0]["pillar_id"] == pillar["pillar_id"]
+
+
+def test_answer_pillar_question():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar_with_site(client, mission_id, coordinator_session="auto-pillar")
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        asked = client.post(
+            f"/api/pillars/{pillar['pillar_id']}/questions?as={visitor['token']}",
+            json={"question": "hi"},
+        ).json()["question"]
+
+    resp = client.post(
+        f"/api/pillars/{pillar['pillar_id']}/questions/{asked['entry_id']}/answer",
+        json={"answer": "because reasons"},
+    )
+    assert resp.status_code == 200
+    answered = resp.json()["question"]
+    assert answered["answer"] == "because reasons"
+    assert answered["answered_by_session"] == "auto-pillar"
+
+
+def test_answer_pillar_question_missing_pillar():
+    client = _client()
+    resp = client.post("/api/pillars/nope/questions/nope/answer", json={"answer": "x"})
+    assert resp.status_code == 404
+
+
+# ── Progress updates ─────────────────────────────────────────────
+
+
+def test_add_question_update_mission_level():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        asked = client.post(
+            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            json={"question": "hi"},
+        ).json()["question"]
+
+    resp = client.post(
+        f"/api/missions/{mission_id}/questions/{asked['entry_id']}/update",
+        json={"text": "still working"},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["update"]["text"] == "still working"
+
+    listed = client.get(f"/api/missions/{mission_id}/questions").json()["questions"]
+    assert listed[0]["updates"][0]["text"] == "still working"
+    assert listed[0]["answer"] is None
+
+
+def test_add_question_update_pillar_level():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar_with_site(client, mission_id)
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        asked = client.post(
+            f"/api/pillars/{pillar['pillar_id']}/questions?as={visitor['token']}",
+            json={"question": "hi"},
+        ).json()["question"]
+
+    resp = client.post(
+        f"/api/pillars/{pillar['pillar_id']}/questions/{asked['entry_id']}/update",
+        json={"text": "capturing new screenshot"},
+    )
+    assert resp.status_code == 201
+
+
+def test_add_question_update_requires_text():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        asked = client.post(
+            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            json={"question": "hi"},
+        ).json()["question"]
+
+    resp = client.post(
+        f"/api/missions/{mission_id}/questions/{asked['entry_id']}/update", json={},
+    )
+    assert resp.status_code == 400
+
+
+def test_add_question_update_missing_entry():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    resp = client.post(
+        f"/api/missions/{mission_id}/questions/nope/update", json={"text": "x"},
+    )
+    assert resp.status_code == 404
+
+
+def test_add_pillar_question_update_missing_pillar():
+    client = _client()
+    resp = client.post("/api/pillars/nope/questions/nope/update", json={"text": "x"})
+    assert resp.status_code == 404
+
+
+# ── Cross-pillar decision log ────────────────────────────────────
+
+
+def test_decision_log_endpoint():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar(client, mission_id, name="Dataset & Schema")
+    client.post(f"/api/pillars/{pillar['pillar_id']}/site", json={"html": "<html>v1</html>", "note": "pillar rev"})
+    client.post(f"/api/missions/{mission_id}/site", json={"html": "<html>v2</html>", "note": "mission rev"})
+
+    log = client.get(f"/api/missions/{mission_id}/decision-log").json()["decision_log"]
+    by_text = {e["text"]: e for e in log}
+    assert by_text["mission rev"]["pillar_id"] is None
+    assert by_text["mission rev"]["pillar_name"] is None
+    assert by_text["pillar rev"]["pillar_id"] == pillar["pillar_id"]
+    assert by_text["pillar rev"]["pillar_name"] == "Dataset & Schema"
+
+
+def test_decision_log_missing_mission():
+    client = _client()
+    resp = client.get("/api/missions/nope/decision-log")
+    assert resp.status_code == 404
