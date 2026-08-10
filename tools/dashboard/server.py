@@ -4088,6 +4088,9 @@ async def api_dispatch_tail(request):
             entries = dao_sessions.get_session_entries(run_name)
             if entries is not None:
                 TaskStateTracker().enrich(run_name, entries)
+                for i, e in enumerate(entries):
+                    if isinstance(e, dict):
+                        e.setdefault("entry_ref", {"file": "mock", "off": i, "sub": 0})
                 return JSONResponse({
                     "entries": entries,
                     "offset": len(entries),
@@ -4100,11 +4103,15 @@ async def api_dispatch_tail(request):
                     "role": "",
                     "resolved": True,
                     "seq": len(entries),
+                    "chain": ["mock"],
                 })
         if sess:
             sid = sess.get("session_id") or sess.get("tmux_session") or run_name
             entries = dao_sessions.get_session_entries(sid) or []
             TaskStateTracker().enrich(sid, entries)
+            for i, e in enumerate(entries):
+                if isinstance(e, dict):
+                    e.setdefault("entry_ref", {"file": "mock", "off": i, "sub": 0})
             return JSONResponse({
                 "entries": entries,
                 "offset": len(entries),
@@ -4117,6 +4124,7 @@ async def api_dispatch_tail(request):
                 "role": sess.get("role") or "",
                 "resolved": True,
                 "seq": len(entries),
+                "chain": ["mock"],
             })
         # fall through to filesystem scan
 
@@ -4199,30 +4207,29 @@ async def api_dispatch_tail(request):
             "project": project,
         })
 
-    entries = []
+    # B6: this bead-style branch parses the same way as _read_session_jsonl
+    # — complete-line clamped, ref-stamped, finalized. Every server path
+    # emits canonical identities; a refless entry would make the client
+    # mint a fresh synthetic ref per delivery and duplicate tiles.
     harness = resolve_harness_for_path(session_file)
     with open(session_file, "rb") as f:
         f.seek(after)
         data = f.read()
-        new_offset = after + len(data)
-
-        text = data.decode("utf-8", errors="replace")
-        for line in text.strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            parsed = harness.parse_line(line)
-            if parsed is None:
-                continue
-            if isinstance(parsed, list):
-                entries.extend(parsed)
-            else:
-                entries.append(parsed)
-
+    last_nl = data.rfind(b"\n")
+    if last_nl == -1:
+        data = b""
+        new_offset = after
+    else:
+        data = data[:last_nl + 1]
+        new_offset = after + last_nl + 1
+    entries = session_harness.parse_lines_with_refs(
+        harness, data, stem=session_file.stem, base_offset=after, ctx={},
+    )
     entries = harness.postprocess_entries(
         entries,
         session_dir=session_file.parent / session_file.stem,
     )
+    session_harness.finalize_entry_refs(entries)
     return JSONResponse({
         "entries": entries,
         "offset": new_offset,
@@ -4232,6 +4239,8 @@ async def api_dispatch_tail(request):
         "tmux_session": tmux_name,
         "session_uuid": session_uuid,
         "project": project,
+        "chain": [session_file.stem],
+        "cursor": {"file": session_file.stem, "off": new_offset},
     })
 
 
@@ -4288,21 +4297,21 @@ async def _tail_from_container(run_name: str, after: int) -> tuple:
     if rc != 0:
         return None, 0, False
 
-    entries = []
-    new_offset = after + len(stdout.encode("utf-8"))
-    for line in stdout.strip().split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        parsed = CLAUDE_HARNESS.parse_line(line)
-        if parsed is None:
-            continue
-        if isinstance(parsed, list):
-            entries.extend(parsed)
-        else:
-            entries.append(parsed)
-
+    # B6: container tails carry the same canonical identity as every other
+    # path — file stem from the in-container session path, byte offsets
+    # from the actual read position, clamped to complete lines.
+    raw = stdout.encode("utf-8")
+    last_nl = raw.rfind(b"\n")
+    if last_nl == -1:
+        return [], after, True
+    raw = raw[:last_nl + 1]
+    new_offset = after + last_nl + 1
+    stem = Path(session_path).stem
+    entries = session_harness.parse_lines_with_refs(
+        CLAUDE_HARNESS, raw, stem=stem, base_offset=after, ctx={},
+    )
     entries = CLAUDE_HARNESS.postprocess_entries(entries)
+    session_harness.finalize_entry_refs(entries)
     return entries, new_offset, True
 
 
@@ -4692,29 +4701,71 @@ def _read_chain_forward(
         if complete <= start:
             cursor = {"file": stem, "off": max(start, complete) if i == idx else complete}
             continue
-        take = min(complete - start, budget)
-        try:
-            with open(path, "rb") as fh:
-                fh.seek(start)
-                data = fh.read(take)
-        except OSError:
-            continue
-        last_nl = data.rfind(b"\n")
-        if last_nl == -1:
-            has_more = True
-            break
-        data = data[:last_nl + 1]
-        end = start + last_nl + 1
-        segments.append({
-            "stem": stem, "path": path, "start": start, "end": end,
-            "data": data, "count": 0,
-        })
-        cursor = {"file": stem, "off": end}
-        budget -= len(data)
-        if budget <= 0:
-            has_more = end < complete or i < len(chain) - 1
+        # Drain THIS file to its complete-line end before moving on — the
+        # old single-read structure could leave a newline-clipped tail
+        # stranded with has_more=False (review B2: 2,234 bytes silently
+        # unreachable until an unrelated future wake).
+        while start < complete:
+            if budget <= 0:
+                has_more = True
+                break
+            take = min(complete - start, budget)
+            try:
+                with open(path, "rb") as fh:
+                    fh.seek(start)
+                    data = fh.read(take)
+            except OSError:
+                break
+            last_nl = data.rfind(b"\n")
+            if last_nl == -1:
+                # A single complete line larger than the remaining budget.
+                # Read the WHOLE line regardless of the cap — progress must
+                # always be possible, or the client continuation loop has
+                # nothing it can ever do (review B2: over-cap line returned
+                # has_more with an unmoved cursor → infinite zero-delay
+                # reschedule). The bust is bounded by one line.
+                line_end = _next_line_end(path, start, complete)
+                if line_end <= start:
+                    break
+                try:
+                    with open(path, "rb") as fh:
+                        fh.seek(start)
+                        data = fh.read(line_end - start)
+                except OSError:
+                    break
+                end = line_end
+            else:
+                data = data[:last_nl + 1]
+                end = start + last_nl + 1
+            segments.append({
+                "stem": stem, "path": path, "start": start, "end": end,
+                "data": data, "count": 0,
+            })
+            cursor = {"file": stem, "off": end}
+            budget -= len(data)
+            start = end
+        if has_more:
             break
     return segments, cursor, has_more
+
+
+def _next_line_end(path: Path, start: int, limit: int) -> int:
+    """Offset just past the first newline at/after ``start`` (≤ limit)."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            pos = start
+            while pos < limit:
+                chunk = fh.read(min(1 << 20, limit - pos))
+                if not chunk:
+                    break
+                nl = chunk.find(b"\n")
+                if nl != -1:
+                    return pos + nl + 1
+                pos += len(chunk)
+    except OSError:
+        pass
+    return limit
 
 
 def _trim_entries_to_last_n(entries: list[dict], n: int) -> list[dict]:
@@ -4733,6 +4784,71 @@ def _trim_entries_to_last_n(entries: list[dict], n: int) -> list[dict]:
     return entries[cut:]
 
 
+def _reconstruct_read_state(
+    chain: list[tuple[str, Path]],
+    harness,
+    *,
+    upto_file: str,
+    upto_off: int,
+) -> dict:
+    """Replay the chain prefix THROUGH the cursor and return the stream
+    state exactly as it stood there (review B3/B4).
+
+    A snapshot of the live monitor's state is state at EOF — enriching a
+    cursor-range replay with it drops or re-labels entries a live client
+    already received (completed_tools suppressing the running-progress row;
+    a wrapper output line parsed without its pending call). Content
+    correctness for gap fills requires state AT the cursor, so we parse the
+    prefix (discarding its entries) to rebuild: parse ctx, postprocess
+    state, the Task* tracker, the queued-dedup seed, and Agent
+    descriptions. Cost is one prefix parse per gap fetch — the happy path
+    (caught up, no entries) never gets here. Built as a standalone helper
+    so it can be reused for reverse windows if that ruling comes.
+    """
+    parse_ctx: dict = {}
+    pp_state = harness.new_postprocess_state()
+    tracker = TaskStateTracker()
+    last_enqueue: str | None = None
+    agent_descriptions: dict[str, str] = {}
+    for stem, path in chain:
+        try:
+            complete = _last_complete_offset_in(path)
+        except OSError:
+            continue
+        limit = min(upto_off, complete) if stem == upto_file else complete
+        if limit > 0:
+            try:
+                with open(path, "rb") as fh:
+                    data = fh.read(limit)
+            except OSError:
+                data = b""
+            prefix = session_harness.parse_lines_with_refs(
+                harness, data, stem=stem, base_offset=0, ctx=parse_ctx,
+            )
+            prefix, last_enqueue, _ = session_monitor_mod.dedup_queued_entries(
+                prefix, last_enqueue,
+            )
+            out = harness.postprocess_entries(
+                prefix, session_dir=path.parent / path.stem, state=pp_state,
+            )
+            for e in out:
+                if e.get("type") == "tool_use" and e.get("tool_name") == "Agent":
+                    tid = e.get("tool_id", "")
+                    desc = (e.get("input") or {}).get("description", "")
+                    if tid and desc:
+                        agent_descriptions[tid] = desc
+            tracker.enrich("_reconstruct", out)
+        if stem == upto_file:
+            break
+    return {
+        "parse_ctx": parse_ctx,
+        "postprocess_state": pp_state,
+        "tracker": tracker,
+        "last_enqueue_content": last_enqueue,
+        "agent_descriptions": agent_descriptions,
+    }
+
+
 def _parse_and_enrich_segments(
     segments: list[dict],
     harness,
@@ -4740,19 +4856,35 @@ def _parse_and_enrich_segments(
     tmux_name: str,
     *,
     trim_to: int | None = None,
-    seed_queued_dedup: bool = False,
+    reconstruct_from: tuple[list[tuple[str, Path]], str, int] | None = None,
 ) -> tuple[list[dict], list[dict], dict | None]:
     """Parse + postprocess + enrich chain segments the same way the live
-    stream does, against a SNAPSHOT of the live monitor's per-session
-    state — read paths never touch the live stream's mutable state.
+    stream does.
+
+    Two state modes (review B3/B4, coordinator-approved split):
+    - ``reconstruct_from=(chain, file, off)`` — forward gap fills into the
+      committed buffer: stream state is REBUILT through the cursor so the
+      replay is semantically identical to what the live stream delivered.
+    - otherwise (reverse/scroll-back pages) — a read-only SNAPSHOT of the
+      live state; display-fidelity only, guarded client-side by the
+      field-level richness preferences in mergeSessionEntries and counted
+      via the merge_downgrades_blocked diag counter.
 
     Returns (entries, spans, older_cursor_adjustment) where the last item
     is the (file, off) of the first kept entry after trimming (None when
     nothing was trimmed).
     """
-    snap = session_monitor.snapshot_read_context(tmux_name) if tmux_name else None
+    recon = None
+    snap = None
+    if reconstruct_from is not None:
+        chain, upto_file, upto_off = reconstruct_from
+        recon = _reconstruct_read_state(
+            chain, harness, upto_file=upto_file, upto_off=upto_off,
+        )
+    else:
+        snap = session_monitor.snapshot_read_context(tmux_name) if tmux_name else None
 
-    parse_ctx: dict = {}   # window-local wrapper pairing
+    parse_ctx: dict = (recon or {}).get("parse_ctx") or {}
     entries: list[dict] = []
     per_file_end: dict[str, int] = {}
     for seg in segments:
@@ -4769,17 +4901,19 @@ def _parse_and_enrich_segments(
         if first_ref:
             trimmed_from = {"file": first_ref["file"], "off": first_ref["off"]}
 
-    # Queued-message dedup, mirroring the live tailer. Forward deltas
-    # continue the live stream, so they seed from the snapshot; backward
-    # windows start mid-history and seed empty.
-    seed = (snap or {}).get("last_enqueue_content") if seed_queued_dedup else None
+    # Queued-message dedup, mirroring the live tailer. Forward deltas seed
+    # from the reconstructed cursor state; backward windows start
+    # mid-history and seed empty.
+    seed = (recon or {}).get("last_enqueue_content")
     entries, _last, _dropped = session_monitor_mod.dedup_queued_entries(entries, seed)
 
     # Postprocess per file (session_dir differs per file for Claude's
-    # subagent enrichment) with ONE stream state ascending — a snapshot
-    # copy of the live state when there is one, so tool names/completions
-    # resolve exactly as the live stream resolved them.
-    pp_state = (snap or {}).get("postprocess_state")
+    # subagent enrichment) with ONE stream state ascending: the
+    # cursor-reconstructed state on forward reads, a snapshot copy on
+    # reverse reads.
+    pp_state = (recon or {}).get("postprocess_state")
+    if pp_state is None:
+        pp_state = (snap or {}).get("postprocess_state")
     if pp_state is None:
         pp_state = harness.new_postprocess_state()
     out: list[dict] = []
@@ -4792,29 +4926,44 @@ def _parse_and_enrich_segments(
             by_file[stem] = []
             file_order.append(stem)
         by_file[stem].append(e)
+    # One postprocess per FILE, in ascending order — a capped forward read
+    # can produce several segments of the same file, and iterating
+    # segments here postprocessed (and served) each file's entries once
+    # per segment (round-1 review fix pass: duplicated every entry).
+    seg_paths: dict[str, Path] = {}
     for seg in segments:
-        stem = seg["stem"]
-        if stem not in by_file:
-            continue
+        seg_paths.setdefault(seg["stem"], seg["path"])
+    for stem in file_order:
+        path = seg_paths.get(stem)
         out.extend(harness.postprocess_entries(
             by_file[stem],
-            session_dir=seg["path"].parent / seg["path"].stem,
+            session_dir=(path.parent / path.stem) if path is not None else None,
             state=pp_state,
         ))
     session_harness.finalize_entry_refs(out)
 
-    # Task* tile annotations: fork the LIVE tracker state when it exists
-    # (S3 fix — fast-open windows used to enrich against nothing), else a
-    # fresh tracker, matching the old behavior for dead sessions.
-    key = tmux_name or "_http"
-    _task_state_tracker.fork_session(key).enrich(key, out)
+    # Task* tile annotations: the cursor-reconstructed tracker on forward
+    # reads (annotations exactly as they stood at the cursor); a fork of
+    # the LIVE tracker on reverse reads (fast-open windows used to enrich
+    # against nothing); a fresh tracker for dead sessions.
+    if recon is not None:
+        recon["tracker"].enrich("_reconstruct", out)
+    else:
+        key = tmux_name or "_http"
+        _task_state_tracker.fork_session(key).enrich(key, out)
 
-    # Agent tool_calls enrichment against snapshot copies (never the live
-    # descriptions/claims — reads must not consume live matching state).
-    if snap is not None and db_row is not None:
+    # Agent tool_calls enrichment against reconstructed/snapshot copies
+    # (never the live descriptions/claims — reads must not consume live
+    # matching state).
+    agent_state = None
+    if recon is not None:
+        agent_state = (recon["agent_descriptions"], set())
+    elif snap is not None:
+        agent_state = (snap["agent_descriptions"], snap["claimed_subagents"])
+    if agent_state is not None and db_row is not None:
         class _TsView:
-            agent_descriptions = snap["agent_descriptions"]
-            claimed_subagents = snap["claimed_subagents"]
+            agent_descriptions = agent_state[0]
+            claimed_subagents = agent_state[1]
         try:
             session_monitor_mod.SessionMonitor._enrich_agent_entries(
                 db_row, _TsView, out,
@@ -5118,8 +5267,17 @@ async def api_session_tail(request):
         segments, cursor, has_more_fwd = _read_chain_forward(
             chain, after_file=after_file, after_off=after,
         )
+        # Reconstruction anchor = the position the forward read actually
+        # started from (mirrors _read_chain_forward's unknown-stem
+        # degrade: current file from 0 — replaying past the served window
+        # would poison the state with the window's own content).
+        if after_file in chain_stems:
+            recon_anchor = (after_file, after)
+        else:
+            recon_anchor = (chain_stems[-1], 0)
         entries, spans, _trimmed = _parse_and_enrich_segments(
-            segments, harness, db_row, tmux_name, seed_queued_dedup=True,
+            segments, harness, db_row, tmux_name,
+            reconstruct_from=(chain, recon_anchor[0], recon_anchor[1]),
         )
         resp = dict(base_resp)
         resp.update({
@@ -11156,9 +11314,12 @@ def _read_jsonl_tail_window(
     exact tile accounting.
 
     Returns ``(raw_bytes, start_offset, end_offset)`` where ``raw_bytes`` is a
-    newline-aligned slice of the file suitable for line-by-line JSONL parsing.
-    ``start_offset`` is the byte offset immediately before ``raw_bytes`` and is
-    used as the cursor for fetching older history.
+    CONTIGUOUS newline-aligned slice of the file (``end - start ==
+    len(raw_bytes)``, blank lines included — review B1/S1: compacting blanks
+    corrupted the byte offsets entry identity is built on). When ``before``
+    is None the window ends at the last COMPLETE newline, never physical
+    EOF — a cold-open taken mid-write must not commit a position inside the
+    writer's partial line, or the wake-up fetch skips that line forever.
     """
     if n <= 0:
         return b"", 0, 0
@@ -11169,7 +11330,10 @@ def _read_jsonl_tail_window(
                 size = fh.tell()
             except OSError:
                 return b"", 0, 0
-            end = size if before is None else max(0, min(int(before), size))
+            if before is None:
+                end = _last_complete_offset_in(path)
+            else:
+                end = max(0, min(int(before), size))
             if end <= 0:
                 return b"", 0, 0
             chunk_size = 8192
@@ -11185,11 +11349,18 @@ def _read_jsonl_tail_window(
                 if nl != -1:
                     offset += nl + 1
                     buf = buf[nl + 1:]
-            segments = [seg for seg in buf.splitlines(keepends=True) if seg.strip()]
-            if not segments:
+            # Pick the start so the window covers the last n NON-BLANK
+            # lines, but serve the original contiguous bytes from there.
+            segments = buf.splitlines(keepends=True)
+            count = 0
+            i = len(segments)
+            while i > 0 and count < n:
+                i -= 1
+                if segments[i].strip():
+                    count += 1
+            if count == 0:
                 return b"", end, end
-            selected = segments[-n:] if len(segments) > n else segments
-            raw = b"".join(selected)
+            raw = b"".join(segments[i:])
             start = end - len(raw)
             return raw, start, end
     except (FileNotFoundError, OSError, ValueError):

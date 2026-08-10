@@ -2987,6 +2987,13 @@ class SessionMonitor:
         gate.inflight_future = None
         if window is None:
             return False
+        # Post-await guard (round-1 addendum item 3): a deregister landing
+        # during the shielded read can pop this session's tail state — the
+        # pre-executor creation above does NOT survive the await. Re-create
+        # rather than KeyError into the crash path (load-bearing before
+        # commit A moved the creation earlier; both are needed).
+        if tmux_name not in self._tail_states:
+            self._tail_states[tmux_name] = _TailState()
         ts = self._tail_states[tmux_name]
         if window.get("parse_ctx_after") is not None:
             ts.parse_ctx = window["parse_ctx_after"]

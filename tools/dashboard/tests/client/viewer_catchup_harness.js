@@ -41,53 +41,84 @@ const SOURCES = [
   ['session-viewer.js', JS('pages/session-viewer.js')],
 ];
 
-const LINE_BYTES = 100;   // fixed synthetic line size — offsets are idx*100
 const SID = 'auto-inject';
 const TAIL = `/api/session/autonomy/${SID}/tail`;
 
 // ── Fixture session: the file set the server truth derives from ─────
+//
+// Round-1 review S4 (fixture realism): lines have REAL variable byte
+// lengths (the serialized entry payload itself), files can carry a
+// trailing PARTIAL line the way a mid-write JSONL does, and the reverse/
+// forward handlers clamp to the last complete newline exactly like the
+// fixed server. Offsets are true cumulative byte positions.
 
 class FixtureSession {
   constructor() {
-    this.files = [{ stem: 'A', lines: [] }];
+    this.files = [];
+    this.rollover('A');
   }
   get current() { return this.files[this.files.length - 1]; }
   get chain() { return this.files.map((f) => f.stem); }
-  // content === null → noise line (parses to nothing / unrenderable)
-  appendLine(content) {
+
+  rollover(stem) {
+    this.files.push({ stem, lines: [], completeSize: 0, partial: null });
+  }
+
+  // content === null → noise line (unrenderable but real bytes).
+  appendLine(content, extraBytes) {
     const f = this.current;
-    f.lines.push({ content });
+    const start = f.completeSize;
+    const body = content === null
+      ? '{"type":"noise","pad":"' + 'n'.repeat(17 + (f.lines.length % 13)) + '"}'
+      : JSON.stringify({ type: 'assistant_text', content });
+    const len = body.length + 1 + (extraBytes || 0);   // + newline
+    f.lines.push({ content, start, len });
+    f.completeSize = start + len;
     return { stem: f.stem, idx: f.lines.length - 1 };
   }
-  rollover(stem) {
-    this.files.push({ stem, lines: [] });
+
+  // A writer mid-line: bytes exist past completeSize with no newline.
+  appendPartial(content) {
+    this.current.partial = { content, bytes: Math.floor(JSON.stringify(content).length / 2) };
   }
-  entryFor(stem, idx, line) {
+  completePartial() {
+    const f = this.current;
+    if (!f.partial) throw new Error('fixture: no partial to complete');
+    const content = f.partial.content;
+    f.partial = null;
+    return this.appendLine(content);
+  }
+
+  physicalSize(f) { return f.completeSize + (f.partial ? f.partial.bytes : 0); }
+
+  entryFor(stem, line) {
     if (line.content === null) return null;
     return {
       type: 'assistant_text',
       role: 'assistant',
       content: line.content,
       timestamp: '2026-08-10T12:00:00Z',
-      entry_ref: { file: stem, off: idx * LINE_BYTES, sub: 0 },
+      entry_ref: { file: stem, off: line.start, sub: 0 },
     };
   }
-  // The oracle: every renderable entry, in tuple order.
+  // The oracle: every renderable COMPLETE entry, in tuple order.
   expectedRefs() {
     const out = [];
     for (const f of this.files) {
-      f.lines.forEach((line, idx) => {
-        if (line.content !== null) out.push(`${f.stem}:${idx * LINE_BYTES}:0`);
-      });
+      for (const line of f.lines) {
+        if (line.content !== null) out.push(`${f.stem}:${line.start}:0`);
+      }
     }
     return out;
   }
   spanFor(stem, idx) {
-    return { file: stem, from: idx * LINE_BYTES, to: (idx + 1) * LINE_BYTES };
+    const f = this.files.find((x) => x.stem === stem);
+    const line = f.lines[idx];
+    return { file: stem, from: line.start, to: line.start + line.len };
   }
   payloadFor(stem, idx) {
     const f = this.files.find((x) => x.stem === stem);
-    const entry = this.entryFor(stem, idx, f.lines[idx]);
+    const entry = this.entryFor(stem, f.lines[idx]);
     return {
       session_id: SID,
       entries: entry ? [entry] : [],
@@ -113,7 +144,7 @@ class FixtureSession {
       role: 'builder',
       activity_state: 'thinking',
       pending_tool_ids: [],
-      offset: this.current.lines.length * LINE_BYTES,
+      offset: this.physicalSize(this.current),
     };
     if (q.has('tail_entries')) {
       return { ...base, ...this._serveReverse(
@@ -129,14 +160,23 @@ class FixtureSession {
     throw new Error('fixture: unexpected tail query ' + url);
   }
 
+  _lineIndexAt(f, off) {
+    // Number of complete lines strictly before byte `off`.
+    let i = 0;
+    while (i < f.lines.length && f.lines[i].start + f.lines[i].len <= off) i++;
+    return i;
+  }
+
   _serveReverse(n, beforeFile, beforeOff) {
     // Walk backward until n RENDERABLE entries collect (noise lines are
     // skipped but consume window bytes) or the chain start is reached.
+    // Windows/spans NEVER extend past completeSize — the partial tail is
+    // invisible, like the fixed server (B1).
     let fi = this.files.length - 1;
-    let limit = null;
+    let limit = null;   // line-count limit within the file
     if (beforeFile !== null && beforeFile !== undefined) {
       const at = this.files.findIndex((f) => f.stem === beforeFile);
-      if (at !== -1) { fi = at; limit = Math.floor(beforeOff / LINE_BYTES); }
+      if (at !== -1) { fi = at; limit = this._lineIndexAt(this.files[at], beforeOff); }
     }
     const entries = [];
     const spans = [];
@@ -149,13 +189,17 @@ class FixtureSession {
       const got = [];
       while (lo > 0 && got.length < n - entries.length) {
         lo--;
-        const e = this.entryFor(f.stem, lo, f.lines[lo]);
+        const e = this.entryFor(f.stem, f.lines[lo]);
         if (e) got.unshift(e);
       }
       if (hi > lo) {
         entries.unshift(...got);
-        spans.unshift({ file: f.stem, from: lo * LINE_BYTES, to: hi * LINE_BYTES });
-        older = { file: f.stem, off: lo * LINE_BYTES };
+        spans.unshift({
+          file: f.stem,
+          from: f.lines[lo].start,
+          to: f.lines[hi - 1].start + f.lines[hi - 1].len,
+        });
+        older = { file: f.stem, off: f.lines[lo].start };
       }
       if (lo > 0) { hasMore = true; break; }
       older = { file: f.stem, off: 0 };
@@ -168,8 +212,9 @@ class FixtureSession {
 
   _serveForward(afterFile, afterOff) {
     let fi = this.files.findIndex((f) => f.stem === afterFile);
-    let startIdx = Math.floor(afterOff / LINE_BYTES);
+    let startIdx = null;
     if (fi === -1) { fi = this.files.length - 1; startIdx = 0; }
+    else startIdx = this._lineIndexAt(this.files[fi], afterOff);
     const entries = [];
     const spans = [];
     let cursor = { file: afterFile, off: afterOff };
@@ -179,12 +224,16 @@ class FixtureSession {
       startIdx = 0;
       if (f.lines.length > lo) {
         for (let i = lo; i < f.lines.length; i++) {
-          const e = this.entryFor(f.stem, i, f.lines[i]);
+          const e = this.entryFor(f.stem, f.lines[i]);
           if (e) entries.push(e);
         }
-        spans.push({ file: f.stem, from: lo * LINE_BYTES, to: f.lines.length * LINE_BYTES });
+        spans.push({
+          file: f.stem,
+          from: f.lines[lo].start,
+          to: f.completeSize,
+        });
       }
-      cursor = { file: f.stem, off: f.lines.length * LINE_BYTES };
+      cursor = { file: f.stem, off: f.completeSize };
     }
     return { entries, window_spans: spans, cursor, has_more_forward: false };
   }
@@ -441,7 +490,9 @@ async function testC_supersededCursor() {
   const client = makeClient(fixture);
   const viewer = await mountViewer(client);
   const store = client.win.getSessionStore(SID);
-  checkEqual({ ...store.committed }, { file: 'A', off: 300 }, 'committed anchored in file A');
+  const aComplete = fixture.files[0].completeSize;
+  checkEqual({ ...store.committed }, { file: 'A', off: aComplete },
+    'committed anchored at file A\'s complete end');
 
   // Asleep: A grows one more line, then rolls over to B which grows two.
   fixture.appendLine('a-3');
@@ -456,7 +507,8 @@ async function testC_supersededCursor() {
   const d = client.diag();
   checkEqual(bufferRefs(client), fixture.expectedRefs(),
     'remainder of A + all of B recovered in order');
-  checkEqual({ ...store.committed }, { file: 'B', off: 200 },
+  checkEqual({ ...store.committed },
+    { file: 'B', off: fixture.files[1].completeSize },
     'committed lands at the successor file\'s end');
   checkEqual(Array.from(store.chain), ['A', 'B'], 'chain adopted');
   checkEqual(d.counters.gap_entries_total, 3, 'the 3 slept-through entries fetched');
@@ -543,6 +595,211 @@ async function testE_noiseRegionPaging() {
   viewer.destroy();
 }
 
+// (f) B1 shape: cold-open during a partial write. committed must anchor
+//     at the last complete newline; the line, once finished, must arrive.
+async function testF_partialLineColdOpen() {
+  console.log('\n── (f) cold-open into a partial write (B1) ──');
+  const fixture = new FixtureSession();
+  fixture.appendLine('done-0');
+  fixture.appendLine('done-1');
+  fixture.appendPartial('finished-later');   // writer mid-line at cold-open
+
+  const client = makeClient(fixture);
+  const viewer = await mountViewer(client);
+  const store = client.win.getSessionStore(SID);
+  const completeAtOpen = fixture.files[0].completeSize;
+  checkEqual({ ...store.committed }, { file: 'A', off: completeAtOpen },
+    'committed anchors at the last COMPLETE newline, not physical EOF');
+
+  // The writer finishes the line + one more while every broadcast is
+  // missed (the B1 timeline). Wake must recover BOTH.
+  fixture.completePartial();
+  fixture.appendLine('after');
+  viewer._setupResumeRecovery();
+  client.emitDocument('visibilitychange');
+  await client.flush();
+
+  checkEqual(bufferRefs(client), fixture.expectedRefs(),
+    'the once-partial line is recovered — never permanently skipped');
+  checkEqual(store.entries.map((e) => e.content),
+    ['done-0', 'done-1', 'finished-later', 'after'], 'contents complete');
+  assertNoLies(client, '(f)');
+  viewer.destroy();
+}
+
+// (g) B7 shape: forced merge failure — the ack must NOT advance past
+//     unapplied content, and recovery must refetch it.
+async function testG_mergeFailureBeforeCommit() {
+  console.log('\n── (g) forced merge failure before commit (B7) ──');
+  const fixture = new FixtureSession();
+  fixture.appendLine('base-0');
+
+  // Hold the recovery catch-up so the invariant is observable before the
+  // (correct) recovery advances committed again.
+  const client = makeClient(fixture, {
+    holdMatcher: (url) => url.includes('after_file='),
+  });
+  const viewer = await mountViewer(client);
+  const store = client.win.getSessionStore(SID);
+  const committedBefore = { ...store.committed };
+
+  // Poison exactly one merge call (the next SSE delivery).
+  const realMerge = client.win.mergeSessionEntries;
+  let poisoned = true;
+  client.win.mergeSessionEntries = function (s, data, prov) {
+    if (poisoned && prov === 'sse') {
+      poisoned = false;
+      throw new Error('injected merge failure');
+    }
+    return realMerge(s, data, prov);
+  };
+
+  const at = fixture.appendLine('poisoned-delivery');
+  client.deliver(at.stem, at.idx, 2);
+  await client.flush(2);
+
+  checkEqual({ ...store.committed }, committedBefore,
+    'a failed merge must NOT advance the committed high-water (apply-before-ack)');
+  check(client.held.length === 1,
+    'the merge failure triggered a recovery catch-up');
+
+  // Release the recovery: the entry must land without a wake, and only
+  // then may committed advance.
+  client.held.forEach((hh) => hh.release());
+  await client.flush();
+  checkEqual(bufferRefs(client), fixture.expectedRefs(),
+    'the dropped delivery is refetched and applied');
+  checkEqual({ ...store.committed },
+    { file: 'A', off: fixture.files[0].completeSize },
+    'committed advances only after successful application');
+  assertNoLies(client, '(g)');
+  viewer.destroy();
+}
+
+// (h) B2 client shape: a stalling forward response (has_more_forward with
+//     an unmoved cursor) must back off, never hot-loop at zero delay.
+async function testH_stalledContinuationBacksOff() {
+  console.log('\n── (h) stalled continuation backs off (B2 client) ──');
+  const fixture = new FixtureSession();
+  fixture.appendLine('only');
+
+  const client = makeClient(fixture);
+  const viewer = await mountViewer(client);
+  const store = client.win.getSessionStore(SID);
+
+  // Malicious server: forward responses claim more data but never move.
+  const realServe = fixture.serveTail.bind(fixture);
+  let forwardCalls = 0;
+  fixture.serveTail = (url) => {
+    if (url.includes('after_file=')) {
+      forwardCalls++;
+      return {
+        chain: fixture.chain, is_live: true, resolved: true,
+        type: 'container', role: 'builder', activity_state: 'thinking',
+        pending_tool_ids: [], offset: 0,
+        entries: [], window_spans: [],
+        cursor: { ...store.committed },
+        has_more_forward: true,
+      };
+    }
+    return realServe(url);
+  };
+
+  viewer._setupResumeRecovery();
+  client.emitDocument('visibilitychange');
+  // 300ms of wall-clock: a zero-delay hot loop would rack up hundreds of
+  // fetches; bounded backoff allows only the wake call + a couple of
+  // short-delay retries.
+  await new Promise((r) => setTimeout(r, 300));
+  check(forwardCalls <= 4,
+    `stalled continuation is rate-limited (saw ${forwardCalls} forward calls in 300ms)`);
+  const d = client.diag();
+  check(d.counters.catchup_stalls >= 1, 'stall counted in diag');
+  assertNoLies(client, '(h)');
+  viewer.destroy();
+}
+
+// (i) S2 shape: a server that pruned a predecessor sends a shorter
+//     chain — adoption must never reverse the retained history's order.
+async function testI_prunedPredecessorChain() {
+  console.log('\n── (i) pruned-predecessor chain adoption (S2) ──');
+  const fixture = new FixtureSession();
+  fixture.appendLine('m1-old');
+  fixture.rollover('B');
+  fixture.appendLine('m2-new');
+
+  const client = makeClient(fixture);
+  const viewer = await mountViewer(client);
+  const store = client.win.getSessionStore(SID);
+  // Scroll back so file A's history is retained client-side.
+  while (store.hasMoreHistory) { await viewer.loadOlder(); await client.flush(2); }
+  checkEqual(Array.from(store.chain), ['A', 'B'], 'full chain retained');
+  const refsBefore = bufferRefs(client);
+
+  // The server prunes A (dead predecessor) — its responses now carry
+  // chain ['B'] only. Deliver a live line under the pruned chain.
+  fixture.files.splice(0, 1);
+  const at = fixture.appendLine('m2-newer');
+  client.deliver(at.stem, at.idx, 9);
+  await client.flush(2);
+
+  checkEqual(Array.from(store.chain), ['A', 'B'],
+    'subsequence adoption keeps retained history order (no [B, A] reversal)');
+  checkEqual(bufferRefs(client).slice(0, refsBefore.length), refsBefore,
+    'retained entries keep their order and identity');
+  assertNoLies(client, '(i)');
+  viewer.destroy();
+}
+
+// (j) addendum item 2: two racing catch-ups — the stale response
+//     resolving LAST must never regress the committed high-water.
+async function testJ_racingCatchupsMonotonic() {
+  console.log('\n── (j) racing catch-ups keep committed monotonic ──');
+  const fixture = new FixtureSession();
+  fixture.appendLine('base-0');
+  fixture.appendLine('base-1');
+
+  // Hold every forward response; we release them out of order.
+  const client = makeClient(fixture, {
+    holdMatcher: (url) => url.includes('after_file='),
+  });
+  const viewer = await mountViewer(client);
+  const store = client.win.getSessionStore(SID);
+
+  // Race: wake catch-up 1 issued at cursor X (held)…
+  viewer._setupResumeRecovery();
+  client.emitDocument('visibilitychange');
+  await client.flush(2);
+  check(client.held.length === 1, 'catch-up 1 held');
+  const held1 = client.held.splice(0, 1)[0];
+
+  // …file grows; the span-gap path fires catch-up 2 (also held), which
+  // will see the LONGER file.
+  const at = fixture.appendLine('late');
+  client.deliver(at.stem, at.idx + 1 === fixture.files[0].lines.length ? at.idx : at.idx, 5);
+  await client.flush(2);
+  // The SSE delivery merged contiguously — no second fetch needed; force
+  // one via the heartbeat wake instead.
+  viewer._resumeHeartbeatAt = 1;
+  viewer._checkResumeHeartbeat(999999);
+  await client.flush(2);
+  const later = client.held.splice(0, client.held.length);
+
+  // Resolve the NEWER catch-up(s) first, then the stale one.
+  later.forEach((hh) => hh.release());
+  await client.flush(2);
+  const committedHigh = { ...store.committed };
+  held1.release();
+  await client.flush(2);
+
+  check(store.committed.off >= committedHigh.off &&
+        store.committed.file === committedHigh.file,
+    `stale catch-up must not regress committed (${JSON.stringify(committedHigh)} → ${JSON.stringify(store.committed)})`);
+  checkEqual(bufferRefs(client), fixture.expectedRefs(), 'buffer equals the oracle');
+  assertNoLies(client, '(j)');
+  viewer.destroy();
+}
+
 (async () => {
   try {
     await testA_withheldBroadcasts();
@@ -550,6 +807,11 @@ async function testE_noiseRegionPaging() {
     await testC_supersededCursor();
     await testD_scrollUpDuringCatchup();
     await testE_noiseRegionPaging();
+    await testF_partialLineColdOpen();
+    await testG_mergeFailureBeforeCommit();
+    await testH_stalledContinuationBacksOff();
+    await testI_prunedPredecessorChain();
+    await testJ_racingCatchupsMonotonic();
   } catch (e) {
     console.error('HARNESS ERROR:', e);
     process.exit(2);

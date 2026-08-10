@@ -1399,7 +1399,7 @@ def _build_codex_semantic_tool_use(
 ) -> dict:
     timestamp = entry.get("timestamp", "") if preserve_timestamp else ""
     role = entry.get("role") or "assistant"
-    return {
+    built = {
         "type": "tool_use",
         "role": role,
         "tool_name": op["tool_name"],
@@ -1408,6 +1408,13 @@ def _build_codex_semantic_tool_use(
         "timestamp": timestamp,
         "semantic_from_exec": True,
     }
+    # Review B5: the semantic upgrade keeps its SOURCE entry's identity —
+    # a fresh refless dict finalized at the head of a cold batch minted a
+    # client-synthetic ref and duplicated the live tile. The split-batch
+    # caller overrides this with the remembered call-line ref (use_refs).
+    if entry.get("entry_ref") is not None:
+        built["entry_ref"] = entry["entry_ref"]
+    return built
 
 
 def _build_codex_bash_tool_use(entry: dict) -> dict:
