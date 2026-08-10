@@ -1345,6 +1345,159 @@ def test_reopen_then_reanswer_leaves_only_the_new_answer_visible():
     assert final["updates"] == []
 
 
+# ── Live-update events (auto-ljkpn) ────────────────────────────────
+#
+# Pattern mirrors tools/dashboard/tests/test_approval_requests.py's
+# test_sse_events_on_create_and_decision: subscribe, act via the ordinary
+# test client, drain the queue, assert the expected (topic, payload-shape)
+# is present. event_bus.broadcast() is a thin sync wrapper (broadcast_sync
+# under the hood), so the event is on the queue by the time client.post()
+# returns -- no async test harness needed.
+
+
+def test_ask_question_publishes_conversation_event():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    visitor = _visitor(client)
+    queue = mc_api.event_bus.subscribe()
+    try:
+        with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+            asked = client.post(
+                f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+                json={"question": "hi"},
+            ).json()["question"]
+        events = []
+        while not queue.empty():
+            topic, data, seq = queue.get_nowait()
+            if topic == mc_api.MISSION_CONVERSATION_TOPIC and seq != 0:
+                events.append(data)
+        assert len(events) == 1
+        assert events[0]["event"] == "asked"
+        assert events[0]["mission_id"] == mission_id
+        assert events[0]["pillar_id"] is None
+        assert events[0]["entry_id"] == asked["entry_id"]
+        assert events[0]["question"]["question"] == "hi"
+    finally:
+        mc_api.event_bus.unsubscribe(queue)
+
+
+def test_answer_question_publishes_conversation_event():
+    client = _client()
+    mission_id = client.post(
+        "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
+    ).json()["mission"]["mission_id"]
+    client.post(f"/api/missions/{mission_id}/site", json={"html": "<html>v1</html>"})
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        asked = client.post(
+            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            json={"question": "hi"},
+        ).json()["question"]
+
+    queue = mc_api.event_bus.subscribe()
+    try:
+        client.post(
+            f"/api/missions/{mission_id}/questions/{asked['entry_id']}/answer",
+            json={"answer": "Q3 2026"},
+        )
+        events = []
+        while not queue.empty():
+            topic, data, seq = queue.get_nowait()
+            if topic == mc_api.MISSION_CONVERSATION_TOPIC and seq != 0:
+                events.append(data)
+        assert len(events) == 1
+        assert events[0]["event"] == "answered"
+        assert events[0]["question"]["answer"] == "Q3 2026"
+    finally:
+        mc_api.event_bus.unsubscribe(queue)
+
+
+def test_add_question_update_publishes_conversation_event():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        asked = client.post(
+            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            json={"question": "hi"},
+        ).json()["question"]
+
+    queue = mc_api.event_bus.subscribe()
+    try:
+        client.post(
+            f"/api/missions/{mission_id}/questions/{asked['entry_id']}/update",
+            json={"text": "still working"},
+        )
+        events = []
+        while not queue.empty():
+            topic, data, seq = queue.get_nowait()
+            if topic == mc_api.MISSION_CONVERSATION_TOPIC and seq != 0:
+                events.append(data)
+        assert len(events) == 1
+        assert events[0]["event"] == "update"
+        assert events[0]["update"]["text"] == "still working"
+    finally:
+        mc_api.event_bus.unsubscribe(queue)
+
+
+def test_reopen_question_publishes_conversation_event():
+    client = _client()
+    mission_id = client.post(
+        "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
+    ).json()["mission"]["mission_id"]
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        asked = client.post(
+            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            json={"question": "hi"},
+        ).json()["question"]
+        client.post(
+            f"/api/missions/{mission_id}/questions/{asked['entry_id']}/answer",
+            json={"answer": "first answer"},
+        )
+
+        queue = mc_api.event_bus.subscribe()
+        try:
+            client.post(
+                f"/api/missions/{mission_id}/questions/{asked['entry_id']}/reopen?as={visitor['token']}",
+                json={"followup": "not quite"},
+            )
+            events = []
+            while not queue.empty():
+                topic, data, seq = queue.get_nowait()
+                if topic == mc_api.MISSION_CONVERSATION_TOPIC and seq != 0:
+                    events.append(data)
+            assert len(events) == 1
+            assert events[0]["event"] == "reopened"
+            assert events[0]["question"]["answer"] is None
+        finally:
+            mc_api.event_bus.unsubscribe(queue)
+
+
+def test_pillar_question_event_carries_pillar_id():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar_with_site(client, mission_id)
+    visitor = _visitor(client)
+    queue = mc_api.event_bus.subscribe()
+    try:
+        with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+            client.post(
+                f"/api/pillars/{pillar['pillar_id']}/questions?as={visitor['token']}",
+                json={"question": "pillar q"},
+            )
+        events = []
+        while not queue.empty():
+            topic, data, seq = queue.get_nowait()
+            if topic == mc_api.MISSION_CONVERSATION_TOPIC and seq != 0:
+                events.append(data)
+        assert len(events) == 1
+        assert events[0]["pillar_id"] == pillar["pillar_id"]
+        assert events[0]["mission_id"] == mission_id
+    finally:
+        mc_api.event_bus.unsubscribe(queue)
+
+
 # ── Cross-pillar decision log ────────────────────────────────────
 
 
