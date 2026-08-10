@@ -519,9 +519,10 @@ class ReplHandler(BaseHTTPRequestHandler):
                     autonomy_root=self.controller.autonomy_root,
                     authorization=self.headers.get("Authorization"))
             except Exception:
+                # No provider label either: naming the profile is naming the
+                # site whose cookie jar this process holds.
                 self._json(200, {
                     "ok": True,
-                    "provider": self.controller.provider,
                     "started_at": self.controller.started_at,
                     "page_ready": self.controller.page is not None,
                     "authenticated": False,

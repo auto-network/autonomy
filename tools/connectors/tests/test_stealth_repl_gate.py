@@ -84,12 +84,12 @@ def test_unauthenticated_health_is_liveness_only(server):
     assert status == 200
     assert payload == {
         "ok": True,
-        "provider": "eversource",
         "started_at": payload["started_at"],
         "page_ready": False,
         "authenticated": False,
     }
-    for leaked in ("url", "title", "profile_dir", "download_dir", "pid"):
+    for leaked in ("url", "title", "profile_dir", "download_dir", "pid",
+                   "provider"):
         assert leaked not in payload
 
 
