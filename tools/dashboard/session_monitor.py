@@ -25,6 +25,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -42,6 +43,7 @@ from tools.dashboard.session_lifecycle_worker import (
     STEP_TIMEOUTS_S,
     derive_lifecycle_state,
 )
+from tools.dashboard import session_harness as session_harness_mod
 from tools.dashboard.session_harness import (
     CLAUDE_HARNESS,
     SessionHarness,
@@ -488,6 +490,31 @@ class _TaskInfo:
     activeForm: str = ""
 
 
+def dedup_queued_entries(
+    entries: list, last_enqueue_content: str | None,
+) -> tuple[list, str | None, int]:
+    """Drop the log echo of a message already shown as its queued tile.
+
+    Shared by the live tailer and the HTTP read paths (auto-16g9t) so both
+    serve the same payload for the same bytes. Returns
+    (deduped_entries, new_last_enqueue_content, dropped_count).
+    """
+    deduped = []
+    dropped = 0
+    for entry in entries:
+        if entry.get("queued"):
+            last_enqueue_content = entry.get("content", "").strip()
+            deduped.append(entry)
+        elif (entry.get("type") in ("user", "crosstalk")
+              and last_enqueue_content
+              and entry.get("content", "").strip() == last_enqueue_content):
+            last_enqueue_content = None
+            dropped += 1
+        else:
+            deduped.append(entry)
+    return deduped, last_enqueue_content, dropped
+
+
 class TaskStateTracker:
     """Walks Task* tool_use entries in order, maintaining taskId→state per session.
 
@@ -521,6 +548,21 @@ class TaskStateTracker:
                 entry["todo_annotation"] = state.on_create(entry.get("input") or {})
             elif name == "TaskUpdate":
                 entry["todo_annotation"] = state.on_update(entry.get("input") or {})
+
+    def fork_session(self, tmux_name: str) -> "TaskStateTracker":
+        """A NEW tracker seeded with a deep copy of one session's state.
+
+        auto-16g9t: HTTP read paths enrich against a fork of the live
+        tracker so Task* tiles resolve taskId→subject exactly as the live
+        stream did, without the read mutating (or racing) live state.
+        An unknown session forks to an empty tracker — same as the old
+        fresh-instance behavior.
+        """
+        fork = TaskStateTracker()
+        state = self._sessions.get(tmux_name)
+        if state is not None:
+            fork._sessions[tmux_name] = copy.deepcopy(state)
+        return fork
 
     def snapshot(self, tmux_name: str) -> list[dict]:
         """Return the current per-task state for a session, ordered by taskId.
@@ -638,6 +680,15 @@ class _TailState:
     resolution_dir: Path | None = None
     # Broadcast sequence number (monotonically increasing per session)
     broadcast_seq: int = 0
+    # auto-16g9t: per-stream harness state, owned by the LOOP task only.
+    # parse_ctx holds cross-line parse state (Codex functions.exec wrapper
+    # pairing); postprocess_state holds the progress/tool-name maps. Read
+    # workers operate on a COPY (returned in the window dict) and the loop
+    # commits it after the shielded await — a cancelled worker finishing
+    # late can never mutate live state (B4 purity). HTTP read paths get a
+    # deep-copy snapshot via SessionMonitor.snapshot_read_context.
+    parse_ctx: dict = field(default_factory=dict)
+    postprocess_state: dict | None = None
     # Last queued message content — for deduping against the subsequent user entry
     last_enqueue_content: str | None = None
     # inotify watch descriptors
@@ -2357,6 +2408,37 @@ class SessionMonitor:
         gate.publish_registry_after_drain = True
         self.request_drain(tmux_name)
 
+    def snapshot_read_context(self, tmux_name: str) -> dict | None:
+        """Deep-copied per-session enrichment state for HTTP read paths.
+
+        auto-16g9t: read paths (tail endpoint backfills) must NEVER share
+        the live stream's mutable parse/postprocess state — they get this
+        snapshot instead. Loop-safe by construction: handlers and the
+        monitor share one event loop, and every field here is committed
+        only by loop tasks (worker copies are committed post-await), so a
+        plain deep-copy sees a consistent picture. No locks, no threads.
+
+        Returns None when the session has no live tail state (dead or
+        never-tailed sessions read with fresh, self-contained state).
+        """
+        ts = self._tail_states.get(tmux_name)
+        if ts is None:
+            return None
+        try:
+            return {
+                "parse_ctx": copy.deepcopy(ts.parse_ctx),
+                "postprocess_state": copy.deepcopy(ts.postprocess_state),
+                "agent_descriptions": dict(ts.agent_descriptions),
+                "claimed_subagents": set(ts.claimed_subagents),
+                "last_enqueue_content": ts.last_enqueue_content,
+            }
+        except Exception:
+            logger.exception(
+                "session_monitor: snapshot_read_context failed for %s",
+                tmux_name,
+            )
+            return None
+
     def _close_track(self, track: _FileTrack, *, state: str, reason: str) -> None:
         """Terminal transition — records the D6 tombstone, releases the wd
         (A8), and logs the late-flush residual (the theorem's explicit
@@ -2775,8 +2857,11 @@ class SessionMonitor:
             if row is None:
                 return
             if row.get("jsonl_path"):
+                if tmux_name not in self._tail_states:
+                    self._tail_states[tmux_name] = _TailState()
                 fut = loop.run_in_executor(
                     None, self._read_tail_window, dict(row),
+                    self._tail_states[tmux_name].parse_ctx,
                 )
                 gate.inflight_future = fut
                 window = await asyncio.shield(fut)
@@ -2816,8 +2901,11 @@ class SessionMonitor:
                     # The currently linked predecessor drains through the
                     # ORDINARY path, advancing the session's persisted
                     # file_offset (Rule 6, forbidden dup route 1).
+                    if tmux_name not in self._tail_states:
+                        self._tail_states[tmux_name] = _TailState()
                     fut = loop.run_in_executor(
                         None, self._read_tail_window, dict(row),
+                        self._tail_states[tmux_name].parse_ctx,
                     )
                     gate.inflight_future = fut
                     window = await asyncio.shield(fut)
@@ -2887,20 +2975,28 @@ class SessionMonitor:
             return False
         track = self._get_track(tmux_name, path)
         loop = asyncio.get_running_loop()
+        if tmux_name not in self._tail_states:
+            self._tail_states[tmux_name] = _TailState()
         fut = loop.run_in_executor(
             None, self._read_segment_window,
             dict(row), path, track.published_up_to, track.generation,
+            self._tail_states[tmux_name].parse_ctx,
         )
         gate.inflight_future = fut
         window = await asyncio.shield(fut)
         gate.inflight_future = None
         if window is None:
             return False
-        if tmux_name not in self._tail_states:
-            self._tail_states[tmux_name] = _TailState()
         ts = self._tail_states[tmux_name]
+        if window.get("parse_ctx_after") is not None:
+            ts.parse_ctx = window["parse_ctx_after"]
         await self._process_tail_entries(
             tmux_name, row, ts, window["entries"], source_path=Path(path),
+            span={
+                "file": Path(path).stem,
+                "from": window["start_offset"],
+                "to": window["new_offset"],
+            },
         )
         await self._graph_appender_tick(tmux_name, Path(path))
         from tools.dashboard.dao.dashboard_db import increment_entry_count
@@ -2920,7 +3016,9 @@ class SessionMonitor:
 
     # ── Read / publish / persist (Rule 6) ─────────────────────────────
 
-    def _read_tail_window(self, row: dict) -> dict | None:
+    def _read_tail_window(
+        self, row: dict, parse_ctx: dict | None = None,
+    ) -> dict | None:
         """Blocking read of the linked file's next complete-line window.
 
         WORKER-PURITY INVARIANT (pinned by
@@ -2962,7 +3060,14 @@ class SessionMonitor:
         last_nl = data.rfind(b"\n")
         if last_nl == -1:
             return None
-        window = self._parse_window(row, data[:last_nl + 1])
+        # Purity: parse against a COPY of the live parse ctx; the loop task
+        # commits window["parse_ctx_after"] only when the window publishes.
+        ctx_after = copy.deepcopy(parse_ctx) if parse_ctx else {}
+        window = self._parse_window(
+            row, data[:last_nl + 1],
+            stem=jsonl_path.stem, base_offset=file_offset,
+            parse_ctx=ctx_after,
+        )
         window.update({
             "path": jsonl_path_str,
             "expect_generation": expect_generation,
@@ -2970,12 +3075,14 @@ class SessionMonitor:
             "new_offset": file_offset + last_nl + 1,
             "mtime": st.st_mtime,
             "size": st.st_size,
+            "parse_ctx_after": ctx_after,
         })
         return window
 
     def _read_segment_window(
         self, row: dict, path: str, start_offset: int,
         expect_generation: tuple[int, int] | None = None,
+        parse_ctx: dict | None = None,
     ) -> dict | None:
         """Blocking read of a NON-linked file's next complete-line window
         (handover publication). Same WORKER-PURITY INVARIANT as
@@ -3003,18 +3110,38 @@ class SessionMonitor:
         last_nl = data.rfind(b"\n")
         if last_nl == -1:
             return None
-        window = self._parse_window(row, data[:last_nl + 1])
+        ctx_after = copy.deepcopy(parse_ctx) if parse_ctx else {}
+        window = self._parse_window(
+            row, data[:last_nl + 1],
+            stem=p.stem, base_offset=start_offset,
+            parse_ctx=ctx_after,
+        )
         window.update({
             "path": path,
             "start_offset": start_offset,
             "new_offset": start_offset + last_nl + 1,
             "mtime": st.st_mtime,
             "size": st.st_size,
+            "parse_ctx_after": ctx_after,
         })
         return window
 
-    def _parse_window(self, row: dict, complete: bytes) -> dict:
-        """Parse a complete-line byte window into publication material."""
+    def _parse_window(
+        self,
+        row: dict,
+        complete: bytes,
+        *,
+        stem: str | None = None,
+        base_offset: int = 0,
+        parse_ctx: dict | None = None,
+    ) -> dict:
+        """Parse a complete-line byte window into publication material.
+
+        ``stem``/``base_offset`` thread the canonical entry identity
+        (auto-16g9t): every parsed entry is stamped with
+        ``entry_ref = (stem, line start offset, sub_index)``. ``parse_ctx``
+        scopes cross-line parse state to this stream — the caller owns it.
+        """
         harness = resolve_harness_for_session_row(row)
         raw_count = 0
         parsed_entries: list = []
@@ -3031,7 +3158,10 @@ class SessionMonitor:
             prior_harness_state = {}
         harness_state = dict(prior_harness_state)
         parse_errors: list[str] = []
-        for raw_line in complete.splitlines():
+        line_off = base_offset
+        for raw_line in complete.splitlines(keepends=True):
+            this_line_off = line_off
+            line_off += len(raw_line)
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
@@ -3048,16 +3178,23 @@ class SessionMonitor:
             model = harness.extract_model(entry, model)
             harness_state = harness.extract_harness_state(entry, harness_state) or {}
             try:
-                parsed = harness.parse_line(line)
+                parsed = harness.parse_line(line, ctx=parse_ctx)
             except Exception as exc:
                 parse_errors.append(
                     f"harness.parse_line: {str(exc)[:160]} | line: {line[:160]}"
                 )
                 parsed = None
-            if isinstance(parsed, list):
-                parsed_entries.extend(parsed)
-            elif parsed is not None:
-                parsed_entries.append(parsed)
+            if parsed is not None:
+                if stem is not None:
+                    parsed_entries.extend(
+                        session_harness_mod.stamp_entry_refs(
+                            parsed, stem, this_line_off,
+                        )
+                    )
+                elif isinstance(parsed, list):
+                    parsed_entries.extend(parsed)
+                else:
+                    parsed_entries.append(parsed)
         # B7: the persist patch carries ONLY the keys this window itself
         # changed, merged into the row inside the UPDATE statement — a
         # concurrent poller write (composer_ready) survives.
@@ -3090,7 +3227,18 @@ class SessionMonitor:
             ts.parse_errors_count += 1
             ts.last_parse_error = err
             ts.last_parse_error_ts = time.time()
-        await self._process_tail_entries(tmux_name, row, ts, window["entries"])
+        # Commit the worker's parse-ctx copy now that this window publishes
+        # (a cancelled worker's late finish mutated only its own copy).
+        if window.get("parse_ctx_after") is not None:
+            ts.parse_ctx = window["parse_ctx_after"]
+        span = {
+            "file": Path(window["path"]).stem,
+            "from": window["start_offset"],
+            "to": window["new_offset"],
+        }
+        await self._process_tail_entries(
+            tmux_name, row, ts, window["entries"], span=span,
+        )
         await self._graph_appender_tick(tmux_name, Path(window["path"]))
 
     def _persist_tail_window(
@@ -3462,6 +3610,7 @@ class SessionMonitor:
         self, tmux_name: str, row: dict, ts: _TailState, new_entries: list,
         *,
         source_path: Path | None = None,
+        span: dict | None = None,
     ) -> None:
         """Dedup, enrich, and broadcast parsed entries from a session tail read.
 
@@ -3469,6 +3618,11 @@ class SessionMonitor:
         identity for publications that do NOT come from the row's linked
         file (ordered-handover predecessor segments) — the batch never
         assumes the DB row links the file being published.
+
+        ``span`` (auto-16g9t) is the batch's raw byte range
+        ``{file, from, to}`` — the client's gap detector advances its
+        committed high-water from contiguous spans, never from entry
+        counts, so server-side dedup can never fake progress.
         """
         if not new_entries:
             return
@@ -3479,20 +3633,12 @@ class SessionMonitor:
         # Dedup queued messages — tracker persists across unrelated entries
         # (assistant turns, tool_result) because the duplicate typically
         # arrives AFTER the agent's assistant response, not immediately.
-        deduped = []
-        for entry in new_entries:
-            if entry.get("queued"):
-                ts.last_enqueue_content = entry.get("content", "").strip()
-                deduped.append(entry)
-            elif (entry.get("type") in ("user", "crosstalk")
-                  and ts.last_enqueue_content
-                  and entry.get("content", "").strip() == ts.last_enqueue_content):
-                ts.last_enqueue_content = None
-                ts.enqueue_dedup_count += 1
-                ts.last_enqueue_dedup_ts = time.time()
-            else:
-                deduped.append(entry)
-        new_entries = deduped
+        new_entries, ts.last_enqueue_content, dropped = dedup_queued_entries(
+            new_entries, ts.last_enqueue_content,
+        )
+        if dropped:
+            ts.enqueue_dedup_count += dropped
+            ts.last_enqueue_dedup_ts = time.time()
 
         harness = resolve_harness_for_session_row(row)
         session_dir = None
@@ -3501,10 +3647,14 @@ class SessionMonitor:
         )
         if batch_path is not None:
             session_dir = batch_path.parent / batch_path.stem
+        if ts.postprocess_state is None:
+            ts.postprocess_state = harness.new_postprocess_state()
         new_entries = harness.postprocess_entries(
             new_entries,
             session_dir=session_dir,
+            state=ts.postprocess_state,
         )
+        session_harness_mod.finalize_entry_refs(new_entries)
 
         # Stamp trusted session identity onto entry types whose serve URLs
         # depend on it. ``viewer_attachment`` payloads come from agent
@@ -3616,6 +3766,9 @@ class SessionMonitor:
                     ),
                     "activity_state": activity_state,
                     "pending_tool_ids": sorted(ts.pending_tool_ids),
+                    # auto-16g9t: raw byte range this batch was parsed from
+                    # — the client's span-contiguity gap detector input.
+                    **({"span": span} if span is not None else {}),
                 },
                 dedup=False,
             )
@@ -4228,11 +4381,12 @@ class SessionMonitor:
             return
         harness = resolve_harness_for_session_row(row)
         prior: list = []
+        warm_ctx: dict = {}   # per-replay parse ctx — never the live stream's
         for raw_line in data.splitlines():
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
-            parsed = harness.parse_line(line)
+            parsed = harness.parse_line(line, ctx=warm_ctx)
             if parsed is None:
                 continue
             if isinstance(parsed, list):

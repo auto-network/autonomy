@@ -614,14 +614,14 @@ async def test_cancelled_drain_releases_only_when_worker_stops(env, monkeypatch)
     real_read = mon._read_tail_window
     slow = {"t": 0.4}
 
-    def slow_read(row):
+    def slow_read(row, parse_ctx=None):
         with lock:
             reads["n"] += 1
             reads["max"] = max(reads["max"], reads["n"])
         worker_inside.set()
         try:
             time.sleep(slow["t"])
-            return real_read(row)
+            return real_read(row, parse_ctx)
         finally:
             with lock:
                 reads["n"] -= 1
@@ -1363,9 +1363,9 @@ async def test_s2_stop_quiesces_drains_and_start_resumes(env, monkeypatch):
     real_read = mon._read_tail_window
     slow = {"t": 0.4}
 
-    def slow_read(row):
+    def slow_read(row, parse_ctx=None):
         time.sleep(slow["t"])
-        return real_read(row)
+        return real_read(row, parse_ctx)
 
     monkeypatch.setattr(mon, "_read_tail_window", slow_read)
     env.db.update_tail_state(name, file_offset=0)

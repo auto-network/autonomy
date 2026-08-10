@@ -26,8 +26,100 @@ _CODEX_TOOL_OUTPUT_SESSION_RE = re.compile(r"Process running with session ID (\d
 _CODEX_TOOL_OUTPUT_EXIT_RE = re.compile(r"Process exited with code (-?\d+)")
 _CODEX_TOOL_OUTPUT_TIME_RE = re.compile(r"Wall time:\s*([0-9.]+)\s*seconds?")
 _CODEX_TOOL_OUTPUT_BODY_RE = re.compile(r"\nOutput:\n", re.MULTILINE)
-_CODEX_SESSION_PROGRESS_STATE: dict[str, dict[str, dict[str, str] | set[str]]] = {}
+# Fallback pairing store for parse_line callers that predate explicit
+# parse contexts (auto-16g9t). Every in-repo parse loop passes its own
+# ``ctx`` dict, so live streams and HTTP replays can never steal each
+# other's pending functions.exec wrapper pairs; this module-level dict
+# only serves stray ctx-less callers, best-effort.
 _CODEX_EXEC_WRAPPER_CALLS: dict[str, list[dict[str, Any]]] = {}
+
+
+# ── Canonical entry identity (auto-16g9t) ──────────────────────────────
+#
+# Every rendered entry carries entry_ref = {file, off, sub}:
+#   file — the transcript file's filename stem (what session_uuids stores)
+#   off  — byte offset of the raw line's start within that file
+#   sub  — 0..k index among the entries produced from that one raw line
+# Total order = (position of file in the session chain, off, sub). Any two
+# batches from any two server paths merge and dedupe by this tuple; harness
+# message ids (Claude uuid, Codex call_id) ride along as metadata only.
+
+
+def iter_jsonl_lines_with_offsets(data: bytes, base_offset: int = 0):
+    """Yield (line_text, line_start_byte_offset) for each non-empty line.
+
+    ``base_offset`` is the file offset of ``data[0]``. Offsets are computed
+    from the RAW bytes (newline included in the running total) so they are
+    exact file positions regardless of decoding replacements.
+    """
+    off = base_offset
+    for raw in data.splitlines(keepends=True):
+        line_off = off
+        off += len(raw)
+        line = raw.decode("utf-8", errors="replace").strip()
+        if line:
+            yield line, line_off
+
+
+def stamp_entry_refs(
+    parsed: dict | list[dict], stem: str, line_off: int,
+) -> list[dict]:
+    """Stamp parse-time entry_refs onto one line's parsed entries."""
+    entries = parsed if isinstance(parsed, list) else [parsed]
+    for sub, entry in enumerate(entries):
+        entry["entry_ref"] = {"file": stem, "off": line_off, "sub": sub}
+    return entries
+
+
+def parse_lines_with_refs(
+    harness: "SessionHarness",
+    data: bytes,
+    *,
+    stem: str,
+    base_offset: int = 0,
+    ctx: dict | None = None,
+) -> list[dict]:
+    """Parse a raw byte window into entries stamped with entry_refs."""
+    out: list[dict] = []
+    for line, line_off in iter_jsonl_lines_with_offsets(data, base_offset):
+        try:
+            parsed = harness.parse_line(line, ctx=ctx)
+        except Exception:
+            logger.exception("parse_lines_with_refs: parse_line failed")
+            continue
+        if parsed is None:
+            continue
+        out.extend(stamp_entry_refs(parsed, stem, line_off))
+    return out
+
+
+def finalize_entry_refs(entries: list[dict]) -> None:
+    """Re-assign sub_index by output order within each (file, off) group.
+
+    Runs AFTER postprocessing: split results (``dict(entry)`` copies) and
+    synthesized sidecars would otherwise duplicate their source line's
+    parse-time sub. Entries with no ref (fresh dicts a builder forgot to
+    stamp) inherit the previous entry's line — postprocess appends derived
+    entries directly after their source, so this is the correct line.
+    Assumes postprocess never drops PART of a multi-entry line (it drops
+    whole lines or whole-line-derived singles), which holds for both
+    harnesses today; a partial drop would only shift sub numbering for
+    that one line.
+    """
+    counters: dict[tuple[str, int], int] = {}
+    last_key: tuple[str, int] | None = None
+    for entry in entries:
+        ref = entry.get("entry_ref")
+        if isinstance(ref, dict) and "file" in ref and "off" in ref:
+            key = (ref["file"], ref["off"])
+        else:
+            key = last_key
+            if key is None:
+                continue
+        sub = counters.get(key, 0)
+        entry["entry_ref"] = {"file": key[0], "off": key[1], "sub": sub}
+        counters[key] = sub + 1
+        last_key = key
 
 
 class SessionHarness(Protocol):
@@ -73,16 +165,31 @@ class SessionHarness(Protocol):
     ) -> None:
         """Attach live tailing for an already-linked session."""
 
-    def parse_line(self, line: str) -> dict | list[dict] | None:
-        """Parse one raw transcript line into normalized viewer entries."""
+    def parse_line(self, line: str, ctx: dict | None = None) -> dict | list[dict] | None:
+        """Parse one raw transcript line into normalized viewer entries.
+
+        ``ctx`` scopes cross-line parse state (e.g. Codex functions.exec
+        wrapper pairing) to ONE parse stream. Every caller that loops over
+        lines must hold one ctx dict per loop — sharing a stream's ctx with
+        an unrelated replay is exactly the state-theft bug auto-16g9t fixed.
+        """
 
     def postprocess_entries(
         self,
         entries: list[dict],
         *,
         session_dir: Path | None = None,
+        state: dict | None = None,
     ) -> list[dict]:
-        """Apply harness-specific entry post-processing."""
+        """Apply harness-specific entry post-processing.
+
+        ``state`` is the stream's persistent postprocess state (see
+        :meth:`new_postprocess_state`). ``None`` means a self-contained
+        read: a fresh state is used and discarded — NEVER a process-global.
+        """
+
+    def new_postprocess_state(self) -> dict:
+        """Fresh postprocess state for one stream (live tail or replay)."""
 
     def extract_message_text(self, raw_entry: dict) -> str:
         """Return the best last-message preview text from a raw transcript event."""
@@ -232,7 +339,8 @@ class ClaudeSessionHarness:
             reset_state=reset_state,
         )
 
-    def parse_line(self, line: str) -> dict | list[dict] | None:
+    def parse_line(self, line: str, ctx: dict | None = None) -> dict | list[dict] | None:
+        _ = ctx  # Claude parsing carries no cross-line state
         return parse_claude_log_line(line)
 
     def postprocess_entries(
@@ -240,8 +348,13 @@ class ClaudeSessionHarness:
         entries: list[dict],
         *,
         session_dir: Path | None = None,
+        state: dict | None = None,
     ) -> list[dict]:
+        _ = state  # Claude postprocessing is batch-local
         return postprocess_claude_entries(entries, session_dir=session_dir)
+
+    def new_postprocess_state(self) -> dict:
+        return {}
 
     def extract_message_text(self, raw_entry: dict) -> str:
         if raw_entry.get("isSidechain"):
@@ -382,16 +495,22 @@ class CodexSessionHarness:
             reset_state=reset_state,
         )
 
-    def parse_line(self, line: str) -> dict | list[dict] | None:
-        return parse_codex_log_line(line)
+    def parse_line(self, line: str, ctx: dict | None = None) -> dict | list[dict] | None:
+        return parse_codex_log_line(line, ctx=ctx)
 
     def postprocess_entries(
         self,
         entries: list[dict],
         *,
         session_dir: Path | None = None,
+        state: dict | None = None,
     ) -> list[dict]:
-        return postprocess_codex_entries(entries, session_dir=session_dir)
+        return postprocess_codex_entries(
+            entries, session_dir=session_dir, state=state,
+        )
+
+    def new_postprocess_state(self) -> dict:
+        return new_codex_progress_state()
 
     def extract_message_text(self, raw_entry: dict) -> str:
         return extract_codex_message_text(raw_entry)
@@ -1349,8 +1468,11 @@ def postprocess_codex_entries(
     entries: list[dict],
     *,
     session_dir: Path | None = None,
+    state: dict | None = None,
 ) -> list[dict]:
-    state = _codex_session_progress_state(session_dir)
+    _ = session_dir  # retained for signature parity with the Claude harness
+    if state is None:
+        state = new_codex_progress_state()
     tool_names = state["tool_names"]
     exec_sessions = state["exec_sessions"]
     write_calls = state["write_calls"]
@@ -1958,9 +2080,17 @@ def _resolve_codex_exec_wrapper_argument(
         return expression
 
 
+def _wrapper_calls_store(ctx: dict | None) -> dict[str, list[dict[str, Any]]]:
+    """The pending functions.exec pairing map for one parse stream."""
+    if ctx is None:
+        return _CODEX_EXEC_WRAPPER_CALLS
+    return ctx.setdefault("exec_wrapper_calls", {})
+
+
 def _build_codex_exec_wrapper_entries(
     payload: dict,
     timestamp: str,
+    ctx: dict | None = None,
 ) -> list[dict] | None:
     """Expand a functions.exec orchestration call into its nested tool calls."""
     source = str(payload.get("input") or "")
@@ -2020,17 +2150,18 @@ def _build_codex_exec_wrapper_entries(
                 )
 
     if outer_tool_id:
-        _CODEX_EXEC_WRAPPER_CALLS[outer_tool_id] = nested_tools
+        _wrapper_calls_store(ctx)[outer_tool_id] = nested_tools
     return entries
 
 
 def _build_codex_exec_wrapper_results(
     payload: dict,
     timestamp: str,
+    ctx: dict | None = None,
 ) -> list[dict] | None:
     """Complete synthetic nested calls when the outer wrapper returns."""
     outer_tool_id = str(payload.get("call_id") or "")
-    nested_tools = _CODEX_EXEC_WRAPPER_CALLS.pop(outer_tool_id, None)
+    nested_tools = _wrapper_calls_store(ctx).pop(outer_tool_id, None)
     if not nested_tools:
         return None
     output = _extract_codex_text_blocks(payload.get("output"))
@@ -2130,34 +2261,22 @@ def _parse_codex_patch_apply_end(payload: dict, timestamp: str) -> dict:
     }
 
 
-def _codex_session_scope(session_dir: Path | None) -> str:
-    if session_dir is None:
-        return "__default__"
-    try:
-        return str(session_dir.resolve())
-    except OSError:
-        return str(session_dir)
+def new_codex_progress_state() -> dict[str, dict[str, str] | set[str]]:
+    """Fresh Codex postprocess state for ONE stream.
 
-
-def _codex_session_progress_state(session_dir: Path | None) -> dict[str, dict[str, str] | set[str]]:
-    if session_dir is None:
-        return {
-            "tool_names": {},
-            "exec_sessions": {},
-            "write_calls": {},
-            "completed_tools": set(),
-        }
-    scope = _codex_session_scope(session_dir)
-    state = _CODEX_SESSION_PROGRESS_STATE.get(scope)
-    if state is None:
-        state = {
-            "tool_names": {},
-            "exec_sessions": {},
-            "write_calls": {},
-            "completed_tools": set(),
-        }
-        _CODEX_SESSION_PROGRESS_STATE[scope] = state
-    return state
+    auto-16g9t: this replaced a process-global registry keyed by session
+    dir — the live tailer and HTTP backfill reads used to mutate the SAME
+    dict, so a scroll-up replay could mark tools completed (or consume
+    pairing state) under the live stream's feet. State is now owned by the
+    caller: the monitor holds one per session, read paths use a snapshot
+    copy or a fresh one, and nothing is shared implicitly.
+    """
+    return {
+        "tool_names": {},
+        "exec_sessions": {},
+        "write_calls": {},
+        "completed_tools": set(),
+    }
 
 
 def _build_codex_exec_progress_result(
@@ -2183,7 +2302,7 @@ def _build_codex_exec_progress_result(
             is_error = int(exit_code) != 0
         except (TypeError, ValueError):
             is_error = bool(exit_code)
-    return {
+    result = {
         "type": "tool_result",
         "role": "tool",
         "tool_id": tool_id,
@@ -2201,6 +2320,11 @@ def _build_codex_exec_progress_result(
         "stderr": "",
         "process_id": process_id,
     }
+    # Derived entries keep their source line's identity (auto-16g9t);
+    # finalize_entry_refs re-numbers sub within the line afterwards.
+    if entry.get("entry_ref") is not None:
+        result["entry_ref"] = entry["entry_ref"]
+    return result
 
 
 def _append_codex_exec_sidecars(out: list[dict], progress: dict) -> None:
@@ -2215,12 +2339,17 @@ def _append_codex_exec_sidecars(out: list[dict], progress: dict) -> None:
     content = str(progress.get("stdout") or progress.get("content") or "")
     timestamp = str(progress.get("timestamp") or "")
     tool_id = str(progress.get("tool_id") or "")
+    ref = progress.get("entry_ref")
     va = _upconvert_viewer_attachment(content, timestamp, tool_id=tool_id)
     if va:
+        if ref is not None:
+            va["entry_ref"] = ref
         out.append(va)
     sem = _upconvert_graph_result(content, timestamp, tool_id=tool_id)
     if sem:
         _enrich_semantic_tile(sem)
+        if ref is not None:
+            sem["entry_ref"] = ref
         out.append(sem)
 
 
@@ -2288,7 +2417,7 @@ def _parse_codex_exec_end(payload: dict, timestamp: str) -> dict | list[dict] | 
     return out if len(out) > 1 else result
 
 
-def parse_codex_log_line(line: str) -> dict | list[dict] | None:
+def parse_codex_log_line(line: str, ctx: dict | None = None) -> dict | list[dict] | None:
     try:
         raw = json.loads(line)
     except json.JSONDecodeError:
@@ -2406,7 +2535,7 @@ def parse_codex_log_line(line: str) -> dict | list[dict] | None:
     if item_type == "custom_tool_call":
         tool_name = payload.get("name") or "?"
         if tool_name in {"exec", "functions.exec"}:
-            nested = _build_codex_exec_wrapper_entries(payload, timestamp)
+            nested = _build_codex_exec_wrapper_entries(payload, timestamp, ctx=ctx)
             if nested:
                 return nested if len(nested) > 1 else nested[0]
         tool_input = {"input": str(payload.get("input") or "")}
@@ -2437,7 +2566,7 @@ def parse_codex_log_line(line: str) -> dict | list[dict] | None:
         return entry
 
     if item_type == "custom_tool_call_output":
-        nested = _build_codex_exec_wrapper_results(payload, timestamp)
+        nested = _build_codex_exec_wrapper_results(payload, timestamp, ctx=ctx)
         if nested:
             return nested if len(nested) > 1 else nested[0]
         return _parse_codex_custom_tool_output(payload, timestamp)
