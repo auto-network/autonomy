@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -923,24 +924,49 @@ def test_search_route_requires_jql(jira_env):
                        content=b"not json").status_code == 400
 
 
-def _stub_workspace(monkeypatch, overrides=QUERY_OVERRIDES):
-    """Pin session→workspace resolution: any session maps to enterprise-ng
-    with the given issue_tracker workspace_overrides."""
-    monkeypatch.setattr(jira_routes, "_workspace_overrides",
-                        lambda session: ("enterprise-ng", overrides))
+_QUERY_TOKEN = "raw-jira-caller-token"
+_QUERY_SESSION = "auto-1"
 
 
-def test_named_query_list_route(jira_env, monkeypatch):
-    _stub_workspace(monkeypatch)
+def _auth(token: str = _QUERY_TOKEN) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _stub_workspace(monkeypatch, tmp_path, overrides=QUERY_OVERRIDES,
+                    session: str = _QUERY_SESSION, token: str = _QUERY_TOKEN):
+    """Stamp a launcher token → session in a fresh auth DB and pin the
+    session→workspace half (already proven in test_repl_auth) to
+    enterprise-ng with the given issue_tracker workspace_overrides. Captures
+    the session the route derived so callers can assert it was never
+    caller-supplied."""
+    from tools.dashboard.dao import auth_db
+
+    auth_db.init_db(tmp_path / "auth.db")
+    auth_db.insert_token(hashlib.sha256(token.encode()).hexdigest(), session)
+    seen = {}
+
+    def resolve(s):
+        seen["session"] = s
+        return ("enterprise-ng", overrides)
+
+    monkeypatch.setattr(jira_routes, "_workspace_overrides", resolve)
+    return seen
+
+
+def test_named_query_list_route(jira_env, monkeypatch, tmp_path):
+    seen = _stub_workspace(monkeypatch, tmp_path)
     client = TestClient(_app())
-    out = client.get("/api/jira/query?session=auto-1").json()
+    out = client.get("/api/jira/query", headers=_auth()).json()
     assert out["workspace"] == "enterprise-ng"
     assert [(q["name"], q["params"]) for q in out["queries"]] == [
         ("mine", []), ("release", ["version"])]
+    # The workspace was derived from the token's session, not a query param.
+    assert seen["session"] == _QUERY_SESSION
 
 
-def test_named_query_run_route_resolves_and_searches(jira_env, monkeypatch):
-    _stub_workspace(monkeypatch)
+def test_named_query_run_route_resolves_and_searches(jira_env, monkeypatch,
+                                                     tmp_path):
+    _stub_workspace(monkeypatch, tmp_path)
     ran = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -951,7 +977,7 @@ def test_named_query_run_route_resolves_and_searches(jira_env, monkeypatch):
     _mock(monkeypatch, handler)
     client = TestClient(_app())
     out = client.get(
-        "/api/jira/query/release?session=auto-1&version=6.1.0").json()
+        "/api/jira/query/release?version=6.1.0", headers=_auth()).json()
     assert ran["jql"] == 'project = ENTERPRISE AND fixVersion = "Enterprise 6.1.0"'
     assert out["workspace"] == "enterprise-ng"
     assert out["query"] == "release"
@@ -959,27 +985,78 @@ def test_named_query_run_route_resolves_and_searches(jira_env, monkeypatch):
     assert out["items"][0]["key"] == "ENT-2"
 
 
-def test_named_query_route_errors(jira_env, monkeypatch):
-    _stub_workspace(monkeypatch)
+def test_named_query_route_errors(jira_env, monkeypatch, tmp_path):
+    _stub_workspace(monkeypatch, tmp_path)
     client = TestClient(_app())
     # Unknown query name / bad params → 400 with the QueryError message.
-    r = client.get("/api/jira/query/nope?session=auto-1")
+    r = client.get("/api/jira/query/nope", headers=_auth())
     assert r.status_code == 400 and "unknown named query" in r.json()["error"]
-    r = client.get("/api/jira/query/release?session=auto-1")
+    r = client.get("/api/jira/query/release", headers=_auth())
     assert r.status_code == 400 and "requires: version" in r.json()["error"]
-    # Session is mandatory — resolution is host-side, never caller-asserted.
-    assert client.get("/api/jira/query").status_code == 400
-    assert client.get("/api/jira/query/mine").status_code == 400
 
 
-def test_named_query_unresolvable_session_is_404(jira_env, monkeypatch):
+def test_named_query_requires_bearer_token(jira_env, monkeypatch, tmp_path):
+    """No token, or a malformed one, is 401 — the routes are no longer an
+    unauthenticated session→workspace oracle (bead auto-9o4k8)."""
+    _stub_workspace(monkeypatch, tmp_path)
+    client = TestClient(_app())
+    for path in ("/api/jira/query", "/api/jira/query/mine"):
+        assert client.get(path).status_code == 401
+        assert client.get(path, headers={"Authorization": "Basic x"}
+                          ).status_code == 401
+        assert client.get(path, headers=_auth("wrong-token")
+                          ).status_code == 401
+
+
+def test_named_query_revoked_token_is_401(jira_env, monkeypatch, tmp_path):
+    """Revoking a token takes effect on the next request, no restart —
+    resolve_token is read fresh per request."""
+    from tools.dashboard.dao import auth_db
+
+    _stub_workspace(monkeypatch, tmp_path)
+    client = TestClient(_app())
+    assert client.get("/api/jira/query", headers=_auth()).status_code == 200
+    auth_db.revoke_token(_QUERY_SESSION)
+    r = client.get("/api/jira/query", headers=_auth())
+    assert r.status_code == 401 and "invalid or revoked" in r.json()["error"]
+
+
+def test_named_query_session_query_param_is_ignored(jira_env, monkeypatch,
+                                                    tmp_path):
+    """A caller-supplied ?session= naming another workspace's session buys
+    nothing: identity is the token, and the stray param never leaks into the
+    derived session or into JQL placeholder substitution."""
+    seen = _stub_workspace(monkeypatch, tmp_path)
+    ran = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        ran["jql"] = json.loads(request.content)["jql"]
+        return httpx.Response(200, json={"issues": []})
+
+    _mock(monkeypatch, handler)
+    client = TestClient(_app())
+    out = client.get(
+        "/api/jira/query/release?version=6.1.0&session=auto-victim",
+        headers=_auth()).json()
+    assert seen["session"] == _QUERY_SESSION      # token's session, not the param
+    assert "auto-victim" not in ran["jql"]        # not a placeholder value
+
+
+def test_named_query_unresolvable_session_is_403(jira_env, monkeypatch,
+                                                 tmp_path):
+    from tools.dashboard.dao import auth_db
+
+    auth_db.init_db(tmp_path / "auth.db")
+    auth_db.insert_token(
+        hashlib.sha256(_QUERY_TOKEN.encode()).hexdigest(), "auto-ghost")
+
     def boom(session):
         raise LookupError(f"session {session!r} does not map to a workspace")
 
     monkeypatch.setattr(jira_routes, "_workspace_overrides", boom)
     client = TestClient(_app())
-    r = client.get("/api/jira/query?session=ghost")
-    assert r.status_code == 404 and "does not map" in r.json()["error"]
+    r = client.get("/api/jira/query", headers=_auth())
+    assert r.status_code == 403 and "does not map" in r.json()["error"]
 
 
 def test_transitions_read_route(jira_env, monkeypatch):
