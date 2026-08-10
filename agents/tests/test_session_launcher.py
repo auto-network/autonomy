@@ -76,7 +76,9 @@ def platform_snapshot(monkeypatch, tmp_path):
     launcher asked for a snapshot and what path it mounted.
     """
     snap = tmp_path / "platform-snapshot"
-    snap.mkdir(exist_ok=True)
+    # A real snapshot checkout materializes data/uploads via the tracked
+    # .gitkeep — the uploads bind's mount point (auto-j3oj3 smoke failure).
+    (snap / "data" / "uploads").mkdir(parents=True, exist_ok=True)
     calls: list[int] = []
 
     def fake() -> str:
@@ -1445,14 +1447,18 @@ def test_caller_workspace_repo_mount_skips_snapshot(
 def test_snapshot_failure_launches_without_platform_mount(
     tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch,
 ):
-    """Snapshot prep failure must NOT fall back to the live host root."""
+    """Snapshot prep failure must NOT fall back to the live host root, and
+    must also skip the uploads bind (its mount point has no parent)."""
     monkeypatch.setattr(session_launcher, "_ensure_platform_snapshot",
                         lambda: None)
     result = _run(output_dir=str(tmp_path / "run"))
     assert result is not None  # the fleet still starts
     specs = _mount_specs(captured_run[0])
-    assert not any(":/workspace/repo:" in s or s.endswith(":/workspace/repo")
-                   for s in specs if "/workspace/repo/data/uploads" not in s)
+    container_targets = [s.split(":")[1] for s in specs]
+    assert not any(
+        t == "/workspace/repo" or t.startswith("/workspace/repo/")
+        for t in container_targets
+    )
     live_root = f"{session_launcher.REPO_ROOT}:"
     assert not any(s.startswith(live_root) for s in specs)
 
@@ -1468,17 +1474,34 @@ def test_stale_graph_db_mount_is_gone(
 def test_uploads_dir_mounted_read_only_for_file_handoff(
     tmp_path, fake_creds, fake_crosstalk, captured_run, platform_snapshot,
 ):
-    """POST /api/upload handoff path stays readable — including for workspaces
-    that mount their own repo at /workspace/repo (nested bind survives)."""
+    """POST /api/upload handoff path stays readable wherever its mount point
+    exists — the snapshot (tracked .gitkeep) and platform worktrees."""
     _run(output_dir=str(tmp_path / "run"))
     uploads = f"{session_launcher.REPO_ROOT / 'data' / 'uploads'}:/workspace/repo/data/uploads:ro"
     assert uploads in _mount_specs(captured_run[0])
 
     worktree = tmp_path / "wt2"
-    worktree.mkdir()
+    (worktree / "data" / "uploads").mkdir(parents=True)
     _run(output_dir=str(tmp_path / "run2"),
          mounts={str(worktree): "/workspace/repo"})
     assert uploads in _mount_specs(captured_run[1])
+
+
+def test_uploads_bind_skipped_when_mount_point_missing(
+    tmp_path, fake_creds, fake_crosstalk, captured_run, platform_snapshot,
+):
+    """A repo at /workspace/repo without data/uploads must lose the uploads
+    bind, not the launch: runc cannot mkdir a mount point under a read-only
+    parent, so a blind nested bind is a deterministic fleet-stopping OCI
+    failure (caught by the auto-j3oj3 pre-merge smoke)."""
+    worktree = tmp_path / "foreign-repo"
+    worktree.mkdir()
+    result = _run(output_dir=str(tmp_path / "run"),
+                  mounts={str(worktree): "/workspace/repo:ro"})
+    assert result is not None
+    specs = _mount_specs(captured_run[0])
+    assert f"{worktree}:/workspace/repo:ro" in specs
+    assert not any("/workspace/repo/data/uploads" in s for s in specs)
 
 
 def test_beads_credential_key_is_masked(

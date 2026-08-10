@@ -269,7 +269,6 @@ def main() -> int:
         mounts = {
             str(REPO_ROOT / ".beads"): "/data/.beads",
             "/dev/null": "/data/.beads/.beads-credential-key:ro",
-            str(REPO_ROOT / "data" / "uploads"): "/workspace/repo/data/uploads:ro",
             str(run_dir): "/workspace/output",
             str(sessions_dir): (
                 "/home/agent/.codex/sessions"
@@ -279,12 +278,23 @@ def main() -> int:
         }
         if args.worktree:
             mounts[args.worktree] = "/workspace/repo"
+            repo_mount_host = args.worktree
         else:
             from agents.session_launcher import _ensure_platform_snapshot
 
-            snapshot = _ensure_platform_snapshot()
-            if snapshot is not None:
-                mounts[snapshot] = "/workspace/repo:ro"
+            repo_mount_host = _ensure_platform_snapshot()
+            if repo_mount_host is not None:
+                mounts[repo_mount_host] = "/workspace/repo:ro"
+        # The uploads bind may only nest where its mount point exists — a
+        # read-only /workspace/repo without data/uploads makes runc's mkdir
+        # an OCI launch failure (see launch_session; the platform snapshot
+        # tracks data/uploads/.gitkeep exactly so this holds).
+        if repo_mount_host is not None and (
+            Path(repo_mount_host) / "data" / "uploads"
+        ).is_dir():
+            mounts[str(REPO_ROOT / "data" / "uploads")] = (
+                "/workspace/repo/data/uploads:ro"
+            )
         if args.git_dir:
             mounts[args.git_dir] = args.git_dir
         host_socket = "/var/run/docker.sock"

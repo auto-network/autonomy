@@ -14,6 +14,12 @@ harness-artifacts/
 # any fixture that must be tracked lives under tools/, never here. The specific
 # data/ rules kept below are redundant with this blanket rule but document
 # *why* each category must never be committed.
+#
+# ONE tracked exception: data/uploads/.gitkeep (force-added). The container
+# platform snapshot is a plain checkout mounted read-only at /workspace/repo,
+# and the data/uploads bind needs its mount point to EXIST inside that
+# read-only tree or runc fails the launch (auto-j3oj3). The keep-file
+# materializes the mount point; upload contents themselves stay ignored.
 /data/
 
 # Managed project clones + per-session worktrees (workspace_manager)
