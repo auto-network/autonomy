@@ -73,11 +73,9 @@
     <div class="flex-grow"></div>
     <div x-data="{ open: false }" class="relative" data-testid="session-launch-dropdown">
       <button @click="open = !open"
-              :disabled="_creating"
               class="w-8 h-8 flex items-center justify-center rounded-lg
                      bg-green-600 hover:bg-green-500 text-white text-lg font-bold
-                     transition-colors disabled:opacity-50 disabled:cursor-wait"
-              :class="_creating && 'animate-pulse'">+</button>
+                     transition-colors">+</button>
       <div x-show="open" @click.away="open = false" x-cloak
            x-transition:enter="transition ease-out duration-100"
            x-transition:enter-start="opacity-0 scale-95"
