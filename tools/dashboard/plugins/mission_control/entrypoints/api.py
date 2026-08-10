@@ -12,6 +12,7 @@ publishes in one call; there is no separate "mark shown" step.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from starlette.background import BackgroundTask
@@ -754,6 +755,84 @@ async def _relay_question(*, mission_id: str, entry_id: str) -> None:
             )
 
     db.mark_question_relay_status(mission_id, entry_id, "sent" if sent_ok else "failed")
+
+
+async def handle_relay_write(participant_id: str, mission_id: str, body: dict) -> dict | None:
+    """The relay's ``write`` op (`tools/dashboard/link_serving.py`) for a
+    ``mission``-type grant, registered into that module's target_type
+    dispatch. The relay hands us only ``(identity, mission_id, body)`` --
+    identity already resolved from the grant, never read out of `body` --
+    and forwards `body` completely uninterpreted; everything about what a
+    mission write means lives here, not in the relay.
+
+    Returns the response envelope's payload on success, or None to have
+    the relay refuse this body on its own terms (bad request).
+    """
+    visitor = db.get_visitor_by_participant_id(participant_id)
+    if not visitor:
+        return None  # the bound identity no longer resolves
+    participant_label = visitor["display_name"]
+
+    # Every guest today is named and pre-minted (Milestone 1) -- this is
+    # not an extension point yet. When Milestone 2's anonymous, self-serve
+    # guests exist, a pre-screening check (e.g. prompt-injection
+    # detection) on `question`/`followup` belongs right here, before the
+    # text reaches ask_question/reopen_question and from there a
+    # coordinator's tmux session.
+
+    kind = body.get("kind")
+    if kind == "question":
+        question = body.get("question")
+        if not isinstance(question, str) or not question.strip():
+            return None
+        anchor = body.get("anchor")
+        if anchor is not None and not isinstance(anchor, str):
+            return None
+        anchor = (anchor or "").strip() or None
+        pillar_id = body.get("pillar_id")
+        if pillar_id is not None:
+            if not isinstance(pillar_id, str):
+                return None
+            # A guest's channel is bound to ONE mission (mission_id, from
+            # the grant) -- a pillar_id belonging to a DIFFERENT mission
+            # must be refused here, not left to ask_question's own
+            # existence check (which only confirms the pillar exists at
+            # all, not that it's this mission's). Otherwise this channel
+            # could relay straight to an unrelated mission's pillar
+            # coordinator.
+            pillar = db.get_pillar(pillar_id)
+            if not pillar or pillar["mission_id"] != mission_id:
+                return None
+        entry = db.ask_question(
+            mission_id, question, participant_id, participant_label,
+            pillar_id=pillar_id, anchor=anchor,
+        )
+        event = "asked"
+    elif kind == "reopen":
+        entry_id = body.get("entry_id")
+        followup = body.get("followup")
+        if not isinstance(entry_id, str) or not entry_id:
+            return None
+        if not isinstance(followup, str) or not followup.strip():
+            return None
+        entry = db.reopen_question(mission_id, entry_id, followup, participant_label)
+        event = "reopened"
+    else:
+        return None
+
+    if entry is None:
+        return None  # mission/entry not found, or reopen on an unanswered entry
+
+    entry_payload = _question_payload(entry)
+    await _publish_conversation_event(
+        event, mission_id, entry.get("pillar_id"), entry["entry_id"], question=entry_payload,
+    )
+    # Fire-and-forget, same contract as the HTTP path's BackgroundTask: a
+    # slow/hung CrossTalk send must never stall the guest's response.
+    asyncio.create_task(
+        _relay_question(mission_id=mission_id, entry_id=entry["entry_id"])
+    )
+    return {"question": entry_payload}
 
 
 async def _ask_question_impl(

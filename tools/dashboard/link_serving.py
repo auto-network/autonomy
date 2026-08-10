@@ -709,6 +709,71 @@ def _serve_join(grant: dict, org: str | None, request: dict) -> bytes:
         return REFUSED
 
 
+#: Ops any write-capable grant serves beyond fetch/head (auto-u0kxw). The
+#: relay knows nothing about what a write MEANS for any given
+#: target_type -- only how to reach the module that does (mirrors
+#: resolve_target()'s read-side dispatch and _claim_service()'s
+#: opaque-handoff shape for org:join). Same one op for every writable
+#: target_type; new target_types add a dispatch entry, not new relay code.
+WRITE_OPS = ("write",)
+
+#: target_types allowed to accept writes at all. Disabled by default --
+#: a target_type must be listed here explicitly to accept a write op, so
+#: a viewer can never stuff data down a channel nothing is listening on.
+#: Checked before the dispatch below is even consulted.
+WRITE_ENABLED_TARGET_TYPES = frozenset({"mission"})
+
+
+def _write_dispatch(target_type: str):
+    """target_type → the module-owned async write handler, or None if
+    this target_type doesn't accept writes. Lazy, same reason
+    _claim_service() is lazy: a target_type gains write support without
+    this dispatch needing to import it before it exists.
+    """
+    if target_type not in WRITE_ENABLED_TARGET_TYPES:
+        return None
+    if target_type == "mission":
+        from tools.dashboard.plugins.mission_control.entrypoints import api as mc_api
+
+        return mc_api.handle_relay_write
+    return None
+
+
+async def _serve_write(token: str, org: str | None, request: dict, clock) -> bytes:
+    """One ``write`` request → the target_type-owned handler's envelope.
+
+    The relay's only jobs: resolve the grant, resolve the identity this
+    channel is allowed to write AS (from the grant's own bound
+    ``meta.participant_id`` — never a value the client supplies), and
+    forward the opaque ``body`` to whichever module owns writes for this
+    grant's target_type. It never interprets ``body`` itself, so there is
+    no field in it for a client to smuggle a different identity into.
+    """
+    grant = await asyncio.to_thread(check_grant, token, org=org, now=clock())
+    if grant is None:
+        return REFUSED
+    handler = _write_dispatch(grant["target_type"])
+    if handler is None:
+        return REFUSED  # this target_type doesn't accept writes at all
+    meta = grant.get("meta") or {}
+    identity = meta.get("participant_id")
+    if not isinstance(identity, str) or not identity:
+        return REFUSED  # no bound identity: nothing to write as
+    body = request.get("body")
+    if not isinstance(body, dict):
+        return BAD_REQUEST
+    try:
+        result = await handler(identity, grant["target_uuid"], body)
+    except Exception:
+        return REFUSED  # handler faults serve nothing, not stack traces
+    if result is None:
+        return BAD_REQUEST  # the handler rejected this body on its own terms
+    try:
+        return canonical_json({"v": 1, "status": "ok", **result}) + b"\n"
+    except Exception:
+        return REFUSED
+
+
 def make_grant_handler(org: str | None = None, *, now=None):
     """Build the ``handler(token, message)`` the B2 connector serves with.
 
@@ -761,6 +826,8 @@ def make_grant_handler(org: str | None = None, *, now=None):
         # tunnel's event loop so one slow lookup can't stall siblings.
         if op in JOIN_OPS:
             return await asyncio.to_thread(_join, token, request)
+        if op in WRITE_OPS:
+            return await _serve_write(token, org, request, clock)
         if op == "attachment.fetch":
             # A well-formed fetch returns a bounded async stream of body
             # frames (or a single error message); the connector streams it
