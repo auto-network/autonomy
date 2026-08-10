@@ -69,13 +69,16 @@ function savePresenceStyle(id) {
 // convention, not coordinator_board's single page-wide surface id. Holds
 // state for every presence-style variant the picker can select (not just
 // avatar-row) so switching styles never re-subscribes the surface.
-function missionPresenceRow(missionId) {
+function missionPresenceRow(id, kind = 'mission') {
+  // kind='mission' -> 'mission:<id>' (a mission's own surface); kind='pillar'
+  // -> 'pillar:<id>' (one surface per pillar, same convention one level
+  // down). Same component either way -- only the surface differs.
   // AVATAR_SIZE matches the shared .nx-avatar-stack > .nx-avatar width
   // (surface-presence.css) -- geometry must track the real substrate
   // class Mission Control renders through, not an assumed size.
   const AVATAR_STEP = 20, AVATAR_SIZE = 24, NAME_SHIFT = 96;
   return Presence.alpine(
-    { surfaceId: 'mission:' + missionId },
+    { surfaceId: kind + ':' + id },
     {
       openId: null,
       identityTimer: null,
@@ -134,6 +137,7 @@ function missionControlPage() {
     missions: [],
     revisions: {},
     conversation: {},
+    pillars: {},
     expanded: '',
     relativeTime: relativeTime,
 
@@ -184,8 +188,22 @@ function missionControlPage() {
             return m;
           }
         }));
+        // Pillars, same small-N no-pagination posture as mission detail
+        // above -- a mission with zero pillars costs one cheap empty-list
+        // fetch and renders exactly as it did before pillars existed.
+        await Promise.all(this.missions.map((m) => this.refreshPillars(m.mission_id)));
       } catch (_) {
         this.missions = [];
+      }
+    },
+
+    async refreshPillars(missionId) {
+      try {
+        const res = await fetch('/api/missions/' + encodeURIComponent(missionId) + '/pillars');
+        const data = await res.json();
+        this.pillars = { ...this.pillars, [missionId]: (data && data.pillars) || [] };
+      } catch (_) {
+        this.pillars = { ...this.pillars, [missionId]: [] };
       }
     },
 

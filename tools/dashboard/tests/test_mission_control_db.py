@@ -485,3 +485,468 @@ def test_list_since_helpers_before_any_watermark_use_epoch_zero(tmp_path):
     mission = db.create_mission("OSS Insights", db_path=path)
     db.push_site_revision(mission["mission_id"], "<html>v1</html>", db_path=path)
     assert len(db.list_site_revisions_since(mission["mission_id"], 0, db_path=path)) == 1
+
+
+# ── Pillars (P4) ───────────────────────────────────────────────────
+
+
+def test_create_and_get_pillar(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(
+        mission["mission_id"], "Dataset & Schema", "auto-schema", "#34d399", db_path=path,
+    )
+    assert pillar["mission_id"] == mission["mission_id"]
+    assert pillar["name"] == "Dataset & Schema"
+    assert pillar["coordinator_session"] == "auto-schema"
+    assert pillar["color"] == "#34d399"
+    assert pillar["current_revision_id"] is None
+    assert pillar["status"] == "active"
+
+    fetched = db.get_pillar(pillar["pillar_id"], db_path=path)
+    assert fetched["pillar_id"] == pillar["pillar_id"]
+    assert fetched["name"] == "Dataset & Schema"
+
+
+def test_get_pillar_missing_returns_none(tmp_path):
+    path = _db_path(tmp_path)
+    db.init_db(path)
+    assert db.get_pillar("nope", db_path=path) is None
+
+
+def test_list_pillars_orders_oldest_first_and_scopes_to_mission(tmp_path):
+    path = _db_path(tmp_path)
+    m1 = db.create_mission("A", db_path=path)
+    m2 = db.create_mission("B", db_path=path)
+    p1 = db.create_pillar(m1["mission_id"], "First", db_path=path)
+    p2 = db.create_pillar(m1["mission_id"], "Second", db_path=path)
+    db.create_pillar(m2["mission_id"], "Other mission's pillar", db_path=path)
+
+    listed = db.list_pillars(m1["mission_id"], db_path=path)
+    assert [p["pillar_id"] for p in listed] == [p1["pillar_id"], p2["pillar_id"]]
+
+
+def test_set_pillar_status_updates_and_persists(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    assert db.set_pillar_status(pillar["pillar_id"], "paused", db_path=path) is True
+    assert db.get_pillar(pillar["pillar_id"], db_path=path)["status"] == "paused"
+
+
+def test_set_pillar_status_missing_pillar_returns_false(tmp_path):
+    path = _db_path(tmp_path)
+    db.init_db(path)
+    assert db.set_pillar_status("nope", "paused", db_path=path) is False
+
+
+def test_set_pillar_status_rejects_invalid_status(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    with pytest.raises(AssertionError):
+        db.set_pillar_status(pillar["pillar_id"], "nope", db_path=path)
+
+
+def test_delete_pillar_removes_pillar_and_revisions(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    db.push_pillar_site_revision(pillar["pillar_id"], "<html>v1</html>", db_path=path)
+
+    assert db.delete_pillar(pillar["pillar_id"], db_path=path) is True
+    assert db.get_pillar(pillar["pillar_id"], db_path=path) is None
+    assert db.list_pillar_site_revisions(pillar["pillar_id"], db_path=path) == []
+
+
+def test_delete_missing_pillar_returns_false(tmp_path):
+    path = _db_path(tmp_path)
+    db.init_db(path)
+    assert db.delete_pillar("nope", db_path=path) is False
+
+
+def test_delete_mission_cascades_to_its_pillars(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    db.push_pillar_site_revision(pillar["pillar_id"], "<html>v1</html>", db_path=path)
+    db.mark_pillar_seen(pillar["pillar_id"], db_path=path)
+
+    assert db.delete_mission(mission["mission_id"], db_path=path) is True
+    assert db.get_pillar(pillar["pillar_id"], db_path=path) is None
+    assert db.list_pillar_site_revisions(pillar["pillar_id"], db_path=path) == []
+    assert db.get_pillar_last_seen(pillar["pillar_id"], db_path=path) is None
+
+
+def test_delete_mission_does_not_touch_other_missions_pillars(tmp_path):
+    path = _db_path(tmp_path)
+    m1 = db.create_mission("A", db_path=path)
+    m2 = db.create_mission("B", db_path=path)
+    p2 = db.create_pillar(m2["mission_id"], "P2", db_path=path)
+
+    db.delete_mission(m1["mission_id"], db_path=path)
+    assert db.get_pillar(p2["pillar_id"], db_path=path) is not None
+
+
+def test_push_pillar_site_revision_stores_and_publishes(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+
+    revision = db.push_pillar_site_revision(
+        pillar["pillar_id"], "<html>v1</html>", "first push", db_path=path,
+    )
+    assert revision["revision_seq"] == 1
+    assert revision["note"] == "first push"
+
+    current = db.get_current_pillar_site(pillar["pillar_id"], db_path=path)
+    assert current["revision_id"] == revision["revision_id"]
+    assert current["html"] == "<html>v1</html>"
+
+
+def test_push_pillar_site_revision_missing_pillar_returns_none(tmp_path):
+    path = _db_path(tmp_path)
+    db.init_db(path)
+    assert db.push_pillar_site_revision("nope", "<html></html>", db_path=path) is None
+
+
+def test_push_pillar_site_revision_increments_seq(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    rev1 = db.push_pillar_site_revision(pillar["pillar_id"], "<html>v1</html>", db_path=path)
+    rev2 = db.push_pillar_site_revision(pillar["pillar_id"], "<html>v2</html>", db_path=path)
+    assert rev1["revision_seq"] == 1
+    assert rev2["revision_seq"] == 2
+
+
+def test_activate_pillar_site_revision_rolls_back_without_new_revision(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    rev1 = db.push_pillar_site_revision(pillar["pillar_id"], "<html>good</html>", db_path=path)
+    db.push_pillar_site_revision(pillar["pillar_id"], "<html>bad</html>", db_path=path)
+
+    ok = db.activate_pillar_site_revision(pillar["pillar_id"], rev1["revision_id"], db_path=path)
+    assert ok is True
+    current = db.get_current_pillar_site(pillar["pillar_id"], db_path=path)
+    assert current["html"] == "<html>good</html>"
+    assert len(db.list_pillar_site_revisions(pillar["pillar_id"], db_path=path)) == 2
+
+
+def test_pillar_last_seen_watermark(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    assert db.get_pillar_last_seen(pillar["pillar_id"], db_path=path) is None
+    seen_at = db.mark_pillar_seen(pillar["pillar_id"], db_path=path)
+    assert db.get_pillar_last_seen(pillar["pillar_id"], db_path=path) == seen_at
+
+
+def test_list_pillar_site_revisions_since_only_returns_newer(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    db.push_pillar_site_revision(pillar["pillar_id"], "<html>v1</html>", "old", db_path=path)
+    watermark = db.mark_pillar_seen(pillar["pillar_id"], db_path=path)
+    rev2 = db.push_pillar_site_revision(pillar["pillar_id"], "<html>v2</html>", "new", db_path=path)
+
+    since = db.list_pillar_site_revisions_since(pillar["pillar_id"], watermark, db_path=path)
+    assert [r["revision_id"] for r in since] == [rev2["revision_id"]]
+
+
+# ── Anchored conversation (mission-level vs pillar-level) ──────────
+
+
+def test_ask_question_mission_level_unaffected_by_pillars(tmp_path):
+    """Backward compatibility: a mission-level ask_question call (no
+    pillar_id) behaves exactly as it did before pillars existed."""
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    entry = db.ask_question(mission["mission_id"], "q", "guest:a", "A", db_path=path)
+    assert entry["pillar_id"] is None
+    assert entry["anchor"] is None
+
+
+def test_ask_question_pillar_scoped_requires_pillar_to_exist(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    assert db.ask_question(
+        mission["mission_id"], "q", "guest:a", "A", pillar_id="nope", db_path=path,
+    ) is None
+
+
+def test_ask_question_pillar_scoped_stores_pillar_and_anchor(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    entry = db.ask_question(
+        mission["mission_id"], "q", "guest:a", "A",
+        pillar_id=pillar["pillar_id"], anchor="table:x", db_path=path,
+    )
+    assert entry["mission_id"] == mission["mission_id"]
+    assert entry["pillar_id"] == pillar["pillar_id"]
+    assert entry["anchor"] == "table:x"
+
+
+def test_list_conversation_excludes_pillar_scoped_entries(tmp_path):
+    """Mission-level list_conversation only ever returns pillar_id IS NULL
+    rows -- pillar activity doesn't leak into the mission's own Q&A list."""
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    mission_entry = db.ask_question(mission["mission_id"], "mission q", "guest:a", "A", db_path=path)
+    db.ask_question(
+        mission["mission_id"], "pillar q", "guest:b", "B",
+        pillar_id=pillar["pillar_id"], db_path=path,
+    )
+
+    listed = db.list_conversation(mission["mission_id"], db_path=path)
+    assert [e["entry_id"] for e in listed] == [mission_entry["entry_id"]]
+
+
+def test_list_pillar_conversation_returns_only_that_pillars_entries(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    p1 = db.create_pillar(mission["mission_id"], "P1", db_path=path)
+    p2 = db.create_pillar(mission["mission_id"], "P2", db_path=path)
+    e1 = db.ask_question(mission["mission_id"], "q1", "guest:a", "A", pillar_id=p1["pillar_id"], db_path=path)
+    db.ask_question(mission["mission_id"], "q2", "guest:b", "B", pillar_id=p2["pillar_id"], db_path=path)
+
+    listed = db.list_pillar_conversation(p1["pillar_id"], db_path=path)
+    assert [e["entry_id"] for e in listed] == [e1["entry_id"]]
+
+
+def test_count_open_questions_excludes_pillar_scoped(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    db.ask_question(mission["mission_id"], "mission q", "guest:a", "A", db_path=path)
+    db.ask_question(mission["mission_id"], "pillar q", "guest:b", "B", pillar_id=pillar["pillar_id"], db_path=path)
+
+    assert db.count_open_questions(mission["mission_id"], db_path=path) == 1
+    assert db.count_open_pillar_questions(pillar["pillar_id"], db_path=path) == 1
+
+
+def test_list_conversation_since_excludes_pillar_scoped(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    watermark = db.mark_seen(mission["mission_id"], db_path=path)
+    db.ask_question(mission["mission_id"], "mission q", "guest:a", "A", db_path=path)
+    db.ask_question(mission["mission_id"], "pillar q", "guest:b", "B", pillar_id=pillar["pillar_id"], db_path=path)
+
+    since = db.list_conversation_since(mission["mission_id"], watermark, db_path=path)
+    assert [e["question"] for e in since] == ["mission q"]
+
+
+def test_list_pillar_conversation_since_only_returns_newer(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    db.ask_question(mission["mission_id"], "old", "guest:a", "A", pillar_id=pillar["pillar_id"], db_path=path)
+    watermark = db.mark_pillar_seen(pillar["pillar_id"], db_path=path)
+    new_entry = db.ask_question(
+        mission["mission_id"], "new", "guest:b", "B", pillar_id=pillar["pillar_id"], db_path=path,
+    )
+
+    since = db.list_pillar_conversation_since(pillar["pillar_id"], watermark, db_path=path)
+    assert [e["entry_id"] for e in since] == [new_entry["entry_id"]]
+
+
+def test_conversation_migrates_onto_pre_existing_database(tmp_path):
+    """A mission_conversation table created before pillar_id/anchor
+    existed must gain both columns -- NULL on old rows -- the next time
+    anything opens the DB, matching the status-column migration test's
+    shape."""
+    import sqlite3
+
+    path = _db_path(tmp_path)
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE mission_conversation ("
+        " entry_id TEXT PRIMARY KEY, mission_id TEXT NOT NULL, question TEXT NOT NULL,"
+        " asked_by_participant_id TEXT NOT NULL, asked_by_label TEXT NOT NULL,"
+        " answer TEXT, answered_by_session TEXT, answered_at REAL,"
+        " relay_status TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO mission_conversation (entry_id, mission_id, question,"
+        " asked_by_participant_id, asked_by_label, relay_status, created_at)"
+        " VALUES ('legacy-1', 'm1', 'old question', 'guest:a', 'A', 'pending', 0)",
+    )
+    conn.commit()
+    conn.close()
+
+    fetched = db.get_question("m1", "legacy-1", db_path=path)
+    assert fetched["pillar_id"] is None
+    assert fetched["anchor"] is None
+
+
+# ── Progress updates ─────────────────────────────────────────────
+
+
+def test_add_and_list_conversation_updates(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    entry = db.ask_question(mission["mission_id"], "q", "guest:a", "A", db_path=path)
+
+    db.add_conversation_update(entry["entry_id"], "still working", db_path=path)
+    db.add_conversation_update(entry["entry_id"], "almost done", db_path=path)
+
+    updates = db.list_conversation_updates(entry["entry_id"], db_path=path)
+    assert [u["text"] for u in updates] == ["still working", "almost done"]
+
+
+def test_conversation_update_never_touches_answer(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    entry = db.ask_question(mission["mission_id"], "q", "guest:a", "A", db_path=path)
+    db.add_conversation_update(entry["entry_id"], "still working", db_path=path)
+
+    fetched = db.get_question(mission["mission_id"], entry["entry_id"], db_path=path)
+    assert fetched["answer"] is None
+
+
+def test_list_conversation_updates_empty_for_unknown_entry(tmp_path):
+    path = _db_path(tmp_path)
+    db.init_db(path)
+    assert db.list_conversation_updates("nope", db_path=path) == []
+
+
+# ── Cross-pillar decision log ────────────────────────────────────
+
+
+def test_decision_log_includes_mission_and_pillar_revisions(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    db.push_site_revision(mission["mission_id"], "<html>m</html>", "mission rev", db_path=path)
+    db.push_pillar_site_revision(pillar["pillar_id"], "<html>p</html>", "pillar rev", db_path=path)
+
+    log = db.list_decision_log(mission["mission_id"], db_path=path)
+    texts = {entry["text"] for entry in log}
+    assert texts == {"mission rev", "pillar rev"}
+    pillar_entry = next(e for e in log if e["text"] == "pillar rev")
+    assert pillar_entry["pillar_id"] == pillar["pillar_id"]
+    mission_entry = next(e for e in log if e["text"] == "mission rev")
+    assert mission_entry["pillar_id"] is None
+
+
+def test_decision_log_includes_answered_questions_only(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    entry = db.ask_question(mission["mission_id"], "q", "guest:a", "A", db_path=path)
+    db.answer_question(mission["mission_id"], entry["entry_id"], "answered!", "auto-x", db_path=path)
+    db.ask_question(mission["mission_id"], "still open", "guest:b", "B", db_path=path)
+
+    log = db.list_decision_log(mission["mission_id"], db_path=path)
+    texts = [entry["text"] for entry in log]
+    assert "answered!" in texts
+    assert "still open" not in texts
+
+
+def test_decision_log_orders_newest_first(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    db.push_site_revision(mission["mission_id"], "<html>v1</html>", "first", db_path=path)
+    db.push_site_revision(mission["mission_id"], "<html>v2</html>", "second", db_path=path)
+
+    log = db.list_decision_log(mission["mission_id"], db_path=path)
+    assert [entry["text"] for entry in log] == ["second", "first"]
+
+
+def test_decision_log_scoped_to_its_own_mission(tmp_path):
+    path = _db_path(tmp_path)
+    m1 = db.create_mission("A", db_path=path)
+    m2 = db.create_mission("B", db_path=path)
+    db.push_site_revision(m1["mission_id"], "<html>a</html>", "a-rev", db_path=path)
+    db.push_site_revision(m2["mission_id"], "<html>b</html>", "b-rev", db_path=path)
+
+    log = db.list_decision_log(m1["mission_id"], db_path=path)
+    assert [entry["text"] for entry in log] == ["a-rev"]
+
+
+def test_decision_log_respects_limit(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    for i in range(5):
+        db.push_site_revision(mission["mission_id"], f"<html>{i}</html>", f"rev{i}", db_path=path)
+
+    log = db.list_decision_log(mission["mission_id"], limit=2, db_path=path)
+    assert len(log) == 2
+
+
+def test_decision_log_empty_mission_returns_empty_list(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    assert db.list_decision_log(mission["mission_id"], db_path=path) == []
+
+
+# ── Idle-nag support ──────────────────────────────────────────────
+
+
+def test_coordinator_nag_state_round_trip(tmp_path):
+    path = _db_path(tmp_path)
+    assert db.get_coordinator_nag_state("auto-x", db_path=path) is None
+    nagged_at = db.mark_coordinator_nagged("auto-x", db_path=path)
+    assert db.get_coordinator_nag_state("auto-x", db_path=path) == nagged_at
+
+
+def test_coordinator_nag_state_upserts(tmp_path):
+    path = _db_path(tmp_path)
+    first = db.mark_coordinator_nagged("auto-x", db_path=path)
+    second = db.mark_coordinator_nagged("auto-x", db_path=path)
+    assert second >= first
+    assert db.get_coordinator_nag_state("auto-x", db_path=path) == second
+
+
+def test_list_open_questions_for_session_spans_missions_and_pillars(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", "auto-x", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", "auto-x", db_path=path)
+    db.ask_question(mission["mission_id"], "mission q", "guest:a", "A", db_path=path)
+    db.ask_question(mission["mission_id"], "pillar q", "guest:b", "B", pillar_id=pillar["pillar_id"], db_path=path)
+
+    open_qs = db.list_open_questions_for_session("auto-x", db_path=path)
+    assert {q["question"] for q in open_qs} == {"mission q", "pillar q"}
+
+
+def test_list_open_questions_for_session_excludes_answered(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", "auto-x", db_path=path)
+    entry = db.ask_question(mission["mission_id"], "q", "guest:a", "A", db_path=path)
+    db.answer_question(mission["mission_id"], entry["entry_id"], "ans", "auto-x", db_path=path)
+
+    assert db.list_open_questions_for_session("auto-x", db_path=path) == []
+
+
+def test_list_coordinators_with_open_questions_groups_by_session(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", "auto-top", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", "auto-pillar", db_path=path)
+    db.ask_question(mission["mission_id"], "mission q", "guest:a", "A", db_path=path)
+    db.ask_question(mission["mission_id"], "pillar q", "guest:b", "B", pillar_id=pillar["pillar_id"], db_path=path)
+
+    grouped = db.list_coordinators_with_open_questions(db_path=path)
+    assert set(grouped.keys()) == {"auto-top", "auto-pillar"}
+    assert grouped["auto-top"][0]["question"] == "mission q"
+    assert grouped["auto-pillar"][0]["question"] == "pillar q"
+
+
+def test_list_coordinators_with_open_questions_excludes_answered(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", "auto-x", db_path=path)
+    entry = db.ask_question(mission["mission_id"], "q", "guest:a", "A", db_path=path)
+    db.answer_question(mission["mission_id"], entry["entry_id"], "ans", "auto-x", db_path=path)
+
+    assert db.list_coordinators_with_open_questions(db_path=path) == {}
+
+
+def test_list_coordinators_with_open_questions_empty_when_no_coordinator_set(tmp_path):
+    """A mission/pillar with no coordinator_session set can't be nagged --
+    the bulk query must not crash or produce a bogus '' key."""
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)  # no coordinator_session
+    db.ask_question(mission["mission_id"], "q", "guest:a", "A", db_path=path)
+    assert db.list_coordinators_with_open_questions(db_path=path) == {}

@@ -3,8 +3,9 @@
 Mission Control (`/mission-control`) hosts chromeless native sites, one per
 mission, with immutable revision history. P1: missions + site hosting. P2
 (§6): visitor Q&A attribution. P3 (§7): presence and "what changed since you
-last looked." Live data feeds beyond that arrive with their own phase — if
-you're looking for those, they aren't here yet.
+last looked." P4 (§8): pillars — a mission split into dedicated
+sub-coordinators, each with its own site, presence surface, and anchored
+conversation.
 
 Dashboard base URL: `https://localhost:8080` on host-network sessions,
 `https://host.docker.internal:8080` from bridge-network containers (`curl -sk`).
@@ -224,3 +225,229 @@ it.
 Handlers: `get_mission`/`mark_mission_seen` in
 `tools/dashboard/plugins/mission_control/entrypoints/api.py`, backed by
 `mission_last_seen` in `tools.dashboard.dao.mission_control_db`.
+
+## 8. Pillars — sub-missions with their own coordinator (P4)
+
+A large mission (data pipeline + schema + delivery + API/UI, say) doesn't
+have to live in one 55,000-word binder. Split it into **pillars**: each one
+a first-class sub-mission with its own `coordinator_session`, its own
+site-revision history, its own presence surface, scoped conversation
+anchored to specific artifacts. Every pillar route below is a structural
+mirror of the mission-level route it corresponds to — same shape, one
+level down.
+
+**Generic infra, not a fixed pillar list.** Nothing here assumes a
+particular number or kind of pillar. You decide the split for your own
+mission (this doc's examples use a 4-pillar OSS-data-product breakdown, but
+that's illustrative, not prescriptive) and create exactly the pillars you
+need.
+
+### Create pillars (the top-level session does this, once per pillar)
+
+```bash
+curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/pillars \
+  -X POST -H 'Content-Type: application/json' \
+  -d '{"name": "Dataset & Schema", "coordinator_session": "auto-schema-abc", "color": "#34d399"}'
+# → 201 {"pillar": {"pillar_id": "<uuid>", "mission_id": "...", "name": "...", "coordinator_session": "...", "color": "...", "created_at": ..., "current_revision_id": null, "status": "active"}}
+```
+
+`color` is a free-text hex/CSS color hint for the mission dashboard's
+pillar-grid dot and your own site's chrome, if you want visual consistency
+between the two — purely cosmetic, no validation.
+
+### A pillar's own site (identical shape to a mission's)
+
+```bash
+curl -sk https://host.docker.internal:8080/api/pillars/<pillar_id>/site \
+  -X POST -H 'Content-Type: application/json' \
+  -d '{"html": "<full self-contained HTML>", "note": "rev3: resolver design finalized"}'
+# → 201 {"revision": {"revision_id", "revision_seq", "note", "created_at", "byte_size", "pillar_id"}}
+```
+
+```bash
+GET    /api/pillars/<pillar_id>                                    # pillar + current revision + since_last_visit
+DELETE /api/pillars/<pillar_id>
+POST   /api/pillars/<pillar_id>/status                             # same {"status": "active"|"paused"|"complete"} as missions
+POST   /api/pillars/<pillar_id>/seen
+GET    /api/pillars/<pillar_id>/site
+GET    /api/pillars/<pillar_id>/site/revisions
+GET    /api/pillars/<pillar_id>/site/revisions/<revision_id>
+POST   /api/pillars/<pillar_id>/site/revisions/<revision_id>/activate
+GET    /missions/<mission_id>/pillars/<pillar_id>                  # chromeless direct-serve
+```
+
+`GET /missions/<mission_id>/pillars/<pillar_id>` is a convenience URL for
+bookmarking/refreshing on one pillar once you're already inside a mission —
+**it is never the link you hand out**. See "one link per mission" below.
+
+### One link per mission, not one per pillar
+
+The share link you mint (§6) and hand to a person is always the
+**mission-level** link. A guest navigates to a specific pillar from inside
+the mission's own page — your top-level HTML fetches
+`GET /api/missions/<id>/pillars` and links or embeds pillar content
+client-side. There is no separate onboarding step per pillar.
+
+### Anchored conversation — one call, no `kind` to pick
+
+Same shape as mission-level Q&A (§6), scoped to a pillar, with an optional
+`anchor` — free text your own HTML defines to say what specifically is
+being discussed (a table name, a screenshot id, an API field):
+
+```bash
+curl -sk "https://host.docker.internal:8080/api/pillars/<pillar_id>/questions?as=<token>" \
+  -X POST -H 'Content-Type: application/json' \
+  -d '{"question": "Why three trigger paths instead of one?", "anchor": "table:oss_purl_resolution"}'
+```
+
+```bash
+GET    /api/pillars/<pillar_id>/questions
+POST   /api/pillars/<pillar_id>/questions/<entry_id>/answer          # {"answer": "..."} -- exactly one, final
+POST   /api/pillars/<pillar_id>/questions/<entry_id>/update          # {"text": "..."} -- any number, doesn't close it
+```
+
+There's no `kind` field (question/proposal/comment) — a message is a
+message, tracked with a reply. Don't invent a taxonomy the API doesn't
+have; typing it would just be a place to be wrong for no benefit.
+
+**Delivery.** A message on a pillar screen goes to **both** that pillar's
+`coordinator_session` (you — a reply is expected) **and** the mission's
+top-level `coordinator_session` (copied, tracking only, no reply expected
+from them). A mission-level message (no pillar) goes to the mission's
+coordinator only, unchanged from P2. Your CrossTalk envelope tells you
+which role you're in.
+
+**Only answer once it's actually correct — not provisionally.** An entry
+with no `answer` yet is simply open; there's no separate "processing"
+status to set. If a task will take a while (redesigning a screen,
+re-running an experiment), post interim visibility as many times as you
+want without closing the question out:
+
+```bash
+curl -sk https://host.docker.internal:8080/api/pillars/<pillar_id>/questions/<entry_id>/update \
+  -X POST -H 'Content-Type: application/json' -d '{"text": "capturing the new screenshot now"}'
+```
+
+Then file exactly one concise closing answer when it's genuinely done.
+
+### The cross-pillar decision log — Mission Control's job, not yours
+
+The top-level mission tracks every unit of work as it lands across every
+pillar — you don't maintain this yourself:
+
+```bash
+curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/decision-log
+# → {"decision_log": [{"log_id", "mission_id", "pillar_id", "pillar_name",
+#     "kind": "revision"|"answer", "revision_seq", "text", "created_at"}, ...]}
+```
+
+This is a computed rollup (every revision pushed anywhere in the mission,
+every answered question), newest first — not an editorial "these were the
+real decisions" judgment. If you want an explicit decision distinct from
+routine progress, say so in your `note`/`answer` text; the log surfaces
+what you wrote, it doesn't interpret it.
+
+### Idle nag — you'll get reminded if you forget to answer
+
+If a coordinator (mission- or pillar-level) has an open question and goes
+idle for about a minute, Mission Control sends a CrossTalk nag listing what's
+outstanding. This is separate from your own `graph set-nag` configuration
+(if you have one) — it won't touch or override it. You don't need to do
+anything to opt in or out beyond actually answering your open questions.
+
+### Presence — same convention, one surface per pillar
+
+`surfaceId: "pillar:" + pillar_id`, exactly like a mission's
+`"mission:" + mission_id` (§7). `push_pillar_site_revision` and
+`answer_pillar_question` already write a presence touch for your
+`coordinator_session` automatically, same zero-integration deal as
+mission-level.
+
+### The mission top-bar — a reusable, inline-able navigation widget
+
+A small, mobile-first, sticky bar for your **mission-level** HTML (the page
+the one share link points to): shows who's currently around and lets a
+visitor jump between pillars without you hand-rolling a nav component.
+**Inline this snippet directly into your generated HTML** — do not
+reference it as an external `/static/...` script. Mission sites are
+meant to stay self-contained (some have survived multiple hosting
+migrations specifically because of this property); a future viewer path
+(auto.network relay-served bytes) may not serve platform static assets
+alongside your page at all, so a same-origin script tag is a real risk, not
+just a style preference.
+
+```html
+<div id="mc-topbar" style="position:sticky;top:0;z-index:40;display:flex;
+     align-items:center;justify-content:space-between;gap:8px;padding:8px 12px;
+     background:#12172380;backdrop-filter:blur(6px);border-bottom:1px solid #1f2937;
+     font:12px/1.4 system-ui,sans-serif;color:#e5e7eb;">
+  <div id="mc-topbar-switcher" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+    <span id="mc-topbar-label">Loading…</span>
+    <span style="color:#6b7280;">▾</span>
+  </div>
+  <div id="mc-topbar-presence" style="display:flex;align-items:center;gap:-6px;"></div>
+</div>
+<div id="mc-topbar-menu" style="display:none;position:fixed;top:44px;left:8px;right:8px;
+     max-width:280px;background:#12172a;border:1px solid #1f2937;border-radius:8px;
+     padding:4px;z-index:41;"></div>
+<script>
+(function () {
+  var MISSION_ID = "<mission_id>";        // fill in at build time
+  var CURRENT_PILLAR_ID = null;           // set to a pillar_id on that pillar's own page, else null
+  var API_BASE = "";                      // same origin as this page
+
+  function el(tag, attrs) {
+    var e = document.createElement(tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  fetch(API_BASE + "/api/missions/" + MISSION_ID + "/pillars")
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      var pillars = (data && data.pillars) || [];
+      var current = pillars.find(function (p) { return p.pillar_id === CURRENT_PILLAR_ID; });
+      document.getElementById("mc-topbar-label").textContent =
+        current ? current.name : "Mission overview";
+
+      var menu = document.getElementById("mc-topbar-menu");
+      var top = el("div", { style: "padding:8px 10px;cursor:pointer;color:#a5b4fc;" });
+      top.textContent = "← Mission overview";
+      top.onclick = function () { window.location.href = "/missions/" + MISSION_ID; };
+      menu.appendChild(top);
+      pillars.forEach(function (p) {
+        var row = el("div", { style: "padding:8px 10px;cursor:pointer;display:flex;align-items:center;gap:6px;" });
+        var dot = el("span", { style: "width:8px;height:8px;border-radius:9999px;background:" + (p.color || "#6b7280") + ";" });
+        row.appendChild(dot);
+        row.appendChild(document.createTextNode(p.name));
+        row.onclick = function () { window.location.href = "/missions/" + MISSION_ID + "/pillars/" + p.pillar_id; };
+        menu.appendChild(row);
+      });
+      document.getElementById("mc-topbar-switcher").onclick = function () {
+        menu.style.display = menu.style.display === "none" ? "block" : "none";
+      };
+
+      // Presence: same-origin surface-presence.js IS safe to reference --
+      // it's not your own content, it's the platform substrate every
+      // dashboard page already loads; only YOUR page's own asset
+      // self-containment is the concern this snippet is designed around.
+      var surfaceId = CURRENT_PILLAR_ID ? "pillar:" + CURRENT_PILLAR_ID : "mission:" + MISSION_ID;
+      if (window.Presence) {
+        var state = Presence.alpine ? null : null; // Presence.alpine() is an Alpine wrapper;
+        // outside an Alpine page, poll participants directly instead:
+        fetch(API_BASE + "/api/graph/settings/dashboard.surface.presence%231")
+          .catch(function () {}); // best-effort; wire to your own polling/render if you want live avatars
+      }
+    })
+    .catch(function () {
+      document.getElementById("mc-topbar-label").textContent = "Mission Control";
+    });
+})();
+</script>
+```
+
+The presence half is deliberately left as a stub above — `Presence.alpine()`
+is an Alpine.js-specific wrapper; if your site doesn't run Alpine, poll
+the surface directly or ask for a plain-JS presence reader when you build
+against this — flag it as a gap if you need it, don't reverse-engineer
+`surface-presence.js` yourself.
