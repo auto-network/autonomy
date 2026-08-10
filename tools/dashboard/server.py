@@ -4651,22 +4651,32 @@ def _read_chain_window_backward(
 
 
 def _last_complete_offset_in(path: Path) -> int:
-    """Largest offset ending on a complete line (0 if none)."""
+    """Largest offset ending on a complete line (0 if none).
+
+    Scans backward CHUNKWISE to the actual preceding newline — round-2
+    review RB1: the old single-64KiB probe mapped any unterminated
+    trailing line larger than 64KiB to "complete at physical EOF", which
+    re-opened the B1 permanent-loss timeline at production line sizes
+    (large tool results are normal). An absurd line costs a longer scan,
+    never a wrong answer.
+    """
     try:
         with open(path, "rb") as fh:
             fh.seek(0, 2)
             size = fh.tell()
-            if size == 0:
-                return 0
-            back = min(size, 65536)
-            fh.seek(size - back)
-            buf = fh.read(back)
+            pos = size
+            chunk = 65536
+            while pos > 0:
+                read = min(chunk, pos)
+                fh.seek(pos - read)
+                buf = fh.read(read)
+                nl = buf.rfind(b"\n")
+                if nl != -1:
+                    return pos - read + nl + 1
+                pos -= read
+            return 0
     except OSError:
         return 0
-    nl = buf.rfind(b"\n")
-    if nl == -1:
-        return 0 if size <= 65536 else size  # give up on absurd lines
-    return size - back + nl + 1
 
 
 def _read_chain_forward(
@@ -4809,7 +4819,21 @@ def _reconstruct_read_state(
     pp_state = harness.new_postprocess_state()
     tracker = TaskStateTracker()
     last_enqueue: str | None = None
-    agent_descriptions: dict[str, str] = {}
+
+    # Round-2 review RB2: the claim ALLOCATION is part of the stream state.
+    # Collecting descriptions alone left claimed_subagents empty, so a
+    # replay re-claimed the first matching subagent for a repeated
+    # description and emitted the wrong tool_calls at the same canonical
+    # ref. Replay the SAME enrichment function over the prefix so both the
+    # descriptions and the claim set stand exactly as they did at the
+    # cursor (the prefix entries themselves are discarded).
+    class _ReconTs:
+        agent_descriptions: dict[str, str] = {}
+        claimed_subagents: set[str] = set()
+    recon_ts = _ReconTs()
+    recon_ts.agent_descriptions = {}
+    recon_ts.claimed_subagents = set()
+
     for stem, path in chain:
         try:
             complete = _last_complete_offset_in(path)
@@ -4831,12 +4855,12 @@ def _reconstruct_read_state(
             out = harness.postprocess_entries(
                 prefix, session_dir=path.parent / path.stem, state=pp_state,
             )
-            for e in out:
-                if e.get("type") == "tool_use" and e.get("tool_name") == "Agent":
-                    tid = e.get("tool_id", "")
-                    desc = (e.get("input") or {}).get("description", "")
-                    if tid and desc:
-                        agent_descriptions[tid] = desc
+            try:
+                session_monitor_mod.SessionMonitor._enrich_agent_entries(
+                    {"jsonl_path": str(path)}, recon_ts, out,
+                )
+            except Exception:
+                logger.exception("tail: prefix agent-claim replay failed")
             tracker.enrich("_reconstruct", out)
         if stem == upto_file:
             break
@@ -4845,7 +4869,8 @@ def _reconstruct_read_state(
         "postprocess_state": pp_state,
         "tracker": tracker,
         "last_enqueue_content": last_enqueue,
-        "agent_descriptions": agent_descriptions,
+        "agent_descriptions": recon_ts.agent_descriptions,
+        "claimed_subagents": recon_ts.claimed_subagents,
     }
 
 
@@ -4957,7 +4982,7 @@ def _parse_and_enrich_segments(
     # matching state).
     agent_state = None
     if recon is not None:
-        agent_state = (recon["agent_descriptions"], set())
+        agent_state = (recon["agent_descriptions"], recon["claimed_subagents"])
     elif snap is not None:
         agent_state = (snap["agent_descriptions"], snap["claimed_subagents"])
     if agent_state is not None and db_row is not None:
