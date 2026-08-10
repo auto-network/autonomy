@@ -426,9 +426,19 @@
       // --- Workspace dropdown state (fetched from /api/projects) ---
       // orgGroups[i].org is a resolved identity object
       // {slug,name,color,favicon,initial,resolved} — the header renders a
-      // glyph + name and inline-colors the text from org.color.
+      // glyph + name and inline-colors the text from org.color. The launch
+      // menu consumes visibleOrgGroups so it follows the page-level org
+      // filter without discarding the full fetched registry.
       projects: [],
       orgGroups: [],
+
+      get visibleOrgGroups() {
+        var selectedOrg = this.selectedOrg;
+        if (!selectedOrg) return this.orgGroups;
+        return this.orgGroups.filter(function(group) {
+          return !!(group.org && group.org.slug === selectedOrg);
+        });
+      },
 
       // --- Org filter (toolbar dropdown, between zoom + launch button) ---
       // '' means "All orgs" (default). Filters both the Active and Recent
