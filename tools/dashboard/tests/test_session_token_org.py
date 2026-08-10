@@ -116,11 +116,11 @@ def test_unknown_token_is_401(server_mod, monkeypatch):
 
 
 def test_orgless_agent_token_is_refused_not_local(server_mod, monkeypatch):
-    # The reject-NULL guard: a legacy/mis-minted AGENT token (no org, agent
-    # session type) is refused, never treated as a local caller.
+    # The reject-NULL guard: an org-less token that is not positively local is
+    # refused, never treated as a local caller.
     monkeypatch.setattr(server_mod.auth_db, "resolve_token",
                         lambda _h: ("auto-legacy", None))
-    monkeypatch.setattr(server_mod, "_org_scoped_session", lambda _s: True)
+    monkeypatch.setattr(server_mod, "_is_local_caller", lambda _s: False)
     identity, err = server_mod.authenticate_session_request(_req("Bearer x"))
     assert identity is None
     assert err.status_code == 403
@@ -128,19 +128,17 @@ def test_orgless_agent_token_is_refused_not_local(server_mod, monkeypatch):
 
 
 def test_orgless_host_token_is_local(server_mod, monkeypatch):
-    # A genuine host/local token (no org) resolves as local, even with the
-    # path-shaped project a host session carries.
+    # A genuine host/local token (no org) resolves as local.
     monkeypatch.setattr(server_mod.auth_db, "resolve_token",
                         lambda _h: ("host-1", None))
-    monkeypatch.setattr(server_mod, "_org_scoped_session", lambda _s: False)
+    monkeypatch.setattr(server_mod, "_is_local_caller", lambda _s: True)
     identity, err = server_mod.authenticate_session_request(_req("Bearer x"))
     assert err is None
     assert identity == ("host-1", None)
 
 
-def test_org_scoped_session_discriminates_on_type_not_project(server_mod, monkeypatch):
+def test_is_local_caller_requires_a_positive_host_assertion(server_mod, monkeypatch):
     from tools.dashboard.dao import dashboard_db
-    # A host session carries a path-shaped project but is NOT org-scoped.
     rows = {
         "host-1": {"type": "host", "project": "-home-jeremy-workspace-autonomy"},
         "auto-c": {"type": "container", "project": "autonomy-developer"},
@@ -150,8 +148,15 @@ def test_org_scoped_session_discriminates_on_type_not_project(server_mod, monkey
         "auto-t": {"type": "terminal", "project": "-workspace-repo"},
     }
     monkeypatch.setattr(dashboard_db, "get_session", lambda s: rows.get(s))
-    # host + untracked -> local (allowed); every agent type -> org-scoped (refused).
-    assert server_mod._org_scoped_session("host-1") is False
-    assert server_mod._org_scoped_session("missing") is False   # no row -> local
+    # Only an existing type='host' row is local (even with a path-shaped project).
+    assert server_mod._is_local_caller("host-1") is True
     for agent in ("auto-c", "auto-d", "auto-l", "auto-a", "auto-t"):
-        assert server_mod._org_scoped_session(agent) is True
+        assert server_mod._is_local_caller(agent) is False
+    # Absence of evidence is NOT locality: no row / unknown / error all refuse.
+    assert server_mod._is_local_caller("rowless-agent-token") is False  # the 1023 case
+    monkeypatch.setattr(dashboard_db, "get_session",
+                        lambda s: {"type": "weird-future-type"})
+    assert server_mod._is_local_caller("x") is False
+    monkeypatch.setattr(dashboard_db, "get_session",
+                        lambda s: (_ for _ in ()).throw(RuntimeError("db down")))
+    assert server_mod._is_local_caller("x") is False  # exception -> refuse, not allow

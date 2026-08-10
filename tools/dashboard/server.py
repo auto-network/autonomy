@@ -3106,27 +3106,26 @@ async def api_terminal_rename(request):
 
 # ── CrossTalk API ────────────────────────────────────────────────────────────
 
-#: Session type that identifies a local/operator caller. Everything else the
-#: launcher can mint (``container``, ``dispatch``, ``librarian``, ``chatwith``,
-#: ``agentic``, ``terminal``, …) is a docker-launched agent subject to the
-#: fail-closed org stamp, so an org-less token for any of them is legacy or
-#: mis-minted. Discriminating on the launcher-written ``type`` field keeps this
-#: cache-independent — we never route through the org-resolving workspace map,
-#: whose staleness (b4lbv) could otherwise start refusing legitimate sessions.
+#: The only session type that identifies a local/operator caller. Everything
+#: else the launcher can mint (``container``, ``dispatch``, ``librarian``,
+#: ``chatwith``, ``agentic``, ``terminal``, …) is a docker-launched agent
+#: subject to the fail-closed org stamp.
 _LOCAL_SESSION_TYPE = "host"
 
 
-def _org_scoped_session(session: str) -> bool:
-    """True when *session* is a tracked remote-agent session that must carry an
-    org — i.e. any launcher-minted type other than ``host``.
+def _is_local_caller(session: str) -> bool:
+    """True ONLY for a positively-asserted local/operator session: an existing
+    session row whose ``type`` is ``host``.
 
-    Used only to classify an org-less token: such a token belonging to an agent
-    session is legacy or mis-minted and must be refused, never treated as a
-    local caller. ``host`` sessions (and untracked callers) are local and
-    authenticate with a NULL org. Decided deliberately: ``terminal`` and
-    ``agentic`` are agent types and ARE refused when org-less — treating either
-    as local would hand it dashboard authority once settings routes consume the
-    org (h4kzx). Best-effort; cache-independent by construction.
+    Used to classify an org-less token. Locality is a POSITIVE assertion, never
+    an absence: no row, an unknown type, an unreadable row, or a lookup error
+    all mean "not local" — an org-less token in any of those states is refused.
+    Rowless is the NORMAL end state for aged-out dispatch/librarian containers
+    (their tokens outlive their session rows), so admitting a rowless token as
+    local would hand every one of them dashboard authority once settings routes
+    consume the org (h4kzx). Discriminates on the launcher-written ``type``
+    field only, so it stays cache-independent (never the b4lbv-stale workspace
+    map).
     """
     try:
         from tools.dashboard.dao import dashboard_db
@@ -3134,9 +3133,8 @@ def _org_scoped_session(session: str) -> bool:
     except Exception:
         return False
     if not row:
-        return False  # untracked -> not a live agent container; NULL org is local
-    stype = (row.get("type") or "").strip()
-    return bool(stype) and stype != _LOCAL_SESSION_TYPE
+        return False
+    return (row.get("type") or "").strip() == _LOCAL_SESSION_TYPE
 
 
 def authenticate_session_request(
@@ -3168,7 +3166,7 @@ def authenticate_session_request(
         return None, JSONResponse(
             {"error": "invalid or revoked token"}, status_code=401)
     session, org = resolved
-    if org is None and _org_scoped_session(session):
+    if org is None and not _is_local_caller(session):
         return None, JSONResponse(
             {"error": (
                 "session token carries no organization; relaunch the session "
