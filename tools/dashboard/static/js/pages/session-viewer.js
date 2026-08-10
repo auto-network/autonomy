@@ -534,14 +534,15 @@
       _expandView: {},
       _groupExpanded: {},
       _groupExpandView: {},
-      // ── Turn-correction overlay (auto-edec1.4) ─────────────────
-      // Sparse map keyed by user entry message_id. Each value is the
-      // serialized turn-correction row from /api/session/.../turn-corrections
-      // ({status, original_sha256, corrected_text, ...}). Renderer
-      // helpers in SessionRenderer read this to overlay user tiles.
-      _corrections: {},
+      // ── Turn-correction overlay (auto-edec1.4, delivery auto-hmow2) ──
+      // The correction data lives in ONE place — the shared session store's
+      // ``_turnCorrections`` map (session-store.js). The renderer joins user
+      // tiles to it; the SSE handler, GET hydration, and accept/dismiss all
+      // write only that map. The viewer keeps no duplicate correction map.
+      // ``_correctionDisplayMode`` is pure view state (accepted-preview raw
+      // toggle), not correction data. ``_correctionHydrateToken`` guards
+      // against out-of-order GET hydration responses.
       _correctionDisplayMode: {},
-      _correctionRefreshTimer: null,
       _correctionHydrateToken: 0,
 
       // Backfill progress (page mode only)
@@ -1643,16 +1644,12 @@
           },
           function(newLen) {
             var s = Alpine.store('sessions')[sid];
-            var sawTurnCorrection = false;
             if (newLen > lastLen) {
               if (s && s._displayDirty) {
                 self._rebuildDisplay();
               } else if (s) {
                 // Incremental: append each new entry (O(1) per entry)
                 for (var i = lastLen; i < newLen; i++) {
-                  if (s.entries[i] && s.entries[i].type === 'turn_correction') {
-                    sawTurnCorrection = true;
-                  }
                   window.SessionDisplay.appendOne(self.displayEntries, s.entries, i);
                 }
               }
@@ -1664,9 +1661,6 @@
             }
             if (self.autoScroll) {
               self._scrollToBottom();
-            }
-            if (sawTurnCorrection) {
-              self._refreshCorrectionsForNewEvent();
             }
             // Update overlay header if in overlay mode
             if (self._mode === 'overlay') self._updateHeader();
@@ -2372,23 +2366,17 @@
       },
 
       // ── Turn-correction overlay hydration / mutation ───────────
+      //
+      // All correction state lives in the shared session store's single
+      // ``_turnCorrections`` map, written through ``window.applyTurnCorrection``.
+      // Hydration seeds it from persisted rows; accept/dismiss update it
+      // optimistically and reconcile against the server row. The viewer holds
+      // no duplicate map, appends nothing to ``entries``, and never emits a
+      // synthetic message entry — the renderer joins tiles to this one map.
 
-      // Pull persisted correction rows for this session and seed
-      // ``_corrections``. Sparse: empty response → empty map. Failures
-      // are swallowed so a transient persistence outage doesn't block
-      // the rest of the viewer from rendering.
-      _refreshCorrectionsForNewEvent() {
-        var self = this;
-        this._hydrateCorrections({ fresh: true });
-        if (this._correctionRefreshTimer) {
-          clearTimeout(this._correctionRefreshTimer);
-        }
-        this._correctionRefreshTimer = setTimeout(function() {
-          self._correctionRefreshTimer = null;
-          self._hydrateCorrections({ fresh: true });
-        }, 350);
-      },
-
+      // Pull persisted correction rows for this session and seed the store
+      // map. Sparse: empty response → empty map. Failures are swallowed so a
+      // transient persistence outage doesn't block the rest of the viewer.
       async _hydrateCorrections(opts) {
         if (!this.sessionKey) return;
         var token = ++this._correctionHydrateToken;
@@ -2404,25 +2392,15 @@
           if (!res.ok) return;
           var data = await res.json();
           if (token !== this._correctionHydrateToken) return;
-          var map = {};
+          var ss = window.getSessionStore(this.sessionKey);
+          if (!ss) return;
           var rows = (data && data.corrections) || [];
           for (var i = 0; i < rows.length; i++) {
-            var row = rows[i];
-            if (row && row.target_message_id) map[row.target_message_id] = row;
+            window.applyTurnCorrection(ss, rows[i]);
           }
-          this._corrections = map;
-          var ss = window.getSessionStore(this.sessionKey);
-          if (ss) ss._turnCorrections = Object.assign({}, map);
         } catch (e) {
           // best-effort
         }
-      },
-
-      _syncCorrectionsFromStore() {
-        if (!this.sessionKey) return;
-        var ss = window.getSessionStore(this.sessionKey);
-        if (!ss || !ss._turnCorrections) return;
-        this._corrections = Object.assign({}, ss._turnCorrections);
       },
 
       async acceptCorrection(entry) {
@@ -2435,22 +2413,14 @@
 
       async _transitionCorrection(entry, action, terminalStatus) {
         if (!entry || !entry.message_id) return;
-        this._syncCorrectionsFromStore();
-        var c = this._corrections[entry.message_id];
-        if (!c) return;
         var ss = window.getSessionStore(this.sessionKey);
-        // Optimistic UI: flip the local state immediately so the tile
-        // reacts without a round-trip; the network call confirms.
+        if (!ss) return;
+        var c = (ss._turnCorrections || {})[entry.message_id];
+        if (!c) return;
+        // Optimistic UI: flip the store state immediately so the tile reacts
+        // without a round-trip; the network call confirms or rolls back.
         var prev = c.status;
-        var next = Object.assign({}, c, { status: terminalStatus });
-        this._corrections = Object.assign({}, this._corrections, {
-          [entry.message_id]: next,
-        });
-        if (ss) {
-          ss._turnCorrections = Object.assign({}, ss._turnCorrections || {}, {
-            [entry.message_id]: next,
-          });
-        }
+        window.applyTurnCorrection(ss, Object.assign({}, c, { status: terminalStatus }));
         try {
           var url = '/api/session/' + encodeURIComponent(this.sessionKey)
             + '/turn-corrections/' + encodeURIComponent(entry.message_id)
@@ -2462,43 +2432,22 @@
           });
           if (!res.ok) {
             if (res.status === 409) {
+              // Server rejected our transition (stale/already-terminal) —
+              // rehydrate the authoritative row rather than guess.
               await this._hydrateCorrections({ fresh: true });
               return;
             }
             // Roll back on failure so the operator can retry.
-            var rollback = Object.assign({}, c, { status: prev });
-            this._corrections = Object.assign({}, this._corrections, {
-              [entry.message_id]: rollback,
-            });
-            if (ss) {
-              ss._turnCorrections = Object.assign({}, ss._turnCorrections || {}, {
-                [entry.message_id]: rollback,
-              });
-            }
+            window.applyTurnCorrection(ss, Object.assign({}, c, { status: prev }));
             return;
           }
           var body = await res.json();
           var serverRow = body && body.correction;
           if (serverRow) {
-            this._corrections = Object.assign({}, this._corrections, {
-              [entry.message_id]: serverRow,
-            });
-            if (ss) {
-              ss._turnCorrections = Object.assign({}, ss._turnCorrections || {}, {
-                [entry.message_id]: serverRow,
-              });
-            }
+            window.applyTurnCorrection(ss, serverRow);
           }
         } catch (e) {
-          var rollback = Object.assign({}, c, { status: prev });
-          this._corrections = Object.assign({}, this._corrections, {
-            [entry.message_id]: rollback,
-          });
-          if (ss) {
-            ss._turnCorrections = Object.assign({}, ss._turnCorrections || {}, {
-              [entry.message_id]: rollback,
-            });
-          }
+          window.applyTurnCorrection(ss, Object.assign({}, c, { status: prev }));
         }
       },
 
@@ -2608,11 +2557,7 @@
         this._expandView = {};
         this._groupExpanded = {};
         this._groupExpandView = {};
-        this._corrections = {};
-        if (this._correctionRefreshTimer) {
-          clearTimeout(this._correctionRefreshTimer);
-          this._correctionRefreshTimer = null;
-        }
+        this._correctionDisplayMode = {};
         this._correctionHydrateToken = 0;
         this.autoScroll = true;
         this._runDir = '';

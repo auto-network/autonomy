@@ -349,23 +349,23 @@ The command shape (v1 contract):
 
 `corrected_text` is the **full replacement message**. Pass `--stdin` for
 long corrections. Do **not** supply `target_message_id` or
-`original_sha256` — the session side resolves them.
+`original_sha256` — the dashboard resolves them server-side from your
+session's recent user turns.
 
-**Delivery requirement:** the JSON printed by this command is the correction
-event. Run it as a standalone tool call and leave its output visible in the
-session log. Never pipe, redirect, capture, or suppress that output (for
-example with `>/dev/null`, `&>/dev/null`, a downstream pipe, or command
-substitution). A zero exit status only means the CLI emitted JSON; if that JSON
-is absent from the recorded tool result, the dashboard may have no correction
-to render.
+**Delivery:** the command submits the correction over one authenticated
+dashboard API call — the transport is the request, not the transcript. Its
+printed output is only a **receipt**; it is safe to redirect, pipe, capture, or
+discard (`>/dev/null`) without affecting delivery. A zero exit status means the
+dashboard accepted and persisted the correction; a non-zero exit means it did
+not (and says why on stderr).
 
 Workflow, end to end:
 
 1. Read the message and decide the full corrected replacement.
-2. Emit `graph turn-correction suggest ... --json` immediately in the
-   same turn (`--stdin` if long).
-3. The session attaches it to the most likely nearby user turn and
-   shows an accept/dismiss overlay.
+2. Run `graph turn-correction suggest ...` immediately in the same turn
+   (`--stdin` if long).
+3. The dashboard attaches it to the most likely nearby user turn and
+   shows a live accept/dismiss overlay in every open viewer.
 4. Do **not** talk about the correction. Just issue it and keep
    working if the path forward is still clear.
 5. Only stop and acknowledge it when the meaning is too uncertain to
@@ -379,7 +379,7 @@ graph turn-correction suggest \
   "What are the implications of the new auth fix?" \
   --mode {{ turn_correction.aggressiveness }} \
   --reason "voice-dictation typos obscured intent" \
-  --confidence 0.9 --json
+  --confidence 0.9
 ```
 
 Then continue your normal reply against the corrected reading. If the

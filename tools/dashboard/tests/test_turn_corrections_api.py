@@ -21,7 +21,6 @@ import pytest
 from starlette.testclient import TestClient
 
 from tools.dashboard.dao import dashboard_db
-from tools.dashboard.session_harness import parse_codex_log_line
 
 
 SESSION_UUID = "uuid-auto-test-designer"
@@ -500,685 +499,6 @@ def test_hydration_survives_fresh_client(test_app):
 # ── SessionMonitor: replay/warm-up ────────────────────────────
 
 
-def test_session_monitor_persists_turn_correction_entries(test_app):
-    """Unresolved turn-correction entries bind to the prior user turn."""
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
-
-    entries = [
-        {"type": "user", "content": "Jason encoded", "message_id": "msg-1"},
-        {
-            "type": "turn_correction",
-            "corrected_text": "JSON encoded",
-            "mode": "balanced",
-            "confidence": 0.9,
-            "reason": "dictation cleanup",
-        },
-    ]
-    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
-    ts = _TailState()
-    SessionMonitor._persist_turn_corrections(row, ts, entries)
-
-    stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-1")
-    assert stored is not None
-    assert stored["status"] == "pending"
-    assert stored["target_message_id"] == "msg-1"
-    assert stored["original_sha256"] == _sha("Jason encoded")
-    assert stored["corrected_text"] == "JSON encoded"
-    assert stored["mode"] == "balanced"
-    assert stored["confidence"] == pytest.approx(0.9)
-    assert stored["reason"] == "dictation cleanup"
-    assert entries[1]["target_message_id"] == "msg-1"
-    assert entries[1]["original_sha256"] == _sha("Jason encoded")
-
-
-def test_session_monitor_skips_non_correction_entries(test_app):
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
-
-    entries = [
-        {"type": "user", "content": "hi", "message_id": "msg-1"},
-        {"type": "assistant", "content": "hello", "message_id": "msg-2"},
-    ]
-    row = {"session_uuid": SESSION_UUID}
-    SessionMonitor._persist_turn_corrections(row, _TailState(), entries)
-    assert dashboard_db.list_turn_corrections(SESSION_UUID) == []
-
-
-def test_session_monitor_skips_session_without_uuid(test_app):
-    """Session still resolving — the helper defends by skipping persistence."""
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
-
-    entries = [{
-        "type": "user",
-        "content": "text",
-        "message_id": "msg-1",
-    }, {
-        "type": "turn_correction",
-        "corrected_text": "corrected",
-    }]
-    row = {"session_uuid": None}
-    SessionMonitor._persist_turn_corrections(row, _TailState(), entries)
-    assert dashboard_db.get_turn_correction("", "msg-1") is None
-
-
-def test_session_monitor_skips_malformed_event(test_app):
-    """Missing corrected_text or no resolvable user target => silently dropped."""
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
-
-    entries = [
-        {  # no preceding/following user turn to resolve against
-            "type": "turn_correction",
-            "corrected_text": "y",
-        },
-        {  # missing corrected_text
-            "type": "turn_correction",
-            "mode": "balanced",
-        },
-    ]
-    row = {"session_uuid": SESSION_UUID}
-    SessionMonitor._persist_turn_corrections(row, _TailState(), entries)
-    assert dashboard_db.list_turn_corrections(SESSION_UUID) == []
-
-
-def test_session_monitor_uses_recent_history_when_correction_arrives_next_tail_pass(test_app):
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
-
-    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
-    ts = _TailState()
-
-    SessionMonitor._persist_turn_corrections(
-        row,
-        ts,
-        [{
-            "type": "user",
-            "content": "Jason encoded",
-            "message_id": "msg-1",
-            "timestamp": "2026-05-03T08:57:01.000Z",
-        }],
-    )
-    SessionMonitor._persist_turn_corrections(
-        row,
-        ts,
-        [{
-            "type": "turn_correction",
-            "corrected_text": "JSON encoded",
-            "timestamp": "2026-05-03T08:57:02.000Z",
-        }],
-    )
-
-    stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-1")
-    assert stored is not None
-    assert stored["original_sha256"] == _sha("Jason encoded")
-    assert stored["corrected_text"] == "JSON encoded"
-
-
-def test_session_monitor_prefers_cleanest_nearby_candidate_over_nearest_prior(test_app):
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
-
-    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
-    ts = _TailState()
-    SessionMonitor._persist_turn_corrections(row, ts, [
-        {
-            "type": "user",
-            "content": "I'm gonna write a message which you can away a correction to.",
-            "message_id": "msg-typo",
-            "timestamp": "2026-05-03T08:57:01.000Z",
-        },
-        {
-            "type": "user",
-            "content": "Time I'm gonna put it two messages back",
-            "message_id": "msg-middle",
-            "timestamp": "2026-05-03T08:57:02.000Z",
-        },
-        {
-            "type": "user",
-            "content": "So now try to apply the correction and we'll see if it can match it",
-            "message_id": "msg-nearest",
-            "timestamp": "2026-05-03T08:57:03.000Z",
-        },
-    ])
-    SessionMonitor._persist_turn_corrections(row, ts, [{
-        "type": "turn_correction",
-        "corrected_text": "I'm gonna write a message which you can apply a correction to.",
-        "timestamp": "2026-05-03T08:57:04.000Z",
-    }])
-
-    stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-typo")
-    assert stored is not None
-    assert stored["original_sha256"] == _sha("I'm gonna write a message which you can away a correction to.")
-    assert stored["corrected_text"] == "I'm gonna write a message which you can apply a correction to."
-    assert dashboard_db.get_turn_correction(SESSION_UUID, "msg-nearest") is None
-
-
-def test_turn_correction_metrics_accepts_long_dictation_cleanup():
-    from tools.dashboard.session_monitor import _turn_correction_metrics
-
-    raw = (
-        "It worked and updated live. Congratulations I think the future is finally almost landed.\n\n"
-        "Now the next thing to do is product conversation, which means primers which explain the command "
-        "and explain when it should be used, which we want to biased towards using it aggressively I would "
-        "not be angry if almost every single one of my messages got a correction if it meant cleaning up the log.\n\n"
-        "Next effort products I want to go back and look at the source viewer so I want to see if corrections "
-        "actually show up when we viewed them in the source viewer and I know that they won’t and the source "
-        "view needs a lot of work because most of the time it doesn’t even know the difference between a "
-        "assistant turn in a user turn even that doesn’t render properly so that’ll be the next thing we work "
-        "on after this is productized"
-    )
-    corrected = (
-        "It worked and updated live. Congratulations. I think the future is finally almost landed.\n\n"
-        "Now the next thing to do is product conversation, which means primers that explain the command and "
-        "explain when it should be used. We want to be biased toward using it aggressively. I would not be "
-        "angry if almost every single one of my messages got a correction if it meant cleaning up the log.\n\n"
-        "Next effort: productize. I want to go back and look at the source viewer. I want to see whether "
-        "corrections actually show up when we view them in the source viewer, and I know they won’t. The "
-        "source viewer needs a lot of work because most of the time it doesn’t even know the difference "
-        "between an assistant turn and a user turn. Even that doesn’t render properly. So that’ll be the "
-        "next thing we work on after this is productized."
-    )
-
-    metrics = _turn_correction_metrics(raw, corrected)
-    assert metrics["acceptable"] is True
-    assert metrics["char_similarity"] >= 0.80
-
-
-def test_turn_correction_metrics_accepts_very_long_prose_cleanup():
-    from tools.dashboard.session_monitor import _turn_correction_metrics
-
-    raw = (
-        "We have a session viewer, which knows how to show the log of an agent session run and "
-        "the session viewer is based on the Jason L log file that Claude or Kodex generates and "
-        "there’s a whole pipeline that tells those files and watches that data and categorize an "
-        "analyzes and enhances that data and then passes it up to the user interface to display "
-        "in the session viewer\n\n"
-        "The session viewers is also complicated because it can do live detailing and it’s all "
-        "event based and it’s reactive and the tiles are dynamic and they can be dynamically "
-        "updated while the log is running.  But it also has a mode where it just views a "
-        "completed session and it’s not interactive.\n\n"
-        "Totally separate from the session viewer we also have the concept of the graph. The "
-        "graph is the central knowledge base of the entire system, and we ingest all of the "
-        "sessions into the graph.  These are representative sources in the graph so the graph "
-        "as a sources table and each session is a different source in the graph and then we "
-        "ingest each of the user messages and each of the agents responses. And those are "
-        "stored in the graph we don’t store the tool use in the graph cause it’s too noisy, "
-        "but we have agent message and user message.\n\n"
-        "And then there’s a screen on the dashboard which we call the source viewer, which is "
-        "really essentially the session viewer\n\n"
-        "And so the graphs session viewer is separate from like the real time interactive "
-        "session viewer control.\n\n"
-        "The graphs source viewer is just meant for digging through past sessions. You would "
-        "never use it to view a currently live session."
-    )
-    corrected = (
-        "We have a session viewer which knows how to show the log of an agent session run, and "
-        "the session viewer is based on the JSONL log file that Claude or Codex generates. "
-        "There's a whole pipeline that tails those files and watches that data and categorizes "
-        "and analyzes and enhances that data, and then passes it up to the user interface to "
-        "display in the session viewer.\n\n"
-        "The session viewer is also complicated because it can do live tailing and it's all "
-        "event-based and it's reactive and the tiles are dynamic and they can be dynamically "
-        "updated while the log is running. But it also has a mode where it just views a "
-        "completed session and it's not interactive.\n\n"
-        "Totally separate from the session viewer, we also have the concept of the graph. The "
-        "graph is the central knowledge base of the entire system, and we ingest all of the "
-        "sessions into the graph. These are represented as sources in the graph, so the graph "
-        "has a sources table and each session is a different source in the graph, and then we "
-        "ingest each of the user messages and each of the agent's responses. Those are stored "
-        "in the graph. We don't store the tool use in the graph because it's too noisy, but we "
-        "have agent message and user message.\n\n"
-        "And then there's a screen on the dashboard which we call the source viewer, which is "
-        "essentially the session viewer.\n\n"
-        "So the graph's source viewer is separate from the real-time interactive session viewer "
-        "control.\n\n"
-        "The graph's source viewer is just meant for digging through past sessions. You would "
-        "never use it to view a currently live session."
-    )
-
-    metrics = _turn_correction_metrics(raw, corrected)
-    assert metrics["acceptable"] is True
-    assert metrics["char_similarity"] >= 0.90
-
-
-def test_turn_correction_metrics_rejects_unrelated_message():
-    from tools.dashboard.session_monitor import _turn_correction_metrics
-
-    raw = "Proceed"
-    corrected = (
-        "It worked and updated live. Congratulations. I think the future is finally almost landed.\n\n"
-        "Now the next thing to do is product conversation, which means primers that explain the command."
-    )
-
-    metrics = _turn_correction_metrics(raw, corrected)
-    assert metrics["acceptable"] is False
-    assert metrics["char_similarity"] < 0.25
-
-
-def test_turn_correction_metrics_rejects_weak_recent_overlap():
-    from tools.dashboard.session_monitor import _turn_correction_metrics
-
-    raw = "Try it see if it works to repro the issue."
-    corrected = "Ok so what’s current state and next steps?"
-
-    metrics = _turn_correction_metrics(raw, corrected)
-    assert metrics["acceptable"] is False
-    assert metrics["char_similarity"] < 0.55
-
-
-def test_turn_correction_metrics_prefers_related_long_message_over_unrelated_short_one():
-    from tools.dashboard.session_monitor import _turn_correction_metrics
-
-    good_raw = "I’m gonna write a message which you can away a correction to."
-    bad_raw = "So now try to apply the correction and we’ll see if it can match it"
-    corrected = "I’m gonna write a message which you can apply a correction to."
-
-    good = _turn_correction_metrics(good_raw, corrected)
-    bad = _turn_correction_metrics(bad_raw, corrected)
-    assert good["score_key"] < bad["score_key"]
-
-
-def test_session_monitor_skips_stale_recent_history_candidates(test_app):
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
-
-    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
-    ts = _TailState()
-
-    SessionMonitor._persist_turn_corrections(
-        row,
-        ts,
-        [{
-            "type": "user",
-            "content": "Jason encoded",
-            "message_id": "msg-1",
-            "timestamp": "2026-05-03T08:00:00.000Z",
-        }],
-    )
-    SessionMonitor._persist_turn_corrections(
-        row,
-        ts,
-        [{
-            "type": "turn_correction",
-            "corrected_text": "JSON encoded",
-            "timestamp": "2026-05-03T08:06:01.000Z",
-        }],
-    )
-
-    assert dashboard_db.get_turn_correction(SESSION_UUID, "msg-1") is None
-
-
-def test_session_monitor_matches_long_productization_cleanup(test_app):
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
-
-    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
-    ts = _TailState()
-
-    raw = (
-        "It worked and updated live. Congratulations I think the future is finally almost landed.\n\n"
-        "Now the next thing to do is product conversation, which means primers which explain the command "
-        "and explain when it should be used, which we want to biased towards using it aggressively I would "
-        "not be angry if almost every single one of my messages got a correction if it meant cleaning up the log.\n\n"
-        "Next effort products I want to go back and look at the source viewer so I want to see if corrections "
-        "actually show up when we viewed them in the source viewer and I know that they won’t and the source "
-        "view needs a lot of work because most of the time it doesn’t even know the difference between a "
-        "assistant turn in a user turn even that doesn’t render properly so that’ll be the next thing we work "
-        "on after this is productized"
-    )
-    corrected = (
-        "It worked and updated live. Congratulations. I think the future is finally almost landed.\n\n"
-        "Now the next thing to do is product conversation, which means primers that explain the command and "
-        "explain when it should be used. We want to be biased toward using it aggressively. I would not be "
-        "angry if almost every single one of my messages got a correction if it meant cleaning up the log.\n\n"
-        "Next effort: productize. I want to go back and look at the source viewer. I want to see whether "
-        "corrections actually show up when we view them in the source viewer, and I know they won’t. The "
-        "source viewer needs a lot of work because most of the time it doesn’t even know the difference "
-        "between an assistant turn and a user turn. Even that doesn’t render properly. So that’ll be the "
-        "next thing we work on after this is productized."
-    )
-
-    SessionMonitor._persist_turn_corrections(row, ts, [
-        {
-            "type": "user",
-            "content": "For the rest of this session, please be aggressive about issuing corrections.",
-            "message_id": "msg-other-1",
-            "timestamp": "2026-05-03T22:09:45.064Z",
-        },
-        {
-            "type": "user",
-            "content": "Proceed",
-            "message_id": "msg-other-2",
-            "timestamp": "2026-05-03T22:10:59.637Z",
-        },
-        {
-            "type": "user",
-            "content": "All right, here’s one short typo message for you to corruct",
-            "message_id": "msg-other-3",
-            "timestamp": "2026-05-03T22:12:00.173Z",
-        },
-        {
-            "type": "user",
-            "content": raw,
-            "message_id": "msg-target",
-            "timestamp": "2026-05-03T22:13:26.551Z",
-        },
-    ])
-    SessionMonitor._persist_turn_corrections(row, ts, [{
-        "type": "turn_correction",
-        "corrected_text": corrected,
-        "timestamp": "2026-05-03T22:13:45.008Z",
-    }])
-
-    stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-target")
-    assert stored is not None
-    assert stored["corrected_text"] == corrected
-
-
-def test_session_monitor_matches_long_stop_message_cleanup(test_app):
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
-
-    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
-    ts = _TailState()
-
-    raw = (
-        "Wait, stop what you’re saying makes no sense. You’re going at it again motherfucker\n\n"
-        "I think you’re confused by the fact that you issued a correction after the one that fail failed "
-        "which I accepted and it worked fine. We’re talking about the really long correction to the longer "
-        "message that didn’t match and I didn’t accept it. I never even saw it displayed please try to keep"
-    )
-    corrected = (
-        "Wait, stop. What you’re saying makes no sense. You’re doing it again, motherfucker.\n\n"
-        "I think you’re confused by the fact that you issued a correction after the one that failed, which "
-        "I accepted, and it worked fine. We’re talking about the really long correction to the longer "
-        "message that didn’t match, and I didn’t accept it. I never even saw it displayed. Please try to "
-        "keep that straight."
-    )
-
-    SessionMonitor._persist_turn_corrections(row, ts, [
-        {
-            "type": "user",
-            "content": "Proceed",
-            "message_id": "msg-other-1",
-            "timestamp": "2026-05-03T22:10:59.637Z",
-        },
-        {
-            "type": "user",
-            "content": "That one failed to match sad face",
-            "message_id": "msg-other-2",
-            "timestamp": "2026-05-03T22:14:02.991Z",
-        },
-        {
-            "type": "user",
-            "content": raw,
-            "message_id": "msg-target",
-            "timestamp": "2026-05-03T22:16:10.709Z",
-        },
-    ])
-    SessionMonitor._persist_turn_corrections(row, ts, [{
-        "type": "turn_correction",
-        "corrected_text": corrected,
-        "timestamp": "2026-05-03T22:16:30.599Z",
-    }])
-
-    stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-target")
-    assert stored is not None
-    assert stored["corrected_text"] == corrected
-
-
-def test_session_monitor_limits_matching_to_last_five_live_user_messages(test_app):
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
-
-    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
-    ts = _TailState()
-
-    SessionMonitor._persist_turn_corrections(row, ts, [
-        {
-            "type": "user",
-            "content": "message zero with the original typo",
-            "message_id": "msg-0",
-            "timestamp": "2026-05-03T08:57:00.000Z",
-        },
-        {
-            "type": "user",
-            "content": "alpha filler about deployment logs",
-            "message_id": "msg-1",
-            "timestamp": "2026-05-03T08:57:01.000Z",
-        },
-        {
-            "type": "user",
-            "content": "beta filler about session cards",
-            "message_id": "msg-2",
-            "timestamp": "2026-05-03T08:57:02.000Z",
-        },
-        {
-            "type": "user",
-            "content": "gamma filler about dashboard css",
-            "message_id": "msg-3",
-            "timestamp": "2026-05-03T08:57:03.000Z",
-        },
-        {
-            "type": "user",
-            "content": "delta filler about graph search",
-            "message_id": "msg-4",
-            "timestamp": "2026-05-03T08:57:04.000Z",
-        },
-        {
-            "type": "user",
-            "content": "epsilon filler about source viewer",
-            "message_id": "msg-5",
-            "timestamp": "2026-05-03T08:57:05.000Z",
-        },
-    ])
-    SessionMonitor._persist_turn_corrections(
-        row,
-        ts,
-        [{
-            "type": "turn_correction",
-            "corrected_text": "message zero with the original fix",
-            "timestamp": "2026-05-03T08:57:06.000Z",
-        }],
-    )
-
-    assert dashboard_db.list_turn_corrections(SESSION_UUID) == []
-
-
-def test_session_monitor_matches_delayed_codex_correction_from_history_tail(
-    test_app,
-    tmp_path: Path,
-):
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
-
-    jsonl = tmp_path / "rollout-2026-05-24T05-52-30-test.jsonl"
-    target_raw = "Ok so what’s current state and next stros"
-    target_corrected = "Ok so what’s current state and next steps?"
-    rows = [
-        {
-            "timestamp": "2026-05-25T03:31:11.164Z",
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": target_raw},
-        },
-    ]
-    for idx in range(12):
-        rows.append({
-            "timestamp": f"2026-05-25T04:0{idx % 10}:00.000Z",
-            "type": "event_msg",
-            "payload": {
-                "type": "user_message",
-                "message": f"Recent unrelated instruction {idx}",
-            },
-        })
-    jsonl.write_text("\n".join(json.dumps(row) for row in rows))
-
-    row = {
-        "session_uuid": SESSION_UUID,
-        "tmux_name": TMUX_NAME,
-        "jsonl_path": str(jsonl),
-    }
-    ts = _TailState()
-    SessionMonitor._persist_turn_corrections(row, ts, [
-        {
-            "type": "user",
-            "content": "Try it see if it works to repro the issue.",
-            "message_id": "recent-wrong",
-            "timestamp": "2026-05-25T04:07:52.426Z",
-        },
-    ])
-    SessionMonitor._persist_turn_corrections(row, ts, [{
-        "type": "turn_correction",
-        "corrected_text": target_corrected,
-        "timestamp": "2026-05-25T04:11:14.217Z",
-    }])
-
-    wrong = dashboard_db.get_turn_correction(SESSION_UUID, "recent-wrong")
-    assert wrong is None
-    rows = dashboard_db.list_turn_corrections(SESSION_UUID)
-    assert len(rows) == 1
-    stored = rows[0]
-    assert stored["target_message_id"].startswith("codex-user:")
-    assert stored["original_sha256"] == _sha(target_raw)
-    assert stored["corrected_text"] == target_corrected
-
-
-def test_session_monitor_history_replay_does_not_warm_live_user_deque(test_app):
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
-
-    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
-    ts = _TailState()
-
-    SessionMonitor._persist_turn_corrections(
-        row,
-        ts,
-        [{
-            "type": "user",
-            "content": "Jason encoded",
-            "message_id": "msg-1",
-            "timestamp": "2026-05-03T08:57:01.000Z",
-        }],
-        remember_users=False,
-    )
-
-    assert list(ts.recent_user_turns) == []
-
-
-def test_session_monitor_persists_codex_event_message_correction_without_raw_uuid(test_app):
-    """Codex event_msg user turns without raw UUID still get a stable target id."""
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
-
-    raw_entries = [
-        {
-            "timestamp": "2026-05-03T08:57:01.000Z",
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Jason encoded"},
-        },
-        {
-            "timestamp": "2026-05-03T08:57:02.000Z",
-            "type": "event_msg",
-            "payload": {
-                "type": "exec_command_end",
-                "call_id": "call_tc_blank",
-                "aggregated_output": "",
-                "stdout": "",
-                "stderr": "",
-                "exit_code": 0,
-                "status": "completed",
-                "cwd": "/workspace/repo",
-                "parsed_cmd": [{"type": "unknown", "cmd": (
-                    'graph turn-correction suggest "JSON encoded" '
-                    '--mode balanced --reason "dictation cleanup" --json'
-                )}],
-                "command": [
-                    "bash",
-                    "-lc",
-                    'graph turn-correction suggest "JSON encoded" '
-                    '--mode balanced --reason "dictation cleanup" --json',
-                ],
-                "duration": {"secs": 0, "nanos": 125_000_000},
-                "process_id": 4243,
-            },
-        },
-    ]
-    entries = []
-    for raw in raw_entries:
-        parsed = parse_codex_log_line(json.dumps(raw))
-        if isinstance(parsed, list):
-            entries.extend(parsed)
-        elif parsed:
-            entries.append(parsed)
-
-    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
-    ts = _TailState()
-    SessionMonitor._persist_turn_corrections(row, ts, entries)
-
-    user = next(e for e in entries if e.get("type") == "user")
-    assert user["message_id"].startswith("codex-user:")
-    stored = dashboard_db.get_turn_correction(SESSION_UUID, user["message_id"])
-    assert stored is not None
-    assert stored["original_sha256"] == _sha("Jason encoded")
-    assert stored["corrected_text"] == "JSON encoded"
-
-
-def test_session_monitor_persists_uuid_less_claude_queue_correction(
-    test_app,
-    tmp_path: Path,
-):
-    """Regression: the screenshot turn has only a queue-operation row."""
-    from tools.dashboard.session_harness import CLAUDE_HARNESS
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
-
-    raw = "There’s absolutely no need to rebuild anything. All of the images are already on Dr. hub."
-    corrected = (
-        "There's absolutely no need to rebuild anything. "
-        "All of the images are already on Docker Hub."
-    )
-    jsonl = tmp_path / "claude-session.jsonl"
-    jsonl.write_text(json.dumps({
-        "type": "queue-operation",
-        "operation": "enqueue",
-        "content": raw,
-        "timestamp": "2026-07-23T19:04:29.105Z",
-    }) + "\n")
-    parsed = CLAUDE_HARNESS.parse_line(jsonl.read_text().strip())
-    assert parsed["message_id"].startswith("claude-queued-user:")
-
-    row = {
-        "session_uuid": SESSION_UUID,
-        "tmux_name": TMUX_NAME,
-        "jsonl_path": str(jsonl),
-    }
-    ts = _TailState()
-    SessionMonitor._persist_turn_corrections(row, ts, [parsed])
-    SessionMonitor._persist_turn_corrections(row, ts, [{
-        "type": "turn_correction",
-        "corrected_text": corrected,
-        "timestamp": "2026-07-23T19:04:41.766Z",
-    }])
-
-    stored = dashboard_db.get_turn_correction(
-        SESSION_UUID, parsed["message_id"],
-    )
-    assert stored is not None
-    assert stored["original_sha256"] == _sha(raw)
-    assert stored["corrected_text"] == corrected
-
-
-def test_session_monitor_replay_does_not_mutate_terminal(test_app):
-    """Replaying a history correction over an already-accepted row leaves it alone."""
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
-
-    sha = _sha("text")
-    dashboard_db.upsert_turn_correction(
-        SESSION_UUID, "msg-1",
-        original_sha256=sha, corrected_text="A",
-    )
-    dashboard_db.set_turn_correction_status(
-        SESSION_UUID, "msg-1", "accepted", expected_sha256=sha,
-    )
-
-    # Re-emitting the same event during replay/warm-up
-    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
-    SessionMonitor._persist_turn_corrections(row, _TailState(), [
-        {"type": "user", "content": "text", "message_id": "msg-1"},
-        {"type": "turn_correction", "corrected_text": "A"},
-    ])
-    stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-1")
-    assert stored["status"] == "accepted"
-
-
 # ── Accept → graph supersedes persistence (auto-edec1.6) ─────
 
 
@@ -1463,97 +783,373 @@ def test_resolve_session_workspace_unresolvable_returns_none(
     assert out is None
 
 
-def test_session_monitor_persists_very_long_first_message_cleanup(test_app):
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
-
-    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
-    ts = _TailState()
-
-    raw = (
-        "We have a session viewer, which knows how to show the log of an agent session run and "
-        "the session viewer is based on the Jason L log file that Claude or Kodex generates and "
-        "there’s a whole pipeline that tells those files and watches that data and categorize an "
-        "analyzes and enhances that data and then passes it up to the user interface to display "
-        "in the session viewer\n\n"
-        "The session viewers is also complicated because it can do live detailing and it’s all "
-        "event based and it’s reactive and the tiles are dynamic and they can be dynamically "
-        "updated while the log is running.  But it also has a mode where it just views a "
-        "completed session and it’s not interactive.\n\n"
-        "Totally separate from the session viewer we also have the concept of the graph. The "
-        "graph is the central knowledge base of the entire system, and we ingest all of the "
-        "sessions into the graph.  These are representative sources in the graph so the graph "
-        "as a sources table and each session is a different source in the graph and then we "
-        "ingest each of the user messages and each of the agents responses. And those are "
-        "stored in the graph we don’t store the tool use in the graph cause it’s too noisy, "
-        "but we have agent message and user message.\n\n"
-        "And then there’s a screen on the dashboard which we call the source viewer, which is "
-        "really essentially the session viewer\n\n"
-        "And so the graphs session viewer is separate from like the real time interactive "
-        "session viewer control.\n\n"
-        "The graphs source viewer is just meant for digging through past sessions. You would "
-        "never use it to view a currently live session."
-    )
-    corrected = (
-        "We have a session viewer which knows how to show the log of an agent session run, and "
-        "the session viewer is based on the JSONL log file that Claude or Codex generates. "
-        "There's a whole pipeline that tails those files and watches that data and categorizes "
-        "and analyzes and enhances that data, and then passes it up to the user interface to "
-        "display in the session viewer.\n\n"
-        "The session viewer is also complicated because it can do live tailing and it's all "
-        "event-based and it's reactive and the tiles are dynamic and they can be dynamically "
-        "updated while the log is running. But it also has a mode where it just views a "
-        "completed session and it's not interactive.\n\n"
-        "Totally separate from the session viewer, we also have the concept of the graph. The "
-        "graph is the central knowledge base of the entire system, and we ingest all of the "
-        "sessions into the graph. These are represented as sources in the graph, so the graph "
-        "has a sources table and each session is a different source in the graph, and then we "
-        "ingest each of the user messages and each of the agent's responses. Those are stored "
-        "in the graph. We don't store the tool use in the graph because it's too noisy, but we "
-        "have agent message and user message.\n\n"
-        "And then there's a screen on the dashboard which we call the source viewer, which is "
-        "essentially the session viewer.\n\n"
-        "So the graph's source viewer is separate from the real-time interactive session viewer "
-        "control.\n\n"
-        "The graph's source viewer is just meant for digging through past sessions. You would "
-        "never use it to view a currently live session."
-    )
-
-    SessionMonitor._persist_turn_corrections(row, ts, [
-        {
-            "type": "user",
-            "content": raw,
-            "message_id": "msg-target",
-            "timestamp": "2026-05-04T02:18:24.446Z",
-        },
-    ])
-    SessionMonitor._persist_turn_corrections(row, ts, [{
-        "type": "turn_correction",
-        "corrected_text": corrected,
-        "timestamp": "2026-05-04T02:18:40.941Z",
-    }])
-
-    stored = dashboard_db.get_turn_correction(SESSION_UUID, "msg-target")
-    assert stored is not None
-    assert stored["corrected_text"] == corrected
 
 
-def test_session_monitor_logs_info_when_no_candidate_accepted(test_app, caplog):
-    from tools.dashboard.session_monitor import SessionMonitor, _TailState
+# ══════════════════════════════════════════════════════════════════
+# auto-hmow2: authenticated suggest endpoint + live event delivery
+# ══════════════════════════════════════════════════════════════════
 
-    row = {"session_uuid": SESSION_UUID, "tmux_name": TMUX_NAME}
-    ts = _TailState()
+SUGGEST_URL = "/api/session/turn-corrections/suggest"
+_BEARER = {"Authorization": "Bearer test-token"}
 
-    SessionMonitor._persist_turn_corrections(row, ts, [{
-        "type": "user",
-        "content": "Proceed",
-        "message_id": "msg-1",
-        "timestamp": "2026-05-04T02:18:24.446Z",
-    }])
-    with caplog.at_level(logging.INFO):
-        SessionMonitor._persist_turn_corrections(row, ts, [{
-            "type": "turn_correction",
-            "corrected_text": "This is a completely unrelated long correction that should never match Proceed.",
-            "timestamp": "2026-05-04T02:18:40.941Z",
-        }])
 
-    assert "session_monitor: turn_correction skipped" in caplog.text
+def _auth_as(monkeypatch, session=TMUX_NAME, org="autonomy"):
+    """Stub the shared session-auth helper's token resolution.
+
+    Identity is whatever the bearer resolves to — the endpoint must derive the
+    session from this, never from the URL or body.
+    """
+    from tools.dashboard import server as _server
+    monkeypatch.setattr(_server.auth_db, "resolve_token", lambda _h: (session, org))
+
+
+def _seed_user_jsonl(tmp_path, content, *, mid="u-target", session=TMUX_NAME, name="c.jsonl"):
+    """Point ``session``'s jsonl_path at a controlled Claude user turn."""
+    p = tmp_path / "sessions" / session / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({
+        "type": "user", "uuid": mid,
+        "message": {"role": "user", "content": [{"type": "text", "text": content}]},
+        "timestamp": "2026-08-10T12:00:00Z",
+    }) + "\n")
+    conn = dashboard_db.get_conn()
+    conn.execute(
+        "UPDATE tmux_sessions SET jsonl_path=? WHERE tmux_name=?", (str(p), session))
+    conn.commit()
+    return mid
+
+
+def _capture_broadcasts(monkeypatch):
+    """Record every event_bus.broadcast call; note DB row state at fire time."""
+    from tools.dashboard import server as _server
+    calls = []
+
+    async def rec(topic, data, dedup=True):
+        row_at_fire = None
+        if topic == "session:turn_corrections":
+            corr = (data or {}).get("correction") or {}
+            row_at_fire = dashboard_db.get_turn_correction(
+                (data or {}).get("session_uuid"), corr.get("target_message_id"))
+        calls.append({"topic": topic, "data": data, "dedup": dedup,
+                      "row_committed_at_fire": row_at_fire})
+        return 0
+
+    monkeypatch.setattr(_server.event_bus, "broadcast", rec)
+    return calls
+
+
+def _tc_broadcasts(calls):
+    return [c for c in calls if c["topic"] == "session:turn_corrections"]
+
+
+# ── happy path ─────────────────────────────────────────────────
+
+
+def test_suggest_creates_pending_and_broadcasts(test_app, client, monkeypatch, tmp_path):
+    _auth_as(monkeypatch)
+    mid = _seed_user_jsonl(tmp_path, "Plese reviw the corections API")
+    calls = _capture_broadcasts(monkeypatch)
+
+    r = client.post(SUGGEST_URL, headers=_BEARER,
+                    json={"corrected_text": "Please review the corrections API"})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["session_id"] == TMUX_NAME
+    corr = body["correction"]
+    assert corr["status"] == "pending"
+    assert corr["target_message_id"] == mid
+    assert corr["corrected_text"] == "Please review the corrections API"
+    assert corr["original_sha256"] == _sha("Plese reviw the corections API")
+
+    # Row committed exactly once.
+    stored = dashboard_db.get_turn_correction(SESSION_UUID, mid)
+    assert stored is not None and stored["status"] == "pending"
+
+    # Exactly one turn-correction broadcast, keyed by canonical tmux name,
+    # carrying the exact committed row — and the row already existed in the DB
+    # when the broadcast fired (persist first, broadcast second).
+    tc_calls = _tc_broadcasts(calls)
+    assert len(tc_calls) == 1
+    call = tc_calls[0]
+    assert call["data"]["session_id"] == TMUX_NAME
+    assert call["data"]["session_uuid"] == SESSION_UUID
+    assert call["data"]["correction"] == corr
+    assert call["dedup"] is False
+    assert call["row_committed_at_fire"] is not None
+
+
+def test_suggest_body_verbatim_long_multiline(test_app, client, monkeypatch, tmp_path):
+    _auth_as(monkeypatch)
+    body_para = "This is a substantial paragraph of dictated prose that needs a light cleanup. " * 6
+    raw = "here is a long messege\n\n" + body_para + "\n\nand it ends with a finl line"
+    _seed_user_jsonl(tmp_path, raw)
+    corrected = "Here is a long message.\n\n" + body_para + "\n\nAnd it ends with a final line."
+    assert "\n\n" in corrected and len(corrected) > 400
+    r = client.post(SUGGEST_URL, headers=_BEARER, json={"corrected_text": corrected})
+    assert r.status_code == 201, r.text
+    # Multiline body preserved verbatim in the committed row.
+    assert r.json()["correction"]["corrected_text"] == corrected
+
+
+def test_suggest_metadata_transmitted(test_app, client, monkeypatch, tmp_path):
+    _auth_as(monkeypatch)
+    _seed_user_jsonl(tmp_path, "Plese reviw the corections API")
+    r = client.post(SUGGEST_URL, headers=_BEARER, json={
+        "corrected_text": "Please review the corrections API",
+        "mode": "aggressive", "reason": "dictation", "confidence": 0.98,
+    })
+    assert r.status_code == 201, r.text
+    corr = r.json()["correction"]
+    assert corr["mode"] == "aggressive"
+    assert corr["reason"] == "dictation"
+    assert corr["confidence"] == pytest.approx(0.98)
+
+
+# ── identity is token-derived, never caller-controlled ─────────
+
+
+@pytest.mark.parametrize("field,value", [
+    ("session_id", "auto-someone-else"),
+    ("session_uuid", "uuid-someone-else"),
+    ("target_message_id", "m-forged"),
+    ("original_sha256", "deadbeef"),
+])
+def test_suggest_rejects_body_identity_fields(test_app, client, monkeypatch, tmp_path, field, value):
+    _auth_as(monkeypatch)
+    _seed_user_jsonl(tmp_path, "Plese reviw the corections API")
+    calls = _capture_broadcasts(monkeypatch)
+    r = client.post(SUGGEST_URL, headers=_BEARER, json={
+        "corrected_text": "Please review the corrections API", field: value,
+    })
+    assert r.status_code == 400
+    assert field in r.json()["error"]
+    assert _tc_broadcasts(calls) == []
+
+
+def test_suggest_session_is_token_derived_not_body(test_app, client, monkeypatch, tmp_path):
+    """The committed row lands on the token's session even though nothing in the
+    body names a session — proving a caller cannot target another session."""
+    _auth_as(monkeypatch, session=TMUX_NAME)
+    mid = _seed_user_jsonl(tmp_path, "Plese reviw the corections API")
+    r = client.post(SUGGEST_URL, headers=_BEARER,
+                    json={"corrected_text": "Please review the corrections API"})
+    assert r.status_code == 201, r.text
+    # Landed on the token session's uuid, nowhere else.
+    assert dashboard_db.get_turn_correction(SESSION_UUID, mid) is not None
+    assert r.json()["session_id"] == TMUX_NAME
+
+
+# ── auth failures ──────────────────────────────────────────────
+
+
+def test_suggest_missing_bearer_401(test_app, client, monkeypatch, tmp_path):
+    calls = _capture_broadcasts(monkeypatch)
+    r = client.post(SUGGEST_URL, json={"corrected_text": "x"})
+    assert r.status_code == 401
+    assert _tc_broadcasts(calls) == []
+
+
+def test_suggest_invalid_token_401(test_app, client, monkeypatch, tmp_path):
+    from tools.dashboard import server as _server
+    monkeypatch.setattr(_server.auth_db, "resolve_token", lambda _h: None)
+    calls = _capture_broadcasts(monkeypatch)
+    r = client.post(SUGGEST_URL, headers=_BEARER, json={"corrected_text": "x"})
+    assert r.status_code == 401
+    assert _tc_broadcasts(calls) == []
+
+
+# ── session-state failures ─────────────────────────────────────
+
+
+def test_suggest_unknown_session_404(test_app, client, monkeypatch):
+    _auth_as(monkeypatch, session="auto-ghost-session")
+    calls = _capture_broadcasts(monkeypatch)
+    r = client.post(SUGGEST_URL, headers=_BEARER, json={"corrected_text": "x"})
+    assert r.status_code == 404
+    assert _tc_broadcasts(calls) == []
+
+
+def test_suggest_unlinked_session_409(test_app, client, monkeypatch):
+    # auto-test-validator exists but has no jsonl_path / session_uuid link.
+    _auth_as(monkeypatch, session="auto-test-validator")
+    conn = dashboard_db.get_conn()
+    conn.execute("UPDATE tmux_sessions SET jsonl_path=NULL, session_uuid=NULL"
+                 " WHERE tmux_name=?", ("auto-test-validator",))
+    conn.commit()
+    calls = _capture_broadcasts(monkeypatch)
+    r = client.post(SUGGEST_URL, headers=_BEARER, json={"corrected_text": "x"})
+    assert r.status_code == 409
+    assert _tc_broadcasts(calls) == []
+
+
+def test_suggest_no_target_409(test_app, client, monkeypatch, tmp_path):
+    _auth_as(monkeypatch)
+    _seed_user_jsonl(tmp_path, "Proceed")
+    calls = _capture_broadcasts(monkeypatch)
+    r = client.post(SUGGEST_URL, headers=_BEARER, json={
+        "corrected_text": (
+            "A wholly unrelated multi-sentence replacement sharing no vocabulary "
+            "with the single short user turn on record."
+        ),
+    })
+    assert r.status_code == 409
+    assert dashboard_db.list_turn_corrections(SESSION_UUID) == []
+    assert _tc_broadcasts(calls) == []
+
+
+def test_suggest_persistence_failure_500_no_broadcast(test_app, client, monkeypatch, tmp_path):
+    _auth_as(monkeypatch)
+    _seed_user_jsonl(tmp_path, "Plese reviw the corections API")
+    from tools.dashboard import server as _server
+
+    def boom(*a, **k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(_server.dashboard_db, "upsert_turn_correction", boom)
+    calls = _capture_broadcasts(monkeypatch)
+    r = client.post(SUGGEST_URL, headers=_BEARER,
+                    json={"corrected_text": "Please review the corrections API"})
+    assert r.status_code == 500
+    assert _tc_broadcasts(calls) == []
+
+
+# ── body validation ────────────────────────────────────────────
+
+
+def test_suggest_invalid_json_400(test_app, client, monkeypatch):
+    _auth_as(monkeypatch)
+    r = client.post(SUGGEST_URL, headers={**_BEARER, "Content-Type": "application/json"},
+                    content=b"{not json")
+    assert r.status_code == 400
+
+
+def test_suggest_missing_corrected_text_400(test_app, client, monkeypatch):
+    _auth_as(monkeypatch)
+    r = client.post(SUGGEST_URL, headers=_BEARER, json={"mode": "balanced"})
+    assert r.status_code == 400
+
+
+def test_suggest_empty_corrected_text_400(test_app, client, monkeypatch):
+    _auth_as(monkeypatch)
+    r = client.post(SUGGEST_URL, headers=_BEARER, json={"corrected_text": ""})
+    assert r.status_code == 400
+
+
+def test_suggest_invalid_mode_400(test_app, client, monkeypatch):
+    _auth_as(monkeypatch)
+    r = client.post(SUGGEST_URL, headers=_BEARER,
+                    json={"corrected_text": "x", "mode": "wild"})
+    assert r.status_code == 400
+
+
+@pytest.mark.parametrize("bad", [-0.1, 1.5, "high", True])
+def test_suggest_bad_confidence_400(test_app, client, monkeypatch, bad):
+    _auth_as(monkeypatch)
+    r = client.post(SUGGEST_URL, headers=_BEARER,
+                    json={"corrected_text": "x", "confidence": bad})
+    assert r.status_code == 400
+
+
+# ── idempotent pending upsert ──────────────────────────────────
+
+
+def test_suggest_repeat_refreshes_same_pending_row(test_app, client, monkeypatch, tmp_path):
+    _auth_as(monkeypatch)
+    mid = _seed_user_jsonl(tmp_path, "Plese reviw the corections API")
+    body = {"corrected_text": "Please review the corrections API"}
+    r1 = client.post(SUGGEST_URL, headers=_BEARER, json=body)
+    r2 = client.post(SUGGEST_URL, headers=_BEARER, json=body)
+    assert r1.status_code == 201 and r2.status_code == 201
+    # One row for the target, still pending.
+    rows = dashboard_db.list_turn_corrections(SESSION_UUID)
+    assert len([x for x in rows if x["target_message_id"] == mid]) == 1
+
+
+def test_suggest_terminal_target_not_reopened_409(test_app, client, monkeypatch, tmp_path):
+    """A target already accepted must not be reopened by a new suggestion."""
+    _auth_as(monkeypatch)
+    mid = _seed_user_jsonl(tmp_path, "Plese reviw the corections API")
+    sha = _sha("Plese reviw the corections API")
+    dashboard_db.upsert_turn_correction(
+        SESSION_UUID, mid, original_sha256=sha, corrected_text="accepted already")
+    dashboard_db.set_turn_correction_status(SESSION_UUID, mid, "accepted", expected_sha256=sha)
+    calls = _capture_broadcasts(monkeypatch)
+    r = client.post(SUGGEST_URL, headers=_BEARER,
+                    json={"corrected_text": "Please review the corrections API"})
+    # Only one user turn exists and it is terminal → no acceptable target.
+    assert r.status_code == 409
+    assert _tc_broadcasts(calls) == []
+    # Terminal row is untouched.
+    assert dashboard_db.get_turn_correction(SESSION_UUID, mid)["status"] == "accepted"
+
+
+# ── accept/dismiss broadcast + graph independence ──────────────
+
+
+def test_accept_broadcasts_terminal_row_despite_graph_failure(test_app, client, monkeypatch):
+    sha = _sha("raw text")
+    dashboard_db.upsert_turn_correction(
+        SESSION_UUID, "msg-acc", original_sha256=sha, corrected_text="fixed text")
+    _stub_workspace_resolver(monkeypatch)
+    _stub_setting(monkeypatch, persist_accepts=True)
+    from tools.dashboard import server as _server
+    monkeypatch.setattr(_server.graph_ops, "persist_corrected_thought",
+                        lambda **k: (_ for _ in ()).throw(RuntimeError("graph down")))
+    calls = _capture_broadcasts(monkeypatch)
+    r = client.post(f"/api/session/{TMUX_NAME}/turn-corrections/msg-acc/accept",
+                    json={"original_sha256": sha})
+    assert r.status_code == 200
+    tc_calls = _tc_broadcasts(calls)
+    assert len(tc_calls) == 1
+    assert tc_calls[0]["data"]["correction"]["status"] == "accepted"
+
+
+def test_dismiss_broadcasts_terminal_row(test_app, client, monkeypatch):
+    sha = _sha("raw text 2")
+    dashboard_db.upsert_turn_correction(
+        SESSION_UUID, "msg-dis", original_sha256=sha, corrected_text="whatever")
+    calls = _capture_broadcasts(monkeypatch)
+    r = client.post(f"/api/session/{TMUX_NAME}/turn-corrections/msg-dis/dismiss",
+                    json={"original_sha256": sha})
+    assert r.status_code == 200
+    tc_calls = _tc_broadcasts(calls)
+    assert len(tc_calls) == 1
+    assert tc_calls[0]["data"]["correction"]["status"] == "dismissed"
+
+
+# ── event-bus fan-out: two subscribers, one committed row ──────
+
+
+def test_event_bus_fans_out_committed_row_to_all_subscribers():
+    from tools.dashboard.event_bus import EventBus
+    bus = EventBus()
+    q1 = bus.subscribe("viewer-1")
+    q2 = bus.subscribe("viewer-2")
+    row = {
+        "session_uuid": SESSION_UUID, "target_message_id": "m1",
+        "status": "pending", "original_sha256": "abc", "corrected_text": "fixed",
+        "mode": None, "reason": None, "confidence": None,
+        "created_at": 1.0, "updated_at": 1.0,
+    }
+    payload = {"session_id": TMUX_NAME, "session_uuid": SESSION_UUID, "correction": row}
+    n = bus.broadcast_sync("session:turn_corrections", payload, dedup=False)
+    assert n == 2
+    got1 = q1.get_nowait()
+    got2 = q2.get_nowait()
+    assert got1[1]["correction"] == row
+    assert got2[1]["correction"] == row
+
+
+def test_event_bus_replay_same_row_is_delivered_each_time():
+    """At-least-once delivery: the same committed row is delivered on replay
+    (dedup=False), so consumers must tolerate duplicates."""
+    from tools.dashboard.event_bus import EventBus
+    bus = EventBus()
+    q = bus.subscribe("viewer")
+    row = {"target_message_id": "m1", "status": "pending", "corrected_text": "x"}
+    payload = {"session_id": TMUX_NAME, "session_uuid": SESSION_UUID, "correction": row}
+    bus.broadcast_sync("session:turn_corrections", payload, dedup=False)
+    bus.broadcast_sync("session:turn_corrections", payload, dedup=False)
+    assert q.get_nowait()[1]["correction"] == row
+    assert q.get_nowait()[1]["correction"] == row

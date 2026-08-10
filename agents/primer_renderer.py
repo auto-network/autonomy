@@ -261,7 +261,7 @@ _TURN_CORRECTION_INSTRUCTIONS: dict[str, str] = {
 _TURN_CORRECTION_COMMAND = (
     "graph turn-correction suggest [corrected_text | --stdin] "
     "[--mode <off|conservative|balanced|aggressive>] "
-    "[--reason <text>] [--confidence <0..1>] --json"
+    "[--reason <text>] [--confidence <0..1>]"
 )
 
 

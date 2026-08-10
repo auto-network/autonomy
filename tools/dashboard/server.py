@@ -115,6 +115,7 @@ from tools.dashboard.session_lifecycle_worker import (
 )
 from tools.dashboard.worktree_monitor import worktree_monitor
 from tools.dashboard import session_trace
+from tools.dashboard import turn_corrections as turn_corrections_mod
 from tools.dashboard.dao import auth_db, dashboard_db, mcp_relay_db
 from tools.dashboard import approvals_routes
 from tools.dashboard import mcp_relay_routes
@@ -5684,6 +5685,175 @@ def _maybe_persist_accepted_correction_to_graph(
             " session_uuid=%s target=%s",
             session_uuid, row.get("target_message_id"),
         )
+
+
+_TURN_CORRECTION_SUGGEST_MODES = ("off", "conservative", "balanced", "aggressive")
+# Caller-controlled identity is never trusted: the session comes from the bearer
+# token and the target/hash are resolved server-side. Presence of any of these
+# is a hard 400, not a silently-ignored field.
+_TURN_CORRECTION_FORBIDDEN_FIELDS = (
+    "session_id", "session_uuid", "target_message_id", "original_sha256",
+)
+
+
+def _validate_turn_correction_suggestion(
+    body: Any,
+) -> tuple[dict | None, JSONResponse | None]:
+    """Validate a suggest POST body. Returns (payload, None) or (None, error)."""
+    if not isinstance(body, dict):
+        return None, JSONResponse(
+            {"error": "request body must be a JSON object"}, status_code=400)
+    for forbidden in _TURN_CORRECTION_FORBIDDEN_FIELDS:
+        if forbidden in body:
+            return None, JSONResponse(
+                {"error": (
+                    f"caller-controlled identity field '{forbidden}' is not "
+                    "accepted; the server derives session and target"
+                )},
+                status_code=400,
+            )
+    corrected = body.get("corrected_text")
+    if not isinstance(corrected, str) or corrected == "":
+        return None, JSONResponse(
+            {"error": "corrected_text is required and must be a non-empty string"},
+            status_code=400,
+        )
+    mode = body.get("mode")
+    if mode is not None and mode not in _TURN_CORRECTION_SUGGEST_MODES:
+        return None, JSONResponse(
+            {"error": "mode must be one of off|conservative|balanced|aggressive"},
+            status_code=400,
+        )
+    reason = body.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        return None, JSONResponse(
+            {"error": "reason must be a string"}, status_code=400)
+    confidence = body.get("confidence")
+    if confidence is not None:
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            return None, JSONResponse(
+                {"error": "confidence must be a number in [0.0, 1.0]"},
+                status_code=400,
+            )
+        confidence = float(confidence)
+        if not (0.0 <= confidence <= 1.0):
+            return None, JSONResponse(
+                {"error": "confidence must be in [0.0, 1.0]"}, status_code=400)
+    return {
+        "corrected_text": corrected,
+        "mode": mode,
+        "reason": reason,
+        "confidence": confidence,
+    }, None
+
+
+async def api_session_turn_correction_suggest(request):
+    """POST /api/session/turn-corrections/suggest
+
+    Authenticated turn-correction submission (bead auto-hmow2). This is the
+    ONLY delivery path — the CLI POSTs here; the correction never becomes a
+    transcript entry and SessionMonitor never participates.
+
+    The caller's canonical tmux session is derived from the bearer
+    ``SESSION_TOKEN`` (never from the URL or body). The server resolves the
+    target from that session's recent canonical user turns, computes
+    ``original_sha256`` from the immutable original text, persists exactly one
+    sparse row, then broadcasts the exact committed row on
+    ``session:turn_corrections``. Persist first, broadcast second; no failure
+    path writes a row or broadcasts.
+    """
+    identity, err = authenticate_session_request(request)
+    if err is not None:
+        return err
+    tmux_name, _org = identity
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    payload, verr = _validate_turn_correction_suggestion(body)
+    if verr is not None:
+        return verr
+
+    session = dashboard_db.get_session(tmux_name)
+    if session is None:
+        return JSONResponse(
+            {"error": "session not found", "session_id": tmux_name},
+            status_code=404,
+        )
+    session_uuid = session.get("session_uuid")
+    jsonl_path = session.get("jsonl_path")
+    if not session_uuid or not jsonl_path:
+        return JSONResponse(
+            {"error": "session is not linked to a JSONL/session UUID"},
+            status_code=409,
+        )
+
+    users = turn_corrections_mod.read_recent_canonical_user_turns(jsonl_path)
+
+    def _target_unavailable(message_id: str) -> bool:
+        # A target already carrying a terminal (accepted/dismissed) correction
+        # must not be re-targeted by a fresh pending suggestion. Pending rows
+        # stay available so the DAO's pending-upsert refreshes them in place.
+        existing = dashboard_db.get_turn_correction(session_uuid, message_id)
+        return existing is not None and existing.get("status") in ("accepted", "dismissed")
+
+    target = turn_corrections_mod.resolve_best_correction_target(
+        users=users,
+        corrected_text=payload["corrected_text"],
+        unavailable=_target_unavailable,
+    )
+    if target is None:
+        return JSONResponse(
+            {"error": "no acceptable recent user turn to correct"},
+            status_code=409,
+        )
+
+    original_sha256 = hashlib.sha256(
+        str(target["content"]).encode("utf-8")).hexdigest()
+    try:
+        row = dashboard_db.upsert_turn_correction(
+            session_uuid,
+            str(target["message_id"]),
+            original_sha256=original_sha256,
+            corrected_text=payload["corrected_text"],
+            mode=payload["mode"],
+            reason=payload["reason"],
+            confidence=payload["confidence"],
+        )
+    except Exception:
+        logger.exception(
+            "turn_correction suggest: persistence failed session=%s target=%s",
+            tmux_name, target.get("message_id"),
+        )
+        return JSONResponse({"error": "persistence failure"}, status_code=500)
+
+    if not row:
+        return JSONResponse({"error": "persistence failure"}, status_code=500)
+    if row.get("status") != "pending":
+        # A concurrent accept/dismiss reached this target between resolution and
+        # upsert; the DAO preserved the terminal row. Report the conflict rather
+        # than claim a pending create for a row we did not write.
+        return JSONResponse(
+            {"error": "target already has a terminal correction",
+             "correction": _serialize_turn_correction(row)},
+            status_code=409,
+        )
+
+    public_row = _serialize_turn_correction(row)
+    await event_bus.broadcast(
+        "session:turn_corrections",
+        {
+            "session_id": tmux_name,
+            "session_uuid": session_uuid,
+            "correction": public_row,
+        },
+        dedup=False,
+    )
+    return JSONResponse(
+        {"ok": True, "session_id": tmux_name, "correction": public_row},
+        status_code=201,
+    )
 
 
 async def api_session_turn_correction_accept(request):
@@ -16283,6 +16453,11 @@ routes = [
     Route("/api/session/{tmux_name}/nag", api_session_nag, methods=["PUT"]),
     Route("/api/session/{tmux_name}/nag", api_session_nag_delete, methods=["DELETE"]),
     Route("/api/session/{tmux_name}/dispatch-nag", api_session_dispatch_nag, methods=["PUT"]),
+    Route(
+        "/api/session/turn-corrections/suggest",
+        api_session_turn_correction_suggest,
+        methods=["POST"],
+    ),
     Route(
         "/api/session/{session_id}/turn-corrections",
         api_session_turn_corrections_list,
