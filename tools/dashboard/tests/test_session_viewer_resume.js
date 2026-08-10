@@ -67,7 +67,7 @@ function makeHarness() {
     if (url === '/api/dao/active_sessions') {
       return Promise.resolve({ json: () => Promise.resolve([]) });
     }
-    if (url.startsWith('/api/session/autonomy/auto-test/tail?after=')) {
+    if (url.startsWith('/api/session/autonomy/auto-test/tail?after_file=f&after=12')) {
       return Promise.resolve({
         ok: true,
         json: () => Promise.resolve({
@@ -75,16 +75,23 @@ function makeHarness() {
             type: 'assistant_text',
             content: 'catch-up entry',
             timestamp: '2026-04-24T01:00:00Z',
+            entry_ref: { file: 'f', off: 12, sub: 0 },
           }],
+          chain: ['f'],
+          cursor: { file: 'f', off: 20 },
+          window_spans: [{ file: 'f', from: 12, to: 20 }],
+          has_more_forward: false,
           offset: 20,
           is_live: true,
-          seq: 5,
           resolved: true,
           type: 'container',
           role: 'builder',
           activity_state: 'thinking',
         }),
       });
+    }
+    if (url === '/api/worktrees') {
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
     }
     throw new Error('unexpected fetch ' + url);
   };
@@ -153,68 +160,70 @@ function makeHarness() {
   };
 }
 
-describe('session viewer resume catch-up', () => {
-  it('visibilitychange to visible fetches tail delta from the current offset and only reconnects when EventSource is closed', async () => {
-    const h = makeHarness();
-    const viewer = h.makeViewer();
-    viewer.sessionKey = 'auto-test';
-    viewer.project = 'autonomy';
-    viewer.sessionId = 'auto-test';
-    viewer._tailUrl = '/api/session/autonomy/auto-test/tail';
-    viewer.state = 'ready';
+const RANGED_URL = '/api/session/autonomy/auto-test/tail?after_file=f&after=12';
 
-    const store = h.window.getSessionStore('auto-test');
-    store.offset = 12;
+function primeViewer(h) {
+  const viewer = h.makeViewer();
+  viewer.sessionKey = 'auto-test';
+  viewer.project = 'autonomy';
+  viewer.sessionId = 'auto-test';
+  viewer._tailUrl = '/api/session/autonomy/auto-test/tail';
+  viewer.state = 'ready';
+  const store = h.window.getSessionStore('auto-test');
+  store.offset = 12;
+  store.chain = ['f'];
+  store.committed = { file: 'f', off: 12 };
+  return { viewer, store };
+}
+
+describe('session viewer resume catch-up (auto-16g9t wake protocol)', () => {
+  it('visibilitychange rebuilds the SSE connection even when readyState claims OPEN (the iOS zombie hole)', async () => {
+    const h = makeHarness();
+    const { viewer, store } = primeViewer(h);
 
     viewer._setupResumeRecovery();
-    h.window._es.readyState = 2;
+    // Zombie: the stream reports OPEN while delivering nothing. The old
+    // code gated reconnect on readyState === 2 and hung here forever.
+    h.window._es.readyState = 1;
     h.document.visibilityState = 'visible';
     h.emitDocument('visibilitychange');
     await flush();
 
-    assert.equal(h.getReconnectCount(), 1);
-    assert.ok(h.fetchCalls.includes('/api/session/autonomy/auto-test/tail?after=12'));
+    assert.equal(h.getReconnectCount(), 1,
+      'wake must rebuild the connection unconditionally');
+    assert.ok(h.fetchCalls.includes(RANGED_URL),
+      'catch-up must be ranged from the committed (file, offset) pair');
     assert.equal(store.offset, 20);
     assert.equal(store.entries.length, 1);
     assert.equal(store.entries[0].content, 'catch-up entry');
+    assert.deepEqual({ ...store.committed }, { file: 'f', off: 20 },
+      'committed advances via the fetch cursor');
+    assert.equal(store._counters.wake_gap, 1);
+    assert.equal(store._counters.stream_rebuilds, 1);
+    assert.equal(store._counters.conclusion_contradicted, 0);
     viewer.destroy();
   });
 
-  it('heartbeat stall triggers catch-up without reconnect churn when EventSource is still open', async () => {
+  it('heartbeat stall triggers the same unconditional rebuild + ranged catch-up', async () => {
     const h = makeHarness();
-    const viewer = h.makeViewer();
-    viewer.sessionKey = 'auto-test';
-    viewer.project = 'autonomy';
-    viewer.sessionId = 'auto-test';
-    viewer._tailUrl = '/api/session/autonomy/auto-test/tail';
-    viewer.state = 'ready';
-
-    const store = h.window.getSessionStore('auto-test');
-    store.offset = 12;
+    const { viewer, store } = primeViewer(h);
 
     h.window._es.readyState = 1;
     viewer._resumeHeartbeatAt = 1000;
     viewer._checkResumeHeartbeat(17050);
     await flush();
 
-    assert.equal(h.getReconnectCount(), 0);
-    assert.ok(h.fetchCalls.includes('/api/session/autonomy/auto-test/tail?after=12'));
+    assert.equal(h.getReconnectCount(), 1);
+    assert.ok(h.fetchCalls.includes(RANGED_URL));
     assert.equal(store.offset, 20);
     assert.equal(store.entries.length, 1);
+    assert.equal(store._counters.wakeups_by_trigger.heartbeat, 1);
     viewer.destroy();
   });
 
   it('deduplicates near-simultaneous resume triggers into one catch-up fetch and one reconnect', async () => {
     const h = makeHarness();
-    const viewer = h.makeViewer();
-    viewer.sessionKey = 'auto-test';
-    viewer.project = 'autonomy';
-    viewer.sessionId = 'auto-test';
-    viewer._tailUrl = '/api/session/autonomy/auto-test/tail';
-    viewer.state = 'ready';
-
-    const store = h.window.getSessionStore('auto-test');
-    store.offset = 12;
+    const { viewer, store } = primeViewer(h);
 
     viewer._setupResumeRecovery();
     h.window._es.readyState = 2;
@@ -223,11 +232,11 @@ describe('session viewer resume catch-up', () => {
     h.emitWindow('focus');
     await flush();
 
-    const tailCalls = h.fetchCalls.filter((url) => (
-      url === '/api/session/autonomy/auto-test/tail?after=12'
-    ));
+    const tailCalls = h.fetchCalls.filter((url) => url === RANGED_URL);
     assert.equal(tailCalls.length, 1);
     assert.equal(h.getReconnectCount(), 1);
+    assert.equal(store._counters.stream_rebuilds_dead, 1,
+      'a provably-dead connection is counted as such');
     assert.equal(store.offset, 20);
     assert.equal(store.entries.length, 1);
     viewer.destroy();

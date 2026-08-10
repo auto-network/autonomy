@@ -481,6 +481,35 @@ class TestReadPathIsolation:
         )
 
 
+# ── Acceptance: cold-open of a very long session is one cheap request ──
+
+
+class TestColdOpenPerformance:
+
+    def test_cold_open_long_session_under_250ms(self, tail_client):
+        """Acceptance gate: latest window of a 20k-line session in one
+        request, <250ms server-time (measured 3-11ms; generous margin
+        against CI noise via best-of-3)."""
+        import time as _time
+        client, tmp_path, db_path = tail_client
+        d = tmp_path / "big"
+        d.mkdir()
+        jsonl = d / "big-9999.jsonl"
+        with open(jsonl, "w") as fh:
+            for i in range(20000):
+                fh.write(_claude_text_line(f"message {i} padded out to a realistic transcript line length") + "\n")
+        _insert_session(db_path, tmux_name="auto-big", jsonl_path=str(jsonl))
+
+        best = float("inf")
+        for _ in range(3):
+            t0 = _time.perf_counter()
+            resp = client.get("/api/session/autonomy/auto-big/tail?tail_entries=200")
+            best = min(best, (_time.perf_counter() - t0) * 1000)
+            assert resp.status_code == 200
+            assert len(resp.json()["entries"]) == 200
+        assert best < 250, f"cold-open took {best:.1f}ms (gate: 250ms)"
+
+
 # ── SSE broadcast spans + entry refs (monitor publish path) ────────────
 
 
