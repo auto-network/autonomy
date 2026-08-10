@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -194,40 +195,84 @@ def _workspace_overrides(session: str) -> tuple[str, dict]:
     return ws.id, {}
 
 
+class _JiraAuthError(Exception):
+    """Refusal with an HTTP status. Everything in the auth ladder fails
+    closed."""
+
+    def __init__(self, message: str, *, status: int):
+        super().__init__(message)
+        self.status = status
+
+
+def _resolve_session(authorization: str | None) -> str:
+    """Resolve the calling session from ``Authorization: Bearer
+    $CROSSTALK_TOKEN`` — never from a caller-supplied name.
+
+    The launcher stamped ``sha256(token) -> tmux_name`` into the auth DB at
+    container start; we resolve the hash there (mirroring
+    ``tools/connectors/repl_auth.py``). Read fresh per request so revoking a
+    token cuts access immediately with no dashboard restart. Bearer
+    missing/malformed or token unknown/revoked -> 401."""
+    auth = authorization or ""
+    if not auth.startswith("Bearer ") or not auth[7:]:
+        raise _JiraAuthError(
+            "missing bearer token: send Authorization: Bearer "
+            "$CROSSTALK_TOKEN", status=401)
+    from tools.dashboard.dao import auth_db
+
+    token_hash = hashlib.sha256(auth[7:].encode()).hexdigest()
+    session = auth_db.resolve_token(token_hash)
+    if session is None:
+        raise _JiraAuthError("invalid or revoked token", status=401)
+    return session
+
+
+def _authorized_workspace(authorization: str | None) -> tuple[str, dict]:
+    """Authenticate the caller from the bearer token and resolve their
+    workspace's ``issue_tracker`` query overrides. Blocking (DB + graph
+    reads); call via :func:`asyncio.to_thread`.
+
+    The caller asserts no session and no workspace — both derive host-side
+    from launcher-stamped state — so there is nothing to forge. A token
+    whose session doesn't map to a workspace -> 403."""
+    session = _resolve_session(authorization)
+    try:
+        return _workspace_overrides(session)
+    except LookupError as e:
+        raise _JiraAuthError(str(e), status=403) from e
+
+
 # Query-string keys the named-query route consumes itself; everything else
-# is a query parameter (name=value) for placeholder substitution.
+# is a query parameter (name=value) for placeholder substitution. ``session``
+# is no longer read for identity (it comes from the bearer token) but stays
+# reserved so a stray ``?session=`` never becomes a JQL placeholder value.
 _RESERVED_QUERY_PARAMS = {"org", "session", "max_results", "page_token"}
 
 
 async def list_named_queries(request: Request) -> JSONResponse:
-    """GET /api/jira/query?session= — the calling workspace's named
-    queries, shaped for discovery (``jira-query --list``)."""
-    session = request.query_params.get("session") or ""
-    if not session:
-        return JSONResponse({"error": "session is required"}, status_code=400)
+    """GET /api/jira/query — the calling workspace's named queries, shaped
+    for discovery (``jira-query --list``). Identity is the bearer token."""
     try:
         workspace_id, overrides = await asyncio.to_thread(
-            _workspace_overrides, session)
-    except LookupError as e:
-        return JSONResponse({"error": str(e)}, status_code=404)
+            _authorized_workspace, request.headers.get("Authorization"))
+    except _JiraAuthError as e:
+        return JSONResponse({"error": str(e)}, status_code=e.status)
     return JSONResponse({"workspace": workspace_id,
                          "queries": queries.list_queries(overrides)})
 
 
 async def run_named_query(request: Request) -> JSONResponse:
-    """GET /api/jira/query/{name}?session=&param=value… — resolve a named
-    query from the calling workspace's enable Setting and run it."""
+    """GET /api/jira/query/{name}?param=value… — resolve a named query from
+    the calling workspace's enable Setting and run it. Identity is the
+    bearer token; the workspace is never caller-asserted."""
     name = request.path_params["name"]
-    session = request.query_params.get("session") or ""
-    if not session:
-        return JSONResponse({"error": "session is required"}, status_code=400)
     params = {k: v for k, v in request.query_params.items()
               if k not in _RESERVED_QUERY_PARAMS}
     try:
         workspace_id, overrides = await asyncio.to_thread(
-            _workspace_overrides, session)
-    except LookupError as e:
-        return JSONResponse({"error": str(e)}, status_code=404)
+            _authorized_workspace, request.headers.get("Authorization"))
+    except _JiraAuthError as e:
+        return JSONResponse({"error": str(e)}, status_code=e.status)
     try:
         jql = queries.resolve_query(overrides, name, params)
     except queries.QueryError as e:
