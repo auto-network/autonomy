@@ -3106,20 +3106,37 @@ async def api_terminal_rename(request):
 
 # ── CrossTalk API ────────────────────────────────────────────────────────────
 
-def _session_has_workspace(session: str) -> bool:
-    """True when *session* maps to a workspace — i.e. is a container session.
+#: Session type that identifies a local/operator caller. Everything else the
+#: launcher can mint (``container``, ``dispatch``, ``librarian``, ``chatwith``,
+#: ``agentic``, ``terminal``, …) is a docker-launched agent subject to the
+#: fail-closed org stamp, so an org-less token for any of them is legacy or
+#: mis-minted. Discriminating on the launcher-written ``type`` field keeps this
+#: cache-independent — we never route through the org-resolving workspace map,
+#: whose staleness (b4lbv) could otherwise start refusing legitimate sessions.
+_LOCAL_SESSION_TYPE = "host"
 
-    Used only to classify an org-less token: a workspace session whose token
-    carries no org is a legacy or mis-minted CONTAINER token, not a local
-    caller. Best-effort and cache-independent (reads only the session row's
-    project field, never the org-resolving workspace map).
+
+def _org_scoped_session(session: str) -> bool:
+    """True when *session* is a tracked remote-agent session that must carry an
+    org — i.e. any launcher-minted type other than ``host``.
+
+    Used only to classify an org-less token: such a token belonging to an agent
+    session is legacy or mis-minted and must be refused, never treated as a
+    local caller. ``host`` sessions (and untracked callers) are local and
+    authenticate with a NULL org. Decided deliberately: ``terminal`` and
+    ``agentic`` are agent types and ARE refused when org-less — treating either
+    as local would hand it dashboard authority once settings routes consume the
+    org (h4kzx). Best-effort; cache-independent by construction.
     """
     try:
         from tools.dashboard.dao import dashboard_db
         row = dashboard_db.get_session(session)
     except Exception:
         return False
-    return bool(((row or {}).get("project") or "").strip())
+    if not row:
+        return False  # untracked -> not a live agent container; NULL org is local
+    stype = (row.get("type") or "").strip()
+    return bool(stype) and stype != _LOCAL_SESSION_TYPE
 
 
 def authenticate_session_request(
@@ -3151,7 +3168,7 @@ def authenticate_session_request(
         return None, JSONResponse(
             {"error": "invalid or revoked token"}, status_code=401)
     session, org = resolved
-    if org is None and _session_has_workspace(session):
+    if org is None and _org_scoped_session(session):
         return None, JSONResponse(
             {"error": (
                 "session token carries no organization; relaunch the session "
