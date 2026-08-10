@@ -1205,12 +1205,28 @@ def launch_session(
 
     _lap("mounts_assembled")
 
-    # ── CrossTalk token ──────────────────────────────────────────
+    # ── Session token ────────────────────────────────────────────
     from tools.dashboard.dao import auth_db
+    # A container token is authoritative for the caller's organization, so it is
+    # stamped ONLY from the canonical metadata["org"] key — never the
+    # graph_org/graph_project fallback chain that feeds the advisory GRAPH_ORG
+    # env below. A container that cannot be assigned an org must not receive a
+    # token: fail the launch loudly rather than mint an org-less container token
+    # (which the caller-org guard would refuse anyway). No backfill exists, so
+    # this is the only thing keeping every live container token org-stamped.
+    token_org = (metadata or {}).get("org")
+    if not isinstance(token_org, str) or not token_org.strip():
+        print(
+            f"  ERROR: refusing to launch session '{name}' without a canonical "
+            "metadata['org'] to stamp on its session token",
+            file=sys.stderr,
+        )
+        return None
+    token_org = token_org.strip()
     raw_token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
-    auth_db.insert_token(token_hash, name)
-    _lap("crosstalk_token")
+    auth_db.insert_token(token_hash, name, token_org)
+    _lap("session_token")
 
     # ── Networking ─────────────────────────────────────────────
     # host-networked containers can just use localhost; bridge-networked

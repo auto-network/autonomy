@@ -2258,7 +2258,10 @@ def _resolve_crosstalk_token() -> str:
         import secrets, hashlib
         from tools.dashboard.dao import auth_db
         raw = secrets.token_urlsafe(32)
-        auth_db.insert_token(hashlib.sha256(raw.encode()).hexdigest(), session_name)
+        # Host mint: org=None marks a local caller. This path already refuses
+        # the container case, so a NULL org here is a genuine local session.
+        auth_db.insert_token(
+            hashlib.sha256(raw.encode()).hexdigest(), session_name, None)
         subprocess.run(
             ["tmux", "set-environment", "-t", session_name, "CROSSTALK_TOKEN", raw],
             check=True, timeout=5,

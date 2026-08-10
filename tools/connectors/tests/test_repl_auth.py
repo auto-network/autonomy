@@ -62,7 +62,9 @@ def env(tmp_path, monkeypatch):
 
 def _stamp_session(project: str = WORKSPACE,
                    session: str = SESSION, token: str = TOKEN) -> None:
-    auth_db.insert_token(_hash(token), session)
+    # org on the token is irrelevant to repl_auth (it gates on the derived
+    # workspace, not the token's org), but insert_token now requires it.
+    auth_db.insert_token(_hash(token), session, ORG)
     dashboard_db.upsert_session(session, "agent", project)
 
 
@@ -102,7 +104,7 @@ def test_revoked_token_is_401(env):
 
 
 def test_session_without_row_or_project_is_403(env):
-    auth_db.insert_token(_hash(TOKEN), SESSION)  # token but no session row
+    auth_db.insert_token(_hash(TOKEN), SESSION, ORG)  # token but no session row
     _refused(env, f"Bearer {TOKEN}", status=403,
              needle="does not map to a workspace")
     dashboard_db.upsert_session(SESSION, "agent", "")

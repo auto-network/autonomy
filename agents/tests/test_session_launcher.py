@@ -92,13 +92,19 @@ def platform_snapshot(monkeypatch, tmp_path):
 
 
 def _run(**kw):
-    """Call launch_session with common defaults filled in."""
+    """Call launch_session with common defaults filled in.
+
+    A container launch now fails closed without a canonical ``metadata["org"]``
+    to stamp on its session token, so the default metadata carries one. Tests
+    that pass their own ``metadata`` control it fully (that is how the
+    fail-closed cases below omit the org deliberately)."""
     defaults = dict(
         session_type="dispatch",
         name="test-session",
         prompt=None,
         detach=True,
         image="autonomy-agent:enterprise",
+        metadata={"org": "test-org"},
     )
     defaults.update(kw)
     return session_launcher.launch_session(**defaults)
@@ -234,7 +240,8 @@ def test_metadata_graph_project_exported(tmp_path, fake_creds, fake_crosstalk, c
     run_dir = tmp_path / "run"
     _run(
         output_dir=str(run_dir),
-        metadata={"graph_project": "anchore", "graph_tags": ["enterprise", "ng"]},
+        metadata={"org": "anchore", "graph_project": "anchore",
+                  "graph_tags": ["enterprise", "ng"]},
     )
     cmd = captured_run[0]
     assert "GRAPH_ORG=anchore" in cmd
@@ -249,17 +256,29 @@ def test_metadata_graph_project_exported(tmp_path, fake_creds, fake_crosstalk, c
 def test_graph_tags_string_passed_through_unchanged(tmp_path, fake_creds, fake_crosstalk, captured_run):
     _run(
         output_dir=str(tmp_path / "run"),
-        metadata={"graph_project": "autonomy", "graph_tags": "dashboard"},
+        metadata={"org": "autonomy", "graph_tags": "dashboard"},
     )
     cmd = captured_run[0]
     assert "GRAPH_TAGS=dashboard" in cmd
 
 
-def test_no_graph_env_without_metadata(tmp_path, fake_creds, fake_crosstalk, captured_run):
+def test_no_graph_tags_without_tags(tmp_path, fake_creds, fake_crosstalk, captured_run):
+    # Org is mandatory now (default metadata carries it), so GRAPH_ORG is always
+    # present; a launch with no tags still exports no GRAPH_TAGS.
     _run(output_dir=str(tmp_path / "run"))
     cmd = captured_run[0]
-    assert not any(s.startswith("GRAPH_ORG=") for s in cmd)
     assert not any(s.startswith("GRAPH_TAGS=") for s in cmd)
+
+
+def test_launch_without_canonical_org_fails_closed(tmp_path, fake_creds, fake_crosstalk, captured_run):
+    # A container that cannot be assigned an org must not receive a token; the
+    # launch fails and no docker command is issued. graph_project/graph_org are
+    # deliberately NOT accepted as the token-stamp source.
+    for md in ({}, {"graph_project": "anchore"}, {"graph_org": "anchore"}):
+        captured_run.clear()
+        result = _run(output_dir=str(tmp_path / "run"), metadata=md)
+        assert result is None
+        assert captured_run == []
 
 
 # ── Codex interactive harness ───────────────────────────────────────
