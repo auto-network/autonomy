@@ -90,20 +90,13 @@ CREATE TABLE IF NOT EXISTS turn_corrections (
     PRIMARY KEY (session_uuid, target_message_id)
 );
 
--- Cache of turn-correction RESOLUTION attempts. Binding a correction to its
--- target turn is an expensive difflib LCS; without this we re-ran it on every
--- history warm-up (i.e. every dashboard restart), including for corrections that
--- never resolve. One row per correction we have already tried, regardless of
--- outcome (resolved OR unresolvable), so warm-up skips the LCS next time. Keyed
--- by a stable hash of the correction itself, NOT the resolved target (failures
--- have no target). Lives in this same DB, so a DB reset correctly clears it and
--- forces a rebuild.
-CREATE TABLE IF NOT EXISTS turn_correction_attempts (
-    session_uuid   TEXT NOT NULL,
-    correction_key TEXT NOT NULL,
-    attempted_at   REAL NOT NULL,
-    PRIMARY KEY (session_uuid, correction_key)
-);
+-- NOTE (auto-hmow2): the former ``turn_correction_attempts`` table cached the
+-- session-monitor's difflib resolution so history warm-ups could skip it.
+-- Turn-correction delivery is now a synchronous authenticated API call
+-- (POST /api/session/turn-corrections/suggest) that resolves the target once,
+-- inline, so there is no monitor warm-up and nothing to cache. The table is no
+-- longer created for fresh databases. Old installations keep their inert table;
+-- we deliberately do not add a destructive migration just to drop it.
 
 -- W4 (auto-gah4g): manifest-driven catch-up sweep. One row per session
 -- JSONL the sweep has ever seen. A steady-state sweep is scandir + stat
@@ -1426,37 +1419,6 @@ def get_turn_correction(session_uuid: str, target_message_id: str) -> dict | Non
         (session_uuid, target_message_id),
     ).fetchone()
     return dict(row) if row else None
-
-
-def correction_attempt_seen(session_uuid: str, correction_key: str) -> bool:
-    """True if this correction has already been through resolution (any outcome).
-
-    Guards the expensive difflib LCS in the session-monitor warm-up: a correction
-    is resolved at most once; this sentinel makes every later warm-up (i.e. every
-    dashboard restart) skip it instead of re-running the LCS.
-    """
-    if not session_uuid or not correction_key:
-        return False
-    conn = get_conn()
-    row = conn.execute(
-        "SELECT 1 FROM turn_correction_attempts WHERE session_uuid=? AND correction_key=?",
-        (session_uuid, correction_key),
-    ).fetchone()
-    return row is not None
-
-
-def mark_correction_attempt(session_uuid: str, correction_key: str) -> None:
-    """Record that resolution was tried for this correction (success OR failure),
-    so future warm-ups skip the LCS. See :func:`correction_attempt_seen`."""
-    if not session_uuid or not correction_key:
-        return
-    conn = get_conn()
-    conn.execute(
-        "INSERT OR IGNORE INTO turn_correction_attempts "
-        "(session_uuid, correction_key, attempted_at) VALUES (?, ?, ?)",
-        (session_uuid, correction_key, time.time()),
-    )
-    conn.commit()
 
 
 def list_turn_corrections(session_uuid: str) -> list[dict]:

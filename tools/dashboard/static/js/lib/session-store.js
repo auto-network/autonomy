@@ -16,6 +16,46 @@
  *
  * Depends on: events.js (registerHandler, unregisterHandler), Alpine.js
  */
+/**
+ * Apply one committed turn-correction row to a session store's single
+ * correction map (auto-hmow2). This is the ONLY writer of correction state:
+ * the SSE handler, GET hydration, and optimistic accept/dismiss all funnel
+ * through it, so the browser keeps exactly one reactive map per store.
+ *
+ * The map is replaced immutably (never mutated in place) so Alpine observes
+ * the change and re-renders the joined user tile. Applying the same committed
+ * row again is a no-op-shaped write: the map ends up value-equal.
+ *
+ * Ordering guard (delivery is at-least-once and NOT ordered across the SSE and
+ * GET-hydration paths): an incoming row whose ``updated_at`` is older than the
+ * row already held is DROPPED. This keeps a slow GET-hydration snapshot (read
+ * while the row was still pending) from regressing a tile that a newer
+ * accept/dismiss SSE event already moved to terminal. Equal ``updated_at`` is
+ * applied, so the optimistic accept/dismiss → rollback path (which reuses the
+ * original row's timestamp) still works. The server is authoritative and only
+ * ever advances ``updated_at``, so dropping strictly-older rows never discards
+ * real forward progress. Returns true when a row was applied.
+ *
+ * Exposed on window so the behavioral sweep exercises the exact function
+ * registered to SSE rather than a test-only reimplementation.
+ */
+window.applyTurnCorrection = function(store, correction) {
+  if (!store) return false;
+  if (!correction || !correction.target_message_id) return false;
+  var current = store._turnCorrections || {};
+  var existing = current[correction.target_message_id];
+  if (existing && Number(correction.updated_at || 0) < Number(existing.updated_at || 0)) {
+    return false;  // stale/out-of-order delivery — keep the newer row
+  }
+  var next = {};
+  for (var k in current) {
+    if (Object.prototype.hasOwnProperty.call(current, k)) next[k] = current[k];
+  }
+  next[correction.target_message_id] = correction;
+  store._turnCorrections = next;
+  return true;
+};
+
 document.addEventListener('alpine:init', function() {
   Alpine.store('sessions', {});
 
@@ -691,15 +731,11 @@ window.ensureSessionMessages = function() {
     var id = data && data.session_id;
     if (!id) return;
 
-    var sessions = Alpine.store('sessions');
-    var store = sessions[id];
+    // Unopened viewers have no store yet; they hydrate later through GET.
+    var store = Alpine.store('sessions')[id];
     if (!store) return;
 
-    var correction = data && data.correction;
-    if (!correction || !correction.target_message_id) return;
-
-    store._turnCorrections = store._turnCorrections || {};
-    store._turnCorrections[correction.target_message_id] = correction;
+    if (!window.applyTurnCorrection(store, data && data.correction)) return;
     store._lastRenderTs = Date.now();
     _emitSessionStoreChanged('turn_correction');
   });
