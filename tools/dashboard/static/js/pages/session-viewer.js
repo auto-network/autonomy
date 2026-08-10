@@ -456,9 +456,9 @@
         if (this.project) return _formatProject(this.project);
         return '';
       },
-      get olderBefore() {
+      get olderCursor() {
         var s = Alpine.store('sessions')[this.sessionKey];
-        return s ? s.olderBefore : null;
+        return s ? s.olderCursor : null;
       },
       get hasMoreHistory() {
         var s = Alpine.store('sessions')[this.sessionKey];
@@ -522,6 +522,10 @@
 
       // ── View-only state ─────────────────────────────────────────
       displayEntries: [],
+      // Monotonic display-revision bookkeeping (auto-16g9t): the merge
+      // revision + entry count displayEntries currently reflects.
+      _displayedRev: 0,
+      _displayedLen: 0,
       autoScroll: true,
       loadingOlder: false,
       _workspaceStatus: null,
@@ -1079,8 +1083,9 @@
             await this._initUploads();
 
             if (data.entries && data.entries.length > 0) {
-              window.appendSessionEntries(store, data, 'fetch');
+              window.mergeSessionEntries(store, data, 'fetch');
             }
+            if (data.cursor) store.committed = data.cursor;
             store.isLive = isLiveHint !== undefined ? !!isLiveHint : !!data.is_live;
             if (data.resolved !== undefined) store.resolved = !!data.resolved;
             store.sessionType = data.type || '';
@@ -1180,16 +1185,16 @@
           this._scrollToBottom();
         } else {
           // First visit — fetch is the authoritative initial render.
-          // Clear any SSE entries that accumulated since SPA boot so the
-          // chronological fetch batch isn't appended *after* newer SSE
-          // entries (which would invert head/tail and hide the latest
-          // message at entries[0]). See auto-cq7yd.
+          // (With tuple-keyed merge, batch order can no longer invert the
+          // buffer — the reset just guarantees a clean cold-open.)
           store.entries = [];
-          store._seenIdentities = {};
+          store.localEntries = [];
           store.toolMap = {};
           store.resultMap = {};
           store._pendingSSE = [];
-          store.olderBefore = null;
+          store.chain = [];
+          store.committed = null;
+          store.olderCursor = null;
           store.hasMoreHistory = false;
 
           store._loading = true;
@@ -1256,13 +1261,16 @@
             }
           }
 
-          // Flush pending SSE events that arrived during fetch
+          // Flush pending SSE events that arrived during fetch — the
+          // tuple merge makes replay order irrelevant; spans still
+          // advance the committed high-water in arrival order.
           var pending = store._pendingSSE;
           store._pendingSSE = [];
           store._loading = false;
           store.loaded = true;
           for (var i = 0; i < pending.length; i++) {
-            window.appendSessionEntries(store, pending[i], 'sse');
+            if (pending[i].span) window.advanceCommittedSpan(store, pending[i].span);
+            window.mergeSessionEntries(store, pending[i], 'sse');
           }
 
           this._rebuildDisplay();
@@ -1635,30 +1643,21 @@
           }, 1000);
         }
 
-        // Single watcher: incremental append + auto-scroll when entries change
-        var lastLen = this.entries.length;
+        // Single watcher on the store's monotonic merge revision.
+        // The old design watched entries.length and coordinated with the
+        // merge through a clearable _displayDirty flag — loadOlder's
+        // synchronous rebuild cleared the flag before this watcher ran,
+        // so the watcher "incrementally appended" indices that were now
+        // the shifted OLD tail: duplicate tail tiles after every
+        // scroll-up. Revisions are never cleared, so any interleaving of
+        // rebuilds and watcher runs converges via _syncDisplayNow().
         track(Alpine.watch(
           function() {
             var s = Alpine.store('sessions')[sid];
-            return s ? s.entries.length : 0;
+            return s ? (s._mergeRev || 0) : 0;
           },
-          function(newLen) {
-            var s = Alpine.store('sessions')[sid];
-            if (newLen > lastLen) {
-              if (s && s._displayDirty) {
-                self._rebuildDisplay();
-              } else if (s) {
-                // Incremental: append each new entry (O(1) per entry)
-                for (var i = lastLen; i < newLen; i++) {
-                  window.SessionDisplay.appendOne(self.displayEntries, s.entries, i);
-                }
-              }
-              lastLen = newLen;
-            } else {
-              // Length decreased or reset — full rebuild
-              self._rebuildDisplay();
-              lastLen = newLen;
-            }
+          function() {
+            self._syncDisplayNow();
             if (self.autoScroll) {
               self._scrollToBottom();
             }
@@ -1915,13 +1914,9 @@
           if (!p || p.target_session !== tmux) continue;
           this._uploadSeen.add(m.key);
           var entry = this._buildUploadEntry(p);
-          if (window.flushPendingSessionAttachments) {
-            store._pendingAttachments = store._pendingAttachments || [];
-            store._pendingAttachments.push(entry);
-            window.flushPendingSessionAttachments(store, 'sse');
-          } else {
-            store.entries.push(entry);
-          }
+          store._pendingAttachments = store._pendingAttachments || [];
+          store._pendingAttachments.push(entry);
+          window.flushPendingSessionAttachments(store, 'sse');
         }
       },
 
@@ -1953,24 +1948,58 @@
           }
           store.pendingToolIds = ptids;
         }
-        if (data.older_before !== undefined) store.olderBefore = data.older_before;
+        if (data.older_cursor !== undefined) store.olderCursor = data.older_cursor;
         if (data.has_more !== undefined) store.hasMoreHistory = !!data.has_more;
-        if (data.seq !== undefined && (!data.entries || data.entries.length === 0)) {
-          store.seq = data.seq;
+        // Forward-delta cursor advances the committed high-water — a
+        // fetch's cursor is complete-line-aligned server truth for
+        // "everything up to here has been served to this client".
+        if (data.cursor && data.cursor.file) {
+          store.committed = { file: data.cursor.file, off: data.cursor.off };
+        } else if (Array.isArray(data.window_spans) && data.window_spans.length &&
+                   !store.committed) {
+          // Cold-open reverse window: anchor committed at the newest
+          // span's end so the first SSE span has a contiguity baseline.
+          var lastSpan = data.window_spans[data.window_spans.length - 1];
+          store.committed = { file: lastSpan.file, off: lastSpan.to };
         }
         if (data.entries && data.entries.length > 0) {
-          window.appendSessionEntries(store, data, 'fetch');
+          window.mergeSessionEntries(store, data, 'fetch');
+        } else if (Array.isArray(data.chain) && data.chain.length && store.chain.length === 0) {
+          store.chain = data.chain.slice();
         }
+      },
+
+      // Bring displayEntries up to the store's merge revision. Idempotent
+      // and monotonic — safe to call from the watcher, loadOlder, and
+      // configure in any interleaving (the _displayDirty race is gone).
+      _syncDisplayNow() {
+        var s = Alpine.store('sessions')[this.sessionKey];
+        if (!s) return;
+        var rev = s._mergeRev || 0;
+        if (rev === (this._displayedRev || 0) &&
+            s.entries.length === (this._displayedLen || 0)) return;
+        if ((s._structureRev || 0) > (this._displayedRev || 0) ||
+            s.entries.length < (this._displayedLen || 0)) {
+          this._rebuildDisplay();
+          return;
+        }
+        // Pure tail-appends since the last handled revision.
+        for (var i = (this._displayedLen || 0); i < s.entries.length; i++) {
+          window.SessionDisplay.appendOne(this.displayEntries, s.entries, i);
+        }
+        this._displayedRev = rev;
+        this._displayedLen = s.entries.length;
       },
 
       _initialTailUrl() {
-        return this._tailUrl + '?tail_lines=' + FAST_OPEN_TAIL_LINES;
+        return this._tailUrl + '?tail_entries=' + FAST_OPEN_TAIL_LINES;
       },
 
-      _olderTailUrl(before) {
+      _olderTailUrl(cursor) {
         return this._tailUrl
-          + '?tail_lines=' + FAST_OPEN_TAIL_LINES
-          + '&before=' + encodeURIComponent(before);
+          + '?tail_entries=' + FAST_OPEN_TAIL_LINES
+          + '&before_file=' + encodeURIComponent(cursor.file)
+          + '&before=' + encodeURIComponent(cursor.off);
       },
 
       // ── Scroll helpers ──────────────────────────────────────────
@@ -1991,7 +2020,7 @@
       },
 
       async loadOlder() {
-        if (this.loadingOlder || !this.hasMoreHistory || this.olderBefore === null || !this._tailUrl) return;
+        if (this.loadingOlder || !this.hasMoreHistory || !this.olderCursor || !this._tailUrl) return;
         var store = Alpine.store('sessions')[this.sessionKey];
         if (!store) return;
         var el = this.$refs.entriesContainer;
@@ -1999,7 +2028,7 @@
         var prevTop = el ? el.scrollTop : 0;
         this.loadingOlder = true;
         try {
-          var res = await fetch(this._olderTailUrl(this.olderBefore));
+          var res = await fetch(this._olderTailUrl(this.olderCursor));
           if (!res.ok) {
             throw new Error('History fetch failed (' + res.status + ')');
           }
@@ -2008,11 +2037,14 @@
           if (data.offset !== undefined) store.offset = data.offset || store.offset || 0;
           if (data.is_live !== undefined) store.isLive = !!data.is_live;
           if (data.resolved !== undefined) store.resolved = !!data.resolved;
-          if (data.older_before !== undefined) store.olderBefore = data.older_before;
+          if (data.older_cursor !== undefined) store.olderCursor = data.older_cursor;
           if (data.has_more !== undefined) store.hasMoreHistory = !!data.has_more;
           if (data.entries && data.entries.length > 0) {
-            window.prependSessionEntries(store, data, 'fetch');
-            this._rebuildDisplay();
+            window.mergeSessionEntries(store, data, 'fetch');
+            // Bring the display current NOW so the scroll anchor math
+            // sees the inserted tiles; the merge-revision watcher will
+            // find nothing left to do (idempotent, no cleared flag).
+            this._syncDisplayNow();
             var self = this;
             this.$nextTick(function() {
               requestAnimationFrame(function() {
@@ -2508,8 +2540,8 @@
           store.isLive = !!data.is_live;
 
           if (data.entries && data.entries.length > 0) {
-            window.appendSessionEntries(store, data, 'fetch');
-            this._rebuildDisplay();
+            window.mergeSessionEntries(store, data, 'fetch');
+            this._syncDisplayNow();
             if (this.autoScroll) this._scrollToBottom();
           }
 
@@ -2553,6 +2585,8 @@
         this._lcSetState('loading', '_reset: viewer dismounted/recycled');
         this.sessionKey = '';
         this.displayEntries = [];
+        this._displayedRev = 0;
+        this._displayedLen = 0;
         this._expanded = {};
         this._expandView = {};
         this._groupExpanded = {};

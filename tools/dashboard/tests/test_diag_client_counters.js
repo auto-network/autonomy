@@ -73,34 +73,38 @@ function makeHarness() {
 }
 
 describe('diag client-side counters (auto-wldnv)', () => {
-  it('dedup_collisions increments when the same identity is appended twice', () => {
+  it('merge_dropped_duplicate increments when the same entry_ref is merged twice', () => {
     const h = makeHarness();
     const store = h.win.getSessionStore('sess-1');
-    const entry = {
-      type: 'tool_use', tool_id: 'call_X', tool_name: 'Read',
-      timestamp: '2026-04-28T00:00:00Z',
-    };
-    h.win.appendSessionEntries(store, { seq: 1, entries: [entry] }, 'sse');
-    assert.equal(store._dedupCollisionsCount || 0, 0);
+    function entry() {
+      return {
+        type: 'tool_use', tool_id: 'call_X', tool_name: 'Read',
+        timestamp: '2026-04-28T00:00:00Z',
+        entry_ref: { file: 'f', off: 10, sub: 0 },
+      };
+    }
+    h.win.mergeSessionEntries(store, { chain: ['f'], entries: [entry()] }, 'sse');
+    assert.equal(store._counters.merge_dropped_duplicate, 0);
 
     // Re-deliver the exact same entry (gap-replay scenario).
-    h.win.appendSessionEntries(store, { seq: 2, entries: [entry] }, 'sse');
-    assert.equal(store._dedupCollisionsCount, 1, 'dedup collision must be tracked');
+    h.win.mergeSessionEntries(store, { chain: ['f'], entries: [entry()] }, 'sse');
+    assert.equal(store._counters.merge_dropped_duplicate, 1, 'duplicate drop must be tracked');
 
     // And again.
-    h.win.appendSessionEntries(store, { seq: 3, entries: [entry] }, 'sse');
-    assert.equal(store._dedupCollisionsCount, 2);
+    h.win.mergeSessionEntries(store, { chain: ['f'], entries: [entry()] }, 'sse');
+    assert.equal(store._counters.merge_dropped_duplicate, 2);
+    assert.equal(store.entries.length, 1, 'replays never grow the buffer');
   });
 
   it('entries_via_fetch_count vs entries_via_sse_count routes by provenance', () => {
     const h = makeHarness();
     const store = h.win.getSessionStore('sess-2');
-    h.win.appendSessionEntries(store, {
+    h.win.mergeSessionEntries(store, {
       seq: 1, entries: [
         { type: 'user', content: 'a', timestamp: '2026-04-28T00:00:00Z' },
       ],
     }, 'fetch');
-    h.win.appendSessionEntries(store, {
+    h.win.mergeSessionEntries(store, {
       seq: 2, entries: [
         { type: 'assistant_text', content: 'b', timestamp: '2026-04-28T00:00:01Z' },
         { type: 'assistant_text', content: 'c', timestamp: '2026-04-28T00:00:02Z' },
@@ -121,7 +125,7 @@ describe('diag client-side counters (auto-wldnv)', () => {
         timestamp: '2026-04-28T00:00:' + String(i).padStart(2, '0') + 'Z',
       });
     }
-    h.win.appendSessionEntries(store, { seq: 12, entries }, 'sse');
+    h.win.mergeSessionEntries(store, { seq: 12, entries }, 'sse');
     const snap = h.win._diagSnapshotSessions(['sess-3']);
     assert.ok(snap['sess-3'], 'session must be in snapshot');
     const block = snap['sess-3'];
@@ -131,14 +135,14 @@ describe('diag client-side counters (auto-wldnv)', () => {
     assert.equal(block.entries_via_fetch_count, 0);
     assert.equal(block.dedup_collisions, 0);
     assert.equal(typeof block.last_render_ms, 'number');
-    assert.equal(typeof block.seen_identities_size, 'number');
-    assert.ok(block.seen_identities_size >= 12);
+    assert.ok(block.counters, 'merge counters must be published');
+    assert.equal(block.counters.merge_inserted, 12);
   });
 
   it('entries_with_null_seq_count counts entries without a seq', () => {
     const h = makeHarness();
     const store = h.win.getSessionStore('sess-null');
-    h.win.appendSessionEntries(store, {
+    h.win.mergeSessionEntries(store, {
       seq: 1, entries: [
         { type: 'assistant_text', content: 'no-seq', timestamp: '2026-04-28T00:00:00Z' },
         { type: 'user', content: 'has-seq', seq: 7, timestamp: '2026-04-28T00:00:01Z' },

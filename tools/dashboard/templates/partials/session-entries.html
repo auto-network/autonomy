@@ -8,10 +8,10 @@
 
    Contract — required methods (from SessionRenderer mixin):
      resolveEntry(dEntry), borderClass(entry), hasGap(idx), chipClass(toolName),
-     groupMeta(entry), formatTime(ts), toggleGroupItem(dIdx, subIdx),
+     groupMeta(entry), formatTime(ts), toggleGroupItem(dEntry.key, subIdx),
      bashStatusColor(item), bashStatus(item), headline(entry),
-     isGroupItemExpanded(dIdx, subIdx), toggleGroupItemView(dIdx, subIdx),
-     groupItemViewMode(dIdx, subIdx), groupItemExpandContent(item, dIdx, subIdx),
+     isGroupItemExpanded(dEntry.key, subIdx), toggleGroupItemView(dEntry.key, subIdx),
+     groupItemViewMode(dEntry.key, subIdx), groupItemExpandContent(item, dEntry.key, subIdx),
      toggleExpand(idx), metaDisplay(entry), isExpanded(idx), expandViewMode(idx),
      toggleView(idx), expandContent(entry, idx), sysIconColor(entry), sysIcon(entry),
      resumeScroll()
@@ -19,7 +19,7 @@
    Descriptors are resolved via resolveEntry() at render time (no per-entry x-data scope).
    No entry data is duplicated — descriptors reference store.entries[] by index. #}
 
-<template x-for="(dEntry, dIdx) in displayEntries" :key="dIdx">
+<template x-for="(dEntry, dIdx) in displayEntries" :key="dEntry.key">
   <div>
 
     <!-- ── Grouped tool calls (combined card) ────────── -->
@@ -39,28 +39,28 @@
           <!-- Per-invocation lines -->
           <template x-for="(item, subIdx) in resolveEntry(dEntry).items" :key="subIdx">
             <div>
-              <div class="sc-group-item" @click="toggleGroupItem(dIdx, subIdx)">
+              <div class="sc-group-item" @click="toggleGroupItem(dEntry.key, subIdx)">
                 <template x-if="resolveEntry(dEntry).tool_name === 'Bash' || resolveEntry(dEntry).tool_name === 'exec_command'">
                   <span class="sc-group-status" :style="bashStatusColor(item)" x-text="bashStatus(item)"></span>
                 </template>
                 <span class="sc-group-item-text" x-text="headline(item)"></span>
               </div>
               <!-- Expanded detail panel (accordion — one at a time) -->
-              <template x-if="isGroupItemExpanded(dIdx, subIdx)">
+              <template x-if="isGroupItemExpanded(dEntry.key, subIdx)">
                 <div @click.stop>
-                  <div class="sc-detail-tabs" @click="toggleGroupItemView(dIdx, subIdx, item)">
+                  <div class="sc-detail-tabs" @click="toggleGroupItemView(dEntry.key, subIdx, item)">
                     <span class="sc-detail-tab"
-                          :class="groupItemViewMode(dIdx, subIdx, item) === 'input' ? 'sc-detail-tab-active' : ''">Input</span>
+                          :class="groupItemViewMode(dEntry.key, subIdx, item) === 'input' ? 'sc-detail-tab-active' : ''">Input</span>
                     <template x-if="hasOutput(item)">
                       <span class="sc-detail-tab"
-                            :class="groupItemViewMode(dIdx, subIdx, item) === 'output' ? 'sc-detail-tab-active' : ''">Output</span>
+                            :class="groupItemViewMode(dEntry.key, subIdx, item) === 'output' ? 'sc-detail-tab-active' : ''">Output</span>
                     </template>
                   </div>
-                  <template x-if="groupItemExpandIsDiff(item, dIdx, subIdx)">
+                  <template x-if="groupItemExpandIsDiff(item, dEntry.key, subIdx)">
                     <pre class="sc-detail sc-detail-diff" x-html="groupItemExpandDiffHTML(item)"></pre>
                   </template>
-                  <template x-if="!groupItemExpandIsDiff(item, dIdx, subIdx)">
-                    <pre class="sc-detail" x-text="groupItemExpandContent(item, dIdx, subIdx)"></pre>
+                  <template x-if="!groupItemExpandIsDiff(item, dEntry.key, subIdx)">
+                    <pre class="sc-detail" x-text="groupItemExpandContent(item, dEntry.key, subIdx)"></pre>
                   </template>
                 </div>
               </template>
@@ -151,13 +151,13 @@
 
             <!-- ── Compact summary: context-compaction boundary marker ─── -->
             <template x-if="resolveEntry(dEntry).type === 'compact_summary'">
-              <div class="sc-cs-card" @click="toggleExpand(dIdx)">
+              <div class="sc-cs-card" @click="toggleExpand(dEntry.key)">
                 <div class="flex items-center gap-2 mb-1">
                   <span class="sc-cs-label">CONTEXT COMPACTION</span>
                   <span class="sc-timestamp" x-text="formatTime(resolveEntry(dEntry).timestamp)"></span>
                 </div>
                 <div class="sc-cs-content"
-                     :class="isExpanded(dIdx) ? '' : 'sc-cs-content-collapsed'"
+                     :class="isExpanded(dEntry.key) ? '' : 'sc-cs-content-collapsed'"
                      x-text="resolveEntry(dEntry).content || ''"></div>
               </div>
             </template>
@@ -175,7 +175,7 @@
 
             <!-- ── Tool use: two-line chip card ────────────── -->
             <template x-if="resolveEntry(dEntry).type === 'tool_use'">
-              <div class="sc-tool-card" :class="isToolRunning(resolveEntry(dEntry)) ? 'sc-tool-running' : ''" @click="toggleExpand(dIdx)">
+              <div class="sc-tool-card" :class="isToolRunning(resolveEntry(dEntry)) ? 'sc-tool-running' : ''" @click="toggleExpand(dEntry.key)">
                 <!-- Line 1: chip or todo-status icon + meta + timestamp + interrupt button -->
                 <div class="sc-line1">
                   <!-- TaskUpdate: status icon takes the chip slot (no "Update Task" label per design) -->
@@ -199,10 +199,10 @@
                 </div>
                 <!-- Line 2: headline -->
                 <div class="sc-line2"
-                     :class="isExpanded(dIdx) ? 'sc-line2-expanded' : 'sc-line2-truncated'"
+                     :class="isExpanded(dEntry.key) ? 'sc-line2-expanded' : 'sc-line2-truncated'"
                      x-text="headline(resolveEntry(dEntry))"></div>
                 <!-- Detail panel (expanded) -->
-                <template x-if="isExpanded(dIdx)">
+                <template x-if="isExpanded(dEntry.key)">
                   <div @click.stop>
                     <!-- Task* tiles: flowing body text, no Input/Output tabs -->
                     <template x-if="hasTodoAnnotation(resolveEntry(dEntry))">
@@ -211,21 +211,21 @@
                     </template>
                     <template x-if="!hasTodoAnnotation(resolveEntry(dEntry))">
                       <div>
-                        <div class="sc-detail-tabs" @click="toggleView(dIdx, resolveEntry(dEntry))">
+                        <div class="sc-detail-tabs" @click="toggleView(dEntry.key, resolveEntry(dEntry))">
                           <span class="sc-detail-tab"
-                                :class="expandViewMode(dIdx, resolveEntry(dEntry)) === 'input' ? 'sc-detail-tab-active' : ''"
+                                :class="expandViewMode(dEntry.key, resolveEntry(dEntry)) === 'input' ? 'sc-detail-tab-active' : ''"
                                 >Input</span>
                           <template x-if="hasOutput(resolveEntry(dEntry))">
                             <span class="sc-detail-tab"
-                                  :class="expandViewMode(dIdx, resolveEntry(dEntry)) === 'output' ? 'sc-detail-tab-active' : ''"
+                                  :class="expandViewMode(dEntry.key, resolveEntry(dEntry)) === 'output' ? 'sc-detail-tab-active' : ''"
                                   >Output</span>
                           </template>
                         </div>
-                        <template x-if="expandIsDiff(resolveEntry(dEntry), dIdx)">
-                          <pre class="sc-detail sc-detail-diff" x-html="expandDiffHTML(resolveEntry(dEntry), dIdx)"></pre>
+                        <template x-if="expandIsDiff(resolveEntry(dEntry), dEntry.key)">
+                          <pre class="sc-detail sc-detail-diff" x-html="expandDiffHTML(resolveEntry(dEntry), dEntry.key)"></pre>
                         </template>
-                        <template x-if="!expandIsDiff(resolveEntry(dEntry), dIdx)">
-                          <pre class="sc-detail" x-text="expandContent(resolveEntry(dEntry), dIdx)"></pre>
+                        <template x-if="!expandIsDiff(resolveEntry(dEntry), dEntry.key)">
+                          <pre class="sc-detail" x-text="expandContent(resolveEntry(dEntry), dEntry.key)"></pre>
                         </template>
                       </div>
                     </template>
@@ -236,12 +236,12 @@
 
             <!-- ── Thinking (collapsed by default) ─────────── -->
             <template x-if="resolveEntry(dEntry).type === 'thinking'">
-              <div class="sc-tool-card" @click="toggleExpand(dIdx)">
+              <div class="sc-tool-card" @click="toggleExpand(dEntry.key)">
                 <div class="sc-line1">
                   <span class="sc-think-label">thinking...</span>
                   <span class="sc-timestamp" x-text="formatTime(resolveEntry(dEntry).timestamp)"></span>
                 </div>
-                <template x-if="isExpanded(dIdx)">
+                <template x-if="isExpanded(dEntry.key)">
                   <div class="sc-detail" style="font-style: italic;" x-text="resolveEntry(dEntry).content || ''"></div>
                 </template>
               </div>
@@ -249,13 +249,13 @@
 
             <!-- ── System / harness message ────────────────── -->
             <template x-if="resolveEntry(dEntry).type === 'system'">
-              <div class="sc-tool-card" @click="toggleExpand(dIdx)">
+              <div class="sc-tool-card" @click="toggleExpand(dEntry.key)">
                 <div class="flex items-center gap-2">
                   <span class="sc-sys-icon" :style="sysIconColor(resolveEntry(dEntry))" x-text="sysIcon(resolveEntry(dEntry))"></span>
                   <span class="sc-sys-label" x-text="resolveEntry(dEntry).content || ''"></span>
                   <span class="sc-timestamp" x-text="formatTime(resolveEntry(dEntry).timestamp)"></span>
                 </div>
-                <template x-if="isExpanded(dIdx)">
+                <template x-if="isExpanded(dEntry.key)">
                   <div class="sc-detail" x-text="resolveEntry(dEntry).body || resolveEntry(dEntry).content || ''"></div>
                 </template>
               </div>

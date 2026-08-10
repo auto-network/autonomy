@@ -10,8 +10,11 @@
  * carried an older fetched entry.
  *
  * Fix: the first-visit branch of session-viewer.js clears
- * `store.entries`, `_seenIdentities`, `toolMap`, `resultMap`, and
- * `_pendingSSE` before flipping `_loading=true` and starting the fetch.
+ * `store.entries`, `localEntries`, `toolMap`, `resultMap`, `chain`,
+ * cursors, and `_pendingSSE` before flipping `_loading=true` and
+ * starting the fetch. (auto-16g9t: the store now merges by entry_ref
+ * tuple, so batch order can no longer invert the buffer — these tests
+ * keep pinning the clear + drain behavior end-to-end.)
  *
  * These tests verify:
  *   1. Pre-fetch SSE entries do not invert head/tail of the rendered list.
@@ -31,6 +34,7 @@ const vm = require('vm');
 
 const REPO_ROOT = process.env.REPO_ROOT || path.resolve(__dirname, '../../..');
 const STORE_JS = path.join(REPO_ROOT, 'tools/dashboard/static/js/lib/session-store.js');
+const DISPLAY_JS = path.join(REPO_ROOT, 'tools/dashboard/static/js/lib/session-display.js');
 const RENDERER_JS = path.join(REPO_ROOT, 'tools/dashboard/static/js/lib/session-renderer.js');
 const VIEWER_JS = path.join(REPO_ROOT, 'tools/dashboard/static/js/pages/session-viewer.js');
 
@@ -142,6 +146,7 @@ function makeHarness(fetchHandlers) {
     'setTimeout(window.ensureSessionMessages, 0);'
   );
   vm.runInContext(storeSrc, sandbox, { filename: 'session-store.js' });
+  vm.runInContext(fs.readFileSync(DISPLAY_JS, 'utf8'), sandbox, { filename: 'session-display.js' });
   vm.runInContext(fs.readFileSync(RENDERER_JS, 'utf8'), sandbox, { filename: 'session-renderer.js' });
   vm.runInContext(fs.readFileSync(VIEWER_JS, 'utf8'), sandbox, { filename: 'session-viewer.js' });
 
@@ -183,7 +188,7 @@ function entryAt(ts, content) {
 describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
   it('clears pre-fetch SSE entries so the chronological backlog renders in order', async () => {
     // Mock fetch to return entries chronologically older than the SSE one.
-    const tailUrl = '/api/session/autonomy/auto-test/tail?tail_lines=200';
+    const tailUrl = '/api/session/autonomy/auto-test/tail?tail_entries=200';
     const fetchedEntries = [
       entryAt('2026-01-01T09:55:00Z', 'fetch-old-1'),
       entryAt('2026-01-01T09:56:00Z', 'fetch-old-2'),
@@ -214,7 +219,7 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
     // Simulate session:registry → session:messages SSE arriving before the
     // viewer mounts. The latest SSE timestamp is *newer* than the fetch's
     // last entry — this is the inversion trigger.
-    h.window.appendSessionEntries(store, {
+    h.window.mergeSessionEntries(store, {
       seq: 42,
       entries: [entryAt('2026-01-01T10:00:00Z', 'sse-pre-nav-newer')],
     }, 'sse');
@@ -245,7 +250,7 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
   });
 
   it('drains pendingSSE arriving during the fetch and keeps chronology', async () => {
-    const tailUrl = '/api/session/autonomy/auto-test/tail?tail_lines=200';
+    const tailUrl = '/api/session/autonomy/auto-test/tail?tail_entries=200';
 
     // We need to inject an SSE event *while_fetchBacklog is awaiting*. Stash
     // a hook on the harness window; the fake fetch resolves on the next tick
@@ -285,7 +290,7 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
 
     const store = h.window.getSessionStore('auto-test');
     // Pre-nav SSE delivery (will be wiped by first-visit clear).
-    h.window.appendSessionEntries(store, {
+    h.window.mergeSessionEntries(store, {
       seq: 42,
       entries: [entryAt('2026-01-01T10:00:00Z', 'sse-pre-nav')],
     }, 'sse');
@@ -313,14 +318,15 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
     viewer.destroy();
   });
 
-  it('resets _seenIdentities so post-fetch entries are not deduped against pre-clear SSE writes', async () => {
-    const tailUrl = '/api/session/autonomy/auto-test/tail?tail_lines=200';
+  it('first-visit clear wipes pre-clear SSE state so the fetched copy is canonical', async () => {
+    const tailUrl = '/api/session/autonomy/auto-test/tail?tail_entries=200';
     const toolEntry = {
       type: 'tool_use',
       tool_id: 'tool_abc',
       tool_name: 'Bash',
       content: 'fetch-version',
       timestamp: '2026-01-01T09:55:00Z',
+      entry_ref: { file: 'fff', off: 10, sub: 0 },
     };
     const h = makeHarness({
       [tailUrl]: () => ({
@@ -328,41 +334,39 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
         status: 200,
         json: () => Promise.resolve({
           entries: [toolEntry],
+          chain: ['fff'],
           offset: 10,
           is_live: true,
-          seq: 1,
         }),
       }),
     });
 
     const store = h.window.getSessionStore('auto-test');
-    // Pre-nav SSE delivers a tool_use with the same tool_id. Without the
-    // first-visit identity reset, the fetch's copy of this tool_use would
-    // be silently deduped — the user never sees the canonical fetch entry.
-    h.window.appendSessionEntries(store, {
-      seq: 5,
+    // Pre-nav SSE delivers the same line (same entry_ref) with an older
+    // rendering. The first-visit clear wipes it; the fetch's copy lands
+    // as the one canonical entry at that ref.
+    h.window.mergeSessionEntries(store, {
       entries: [{
         type: 'tool_use',
         tool_id: 'tool_abc',
         tool_name: 'Bash',
         content: 'sse-version',
         timestamp: '2026-01-01T10:00:00Z',
+        entry_ref: { file: 'fff', off: 10, sub: 0 },
       }],
+      chain: ['fff'],
     }, 'sse');
     assert.equal(store.entries.length, 1);
-    assert.ok(store._seenIdentities && store._seenIdentities['tu:tool_abc'],
-      'pre-clear SSE write must register identity');
 
     const viewer = h.makeViewer();
     await viewer.configure({ sessionId: 'auto-test', project: 'autonomy' });
     await flush();
 
-    // The fetch's tool_use must land — not be filtered as a dedup hit.
     assert.equal(store.entries.length, 1);
     assert.equal(store.entries[0].content, 'fetch-version',
-      'fetched tool_use must not be silently merged into the cleared SSE entry');
-    assert.equal(store._dedupCollisionsCount || 0, 0,
-      'no dedup collisions expected after first-visit clear');
+      'fetched tool_use must be the canonical copy after the clear');
+    assert.equal((store._counters && store._counters.merge_dropped_duplicate) || 0, 0,
+      'no duplicate drops expected after first-visit clear');
 
     viewer.destroy();
   });
@@ -372,7 +376,7 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
     // hit the cached path — no clear, no fetch.
     const h = makeHarness({});
     const store = h.window.getSessionStore('auto-test');
-    h.window.appendSessionEntries(store, {
+    h.window.mergeSessionEntries(store, {
       seq: 10,
       entries: [
         entryAt('2026-01-01T09:00:00Z', 'cached-1'),
@@ -399,7 +403,7 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
   it('hydrates uploaded screenshots into an already-loaded timeline chronologically', async () => {
     const h = makeHarness({});
     const store = h.window.getSessionStore('auto-test');
-    h.window.appendSessionEntries(store, {
+    h.window.mergeSessionEntries(store, {
       seq: 10,
       entries: [
         entryAt('2026-01-01T09:00:00Z', 'older-turn'),
@@ -447,14 +451,22 @@ describe('session viewer first-visit head/tail inversion (auto-cq7yd)', () => {
 
     await viewer._initUploads();
 
-    assert.equal(store.entries.length, 4);
-    assert.equal(store.entries[0].content, 'older-turn');
-    assert.equal(store.entries[1].rel_path, '.uploads/a.png');
-    assert.equal(store.entries[2].rel_path, '.uploads/b.png');
-    assert.equal(store.entries[3].content, 'newer-turn');
+    // Client-local tiles live in localEntries (no entry_ref — never part
+    // of the server-truth buffer); the display layer interleaves them by
+    // timestamp at build time.
+    assert.equal(store.entries.length, 2);
+    assert.equal(store.localEntries.length, 2);
+    assert.equal(store.localEntries[0].rel_path, '.uploads/a.png');
+    assert.equal(store.localEntries[1].rel_path, '.uploads/b.png');
     assert.equal(store._pendingAttachments.length, 0);
-    assert.equal(store._displayDirty, true,
-      'mid-list upload insertion must force a full display rebuild');
+    assert.equal(store._structureRev, store._mergeRev,
+      'local-tile arrival must mark a structural change (full rebuild)');
+    const display = h.window.SessionDisplay.buildAll(store.entries, store.localEntries);
+    const order = Array.from(display, (d) =>
+      d.local !== undefined ? store.localEntries[d.local].rel_path : store.entries[d.idx].content);
+    assert.deepEqual(order,
+      ['older-turn', '.uploads/a.png', '.uploads/b.png', 'newer-turn'],
+      'display interleaves local tiles chronologically');
 
     viewer.destroy();
   });

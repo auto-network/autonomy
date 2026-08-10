@@ -443,8 +443,8 @@
       const currD = this.displayEntries[idx];
       if (!prevD || !currD) return false;
       // Resolve descriptors to get actual entry types
-      const prev = window.SessionDisplay.resolve(prevD, this.entries);
-      const curr = window.SessionDisplay.resolve(currD, this.entries);
+      const prev = this.resolveEntry(prevD);
+      const curr = this.resolveEntry(currD);
       if (!prev || !curr) return false;
       const prevIsUser = prev.type === 'user';
       const currIsUser = curr.type === 'user';
@@ -571,14 +571,23 @@
     // ── Internal helpers ───────────────────────────────────────
 
     resolveEntry(dEntry) {
-      return window.SessionDisplay.resolve(dEntry, this.entries);
+      const sessions = Alpine.store('sessions');
+      const store = sessions && this.sessionKey ? sessions[this.sessionKey] : null;
+      return window.SessionDisplay.resolve(
+        dEntry, this.entries, store ? store.localEntries : null);
     },
 
     _rebuildDisplay() {
-      this.displayEntries = window.SessionDisplay.buildAll(this.entries);
       const sessions = Alpine.store('sessions');
       const store = sessions && this.sessionKey ? sessions[this.sessionKey] : null;
-      if (store) store._displayDirty = false;
+      this.displayEntries = window.SessionDisplay.buildAll(
+        this.entries, store ? store.localEntries : null);
+      // Monotonic display-revision bookkeeping (auto-16g9t): record which
+      // merge revision this rebuild covers — no clearable flag, so a
+      // synchronous rebuild racing the entries watcher can only repeat
+      // idempotent work, never leave a stale-index incremental append.
+      this._displayedRev = store ? (store._mergeRev || 0) : 0;
+      this._displayedLen = this.entries.length;
     },
 
     _smartPath(path) {

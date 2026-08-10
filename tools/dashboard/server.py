@@ -4904,10 +4904,19 @@ async def api_session_tail(request):
             # defaults to True and dead-dispatch viewers render as live.
             mock_session = dao_sessions.get_session_by_id(session_id) or {}
             TaskStateTracker().enrich(session_id, entries)
+            # Synthetic identity for fixture entries: one pseudo-file
+            # "mock", off = fixture index. Keeps the client's tuple merge
+            # (and the behavioral sweep driving it) working against mock.
+            for i, e in enumerate(entries):
+                if isinstance(e, dict):
+                    e.setdefault("entry_ref", {"file": "mock", "off": i, "sub": 0})
             if reverse_window:
                 end_idx = len(entries) if before is None else max(0, min(before, len(entries)))
                 start_idx = max(0, end_idx - tail_lines)
                 chunk_entries = entries[start_idx:end_idx]
+            elif chain_forward:
+                start_idx = max(0, min(after, len(entries)))
+                chunk_entries = entries[start_idx:]
             else:
                 start_idx = 0
                 chunk_entries = entries
@@ -4919,10 +4928,17 @@ async def api_session_tail(request):
                 "tmux_session": mock_session.get("tmux_session", session_id),
                 "seq": len(entries),
                 "resolved": bool(mock_session.get("resolved", True)),
+                "chain": ["mock"],
             }
             if reverse_window:
                 resp["older_before"] = start_idx
                 resp["has_more"] = start_idx > 0
+                resp["older_cursor"] = {"file": "mock", "off": start_idx}
+                end_idx_val = end_idx if before is not None else len(entries)
+                resp["window_spans"] = [
+                    {"file": "mock", "from": start_idx, "to": end_idx_val}]
+            if chain_forward or not reverse_window:
+                resp["cursor"] = {"file": "mock", "off": len(entries)}
             return JSONResponse(resp)
 
     # First, try resolving via DB (session_id may be a tmux_name,

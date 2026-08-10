@@ -79,7 +79,11 @@ function makeHarness() {
   };
 }
 
-function makeExecUse(toolId, cmd) {
+function ref(off, sub) {
+  return { file: 'f', off, sub: sub || 0 };
+}
+
+function makeExecUse(toolId, cmd, entryRef) {
   return {
     type: 'tool_use',
     role: 'assistant',
@@ -91,6 +95,7 @@ function makeExecUse(toolId, cmd) {
       cwd: REPO_ROOT,
     },
     timestamp: '2026-04-23T20:00:00Z',
+    ...(entryRef ? { entry_ref: entryRef } : {}),
   };
 }
 
@@ -159,22 +164,26 @@ function plain(value) {
 }
 
 describe('semantic tool entry updates', () => {
-  it('merges a duplicate tool_use update in place and marks display dirty when tool_name changes', () => {
+  // The split-batch semantic upgrade rides the CALL line's entry_ref
+  // (auto-16g9t: postprocess remembers use_refs, so the live path and a
+  // cold re-read stamp the identical identity). These batches mirror the
+  // exact refs the server emits.
+  it('merges a duplicate tool_use update in place and marks a structural change when tool_name changes', () => {
     const h = makeHarness();
     const store = h.win.getSessionStore('sess-read-single');
 
-    h.win.appendSessionEntries(store, {
-      seq: 1,
+    h.win.mergeSessionEntries(store, {
+      chain: ['f'],
       entries: [
-        makeExecUse('call_read', "sed -n '1,2p' tools/dashboard/server.py"),
+        makeExecUse('call_read', "sed -n '1,2p' tools/dashboard/server.py", ref(100)),
       ],
     });
 
-    h.win.appendSessionEntries(store, {
-      seq: 2,
+    h.win.mergeSessionEntries(store, {
+      chain: ['f'],
       entries: [
-        makeSemanticUse('call_read', 'Read', { file_path: 'tools/dashboard/server.py' }),
-        makeSemanticResult('call_read', 'line1\nline2\n', { line_count: 2 }),
+        Object.assign(makeSemanticUse('call_read', 'Read', { file_path: 'tools/dashboard/server.py' }), { entry_ref: ref(100) }),
+        Object.assign(makeSemanticResult('call_read', 'line1\nline2\n', { line_count: 2 }), { entry_ref: ref(200) }),
       ],
     });
 
@@ -182,27 +191,28 @@ describe('semantic tool entry updates', () => {
     assert.equal(store.entries[0].tool_name, 'Read');
     assert.deepStrictEqual(plain(store.entries[0].input), { file_path: 'tools/dashboard/server.py' });
     assert.equal(store.resultMap.call_read.line_count, 2);
-    assert.equal(store._displayDirty, true);
+    assert.equal(store._structureRev, store._mergeRev,
+      'tool_name change must mark a structural display change');
   });
 
   it('appends extra semantic tool entries after an in-place update', () => {
     const h = makeHarness();
     const store = h.win.getSessionStore('sess-read-multi');
 
-    h.win.appendSessionEntries(store, {
-      seq: 1,
+    h.win.mergeSessionEntries(store, {
+      chain: ['f'],
       entries: [
-        makeExecUse('call_multi', "sed -n '1,2p' tools/a.py && sed -n '5,7p' tools/b.py"),
+        makeExecUse('call_multi', "sed -n '1,2p' tools/a.py && sed -n '5,7p' tools/b.py", ref(100)),
       ],
     });
 
-    h.win.appendSessionEntries(store, {
-      seq: 2,
+    h.win.mergeSessionEntries(store, {
+      chain: ['f'],
       entries: [
-        makeSemanticUse('call_multi', 'Read', { file_path: 'tools/a.py' }),
-        makeSemanticUse('call_multi#2', 'Read', { file_path: 'tools/b.py' }, { timestamp: '2026-04-23T20:00:00Z' }),
-        makeSemanticResult('call_multi', 'a1\na2\n', { line_count: 2 }),
-        makeSemanticResult('call_multi#2', 'b1\nb2\nb3\n', { line_count: 3 }),
+        Object.assign(makeSemanticUse('call_multi', 'Read', { file_path: 'tools/a.py' }), { entry_ref: ref(100, 0) }),
+        Object.assign(makeSemanticUse('call_multi#2', 'Read', { file_path: 'tools/b.py' }, { timestamp: '2026-04-23T20:00:00Z' }), { entry_ref: ref(100, 1) }),
+        Object.assign(makeSemanticResult('call_multi', 'a1\na2\n', { line_count: 2 }), { entry_ref: ref(200, 0) }),
+        Object.assign(makeSemanticResult('call_multi#2', 'b1\nb2\nb3\n', { line_count: 3 }), { entry_ref: ref(200, 1) }),
       ],
     });
 
@@ -223,21 +233,21 @@ describe('semantic tool entry updates', () => {
     const h = makeHarness();
     const store = h.win.getSessionStore('sess-grep');
 
-    h.win.appendSessionEntries(store, {
-      seq: 1,
+    h.win.mergeSessionEntries(store, {
+      chain: ['f'],
       entries: [
-        makeExecUse('call_rg', "rg -n 'context_tokens' tools/dashboard -S"),
+        makeExecUse('call_rg', "rg -n 'context_tokens' tools/dashboard -S", ref(100)),
       ],
     });
 
-    h.win.appendSessionEntries(store, {
-      seq: 2,
+    h.win.mergeSessionEntries(store, {
+      chain: ['f'],
       entries: [
-        makeSemanticUse('call_rg', 'Grep', {
+        Object.assign(makeSemanticUse('call_rg', 'Grep', {
           pattern: 'context_tokens',
           path: 'tools/dashboard',
-        }),
-        makeSemanticResult('call_rg', 'tools/dashboard/server.py:1:context_tokens\n'),
+        }), { entry_ref: ref(100) }),
+        Object.assign(makeSemanticResult('call_rg', 'tools/dashboard/server.py:1:context_tokens\n'), { entry_ref: ref(200) }),
       ],
     });
 
@@ -354,7 +364,7 @@ describe('exec_command meta badges', () => {
     const h = makeHarness();
     const store = h.win.getSessionStore('sess-exec-regression');
 
-    h.win.appendSessionEntries(store, {
+    h.win.mergeSessionEntries(store, {
       seq: 1,
       entries: [
         makeExecUse('call_exec_done', 'git status --short'),
@@ -365,7 +375,7 @@ describe('exec_command meta badges', () => {
       ],
     });
 
-    h.win.appendSessionEntries(store, {
+    h.win.mergeSessionEntries(store, {
       seq: 2,
       entries: [
         makeExecResult('call_exec_done', [], 'bringing up nodes...\n', {

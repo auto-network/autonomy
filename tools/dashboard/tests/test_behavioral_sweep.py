@@ -7388,9 +7388,13 @@ TURN_CORRECTION_BEFORE_TILE_CHECKS = r"""(async () => {
   r.no_tile_yet = !tileFor(LATE_FP);
   r.map_holds_row = !!(store._turnCorrections && store._turnCorrections[LATE_ID]);
 
-  // Now the user entry appends (as a live session:messages push would do).
-  store.entries.push({ type:'user', role:'user', content: LATE_RAW,
-    message_id: LATE_ID, timestamp: '2026-08-10T13:00:00Z' });
+  // Now the user entry arrives through the production merge path (the
+  // same call the session:messages SSE handler makes — auto-16g9t: a
+  // direct entries.push would bypass the merge revision the display
+  // watcher keys on, which no production writer does).
+  window.mergeSessionEntries(store, { entries: [{ type:'user', role:'user',
+    content: LATE_RAW, message_id: LATE_ID,
+    timestamp: '2026-08-10T13:00:00Z' }] }, 'sse');
 
   r.tile_appeared = await waitFor(function(){ return !!tileFor(LATE_FP); }, 3000);
   r.overlay_applied_on_append = await waitFor(function(){

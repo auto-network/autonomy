@@ -1,5 +1,6 @@
-// Node harness that reproduces the SSE gap-replay dedup bug in
-// session-store.js's appendSessionEntries().
+// Node harness for SSE gap-replay behavior of session-store.js's
+// mergeSessionEntries() (auto-16g9t: the tuple-keyed one-merge that
+// replaced appendSessionEntries' seq-gated append).
 //
 // Loads the real events.js and session-store.js (unmodified) inside a stub
 // DOM + stub EventSource, drives three scenarios, asserts store state.
@@ -13,10 +14,10 @@
 // Usage: node harness_gap_dedup.js
 //   exit 0 on all tests passing, exit 1 on any failure.
 //
-// Implementer notes:
-//   Test A must continue to pass after the fix — do NOT regress in-order merge.
-//   Tests B and C demonstrate the bug; both should pass after implementing
-//   entry-identity dedup (keyed on tool_id) in appendSessionEntries.
+// Under the tuple merge, replay order is irrelevant: every entry lands
+// at its (chain position, line offset, sub) slot, so late replays both
+// dedupe AND restore chronological order (stronger than the old
+// arrival-order guarantee these tests were first written against).
 
 const fs = require('fs');
 const path = require('path');
@@ -116,11 +117,15 @@ function makeHarness() {
 // ── Test fixtures ──────────────────────────────────────────────────
 
 function makeEntry(id) {
+  // entry_ref off derives from the numeric part of the id — the same
+  // stable line identity the server stamps on every path.
+  const off = parseInt(String(id).replace(/[^0-9]/g, ''), 10) || 0;
   return {
     type: 'tool_use',
     tool_id: id,
     tool_name: 'Bash',
     timestamp: '2026-04-20T11:51:00Z',
+    entry_ref: { file: 'f', off, sub: 0 },
   };
 }
 
@@ -128,6 +133,7 @@ function sessionMessagesPayload(sessionId, payloadSeq, entries) {
   return {
     session_id: sessionId,
     seq: payloadSeq,
+    chain: ['f'],
     entries,
     activity_state: 'thinking',
     context_tokens: 0,
@@ -186,7 +192,7 @@ async function testA_clean_gap_replay() {
   const store = h.win.getSessionStore(sessionId);
 
   // Pre-state: 3 entries applied, store.seq=123, _lastSeq=218.
-  h.win.appendSessionEntries(store, sessionMessagesPayload(
+  h.win.mergeSessionEntries(store, sessionMessagesPayload(
     sessionId, 123, [makeEntry('E1'), makeEntry('E2'), makeEntry('E3')]
   ));
   h.win._lastSeq = 218;
@@ -218,7 +224,7 @@ async function testB_out_of_band_store_seq_advance() {
   const store = h.win.getSessionStore(sessionId);
 
   // Pre-state.
-  h.win.appendSessionEntries(store, sessionMessagesPayload(
+  h.win.mergeSessionEntries(store, sessionMessagesPayload(
     sessionId, 123, [makeEntry('E1'), makeEntry('E2'), makeEntry('E3')]
   ));
   h.win._lastSeq = 218;
@@ -226,7 +232,7 @@ async function testB_out_of_band_store_seq_advance() {
   // OUT-OF-BAND: something (iOS native EventSource reconnect replay, or a
   // _fetchBacklog firing on page re-init during app-resume) delivered E131
   // to the store BEFORE the gap replay events run through events.js.
-  h.win.appendSessionEntries(store, sessionMessagesPayload(
+  h.win.mergeSessionEntries(store, sessionMessagesPayload(
     sessionId, 131, [makeEntry('E131')]
   ));
 
@@ -245,8 +251,8 @@ async function testB_out_of_band_store_seq_advance() {
   // re-append (entry-identity dedup).
   assertEqual(
     ids,
-    ['E1','E2','E3','E131','E124','E125','E126','E127','E128','E129','E130'],
-    'B: replay entries land even when store.seq is ahead; duplicate held trigger is deduped by tool_id'
+    ['E1','E2','E3','E124','E125','E126','E127','E128','E129','E130','E131'],
+    'B: replay entries land IN ORDER even when store.seq is ahead; duplicate held trigger is deduped by entry_ref'
   );
 }
 
@@ -259,13 +265,13 @@ async function testC_dedup_silent_drop_isolated() {
   const store = h.win.getSessionStore(sessionId);
 
   // Pre-state: single entry at store.seq=131.
-  h.win.appendSessionEntries(store, sessionMessagesPayload(
+  h.win.mergeSessionEntries(store, sessionMessagesPayload(
     sessionId, 131, [makeEntry('E131')]
   ));
 
   // Apply 7 "replay-shaped" payloads with per-session seqs 124..130.
   for (let pseq = 124; pseq <= 130; pseq++) {
-    h.win.appendSessionEntries(store, sessionMessagesPayload(
+    h.win.mergeSessionEntries(store, sessionMessagesPayload(
       sessionId, pseq, [makeEntry(`E${pseq}`)]
     ));
   }
@@ -275,8 +281,8 @@ async function testC_dedup_silent_drop_isolated() {
   // Fix: entries append (entry-identity dedup doesn't care about seq order).
   assertEqual(
     ids,
-    ['E131','E124','E125','E126','E127','E128','E129','E130'],
-    'C: replay-shaped payloads with lower seq land (entry-identity dedup)'
+    ['E124','E125','E126','E127','E128','E129','E130','E131'],
+    'C: replay-shaped payloads with lower seq land at their tuple position (order restored)'
   );
 }
 
