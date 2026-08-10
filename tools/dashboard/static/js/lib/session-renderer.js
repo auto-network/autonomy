@@ -667,18 +667,27 @@
       this.attachments = [];
     },
 
-    // ── Turn-correction overlay (auto-edec1.4) ─────────────────────
+    // ── Turn-correction overlay (auto-edec1.4, delivery auto-hmow2) ────
     //
-    // Sparse: only user entries whose message_id matches a row in
-    // ``this._corrections`` get overlaid. Everything else flows through
-    // the unmodified raw rendering path.
+    // Sparse: only user entries whose message_id matches a row in the
+    // session store's single ``_turnCorrections`` map get overlaid.
+    // Everything else flows through the unmodified raw rendering path.
+    // Reading the store map here (not a viewer-local copy) is what keeps
+    // one reactive correction map per browser session store — the SSE
+    // handler replaces that map immutably and Alpine re-renders this join.
+
+    _correctionsMap() {
+      var store = (window.Alpine && Alpine.store('sessions'))
+        ? Alpine.store('sessions')[this.sessionKey]
+        : null;
+      return (store && store._turnCorrections) || {};
+    },
 
     _correctionFor(entry) {
       if (!entry || entry.type !== 'user') return null;
       var mid = entry.message_id;
       if (!mid) return null;
-      var corrections = this._corrections || {};
-      return corrections[mid] || null;
+      return this._correctionsMap()[mid] || null;
     },
 
     correctionStateFor(entry) {

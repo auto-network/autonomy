@@ -7268,6 +7268,280 @@ class TestSessionTurnCorrectionOverlay:
         )
 
 
+# ── L2.B: live turn-correction convergence via the production handler ──
+#
+# auto-hmow2. Delivery is now an authenticated API POST that persists a row and
+# broadcasts it on ``session:turn_corrections``. The browser applies each
+# committed row through the single production ``window.applyTurnCorrection``
+# function into the one shared store map; the renderer joins the immutable user
+# tile to that map. These checks drive that exact function (not a test
+# reimplementation) and assert user-visible tile behavior, not CSS.
+
+TURN_CORRECTION_LIVE_SYNC_CHECKS = r"""(async () => {
+  var sleep = function(ms){ return new Promise(function(res){ setTimeout(res, ms); }); };
+  var waitFor = async function(pred, t){ var d = Date.now()+t; while(Date.now()<d){ if(pred()) return true; await sleep(40);} return false; };
+  var r = {};
+  // Diff-stable fingerprint: 'control message' survives as a 'same' fragment
+  // in every state (pending diff, accepted FIX, dismissed RAW), whereas the
+  // full raw string 'control message — no overlay' is broken apart by the
+  // inline diff spans in the pending state.
+  var FP = 'control message';
+  var FIX = 'control message — an overlay';
+  var CID = 'tc-control-msg';
+  var content = document.getElementById('content');
+  function tileFor(text){
+    var tiles = content ? content.querySelectorAll('.sc-entry') : [];
+    for (var i=0;i<tiles.length;i++){ var t=tiles[i]; if(!t.querySelector('.sc-user-label')) continue; if((t.textContent||'').indexOf(text)!==-1) return t; }
+    return null;
+  }
+  function count(){ return content ? content.querySelectorAll('.sc-entry').length : 0; }
+  function standaloneHits(text){
+    var tiles = content.querySelectorAll('.sc-entry'); var hits = 0;
+    for (var i=0;i<tiles.length;i++){ var t=tiles[i]; var s=t.getAttribute('data-correction-state')||'';
+      if ((t.textContent||'').indexOf(text)!==-1 && !(s==='pending'||s==='accepted')) hits++; }
+    return hits;
+  }
+  function row(status, corrected){
+    return { session_uuid:'auto-sweep-alpha', target_message_id:CID, status:status,
+      original_sha256:'live-sha', corrected_text:corrected, mode:null, reason:null,
+      confidence:null, created_at:1, updated_at:1 };
+  }
+
+  r.has_apply_fn = typeof window.applyTurnCorrection === 'function';
+  var store = Alpine.store('sessions')['auto-sweep-alpha'];
+  r.has_store = !!store;
+  if (!store || !r.has_apply_fn) return JSON.stringify(r);
+
+  r.control_present = !!tileFor(FP);
+  r.baseline_count = count();
+  var adj = tileFor('Hello');
+  var adjBefore = adj ? (adj.querySelector('.sc-user-content')||{}).textContent : null;
+
+  // ── Pending applied live: target tile changes in place ──
+  window.applyTurnCorrection(store, row('pending', FIX));
+  r.pending_applied = await waitFor(function(){ var t=tileFor(FP); return t && t.getAttribute('data-correction-state')==='pending'; }, 3000);
+  var pt = tileFor(FP);
+  r.pending_has_diff = !!(pt && pt.querySelector('[data-testid="turn-correction-pending"]'));
+  r.pending_has_actions = !!(pt && pt.querySelector('[data-testid="turn-correction-actions"]'));
+  r.count_after_pending = count();
+  r.pending_no_standalone = standaloneHits('an overlay') === 0;
+
+  // ── Idempotent replay of the SAME committed pending row ──
+  window.applyTurnCorrection(store, row('pending', FIX));
+  await sleep(200);
+  r.count_after_replay = count();
+  var pr = tileFor(FP);
+  r.replay_still_pending = !!(pr && pr.getAttribute('data-correction-state')==='pending');
+
+  // ── Accepted applied live: corrected text + revised marker, no actions ──
+  window.applyTurnCorrection(store, row('accepted', FIX));
+  r.accepted_applied = await waitFor(function(){ var t=tileFor(FIX); return t && t.getAttribute('data-correction-state')==='accepted'; }, 3000);
+  var at = tileFor(FIX);
+  r.accepted_marker = !!(at && at.querySelector('[data-testid="turn-correction-revised"]'));
+  r.accepted_no_actions = !!(at && !at.querySelector('[data-testid="turn-correction-actions"]'));
+  r.accepted_no_diff = !!(at && !at.querySelector('[data-testid="turn-correction-pending"]'));
+  r.count_after_accepted = count();
+
+  // ── Dismissed applied live: raw text returns, no affordances ──
+  window.applyTurnCorrection(store, row('dismissed', FIX));
+  r.dismissed_applied = await waitFor(function(){ var t=tileFor(FP); return t && (t.getAttribute('data-correction-state')||'')==='dismissed'; }, 3000);
+  var dt = tileFor(FP);
+  // Dismissed shows the raw original contiguously (no diff spans splitting it).
+  r.dismissed_shows_raw = !!(dt && (dt.textContent||'').indexOf('control message — no overlay') !== -1);
+  r.dismissed_no_marker = !!(dt && !dt.querySelector('[data-testid="turn-correction-revised"]'));
+  r.dismissed_no_actions = !!(dt && !dt.querySelector('[data-testid="turn-correction-actions"]'));
+  r.count_after_dismissed = count();
+
+  // ── Adjacent non-target tile is untouched throughout ──
+  var adj2 = tileFor('Hello');
+  var adjAfter = adj2 ? (adj2.querySelector('.sc-user-content')||{}).textContent : null;
+  r.adjacent_unchanged = (adjBefore === adjAfter)
+    && (adj2 ? ((adj2.getAttribute('data-correction-state')||'')==='') : false);
+
+  return JSON.stringify(r);
+})()"""
+
+
+TURN_CORRECTION_BEFORE_TILE_CHECKS = r"""(async () => {
+  var sleep = function(ms){ return new Promise(function(res){ setTimeout(res, ms); }); };
+  var waitFor = async function(pred, t){ var d = Date.now()+t; while(Date.now()<d){ if(pred()) return true; await sleep(40);} return false; };
+  var r = {};
+  var LATE_ID = 'tc-late-arriving-msg';
+  var LATE_RAW = 'a late arriving user turn that loads after its correction';
+  var LATE_FIX = 'A late-arriving user turn that loads after its correction.';
+  // Diff-stable fingerprint present as a 'same' fragment in every state.
+  var LATE_FP = 'loads after its correction';
+  var content = document.getElementById('content');
+  function tileFor(text){
+    var tiles = content ? content.querySelectorAll('.sc-entry') : [];
+    for (var i=0;i<tiles.length;i++){ var t=tiles[i]; if(!t.querySelector('.sc-user-label')) continue; if((t.textContent||'').indexOf(text)!==-1) return t; }
+    return null;
+  }
+  var store = Alpine.store('sessions')['auto-sweep-alpha'];
+  if (!store) return JSON.stringify({has_store:false});
+
+  // Correction arrives BEFORE its user entry exists.
+  window.applyTurnCorrection(store, { session_uuid:'auto-sweep-alpha',
+    target_message_id: LATE_ID, status:'pending', original_sha256:'late-sha',
+    corrected_text: LATE_FIX, mode:null, reason:null, confidence:null,
+    created_at:1, updated_at:1 });
+  r.no_tile_yet = !tileFor(LATE_FP);
+  r.map_holds_row = !!(store._turnCorrections && store._turnCorrections[LATE_ID]);
+
+  // Now the user entry appends (as a live session:messages push would do).
+  store.entries.push({ type:'user', role:'user', content: LATE_RAW,
+    message_id: LATE_ID, timestamp: '2026-08-10T13:00:00Z' });
+
+  r.tile_appeared = await waitFor(function(){ return !!tileFor(LATE_FP); }, 3000);
+  r.overlay_applied_on_append = await waitFor(function(){
+    var t = tileFor(LATE_FP);
+    return t && t.getAttribute('data-correction-state')==='pending'
+      && !!t.querySelector('[data-testid="turn-correction-pending"]');
+  }, 3000);
+  return JSON.stringify(r);
+})()"""
+
+
+TURN_CORRECTION_STALE_ORDERING = r"""(() => {
+  var s = { _turnCorrections: {} };
+  window.applyTurnCorrection(s, { target_message_id:'m', status:'accepted',
+    updated_at:2, corrected_text:'accepted body' });
+  // A slow GET-hydration snapshot (older, still pending) arrives late.
+  var staleRefused = window.applyTurnCorrection(s, { target_message_id:'m',
+    status:'pending', updated_at:1, corrected_text:'accepted body' });
+  var afterStale = s._turnCorrections.m.status;
+  // A genuinely newer terminal row still advances.
+  var newerApplied = window.applyTurnCorrection(s, { target_message_id:'m',
+    status:'dismissed', updated_at:3, corrected_text:'accepted body' });
+  // Equal updated_at (optimistic rollback shape) is still applied.
+  var equalApplied = window.applyTurnCorrection(s, { target_message_id:'m',
+    status:'dismissed', updated_at:3, corrected_text:'accepted body' });
+  return JSON.stringify({
+    stale_refused: staleRefused === false,
+    still_terminal_after_stale: afterStale === 'accepted',
+    newer_applied: newerApplied === true && s._turnCorrections.m.status === 'dismissed',
+    equal_applied: equalApplied === true
+  });
+})()"""
+
+
+TURN_CORRECTION_TWO_STORE_CONVERGE = r"""(() => {
+  var a = { _turnCorrections: {} };
+  var b = { _turnCorrections: {} };
+  var committed = { session_uuid:'s', target_message_id:'m1', status:'pending',
+    original_sha256:'h', corrected_text:'converged text', mode:null, reason:null,
+    confidence:null, created_at:1, updated_at:1 };
+  var ra = window.applyTurnCorrection(a, committed);
+  var rb = window.applyTurnCorrection(b, committed);
+  return JSON.stringify({
+    returned_true: ra === true && rb === true,
+    a_has: !!(a._turnCorrections && a._turnCorrections.m1),
+    b_has: !!(b._turnCorrections && b._turnCorrections.m1),
+    immutable_new_ref_a: a._turnCorrections.m1 === committed,
+    converge: JSON.stringify(a._turnCorrections) === JSON.stringify(b._turnCorrections)
+  });
+})()"""
+
+
+class TestSessionTurnCorrectionLiveSync:
+    """L2.B: live convergence of committed correction rows through the single
+    production ``applyTurnCorrection`` handler + one shared store map (auto-hmow2).
+
+    Asserts user-visible tile behavior for pending/accepted/dismissed applied
+    live, entry-count invariance, no standalone tile, idempotent replay,
+    correction-before-tile, adjacent invariance, and (compositionally) two-store
+    fan-out convergence. No HTML/CSS/copy change — same overlay contract as
+    ``TestSessionTurnCorrectionOverlay``, which must remain green.
+    """
+
+    @pytest.fixture(scope="class", autouse=True)
+    def checks(self, browser, request):
+        # Navigate fresh to the session, then drive the production handler.
+        subprocess.run(
+            ["agent-browser", "eval", "navigateTo('/session/autonomy/auto-sweep-alpha')"],
+            capture_output=True, timeout=10,
+        )
+        time.sleep(1.5)
+        request.cls._live = _run_async_eval(TURN_CORRECTION_LIVE_SYNC_CHECKS)
+        request.cls._before = _run_async_eval(TURN_CORRECTION_BEFORE_TILE_CHECKS)
+        request.cls._two = _run_async_eval(TURN_CORRECTION_TWO_STORE_CONVERGE)
+        request.cls._stale = _run_async_eval(TURN_CORRECTION_STALE_ORDERING)
+
+    def test_production_handler_is_wired(self):
+        assert self._live.get("has_apply_fn"), (
+            "window.applyTurnCorrection must be the production SSE handler"
+        )
+        assert self._live.get("has_store")
+        assert self._live.get("control_present"), "control user tile not rendered"
+
+    def test_pending_applied_in_place_no_new_entry(self):
+        c = self._live
+        assert c.get("pending_applied"), "target tile did not flip to pending in place"
+        assert c.get("pending_has_diff"), "pending tile missing inline diff block"
+        assert c.get("pending_has_actions"), "pending tile missing accept/dismiss actions"
+        assert c.get("count_after_pending") == c.get("baseline_count"), (
+            "applying a pending correction must not grow the timeline"
+        )
+        assert c.get("pending_no_standalone"), (
+            "correction rendered as a standalone tile instead of editing in place"
+        )
+
+    def test_replay_same_row_is_idempotent(self):
+        c = self._live
+        assert c.get("count_after_replay") == c.get("baseline_count"), (
+            "replaying the same committed row must not add entries"
+        )
+        assert c.get("replay_still_pending"), "replay must leave visible state unchanged"
+
+    def test_accepted_applied_in_place(self):
+        c = self._live
+        assert c.get("accepted_applied"), "tile did not transition to accepted"
+        assert c.get("accepted_marker"), "accepted tile missing revised marker"
+        assert c.get("accepted_no_actions"), "accepted tile must drop accept/dismiss actions"
+        assert c.get("accepted_no_diff"), "accepted tile must drop the pending diff block"
+        assert c.get("count_after_accepted") == c.get("baseline_count")
+
+    def test_dismissed_applied_in_place(self):
+        c = self._live
+        assert c.get("dismissed_applied"), "tile did not transition to dismissed"
+        assert c.get("dismissed_shows_raw"), "dismissed tile must show raw original text"
+        assert c.get("dismissed_no_marker"), "dismissed tile must not show revised marker"
+        assert c.get("dismissed_no_actions"), "dismissed tile must not show actions"
+        assert c.get("count_after_dismissed") == c.get("baseline_count")
+
+    def test_adjacent_tile_unchanged(self):
+        assert self._live.get("adjacent_unchanged"), (
+            "a non-target user tile changed while a correction was applied"
+        )
+
+    def test_correction_before_tile_applies_on_append(self):
+        c = self._before
+        assert c.get("no_tile_yet"), "target tile should not exist before its entry loads"
+        assert c.get("map_holds_row"), "store map must retain a correction with no tile yet"
+        assert c.get("tile_appeared"), "user tile did not render after appending its entry"
+        assert c.get("overlay_applied_on_append"), (
+            "overlay must attach when the user entry finally loads"
+        )
+
+    def test_two_stores_converge_through_production_handler(self):
+        c = self._two
+        assert c.get("returned_true"), "applyTurnCorrection must report it applied the row"
+        assert c.get("a_has") and c.get("b_has"), "both stores must receive the row"
+        assert c.get("immutable_new_ref_a"), "map must hold the exact committed row object"
+        assert c.get("converge"), "two independent stores must converge to the same map"
+
+    def test_stale_delivery_does_not_regress_terminal_state(self):
+        """A late GET-hydration snapshot (older, pending) must not revert a tile
+        that a newer accept/dismiss already moved to terminal."""
+        c = self._stale
+        assert c.get("stale_refused"), "older-updated_at row must be dropped"
+        assert c.get("still_terminal_after_stale"), (
+            "terminal state regressed to pending on stale delivery"
+        )
+        assert c.get("newer_applied"), "a genuinely newer row must still advance"
+        assert c.get("equal_applied"), "equal-updated_at (rollback shape) must apply"
+
+
 class TestHostSessionTailContract:
     """L2.A contract test: /api/session/{project}/{id}/tail must return
     `type` and `is_live` consistent with the session registry.

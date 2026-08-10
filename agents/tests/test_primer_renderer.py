@@ -736,8 +736,12 @@ def test_turn_correction_command_shape_is_canonical(_turn_correction_org_env):
     assert (
         "graph turn-correction suggest [corrected_text | --stdin] "
         "[--mode <off|conservative|balanced|aggressive>] "
-        "[--reason <text>] [--confidence <0..1>] --json"
+        "[--reason <text>] [--confidence <0..1>]"
     ) in out
+    # Delivery is the authenticated API, never a stdout-transport flag: the
+    # turn-correction command line no longer carries --json.
+    assert "[--confidence <0..1>] --json" not in out
+    assert "--confidence 0.9 --json" not in out
     # The agent must NOT supply target_message_id or original_sha256.
     assert "target_message_id" in out and "original_sha256" in out
     assert "Do **not** supply" in out
@@ -751,30 +755,34 @@ def test_turn_correction_explains_full_replacement_semantics(_turn_correction_or
     assert "full replacement message" in out
 
 
-def test_turn_correction_requires_visible_standalone_output(_turn_correction_org_env):
-    """The CLI's JSON stdout is the event transport, not disposable noise."""
+def test_turn_correction_output_is_a_redirect_safe_receipt(_turn_correction_org_env):
+    """Delivery is the authenticated API call; the CLI's stdout is only a
+    receipt and must be documented as safe to redirect or discard — the exact
+    opposite of the old stdout-as-transport contract."""
     out = render_workspace_primer(_cfg(id="sample"))
     flat = " ".join(out.split())
-    assert "Run it as a standalone tool call" in flat
-    assert "leave its output visible in the session log" in flat
+    assert "receipt" in flat
+    assert "authenticated dashboard API" in flat
     assert ">/dev/null" in out
-    assert "if that JSON is absent from the recorded tool result" in flat
+    assert "safe to redirect" in flat
+    # The stale stdout-transport language must be gone.
+    assert "leave its output visible in the session log" not in flat
+    assert "if that JSON is absent from the recorded tool result" not in flat
 
 
-def test_turn_correction_explains_session_side_resolution(_turn_correction_org_env):
+def test_turn_correction_explains_server_side_resolution(_turn_correction_org_env):
     """The primer must teach the workflow, not just the command name.
 
-    Specifically: the session side (a) attaches the suggestion to the
-    most likely nearby user turn, and (b) derives the guard hash. The
-    agent doesn't supply either. The viewer renders the overlay; the
-    operator may accept or dismiss it.
+    Specifically: the dashboard (a) attaches the suggestion to the most likely
+    nearby user turn, and (b) derives the guard hash server-side. The agent
+    doesn't supply either. The viewer renders the overlay; the operator may
+    accept or dismiss it.
     """
     out = render_workspace_primer(_cfg(id="sample"))
     # Whitespace-normalized: markdown wrap may split phrases across lines.
     flat = " ".join(out.split())
-    assert "session side" in flat
     assert "most likely nearby user turn" in flat
-    assert "session side resolves them" in flat
+    assert "resolves them server-side" in flat
     assert "accept" in flat and "dismiss" in flat
 
 
