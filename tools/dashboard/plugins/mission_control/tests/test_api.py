@@ -1120,6 +1120,231 @@ def test_add_pillar_question_update_missing_pillar():
     assert resp.status_code == 404
 
 
+def test_question_payload_hides_updates_once_answered():
+    """Updates are working-in-progress noise, not part of the record --
+    once an entry is answered, GET .../questions must stop returning its
+    update trail. See _question_payload's docstring."""
+    client = _client()
+    mission_id = client.post(
+        "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
+    ).json()["mission"]["mission_id"]
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        asked = client.post(
+            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            json={"question": "hi"},
+        ).json()["question"]
+    client.post(
+        f"/api/missions/{mission_id}/questions/{asked['entry_id']}/update",
+        json={"text": "still working"},
+    )
+    still_open = client.get(f"/api/missions/{mission_id}/questions").json()["questions"][0]
+    assert still_open["updates"]  # visible while open
+
+    client.post(
+        f"/api/missions/{mission_id}/questions/{asked['entry_id']}/answer",
+        json={"answer": "final"},
+    )
+    answered = client.get(f"/api/missions/{mission_id}/questions").json()["questions"][0]
+    assert answered["updates"] == []
+    assert answered["answer"] == "final"
+
+
+# ── Reopening ─────────────────────────────────────────────────────
+
+
+def test_reopen_question_mission_level():
+    client = _client()
+    mission_id = client.post(
+        "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
+    ).json()["mission"]["mission_id"]
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        asked = client.post(
+            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            json={"question": "hi"},
+        ).json()["question"]
+        client.post(
+            f"/api/missions/{mission_id}/questions/{asked['entry_id']}/answer",
+            json={"answer": "first answer"},
+        )
+        resp = client.post(
+            f"/api/missions/{mission_id}/questions/{asked['entry_id']}/reopen?as={visitor['token']}",
+            json={"followup": "not quite -- what about X?"},
+        )
+
+    assert resp.status_code == 200
+    reopened = resp.json()["question"]
+    assert reopened["answer"] is None
+    assert reopened["entry_id"] == asked["entry_id"]
+    assert reopened["question"] == "hi"  # the original ask is untouched
+
+
+@patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock)
+def test_reopen_question_relays_again_with_prior_context(mock_send):
+    client = _client()
+    mission_id = client.post(
+        "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
+    ).json()["mission"]["mission_id"]
+    visitor = _visitor(client)
+    asked = client.post(
+        f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+        json={"question": "hi"},
+    ).json()["question"]
+    client.post(
+        f"/api/missions/{mission_id}/questions/{asked['entry_id']}/answer",
+        json={"answer": "first answer"},
+    )
+    mock_send.reset_mock()
+
+    client.post(
+        f"/api/missions/{mission_id}/questions/{asked['entry_id']}/reopen?as={visitor['token']}",
+        json={"followup": "not quite -- what about X?"},
+    )
+
+    mock_send.assert_called_once()
+    envelope = mock_send.call_args.args[1]
+    assert "reopened" in envelope
+    assert "first answer" in envelope
+    assert "not quite -- what about X?" in envelope
+    assert "ONE new answer" in envelope
+
+
+def test_reopen_question_requires_followup_text():
+    client = _client()
+    mission_id = client.post(
+        "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
+    ).json()["mission"]["mission_id"]
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        asked = client.post(
+            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            json={"question": "hi"},
+        ).json()["question"]
+        client.post(
+            f"/api/missions/{mission_id}/questions/{asked['entry_id']}/answer",
+            json={"answer": "first answer"},
+        )
+        resp = client.post(
+            f"/api/missions/{mission_id}/questions/{asked['entry_id']}/reopen?as={visitor['token']}",
+            json={},
+        )
+    assert resp.status_code == 400
+
+
+def test_reopen_question_requires_visitor_identity():
+    client = _client()
+    mission_id = client.post(
+        "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
+    ).json()["mission"]["mission_id"]
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        asked = client.post(
+            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            json={"question": "hi"},
+        ).json()["question"]
+        client.post(
+            f"/api/missions/{mission_id}/questions/{asked['entry_id']}/answer",
+            json={"answer": "first answer"},
+        )
+        resp = client.post(
+            f"/api/missions/{mission_id}/questions/{asked['entry_id']}/reopen",
+            json={"followup": "not quite"},
+        )
+    assert resp.status_code == 401
+
+
+def test_reopen_question_not_yet_answered_returns_404():
+    client = _client()
+    mission_id = client.post(
+        "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
+    ).json()["mission"]["mission_id"]
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        asked = client.post(
+            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            json={"question": "hi"},
+        ).json()["question"]
+        resp = client.post(
+            f"/api/missions/{mission_id}/questions/{asked['entry_id']}/reopen?as={visitor['token']}",
+            json={"followup": "still waiting"},
+        )
+    assert resp.status_code == 404
+
+
+def test_reopen_question_missing_mission():
+    client = _client()
+    visitor = _visitor(client)
+    resp = client.post(
+        f"/api/missions/nope/questions/nope/reopen?as={visitor['token']}",
+        json={"followup": "x"},
+    )
+    assert resp.status_code == 404
+
+
+def test_reopen_pillar_question():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar_with_site(client, mission_id, coordinator_session="auto-pillar")
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        asked = client.post(
+            f"/api/pillars/{pillar['pillar_id']}/questions?as={visitor['token']}",
+            json={"question": "hi"},
+        ).json()["question"]
+        client.post(
+            f"/api/pillars/{pillar['pillar_id']}/questions/{asked['entry_id']}/answer",
+            json={"answer": "first answer"},
+        )
+        resp = client.post(
+            f"/api/pillars/{pillar['pillar_id']}/questions/{asked['entry_id']}/reopen?as={visitor['token']}",
+            json={"followup": "still unclear"},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["question"]["answer"] is None
+
+
+def test_reopen_pillar_question_missing_pillar():
+    client = _client()
+    visitor = _visitor(client)
+    resp = client.post(
+        f"/api/pillars/nope/questions/nope/reopen?as={visitor['token']}", json={"followup": "x"},
+    )
+    assert resp.status_code == 404
+
+
+def test_reopen_then_reanswer_leaves_only_the_new_answer_visible():
+    """The end-to-end point of reopening: after a full reopen -> re-answer
+    cycle, the record shows one question and one (new) answer -- no trace
+    of the old answer or the follow-up that prompted it."""
+    client = _client()
+    mission_id = client.post(
+        "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
+    ).json()["mission"]["mission_id"]
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        asked = client.post(
+            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            json={"question": "hi"},
+        ).json()["question"]
+        client.post(
+            f"/api/missions/{mission_id}/questions/{asked['entry_id']}/answer",
+            json={"answer": "first answer"},
+        )
+        client.post(
+            f"/api/missions/{mission_id}/questions/{asked['entry_id']}/reopen?as={visitor['token']}",
+            json={"followup": "not quite -- what about X?"},
+        )
+        client.post(
+            f"/api/missions/{mission_id}/questions/{asked['entry_id']}/answer",
+            json={"answer": "integrated final answer"},
+        )
+
+    final = client.get(f"/api/missions/{mission_id}/questions").json()["questions"][0]
+    assert final["answer"] == "integrated final answer"
+    assert final["updates"] == []
+
+
 # ── Cross-pillar decision log ────────────────────────────────────
 
 
