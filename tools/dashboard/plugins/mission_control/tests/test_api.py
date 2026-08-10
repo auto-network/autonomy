@@ -1,6 +1,7 @@
 """API tests for the Mission Control plugin."""
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import yaml
@@ -1513,6 +1514,140 @@ def test_pillar_question_event_carries_pillar_id():
         assert len(events) == 1
         assert events[0]["pillar_id"] == pillar["pillar_id"]
         assert events[0]["mission_id"] == mission_id
+    finally:
+        mc_api.event_bus.unsubscribe(queue)
+
+
+# ── handle_relay_write (auto-u0kxw) ──────────────────────────────
+#
+# The relay (tools/dashboard/link_serving.py) never calls into this
+# module's HTTP handlers -- it calls handle_relay_write directly with an
+# identity already resolved from the grant and a raw body it never
+# interprets. These tests call handle_relay_write the same way, with no
+# HTTP request/response involved.
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def test_handle_relay_write_asks_a_question():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    visitor = _visitor(client)
+
+    with patch.object(mc_api, "_relay_question", new_callable=AsyncMock):
+        result = _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id, {"kind": "question", "question": "hi"},
+        ))
+
+    assert result["question"]["question"] == "hi"
+    assert result["question"]["asked_by_participant_id"] == visitor["participant_id"]
+    assert result["question"]["asked_by_label"] == "Alex"
+    entries = db.list_conversation(mission_id)
+    assert len(entries) == 1 and entries[0]["question"] == "hi"
+
+
+def test_handle_relay_write_reopens_a_question():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        asked = client.post(
+            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            json={"question": "hi"},
+        ).json()["question"]
+    client.post(
+        f"/api/missions/{mission_id}/questions/{asked['entry_id']}/answer",
+        json={"answer": "done"},
+    )
+
+    with patch.object(mc_api, "_relay_question", new_callable=AsyncMock):
+        result = _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "reopen", "entry_id": asked["entry_id"], "followup": "not quite"},
+        ))
+
+    assert result["question"]["entry_id"] == asked["entry_id"]
+    assert result["question"]["answer"] is None  # reopened -- cleared back to open
+
+
+def test_handle_relay_write_unknown_participant_rejected():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    result = _run(mc_api.handle_relay_write(
+        "guest:nonexistent", mission_id, {"kind": "question", "question": "hi"},
+    ))
+    assert result is None
+    assert db.list_conversation(mission_id) == []
+
+
+def test_handle_relay_write_unknown_kind_rejected():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    visitor = _visitor(client)
+    result = _run(mc_api.handle_relay_write(
+        visitor["participant_id"], mission_id, {"kind": "delete_everything"},
+    ))
+    assert result is None
+
+
+def test_handle_relay_write_pillar_from_a_different_mission_rejected():
+    """The bug found in review: a guest's channel is bound to ONE mission
+    -- a pillar_id belonging to a DIFFERENT mission must be refused, not
+    passed through to a coordinator who never granted this guest access."""
+    client = _client()
+    mission_a = _mission_with_site(client)
+    mission_b = client.post("/api/missions", json={"name": "B"}).json()["mission"]["mission_id"]
+    pillar_b = _pillar_with_site(client, mission_b)
+    visitor = _visitor(client)
+
+    result = _run(mc_api.handle_relay_write(
+        visitor["participant_id"], mission_a,
+        {"kind": "question", "question": "cross-mission smuggle", "pillar_id": pillar_b["pillar_id"]},
+    ))
+    assert result is None
+    assert db.list_conversation(mission_a) == []
+    assert db.list_pillar_conversation(pillar_b["pillar_id"]) == []
+
+
+def test_handle_relay_write_pillar_scoped_question_same_mission_succeeds():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    pillar = _pillar_with_site(client, mission_id)
+    visitor = _visitor(client)
+
+    with patch.object(mc_api, "_relay_question", new_callable=AsyncMock):
+        result = _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "question", "question": "pillar q", "pillar_id": pillar["pillar_id"]},
+        ))
+
+    assert result["question"]["pillar_id"] == pillar["pillar_id"]
+    assert len(db.list_pillar_conversation(pillar["pillar_id"])) == 1
+
+
+def test_handle_relay_write_publishes_conversation_event_and_schedules_relay():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    visitor = _visitor(client)
+    queue = mc_api.event_bus.subscribe()
+    try:
+        with patch.object(mc_api, "_relay_question", new_callable=AsyncMock) as mock_relay:
+            result = _run(mc_api.handle_relay_write(
+                visitor["participant_id"], mission_id, {"kind": "question", "question": "hi"},
+            ))
+        events = []
+        while not queue.empty():
+            topic, data, seq = queue.get_nowait()
+            if topic == mc_api.MISSION_CONVERSATION_TOPIC and seq != 0:
+                events.append(data)
+        assert len(events) == 1
+        assert events[0]["event"] == "asked"
+        assert events[0]["entry_id"] == result["question"]["entry_id"]
+        mock_relay.assert_called_once_with(
+            mission_id=mission_id, entry_id=result["question"]["entry_id"],
+        )
     finally:
         mc_api.event_bus.unsubscribe(queue)
 
