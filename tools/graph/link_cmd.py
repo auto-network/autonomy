@@ -30,7 +30,7 @@ import uuid
 
 from .duration import parse_duration
 
-LINK_TARGET_TYPES = ("present", "design", "note", "file", "org:join")
+LINK_TARGET_TYPES = ("present", "design", "note", "file", "mission", "org:join")
 
 _TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 _EVENT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -109,6 +109,31 @@ def _resolve_design_target(target_id: str, target_type: str) -> str:
     if title:
         print(f"  target: {label} “{title}” ({resolved})")
     return resolved
+
+
+def _resolve_mission_target(target_id: str) -> str:
+    """A mission_id is a plain UUID minted by mission_control_db (no prefix
+    support exists there today -- unlike design/present's Design Studio
+    prefix-resolve endpoint, or note/file's graph-source prefix lookup, so
+    this deliberately does not invent one). Confirms the mission actually
+    exists before an approval request is built for it.
+    """
+    try:
+        uuid.UUID(target_id)
+    except (ValueError, AttributeError):
+        _fail(f"'{target_id}' does not look like a mission id (missions require a full UUID)")
+    try:
+        mission = _api_request("GET", f"/api/missions/{target_id}")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            _fail(f"mission '{target_id}' does not exist")
+        _fail(f"could not resolve mission '{target_id}': HTTP {e.code}")
+    except urllib.error.URLError as e:
+        _fail(f"cannot reach the dashboard at {_dash_base()}: {e.reason}")
+    name = mission.get("mission", mission).get("name") if isinstance(mission, dict) else None
+    if name:
+        print(f"  target: Mission “{name}” ({target_id})")
+    return target_id
 
 
 def _resolve_uuid_target(target_id: str, target_type: str) -> str:
@@ -316,6 +341,8 @@ def cmd_link_publish(args) -> None:
         expires_at = invite["expiry"]
     elif target_type in ("present", "design"):
         target_uuid = _resolve_design_target(target_id, target_type)
+    elif target_type == "mission":
+        target_uuid = _resolve_mission_target(target_id)
     else:
         target_uuid = _resolve_uuid_target(target_id, target_type)
 

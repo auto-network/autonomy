@@ -756,6 +756,61 @@ class TestDesignResolvers:
         assert serve(token) == link_serving.REFUSED
 
 
+class TestMissionResolver:
+    """Deliberately the opposite of TestDesignResolvers: a mission grant
+    must NOT pin to a revision the way `design` does (a714c09a-ccd's "BUG"
+    section) -- it always serves whatever is current, matching `note`."""
+
+    @pytest.fixture(autouse=True)
+    def _mission_db(self, env, tmp_path, monkeypatch):
+        # `env` isolates GRAPH_DB/GRAPH_ORG (grants live there via
+        # put_grant) -- without it this class writes into whatever graph
+        # DB the ambient environment happens to have live, exactly the
+        # cross-test collision TestDesignResolvers avoids by depending on
+        # `env` through its own `deck` fixture.
+        from tools.dashboard.dao import mission_control_db as mdb
+        monkeypatch.setattr(mdb, "DB_PATH", tmp_path / "mission_control.db")
+        mdb.init_db(tmp_path / "mission_control.db")
+        self.mdb = mdb
+
+    def test_mission_serves_current_revision_not_pinned(self):
+        mission = self.mdb.create_mission("OSS Insights")
+        mission_id = mission["mission_id"]
+        self.mdb.push_site_revision(mission_id, "<html>rev one</html>", "first")
+        token = _token(50)
+        put_grant(token, mission_id, "mission")
+        header, body = parse(serve(token))
+        assert header["kind"] == "mission" and "content" not in header
+        assert sliced(body, header["viewer"]) == b"<html>rev one</html>"
+
+        # Same grant, same token -- push two more revisions and re-fetch.
+        # A `design`-style pinned resolver would still show rev one here;
+        # this must show the latest, unpinned, exactly like `note`.
+        self.mdb.push_site_revision(mission_id, "<html>rev two</html>", "second")
+        self.mdb.push_site_revision(mission_id, "<html>rev three</html>", "third")
+        header2, body2 = parse(serve(token))
+        assert sliced(body2, header2["viewer"]) == b"<html>rev three</html>"
+
+    def test_mission_with_no_revision_yet_refused(self):
+        mission = self.mdb.create_mission("Empty Mission")
+        token = _token(51)
+        put_grant(token, mission["mission_id"], "mission")
+        assert serve(token) == link_serving.REFUSED
+
+    def test_unknown_mission_refused(self):
+        token = _token(52)
+        put_grant(token, str(uuid.uuid4()), "mission")
+        assert serve(token) == link_serving.REFUSED
+
+    def test_mission_forbids_content_field(self):
+        """_serialize_artifact's kind-arm rejection -- a mission artifact
+        can never legitimately carry `content` (that's note's shape)."""
+        with pytest.raises(ValueError, match="forbid content"):
+            link_serving._serialize_artifact(
+                {"kind": "mission", "viewer": b"<html></html>", "content": {}}
+            )
+
+
 def test_check_grant_reads_owning_scope_not_composed(monkeypatch):
     """The serving gate reads owning scope (P2): a peer-published grant — one
     a peer-COMPOSED read WOULD surface — must never be servable through

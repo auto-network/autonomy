@@ -354,6 +354,43 @@ def test_note_preview_comes_from_trusted_graph_target(env):
     assert "requester-controlled" not in str(enriched["target_preview"])
 
 
+def test_mission_title_comes_from_trusted_mission_store(env, tmp_path, monkeypatch):
+    from tools.dashboard.dao import mission_control_db as mdb
+    monkeypatch.setattr(mdb, "DB_PATH", tmp_path / "mission_control.db")
+    mission = mdb.create_mission("OSS Insights")
+
+    r = env.post("/api/approvals", json={
+        "kind": "link_publish", "session": SESSION,
+        "request": {
+            "org": ORG,
+            "target_uuid": mission["mission_id"],
+            "target_type": "mission",
+            "preview": "requester-controlled fake title",
+        },
+    })
+    enriched = env.get(f"/api/approvals/{r.json()['id']}").json()
+    assert enriched["target_title"] == "OSS Insights"
+    assert "requester-controlled" not in str(enriched.get("target_title"))
+
+
+def test_unknown_mission_target_errors_cleanly(env, tmp_path, monkeypatch):
+    from tools.dashboard.dao import mission_control_db as mdb
+    monkeypatch.setattr(mdb, "DB_PATH", tmp_path / "mission_control.db")
+    mdb.init_db(tmp_path / "mission_control.db")
+
+    r = env.post("/api/approvals", json={
+        "kind": "link_publish", "session": SESSION,
+        "request": {
+            "org": ORG,
+            "target_uuid": "nope-not-a-real-mission",
+            "target_type": "mission",
+        },
+    })
+    enriched = env.get(f"/api/approvals/{r.json()['id']}").json()
+    assert enriched["target_title"] is None
+    assert "not found" in (enriched.get("target_error") or "")
+
+
 def test_decline_surfaces_to_requester(env):
     rid = _create_publish(env)
     result = _decide_and_wait(env, rid, {"approved": False})

@@ -82,6 +82,7 @@ NETWORK_PUB_HEX_LEN = 64  # raw Ed25519 public key, lowercase hex (= key id)
 TARGET_TYPES = (
     "design",
     "file",
+    "mission",
     "note",
     "present",
     "org:join",

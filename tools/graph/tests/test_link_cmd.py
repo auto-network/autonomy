@@ -194,6 +194,62 @@ def test_full_uuid_does_not_require_graph_lookup(monkeypatch):
     assert link_cmd._resolve_uuid_target(NOTE_TARGET, "note") == NOTE_TARGET
 
 
+MISSION_TARGET = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+
+
+def test_resolve_mission_target_confirms_existence(monkeypatch, capsys):
+    calls = []
+
+    def fake_api(method, path, **kwargs):
+        calls.append((method, path))
+        return {"mission": {"mission_id": MISSION_TARGET, "name": "OSS Insights"}}
+
+    monkeypatch.setattr(link_cmd, "_api_request", fake_api)
+    assert link_cmd._resolve_mission_target(MISSION_TARGET) == MISSION_TARGET
+    assert calls == [("GET", "/api/missions/" + MISSION_TARGET)]
+    assert "OSS Insights" in capsys.readouterr().out
+
+
+def test_resolve_mission_target_rejects_non_uuid(monkeypatch):
+    monkeypatch.setattr(link_cmd, "_api_request", lambda *a, **k: pytest.fail("unexpected lookup"))
+    with pytest.raises(SystemExit):
+        link_cmd._resolve_mission_target("not-a-uuid-at-all")
+
+
+def test_resolve_mission_target_fails_clean_on_404(monkeypatch):
+    def fake_api(method, path, **kwargs):
+        raise urllib.error.HTTPError(path, 404, "not found", {}, io.BytesIO(b""))
+
+    monkeypatch.setattr(link_cmd, "_api_request", fake_api)
+    with pytest.raises(SystemExit):
+        link_cmd._resolve_mission_target(MISSION_TARGET)
+
+
+def test_mission_target_type_does_not_fall_through_to_uuid_resolver(monkeypatch):
+    """Regression: mission must not silently hit _resolve_uuid_target's
+    note/file-shaped type check, which knows nothing about mission_id."""
+    monkeypatch.setattr(
+        link_cmd, "_resolve_mission_target",
+        lambda target_id: MISSION_TARGET,
+    )
+    monkeypatch.setattr(
+        link_cmd, "_resolve_uuid_target",
+        lambda *a, **k: pytest.fail("mission target hit the uuid resolver, not its own"),
+    )
+    monkeypatch.setattr(
+        link_cmd, "_post_approval", lambda kind, request: "approval-id",
+    )
+    # cmd_link_publish always calls _await_decision right after
+    # _post_approval -- a real, network-polling function (up to 55s per
+    # attempt). This test only cares about the target-resolution dispatch
+    # above it, so mock this too rather than let it hang against nothing.
+    monkeypatch.setattr(
+        link_cmd, "_await_decision",
+        lambda approval_id, verb: {"url": "https://relay.auto.network/l/deadbeef"},
+    )
+    link_cmd.cmd_link_publish(_publish_args(target=MISSION_TARGET, target_type="mission"))
+
+
 def test_publish_prints_url(operator_env, capsys):
     link_cmd.cmd_link_publish(_publish_args())
     out = capsys.readouterr().out
