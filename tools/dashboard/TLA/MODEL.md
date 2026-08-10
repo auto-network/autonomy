@@ -23,8 +23,11 @@ This machine's center of gravity is **liveness and message ordering**,
 not lock cycles: the production failures are stalls (a session never
 shows its transcript), lost signals, and identity races.  Checked:
 
-- Safety: `NoChildAdoption` (identity), `NoDuplicates` (exactly-once
-  delivery), `OffsetCoherent` (acked offset vs. linked content),
+- Safety: `NoChildAdoption` (identity), `BoundedDuplicates` (duplicates only after a failure event —
+  crash, cancellation, restart — at most one in-flight read window each;
+  exactly-once when failure-free; strict `NoDuplicates` remains the
+  invariant for the RACE calibrations, where duplication without any
+  failure is still forbidden), `OffsetCoherent` (acked offset vs. linked content),
   `ComposerSticky` (no lost update on `harness_state`), `SingleOwner`
   (drain gate), `TypeOK`.
 - Liveness (weak fairness on the reliable machinery only):
@@ -236,15 +239,18 @@ Recorded so nobody mistakes model silence for a checked guarantee:
   drain requested), in `observe_rollout`, in the handover commit's
   stale branch, and anywhere else a verified-main track can meet its
   own row.
-- **A4 adjudication (design question left open by the review).**
-  `CalOffsetAckFirst` (persist-then-process, the shipped order)
-  violates `EventuallyDrained` under one crash: the offset is acked
-  past bytes that were never delivered.  `CalProcessFirstCrash`
-  (process-then-persist) violates `NoDuplicates` under one crash:
-  the retry re-delivers.  Only idempotent downstream publication
-  (dedup by line index/offset before persist) satisfies both — the
-  green configs run `PersistOrder = "idempotent"`, which is therefore
-  a REQUIREMENT on the implementation, not a free choice.
+- **A4 adjudication, superseded by operator decision (2026-08-10).**
+  `CalOffsetAckFirst` (persist-then-process, the shipped order) loses
+  the startup burst under one crash — still forbidden.  The operator
+  accepted the other horn: rare duplicate lines in a crash-retry
+  window.  Green configs therefore run `PersistOrder = "processFirst"`
+  (publish-then-persist, no dedup layer) and prove `BoundedDuplicates`;
+  `CalProcessFirstCrash` is repurposed as the documented pin of the
+  accepted window.  Two FAILURE-FREE duplicate routes surfaced by the
+  relaxation are forbidden by proven rules: the handover advances the
+  persisted offset when it publishes the currently-linked file, and
+  linking never rewinds publication (offset initializes at the
+  already-published level).
 
 
 ## Ordered handover (operator decision, 2026-08-09)
@@ -297,7 +303,7 @@ adversarial review, and must FAIL its config (see `calibration/`):
 | CalSkipOnContention | T87 skip contended signal | EventuallyDrained (stranding) |
 | CalEventDrivenDeadline | T110 deadline only in on_file_event | CharacterizingResolves |
 | CalOffsetAckFirst | A4 shipped persist-before-process + crash | EventuallyDrained (lost burst) |
-| CalProcessFirstCrash | A4 naive alternative + crash | NoDuplicates (re-delivery) |
+| CalProcessFirstCrash | the accepted crash-window (documented residual pin) | NoDuplicates (strict form — shows where the acceptance boundary is) |
 | CalSyncEntryNoop | B2 sync claim, schedule() no-op | EventuallyDrained (busy pinned) |
 | CalTerminalQuarantine | B3 terminal quarantine | EventuallyLinked (slow start unadoptable) |
 | CalNaiveReobserve | A6 unconditional re-observation | CharacterizingResolves (livelock) |
