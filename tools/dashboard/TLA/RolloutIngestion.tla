@@ -154,7 +154,7 @@ ChainBefore(g, f) ==
 \* AND its final check has been recorded (sealed).  The handover walk
 \* makes predecessors ready oldest-first, so no later file publishes
 \* before every earlier file's check.
-PredReady(g) == consumed[g] = fLines[g] /\ g \in sealedSet
+PredReady(g) == consumed[g] >= fLines[g] /\ g \in sealedSet
 
 HasUnreadyPred(f) ==
     \E g \in FILES :
@@ -167,6 +167,7 @@ OldestUnreadyPred(f) ==
              (q \in fExists /\ ChainBefore(q, g)) => PredReady(q)
 AnyArmed(f)      == \E s \in SESSIONS : TrackArmed(s, f)
 Max(a, b)        == IF a >= b THEN a ELSE b
+Min(a, b)        == IF a <= b THEN a ELSE b
 FreeSlot(s)      == \E w \in WORKERS : wk[<<s, w>>].pc = "idle"
 PickSlot(s)      == CHOOSE w \in WORKERS : wk[<<s, w>>].pc = "idle"
 
@@ -262,7 +263,14 @@ LinkEffect(s, f, prv, sync, exp) ==
     LET old == rowPath[s] IN
          /\ rowPath' = [rowPath EXCEPT ![s] = f]
          /\ rowOffset' = IF prv = "persisted" THEN rowOffset
-                         ELSE [rowOffset EXCEPT ![s] = 0]
+                         \* Linking never rewinds publication: the read
+                         \* position starts at the level the handover
+                         \* already delivered (zero for a never-published
+                         \* file) — otherwise a late trusted link of a
+                         \* handover-published file re-publishes it all
+                         \* (second failure-free duplicate route TLC found).
+                         ELSE [rowOffset EXCEPT ![s] =
+                                 Min(consumed[f], fLines[f])]
          /\ track' = LET t1 == [track EXCEPT ![<<s, f>>] =
                                  [st |-> "stream", prov |-> prv,
                                   expPrev |-> exp, dl |-> FALSE, closeL |-> 0]]
@@ -907,13 +915,25 @@ DeadlinePass(s, f) ==
 \* restart cannot inflate counts.
 HandoverDrain(s) ==
     /\ pendingLink[s] # NoFile
+    /\ ~GBusy(s, pendingLink[s])   \* codex review #4: the handover walk
+                                   \* runs under the session drain gate —
+                                   \* never concurrently with a drain owner
     /\ HasUnreadyPred(pendingLink[s])
     /\ LET p == OldestUnreadyPred(pendingLink[s]) IN
        /\ consumed' = [consumed EXCEPT ![p] = Max(@, fLines[p])]
        /\ sealedSet' = sealedSet \cup {p}
        /\ sealedAt' = [sealedAt EXCEPT ![p] = Max(@, fLines[p])]
+       \* When the predecessor is the CURRENTLY LINKED file, this walk
+       \* step IS the ordinary drain-to-EOF and must advance the acked
+       \* offset — otherwise the regular reader re-publishes the same
+       \* lines from its stale position (a failure-free duplicate source
+       \* TLC found the moment strict dedup was dropped).  Never-linked
+       \* predecessors have no offset and no competing reader.
+       /\ rowOffset' = IF p = rowPath[s]
+                       THEN [rowOffset EXCEPT ![s] = Max(@, fLines[p])]
+                       ELSE rowOffset
     /\ UNCHANGED fsVars /\ UNCHANGED chanVars
-    /\ UNCHANGED << track, rowPath, rowOffset, regLinked, regCount,
+    /\ UNCHANGED << track, rowPath, regLinked, regCount,
                     pubAfter, busyS, busyF, dirtyS, dirtyF, drainReq,
                     pendingLink, pendingExp >>
     /\ UNCHANGED << cancelRel, wk, rowComposer, composerEverSet >>
@@ -926,6 +946,7 @@ HandoverDrain(s) ==
 \* defer time is re-verified; a stale commit re-arms the candidate.
 CommitLink(s) ==
     /\ pendingLink[s] # NoFile
+    /\ ~GBusy(s, pendingLink[s])   \* codex review #4: same gate discipline
     /\ ~HasUnreadyPred(pendingLink[s])
     /\ IF rowPath[s] = pendingExp[s]
        THEN /\ LinkEffect(s, pendingLink[s],
@@ -1069,6 +1090,15 @@ NoChildAdoption ==
 NoDuplicates ==
     \A f \in FILES : consumed[f] <= fLines[f]
 
+\* Operator decision 2026-08-10: rare duplicate lines in a crash-retry
+\* window are ACCEPTED.  Publication is publish-then-persist with no
+\* downstream dedup; each crash can re-deliver at most one in-flight
+\* read range.  Crash-free behavior remains exactly-once.
+BoundedDuplicates ==
+    LET failures == (CrashBudget - crashesLeft) + (CancelBudget - cancelsLeft)
+                    + (RestartBudget - restartsLeft)
+    IN \A f \in FILES : consumed[f] <= fLines[f] + failures * MaxLines
+
 \* The acked offset never exceeds the linked file's real content.
 OffsetCoherent ==
     \A s \in SESSIONS :
@@ -1083,7 +1113,7 @@ SingleOwner ==
     \A s \in SESSIONS :
         Cardinality({w \in WORKERS : wk[<<s, w>>].pc # "idle"}) <= 1
 
-Inv == TypeOK /\ NoChildAdoption /\ NoDuplicates
+Inv == TypeOK /\ NoChildAdoption /\ BoundedDuplicates
        /\ OffsetCoherent /\ ComposerSticky
 
 \* Guard-branch reachability probe (must be VIOLATED in the green design):
@@ -1105,7 +1135,7 @@ ProbeBirthCASFailUnreached ==
 \* becomes operator-visible (auto-0807-225218 violates this).
 EventuallyDrained ==
     <>[] (\A s \in SESSIONS :
-            rowPath[s] # NoFile => consumed[rowPath[s]] = fLines[rowPath[s]])
+            rowPath[s] # NoFile => consumed[rowPath[s]] >= fLines[rowPath[s]])
 
 \* Every session whose writer produced content eventually links the file
 \* the writer actually wrote.
@@ -1129,12 +1159,17 @@ NoDurableStartingCard ==
 \* file until every existing predecessor has been through its pre-advance
 \* final check and everything that check saw is published.
 OrderedDelivery ==
+    \* Strengthened per codex review #12: every predecessor of a consumed
+    \* successor must have been FINAL-CHECKED (sealed) and published to its
+    \* seal — completeness alone is not evidence the check happened.  (The
+    \* earlier weaker disjunct was needed only under the pre-alignment
+    \* defer guard, which could publish a later predecessor while an empty
+    \* earlier one was complete-but-unchecked.)
     \A f \in FILES :
         consumed[f] > 0 =>
             \A g \in FILES :
                 (g \in fExists /\ ChainBefore(g, f)) =>
-                    \/ consumed[g] = fLines[g]
-                    \/ (g \in sealedSet /\ consumed[g] >= sealedAt[g])
+                    (g \in sealedSet /\ consumed[g] >= sealedAt[g])
 
 \* Operator requirement (liveness half): for a resolved session every
 \* existing main file eventually publishes up to its seal — in full for
