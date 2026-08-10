@@ -150,11 +150,6 @@ ChainBefore(g, f) ==
     /\ \/ FSucc[g] = f
        \/ FSucc[g] # NoFile /\ FSucc[FSucc[g]] = f
 
-\* Predecessors of f that exist on disk with unpublished lines.
-HasIncompletePred(f) ==
-    \E g \in FILES :
-        g \in fExists /\ ChainBefore(g, f) /\ consumed[g] < fLines[g]
-
 \* A predecessor is READY once it is published to its current end-of-file
 \* AND its final check has been recorded (sealed).  The handover walk
 \* makes predecessors ready oldest-first, so no later file publishes
@@ -329,7 +324,14 @@ Promote(s, f, prv, exp, sync) ==
          /\ UNCHANGED << pendingLink, pendingExp >>
     ELSE
     IF CASOk(s, f, prv, exp)
-    THEN IF OrderedHandover /\ prv # "persisted" /\ HasIncompletePred(f)
+    THEN IF OrderedHandover /\ prv # "persisted" /\ HasUnreadyPred(f)
+         \* Defer on UNREADY (unpublished OR unchecked), matching the bead
+         \* pseudocode exactly: the handover walk is the single place
+         \* predecessors become ready, and the commit guard re-checks the
+         \* same predicate.  (Previously deferred only on unpublished
+         \* content, sealing checked-but-complete predecessors at link
+         \* time — same outcomes, but a second branch shape the
+         \* implementation would not mirror.)
          THEN \* defer: no link, no broadcast, no offset reset yet
               /\ pendingLink' = [pendingLink EXCEPT ![s] = f]
               /\ pendingExp' = [pendingExp EXCEPT ![s] = exp]
