@@ -5068,6 +5068,12 @@ async def api_session_confirm_link(request):
                         )
                     session_monitor._add_file_watch(tmux_session, str(jf))
                     session_monitor._add_dir_watch(tmux_session, str(jf.parent))
+                    # auto-suvcp: persisted re-attach + catch-up drain, so the
+                    # handshake transcript's existing bytes become visible
+                    # without waiting for the next write.
+                    session_monitor.observe_rollout(
+                        tmux_session, jf, source="confirm_link",
+                    )
                     await session_monitor._broadcast_registry()
                     return JSONResponse({"ok": True, "project": project, "session_id": session_id})
         except Exception:

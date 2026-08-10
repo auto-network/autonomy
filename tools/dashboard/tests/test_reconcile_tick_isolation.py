@@ -161,8 +161,10 @@ class TestStepIsolation:
         """reconciliation_tick itself must not propagate a step failure —
         the caller (_reconciliation_loop) relies on this to keep looping."""
         sm_mod, mon = _fresh_monitor()
+        # auto-suvcp: step 1 is the unrestricted live-session scan (N3) —
+        # inject the failure at the call the tick actually makes now.
         monkeypatch.setattr(
-            "tools.dashboard.dao.dashboard_db.get_sessions_needing_resolution",
+            "tools.dashboard.session_monitor.get_live_sessions",
             lambda: (_ for _ in ()).throw(RuntimeError("simulated failure")),
         )
         result = await mon.reconciliation_tick()
@@ -187,8 +189,10 @@ class TestHealthSurfacing:
     @pytest.mark.asyncio
     async def test_failing_tick_increments_streak(self, setup_env, monkeypatch):
         sm_mod, mon = _fresh_monitor()
+        # auto-suvcp: step 1 is the unrestricted live-session scan (N3) —
+        # inject the failure at the call the tick actually makes now.
         monkeypatch.setattr(
-            "tools.dashboard.dao.dashboard_db.get_sessions_needing_resolution",
+            "tools.dashboard.session_monitor.get_live_sessions",
             lambda: (_ for _ in ()).throw(RuntimeError("simulated failure")),
         )
         await mon.reconciliation_tick()
@@ -200,8 +204,10 @@ class TestHealthSurfacing:
     @pytest.mark.asyncio
     async def test_streak_resets_on_next_clean_tick(self, setup_env, monkeypatch):
         sm_mod, mon = _fresh_monitor()
+        # auto-suvcp: step 1 is the unrestricted live-session scan (N3) —
+        # inject the failure at the call the tick actually makes now.
         monkeypatch.setattr(
-            "tools.dashboard.dao.dashboard_db.get_sessions_needing_resolution",
+            "tools.dashboard.session_monitor.get_live_sessions",
             lambda: (_ for _ in ()).throw(RuntimeError("simulated failure")),
         )
         await mon.reconciliation_tick()
@@ -218,8 +224,10 @@ class TestHealthSurfacing:
         """A short failure streak is visible in the streak counter but not
         yet flagged 'degraded' — avoids paging on a single transient blip."""
         sm_mod, mon = _fresh_monitor()
+        # auto-suvcp: step 1 is the unrestricted live-session scan (N3) —
+        # inject the failure at the call the tick actually makes now.
         monkeypatch.setattr(
-            "tools.dashboard.dao.dashboard_db.get_sessions_needing_resolution",
+            "tools.dashboard.session_monitor.get_live_sessions",
             lambda: (_ for _ in ()).throw(RuntimeError("simulated failure")),
         )
         await mon.reconciliation_tick()
@@ -233,8 +241,10 @@ class TestHealthSurfacing:
         flags degraded=True."""
         sm_mod, mon = _fresh_monitor()
         mon._DEGRADED_THRESHOLD_SECONDS = 0.01
+        # auto-suvcp: step 1 is the unrestricted live-session scan (N3) —
+        # inject the failure at the call the tick actually makes now.
         monkeypatch.setattr(
-            "tools.dashboard.dao.dashboard_db.get_sessions_needing_resolution",
+            "tools.dashboard.session_monitor.get_live_sessions",
             lambda: (_ for _ in ()).throw(RuntimeError("simulated failure")),
         )
         await mon.reconciliation_tick()

@@ -393,6 +393,21 @@ def init_db(db_path: Path | None = None) -> None:
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN disk_detail TEXT")
         _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN disk_sampled_at REAL")
         _conn.commit()
+    # Migrate: rollout generation identity (bead auto-suvcp, Rule 6).
+    # ``jsonl_generation`` = "<st_dev>:<st_ino>:<link_seq>" — stamped wherever
+    # jsonl_path is written; the tail-persistence CAS requires path AND
+    # generation to still match so a stale drain's write is dropped rather
+    # than acking offsets against a replaced file. ``link_seq`` is the
+    # persisted per-session link sequence nonce that makes a re-link of the
+    # same inode distinguishable from the original link.
+    try:
+        _conn.execute("SELECT jsonl_generation FROM tmux_sessions LIMIT 0")
+    except sqlite3.OperationalError:
+        _conn.execute("ALTER TABLE tmux_sessions ADD COLUMN jsonl_generation TEXT")
+        _conn.execute(
+            "ALTER TABLE tmux_sessions ADD COLUMN link_seq INTEGER NOT NULL DEFAULT 0"
+        )
+        _conn.commit()
     logger.info("dashboard_db: initialised at %s", path)
 
 
@@ -504,10 +519,22 @@ def insert_session(
     conn.commit()
 
 
-def update_jsonl_link(tmux_name: str, session_uuid: str, jsonl_path: str, project: str | None = None) -> None:
+def update_jsonl_link(
+    tmux_name: str,
+    session_uuid: str,
+    jsonl_path: str,
+    project: str | None = None,
+    *,
+    generation: str | None = None,
+    file_offset: int | None = None,
+) -> None:
     """LINK step: set session_uuid, jsonl_path, and append to session_uuids.
 
-    Also updates curr_jsonl_file and derives resolution_dir from the file path.
+    Also updates curr_jsonl_file and derives resolution_dir from the file
+    path. ``generation`` is the rollout generation identity (auto-suvcp
+    Rule 6) — stamped in the same UPDATE as jsonl_path so the two can never
+    disagree. ``file_offset`` lets promotion initialize the read cursor at
+    the file's already-published level (linking never rewinds publication).
     """
     import json as _json
 
@@ -522,23 +549,59 @@ def update_jsonl_link(tmux_name: str, session_uuid: str, jsonl_path: str, projec
 
     resolution_dir = str(Path(jsonl_path).parent)
 
+    parts = [
+        "session_uuid=?", "jsonl_path=?",
+        "resolution_dir=COALESCE(resolution_dir, ?)", "session_uuids=?",
+        "curr_jsonl_file=?",
+    ]
+    vals: list[Any] = [
+        session_uuid, jsonl_path, resolution_dir, _json.dumps(uuids), jsonl_path,
+    ]
     if project:
-        conn.execute(
-            "UPDATE tmux_sessions SET session_uuid=?, jsonl_path=?, project=?,"
-            " resolution_dir=COALESCE(resolution_dir, ?), session_uuids=?,"
-            " curr_jsonl_file=? WHERE tmux_name=?",
-            (session_uuid, jsonl_path, project, resolution_dir, _json.dumps(uuids),
-             jsonl_path, tmux_name),
-        )
-    else:
-        conn.execute(
-            "UPDATE tmux_sessions SET session_uuid=?, jsonl_path=?,"
-            " resolution_dir=COALESCE(resolution_dir, ?), session_uuids=?,"
-            " curr_jsonl_file=? WHERE tmux_name=?",
-            (session_uuid, jsonl_path, resolution_dir, _json.dumps(uuids),
-             jsonl_path, tmux_name),
-        )
+        parts.append("project=?")
+        vals.append(project)
+    if generation is not None:
+        parts.append("jsonl_generation=?")
+        vals.append(generation)
+    if file_offset is not None:
+        parts.append("file_offset=?")
+        vals.append(file_offset)
+    vals.append(tmux_name)
+    conn.execute(
+        f"UPDATE tmux_sessions SET {', '.join(parts)} WHERE tmux_name=?", vals,
+    )
     conn.commit()
+
+
+def next_link_seq(tmux_name: str) -> int:
+    """Increment and return the per-session link sequence nonce (auto-suvcp).
+
+    Part of the generation identity ``<st_dev>:<st_ino>:<seq>`` — the nonce
+    makes a re-link of a recycled inode produce a distinct generation.
+    """
+    conn = get_conn()
+    cur = conn.execute(
+        "UPDATE tmux_sessions SET link_seq = COALESCE(link_seq, 0) + 1"
+        " WHERE tmux_name=? RETURNING link_seq",
+        (tmux_name,),
+    )
+    row = cur.fetchone()
+    conn.commit()
+    return int(row[0]) if row else 0
+
+
+def set_jsonl_generation(tmux_name: str, generation: str, *, expect_path: str) -> bool:
+    """Backfill ``jsonl_generation`` for a persisted re-attach of a row whose
+    link predates the generation column. Guarded on the path still matching.
+    """
+    conn = get_conn()
+    cur = conn.execute(
+        "UPDATE tmux_sessions SET jsonl_generation=?"
+        " WHERE tmux_name=? AND jsonl_path=?",
+        (generation, tmux_name, expect_path),
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def link_and_enrich(tmux_name: str, session_uuid: str, jsonl_path: str, project: str | None = None) -> None:
@@ -874,6 +937,99 @@ def update_tail_state(
         return
     vals.append(tmux_name)
     conn.execute(f"UPDATE tmux_sessions SET {', '.join(parts)} WHERE tmux_name=?", vals)
+    conn.commit()
+
+
+def persist_tail_state(
+    tmux_name: str,
+    *,
+    expect_path: str,
+    expect_generation: str,
+    file_offset: int,
+    last_activity: float | None = None,
+    last_message: str | None = None,
+    entry_count_add: int = 0,
+    context_tokens: int | None = None,
+    model: str | None = None,
+    harness_state_patch: str | None = None,
+) -> bool:
+    """Drain-owner persistence with generation CAS (auto-suvcp Rule 6).
+
+    The write lands only if ``jsonl_path`` AND ``jsonl_generation`` still
+    match what the drain pass read — a drain racing a rollover or re-link
+    silently drops its ack instead of corrupting the successor's cursor
+    (OffsetCoherent).
+
+    ``harness_state_patch`` is merged INTO the row inside the UPDATE via
+    ``json_patch`` (B7): the patch carries only the keys this drain pass
+    itself changed, so a concurrent screen-poller write (e.g.
+    ``composer_ready``) is never clobbered by a read-modify-write that
+    straddled an await (ComposerSticky).
+
+    ``entry_count_add`` is an increment, not an absolute, for the same
+    reason. Lifecycle columns are deliberately absent from this statement —
+    ``state``/``startup_state`` belong exclusively to STATE_AUTHORITY.
+
+    Returns True iff the row accepted the write.
+    """
+    conn = get_conn()
+    parts = ["file_offset=?", "entry_count=COALESCE(entry_count,0)+?"]
+    vals: list[Any] = [file_offset, entry_count_add]
+    if last_activity is not None:
+        parts.append("last_activity=?")
+        vals.append(last_activity)
+    if last_message is not None:
+        parts.append("last_message=?")
+        vals.append(last_message)
+    if context_tokens is not None:
+        parts.append("context_tokens=?")
+        vals.append(context_tokens)
+    if model is not None:
+        parts.append("model=?")
+        vals.append(model)
+    if harness_state_patch is not None:
+        parts.append(
+            "harness_state=json_patch(COALESCE(NULLIF(harness_state,''),'{}'), ?)"
+        )
+        vals.append(harness_state_patch)
+    vals.extend([tmux_name, expect_path, expect_generation])
+    cur = conn.execute(
+        f"UPDATE tmux_sessions SET {', '.join(parts)}"
+        " WHERE tmux_name=? AND jsonl_path=?"
+        "   AND COALESCE(jsonl_generation,'')=?",
+        vals,
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def increment_entry_count(
+    tmux_name: str,
+    add: int,
+    *,
+    last_message: str | None = None,
+    last_activity: float | None = None,
+) -> None:
+    """Handover publication accounting (auto-suvcp Rule 4/6).
+
+    Publishing a never-linked predecessor advances the session's cumulative
+    ``entry_count`` (it counts lines published across ALL of the session's
+    files) without touching ``file_offset`` — the offset cursor belongs to
+    the currently linked file only.
+    """
+    conn = get_conn()
+    parts = ["entry_count=COALESCE(entry_count,0)+?"]
+    vals: list[Any] = [add]
+    if last_message is not None:
+        parts.append("last_message=?")
+        vals.append(last_message)
+    if last_activity is not None:
+        parts.append("last_activity=?")
+        vals.append(last_activity)
+    vals.append(tmux_name)
+    conn.execute(
+        f"UPDATE tmux_sessions SET {', '.join(parts)} WHERE tmux_name=?", vals,
+    )
     conn.commit()
 
 

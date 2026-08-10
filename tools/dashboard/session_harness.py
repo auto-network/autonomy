@@ -2942,6 +2942,14 @@ def _attach_live_monitoring(
     if reset_offset:
         update_tail_state(tmux_name, file_offset=0)
 
+    # auto-suvcp: attaching arms IN_MODIFY, which never fires for bytes
+    # already on disk — request a catch-up drain so a quiet file's existing
+    # content becomes operator-visible with no further write (the
+    # attach-without-catch-up gap of incident auto-0807-225218).
+    request_drain = getattr(monitor, "request_drain", None)
+    if callable(request_drain):
+        request_drain(tmux_name)
+
 
 async def _watch_for_claude_host_jsonl(
     monitor: Any,
