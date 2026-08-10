@@ -419,6 +419,20 @@ window.getSessionStore = function(sessionId) {
         merge_merged: 0,
         merge_dropped_duplicate: 0,
         span_gaps_detected: 0,
+        // Wake/catch-up protocol counters (commit C).
+        wakeups_by_trigger: {},      // trigger reason → count
+        wake_happy: 0,               // caught-up wakes (no entries fetched)
+        wake_gap: 0,                 // wakes that had to fill a gap
+        gap_entries_total: 0,        // entries recovered by catch-ups
+        gap_bytes_total: 0,          // raw bytes covered by catch-ups
+        on_the_fly_catchups: 0,      // SSE span exposed a hole mid-stream
+        catchup_count: 0,
+        catchup_latency_ms_total: 0,
+        stream_rebuilds: 0,          // SSE connections torn down + reopened
+        stream_rebuilds_dead: 0,     // …where the old one was provably dead
+        // Viewer believed caught-up, a later fetch proved otherwise.
+        // MUST trend to zero — the acceptance gate for truthful catch-up.
+        conclusion_contradicted: 0,
       },
       // /api/diag depth fields — never read on the hot path.
       _entriesViaFetchCount: 0,
@@ -754,12 +768,14 @@ window.ensureSessionMessages = function() {
 
     var spanState = data.span ? window.advanceCommittedSpan(store, data.span) : null;
     window.mergeSessionEntries(store, data, 'sse');
-    // A span that exposes a hole (or a rollover file switch) triggers the
-    // viewer's ranged catch-up — registered via onSessionSpanGap by the
-    // wake/catch-up layer.
-    if ((spanState === 'gap' || spanState === 'file_switch') &&
-        typeof window._onSessionSpanGap === 'function') {
-      try { window._onSessionSpanGap(id, spanState, data.span); } catch (e) { /* best-effort */ }
+    // The "first event exposes the gap" path: a span starting past the
+    // committed high-water (or a rollover file switch) triggers the
+    // viewer's ranged catch-up immediately — no waiting for a wake.
+    if (spanState === 'gap' || spanState === 'file_switch') {
+      var gapHandler = window._sessionGapHandlers && window._sessionGapHandlers[id];
+      if (typeof gapHandler === 'function') {
+        try { gapHandler(spanState, data.span); } catch (e) { /* best-effort */ }
+      }
     }
 
     // Update metadata

@@ -1694,6 +1694,27 @@
           }
         ));
 
+        // On-the-fly gap detection: an SSE payload whose span starts past
+        // the committed high-water (or switches files — rollover) fires
+        // the same ranged catch-up immediately. Registered per session in
+        // a global map the SSE handler consults; torn down with the rest
+        // of the watchers.
+        window._sessionGapHandlers = window._sessionGapHandlers || {};
+        window._sessionGapHandlers[sid] = function (state, span) {
+          var s = Alpine.store('sessions')[sid];
+          if (!s) return;
+          if (s._counters) s._counters.on_the_fly_catchups += 1;
+          self._catchUp(s, 'span_' + state).catch(function (e) {
+            console.warn('[sessionViewer] span-gap catch-up failed', e);
+          });
+        };
+        track(function () {
+          if (window._sessionGapHandlers &&
+              window._sessionGapHandlers[sid]) {
+            delete window._sessionGapHandlers[sid];
+          }
+        });
+
         this._setupResumeRecovery();
       },
 
@@ -1840,23 +1861,39 @@
         }
       },
 
+      // Two-round-trip wake protocol (auto-16g9t). On EVERY wake trigger:
+      //   1. Unconditionally tear down and re-open the SSE CONNECTION —
+      //      a few hundred bytes. readyState is never consulted: iOS
+      //      zombie streams report OPEN while delivering nothing (the
+      //      old `readyState === 2` gate was the silent
+      //      "foregrounded but never catches up" hole). The buffer is
+      //      never discarded.
+      //   2. ONE ranged catch-up from the last COMMITTED (file, offset)
+      //      pair — never a bare byte count, never advanced past
+      //      dropped entries. Happy path: a small response with no
+      //      entries and the current (file, size).
       async _recoverSessionSync(reason) {
         if (!this.sessionKey || !this._tailUrl || this.state === 'error') return;
         var store = Alpine.store('sessions')[this.sessionKey];
         if (!store) return;
+        var c = store._counters;
+        if (c) {
+          c.wakeups_by_trigger[reason] = (c.wakeups_by_trigger[reason] || 0) + 1;
+        }
         if (this._resumeRefreshInFlight) return this._resumeRefreshInFlight;
 
         var self = this;
         this._resumeRefreshInFlight = (async function() {
           try {
-            if (
-              typeof window.reconnectEvents === 'function' &&
-              window._es &&
-              window._es.readyState === 2
-            ) {
+            if (typeof window.reconnectEvents === 'function') {
+              var wasDead = !!(window._es && window._es.readyState === 2);
               window.reconnectEvents();
+              if (c) {
+                c.stream_rebuilds += 1;
+                if (wasDead) c.stream_rebuilds_dead += 1;
+              }
             }
-            await self._fetchDelta(store);
+            await self._catchUp(store, reason);
           } catch (e) {
             console.warn('[sessionViewer] resume catch-up failed (' + reason + ')', e);
           } finally {
@@ -2513,16 +2550,90 @@
         this._rebuildDisplay();
       },
 
-      async _fetchDelta(store) {
-        var after = (store && store.offset) || 0;
-        var res = await fetch(this._tailUrl + '?after=' + after);
-        if (!res.ok) {
-          throw new Error('Tail request failed (' + res.status + ')');
+      // Ranged catch-up from the committed (file, offset) high-water.
+      // Bounded per wake: responses are server-byte-capped and this loop
+      // runs at most _CATCHUP_MAX_ROUNDS before rescheduling itself on a
+      // fresh task — a huge backlog never blocks the UI.
+      async _catchUp(store, why) {
+        var c = store._counters;
+        var t0 = Date.now();
+        var committedAtStart = store.committed
+          ? { file: store.committed.file, off: store.committed.off }
+          : null;
+        var fetchedEntries = 0;
+        var fetchedBytes = 0;
+        var rounds = 0;
+        var hasMore = false;
+        var MAX_ROUNDS = 6;
+        do {
+          var url;
+          if (store.committed && store.committed.file) {
+            url = this._tailUrl
+              + '?after_file=' + encodeURIComponent(store.committed.file)
+              + '&after=' + encodeURIComponent(store.committed.off);
+          } else {
+            // No committed anchor yet (never-loaded store): the initial
+            // reverse window is the right first fetch, not a full replay.
+            url = this._initialTailUrl();
+          }
+          var res = await fetch(url);
+          if (!res.ok) throw new Error('Tail request failed (' + res.status + ')');
+          var data = await res.json();
+          if (data.error) throw new Error(data.error);
+          var insertedBefore = (c && c.merge_inserted) || 0;
+          var prevCommitted = store.committed;
+          this._applyTailPayload(store, data);
+          var inserted = ((c && c.merge_inserted) || 0) - insertedBefore;
+          fetchedEntries += inserted;
+          if (Array.isArray(data.window_spans)) {
+            for (var si = 0; si < data.window_spans.length; si++) {
+              fetchedBytes += Math.max(0,
+                data.window_spans[si].to - data.window_spans[si].from);
+            }
+          }
+          // Conclusion-contradicted: this fetch inserted entries at or
+          // below the position we already believed committed — we held a
+          // hole we thought was closed. Must trend to zero.
+          if (c && inserted > 0 && committedAtStart && store._lastMinInsertRef) {
+            var ref = store._lastMinInsertRef;
+            var refIdx = store.chain.indexOf(ref.file);
+            var comIdx = store.chain.indexOf(committedAtStart.file);
+            if (refIdx !== -1 && comIdx !== -1 &&
+                (refIdx < comIdx ||
+                 (refIdx === comIdx && ref.off < committedAtStart.off))) {
+              c.conclusion_contradicted += 1;
+            }
+          }
+          hasMore = !!data.has_more_forward;
+          // Progress guard: a capped response that failed to advance the
+          // cursor must not spin.
+          if (hasMore && prevCommitted && store.committed &&
+              store.committed.file === prevCommitted.file &&
+              store.committed.off <= prevCommitted.off) break;
+          rounds++;
+        } while (hasMore && rounds < MAX_ROUNDS);
+
+        if (c) {
+          c.catchup_count += 1;
+          c.catchup_latency_ms_total += Date.now() - t0;
+          if (fetchedEntries === 0) c.wake_happy += 1;
+          else {
+            c.wake_gap += 1;
+            c.gap_entries_total += fetchedEntries;
+            c.gap_bytes_total += fetchedBytes;
+          }
         }
-        var data = await res.json();
-        if (data.error) throw new Error(data.error);
-        this._applyTailPayload(store, data);
-        return data;
+        if (hasMore) {
+          // Reschedule the remainder — never block this task on a huge
+          // backlog (the server caps each response's bytes).
+          var self = this;
+          setTimeout(function () {
+            self._catchUp(store, 'continuation').catch(function (e) {
+              console.warn('[sessionViewer] catch-up continuation failed', e);
+            });
+          }, 0);
+        }
+        return fetchedEntries;
       },
 
       // ── Overlay: dispatch tail polling ──────────────────────────
