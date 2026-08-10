@@ -5612,7 +5612,7 @@ def main():
         "link",
         help="Share-links (publish/revoke/list) or create edge between two graph nodes",
         epilog="Share-links (operator-approved, spec graph://a17c8657-939):\n"
-               "  graph link publish <target-id> --type present|design|note|file [--ttl 7d] [--label text]\n"
+               "  graph link publish <target-id> --type present|design|note|file|mission [--ttl 7d] [--label text]\n"
                "  graph link publish <invite-event-id> --type org:join --invite-token-fd <fd>\n"
                "  graph link revoke <token>\n"
                "  graph link list\n"
@@ -5625,7 +5625,7 @@ def main():
     p.add_argument("--turns", "-t", help="Edge turn range (e.g. 286 or 338-344)")
     p.add_argument("--note", "-n", help="Context note for this edge")
     p.add_argument("--type", dest="target_type",
-                   choices=["present", "design", "note", "file", "org:join"],
+                   choices=["present", "design", "note", "file", "mission", "org:join"],
                    help="publish: what kind of artifact the target id names")
     p.add_argument("--ttl", help="publish: link lifetime (e.g. 3600, 24h, 7d); default no expiry")
     p.add_argument("--label", help="publish: human label carried on the grant")
