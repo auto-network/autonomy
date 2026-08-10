@@ -83,6 +83,14 @@ def _node_service(
     if first_org:
         environment["AUTONOMY_FIRST_ORG"] = first_org
         environment["AUTONOMY_FIRST_ORG_NAME"] = f"Harness {first_org}"
+        # Pin the serving scope to the founded slug. Without this, GRAPH_DB is
+        # set but GRAPH_ORG is empty, so _discover_startup_orgs() manages only
+        # org=None: the connector then answers join ops with org=None, and the
+        # claim service (which opens the org LEDGER, keyed by real slug) raises
+        # "org must be a non-empty local slug" -> the join context is refused
+        # as "unavailable". Serving under the real slug lets the claim service
+        # open the founded org's ledger, so the join context resolves.
+        environment["GRAPH_ORG"] = first_org
     if invitation:
         # The value is supplied only to the `up node-b` subprocess.  It is
         # never rendered into the generated file or written to artifacts.
@@ -199,7 +207,7 @@ def compose_model(config: TopologyConfig) -> dict:
         "name": config.project,
         "services": services,
         "volumes": volumes,
-        "networks": {"harness": {"driver": "bridge", "internal": True}},
+        "networks": {"harness": {"driver": "bridge", "internal": False}},
     }
 
 

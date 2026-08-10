@@ -264,7 +264,14 @@ def found_node(payload: dict) -> dict:
         )
 
     content_id = str(uuid.uuid4())
-    db = GraphDB.open_org_db(org)
+    # Write the served note through the SAME resolution reads use:
+    # GraphDB(org=...) -> resolve_caller_db_path, which honors a pinned
+    # GRAPH_DB. open_org_db() bypasses the pin and lands the note in
+    # data/orgs/<slug>.db, where the pinned-GRAPH_DB serving + dashboard reads
+    # never look -> the note serves "unavailable" / "not found in caller
+    # scope". Keeping the note on the same DB as the grants (both honor the
+    # pin) is what makes resolve_target/op:fetch and /graph/<id> resolve it.
+    db = GraphDB(org=org)
     try:
         db.insert_source(
             Source(
@@ -475,6 +482,7 @@ def inspect_node(payload: dict) -> dict:
     from tools.graph.schemas.network_identity import (
         NETWORK_SERVE_CERT_SET_ID,
     )
+    from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
     from tools.network.ledger import LedgerStore, org_ledger_db_path
 
     if set(payload) != {"org", "password", "persona_pub"}:
@@ -494,7 +502,7 @@ def inspect_node(payload: dict) -> dict:
     return {
         "org_root_pub": root.public_hex,
         "personal_root_pub": _setting_payload(
-            "autonomy.personal.identity", None
+            PERSONAL_IDENTITY_SET_ID, None
         )["root_pub"],
         "genesis_id": genesis_id,
         "member_present": member is not None,
