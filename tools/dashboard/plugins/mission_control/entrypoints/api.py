@@ -2,8 +2,8 @@
 
 P1: missions + native chromeless site hosting. Entity model is deliberately
 minimal — a mission is ``{mission_id, name, coordinator_session,
-created_at}``. Resources, Q&A, and live data feeds arrive with their own
-phases (P2/P3) and are not guessed at here.
+created_at, current_revision_id, status}``. Resources and live data feeds
+arrive with their own phases and are not guessed at here.
 
 Storage is Mission Control's own (``tools.dashboard.dao.mission_control_db``),
 not a foreign key into Design Studio's design/revision tables — see that
@@ -38,6 +38,7 @@ def _mission_payload(mission: dict) -> dict:
         "coordinator_session": mission["coordinator_session"],
         "created_at": mission["created_at"],
         "current_revision_id": mission["current_revision_id"],
+        "status": mission["status"],
     }
 
 
@@ -115,12 +116,59 @@ async def mark_mission_seen(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "seen_at": seen_at})
 
 
+async def set_mission_status(request: Request) -> JSONResponse:
+    """Coordinator-set lifecycle state -- never inferred from staleness
+    (see mission_control_db.VALID_MISSION_STATUSES)."""
+    mission_id = request.path_params["mission_id"]
+    body = await request.json()
+    status = body.get("status")
+    if status not in db.VALID_MISSION_STATUSES:
+        return JSONResponse(
+            {"error": f"status must be one of {db.VALID_MISSION_STATUSES}"},
+            status_code=400,
+        )
+    ok = db.set_mission_status(mission_id, status)
+    if not ok:
+        return JSONResponse({"error": "mission not found"}, status_code=404)
+    return JSONResponse({"mission": _mission_payload(db.get_mission(mission_id))})
+
+
 async def delete_mission(request: Request) -> JSONResponse:
     mission_id = request.path_params["mission_id"]
     deleted = db.delete_mission(mission_id)
     if not deleted:
         return JSONResponse({"error": "mission not found"}, status_code=404)
     return JSONResponse({"ok": True})
+
+
+def _heartbeat_coordinator_presence(mission_id: str, coordinator_session: str) -> None:
+    """Best-effort presence touch for whoever is coordinating this mission.
+
+    A coordinator pushing a revision or answering a question is
+    unambiguously "working this mission right now" -- record it with zero
+    coordinator-side integration required (suggested by the OSS Insights
+    coordinator, auto-0709-092918, as a cheap partial fix for the "why
+    isn't the coordinator in Presence" gap). Never fails or blocks the
+    caller's response -- a presence hiccup must not break a push or an
+    answer.
+    """
+    if not coordinator_session:
+        return
+    try:
+        from tools.graph.surface import Presence
+        with Presence(
+            surface_id=f"mission:{mission_id}",
+            participant_kind="agent",
+            participant_id=coordinator_session,
+            label=coordinator_session,
+            org="autonomy",
+        ):
+            pass
+    except Exception:
+        logger.warning(
+            "presence heartbeat failed for mission=%s coordinator=%s",
+            mission_id, coordinator_session, exc_info=True,
+        )
 
 
 async def push_site_revision(request: Request) -> JSONResponse:
@@ -133,6 +181,8 @@ async def push_site_revision(request: Request) -> JSONResponse:
     revision = db.push_site_revision(mission_id, html, note)
     if revision is None:
         return JSONResponse({"error": "mission not found"}, status_code=404)
+    mission = db.get_mission(mission_id)
+    _heartbeat_coordinator_presence(mission_id, mission.get("coordinator_session") if mission else "")
     return JSONResponse(
         {"revision": _revision_payload({**revision, "byte_size": len(html)}, include_html=False)},
         status_code=201,
@@ -379,6 +429,7 @@ async def answer_question(request: Request) -> JSONResponse:
     entry = db.answer_question(mission_id, entry_id, answer, answered_by_session)
     if entry is None:
         return JSONResponse({"error": "question not found"}, status_code=404)
+    _heartbeat_coordinator_presence(mission_id, answered_by_session)
     return JSONResponse({"question": _question_payload(entry)})
 
 
@@ -388,6 +439,7 @@ routes: list[Route] = [
     Route("/api/missions/{mission_id}", get_mission, methods=["GET"]),
     Route("/api/missions/{mission_id}", delete_mission, methods=["DELETE"]),
     Route("/api/missions/{mission_id}/seen", mark_mission_seen, methods=["POST"]),
+    Route("/api/missions/{mission_id}/status", set_mission_status, methods=["POST"]),
     Route("/api/missions/{mission_id}/site", push_site_revision, methods=["POST"]),
     Route("/api/missions/{mission_id}/site", get_current_site, methods=["GET"]),
     Route(

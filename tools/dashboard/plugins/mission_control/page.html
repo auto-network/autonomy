@@ -3,16 +3,27 @@
      data-testid="mission-control-root"
      class="mission-control-page bg-gray-900 text-gray-200 antialiased min-h-screen">
 
-  <header class="border-b border-gray-800 px-4 sm:px-6 py-4">
-    <h1 class="text-2xl font-bold text-white">Mission Control</h1>
-  </header>
+  <!-- The app shell's own topbar already names this page "Mission Control"
+       -- a second, page-level H1 plus its padding was pure wasted space.
+       This bar carries the two things the home page actually needs above
+       the fold: status filters and the presence-style picker. -->
+  <div class="flex items-center justify-between gap-3 px-4 sm:px-6 py-2.5 border-b border-gray-800">
+    <div class="flex items-center gap-1.5 overflow-x-auto" data-testid="mc-status-filters">
+      <template x-for="f in statusFilters" :key="f.value">
+        <button @click="statusFilter = f.value"
+                class="px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap transition-colors"
+                :class="statusFilter === f.value ? 'bg-indigo-700 text-white' : 'bg-gray-800/60 text-gray-400 hover:text-gray-200'"
+                :data-testid="'mc-filter-' + f.value">
+          <span x-text="f.label"></span>
+          <span class="opacity-70" x-text="'(' + f.count + ')'"></span>
+        </button>
+      </template>
+    </div>
 
-  <main class="max-w-3xl mx-auto px-4 sm:px-6 py-6 space-y-3">
-
-    <!-- One picker for the whole page, not one per card -- it chooses how
-         every mission's presence area renders below. Common control,
-         knows nothing about missions: tools/dashboard/static/js/style-picker.js. -->
-    <div class="picker-zone mb-2" x-show="missions.length">
+    <!-- Common control, knows nothing about missions:
+         tools/dashboard/static/js/style-picker.js. Chooses how every
+         mission's presence area renders below. -->
+    <div class="picker-zone shrink-0" x-show="missions.length">
       <div x-data="StylePicker.alpine(presenceStyles)">
         <div class="picker" x-ref="picker" :class="expanded ? 'expanded' : 'idle'"
              :style="'width:' + pickerWidth + 'px'"
@@ -30,14 +41,24 @@
         </div>
       </div>
     </div>
+  </div>
 
-    <template x-for="m in missions" :key="m.mission_id">
+  <main class="max-w-3xl mx-auto px-4 sm:px-6 py-4 space-y-3">
+
+    <template x-for="m in filteredMissions" :key="m.mission_id">
       <div class="rounded-md border border-gray-800 bg-gray-900/40 p-4 min-w-0" :data-testid="'mc-mission-' + m.mission_id">
 
         <!-- Headline row: identity + the one action + the one thing that needs you. -->
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0">
-            <div class="text-white font-semibold text-base" x-text="m.name"></div>
+            <div class="flex items-center gap-2">
+              <span class="text-white font-semibold text-base" x-text="m.name"></span>
+              <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide"
+                    x-show="m.status !== 'active'"
+                    :class="m.status === 'paused' ? 'bg-amber-900/40 text-amber-300' : 'bg-gray-700/60 text-gray-400'"
+                    :data-testid="'mc-status-' + m.mission_id"
+                    x-text="m.status"></span>
+            </div>
             <div class="text-xs text-gray-500 mt-0.5">
               <span x-show="m.current_revision" x-text="'Updated ' + relativeTime(m.current_revision && m.current_revision.created_at)"></span>
               <span x-show="!m.current_revision" class="text-amber-400">No site yet</span>
@@ -253,6 +274,7 @@
     </template>
 
     <p class="text-xs text-gray-500" x-show="missions.length === 0" data-testid="mc-empty">No missions yet.</p>
+    <p class="text-xs text-gray-500" x-show="missions.length > 0 && filteredMissions.length === 0" data-testid="mc-empty-filtered">No missions match this filter.</p>
 
   </main>
 </div>

@@ -1,7 +1,7 @@
 """API tests for the Mission Control plugin."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import yaml
 import pytest
@@ -24,6 +24,18 @@ def _isolated_db(tmp_path, monkeypatch):
     path = tmp_path / "mission_control.db"
     monkeypatch.setattr(db, "DB_PATH", path)
     db.init_db(path)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_presence_writes():
+    """push_site_revision/answer_question fire a best-effort coordinator
+    presence heartbeat (tools.graph.surface.Presence) that isn't scoped by
+    _isolated_db above -- it writes through the real graph Settings
+    substrate. Autoused so no test in this module (present or future) can
+    silently leak a presence row into shared state; tests that care about
+    the heartbeat itself override with their own @patch."""
+    with patch("tools.graph.surface.Presence", MagicMock()):
+        yield
 
 
 def _client() -> TestClient:
@@ -59,6 +71,7 @@ def test_create_mission():
     assert body["name"] == "OSS Insights"
     assert body["coordinator_session"] == "auto-x"
     assert body["current_revision_id"] is None
+    assert body["status"] == "active"
 
 
 def test_create_mission_requires_name():
@@ -138,6 +151,34 @@ def test_delete_mission_not_found():
     assert resp.status_code == 404
 
 
+# ── Mission status (lifecycle) ─────────────────────────────────────
+
+
+def test_set_mission_status():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    resp = client.post(f"/api/missions/{mission_id}/status", json={"status": "paused"})
+    assert resp.status_code == 200
+    assert resp.json()["mission"]["status"] == "paused"
+    assert client.get(f"/api/missions/{mission_id}").json()["mission"]["status"] == "paused"
+
+
+def test_set_mission_status_rejects_invalid_value():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    resp = client.post(f"/api/missions/{mission_id}/status", json={"status": "nope"})
+    assert resp.status_code == 400
+
+
+def test_set_mission_status_missing_mission():
+    client = _client()
+    resp = client.post("/api/missions/nope/status", json={"status": "paused"})
+    assert resp.status_code == 404
+
+
+# ── Coordinator presence heartbeat ─────────────────────────────────
+
+
 def test_push_site_revision_stores_and_publishes_in_one_call():
     client = _client()
     mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
@@ -157,6 +198,45 @@ def test_push_site_revision_stores_and_publishes_in_one_call():
     site = client.get(f"/api/missions/{mission_id}/site")
     assert site.status_code == 200
     assert site.json()["revision"]["html"] == "<html>v1</html>"
+
+
+@patch("tools.graph.surface.Presence")
+def test_push_site_revision_touches_coordinator_presence(mock_presence):
+    mock_presence.return_value = MagicMock()
+    client = _client()
+    mission_id = client.post(
+        "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
+    ).json()["mission"]["mission_id"]
+
+    client.post(f"/api/missions/{mission_id}/site", json={"html": "<html>v1</html>"})
+
+    mock_presence.assert_called_once_with(
+        surface_id=f"mission:{mission_id}",
+        participant_kind="agent",
+        participant_id="auto-coordinator",
+        label="auto-coordinator",
+        org="autonomy",
+    )
+
+
+@patch("tools.graph.surface.Presence")
+def test_push_site_revision_skips_presence_when_no_coordinator(mock_presence):
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    client.post(f"/api/missions/{mission_id}/site", json={"html": "<html>v1</html>"})
+    mock_presence.assert_not_called()
+
+
+@patch("tools.graph.surface.Presence")
+def test_push_site_revision_succeeds_even_if_presence_heartbeat_raises(mock_presence):
+    mock_presence.side_effect = RuntimeError("graph substrate unavailable")
+    client = _client()
+    mission_id = client.post(
+        "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
+    ).json()["mission"]["mission_id"]
+
+    resp = client.post(f"/api/missions/{mission_id}/site", json={"html": "<html>v1</html>"})
+    assert resp.status_code == 201
 
 
 def test_push_site_revision_requires_html():

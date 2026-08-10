@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS missions (
     name                   TEXT NOT NULL,
     coordinator_session    TEXT NOT NULL DEFAULT '',
     created_at             REAL NOT NULL,
-    current_revision_id   TEXT
+    current_revision_id   TEXT,
+    status                 TEXT NOT NULL DEFAULT 'active'
 );
 
 CREATE TABLE IF NOT EXISTS mission_site_revisions (
@@ -87,6 +88,12 @@ CREATE TABLE IF NOT EXISTS mission_last_seen (
 );
 """
 
+#: Explicit lifecycle state, coordinator-set (never inferred from staleness --
+#: a mission that's genuinely done looks identical to one that's stalled, so
+#: guessing from recency would be actively misleading). Default 'active' on
+#: creation.
+VALID_MISSION_STATUSES = ("active", "paused", "complete")
+
 
 def _db_path(db_path: Path | str | None = None) -> Path:
     return Path(db_path) if db_path is not None else DB_PATH
@@ -107,6 +114,13 @@ def _get_conn(db_path: Path | str | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(CREATE_TABLES)
+    # Migrate: add status column if missing (for databases created before
+    # the mission lifecycle field existed).
+    try:
+        conn.execute("SELECT status FROM missions LIMIT 0")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE missions ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+        conn.commit()
     return conn
 
 
@@ -124,8 +138,10 @@ def create_mission(
     db_path: Path | str | None = None,
 ) -> dict:
     """Create a mission. Entity is deliberately minimal: id, name,
-    coordinator_session, created_at. No status, register, or conversation
-    model — those arrive with their own phases, not guessed at here."""
+    coordinator_session, created_at, status. No register or conversation
+    model — those arrive with their own phases, not guessed at here.
+    Status starts 'active' (the column default) — explicit, coordinator-set
+    from here on, never inferred."""
     mission_id = str(uuid.uuid4())
     created_at = time.time()
     conn = _get_conn(db_path)
@@ -144,6 +160,7 @@ def create_mission(
         "coordinator_session": coordinator_session,
         "created_at": created_at,
         "current_revision_id": None,
+        "status": "active",
     }
 
 
@@ -156,6 +173,26 @@ def get_mission(mission_id: str, *, db_path: Path | str | None = None) -> dict |
     finally:
         conn.close()
     return dict(row) if row else None
+
+
+def set_mission_status(
+    mission_id: str, status: str, *, db_path: Path | str | None = None,
+) -> bool:
+    """Set a mission's lifecycle status. Coordinator-set, never inferred.
+
+    Returns True on success, False if the mission doesn't exist.
+    """
+    assert status in VALID_MISSION_STATUSES, status
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE missions SET status = ? WHERE mission_id = ?",
+            (status, mission_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return cur.rowcount > 0
 
 
 def list_missions(*, db_path: Path | str | None = None) -> list[dict]:

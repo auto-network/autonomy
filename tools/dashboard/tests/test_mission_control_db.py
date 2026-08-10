@@ -15,16 +15,64 @@ def test_create_and_get_mission(tmp_path):
     assert mission["name"] == "OSS Insights"
     assert mission["coordinator_session"] == "auto-coordinator"
     assert mission["current_revision_id"] is None
+    assert mission["status"] == "active"
 
     fetched = db.get_mission(mission["mission_id"], db_path=path)
     assert fetched["mission_id"] == mission["mission_id"]
     assert fetched["name"] == "OSS Insights"
+    assert fetched["status"] == "active"
+
+
+def test_set_mission_status_updates_and_persists(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    assert db.set_mission_status(mission["mission_id"], "paused", db_path=path) is True
+    assert db.get_mission(mission["mission_id"], db_path=path)["status"] == "paused"
+
+
+def test_set_mission_status_missing_mission_returns_false(tmp_path):
+    path = _db_path(tmp_path)
+    db.init_db(path)
+    assert db.set_mission_status("nope", "paused", db_path=path) is False
+
+
+def test_set_mission_status_rejects_invalid_status(tmp_path):
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    with pytest.raises(AssertionError):
+        db.set_mission_status(mission["mission_id"], "nope", db_path=path)
 
 
 def test_get_mission_missing_returns_none(tmp_path):
     path = _db_path(tmp_path)
     db.init_db(path)
     assert db.get_mission("does-not-exist", db_path=path) is None
+
+
+def test_status_column_migrates_onto_a_pre_existing_database(tmp_path):
+    """A missions table created before the status column existed (no
+    ALTER TABLE has ever run against it) must gain the column -- with the
+    documented default -- the next time anything opens the DB, not error
+    or silently omit status from old rows."""
+    import sqlite3
+
+    path = _db_path(tmp_path)
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE missions ("
+        " mission_id TEXT PRIMARY KEY, name TEXT NOT NULL,"
+        " coordinator_session TEXT NOT NULL DEFAULT '',"
+        " created_at REAL NOT NULL, current_revision_id TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO missions (mission_id, name, coordinator_session, created_at)"
+        " VALUES ('legacy-1', 'Pre-status mission', '', 0)",
+    )
+    conn.commit()
+    conn.close()
+
+    fetched = db.get_mission("legacy-1", db_path=path)
+    assert fetched["status"] == "active"
 
 
 def test_read_paths_do_not_require_init_db_first(tmp_path):
