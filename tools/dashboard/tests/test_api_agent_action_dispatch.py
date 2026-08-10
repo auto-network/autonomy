@@ -573,8 +573,13 @@ def test_dispatch_explicit_workspace_materializes_workspace_settings(
     assert call["needs_nested_docker"] is True
     assert call["runtime"] == "privileged"
     assert call["network_host"] is False
-    assert call["metadata"]["graph_project"] == "autonomy"
-    assert call["metadata"]["graph_org"] == "autonomy"
+    # One canonical org key. The launcher stamps the session token from
+    # metadata["org"] alone and refuses to mint without it; graph_project /
+    # graph_org were the legacy fallback keys it ignores, and setting only
+    # those is what silently broke every agent-actions dispatch.
+    assert call["metadata"]["org"] == "autonomy"
+    assert "graph_project" not in call["metadata"]
+    assert "graph_org" not in call["metadata"]
     assert call["metadata"]["graph_tags"] == ["operator", "agent-actions"]
     assert call["model"] == "claude-haiku-4-5-20251001"
     assert call["global_claude_md"].name == ".claude_md"
