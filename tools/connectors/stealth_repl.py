@@ -505,7 +505,6 @@ class ReplHandler(BaseHTTPRequestHandler):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--provider", required=True)
     parser.add_argument("--profile-dir", required=True, type=Path)
     parser.add_argument("--download-dir", required=True, type=Path)
     parser.add_argument("--port", required=True, type=int)
@@ -518,7 +517,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    controller = BrowserController(args.provider, args.profile_dir, args.download_dir,
+    controller = BrowserController(args.profile_dir.name, args.profile_dir, args.download_dir,
                                    args.start_url, args.autonomy_root,
                                    args.login_key_file)
     controller.start()
