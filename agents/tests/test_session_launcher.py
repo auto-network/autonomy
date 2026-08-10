@@ -67,6 +67,28 @@ def captured_run(monkeypatch):
     return calls
 
 
+@pytest.fixture(autouse=True)
+def platform_snapshot(monkeypatch, tmp_path):
+    """Stub the platform-snapshot git preparation with a tmp directory.
+
+    ``_ensure_platform_snapshot`` runs real git (clone/fetch/checkout of the
+    live checkout) — tests must never do that. The stub records whether the
+    launcher asked for a snapshot and what path it mounted.
+    """
+    snap = tmp_path / "platform-snapshot"
+    snap.mkdir(exist_ok=True)
+    calls: list[int] = []
+
+    def fake() -> str:
+        calls.append(1)
+        return str(snap)
+
+    monkeypatch.setattr(session_launcher, "_ensure_platform_snapshot", fake)
+    fake.calls = calls  # type: ignore[attr-defined]
+    fake.path = snap  # type: ignore[attr-defined]
+    return fake
+
+
 def _run(**kw):
     """Call launch_session with common defaults filled in."""
     defaults = dict(
@@ -272,6 +294,7 @@ def test_codex_interactive_does_not_require_claude_credentials(
 
 def test_codex_trust_uses_dedicated_working_repo_mount(
     tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch,
+    platform_snapshot,
 ):
     """A non-Autonomy repo must not hide or trust the platform checkout."""
     worktree = tmp_path / "idea-board-worktree"
@@ -296,7 +319,7 @@ def test_codex_trust_uses_dedicated_working_repo_mount(
     cmd = captured_run[0]
     joined = " ".join(cmd)
     assert f"{worktree}:/workspace/idea-board" in joined
-    assert f"{session_launcher.REPO_ROOT}:/workspace/repo:ro" in joined
+    assert f"{platform_snapshot.path}:/workspace/repo:ro" in joined
     assert cmd[cmd.index("-w") + 1] == "/workspace/idea-board"
 
 
@@ -1379,3 +1402,91 @@ def test_no_hardcoded_license_mount(tmp_path, fake_creds, fake_crosstalk, captur
     # workspace repo root or /etc/autonomy/artifacts — launch_session must
     # be agnostic to the artifact layer; callers inject mounts explicitly.
     assert not any("license.yaml" in s for s in cmd)
+
+
+# ── platform mount: snapshot instead of live host root (auto-j3oj3) ──
+
+def _mount_specs(cmd: list[str]) -> list[str]:
+    """Every ``-v`` argument value in the docker command."""
+    return [cmd[i + 1] for i, a in enumerate(cmd) if a == "-v"]
+
+
+def test_default_platform_mount_is_snapshot_not_live_root(
+    tmp_path, fake_creds, fake_crosstalk, captured_run, platform_snapshot,
+):
+    """No caller mount at /workspace/repo → the git snapshot is mounted ro,
+    and the live host root appears nowhere in the docker command."""
+    _run(output_dir=str(tmp_path / "run"))
+    specs = _mount_specs(captured_run[0])
+    assert f"{platform_snapshot.path}:/workspace/repo:ro" in specs
+    assert platform_snapshot.calls, "launcher never asked for the snapshot"
+    live_root = f"{session_launcher.REPO_ROOT}:"
+    assert not any(s.startswith(live_root) for s in specs), specs
+
+
+def test_caller_workspace_repo_mount_skips_snapshot(
+    tmp_path, fake_creds, fake_crosstalk, captured_run, platform_snapshot,
+):
+    """A workspace repo at /workspace/repo displaces the default entirely —
+    the launcher must not even prepare a snapshot."""
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    _run(
+        output_dir=str(tmp_path / "run"),
+        mounts={str(worktree): "/workspace/repo"},
+    )
+    specs = _mount_specs(captured_run[0])
+    assert f"{worktree}:/workspace/repo" in specs
+    assert not platform_snapshot.calls
+    assert sum(s.split(":")[1] == "/workspace/repo" if s.count(":") >= 2
+               else False for s in specs) <= 1
+
+
+def test_snapshot_failure_launches_without_platform_mount(
+    tmp_path, fake_creds, fake_crosstalk, captured_run, monkeypatch,
+):
+    """Snapshot prep failure must NOT fall back to the live host root."""
+    monkeypatch.setattr(session_launcher, "_ensure_platform_snapshot",
+                        lambda: None)
+    result = _run(output_dir=str(tmp_path / "run"))
+    assert result is not None  # the fleet still starts
+    specs = _mount_specs(captured_run[0])
+    assert not any(":/workspace/repo:" in s or s.endswith(":/workspace/repo")
+                   for s in specs if "/workspace/repo/data/uploads" not in s)
+    live_root = f"{session_launcher.REPO_ROOT}:"
+    assert not any(s.startswith(live_root) for s in specs)
+
+
+def test_stale_graph_db_mount_is_gone(
+    tmp_path, fake_creds, fake_crosstalk, captured_run, platform_snapshot,
+):
+    """Nothing in-container reads the pre-sharding graph.db; the mount is dropped."""
+    _run(output_dir=str(tmp_path / "run"))
+    assert not any("graph.db" in s for s in _mount_specs(captured_run[0]))
+
+
+def test_uploads_dir_mounted_read_only_for_file_handoff(
+    tmp_path, fake_creds, fake_crosstalk, captured_run, platform_snapshot,
+):
+    """POST /api/upload handoff path stays readable — including for workspaces
+    that mount their own repo at /workspace/repo (nested bind survives)."""
+    _run(output_dir=str(tmp_path / "run"))
+    uploads = f"{session_launcher.REPO_ROOT / 'data' / 'uploads'}:/workspace/repo/data/uploads:ro"
+    assert uploads in _mount_specs(captured_run[0])
+
+    worktree = tmp_path / "wt2"
+    worktree.mkdir()
+    _run(output_dir=str(tmp_path / "run2"),
+         mounts={str(worktree): "/workspace/repo"})
+    assert uploads in _mount_specs(captured_run[1])
+
+
+def test_beads_credential_key_is_masked(
+    tmp_path, fake_creds, fake_crosstalk, captured_run, platform_snapshot,
+):
+    """.beads stays read-write for bd, but the dolt credential inside it is
+    shadowed by an empty read-only bind in every container."""
+    _run(output_dir=str(tmp_path / "run"))
+    specs = _mount_specs(captured_run[0])
+    assert f"{session_launcher.REPO_ROOT / '.beads'}:/data/.beads" in specs
+    assert "/dev/null:/data/.beads/.beads-credential-key:ro" in specs

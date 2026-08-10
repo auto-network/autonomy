@@ -886,6 +886,24 @@ def prepare_session_mounts(
                     exc_info=True,
                 )
     _apply_workspace_mount_settings(workspace, mounts)
+    # Explicit live-host-root opt-in (auto-j3oj3): a workspace that stated a
+    # reason gets the LIVE platform checkout — data/ included — read-only at
+    # the platform path, overriding the launcher's snapshot default. A repo
+    # already claiming /workspace/repo contradicts the opt-in; fail the
+    # launch rather than let docker pick a winner.
+    if getattr(workspace, "host_root_mount_reason", None):
+        claimed = {spec.split(":", 1)[0] for spec in mounts.values()}
+        if "/workspace/repo" in claimed:
+            raise WorkspaceError(
+                f"workspace {workspace.id!r}: host_root_mount conflicts with "
+                "a repo or mount already at /workspace/repo"
+            )
+        logger.warning(
+            "workspace %s: mounting LIVE host root at /workspace/repo — "
+            "stated reason: %s",
+            workspace.id, workspace.host_root_mount_reason,
+        )
+        mounts[str(REPO_ROOT)] = "/workspace/repo:ro"
     return mounts
 
 

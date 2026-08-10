@@ -353,6 +353,11 @@ class WorkspaceV1:
     artifacts: tuple[ArtifactSpec, ...] = ()
     mounts: dict[str, ResolvedSetting] = field(default_factory=dict)
     capabilities: tuple[MaterializedCapability, ...] = ()
+    #: Stated reason for mounting the LIVE host platform checkout (with its
+    #: data/) instead of the default git snapshot. ``None`` = snapshot (the
+    #: default for every workspace). Set only via the explicit
+    #: ``host_root_mount.reason`` Setting field — never inferred.
+    host_root_mount_reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.session_runtime is None:
@@ -449,6 +454,18 @@ def _workspace_from_setting(
         if runtime_raw
         else ("privileged" if needs_nested_docker else "standard")
     )
+    host_root_raw = setting_payload.get("host_root_mount")
+    host_root_mount_reason: str | None = None
+    if host_root_raw is not None:
+        reason = (
+            host_root_raw.get("reason") if isinstance(host_root_raw, dict) else None
+        )
+        if not isinstance(reason, str) or not reason.strip():
+            raise WorkspaceSettingsError(
+                f"workspace {workspace_id!r}: host_root_mount requires a "
+                "non-empty 'reason' string"
+            )
+        host_root_mount_reason = reason.strip()
     return WorkspaceV1(
         id=workspace_id,
         name=str(setting_payload.get("name") or workspace_id),
@@ -474,6 +491,7 @@ def _workspace_from_setting(
         artifacts=artifacts,
         mounts=mounts,
         capabilities=capabilities,
+        host_root_mount_reason=host_root_mount_reason,
     )
 
 

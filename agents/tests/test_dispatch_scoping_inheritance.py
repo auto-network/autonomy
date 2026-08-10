@@ -31,6 +31,16 @@ from tools.graph.ingest import ingest_claude_code_session
 
 # ── Helpers ──────────────────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def _stub_platform_snapshot(monkeypatch, tmp_path):
+    """Never run the real snapshot git (clone/fetch of the live checkout)."""
+    monkeypatch.setattr(
+        session_launcher,
+        "_ensure_platform_snapshot",
+        lambda: str(tmp_path / "platform-snapshot"),
+    )
+
+
 def _completed_process(stdout: str = "", stderr: str = "", returncode: int = 0):
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
