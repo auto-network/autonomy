@@ -555,6 +555,18 @@ async def create_visitor_token(request: Request) -> JSONResponse:
     return JSONResponse({"visitor": visitor}, status_code=201)
 
 
+async def get_visitor_by_participant_id(request: Request) -> JSONResponse:
+    """Confirm a participant_id refers to a real, already-minted visitor --
+    what personalized mission-grant minting (auto-tp1v9) checks before
+    binding a grant to it, so a link never points at a dangling reference.
+    Never accepts or returns a token -- participant_id only."""
+    participant_id = request.path_params["participant_id"]
+    visitor = db.get_visitor_by_participant_id(participant_id)
+    if not visitor:
+        return JSONResponse({"error": "participant not found"}, status_code=404)
+    return JSONResponse({"visitor": visitor})
+
+
 def _resolve_visitor_identity(request: Request) -> dict | None:
     """Cookie first (the TOKEN, never bare participant_id -- an
     impersonation hole otherwise: participant_id is deliberately
@@ -974,6 +986,10 @@ routes: list[Route] = [
         activate_site_revision, methods=["POST"],
     ),
     Route("/api/visitor-tokens", create_visitor_token, methods=["POST"]),
+    Route(
+        "/api/visitor-tokens/{participant_id}",
+        get_visitor_by_participant_id, methods=["GET"],
+    ),
     Route("/api/missions/{mission_id}/questions", ask_question, methods=["POST"]),
     Route("/api/missions/{mission_id}/questions", list_conversation, methods=["GET"]),
     Route(

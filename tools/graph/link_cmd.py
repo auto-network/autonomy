@@ -136,6 +136,31 @@ def _resolve_mission_target(target_id: str) -> str:
     return target_id
 
 
+def _resolve_mission_participant(participant_id: str) -> str:
+    """Confirm participant_id names a real, already-minted Mission Control
+    visitor (`graph mission visitor-token`, unchanged) before a grant gets
+    bound to it -- minting a grant does not create a participant, it only
+    references one; failing closed here is what keeps a personalized
+    mission link from ever pointing at a dangling reference.
+    """
+    try:
+        resolved = _api_request("GET", f"/api/visitor-tokens/{participant_id}")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            _fail(
+                f"participant '{participant_id}' does not exist -- mint one first "
+                "(the visitor-token API), then publish the personalized link "
+                "naming its participant_id"
+            )
+        _fail(f"could not resolve participant '{participant_id}': HTTP {e.code}")
+    except urllib.error.URLError as e:
+        _fail(f"cannot reach the dashboard at {_dash_base()}: {e.reason}")
+    name = resolved.get("visitor", resolved).get("display_name") if isinstance(resolved, dict) else None
+    if name:
+        print(f"  participant: “{name}” ({participant_id})")
+    return participant_id
+
+
 def _resolve_uuid_target(target_id: str, target_type: str) -> str:
     """Expand a note or attachment UUID prefix through the dashboard.
 
@@ -306,7 +331,11 @@ def _post_approval(kind: str, request: dict) -> str:
 
 def cmd_link_publish(args) -> None:
     """graph link publish <target-id> --type present|design|note|file
-    [--ttl 7d] [--label text] [--org slug]"""
+    [--ttl 7d] [--label text] [--org slug]
+
+    --type mission requires --participant <participant_id> -- a mission
+    link is always bound to one guest identity.
+    """
     org = _resolve_org(args)
     target_type = getattr(args, "target_type", None)
     if not target_type:
@@ -329,6 +358,17 @@ def cmd_link_publish(args) -> None:
         meta["ttl"] = ttl
     if getattr(args, "label", None):
         meta["label"] = args.label
+    if target_type == "mission":
+        participant_id = getattr(args, "participant", None)
+        if not participant_id:
+            _fail(
+                "--participant is required for --type mission (a mission link "
+                "is always bound to one guest identity -- mint one first with "
+                "the visitor-token API)"
+            )
+        meta["participant_id"] = _resolve_mission_participant(participant_id)
+    elif getattr(args, "participant", None):
+        _fail("--participant is only valid for --type mission")
 
     invite_token = None
     invite_ref = None

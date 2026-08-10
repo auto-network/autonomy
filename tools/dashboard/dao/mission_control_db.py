@@ -780,6 +780,35 @@ def resolve_visitor(
     }
 
 
+def get_visitor_by_participant_id(
+    participant_id: str, *, db_path: Path | str | None = None,
+) -> dict | None:
+    """participant_id -> {participant_id, display_name}, or None if unknown.
+
+    The lookup direction `resolve_visitor` doesn't cover -- that one goes
+    token -> identity (authenticating a live visitor); this one goes
+    display-safe id -> identity, for a caller (personalized relay-grant
+    minting, auto-tp1v9) that already has a participant_id on hand and
+    needs to confirm it's real before binding a grant to it. Never takes
+    or returns a token -- participant_id is safe to pass around, the
+    token never is.
+    """
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT participant_id, display_name FROM visitor_tokens WHERE participant_id = ?",
+            (participant_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return {
+        "participant_id": row["participant_id"],
+        "display_name": row["display_name"],
+    }
+
+
 # ── Mission conversation (P2 Q&A) ─────────────────────────────────
 
 

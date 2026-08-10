@@ -281,6 +281,33 @@ def test_resolve_visitor_never_leaks_the_token_itself(tmp_path):
     assert "token" not in resolved
 
 
+def test_get_visitor_by_participant_id_returns_display_name(tmp_path):
+    path = _db_path(tmp_path)
+    visitor = db.create_visitor_token("Priya (data partner)", db_path=path)
+    found = db.get_visitor_by_participant_id(visitor["participant_id"], db_path=path)
+    assert found == {
+        "participant_id": visitor["participant_id"],
+        "display_name": "Priya (data partner)",
+    }
+
+
+def test_get_visitor_by_participant_id_unknown_returns_none(tmp_path):
+    path = _db_path(tmp_path)
+    db.init_db(path)
+    assert db.get_visitor_by_participant_id("guest:nope", db_path=path) is None
+
+
+def test_get_visitor_by_participant_id_never_takes_or_returns_a_token(tmp_path):
+    """The lookup direction this function serves (a caller already holding
+    a participant_id, confirming it's real before binding a grant to it)
+    must never accept or leak the bearer token -- participant_id only."""
+    path = _db_path(tmp_path)
+    visitor = db.create_visitor_token("Alex", db_path=path)
+    found = db.get_visitor_by_participant_id(visitor["participant_id"], db_path=path)
+    assert "token" not in found
+    assert db.get_visitor_by_participant_id(visitor["token"], db_path=path) is None
+
+
 # ── Mission conversation (P2 Q&A) ─────────────────────────────────
 
 
