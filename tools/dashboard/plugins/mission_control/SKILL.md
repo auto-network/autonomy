@@ -42,6 +42,14 @@ shows up in the revision history list, and it's free now, annoying to
 retrofit later. This call **is** the publish step. There is nothing else to
 call afterward.
 
+`note` is a changelog entry, not content — one line, what changed, not the
+substance of the change (that belongs in the site's own HTML, where you
+already have it). Redundantly duplicating your narrative into `note` just
+makes the revision history list unreadable.
+
+- Good: `"rev15: corrected licensing narrative with measured ClearlyDefined/deps.dev evidence"`
+- Bad: `"rev15: licensing narrative corrected with measured evidence — ClearlyDefined 97-100% not_found across all ecosystems on a random universe sample; clean-license spine is deps.dev + registries + forge metrics, raising the weight of the ecosyste.ms commercial-license question."`
+
 Handler: `push_site_revision` in
 `tools/dashboard/plugins/mission_control/entrypoints/api.py`, backed by
 `tools.dashboard.dao.mission_control_db.push_site_revision` — appends an
