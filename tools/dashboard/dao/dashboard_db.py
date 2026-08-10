@@ -590,15 +590,32 @@ def next_link_seq(tmux_name: str) -> int:
     return int(row[0]) if row else 0
 
 
-def set_jsonl_generation(tmux_name: str, generation: str, *, expect_path: str) -> bool:
-    """Backfill ``jsonl_generation`` for a persisted re-attach of a row whose
-    link predates the generation column. Guarded on the path still matching.
+def set_jsonl_generation(
+    tmux_name: str,
+    generation: str,
+    *,
+    expect_path: str,
+    file_offset: int | None = None,
+) -> bool:
+    """Backfill or repair ``jsonl_generation`` for a persisted re-attach,
+    guarded on the path still matching. ``file_offset`` (R1) rides the
+    SAME UPDATE: a generation repair after an inode change must reset the
+    cursor atomically with the identity write — a stale byte cursor
+    against a replacement file reads mid-line and silently loses the line
+    spanning it (loss is never acceptable; replacement is a failure event
+    and its re-read duplicates are the accepted residual).
     """
     conn = get_conn()
+    parts = ["jsonl_generation=?"]
+    vals: list[Any] = [generation]
+    if file_offset is not None:
+        parts.append("file_offset=?")
+        vals.append(file_offset)
+    vals.extend([tmux_name, expect_path])
     cur = conn.execute(
-        "UPDATE tmux_sessions SET jsonl_generation=?"
+        f"UPDATE tmux_sessions SET {', '.join(parts)}"
         " WHERE tmux_name=? AND jsonl_path=?",
-        (generation, tmux_name, expect_path),
+        vals,
     )
     conn.commit()
     return cur.rowcount > 0
@@ -623,8 +640,32 @@ def link_and_enrich(
 
     This is the ONLY function that should be called when a JSONL is discovered
     (by the watcher or the Link Terminal handshake).
+
+    R3 (auto-suvcp round 2): the generation identity and cursor are
+    derived HERE by default — callers cannot opt out of atomicity. A
+    caller-supplied ``generation``/``file_offset`` (the host-rollover
+    path) still wins; otherwise the generation is stat-derived and, when
+    the link moves to a DIFFERENT path than the row currently holds, the
+    cursor resets to 0 in the same UPDATE (the old offset describes the
+    old file's bytes).
     """
     import subprocess
+
+    if generation is None:
+        try:
+            st = Path(jsonl_path).stat()
+            seq = next_link_seq(tmux_name)
+            generation = f"{st.st_dev}:{st.st_ino}:{seq}"
+        except OSError:
+            generation = None
+    if file_offset is None:
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT jsonl_path FROM tmux_sessions WHERE tmux_name=?",
+            (tmux_name,),
+        ).fetchone()
+        if row is None or row[0] != jsonl_path:
+            file_offset = 0
 
     # LINK: write session_uuid and jsonl_path (+ generation/cursor atomically)
     update_jsonl_link(

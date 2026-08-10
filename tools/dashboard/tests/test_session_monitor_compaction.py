@@ -224,8 +224,9 @@ class TestInCreateRewatch:
             assert ts.last_known_inode == new_inode, (
                 f"last_known_inode {ts.last_known_inode} != new {new_inode}"
             )
-            assert ts.watch_descriptor in mon._wd_to_session
-            assert mon._wd_to_session[ts.watch_descriptor] == "auto-comp-1"
+            assert ts.watch_descriptor in mon._wd_to_inode
+            inode_key = mon._wd_to_inode[ts.watch_descriptor]
+            assert ("session", "auto-comp-1") in mon._inode_watches[inode_key]["subscribers"]
 
             # File offset must be reset (new file is a fresh stream).
             from tools.dashboard.dao.dashboard_db import get_session
@@ -318,7 +319,7 @@ class TestReconciliationInodeBackstop:
         assert ts.last_known_inode == new_inode, (
             f"last_known_inode {ts.last_known_inode} != new {new_inode}"
         )
-        assert ts.watch_descriptor in mon._wd_to_session
+        assert ts.watch_descriptor in mon._wd_to_inode
 
     @pytest.mark.asyncio
     async def test_reconciliation_skips_when_inode_unchanged(self, setup_env):

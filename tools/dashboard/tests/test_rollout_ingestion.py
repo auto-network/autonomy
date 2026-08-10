@@ -323,7 +323,7 @@ def test_wd_epoch_invalidated_on_release(env):
     assert track.wd is not None
     wd, epoch = track.wd, track.wd_epoch
     inode_key = mon._wd_to_inode[wd]
-    assert (name, str(f)) in mon._inode_watches[inode_key]["subscribers"]
+    assert ("track", name, str(f)) in mon._inode_watches[inode_key]["subscribers"]
 
     mon._release_track_watch(track)
     assert track.wd is None
@@ -750,7 +750,8 @@ async def test_b2_inode_watch_shared_by_two_tracks_survives_single_release(env):
     inode_key = mon._wd_to_inode[ta.wd]
     entry = mon._inode_watches[inode_key]
     assert entry["subscribers"] == {
-        ("auto-two-a", str(empty)), ("auto-two-b", str(empty)),
+        ("track", "auto-two-a", str(empty)),
+        ("track", "auto-two-b", str(empty)),
     }
 
     # Releasing b keeps a's subscription, mapping, and kernel watch.
@@ -758,7 +759,7 @@ async def test_b2_inode_watch_shared_by_two_tracks_survives_single_release(env):
     assert tb.wd is None
     assert ta.wd is not None
     assert mon._wd_to_inode.get(ta.wd) == inode_key
-    assert entry["subscribers"] == {("auto-two-a", str(empty))}
+    assert entry["subscribers"] == {("track", "auto-two-a", str(empty))}
 
     # Last release removes everything — a stale queued wd maps nowhere.
     old_wd = ta.wd
@@ -860,10 +861,10 @@ async def test_b5_teardown_purges_tracks_gates_and_watches(env):
     gate = mon._session_gates.get(name)
     assert gate is None or gate.retired, "gate not retired"
     assert not any(
-        (name, str(pending)) in e["subscribers"]
+        sub[1] == name
         for e in mon._inode_watches.values()
-    ), "inode subscription not removed"
-    assert name not in mon._wd_to_session.values(), "file watch mapping remains"
+        for sub in e["subscribers"]
+    ), "inode/file subscription not removed"
 
     # Post-death writes produce no dispatchable events: drain the queue
     # (IN_IGNORED from the removals), then write and check again.
@@ -872,11 +873,12 @@ async def test_b5_teardown_purges_tracks_gates_and_watches(env):
         fh.write(_msg_line("after-death") + "\n")
     events = mon._inotify.read(timeout=200)
     for ev in events:
-        assert mon._wd_to_session.get(ev.wd) != name
-        assert mon._wd_to_inode.get(ev.wd) is None or not any(
-            s[0] == name
-            for s in mon._inode_watches.get(mon._wd_to_inode[ev.wd], {}).get("subscribers", set())
+        inode_key = mon._wd_to_inode.get(ev.wd)
+        subs = (
+            mon._inode_watches.get(inode_key, {}).get("subscribers", set())
+            if inode_key else set()
         )
+        assert not any(s[1] == name for s in subs)
     # A stray request against the retired gate is refused.
     if gate is not None:
         mon.request_drain(name)
@@ -921,21 +923,13 @@ async def test_b6_quiet_host_burst_becomes_visible_without_further_write(env):
     )
     assert row["entry_count"] == 2
     assert "host burst answer" in (row["last_message"] or "")
-    # No linked-but-zero registry broadcast before the burst published:
-    # every registry broadcast that shows the link must come after the
-    # session:messages broadcast carrying the burst.
-    first_msgs = next(
-        (i for i, (t, p) in enumerate(env.bus.broadcasts)
-         if t == "session:messages" and p.get("session_id") == name), None,
+    # No linked-but-zero registry broadcast before the burst published.
+    # (Round 2: the original loop keyed rows by 'tmux_name'/'jsonl_path'
+    # — keys registry rows don't have — and was vacuous; both reviewers
+    # found it. Rewritten against session_id/resolved/entry_count.)
+    assert not _registry_linked_zero_before_messages(env.bus, name), (
+        "durable linked-but-zero registry broadcast before the drain"
     )
-    assert first_msgs is not None
-    for i, (topic, payload) in enumerate(env.bus.broadcasts[:first_msgs]):
-        if topic == "session:registry":
-            entry = next((r for r in payload if r.get("tmux_name") == name), None)
-            if entry is not None:
-                assert not entry.get("jsonl_path"), (
-                    "linked-but-zero registry broadcast before the drain"
-                )
 
 
 @pytest.mark.asyncio
@@ -968,6 +962,418 @@ async def test_b6_stale_truthy_generation_is_repaired_on_reattach(env):
         "reads must accept the repaired identity and drain to EOF"
     )
     assert env.bus.message_texts(name).count("repair-line") == 1
+
+
+# ── Round-2 review pins (R1-R3, S2 — 2026-08-10) ───────────────────────
+
+
+@pytest.mark.asyncio
+async def test_r1_larger_replacement_resets_cursor_no_loss(env):
+    """R1: ANY (dev,ino) mismatch on re-attach resets the cursor to 0
+    atomically with the generation repair. A same-or-larger replacement
+    file must republish IN FULL — a kept stale cursor reads mid-line and
+    silently loses the line spanning it (loss never; the replacement is a
+    failure event and its re-read duplicates are the accepted residual)."""
+    name = "auto-r1pin"
+    sdir = env.tmp_path / name / "sessions"
+    env.make_session(name, sdir)
+    path = sdir / "rollout-2026-08-10T11-00-00-aaaaaaaa-1111-1111-1111-111111111111.jsonl"
+    path.write_text(_msg_line("old-line-1") + "\n")
+    old_offset = path.stat().st_size
+    env.db.update_jsonl_link(
+        name, session_uuid=path.stem, jsonl_path=str(path),
+        generation="424242:424242:1",   # stale — describes the replaced inode
+        file_offset=old_offset,
+    )
+    # Larger replacement whose FIRST line spans the stale cursor.
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(
+        _msg_line("replacement-first-line " + "x" * 120) + "\n"
+        + _msg_line("replacement-second-line") + "\n"
+    )
+    tmp.rename(path)
+    assert path.stat().st_size >= old_offset
+
+    mon = env.make_monitor()
+    mon.observe_rollout(name, path, source="startup_recovery")
+    await _settle(mon, rounds=20)
+
+    row = _db_row(env.db_path, name)
+    st = path.stat()
+    assert row["jsonl_generation"].startswith(f"{st.st_dev}:{st.st_ino}:")
+    texts = env.bus.message_texts(name)
+    assert any(t.startswith("replacement-first-line") for t in texts), (
+        f"first line lost: {texts}"
+    )
+    assert texts.count("replacement-second-line") == 1
+    assert row["file_offset"] == st.st_size
+    assert row["entry_count"] == 2
+    # Secondary (observed in the repro): a mid-line read also inflates
+    # parse_errors — a full re-read must not.
+    ts = mon._tail_states.get(name)
+    assert ts is not None and ts.parse_errors_count == 0
+
+
+@pytest.mark.asyncio
+async def test_r2_two_streaming_sessions_share_inode_watch(env):
+    """R2: two STREAMING sessions on one inode subscribe to ONE entry;
+    MODIFY fans out to BOTH; removing one session's watches keeps the
+    other's subscription and the kernel watch."""
+    shared = env.tmp_path / "projects" / "-workspace-repo"
+    shared.mkdir(parents=True)
+    f = shared / "11111111-2222-3333-4444-555555555555.jsonl"
+    f.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text": "shared transcript"}]},
+    }) + "\n")
+    mon = env.make_monitor()
+    for name in ("host-r2p-a", "host-r2p-b"):
+        env.db.insert_session(
+            tmux_name=name, session_type="host", project="-workspace-repo",
+            harness="claude", resolution_dir=str(shared),
+        )
+        env.db.update_jsonl_link(name, session_uuid=f.stem, jsonl_path=str(f))
+        mon._add_file_watch(name, str(f))
+
+    ts_a = mon._tail_states["host-r2p-a"]
+    ts_b = mon._tail_states["host-r2p-b"]
+    assert ts_a.watch_descriptor == ts_b.watch_descriptor
+    wd = ts_a.watch_descriptor
+    inode_key = mon._wd_to_inode[wd]
+    subs = mon._inode_watches[inode_key]["subscribers"]
+    assert ("session", "host-r2p-a") in subs
+    assert ("session", "host-r2p-b") in subs
+
+    # MODIFY fan-out reaches BOTH sessions.
+    assert mon._dispatch_modify_wd(wd) == {"host-r2p-a", "host-r2p-b"}
+
+    # Removing b keeps a's subscription and the kernel/dispatch mapping.
+    mon._remove_watches("host-r2p-b")
+    assert ("session", "host-r2p-a") in mon._inode_watches[inode_key]["subscribers"]
+    assert ("session", "host-r2p-b") not in mon._inode_watches[inode_key]["subscribers"]
+    assert mon._wd_to_inode.get(wd) == inode_key
+    assert mon._dispatch_modify_wd(wd) == {"host-r2p-a"}
+
+
+@pytest.mark.asyncio
+async def test_r2_mixed_streaming_and_track_fan_out(env):
+    """R2: a streaming session and a characterizing track on one inode —
+    MODIFY dispatch reaches BOTH (no scalar-map shadowing), and the
+    track's release never drops the streaming session's kernel watch."""
+    shared = env.tmp_path / "shared" / "sessions"
+    shared.mkdir(parents=True)
+    f = shared / "rollout-2026-08-10T12-00-00-aaaaaaaa-1111-1111-1111-111111111111.jsonl"
+    f.touch()
+    mon = env.make_monitor()
+    env.db.insert_session(
+        tmux_name="auto-r2p-stream", session_type="container",
+        project="autonomy", harness="codex", resolution_dir=str(shared),
+    )
+    env.db.update_jsonl_link(
+        "auto-r2p-stream", session_uuid=f.stem, jsonl_path=str(f),
+    )
+    mon._add_file_watch("auto-r2p-stream", str(f))
+    env.db.insert_session(
+        tmux_name="auto-r2p-char", session_type="container",
+        project="autonomy", harness="codex", resolution_dir=str(shared),
+    )
+    mon.observe_rollout("auto-r2p-char", f, source="reconciliation")
+    track = mon._tracks[("auto-r2p-char", str(f))]
+    assert track.state == "CHARACTERIZING"
+    wd = mon._tail_states["auto-r2p-stream"].watch_descriptor
+    assert track.wd == wd, "one inode → one shared watch entry"
+
+    # Write the fork header; MODIFY dispatch must BOTH return the
+    # streaming session AND reclassify the track (no shadowing).
+    f.write_text(_fork_meta_line("aaaaaaaa-1111-1111-1111-111111111111") + "\n")
+    modified = mon._dispatch_modify_wd(wd)
+    assert modified == {"auto-r2p-stream"}
+    assert track.state == "IGNORED", "track recheck was shadowed"
+
+    # The track's release (classification resolved → IGNORED already
+    # released it) must have left the streaming watch intact.
+    inode_key = mon._wd_to_inode.get(wd)
+    assert inode_key is not None, "kernel watch dropped with the track"
+    assert ("session", "auto-r2p-stream") in mon._inode_watches[inode_key]["subscribers"]
+    # And the file did NOT get IN_IGNORED'd: no event tears it down.
+    mon._dispatch_ignored_wd(wd)   # stale IGNORED → revalidates, survives
+    assert mon._wd_to_inode.get(wd) == inode_key
+
+
+@pytest.mark.asyncio
+async def test_r2_wd_reuse_after_ignored(env, monkeypatch):
+    """R2 (dedicated wd-reuse pin, flagged missing since round 1): after a
+    watch is torn down, a QUEUED stale event with the old wd dispatches
+    nothing; a stale IGNORED arriving while a live entry owns the number
+    is revalidated by re-stat and does NOT tear the live entry down; a
+    genuine IGNORED (file gone) does."""
+    sdir = env.tmp_path / "auto-reuse" / "sessions"
+    env.make_session("auto-reuse", sdir)
+    fa = sdir / "rollout-2026-08-10T12-00-00-aaaaaaaa-1111-1111-1111-111111111111.jsonl"
+    fa.touch()
+    mon = env.make_monitor()
+    mon.observe_rollout("auto-reuse", fa, source="reconciliation")
+    track_a = mon._tracks[("auto-reuse", str(fa))]
+    wd_a = track_a.wd
+    assert wd_a is not None
+
+    calls = {"n": 0}
+    real_classify = mon._classify_and_step
+
+    def counting_classify(track, **kw):
+        calls["n"] += 1
+        return real_classify(track, **kw)
+
+    monkeypatch.setattr(mon, "_classify_and_step", counting_classify)
+
+    # Tear down (quarantine-style release), then a stale queued MODIFY
+    # with the old wd arrives: dispatches nothing.
+    mon._release_track_watch(track_a)
+    assert mon._dispatch_modify_wd(wd_a) == set()
+    assert calls["n"] == 0
+
+    # A new watch that recycles the number: simulate by arming a live
+    # entry, then delivering a STALE IGNORED for its wd while its file
+    # still exists — re-stat revalidation must keep it.
+    fb = sdir / "rollout-2026-08-10T13-00-00-bbbbbbbb-2222-2222-2222-222222222222.jsonl"
+    fb.touch()
+    mon.observe_rollout("auto-reuse", fb, source="reconciliation")
+    track_b = mon._tracks[("auto-reuse", str(fb))]
+    wd_b = track_b.wd
+    inode_b = mon._wd_to_inode[wd_b]
+    mon._dispatch_ignored_wd(wd_b)   # stale (fb still exists)
+    assert mon._wd_to_inode.get(wd_b) == inode_b, (
+        "stale IGNORED tore down a live entry"
+    )
+    assert track_b.wd == wd_b
+
+    # Genuine IGNORED: the file is gone → entry detaches, track wd
+    # cleared, epoch bumped.
+    epoch_before = track_b.wd_epoch
+    fb.unlink()
+    mon._dispatch_ignored_wd(wd_b)
+    assert wd_b not in mon._wd_to_inode
+    assert track_b.wd is None
+    assert track_b.wd_epoch > epoch_before
+
+
+@pytest.mark.asyncio
+async def test_r3_link_and_enrich_atomic_by_default(env, monkeypatch):
+    """R3: link_and_enrich derives generation (and resets the cursor when
+    the path moves) BY DEFAULT — no caller can create a path/generation
+    disagreement window."""
+    import subprocess as _sp
+    monkeypatch.setattr(
+        _sp, "run",
+        lambda *a, **kw: type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})(),
+    )
+    name = "host-r3pin"
+    shared = env.tmp_path / "projects" / "-workspace-repo"
+    shared.mkdir(parents=True)
+    env.db.insert_session(
+        tmux_name=name, session_type="host", project="-workspace-repo",
+        harness="claude", resolution_dir=str(shared),
+    )
+    old = shared / "00000000-old.jsonl"
+    old.write_text("{}\n")
+    env.db.update_jsonl_link(
+        name, session_uuid=old.stem, jsonl_path=str(old),
+        generation="7:7:1", file_offset=2,
+    )
+    new = shared / "11111111-new.jsonl"
+    new.write_text(json.dumps({"type": "user", "message": {"content": "x"}}) + "\n")
+
+    # The exact bare server call shape — no generation, no offset.
+    env.db.link_and_enrich(
+        name, session_uuid=new.stem, jsonl_path=str(new),
+        project="-workspace-repo",
+    )
+    row = _db_row(env.db_path, name)
+    st = new.stat()
+    assert row["jsonl_path"] == str(new)
+    assert row["jsonl_generation"].startswith(f"{st.st_dev}:{st.st_ino}:"), (
+        f"generation not derived: {row['jsonl_generation']!r}"
+    )
+    assert row["file_offset"] == 0, "cursor must reset when the path moves"
+
+
+def _registry_linked_zero_before_messages(bus, name) -> bool:
+    """True when a registry broadcast showed resolved=True with zero
+    entry_count BEFORE the first session:messages broadcast — the durable
+    linked-but-zero signature (rewritten per round 2: registry rows key on
+    session_id and expose resolved/entry_count)."""
+    first_msgs = next(
+        (i for i, (t, p) in enumerate(bus.broadcasts)
+         if t == "session:messages" and p.get("session_id") == name),
+        len(bus.broadcasts),
+    )
+    for topic, payload in bus.broadcasts[:first_msgs]:
+        if topic != "session:registry":
+            continue
+        entry = next(
+            (r for r in payload if r.get("session_id") == name), None,
+        )
+        if entry is not None and entry.get("resolved") and not entry.get("entry_count"):
+            return True
+    return False
+
+
+@pytest.mark.asyncio
+async def test_r3_active_server_host_watcher_quiet_burst(env, monkeypatch):
+    """R3 (the discriminating host-activation pin): the ACTIVE
+    fingerprint-matching server._watch_for_host_session_jsonl links with a
+    derived generation, drains the burst already on disk with NO further
+    write, and never broadcasts a resolved-with-zero-entries registry row."""
+    from tools.dashboard import server as server_mod
+
+    name = "host-server-quiet"
+    projects = env.tmp_path / "projects" / "-workspace-repo"
+    projects.mkdir(parents=True)
+    env.db.insert_session(
+        tmux_name=name, session_type="host", project="-workspace-repo",
+        harness="claude", resolution_dir=str(projects),
+    )
+    mon = env.make_monitor()
+    monkeypatch.setattr(server_mod, "session_monitor", mon)
+    import subprocess as _sp
+    monkeypatch.setattr(
+        _sp, "run",
+        lambda *a, **kw: type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})(),
+    )
+
+    watcher = asyncio.create_task(
+        server_mod._watch_for_host_session_jsonl(projects, name, timeout=5.0),
+    )
+    await asyncio.sleep(0.6)
+    burst = projects / "99999999-8888-7777-6666-555555555555.jsonl"
+    burst.write_text(
+        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None,
+                    "message": {"role": "user",
+                                "content": f"orientation for {name}"}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "a1",
+                      "message": {"role": "assistant", "content": [
+                          {"type": "text",
+                           "text": "server watcher burst answer"}]}}) + "\n"
+    )
+    await watcher
+    await _settle(mon, rounds=20)
+
+    row = _db_row(env.db_path, name)
+    st = burst.stat()
+    assert row["jsonl_path"] == str(burst)
+    assert row["jsonl_generation"].startswith(f"{st.st_dev}:{st.st_ino}:")
+    assert row["file_offset"] == st.st_size, (
+        "burst must persist with no further write"
+    )
+    assert row["entry_count"] == 2
+    assert "server watcher burst" in (row["last_message"] or "")
+    assert not _registry_linked_zero_before_messages(env.bus, name), (
+        "durable linked-but-zero registry broadcast before the drain"
+    )
+
+
+@pytest.mark.asyncio
+async def test_r3_confirm_link_drains_and_stamps_generation(env, monkeypatch):
+    """R3: the confirm-link handshake path links atomically (generation
+    derived inside link_and_enrich), drains the transcript's existing
+    bytes, and publishes the registry only after the drain."""
+    from tools.dashboard import server as server_mod
+
+    name = "host-confirm"
+    projects_root = env.tmp_path / "home" / ".claude" / "projects"
+    project_dir = projects_root / "-workspace-repo"
+    project_dir.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: env.tmp_path / "home"))
+    env.db.insert_session(
+        tmux_name=name, session_type="host", project="-workspace-repo",
+        harness="claude", resolution_dir=str(project_dir),
+    )
+    mon = env.make_monitor()
+    monkeypatch.setattr(server_mod, "session_monitor", mon)
+    import subprocess as _sp
+    monkeypatch.setattr(
+        _sp, "run",
+        lambda *a, **kw: type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})(),
+    )
+
+    # ASCII-only: json.dumps escapes non-ASCII in the stored line, and the
+    # handler's substring match runs against the RAW line text.
+    handshake = "[dashboard] confirming terminal link please reply with I SEE IT"
+    jf = project_dir / "44444444-3333-2222-1111-000000000000.jsonl"
+    jf.write_text(
+        json.dumps({"type": "user", "uuid": "u1", "parentUuid": None,
+                    "message": {"role": "user", "content": handshake}}) + "\n"
+        + json.dumps({"type": "assistant", "uuid": "a1",
+                      "message": {"role": "assistant", "content": [
+                          {"type": "text", "text": "I SEE IT"}]}}) + "\n"
+    )
+
+    class _FakeRequest:
+        async def json(self):
+            return {"tmux_session": name, "handshake": handshake}
+
+    resp = await server_mod.api_session_confirm_link(_FakeRequest())
+    assert resp.status_code == 200
+    await _settle(mon, rounds=20)
+
+    row = _db_row(env.db_path, name)
+    st = jf.stat()
+    assert row["jsonl_path"] == str(jf)
+    assert row["jsonl_generation"].startswith(f"{st.st_dev}:{st.st_ino}:")
+    assert row["file_offset"] == st.st_size
+    assert row["entry_count"] == 2
+    assert not _registry_linked_zero_before_messages(env.bus, name)
+
+
+@pytest.mark.asyncio
+async def test_s2_stop_quiesces_drains_and_start_resumes(env, monkeypatch):
+    """S2: at stop() return there are ZERO live drain owners and the gate
+    is not busy; responsibility is RETAINED (needs_drain) and the next
+    start() resumes it."""
+    name = "auto-s2pin"
+    m1 = _link_single(env, name, "s2pin-line")
+    mon = env.make_monitor()
+    monkeypatch.setattr(
+        mon.__class__, "_check_tmux", staticmethod(lambda _n: True),
+    )
+    from tools.dashboard.session_harness import parse_claude_log_line
+    await mon.start(event_bus=env.bus, entry_parser=parse_claude_log_line)
+    await _settle(mon)
+
+    real_read = mon._read_tail_window
+    slow = {"t": 0.4}
+
+    def slow_read(row):
+        time.sleep(slow["t"])
+        return real_read(row)
+
+    monkeypatch.setattr(mon, "_read_tail_window", slow_read)
+    env.db.update_tail_state(name, file_offset=0)
+    env.bus.broadcasts.clear()
+    mon.request_drain(name)
+    await asyncio.sleep(0.1)   # owner inside its slow read
+
+    await mon.stop()
+
+    drain_code = mon._drain_as_owner.__func__.__code__
+    live_owners = [
+        t for t in asyncio.all_tasks()
+        if getattr(t.get_coro(), "cr_code", None) is drain_code
+        and not t.done()
+    ]
+    assert live_owners == [], "stop() must leave zero live drain owners"
+    gate = mon._session_gates.get(name)
+    assert gate is not None and not gate.busy
+    assert gate.needs_drain, "responsibility must be RETAINED for restart"
+
+    # The next start() resumes the retained work.
+    slow["t"] = 0.0
+    await mon.start(event_bus=env.bus, entry_parser=parse_claude_log_line)
+    await _settle(mon, rounds=20)
+    row = _db_row(env.db_path, name)
+    assert row["file_offset"] == m1.stat().st_size
+    assert env.bus.message_texts(name).count("s2pin-line") == 1
+    await mon.stop()
 
 
 # ── Lifecycle non-interference ─────────────────────────────────────────

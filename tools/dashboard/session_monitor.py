@@ -958,6 +958,11 @@ class SessionMonitor:
         # gate (_LIVENESS_MISS_THRESHOLD). Probe failures don't count.
         self._liveness_misses: dict[str, int] = {}
         self._started = False
+        # S2: stop-scoped quiesce — while True, drain continuations are
+        # RETAINED (needs_drain) but never pumped, so stop() returns with
+        # zero live owners; start() clears it and its loop-start pump
+        # resumes the retained work.
+        self._stopping = False
         self._last_pause_nag_sent: float = 0.0  # timestamp of last dispatch-pause nag
         self._last_orphan_prune: float = time.time()  # defer first prune one full interval
         # auto-ja51w: transient per-session phase progress dict (e.g.
@@ -969,7 +974,6 @@ class SessionMonitor:
         # inotify state — populated by _init_inotify()
         self._inotify: Any = None                        # INotify instance
         self._use_inotify: bool = False
-        self._wd_to_session: dict[int, str] = {}         # file wd → tmux_name
         self._dir_wd_sessions: dict[int, set[str]] = {}  # dir wd → set of tmux_names
         self._dir_path_to_wd: dict[str, int] = {}        # dir path → wd (dedup)
         self._wd_to_dir_path: dict[int, str] = {}        # reverse: wd → dir path
@@ -979,14 +983,22 @@ class SessionMonitor:
         # `busy` would break SingleOwner.
         self._tracks: dict[tuple[str, str], _FileTrack] = {}
         self._session_gates: dict[str, _SessionGate] = {}
-        # Characterizing-track file watches, owned PER INODE (Rule 8/D3):
-        # the kernel dedups watches by inode per inotify instance, so two
-        # tracks on one file share one wd — ownership must be the inode's,
-        # with a subscriber set, or one track's release drops the other's
-        # watch. _inode_watches: (st_dev, st_ino) → {"wd": int,
-        # "subscribers": set[(tmux_name, path)]}; _wd_to_inode is the
-        # dispatch-side reverse map. Handlers act only after the lookup
-        # matches the track's recorded generation.
+        # ALL file watches (streaming sessions AND characterizing tracks)
+        # are owned PER INODE (Rule 8/D3, review R2): the kernel dedups
+        # watches by inode per inotify instance, so any two watchers of
+        # one file share one wd — ownership must be the inode's, with a
+        # TYPED subscriber set, or one watcher's release drops the
+        # others' watch and a scalar map shadows all but one subscriber.
+        #   _inode_watches: (st_dev, st_ino) → {
+        #       "wd": int,
+        #       "subscribers": set[("session", tmux) | ("track", tmux, path)],
+        #       "paths": {subscriber: path},   # for IGNORED revalidation
+        #   }
+        #   _wd_to_inode: wd → (st_dev, st_ino)   (dispatch-side reverse)
+        # MODIFY fans out to EVERY subscriber (drain per session,
+        # reclassify per track); IN_IGNORED revalidates by re-stat before
+        # tearing down (a recycled wd's stale IGNORED must not kill a
+        # live entry).
         self._inode_watches: dict[tuple[int, int], dict] = {}
         self._wd_to_inode: dict[int, tuple[int, int]] = {}
         # Registration-epoch snapshots per (tmux_name, dir): A7/N1 birth
@@ -1549,6 +1561,7 @@ class SessionMonitor:
         if self._started:
             return
         self._started = True
+        self._stopping = False
         self._event_bus = event_bus
         self._entry_parser = entry_parser
         self._entry_enricher = entry_enricher
@@ -1575,6 +1588,9 @@ class SessionMonitor:
         """Cancel background tasks and reset state so start() can be called again."""
         if not self._started:
             return
+        # S2: quiesce first — the cancelled owners' release callbacks
+        # must retain (needs_drain) instead of pumping fresh owners.
+        self._stopping = True
         tasks = [
             t for t in (self._tailer_task, self._liveness_task,
                         self._reconciliation_task, self._screen_poll_task)
@@ -1731,7 +1747,7 @@ class SessionMonitor:
                 self._add_dir_watch(row["tmux_name"], dir_path)
             logger.info(
                 "session_monitor: inotify initialised — %d file watches, %d dir watches",
-                len(self._wd_to_session), len(self._dir_path_to_wd),
+                len(self._inode_watches), len(self._dir_path_to_wd),
             )
         except OSError as exc:
             logger.warning("session_monitor: inotify init failed (%s), using polling", exc)
@@ -1739,32 +1755,151 @@ class SessionMonitor:
             self._use_inotify = False
 
     def _add_file_watch(self, tmux_name: str, jsonl_path: str) -> None:
-        """Add an IN_MODIFY watch on a session's JSONL file."""
+        """Subscribe a session's streaming tail to its file's inode watch
+        (R2: one inode-owned structure for ALL watch kinds — the old
+        scalar wd→session map collided whenever two watchers shared an
+        inode and let one watcher's release blind the others)."""
         if not self._inotify:
             return
         ts = self._tail_states.get(tmux_name)
-        # Remove stale watch if present
-        if ts and ts.watch_descriptor is not None:
-            try:
-                self._inotify.rm_watch(ts.watch_descriptor)
-            except OSError:
-                pass
-            self._wd_to_session.pop(ts.watch_descriptor, None)
-            ts.watch_descriptor = None
-        try:
-            wd = self._inotify.add_watch(jsonl_path, _iflags.MODIFY)
-        except OSError as exc:
-            logger.warning("session_monitor: add_watch MODIFY failed for %s: %s", tmux_name, exc)
-            return
         if ts is None:
             ts = _TailState()
             self._tail_states[tmux_name] = ts
-        ts.watch_descriptor = wd
-        self._wd_to_session[wd] = tmux_name
+        # Drop this session's previous file subscription (re-link).
+        self._unsubscribe_watch(("session", tmux_name))
+        ts.watch_descriptor = None
         try:
-            ts.last_known_inode = Path(jsonl_path).stat().st_ino
-        except OSError:
+            st = os.stat(jsonl_path)
+        except OSError as exc:
+            logger.warning(
+                "session_monitor: add_watch MODIFY failed for %s: %s",
+                tmux_name, exc,
+            )
             ts.last_known_inode = 0
+            return
+        entry = self._subscribe_inode(
+            (st.st_dev, st.st_ino), ("session", tmux_name), jsonl_path,
+        )
+        if entry is None:
+            return
+        ts.watch_descriptor = entry["wd"]
+        ts.last_known_inode = st.st_ino
+
+    def _subscribe_inode(
+        self, inode_key: tuple[int, int], subscriber: tuple, path: str | Path,
+    ) -> dict | None:
+        """Attach *subscriber* to the inode's (possibly shared) watch entry."""
+        entry = self._inode_watches.get(inode_key)
+        if entry is None:
+            try:
+                wd = self._inotify.add_watch(str(path), _iflags.MODIFY)
+            except OSError as exc:
+                logger.warning(
+                    "session_monitor: add_watch MODIFY failed for %s: %s",
+                    path, exc,
+                )
+                return None
+            # wd-reuse guard (Rule 8): the kernel may hand back a wd whose
+            # previous incarnation's IN_IGNORED is still queued. If that
+            # number is still mapped to a DIFFERENT inode entry, that
+            # entry is dead — detach it now so the stale mapping can't
+            # shadow or misdispatch this one.
+            stale_key = self._wd_to_inode.get(wd)
+            if stale_key is not None and stale_key != inode_key:
+                self._detach_inode_entry(wd, stale_key)
+            entry = {"wd": wd, "subscribers": set(), "paths": {}}
+            self._inode_watches[inode_key] = entry
+            self._wd_to_inode[wd] = inode_key
+        entry["subscribers"].add(subscriber)
+        entry["paths"][subscriber] = str(path)
+        return entry
+
+    def _unsubscribe_watch(self, subscriber: tuple) -> None:
+        """Detach *subscriber*; the kernel watch is removed only when the
+        LAST subscriber leaves (refcounted — one watcher's release never
+        drops another's watch)."""
+        for inode_key, entry in list(self._inode_watches.items()):
+            if subscriber not in entry["subscribers"]:
+                continue
+            entry["subscribers"].discard(subscriber)
+            entry["paths"].pop(subscriber, None)
+            if not entry["subscribers"]:
+                self._inode_watches.pop(inode_key, None)
+                self._wd_to_inode.pop(entry["wd"], None)
+                if self._inotify:
+                    try:
+                        self._inotify.rm_watch(entry["wd"])
+                    except OSError:
+                        pass
+
+    def _detach_inode_entry(
+        self, wd: int, inode_key: tuple[int, int],
+    ) -> None:
+        """Drop an inode entry and null out every subscriber's wd state."""
+        entry = self._inode_watches.pop(inode_key, None)
+        self._wd_to_inode.pop(wd, None)
+        if entry is None:
+            return
+        for sub in entry["subscribers"]:
+            if sub[0] == "session":
+                ts = self._tail_states.get(sub[1])
+                if ts is not None and ts.watch_descriptor == wd:
+                    ts.watch_descriptor = None
+            else:
+                track = self._tracks.get((sub[1], sub[2]))
+                if track is not None and track.wd == wd:
+                    track.wd = None
+                    track.wd_epoch += 1   # invalidate queued dispatch
+
+    def _dispatch_modify_wd(self, wd: int) -> set[str]:
+        """MODIFY fan-out (R2): every subscriber of the inode acts —
+        streaming sessions get a drain request (returned to the caller),
+        characterizing tracks re-run classification. Track dispatch
+        validates (wd, generation) jointly (Rule 8)."""
+        modified: set[str] = set()
+        inode_key = self._wd_to_inode.get(wd)
+        entry = self._inode_watches.get(inode_key) if inode_key else None
+        if entry is None:
+            return modified
+        for sub in list(entry["subscribers"]):
+            if sub[0] == "session":
+                name = sub[1]
+                modified.add(name)
+                ts = self._tail_states.get(name)
+                if ts is not None:
+                    ts.inotify_events_received += 1
+                    ts.last_inotify_event_ts = time.time()
+            else:
+                track = self._tracks.get((sub[1], sub[2]))
+                if (
+                    track is not None
+                    and track.wd == wd
+                    and track.generation == inode_key
+                ):
+                    self._classify_and_step(track)
+        return modified
+
+    def _dispatch_ignored_wd(self, wd: int) -> None:
+        """IN_IGNORED teardown with re-stat revalidation (Rule 8/D3): a
+        recycled wd's STALE queued IGNORED must not tear down the live
+        entry that now owns the number — if any subscribed path still
+        resolves to the entry's inode, the watch is alive and the event
+        belonged to a previous incarnation."""
+        inode_key = self._wd_to_inode.get(wd)
+        if inode_key is None:
+            return
+        entry = self._inode_watches.get(inode_key)
+        if entry is None:
+            self._wd_to_inode.pop(wd, None)
+            return
+        for sub, sub_path in entry["paths"].items():
+            try:
+                st = os.stat(sub_path)
+            except OSError:
+                continue
+            if (st.st_dev, st.st_ino) == inode_key:
+                return   # stale IGNORED — the entry's inode is still live
+        self._detach_inode_entry(wd, inode_key)
 
     def _add_dir_watch(self, tmux_name: str, dir_path: str) -> None:
         """Add an IN_CREATE watch on a session directory (deduplicated).
@@ -1914,12 +2049,9 @@ class SessionMonitor:
         *,
         source: str = "discovery",
         create_event: bool = False,
-        row: dict | None = None,
     ) -> bool:
         """[model: ObserveOutcome / DeliverCreate] — the single entry point.
 
-        ``row`` is an optional read optimization for tick-driven callers
-        that already hold a fresh row; promotion and drains always re-read.
         Returns True when the observation left the file's track STREAMING.
         """
         path = Path(jsonl_path)
@@ -1941,7 +2073,7 @@ class SessionMonitor:
             # observable progress (B3+A6).
             if not self._observable_progress(track):
                 return False
-            row = row or get_session(tmux_name)
+            row = get_session(tmux_name)
             if row is None:
                 return False
             try:
@@ -1965,7 +2097,7 @@ class SessionMonitor:
                 "session_monitor: track reopened on progress tmux=%s path=%s source=%s",
                 tmux_name, path.name, source,
             )
-        row = row or get_session(tmux_name)
+        row = get_session(tmux_name)
         if row is None:
             return False
         # B1: ambient (non-create) observation of a file in a HOST row's
@@ -2153,21 +2285,26 @@ class SessionMonitor:
                 # B6: a stale TRUTHY generation (inode changed while the
                 # path stayed) must be repaired, not just a falsy one
                 # backfilled — otherwise every read re-stats, mismatches,
-                # and rejects the new inode forever. Offset survives when
-                # the content is plausibly the same-or-grown file (a
-                # renumbered device across a container restart); a SHRUNK
-                # file is a replacement and restarts from byte 0.
+                # and rejects the new inode forever.
+                # R1: ANY (dev,ino) mismatch resets the cursor to 0, in
+                # the SAME UPDATE as the generation write. The old byte
+                # cursor describes the REPLACED file's content; keeping it
+                # against a same-or-larger replacement reads mid-line and
+                # silently loses the line spanning the cursor. Loss is
+                # never acceptable; the replacement is a failure event and
+                # the full re-read's duplicates are the accepted residual.
                 seq = next_link_seq(tmux_name)
                 repaired = f"{st.st_dev}:{st.st_ino}:{seq}"
+                stale = bool(row_generation) and not generation_current
                 set_jsonl_generation(
                     tmux_name, repaired, expect_path=str(path),
+                    file_offset=0 if stale else None,
                 )
-                if row_generation and not generation_current:
-                    if st.st_size < (row.get("file_offset", 0) or 0):
-                        update_tail_state(tmux_name, file_offset=0)
+                if stale:
                     logger.info(
                         "session_monitor: repaired stale generation for %s "
-                        "(%s → %s)", tmux_name, row_generation, repaired,
+                        "(%s → %s) — cursor reset to 0 (replacement inode)",
+                        tmux_name, row_generation, repaired,
                     )
         else:
             # First resolution or rollover advance.
@@ -2313,16 +2450,11 @@ class SessionMonitor:
         except OSError:
             return
         inode_key = (st.st_dev, st.st_ino)
-        entry = self._inode_watches.get(inode_key)
+        entry = self._subscribe_inode(
+            inode_key, ("track", track.tmux_name, track.path), track.path,
+        )
         if entry is None:
-            try:
-                wd = self._inotify.add_watch(track.path, _iflags.MODIFY)
-            except OSError:
-                return
-            entry = {"wd": wd, "subscribers": set()}
-            self._inode_watches[inode_key] = entry
-            self._wd_to_inode[wd] = inode_key
-        entry["subscribers"].add((track.tmux_name, track.path))
+            return
         track.generation = inode_key
         track.wd_epoch += 1
         track.wd = entry["wd"]
@@ -2333,21 +2465,9 @@ class SessionMonitor:
         releasing one track never drops another's watch."""
         if track.wd is None:
             return
-        wd, track.wd = track.wd, None
+        track.wd = None
         track.wd_epoch += 1   # invalidate any queued dispatch for this track
-        inode_key = self._wd_to_inode.get(wd)
-        entry = self._inode_watches.get(inode_key) if inode_key else None
-        if entry is None:
-            return
-        entry["subscribers"].discard((track.tmux_name, track.path))
-        if not entry["subscribers"]:
-            self._inode_watches.pop(inode_key, None)
-            self._wd_to_inode.pop(wd, None)
-            if self._inotify:
-                try:
-                    self._inotify.rm_watch(wd)
-                except OSError:
-                    pass
+        self._unsubscribe_watch(("track", track.tmux_name, track.path))
 
     # ── Succession ordering (Rule 3 / D5) ─────────────────────────────
 
@@ -2497,6 +2617,15 @@ class SessionMonitor:
         dirty flag (T87: never skip — the skipped signal may be the only
         one those bytes get).
         """
+        # A session torn down by B5 has neither a gate nor a tail state; a
+        # stray request must not auto-recreate a fresh (non-retired) gate
+        # for it. (Currently unreachable — dispatch maps are purged first
+        # — kept as a one-line belt per review round 2.)
+        if (
+            tmux_name not in self._session_gates
+            and tmux_name not in self._tail_states
+        ):
+            return
         gate = self._gate(tmux_name)
         if gate.retired:
             return   # B5: dead session — no new work is ever accepted
@@ -2516,7 +2645,7 @@ class SessionMonitor:
         forever).
         """
         gate = self._gate(tmux_name)
-        if gate.retired or gate.busy or not gate.needs_drain:
+        if self._stopping or gate.retired or gate.busy or not gate.needs_drain:
             return
         try:
             loop = asyncio.get_running_loop()
@@ -2595,6 +2724,12 @@ class SessionMonitor:
             self._session_gates.pop(tmux_name, None)
             return
         needs_continuation = gate.dirty or gate.pending_link is not None
+        if self._stopping:
+            # S2: retain responsibility for the next start(); never pump.
+            if needs_continuation:
+                gate.needs_drain = True
+                gate.dirty = False
+            return
         if needs_continuation:
             # Continuation targets the row's CURRENT path (N4 corollary) —
             # the next owner re-reads the row at every pass.
@@ -2788,7 +2923,7 @@ class SessionMonitor:
         """Blocking read of the linked file's next complete-line window.
 
         WORKER-PURITY INVARIANT (pinned by
-        test_rollout_ingestion.py::test_read_workers_are_pure): this
+        test_rollout_ingestion.py::test_b4_purity_read_workers_never_write_or_broadcast): this
         function and :meth:`_read_segment_window` run on executor threads
         that CANNOT be stopped by cancelling their awaiter (A5). They must
         therefore never write the DB, never broadcast, never mutate
@@ -3299,14 +3434,9 @@ class SessionMonitor:
         ts = self._tail_states.get(tmux_name)
         if not ts:
             return
-        # File watch
-        if ts.watch_descriptor is not None:
-            try:
-                self._inotify.rm_watch(ts.watch_descriptor)
-            except OSError:
-                pass
-            self._wd_to_session.pop(ts.watch_descriptor, None)
-            ts.watch_descriptor = None
+        # File watch (refcounted inode subscription — R2)
+        self._unsubscribe_watch(("session", tmux_name))
+        ts.watch_descriptor = None
         # Dir watch (deduplicated — only remove kernel watch when refcount hits 0)
         if ts.dir_watch_descriptor is not None:
             wd = ts.dir_watch_descriptor
@@ -3743,51 +3873,12 @@ class SessionMonitor:
                 modified: set[str] = set()
                 for event in events:
                     if event.mask & _iflags.MODIFY:
-                        name = self._wd_to_session.get(event.wd)
-                        if name:
-                            modified.add(name)
-                            ts_for_event = self._tail_states.get(name)
-                            if ts_for_event is not None:
-                                ts_for_event.inotify_events_received += 1
-                                ts_for_event.last_inotify_event_ts = time.time()
-                        else:
-                            # D3 dispatch: wd → inode → subscriber tracks;
-                            # act only where the track's recorded
-                            # generation matches the owning inode.
-                            inode_key = self._wd_to_inode.get(event.wd)
-                            entry = (
-                                self._inode_watches.get(inode_key)
-                                if inode_key else None
-                            )
-                            if entry is not None:
-                                for sub in list(entry["subscribers"]):
-                                    track = self._tracks.get(sub)
-                                    if (
-                                        track is not None
-                                        and track.wd == event.wd
-                                        and track.generation == inode_key
-                                    ):
-                                        self._classify_and_step(track)
+                        modified |= self._dispatch_modify_wd(event.wd)
                     if event.mask & _iflags.CREATE:
                         await self._handle_in_create(event)
                     if event.mask & _iflags.IGNORED:
-                        # Kernel auto-removed the watch (file deleted/moved)
-                        gone = self._wd_to_session.pop(event.wd, None)
-                        if gone:
-                            ts = self._tail_states.get(gone)
-                            if ts and ts.watch_descriptor == event.wd:
-                                ts.watch_descriptor = None
-                        inode_key = self._wd_to_inode.pop(event.wd, None)
-                        entry = (
-                            self._inode_watches.pop(inode_key, None)
-                            if inode_key else None
-                        )
-                        if entry is not None:
-                            for sub in entry["subscribers"]:
-                                track = self._tracks.get(sub)
-                                if track is not None and track.wd == event.wd:
-                                    track.wd = None
-                                    track.wd_epoch += 1   # invalidate queued events
+                        # Kernel auto-removed the watch (file deleted/moved).
+                        self._dispatch_ignored_wd(event.wd)
 
                 # Request a drain for each modified session — the gate
                 # serializes owners; the drain re-reads the row's current
@@ -3894,25 +3985,17 @@ class SessionMonitor:
             )
             return
 
-        # Drop any stale wd → tmux_name mapping defensively (the kernel
-        # already removed the watch, but the dict entry may linger if
-        # IN_IGNORED hasn't been processed yet).
-        if ts.watch_descriptor is not None:
-            self._wd_to_session.pop(ts.watch_descriptor, None)
-            ts.watch_descriptor = None
-
         if not self._inotify:
             return
-        try:
-            new_wd = self._inotify.add_watch(str(new_path), _iflags.MODIFY)
-        except OSError as exc:
+        # R2: re-subscribe through the inode-owned structure — this drops
+        # the session's stale subscription (the kernel already removed the
+        # old inode's watch) and attaches to the replacement inode.
+        self._add_file_watch(tmux_name, str(new_path))
+        if ts.watch_descriptor is None:
             logger.warning(
-                "session_monitor: rewatch add_watch failed for %s: %s", tmux_name, exc,
+                "session_monitor: rewatch add_watch failed for %s", tmux_name,
             )
             return
-
-        ts.watch_descriptor = new_wd
-        self._wd_to_session[new_wd] = tmux_name
         ts.last_known_inode = new_inode
         # State derived from the old file's stream is no longer valid.
         ts.recent_processed.clear()
