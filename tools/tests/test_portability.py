@@ -385,10 +385,20 @@ def test_restore_rejects_traversal_member_and_existing_target(tmp_path):
     _seed_node(volume)
     artifact = tmp_path / "good.tar.gz"
     create_snapshot(volume, artifact, quiesced=True)
-    existing = tmp_path / "existing"
-    existing.mkdir()
-    with pytest.raises(PortabilityError, match="fresh and absent"):
-        restore_snapshot(artifact, existing)
+    populated = tmp_path / "populated"
+    populated.mkdir()
+    (populated / "already-here").write_text("do not clobber me")
+    with pytest.raises(PortabilityError, match="fresh and empty"):
+        restore_snapshot(artifact, populated)
+
+    # An existing but EMPTY target is fresh: that is what a container's mounted
+    # data volume always looks like (the runtime creates the mount point before
+    # anything runs), so refusing on mere existence made restore impossible in
+    # the one environment it exists for.
+    mount_point = tmp_path / "mounted-volume"
+    mount_point.mkdir()
+    restore_snapshot(artifact, mount_point)
+    assert (mount_point / VOLUME_STAMP).exists()
 
 
 def test_beads_declaration_and_restore_are_fail_closed(tmp_path):

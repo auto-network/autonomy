@@ -534,8 +534,9 @@ def restore_snapshot(
     target = Path(target_volume).resolve()
     if not source.is_file():
         raise PortabilityError(f"snapshot artifact not found: {source}")
-    if target.exists():
-        raise PortabilityError(f"restore target must be fresh and absent: {target}")
+    target_preexists = target.exists()
+    if target_preexists and any(target.iterdir()):
+        raise PortabilityError(f"restore target must be fresh and empty: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory(
@@ -590,7 +591,16 @@ def restore_snapshot(
 
         restored_payload = stage / VOLUME_PAYLOAD
         try:
-            os.replace(restored_payload, target)
+            if target_preexists:
+                # An existing EMPTY target is a mounted volume (e.g. the
+                # container's /app/data): its mount point cannot be replaced
+                # by rename (EBUSY) and it sits on a different filesystem than
+                # the stage (EXDEV). Fill it child-by-child rather than
+                # replacing the directory itself.
+                for child in restored_payload.iterdir():
+                    shutil.move(str(child), str(target / child.name))
+            else:
+                os.replace(restored_payload, target)
             if requested_beads is not None and staged_beads_output is not None:
                 try:
                     # The temporary and final dump share a filesystem.
