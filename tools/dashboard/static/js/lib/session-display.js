@@ -120,9 +120,15 @@
           j++;
         }
         if (j - i >= 2) {
+          // Membership is IMMUTABLE ref keys captured at build time —
+          // never a numeric interval (round-3 review: an interval
+          // re-read at paint time admits same-tool entries from a
+          // DIFFERENT flow that shift into the range).
+          var refs = [];
+          for (var g = i; g < j; g++) refs.push(refKey(entries[g], g));
           display.push({
-            type: 'group', tool_name: e.tool_name, start: i, end: j - 1,
-            key: 'g:' + refKey(e, i),
+            type: 'group', tool_name: e.tool_name, refs: refs,
+            key: 'g:' + refs[0],
           });
           i = j;
           continue;
@@ -163,21 +169,21 @@
     var last = display.length > 0 ? display[display.length - 1] : null;
 
     if (last && isGroupable(entry)) {
-      // Case 1: last is a group of the same tool — extend
+      // Case 1: last is a group of the same tool — extend membership
       if (last.type === 'group' && last.tool_name === entry.tool_name) {
-        last.end = newIdx;
+        last.refs.push(refKey(entry, newIdx));
         return display;
       }
       // Case 2: last is a single of the same groupable tool — promote to group
       if (last.idx !== undefined) {
         var prevEntry = entries[last.idx];
         if (isGroupable(prevEntry) && prevEntry.tool_name === entry.tool_name) {
+          var pk = refKey(prevEntry, last.idx);
           display[display.length - 1] = {
             type: 'group',
             tool_name: entry.tool_name,
-            start: last.idx,
-            end: newIdx,
-            key: 'g:' + refKey(prevEntry, last.idx),
+            refs: [pk, refKey(entry, newIdx)],
+            key: 'g:' + pk,
           };
           return display;
         }
@@ -199,32 +205,41 @@
   /**
    * Resolve a descriptor to the actual entry or group object.
    *
-   * Identity-checked (the transient-desync fix): descriptors carry their
-   * entry's ref key; resolution verifies the indexed slot still holds
-   * that ref and otherwise falls back to the byRef map — O(1) either
-   * way, no scans on the paint path. A stale descriptor therefore
-   * resolves to the CORRECT entry wherever it moved, or to STALE
-   * (missing-not-wrong) when it is gone entirely.
+   * Identity-checked (the transient-desync fix): descriptors carry ref
+   * keys; resolution goes through identity, never through a live index
+   * or numeric interval. A stale descriptor therefore resolves to the
+   * CORRECT entry wherever it moved, or paints MISSING (the STALE
+   * sentinel / an omitted member) — never a wrong entry.
+   *
+   * Complexity, honestly stated: singles are O(1) per call (one refKey
+   * compare on the fast path, one byRef map lookup on the fallback).
+   * Groups are O(m) per call over their m member refs, and the group
+   * template calls resolveEntry several times per tile per paint, so a
+   * group tile's paint cost is O(m · calls) — small in practice (m is a
+   * consecutive same-tool run, calls ≈ 10) and NOT memoized here:
+   * descriptors live inside Alpine-reactive arrays, and caching onto
+   * them from inside a render effect risks re-render feedback.
    *
    * Single: returns the entry (same reference).
    * Local:  returns locals[d.local] (key-checked).
    * Group:  returns { type: 'tool_group', tool_name, items, timestamp }
-   *         with items membership-checked (same tool, groupable).
+   *         — items resolved per-member BY REF from the immutable
+   *         membership captured at build time; unresolved members are
+   *         omitted; an empty resolution is STALE.
    */
   function resolve(d, entries, locals, byRef) {
     if (d.type === 'group') {
-      var anchor = entries[d.start];
-      if (!anchor || 'g:' + refKey(anchor, d.start) !== d.key) {
-        anchor = byRef ? byRef[(d.key || '').slice(2)] : undefined;
-        if (!anchor) return STALE;
-      }
-      // Membership check: only same-tool groupable entries may render
-      // inside this group tile — an interior shift drops the interloper
-      // (missing-not-wrong) rather than painting it under a wrong chip.
+      if (!byRef || !Array.isArray(d.refs)) return STALE;
       var items = [];
-      for (var i = d.start; i <= d.end && i < entries.length; i++) {
-        var it = entries[i];
-        if (it && isGroupable(it) && it.tool_name === d.tool_name) items.push(it);
+      for (var i = 0; i < d.refs.length; i++) {
+        var member = byRef[d.refs[i]];
+        // Identity resolution: the ref names exactly one logical entry;
+        // a member that vanished is OMITTED (missing-not-wrong). The
+        // tool guard is belt-and-suspenders — an entry's identity never
+        // changes type, so this only trips on a corrupted map.
+        if (member && member.type === 'tool_use' && member.tool_name === d.tool_name) {
+          items.push(member);
+        }
       }
       if (!items.length) return STALE;
       return {

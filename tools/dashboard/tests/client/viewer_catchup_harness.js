@@ -998,23 +998,20 @@ async function testL_forcedDescriptorRace() {
     'stale descriptors resolve to their CORRECT entries after the mid-buffer shift');
   checkEqual(singleMissing, 0,
     'no single tile goes missing while its entry exists (byRef fallback)');
-  console.log('   group descriptors degraded to missing-not-wrong:', groupMissing);
+  checkEqual(groupMissing, 0,
+    'groups resolve their immutable membership by ref even mid-shift');
 
-  // Group membership (condition 2): shove an interloper INSIDE a stale
-  // group's index range — it must be DROPPED from the group's items
-  // (missing-not-wrong), never painted under the Bash chip.
+  // Group membership: after the shift, the group's IMMUTABLE ref list
+  // resolves to exactly its original members — never an index-range
+  // re-read.
   const groupD = display.find((d) => d.type === 'group');
   check(!!groupD, 'fixture produced a tool group');
   if (groupD) {
-    // Simulate the shift: the group's index range now spans an
-    // assistant_text (the merge above already shifted indices by 4).
     const resolved = SD.resolve(groupD, store.entries, store.localEntries, store._byRef);
-    if (resolved.type === 'tool_group') {
-      const bad = resolved.items.filter((it) => !(it.type === 'tool_use' && it.tool_name === groupD.tool_name));
-      checkEqual(bad.length, 0, 'group slice never paints a non-member (missing-not-wrong)');
-    } else {
-      check(resolved.type === '__stale__', 'unresolvable group paints as MISSING, not wrong');
-    }
+    checkEqual(resolved.type, 'tool_group', 'group resolves mid-shift');
+    const memberKeys = (resolved.items || []).map((it) =>
+      it.entry_ref.file + ':' + it.entry_ref.off + ':' + (it.entry_ref.sub || 0));
+    checkEqual(memberKeys, groupD.refs || [], 'group items are exactly the built membership refs');
   }
 
   // Unknown-key descriptor (target gone entirely) → STALE sentinel.
@@ -1022,6 +1019,67 @@ async function testL_forcedDescriptorRace() {
   checkEqual(phantom.type, '__stale__', 'a vanished target paints as MISSING, never as whatever holds its index');
 
   assertNoLies(client, '(l)');
+  viewer.destroy();
+}
+
+// (m) round-3 codex pin, their exact shape: two SAME-TOOL groups (X and
+//     G) separated by user/assistant boundaries; a same-tool intruder
+//     merges between descriptor build and paint, landing inside G's old
+//     numeric interval. Membership must be asserted BY MEMBER REFS, not
+//     item types — the interval semantics painted the intruder under
+//     G's chip (WRONG, invisible to any type/tool filter).
+async function testM_sameToolGroupIntruder() {
+  console.log('\n── (m) same-tool intruder vs immutable group membership ──');
+  const fixture = new FixtureSession();
+  fixture.appendTyped({ type: 'user', role: 'user', content: 'flow one' });
+  const x0 = fixture.appendTyped({ type: 'tool_use', role: 'assistant', tool_name: 'Bash',
+    tool_id: 'X0', input: { command: 'x0' } });
+  fixture.appendTyped({ type: 'tool_use', role: 'assistant', tool_name: 'Bash',
+    tool_id: 'X1', input: { command: 'x1' } });
+  fixture.appendLine('between the flows');
+  fixture.appendTyped({ type: 'user', role: 'user', content: 'flow two' });
+  const g0 = fixture.appendTyped({ type: 'tool_use', role: 'assistant', tool_name: 'Bash',
+    tool_id: 'G0', input: { command: 'g0' } });
+  fixture.appendTyped({ type: 'tool_use', role: 'assistant', tool_name: 'Bash',
+    tool_id: 'G1', input: { command: 'g1' } });
+  fixture.appendLine('tail');
+
+  const client = makeClient(fixture);
+  const viewer = await mountViewer(client);
+  const store = client.win.getSessionStore(SID);
+  const SD = client.win.SessionDisplay;
+
+  // Paint 1: two Bash groups with distinct membership.
+  const display = SD.buildAll(store.entries, store.localEntries);
+  const groups = display.filter((d) => d.type === 'group');
+  checkEqual(groups.length, 2, 'two same-tool groups built');
+  const [gX, gG] = groups;
+  checkEqual((gX.refs || []).length, 2, 'X group has exactly its two members');
+  checkEqual((gG.refs || []).length, 2, 'G group has exactly its two members');
+
+  // THE RACE: a same-tool Bash intruder from ANOTHER flow merges in,
+  // positioned just before G0 — under interval semantics it lands
+  // inside gG's stale start..end and the tool filter cannot reject it.
+  const g0Entry = store.entries.find((e) => e.tool_id === 'G0');
+  const intruderRef = { file: 'A', off: g0Entry.entry_ref.off - 1, sub: 0 };
+  client.win.mergeSessionEntries(store, { chain: ['A'], entries: [{
+    type: 'tool_use', role: 'assistant', tool_name: 'Bash', tool_id: 'INTRUDER',
+    input: { command: 'evil' }, timestamp: '2026-08-10T12:30:00Z',
+    entry_ref: intruderRef,
+  }] }, 'sse');
+
+  // Paint 2 with the STALE descriptors: assert MEMBER REFS, not types.
+  for (const [label, gd] of [['X', gX], ['G', gG]]) {
+    const resolved = SD.resolve(gd, store.entries, store.localEntries, store._byRef);
+    checkEqual(resolved.type, 'tool_group', label + ' group still resolves');
+    const memberKeys = (resolved.items || []).map((it) =>
+      it.entry_ref.file + ':' + it.entry_ref.off + ':' + (it.entry_ref.sub || 0));
+    checkEqual(memberKeys, gd.refs || [],
+      label + ' group paints EXACTLY its built membership refs (intruder excluded)');
+    check(!(resolved.items || []).some((it) => it.tool_id === 'INTRUDER'),
+      label + ' group never paints the same-tool intruder');
+  }
+  assertNoLies(client, '(m)');
   viewer.destroy();
 }
 
@@ -1039,6 +1097,7 @@ async function testL_forcedDescriptorRace() {
     await testJ_racingCatchupsMonotonic();
     await testK_anchorRuleAgentTranscript();
     await testL_forcedDescriptorRace();
+    await testM_sameToolGroupIntruder();
   } catch (e) {
     console.error('HARNESS ERROR:', e);
     process.exit(2);
