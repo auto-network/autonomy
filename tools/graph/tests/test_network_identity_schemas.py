@@ -381,6 +381,82 @@ def test_link_grant_non_join_refuses_invite_reference():
         )
 
 
+# ── link-grant participant_id (auto-xwamk) ────────────────────
+#
+# Same conditional-validity shape as invite_ref/org:join above, deliberately
+# a meta key rather than a new typed/versioned field -- see
+# graph://ce07a01f-faa "More information" for the full reasoning. Mirrors
+# the two invite_ref tests immediately above rather than inventing a new
+# test shape.
+
+
+def test_link_grant_mission_requires_participant_id():
+    assert "mission" in ni.TARGET_TYPES
+    payload = link_grant_payload()
+    payload["target_type"] = "mission"
+    payload["meta"] = {"participant_id": "guest:11111111-1111-4111-8111-111111111111"}
+    validate_payload(
+        ni.NETWORK_LINK_GRANT_SET_ID,
+        ni.NETWORK_LINK_GRANT_REVISION,
+        payload,
+    )
+
+    # Present but empty meta -- participant_id simply absent from it.
+    missing = dict(payload)
+    missing["meta"] = {}
+    with pytest.raises(SchemaValidationError, match="participant_id"):
+        validate_payload(
+            ni.NETWORK_LINK_GRANT_SET_ID,
+            ni.NETWORK_LINK_GRANT_REVISION,
+            missing,
+        )
+
+    # meta absent entirely -- the case a naive `if meta:` guard would miss.
+    no_meta = dict(payload)
+    no_meta.pop("meta")
+    with pytest.raises(SchemaValidationError, match="participant_id"):
+        validate_payload(
+            ni.NETWORK_LINK_GRANT_SET_ID,
+            ni.NETWORK_LINK_GRANT_REVISION,
+            no_meta,
+        )
+
+    # Empty-string participant_id is exactly as invalid as absent.
+    blank = dict(payload)
+    blank["meta"] = {"participant_id": ""}
+    with pytest.raises(SchemaValidationError, match="participant_id"):
+        validate_payload(
+            ni.NETWORK_LINK_GRANT_SET_ID,
+            ni.NETWORK_LINK_GRANT_REVISION,
+            blank,
+        )
+
+
+def test_link_grant_non_mission_refuses_participant_id():
+    payload = link_grant_payload()  # target_type="present" by default
+    payload["meta"]["participant_id"] = "guest:11111111-1111-4111-8111-111111111111"
+    with pytest.raises(SchemaValidationError, match="only valid.*mission"):
+        validate_payload(
+            ni.NETWORK_LINK_GRANT_SET_ID,
+            ni.NETWORK_LINK_GRANT_REVISION,
+            payload,
+        )
+
+
+def test_link_grant_existing_target_types_unaffected_by_participant_id():
+    """No schema_revision bump, no new field -- existing design/present/
+    note/org:join grants validate exactly as before (present's own base
+    fixture already covers this implicitly via link_grant_payload(), this
+    pins it explicitly against regression)."""
+    payload = link_grant_payload()
+    assert payload["target_type"] == "present"
+    validate_payload(
+        ni.NETWORK_LINK_GRANT_SET_ID,
+        ni.NETWORK_LINK_GRANT_REVISION,
+        payload,
+    )
+
+
 # ── graph set schema / example / add round-trips ─────────────
 
 

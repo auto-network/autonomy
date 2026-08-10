@@ -91,7 +91,7 @@ TARGET_TYPES = (
 RECOVERY_MODES = ("none", "recovery-key", "org-vouch", "blindhash-escrow")
 RESERVED_RECOVERY_MODES = ("org-vouch", "blindhash-escrow")  # companion ledger spec
 
-GRANT_META_KEYS = frozenset({"ttl", "label", "require_auth"})
+GRANT_META_KEYS = frozenset({"ttl", "label", "require_auth", "participant_id"})
 
 _ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _HEX_RE = re.compile(r"^[0-9a-f]+$")
@@ -569,6 +569,29 @@ class NetworkLinkGrantV1(SettingSchema):
                         "answers 501 for it today — issue the grant without "
                         "require_auth"
                     )
+            if target_type != "mission" and "participant_id" in meta:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: meta.participant_id is only valid for "
+                    "target_type='mission'"
+                )
+
+        # Deliberately OUTSIDE the `meta is not None` guard above: a mission
+        # grant with no `meta` at all must fail this the same way one with
+        # an empty meta does -- participant_id is required, not merely
+        # validated-if-present. Same conditional-on-target_type shape as
+        # invite_ref's own target_type=='org:join' check below, written
+        # against a meta key rather than a typed top-level field: see
+        # graph://ce07a01f-faa ("More information") for why a
+        # schema_revision bump buys nothing once meta's own validator
+        # applies the same rigor.
+        if target_type == "mission":
+            participant_id = (meta or {}).get("participant_id")
+            if not isinstance(participant_id, str) or not participant_id:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: meta.participant_id is required for "
+                    "target_type='mission' (a mission grant is always "
+                    "bound to one guest identity)"
+                )
 
         subject = payload.get("subject")
         if not isinstance(subject, dict) or set(subject) != {"kind", "id"}:
