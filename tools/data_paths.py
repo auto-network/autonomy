@@ -89,6 +89,9 @@ STORE_MANIFEST: tuple = (
           "restart-safe invite-join progress (identifiers and counts only)"),
     Store("serving_keys", "network", "AUTONOMY_NETWORK_KEY_DIR", "dir",
           "mode-0600 auto.network tunnel-serving delegate keys"),
+    Store("repl_login_key", "repl-login.key", "REPL_LOGIN_KEY_FILE", "file",
+          "mode-0600 X25519 private key — the HPKE recipient for "
+          "browser-sealed secure-setting provisioning"),
     Store("tls_cert", "tls.crt", "AUTONOMY_TLS_CERT", "file",
           "TLS certificate (self-signed by default)"),
     Store("tls_key", "tls.key", "AUTONOMY_TLS_KEY", "file",

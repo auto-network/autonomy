@@ -99,6 +99,7 @@ def _enrich_commit_sign(row: dict) -> dict:
 from tools.dashboard import link_approvals as _link_approvals
 from tools.dashboard import dashboard_access_approvals as _dashboard_access
 from tools.dashboard import mcp_peer_approvals as _mcp_peer
+from tools.dashboard import secure_setting_approvals as _secure_setting
 
 # Optional per-kind request preparation. A handler returns the normalized
 # request plus a server-frozen staged context. Kinds absent here retain the
@@ -107,10 +108,12 @@ PREPARE_CREATE = {
     "link_publish": _link_approvals.prepare_create,
     **_dashboard_access.PREPARE_CREATE,
     **_mcp_peer.PREPARE_CREATE,
+    **_secure_setting.PREPARE_CREATE,
 }
 AUTHORIZE_DECISION = {
     **_dashboard_access.AUTHORIZE_DECISION,
     **_mcp_peer.AUTHORIZE_DECISION,
+    **_secure_setting.AUTHORIZE_DECISION,
 }
 
 # Per-kind GET enrichment — the only kind-specific hook on the server side of
@@ -120,6 +123,7 @@ ENRICH = {
     **_link_approvals.ENRICH,
     **_dashboard_access.ENRICH,
     **_mcp_peer.ENRICH,
+    **_secure_setting.ENRICH,
 }
 
 
@@ -142,6 +146,7 @@ EXECUTORS: dict = {
     **_link_approvals.EXECUTORS,
     **_dashboard_access.EXECUTORS,
     **_mcp_peer.EXECUTORS,
+    **_secure_setting.EXECUTORS,
 }
 
 # Requests whose executor is running: the verdict is committed but the result

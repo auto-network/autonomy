@@ -2565,6 +2565,60 @@
           },
           decision: (self, req) => _signDashboardAccessDecision(self, req),
         },
+        // Secure-setting provisioning: the agent described a small form
+        // (staged.fields); the operator fills it and the values are HPKE-
+        // sealed IN THIS BROWSER to the server-frozen recipient key. The
+        // decision carries only {nonce, sealed_payload} — the plaintext
+        // never leaves this page.
+        secure_setting: {
+          open(self, r) {
+            const staged = r.staged;
+            const req = r.request || {};
+            if (!staged || !Array.isArray(staged.fields) || !staged.fields.length ||
+                !staged.recipient_pub || !staged.nonce || !staged.purpose) {
+              throw new Error('secure setting request has no server-frozen sealing context');
+            }
+            const lines = [req.description || ''];
+            lines.push('', 'For: ' + (req.origin || 'unknown'),
+              'Stored as: ' + (staged.target_key || '?') + ' (org ' + (staged.org || '?') + ')',
+              'Recipient key: ' + (staged.key_id || '?'),
+              '', 'Values are sealed in your browser — the server stores only ciphertext.');
+            self.approvalBusy = false;
+            self.approvalRequest = {
+              id: r.id, kind: r.kind, session: r.session,
+              title: req.title || 'Provide a secure setting',
+              actionLabel: 'Seal & save',
+              op: 'seal', target: staged.target_key || '',
+              bodyMarkdown: lines.join('\n').trim(),
+              secure: {
+                fields: staged.fields.map((f) => ({
+                  label: f.label, key: f.key, secret: f.secret !== false,
+                  placeholder: f.placeholder || '', value: '', show: false,
+                })),
+                recipientPub: staged.recipient_pub,
+                purpose: staged.purpose,
+                nonce: staged.nonce,
+              },
+              awaitExecution: true,
+              error: '',
+            };
+          },
+          async decision(self, req) {
+            const s = req.secure;
+            const payload = {};
+            for (const f of s.fields) {
+              if (!f.value) throw new Error('Fill in “' + f.label + '” before approving.');
+              payload[f.key] = f.value;
+            }
+            const sealing = await import('../ceremony/sealing.js');
+            const record = await sealing.sealToEncapsulationKey(
+              new TextEncoder().encode(JSON.stringify(payload)),
+              s.recipientPub, s.purpose);
+            const sealedHex = Array.from(record)
+              .map((b) => b.toString(16).padStart(2, '0')).join('');
+            return { nonce: s.nonce, sealed_payload: sealedHex };
+          },
+        },
         commit_sign: {
           async open(self, r) {
             // Render the pending commit in THIS overlay, in sign mode.
