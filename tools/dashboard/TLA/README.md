@@ -46,9 +46,11 @@ meaning something.
 - The claim (`request_drain`) and the final dirty-check/release sequence
   are actually await-free (bead invariants 4/7), including the CPython
   try-claim fast path.
-- Downstream publication is idempotent by line index/offset
-  (`PersistOrder = "idempotent"` is the only variant that survives both
-  A4 crash configs — see MODEL.md, "A4 adjudication").
+- Publication is publish-then-persist (`PersistOrder = "processFirst"`);
+  crash-window duplicates are operator-accepted and bounded
+  (`BoundedDuplicates`), with two proven no-failure-duplicate rules:
+  the handover advances the linked file's offset, and linking never
+  rewinds publication (see MODEL.md, "A4 adjudication, superseded").
 - (wd, epoch) joint identity on every inotify dispatch (host review B6;
   wd identity is abstracted here).
 - Deadline/interval sizing (the model proves "eventually", not "within
