@@ -185,6 +185,13 @@ def test_full_provisioning_round_trip(env):
     lambda r: r.update(schema="username"),
     lambda r: r.update(title=""),
     lambda r: r.update(description="x" * 2001),
+    lambda r: r.pop("workspaces"),
+    lambda r: r.update(workspaces=[]),
+    lambda r: r.update(workspaces="finance-ws"),
+    lambda r: r.update(workspaces=["finance-ws", "finance-ws"]),
+    lambda r: r.update(workspaces=["Has Spaces"]),
+    lambda r: r.update(workspaces=["not-a-known-workspace"]),
+    lambda r: r.update(workspaces=[f"ws-{i}" for i in range(9)]),
 ])
 def test_create_rejects_malformed_requests(env, mutate):
     client, _tmp = env
@@ -202,19 +209,34 @@ def test_decision_rejects_bad_nonce_extra_fields_and_bad_records(env):
 
     rid, staged = _queue(client)
     sealed = _seal_form(staged, values)
-    assert _approve(client, rid, {"nonce": "0" * 64, "sealed_payload": sealed}) == {
+    assert _approve(client, rid, {"nonce": "0" * 64, "sealed_payloads": sealed}) == {
         "ok": False, "error": "the decision nonce does not match this request",
     }
 
     rid, staged = _queue(client)
     execution = _approve(client, rid, {
-        "nonce": staged["nonce"], "sealed_payload": _seal_form(staged, values),
+        "nonce": staged["nonce"], "sealed_payloads": _seal_form(staged, values),
         "plaintext": "smuggled",
     })
     assert execution == {"ok": False, "error": (
         "secure_setting approval must carry only approved, nonce, "
-        "and sealed_payload"
+        "and sealed_payloads"
     )}
+
+    # A decision must seal for exactly the allowlisted workspaces — no
+    # partial coverage, no extra workspace smuggled in at approval time.
+    for bad_map in [
+        {},
+        {"finance-ws": "01" + "00" * 60},
+        {**_seal_form(staged, values), "extra-ws": "01" + "00" * 60},
+    ]:
+        rid, staged = _queue(client)
+        execution = _approve(client, rid, {"nonce": staged["nonce"],
+                                           "sealed_payloads": bad_map})
+        assert execution == {"ok": False, "error": (
+            "sealed_payloads must carry exactly one record per allowlisted "
+            "workspace"
+        )}
 
     for bad, error in [
         ("zz", "sealed_payload must be lowercase hex"),
@@ -223,9 +245,12 @@ def test_decision_rejects_bad_nonce_extra_fields_and_bad_records(env):
         ("01" + "00" * (64 * 1024), "sealed_payload exceeds the size limit"),
     ]:
         rid, staged = _queue(client)
-        execution = _approve(client, rid, {"nonce": staged["nonce"],
-                                           "sealed_payload": bad})
-        assert execution == {"ok": False, "error": error}
+        execution = _approve(client, rid, {
+            "nonce": staged["nonce"],
+            "sealed_payloads": {ws: bad for ws in staged["workspaces"]},
+        })
+        assert execution["ok"] is False
+        assert error in execution["error"]
 
 
 def test_nonce_is_single_use_per_request(env):
@@ -233,9 +258,9 @@ def test_nonce_is_single_use_per_request(env):
     rid, staged = _queue(client)
     sealed = _seal_form(staged, {"username": "u", "password": "p"})
     assert _approve(client, rid, {"nonce": staged["nonce"],
-                                  "sealed_payload": sealed})["ok"] is True
+                                  "sealed_payloads": sealed})["ok"] is True
     replay = client.post(f"/api/approvals/{rid}/decision", json={
-        "approved": True, "nonce": staged["nonce"], "sealed_payload": sealed,
+        "approved": True, "nonce": staged["nonce"], "sealed_payloads": sealed,
     })
     assert replay.json() == {
         "ok": False, "error": "This approval has already been completed.",
@@ -277,7 +302,7 @@ def test_rotated_recipient_key_fails_closed(env):
     sealed = _seal_form(staged, {"username": "u", "password": "p"})
     (tmp_path / "repl-login.key").unlink()  # forces a fresh key on next use
     execution = _approve(client, rid, {"nonce": staged["nonce"],
-                                       "sealed_payload": sealed})
+                                       "sealed_payloads": sealed})
     assert execution == {"ok": False, "error": (
         "the host recipient key changed after this request was staged — "
         "decline and request provisioning again"
@@ -291,7 +316,7 @@ def test_locked_dashboard_cannot_decide(env, monkeypatch):
     sealed = _seal_form(staged, {"username": "u", "password": "p"})
     monkeypatch.delenv("DASHBOARD_AUTH", raising=False)
     refused = client.post(f"/api/approvals/{rid}/decision", json={
-        "approved": True, "nonce": staged["nonce"], "sealed_payload": sealed,
+        "approved": True, "nonce": staged["nonce"], "sealed_payloads": sealed,
     })
     assert refused.status_code == 401
     assert client.get(f"/api/approvals/{rid}").json()["result"] is None
@@ -302,20 +327,20 @@ def test_reprovision_upserts_in_place(env):
     rid, staged = _queue(client)
     assert _approve(client, rid, {
         "nonce": staged["nonce"],
-        "sealed_payload": _seal_form(staged, {"username": "u", "password": "old"}),
+        "sealed_payloads": _seal_form(staged, {"username": "u", "password": "old"}),
     })["ok"] is True
     first = settings_ops.read_set(SECURE_SETTING_SET_ID, org=ORG).members
 
     rid2, staged2 = _queue(client)
     assert _approve(client, rid2, {
         "nonce": staged2["nonce"],
-        "sealed_payload": _seal_form(staged2, {"username": "u", "password": "new"}),
+        "sealed_payloads": _seal_form(staged2, {"username": "u", "password": "new"}),
     })["ok"] is True
     second = settings_ops.read_set(SECURE_SETTING_SET_ID, org=ORG).members
 
     assert len(first) == 1 and len(second) == 1
     assert first[0].id == second[0].id  # one evolving row, not an append
-    assert first[0].payload["ciphertext_hex"] != second[0].payload["ciphertext_hex"]
+    assert first[0].payload["ciphertexts_hex"] != second[0].payload["ciphertexts_hex"]
 
 
 def test_decline_stores_nothing(env):

@@ -61,3 +61,39 @@ existing approval executor validates the prompt binding and envelope
 associated data before writing the setting. A separate host-only resolver loads
 the envelope later for `repl_login`; the agent-facing result is only an
 authentication state.
+
+## v2 — workspace-bound records and authenticated callers (bead auto-0qxna)
+
+Two changes landed together; both fail closed.
+
+**Caller identity is authenticated, never supplied.** Every POST to the
+stealth REPL (`/api/login`, `/api/command`, raw `/`) requires
+`Authorization: Bearer $CROSSTALK_TOKEN`. The REPL resolves
+`sha256(token)` in the dashboard's auth DB to the launcher-stamped
+session, derives the workspace from that session's `project` row, and
+requires `<workspace-id>:repl_login` in
+`autonomy.workspace.capability.enable` (read fresh per request — a
+revoked grant or token takes effect immediately, no restart). The caller
+supplies no session name and no workspace: there is nothing to assert,
+so nothing to forge. Unauthenticated `/health` is liveness-only.
+
+*Accepted coupling:* `CROSSTALK_TOKEN` is thereby both the container's
+messaging identity and its credential-decryption identity. Same trust
+boundary (the container env), but anyone widening CrossTalk token
+distribution must know browser-login credential access rides on it.
+
+**The workspace allowlist is inside the seal.** A provisioning request
+names `workspaces`; the operator sees the allowlist in the approval
+overlay and the browser seals the credential once per workspace under
+
+    autonomy.secure-setting.v2|<org>|<target_key>|<nonce>|workspace=<ws>
+
+The stored record keeps one ciphertext per workspace and NO purpose
+string. At login the REPL reconstructs the label from its own derived
+view of the caller's workspace (`repl_login.py`). Editing the stored
+Setting to widen the allowlist produces labels that do not decrypt —
+enforcement is the AEAD tag, not a check. Re-provisioning through a
+fresh operator approval is therefore the only way to widen an
+allowlist; that is a feature, not a limitation. Revision-1 records
+(single ciphertext, stored purpose) are refused outright: accepting
+them would bypass the binding.
