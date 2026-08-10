@@ -927,9 +927,7 @@ async def test_b6_quiet_host_burst_becomes_visible_without_further_write(env):
     # (Round 2: the original loop keyed rows by 'tmux_name'/'jsonl_path'
     # — keys registry rows don't have — and was vacuous; both reviewers
     # found it. Rewritten against session_id/resolved/entry_count.)
-    assert not _registry_linked_zero_before_messages(env.bus, name), (
-        "durable linked-but-zero registry broadcast before the drain"
-    )
+    _assert_registry_publishes_after_drain(env.bus, name)
 
 
 @pytest.mark.asyncio
@@ -1197,25 +1195,49 @@ async def test_r3_link_and_enrich_atomic_by_default(env, monkeypatch):
     assert row["file_offset"] == 0, "cursor must reset when the path moves"
 
 
-def _registry_linked_zero_before_messages(bus, name) -> bool:
-    """True when a registry broadcast showed resolved=True with zero
-    entry_count BEFORE the first session:messages broadcast — the durable
-    linked-but-zero signature (rewritten per round 2: registry rows key on
-    session_id and expose resolved/entry_count)."""
+def _assert_registry_publishes_after_drain(bus, name) -> None:
+    """The invariant-9 shape, both directions (round-2 polish: the
+    absence-only form is vacuous when no registry is emitted at all):
+
+    - BEFORE the first session:messages broadcast, no registry row for
+      the session shows resolved=True with zero entry_count (the durable
+      linked-but-zero signature);
+    - AFTER it, EXACTLY ONE registry broadcast carries the session
+      resolved with a nonzero entry_count (the post-drain publish).
+
+    Registry rows key on session_id and expose resolved/entry_count."""
     first_msgs = next(
         (i for i, (t, p) in enumerate(bus.broadcasts)
          if t == "session:messages" and p.get("session_id") == name),
-        len(bus.broadcasts),
+        None,
     )
+    assert first_msgs is not None, "no session:messages broadcast at all"
     for topic, payload in bus.broadcasts[:first_msgs]:
         if topic != "session:registry":
             continue
         entry = next(
             (r for r in payload if r.get("session_id") == name), None,
         )
-        if entry is not None and entry.get("resolved") and not entry.get("entry_count"):
-            return True
-    return False
+        assert not (
+            entry is not None
+            and entry.get("resolved")
+            and not entry.get("entry_count")
+        ), "durable linked-but-zero registry broadcast before the drain"
+    post_drain = [
+        entry
+        for topic, payload in bus.broadcasts[first_msgs:]
+        if topic == "session:registry"
+        for entry in [
+            next((r for r in payload if r.get("session_id") == name), None)
+        ]
+        if entry is not None
+        and entry.get("resolved")
+        and (entry.get("entry_count") or 0) > 0
+    ]
+    assert len(post_drain) == 1, (
+        f"expected exactly one post-drain resolved registry row, "
+        f"got {len(post_drain)}"
+    )
 
 
 @pytest.mark.asyncio
@@ -1267,9 +1289,7 @@ async def test_r3_active_server_host_watcher_quiet_burst(env, monkeypatch):
     )
     assert row["entry_count"] == 2
     assert "server watcher burst" in (row["last_message"] or "")
-    assert not _registry_linked_zero_before_messages(env.bus, name), (
-        "durable linked-but-zero registry broadcast before the drain"
-    )
+    _assert_registry_publishes_after_drain(env.bus, name)
 
 
 @pytest.mark.asyncio
@@ -1322,7 +1342,7 @@ async def test_r3_confirm_link_drains_and_stamps_generation(env, monkeypatch):
     assert row["jsonl_generation"].startswith(f"{st.st_dev}:{st.st_ino}:")
     assert row["file_offset"] == st.st_size
     assert row["entry_count"] == 2
-    assert not _registry_linked_zero_before_messages(env.bus, name)
+    _assert_registry_publishes_after_drain(env.bus, name)
 
 
 @pytest.mark.asyncio

@@ -205,13 +205,22 @@ class TestInCreateRewatch:
             )
 
             # Wait for the inotify tailer to process IN_IGNORED + IN_CREATE.
+            # The settle predicate must cover watch identity AND the
+            # persisted cursor reaching the new file's EOF — stopping at
+            # reattachment races the async catch-up drain, which can then
+            # leak into executor shutdown at test teardown (round-2 review
+            # polish item).
+            from tools.dashboard.dao.dashboard_db import get_session
             deadline = time.monotonic() + 3.0
             while time.monotonic() < deadline:
                 ts = mon._tail_states.get("auto-comp-1")
+                row = get_session("auto-comp-1")
                 if (
                     ts is not None
                     and ts.watch_descriptor is not None
                     and ts.last_known_inode == new_inode
+                    and row is not None
+                    and row["file_offset"] == jsonl.stat().st_size
                 ):
                     break
                 await asyncio.sleep(0.05)
@@ -229,7 +238,6 @@ class TestInCreateRewatch:
             assert ("session", "auto-comp-1") in mon._inode_watches[inode_key]["subscribers"]
 
             # File offset must be reset (new file is a fresh stream).
-            from tools.dashboard.dao.dashboard_db import get_session
             row = get_session("auto-comp-1")
             # Offset may have already advanced past byte 0 because the
             # rewatch path tails immediately. The contract is that it was

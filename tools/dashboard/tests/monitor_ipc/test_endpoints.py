@@ -91,11 +91,17 @@ class TestRegisterEndpoint:
             )
             # 2. An inotify watch is installed on the jsonl file.
             #    Either the watch descriptor is set on _TailState, OR the
-            #    tmux_name appears in the monitor's _wd_to_session map.
+            #    session is subscribed in the monitor's inode-owned watch
+            #    structure (auto-suvcp R2 — the scalar _wd_to_session map
+            #    is retired).
             ts = mon._tail_states["auto-test-001"]
             watch_on_file = (
                 getattr(ts, "watch_descriptor", None) is not None
-                or "auto-test-001" in set(mon._wd_to_session.values())
+                or any(
+                    sub == ("session", "auto-test-001")
+                    for entry in mon._inode_watches.values()
+                    for sub in entry["subscribers"]
+                )
             )
             assert watch_on_file, (
                 "register endpoint did not install inotify watch for the "
