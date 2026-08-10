@@ -520,3 +520,467 @@ editorial pass that cleans them up before anyone reads them. Whatever you
 write is, verbatim, what lands in the permanent cross-pillar record. Write
 the version you'd want to read cold, six months from now, with no memory
 of the conversation that produced it.
+
+## 10. The conversation widget — anchored Q&A, live, on your own page
+
+The embeddable counterpart to the top-bar (§8): a self-contained, vanilla-JS
+widget that turns any element you mark up into a live discussion thread —
+ask a question, watch a progress update or the final answer arrive without
+a page reload, reopen with a follow-up if the answer wasn't right. Verified
+this session against a real coordinator's live production site (a real
+Postgres schema table, a real guest identity, a real answer arriving via
+server-sent events with zero manual refresh) — this is shipped, working
+code, not a mockup.
+
+**Same self-containment rule as §8, and the same reason.** Paste both
+blocks below directly into your generated HTML, once, before `</body>`.
+Do not reference them as external `/static/...` files.
+
+**The one thing you add per artifact:** `data-mc-anchor="<short-id>"` on
+whatever element should be discussable — a table cell, a diagram, a
+paragraph. Put the anchor on an element that can safely hold extra inline
+content (the widget appends a small badge inside it) — a `<td>`, not a
+`<tr>` (a `<tr>` may only contain `<td>`/`<th>`, so anything else appended
+there gets silently relocated by the browser's own HTML parser — this bit
+the first draft of this widget and is worth not repeating):
+
+```html
+<td data-mc-anchor="table:component_catalog_oss_projects">
+  Keyed by canonical version-less purl…
+</td>
+```
+
+Everything else — the discuss badge, the panel, presence, live updates,
+asking, reopening — is handled entirely by the pasted-in code. A mission
+writes zero lines of API, presence, or rendering code of its own.
+
+**What it does and does not do.** Guests can ask and reopen; only a
+coordinator's own agent-side API call (§6/§8, unchanged) can answer — this
+widget never exposes an answer path, matching the existing design that
+answering is the responder's job, not a browser action. Presence is
+per-mission/per-pillar surface only, not per-anchor: the panel shows who's
+around on this pillar right now, not literally who's looking at this one
+row — guests aren't heartbeat-tracked continuously the way coordinators
+are (§7), and the widget doesn't pretend otherwise.
+
+**Live updates ride the plain event bus, same-origin only.** This widget
+talks directly to your own mission/pillar's API over `fetch`/`EventSource`
+— it has no relay dependency and does not work for a guest with no network
+path to the dashboard (see `graph://ce07a01f-faa` for the relay-served,
+personalized-guest-link path, which is separate, later work). For today's
+`?as=<token>` guests (§6) and anyone with direct access, this is the real
+thing: `EventSource("/api/events")` filtered to `mission_control:conversation`
+(carries the full entry, so no refetch is needed) and `setting.changed`
+for `dashboard.surface.presence` (a nudge to re-poll, not a payload).
+
+```html
+<style>
+/* Mission Control embeddable widget -- self-contained styles, mc- prefixed
+   to avoid colliding with the host page's own CSS. Dark-theme colors
+   chosen to read well against either a dark or light host page (small
+   footprint, high-contrast panel, not a full theme takeover). */
+#mc-panel-host{position:fixed;right:16px;bottom:16px;width:340px;max-width:calc(100vw - 32px);
+  max-height:70vh;overflow-y:auto;z-index:9999;display:flex;flex-direction:column;gap:10px}
+.mc-anchor-open{background:rgba(99,102,241,.08)!important;box-shadow:inset 3px 0 0 0 #6366f1}
+.mc-badge{display:inline-flex;align-items:center;gap:4px;margin-left:8px;padding:2px 9px;
+  border-radius:999px;border:none;cursor:pointer;font-size:11px;font-family:inherit;
+  background:#30363d;color:#8b98ab;vertical-align:middle}
+.mc-badge:hover{color:#dbe4f0}
+.mc-badge-open{background:#4f46e5;color:#fff}
+.mc-badge-pending:not(.mc-badge-open){background:#78350f;color:#fcd34d}
+.mc-badge-resolved:not(.mc-badge-open){background:#312e81;color:#a5b4fc}
+.mc-panel{margin:6px 0 18px;padding:12px 14px;border-radius:8px;background:#0d1117;
+  border:1px solid #30363d;border-left:3px solid #6366f1;font-size:13px;color:#dbe4f0;
+  font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}
+.mc-panel-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.mc-discussing{font-size:11px;color:#a5b4fc}
+.mc-presence{display:flex;align-items:center;gap:4px}
+.mc-avatar{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;
+  border-radius:999px;font-size:9px;font-weight:700;color:#0b0f19;flex-shrink:0}
+.mc-presence-label{font-size:11px;color:#8b98ab;margin-left:2px}
+.mc-empty{color:#6b7684;font-size:12.5px;margin:4px 0}
+.mc-message{display:flex;gap:8px;margin:8px 0}
+.mc-message-body{min-width:0;flex:1}
+.mc-message-meta{display:flex;align-items:baseline;gap:6px}
+.mc-name{font-size:12px;font-weight:600;color:#dbe4f0}
+.mc-when{font-size:10px;color:#57606a}
+.mc-text{font-size:12.5px;color:#c7d4e8;margin-top:2px;line-height:1.5}
+.mc-update{display:flex;align-items:center;gap:6px;padding-left:26px;margin:4px 0}
+.mc-update-dot{width:4px;height:4px;border-radius:999px;background:#57606a;flex-shrink:0}
+.mc-update-text{font-size:11px;color:#8b98ab;font-style:italic}
+.mc-waiting{display:flex;align-items:center;gap:4px;padding-left:26px;margin:6px 0}
+.mc-dot{width:4px;height:4px;border-radius:999px;background:#57606a;animation:mc-blink 1.2s infinite}
+.mc-dot:nth-child(2){animation-delay:.2s}
+.mc-dot:nth-child(3){animation-delay:.4s}
+@keyframes mc-blink{0%,80%,100%{opacity:.2}40%{opacity:1}}
+.mc-waiting-label{font-size:11px;color:#57606a;margin-left:4px}
+.mc-followup-link{background:none;border:none;color:#818cf8;font-size:11.5px;cursor:pointer;
+  padding:0;margin-top:4px;font-family:inherit}
+.mc-followup-link:hover{color:#a5b4fc;text-decoration:underline}
+.mc-input{flex:1;background:#161b22;border:1px solid #30363d;border-radius:999px;
+  padding:6px 12px;font-size:12.5px;color:#dbe4f0;font-family:inherit}
+.mc-input:focus{outline:none;border-color:#6366f1}
+.mc-error{width:100%;font-size:11px;color:#f85149;margin-bottom:2px}
+.mc-compose-wrap{display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap}
+.mc-send{flex-shrink:0;width:26px;height:26px;border-radius:999px;border:none;background:#4f46e5;
+  color:#fff;cursor:pointer;font-size:12px;line-height:1}
+.mc-send:hover{background:#4338ca}
+.mc-send:disabled,.mc-input:disabled{opacity:.5}
+</style>
+<script>
+(function () {
+  "use strict";
+  // ── Mission Control embeddable conversation widget ──────────────────
+  // Paste this block once, before </body>. Mark any element you want
+  // discussable with data-mc-anchor="<short-id>" -- everything else
+  // (API calls, presence, rendering) is handled here. No external
+  // script references -- self-contained by design, see SKILL.md §10.
+  // Vanilla JS on purpose: this widget must drop into any coordinator's
+  // page regardless of that page's own stack (this site is vanilla; the
+  // widget doesn't require Alpine or any other framework to be present).
+  var API_BASE = "";              // fill in at build time, e.g. "https://localhost:8080"
+  var MISSION_ID = "";            // fill in at build time
+  var CURRENT_PILLAR_ID = "";     // fill in at build time; "" = mission-level, not a pillar
+
+  var QUESTIONS_BASE = CURRENT_PILLAR_ID
+    ? API_BASE + "/api/pillars/" + CURRENT_PILLAR_ID + "/questions"
+    : API_BASE + "/api/missions/" + MISSION_ID + "/questions";
+  var SURFACE_ID = CURRENT_PILLAR_ID ? "pillar:" + CURRENT_PILLAR_ID : "mission:" + MISSION_ID;
+
+  // ── tiny DOM helper, no dependencies ─────────────────────────────
+  function el(tag, attrs, children) {
+    var e = document.createElement(tag);
+    for (var k in (attrs || {})) {
+      if (k === "class") e.className = attrs[k];
+      else if (k === "html") { /* never used for API-sourced text -- see textContent below */ }
+      else e.setAttribute(k, attrs[k]);
+    }
+    (children || []).forEach(function (c) { if (c) e.appendChild(c); });
+    return e;
+  }
+  function text(s) { return document.createTextNode(s == null ? "" : String(s)); }
+  function fmtWhen(epochSeconds) {
+    try {
+      var s = Math.round(Date.now() / 1000 - epochSeconds);
+      if (s < 5) return "just now";
+      if (s < 60) return s + "s ago";
+      if (s < 3600) return Math.round(s / 60) + "m ago";
+      if (s < 86400) return Math.round(s / 3600) + "h ago";
+      return Math.round(s / 86400) + "d ago";
+    } catch (e) { return ""; }
+  }
+
+  // ── presence read -- no external script, see graph://ce07a01f-faa ──
+  // Polled every 10s (matches the write-side heartbeat interval), plus
+  // refreshed immediately on a "setting.changed" SSE nudge for this
+  // set_id. No per-anchor granularity: presence is per mission/pillar
+  // surface only -- guests aren't heartbeat-tracked continuously, only
+  // coordinators, and only on push/answer. Don't overpromise more than
+  // that in the UI.
+  function mcFetchPresence(surfaceId) {
+    return fetch(API_BASE + "/api/graph/settings/dashboard.surface.presence", {
+      headers: { "X-Graph-Org": "autonomy" },
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (body) {
+        return (body.members || [])
+          .map(function (m) { return m.payload; })
+          .filter(function (p) { return p.surface_id === surfaceId; });
+      })
+      .catch(function () { return []; });
+  }
+  function mcColor(id) {
+    var h = 0;
+    for (var i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+    return "hsl(" + (h % 360) + " 60% 55%)";
+  }
+  function mcInitial(label) {
+    return (label || "?").trim().charAt(0).toUpperCase() || "?";
+  }
+
+  var presenceListeners = [];
+  function pollPresence() {
+    mcFetchPresence(SURFACE_ID).then(function (participants) {
+      presenceListeners.forEach(function (fn) { fn(participants); });
+    });
+  }
+  setInterval(pollPresence, 10000);
+
+  var _panelHost = null;
+  function mcPanelHost() {
+    if (!_panelHost) {
+      _panelHost = el("div", { id: "mc-panel-host" });
+      document.body.appendChild(_panelHost);
+    }
+    return _panelHost;
+  }
+
+  // ── one row per anchor: state + rendering + actions ──────────────
+  function Row(hostEl, anchor) {
+    this.host = hostEl;
+    this.anchor = anchor;
+    this.open = false;
+    this.entry = null;
+    this.followingUp = false;
+    this.presence = [];
+    this._buildChrome();
+    var self = this;
+    presenceListeners.push(function (p) {
+      self.presence = p;
+      if (self.open) self._renderPresence();
+    });
+  }
+
+  Row.prototype._buildChrome = function () {
+    var self = this;
+    this.badge = el("button", { type: "button", class: "mc-badge", "data-mc-anchor": this.anchor });
+    this.badge.textContent = "discuss";
+    this.badge.addEventListener("click", function () { self.toggle(); });
+    // Appended INSIDE the anchor element, never as its sibling: the
+    // anchor can be anything a coordinator marks up, including a <td>,
+    // where a <tr>-level sibling insert would be invalid HTML (a <tr>
+    // may only contain <td>/<th>) and get silently relocated by the
+    // browser's parser. A trailing inline badge is valid inside any
+    // anchor element that can hold text/inline content.
+    this.host.appendChild(this.badge);
+
+    this.panel = el("div", { class: "mc-panel", style: "display:none" });
+    this.headerRow = el("div", { class: "mc-panel-header" });
+    this.presenceRow = el("div", { class: "mc-presence" });
+    this.headerRow.appendChild(el("span", { class: "mc-discussing" }, [text("Discussing " + this.anchor)]));
+    this.headerRow.appendChild(this.presenceRow);
+    this.body = el("div", { class: "mc-body" });
+    this.composeWrap = el("div", { class: "mc-compose-wrap" });
+    this.panel.appendChild(this.headerRow);
+    this.panel.appendChild(this.body);
+    this.panel.appendChild(this.composeWrap);
+    // Panels all live in ONE shared container at the end of <body>, not
+    // as a DOM sibling of the anchor -- the anchor can be any element
+    // type (a table cell, a span, a div), and a block-level panel isn't
+    // valid next to/inside all of them (again, <tr>/<td> being the
+    // sharpest example). The badge already ties the panel to its anchor
+    // visually via the "Discussing <anchor>" label; DOM adjacency isn't
+    // required for that connection to read clearly.
+    mcPanelHost().appendChild(this.panel);
+  };
+
+  Row.prototype.toggle = function () {
+    this.open = !this.open;
+    this.panel.style.display = this.open ? "" : "none";
+    // Visual tie-back to the anchor now that the panel isn't a DOM
+    // sibling of it -- safe on any element type (a <td> included).
+    if (this.host.classList) this.host.classList.toggle("mc-anchor-open", this.open);
+    this._updateBadge();
+    if (this.open) {
+      pollPresence();
+      this.refresh();
+    }
+  };
+
+  Row.prototype._updateBadge = function () {
+    this.badge.className = "mc-badge" + (this.open ? " mc-badge-open" : "")
+      + (this.entry ? (this.entry.answer ? " mc-badge-resolved" : " mc-badge-pending") : "");
+    this.badge.textContent = this.open
+      ? (this.entry ? (this.entry.answer ? "resolved" : "open") : "discuss")
+      : (this.entry ? (this.entry.answer ? "resolved" : "open") : "discuss");
+  };
+
+  Row.prototype.refresh = function () {
+    var self = this;
+    return fetch(QUESTIONS_BASE, { credentials: "same-origin" })
+      .then(function (r) { return r.json(); })
+      .then(function (body) {
+        var entry = (body.questions || []).find(function (q) { return q.anchor === self.anchor; });
+        self.entry = entry || null;
+        self._updateBadge();
+        self.render();
+      });
+  };
+
+  Row.prototype._renderPresence = function () {
+    this.presenceRow.textContent = "";
+    var self = this;
+    this.presence.slice(0, 5).forEach(function (p) {
+      var av = el("span", { class: "mc-avatar", style: "background:" + mcColor(p.participant_id) });
+      av.textContent = mcInitial(p.participant_label);
+      self.presenceRow.appendChild(av);
+    });
+    var label = this.presence.length
+      ? this.presence.length + " here now"
+      : "no one else here right now";
+    this.presenceRow.appendChild(el("span", { class: "mc-presence-label" }, [text(label)]));
+  };
+
+  Row.prototype.render = function () {
+    this._renderPresence();
+    this.body.textContent = "";
+    this.composeWrap.textContent = "";
+
+    if (!this.entry) {
+      this.body.appendChild(el("p", { class: "mc-empty" }, [text("No discussion yet.")]));
+      this._renderCompose(false);
+      return;
+    }
+
+    var q = this.entry;
+    var askedRow = el("div", { class: "mc-message" });
+    askedRow.appendChild(el("span", { class: "mc-avatar", style: "background:" + mcColor(q.asked_by_participant_id) }, [text(mcInitial(q.asked_by_label))]));
+    var askedBody = el("div", { class: "mc-message-body" });
+    var askedMeta = el("div", { class: "mc-message-meta" });
+    askedMeta.appendChild(el("span", { class: "mc-name" }, [text(q.asked_by_label)]));
+    askedMeta.appendChild(el("span", { class: "mc-when" }, [text(fmtWhen(q.created_at))]));
+    askedBody.appendChild(askedMeta);
+    askedBody.appendChild(el("div", { class: "mc-text" }, [text(q.question)]));
+    askedRow.appendChild(askedBody);
+    this.body.appendChild(askedRow);
+
+    if (!q.answer) {
+      // Ephemeral, only while open -- vanishes from the record the
+      // instant an answer lands (server already drops `updates` once
+      // answer IS NOT NULL; this just mirrors that, doesn't re-decide it).
+      (q.updates || []).forEach(function (u) {
+        var uRow = el("div", { class: "mc-update" });
+        uRow.appendChild(el("span", { class: "mc-update-dot" }));
+        uRow.appendChild(el("span", { class: "mc-update-text" }, [text(u.text)]));
+        this.body.appendChild(uRow);
+      }, this);
+      var waiting = el("div", { class: "mc-waiting" });
+      waiting.appendChild(el("span", { class: "mc-dot" }));
+      waiting.appendChild(el("span", { class: "mc-dot" }));
+      waiting.appendChild(el("span", { class: "mc-dot" }));
+      waiting.appendChild(el("span", { class: "mc-waiting-label" }, [text("waiting for a reply")]));
+      this.body.appendChild(waiting);
+      this._renderCompose(false);
+      return;
+    }
+
+    var ansRow = el("div", { class: "mc-message" });
+    ansRow.appendChild(el("span", { class: "mc-avatar", style: "background:" + mcColor("responder") }, [text("A")]));
+    var ansBody = el("div", { class: "mc-message-body" });
+    var ansMeta = el("div", { class: "mc-message-meta" });
+    ansMeta.appendChild(el("span", { class: "mc-name" }, [text("auto-schema")]));
+    ansMeta.appendChild(el("span", { class: "mc-when" }, [text(fmtWhen(q.answered_at))]));
+    ansBody.appendChild(ansMeta);
+    ansBody.appendChild(el("div", { class: "mc-text" }, [text(q.answer)]));
+    ansRow.appendChild(ansBody);
+    this.body.appendChild(ansRow);
+    this._renderCompose(true);
+  };
+
+  Row.prototype._renderCompose = function (answered) {
+    var self = this;
+    if (answered && !this.followingUp) {
+      var link = el("button", { type: "button", class: "mc-followup-link" });
+      link.textContent = "Not quite — ask a follow-up";
+      link.addEventListener("click", function () { self.followingUp = true; self.render(); });
+      this.composeWrap.appendChild(link);
+      return;
+    }
+    var input = el("input", {
+      type: "text",
+      class: "mc-input",
+      placeholder: answered ? "What's still unclear…" : "Ask a question…",
+    });
+    var send = el("button", { type: "button", class: "mc-send" });
+    send.textContent = "➤";
+    function showError(msg) {
+      var err = self.composeWrap.querySelector(".mc-error");
+      if (!err) {
+        err = el("div", { class: "mc-error" });
+        self.composeWrap.insertBefore(err, self.composeWrap.firstChild);
+      }
+      err.textContent = msg;
+    }
+    function doSend() {
+      var val = input.value.trim();
+      if (!val) return;
+      input.disabled = true; send.disabled = true;
+      var req = answered
+        ? fetch(QUESTIONS_BASE + "/" + self.entry.entry_id + "/reopen" + mcAsParam(), {
+            method: "POST", credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ followup: val }),
+          })
+        : fetch(QUESTIONS_BASE + mcAsParam(), {
+            method: "POST", credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ question: val, anchor: self.anchor }),
+          });
+      req.then(function (r) {
+        if (r.status === 401) { showError("This link needs to be reopened from your invite to post — try it again from your original link."); throw new Error("unauthorized"); }
+        if (!r.ok) { showError("That didn't go through — try again in a moment."); throw new Error("request failed"); }
+        return r.json();
+      }).then(function () {
+        self.followingUp = false;
+        input.disabled = false; send.disabled = false;
+        self.refresh();
+      }).catch(function () {
+        input.disabled = false; send.disabled = false;
+      });
+    }
+    input.addEventListener("keydown", function (ev) { if (ev.key === "Enter") doSend(); });
+    send.addEventListener("click", doSend);
+    this.composeWrap.appendChild(input);
+    this.composeWrap.appendChild(send);
+  };
+
+  function mcAsParam() {
+    // The visitor token, if this page was opened with ?as=<token>, is
+    // already carried by the mc_visitor cookie after first load -- see
+    // SKILL.md §6. Nothing to add here; same-origin fetch sends cookies
+    // automatically. Placeholder kept for a future explicit-token path.
+    return "";
+  }
+
+  // ── live updates: ride the plain /api/events SSE bus, no relay ────
+  // Same-origin/local access only (see graph://ce07a01f-faa for why the
+  // relay-served case is a separate, not-yet-built path). Filters two
+  // topics: mission_control:conversation (carries the full entry, no
+  // refetch needed) and setting.changed for dashboard.surface.presence
+  // (just a nudge -- presence is refetched, not carried in the event).
+  function startLiveUpdates(rows) {
+    var es;
+    try {
+      es = new EventSource(API_BASE + "/api/events");
+    } catch (e) {
+      return; // no live updates; rows still work via manual refresh on open
+    }
+    es.addEventListener("mission_control:conversation", function (ev) {
+      var data;
+      try { data = JSON.parse(ev.data); } catch (e) { return; }
+      if (data.mission_id !== MISSION_ID) return;
+      if ((data.pillar_id || "") !== (CURRENT_PILLAR_ID || "")) return;
+      rows.forEach(function (row) {
+        if (row.open && row.entry && row.entry.entry_id === data.entry_id) row.refresh();
+        else if (row.open && !row.entry && data.question && data.question.anchor === row.anchor) row.refresh();
+      });
+    });
+    es.addEventListener("setting.changed", function (ev) {
+      var data;
+      try { data = JSON.parse(ev.data); } catch (e) { return; }
+      if (data.set_id === "dashboard.surface.presence") pollPresence();
+    });
+  }
+
+  // ── boot: scan for anchors, wire everything ────────────────────────
+  document.addEventListener("DOMContentLoaded", function () {
+    var rows = [];
+    document.querySelectorAll("[data-mc-anchor]").forEach(function (hostEl) {
+      var anchor = hostEl.getAttribute("data-mc-anchor");
+      if (!anchor) return;
+      rows.push(new Row(hostEl, anchor));
+    });
+    startLiveUpdates(rows);
+    pollPresence();
+  });
+})();
+</script>
+```
+
+**Verified this session:** pushed onto a real pillar site built from the OSS
+Insights coordinator's actual production HTML (their real `component_catalog`
+schema table, unmodified except for three `data-mc-anchor` attributes),
+opened via a real minted guest identity — a question asked, answered from a
+separate curl call standing in for the pillar's own coordinator session, and
+the answer arriving in the open browser tab with no manual reload, purely
+over the SSE mechanism above. Screenshots: `graph://89fb0c04-017`.
