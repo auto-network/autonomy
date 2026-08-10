@@ -406,6 +406,9 @@ window.getSessionStore = function(sessionId) {
       // Client-local tiles (uploads) — no entry_ref, display interleaves
       // them by timestamp; never part of the server-truth buffer.
       localEntries: [],
+      // Ref-string → entry identity map; the display's paint-safe
+      // resolution path (never resolve a tile by array index alone).
+      _byRef: {},
       _mergeRev: 0,
       _structureRev: 0,
       _localRefSeq: 0,
@@ -703,6 +706,12 @@ window.mergeSessionEntries = function(store, data, provenance) {
       if (out.structural) structural = true;
     } else {
       store.entries.splice(at, 0, entry);
+      // Ref → entry identity map: the display layer resolves tiles
+      // through this, never by array index, so a descriptor can never
+      // paint the wrong entry mid-shift (the transient type-swapped
+      // tiles the operator photographed during rapid scroll-back).
+      if (!store._byRef) store._byRef = {};
+      store._byRef[ref.file + ':' + ref.off + ':' + (ref.sub || 0)] = entry;
       if (entry.type === 'tool_use' && entry.tool_id) _registerToolUse(store, entry);
       if (entry.type === 'tool_result' && entry.tool_id) _registerToolResult(store, entry);
       inserted++;

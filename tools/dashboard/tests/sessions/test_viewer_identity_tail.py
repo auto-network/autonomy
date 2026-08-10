@@ -849,6 +849,34 @@ class TestRound2Blockers:
         )
 
 
+# ── Diag store-dump plumbing (auto-64nx3 incident instrumentation) ─────
+
+
+class TestDiagStoreDump:
+
+    def test_store_dump_requires_session(self, tail_client):
+        client, _tmp, _db = tail_client
+        resp = client.get("/api/diag/store-dump")
+        assert resp.status_code == 400
+
+    def test_store_dump_round_trip_shape(self, tail_client, monkeypatch):
+        """No connected tabs in the test app — the endpoint still emits the
+        diag:request and returns the aggregation envelope."""
+        client, _tmp, _db = tail_client
+        from tools.dashboard import server as server_mod
+        import sys
+        srv = sys.modules[server_mod.__name__]
+        monkeypatch.setattr(srv, "_DIAG_COLLECTION_WINDOW_SECONDS", 0.05)
+        resp = client.get("/api/diag/store-dump?session=auto-x&from=10&limit=50")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["session"] == "auto-x"
+        assert data["from"] == 10
+        assert data["limit"] == 50
+        assert data["clients_responded"] == 0
+        assert data["clients"] == []
+
+
 # ── Acceptance: cold-open of a very long session is one cheap request ──
 
 
