@@ -143,8 +143,8 @@ class TestInotifyInit:
         mon._init_inotify()
 
         assert mon._use_inotify is True
-        assert len(mon._wd_to_session) == 1
-        assert "auto-test-1" in mon._wd_to_session.values()
+        assert len(mon._inode_watches) == 1
+        assert any(sub == ("session", "auto-test-1") for e in mon._inode_watches.values() for sub in e["subscribers"])
         assert len(mon._dir_path_to_wd) == 1
 
 
@@ -165,7 +165,8 @@ class TestWatchManagement:
 
         ts = mon._tail_states["auto-x"]
         assert ts.watch_descriptor is not None
-        assert mon._wd_to_session[ts.watch_descriptor] == "auto-x"
+        inode_key = mon._wd_to_inode[ts.watch_descriptor]
+        assert ("session", "auto-x") in mon._inode_watches[inode_key]["subscribers"]
 
     def test_add_dir_watch_dedup(self, setup_env):
         """Multiple sessions in same dir share one kernel watch."""
@@ -243,8 +244,9 @@ class TestWatchManagement:
         new_wd = mon._tail_states["auto-r"].watch_descriptor
         assert new_wd is not None
         assert new_wd != old_wd
-        assert old_wd not in mon._wd_to_session
-        assert mon._wd_to_session[new_wd] == "auto-r"
+        assert old_wd not in mon._wd_to_inode
+        inode_key = mon._wd_to_inode[new_wd]
+        assert ("session", "auto-r") in mon._inode_watches[inode_key]["subscribers"]
 
 
 class TestInotifyTailerLoop:
@@ -371,11 +373,11 @@ class TestRegisterDeregister:
         ts = mon._tail_states.get("auto-dereg-test")
         old_wd = ts.watch_descriptor
         assert old_wd is not None
-        assert old_wd in mon._wd_to_session
+        assert old_wd in mon._wd_to_inode
 
         await mon.deregister("auto-dereg-test")
 
-        assert old_wd not in mon._wd_to_session
+        assert old_wd not in mon._wd_to_inode
         assert "auto-dereg-test" not in mon._tail_states
 
 
@@ -443,7 +445,8 @@ class TestHostSessionWatcherAddsWatches:
             ts = mon._tail_states.get(tmux_name)
             assert ts is not None, "TailState should exist after watcher links"
             assert ts.watch_descriptor is not None, "File watch should be set"
-            assert mon._wd_to_session[ts.watch_descriptor] == tmux_name
+            inode_key = mon._wd_to_inode[ts.watch_descriptor]
+            assert ("session", tmux_name) in mon._inode_watches[inode_key]["subscribers"]
 
             # Verify: inotify dir watch exists
             assert str(projects_dir) in mon._dir_path_to_wd, "Dir watch should be set"

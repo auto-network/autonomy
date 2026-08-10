@@ -5070,11 +5070,13 @@ async def api_session_confirm_link(request):
                     session_monitor._add_dir_watch(tmux_session, str(jf.parent))
                     # auto-suvcp: persisted re-attach + catch-up drain, so the
                     # handshake transcript's existing bytes become visible
-                    # without waiting for the next write.
+                    # without waiting for the next write. The registry
+                    # publishes AFTER that drain (invariant 9) — no direct
+                    # broadcast here, or the card durably shows
+                    # resolved=true with zero entries (R3).
                     session_monitor.observe_rollout(
                         tmux_session, jf, source="confirm_link",
                     )
-                    await session_monitor._broadcast_registry()
                     return JSONResponse({"ok": True, "project": project, "session_id": session_id})
         except Exception:
             continue
@@ -8378,8 +8380,15 @@ async def _watch_for_host_session_jsonl(
         session_monitor._add_file_watch(tmux_name, str(new_jsonl))
         session_monitor._add_dir_watch(tmux_name, str(projects_dir))
 
-        # Broadcast registry so clients see resolved=true
-        await session_monitor._broadcast_registry()
+        # auto-suvcp R3: activation goes through the unified machine — the
+        # persisted re-attach requests a catch-up drain (the orientation
+        # burst already on disk becomes visible with no further write) and
+        # the registry publishes AFTER that drain (invariant 9). A direct
+        # broadcast here would durably show resolved=true with zero
+        # entries — the CalStartupStall broadcast leg, host edition.
+        session_monitor.observe_rollout(
+            tmux_name, new_jsonl, source="host_watch",
+        )
         return
     logger.warning("JSONL watcher timed out after %.0fs  tmux=%s", timeout, tmux_name)
 
