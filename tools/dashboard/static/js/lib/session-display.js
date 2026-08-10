@@ -31,6 +31,43 @@
     return entry && entry.internal !== true && entry.hidden !== true;
   }
 
+  // ── The anchor rule (auto-64nx3, operator-specified) ────────────────
+  //
+  // An ANCHOR is an entry whose meaning needs nothing before it: a
+  // user's actual text message (a bare tool-result carrier is NOT one),
+  // or the start of agent flow (assistant text / thinking). The display
+  // renders the contiguous buffer from the FIRST anchor downward;
+  // anything above the topmost anchor is HELD — kept in the buffer,
+  // never rendered, and no fetch is made on its behalf. When scroll-up
+  // merges the next older page, the buffer becomes contiguous through
+  // the held entries and they render exactly once under their owning
+  // flow; an owner that never arrives in view means they never render.
+  //
+  // This is a render-time if-statement, nothing more. It deletes the
+  // dangling-fragment class by construction: a tool-result carrier can
+  // never render as an empty USER tile and tool output can never render
+  // as ASSISTANT prose, because nothing renders without its owning flow
+  // present (IMG_2110, live on a phone over an agent transcript).
+  function isAnchor(entry) {
+    if (!entry) return false;
+    if (entry.type === 'user') {
+      var c = entry.content;
+      if (typeof c === 'string') return c.trim().length > 0;
+      return c !== undefined && c !== null;
+    }
+    // A peer message is a user message with a different label.
+    if (entry.type === 'crosstalk') return true;
+    // Agent flow: everything below is attributed to this agent's turn.
+    return entry.type === 'assistant_text' || entry.type === 'thinking';
+  }
+
+  function firstAnchorIndex(entries) {
+    for (var i = 0; i < entries.length; i++) {
+      if (isAnchor(entries[i])) return i;
+    }
+    return -1;
+  }
+
   function refKey(entry, idx) {
     var r = entry && entry.entry_ref;
     if (r) return r.file + ':' + r.off + ':' + (r.sub || 0);
@@ -61,7 +98,14 @@
       }
     }
 
-    var i = 0;
+    // Anchor rule: render from the first anchor downward; entries above
+    // it are held. No anchor in the buffer → nothing renders yet.
+    var anchorAt = firstAnchorIndex(entries);
+    if (anchorAt === -1) {
+      flushLocalsUpTo(null);
+      return display;
+    }
+    var i = anchorAt;
     var len = entries.length;
     while (i < len) {
       var e = entries[i];
@@ -104,6 +148,18 @@
     if (newIdx < 0 || newIdx >= entries.length) return display;
     var entry = entries[newIdx];
     if (!isDisplayable(entry)) return display;
+    // Anchor rule: a tail entry renders only at-or-below an anchor. A
+    // server descriptor already in the display proves an anchor above;
+    // otherwise this entry must itself be one (local upload tiles don't
+    // anchor server flow).
+    var hasServerDescriptor = false;
+    for (var di = display.length - 1; di >= 0; di--) {
+      if (display[di].idx !== undefined || display[di].type === 'group') {
+        hasServerDescriptor = true;
+        break;
+      }
+    }
+    if (!hasServerDescriptor && !isAnchor(entry)) return display;
     var last = display.length > 0 ? display[display.length - 1] : null;
 
     if (last && isGroupable(entry)) {
@@ -158,6 +214,7 @@
     buildAll: buildAll,
     appendOne: appendOne,
     resolve: resolve,
+    isAnchor: isAnchor,
     _isGroupable: isGroupable
   };
 

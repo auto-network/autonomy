@@ -153,6 +153,36 @@ describe('diag client-side counters (auto-wldnv)', () => {
       'entries with no seq field counted');
   });
 
+  it('wire shape carries the full counter set + committed (auto-64nx3)', () => {
+    // The production acceptance instrumentation must survive the actual
+    // wire: collector output → JSON → session_markers. Traced live-shape
+    // end-to-end (real server, real tab) during auto-64nx3; this pins
+    // the client half so a future field-list regression is caught here.
+    const h = makeHarness();
+    const store = h.win.getSessionStore('sess-wire');
+    h.win.mergeSessionEntries(store, {
+      chain: ['f'],
+      entries: [{ type: 'assistant_text', content: 'x', timestamp: 't',
+                  entry_ref: { file: 'f', off: 0, sub: 0 } }],
+    }, 'sse');
+    store.committed = { file: 'f', off: 40 };
+    const wire = JSON.parse(JSON.stringify(
+      h.win._diagSnapshotSessions(['sess-wire'])));
+    const m = wire['sess-wire'];
+    assert.ok(m, 'marker block present');
+    assert.deepEqual(m.committed, { file: 'f', off: 40 });
+    assert.ok(m.counters, 'counters present on the wire');
+    for (const key of ['merge_inserted', 'merge_merged',
+      'merge_dropped_duplicate', 'merge_downgrades_blocked',
+      'span_gaps_detected', 'catchup_stalls', 'wakeups_by_trigger',
+      'wake_happy', 'wake_gap', 'gap_entries_total', 'gap_bytes_total',
+      'on_the_fly_catchups', 'catchup_count', 'catchup_latency_ms_total',
+      'stream_rebuilds', 'stream_rebuilds_dead', 'conclusion_contradicted']) {
+      assert.ok(key in m.counters, `counter ${key} missing from wire shape`);
+    }
+    assert.equal(m.counters.merge_inserted, 1);
+  });
+
   it('_diagSnapshotSessions reads gap_replays_count + ts via global hooks', () => {
     const h = makeHarness();
     h.win.getSessionStore('sess-4');
