@@ -2136,6 +2136,30 @@ def test_dashboard_pending_commit_shas_filters_non_autonomy_repos(tmp_path):
     assert pending == [pending_sha]
 
 
+def test_cherry_pick_dry_run_accepts_binary_blob_output(tmp_path):
+    """A binary asset in merge-tree output must not be decoded as UTF-8."""
+    repo = tmp_path / "binary-merge-tree"
+    repo.mkdir()
+    _run(["init", "-q", "-b", "master"], repo)
+    _run(["config", "user.email", "t@t"], repo)
+    _run(["config", "user.name", "t"], repo)
+    (repo / "base.txt").write_text("base\n")
+    _run(["add", "base.txt"], repo)
+    _run(["commit", "-q", "-m", "base"], repo)
+
+    _run(["checkout", "-q", "-b", "feature"], repo)
+    (repo / "provider.png").write_bytes(
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\xff\xfe\xfd"
+    )
+    _run(["add", "provider.png"], repo)
+    _run(["commit", "-q", "-m", "add binary provider icon"], repo)
+
+    assert wm._cherry_pick_dry_run(repo, _rev_parse(repo), "master") == (
+        True,
+        "clean",
+    )
+
+
 def _make_commit_detail_fixture(tmp_path):
     """A repo with an add, a modify, a rename, and a binary-file commit."""
     repo = tmp_path / "detail-fixture"

@@ -1042,7 +1042,7 @@ class WorktreeDirtyDetail:
     reason: str | None = None
 
 
-# Process-lifetime count of ``_git_output`` invocations. Coarse and
+# Process-lifetime count of git-output helper invocations. Coarse and
 # unscoped by design: callers that want a sweep-scoped count take a
 # before/after snapshot via :func:`git_call_count` rather than us
 # threading a counter object through every helper's signature (which
@@ -1077,6 +1077,27 @@ def _git_output(args: list[str], cwd: Path, *, timeout: int = 15) -> tuple[int, 
         return 124, "", f"timeout after {timeout}s"
     except FileNotFoundError as e:
         return 127, "", str(e)
+    return r.returncode, r.stdout, r.stderr
+
+
+def _git_output_bytes(
+    args: list[str], cwd: Path, *, timeout: int = 15,
+) -> tuple[int, bytes, bytes]:
+    """Run git and return raw output for commands that may emit binary blobs."""
+    global _git_call_total
+    _git_call_total += 1
+    try:
+        r = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, b"", f"timeout after {timeout}s".encode()
+    except FileNotFoundError as e:
+        return 127, b"", str(e).encode()
     return r.returncode, r.stdout, r.stderr
 
 
@@ -2686,14 +2707,17 @@ def _cherry_pick_dry_run(
     The dry-run does not write any state. Safe to call on every worktree row
     refresh.
     """
-    rc, out, _ = _git_output(
+    # ``merge-tree`` can include complete blob contents in its output. Keep
+    # that output as bytes: a clean commit containing a PNG is not UTF-8 and
+    # must not make the worktree scanner fail while checking for conflicts.
+    rc, out, _ = _git_output_bytes(
         ["merge-tree", f"{commit_sha}^", target_branch, commit_sha],
         clone,
         timeout=20,
     )
     if rc != 0:
         return False, f"merge-tree exited {rc}"
-    if "<<<<<<<" in out:
+    if b"<<<<<<<" in out:
         return False, "would conflict"
     return True, "clean"
 
