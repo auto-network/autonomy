@@ -1437,7 +1437,14 @@ const autonet = (() => {
       }).then(reply);
     }
     if (url.indexOf("/pillars") !== -1 && url.indexOf("/api/missions/") !== -1) {
-      return ask("read", { kind: "pillars" }).then(reply);
+      return ask("read", { kind: "pillars" }).then(function (r) {
+        // Cache the roster: the dropdown's row handlers build their target
+        // by concatenation, so there is no literal pillar id in the
+        // handler source to read. Matching the row's own text against
+        // this list is what makes those rows routable.
+        if (r && r.pillars) window.__mcPillars = r.pillars;
+        return reply(r);
+      });
     }
     if (url.indexOf("dashboard.surface.presence") !== -1) {
       return ask("read", { kind: "presence" }).then(function (r) {
@@ -1505,27 +1512,71 @@ const autonet = (() => {
     // page; an absolute external link is left alone.
     if (href.charAt(0) === "/") event.preventDefault();
   }, true);
-  // The page also navigates by assignment (window.location.href = ...),
-  // which a sandbox without allow-top-navigation blocks outright. Give it
-  // a settable shim that routes to the same in-place swap.
+  // The page ALSO navigates by assignment -- the pillar dropdown builds
+  // <span> rows with row.onclick = window.location.href = "/missions/...".
+  // Two reasons the click handler above misses those: they are not <a>
+  // elements, so walking up for an anchor finds nothing, and
+  // window.location is NON-CONFIGURABLE in every engine, so redefining it
+  // (the previous attempt here) silently hit its own catch and did
+  // nothing. On mobile that read as a dropdown that opens and closes but
+  // cannot select anything.
+  //
+  // Intercept the surviving path instead: a same-document navigation the
+  // sandbox is about to perform fires unload. By then the URL is already
+  // known via document.activeElement's own handler, so instead hook the
+  // two APIs that CAN be replaced -- location.assign/replace -- and catch
+  // the href-setter case by watching for the frame trying to leave.
   try {
     var realAssign = window.location.assign.bind(window.location);
-    Object.defineProperty(window, "location", {
-      configurable: true,
-      get: function () { return window.__mcLocation; },
-      set: function (value) { window.__mcLocation.href = value; },
-    });
-    window.__mcLocation = {
-      get href() { return document.baseURI; },
-      set href(value) {
-        var m = String(value).match(/\\/missions\\/[^\\/]+\\/pillars\\/([^\\/?#]+)/);
-        if (m) { openPillar(m[1]); return; }
-        realAssign(value);
-      },
-      assign: function (v) { this.href = v; },
-      replace: function (v) { this.href = v; },
-    };
-  } catch (e) { /* a browser refusing the redefinition keeps link clicks */ }
+    var realReplace = window.location.replace.bind(window.location);
+    function routeOrGo(value, fallback) {
+      var m = String(value).match(/\\/missions\\/[^\\/]+\\/pillars\\/([^\\/?#]+)/);
+      if (m) { openPillar(m[1]); return; }
+      if (/\\/missions\\/[^\\/?#]+\\/?$/.test(String(value))) {
+        if (MISSION_HTML) swap(MISSION_HTML);
+        return;
+      }
+      fallback(value);
+    }
+    window.location.assign = function (v) { routeOrGo(v, realAssign); };
+    window.location.replace = function (v) { routeOrGo(v, realReplace); };
+  } catch (e) { /* assign/replace not replaceable: click handling still applies */ }
+  // The href-setter case cannot be hooked at all, so catch it one level
+  // up: any click whose handler is about to set location gets its target
+  // inspected first. A row carrying an onclick that mentions a pillar
+  // path is routed here and its handler suppressed, which is what makes
+  // the dropdown selectable.
+  document.addEventListener("click", function (event) {
+    var el = event.target;
+    while (el && el !== document) {
+      var handler = el.getAttribute && el.getAttribute("onclick");
+      var src = handler || (el.onclick ? String(el.onclick) : "");
+      var m = src && src.match(/\\/missions\\/[^\\/"']+\\/pillars\\/([^\\/"'?#\\s+]+)/);
+      if (m) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        openPillar(m[1]);
+        return;
+      }
+      // A handler that builds the path by concatenation ("/pillars/" +
+      // p.pillar_id) has no literal id to read, so fall back to the
+      // element's own text matched against the pillar list.
+      if (src && src.indexOf("/pillars/") !== -1) {
+        var label = (el.textContent || "").trim();
+        if (label && window.__mcPillars) {
+          for (var i = 0; i < window.__mcPillars.length; i++) {
+            if ((window.__mcPillars[i].name || "").trim() === label) {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+              openPillar(window.__mcPillars[i].pillar_id);
+              return;
+            }
+          }
+        }
+      }
+      el = el.parentElement;
+    }
+  }, true);
 })();<\/script>`;
 
   function missionShimmed(html) {
