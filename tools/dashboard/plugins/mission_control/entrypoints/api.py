@@ -835,6 +835,93 @@ async def handle_relay_write(participant_id: str, mission_id: str, body: dict) -
     return {"question": entry_payload}
 
 
+def _pillar_of_this_mission(pillar_id, mission_id: str) -> dict | None:
+    """A pillar_id from a guest's request body is only usable if it
+    belongs to THIS channel's own mission. Same check, same reason, as
+    handle_relay_write's -- a guest's channel is bound to one mission and
+    must never reach another mission's content through a supplied id."""
+    if not isinstance(pillar_id, str) or not pillar_id:
+        return None
+    pillar = db.get_pillar(pillar_id)
+    if not pillar or pillar["mission_id"] != mission_id:
+        return None
+    return pillar
+
+
+def _mission_presence(mission_id: str) -> list[dict]:
+    """Presence rows for this mission's own surface.
+
+    Rows are keyed ``{surface_id}:{participant_id}`` and a mission's
+    surface_id is itself ``mission:<mission_id>``, so the prefix match
+    below is three-part by construction -- the same shape the relay
+    publisher's presence routing depends on.
+    """
+    from tools.graph import settings_ops
+    from tools.graph.surface import SURFACE_PRESENCE_SET_ID
+
+    prefix = f"mission:{mission_id}:"
+    try:
+        rows = settings_ops.read_set(SURFACE_PRESENCE_SET_ID)
+    except Exception:
+        return []  # presence is decoration; never fail a read over it
+    out = []
+    for member in rows.members:
+        if not isinstance(member.key, str) or not member.key.startswith(prefix):
+            continue
+        payload = member.payload if isinstance(member.payload, dict) else {}
+        out.append({
+            "participant_id": payload.get("participant_id"),
+            "participant_label": payload.get("participant_label"),
+            "participant_kind": payload.get("participant_kind"),
+            "state": payload.get("state"),
+            "heartbeat_at": payload.get("heartbeat_at"),
+        })
+    return out
+
+
+async def handle_relay_read(participant_id: str, mission_id: str, body: dict) -> dict | None:
+    """The relay's ``read`` op for a ``mission`` grant (auto-t2lz1).
+
+    The read mirror of :func:`handle_relay_write`: the relay hands over
+    ``(identity, mission_id, body)`` and never interprets ``body``, so
+    everything a mission read MEANS lives here. This is what the mission
+    site's own ``fetch('/api/...')`` calls become over the relay, where
+    the dashboard's origin does not exist.
+
+    Returns the response payload, or None for the relay to refuse.
+    """
+    if not db.get_mission(mission_id):
+        return None
+    kind = body.get("kind")
+
+    if kind == "pillars":
+        return {"pillars": [_pillar_payload(p) for p in db.list_pillars(mission_id)]}
+
+    if kind == "questions":
+        pillar_id = body.get("pillar_id")
+        if pillar_id is None:
+            entries = db.list_conversation(mission_id)
+        else:
+            if _pillar_of_this_mission(pillar_id, mission_id) is None:
+                return None
+            entries = db.list_pillar_conversation(pillar_id)
+        return {"questions": [_question_payload(e) for e in entries]}
+
+    if kind == "presence":
+        return {"presence": _mission_presence(mission_id)}
+
+    if kind == "pillar_site":
+        pillar_id = body.get("pillar_id")
+        if _pillar_of_this_mission(pillar_id, mission_id) is None:
+            return None
+        current = db.get_current_pillar_site(pillar_id)
+        if not current or not current.get("html"):
+            return None
+        return {"pillar_id": pillar_id, "html": current["html"]}
+
+    return None
+
+
 async def _ask_question_impl(
     request: Request, *, mission_id: str, pillar_id: str | None,
 ) -> JSONResponse:

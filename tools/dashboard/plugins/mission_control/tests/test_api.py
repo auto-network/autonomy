@@ -1652,6 +1652,113 @@ def test_handle_relay_write_publishes_conversation_event_and_schedules_relay():
         mc_api.event_bus.unsubscribe(queue)
 
 
+# ── handle_relay_read (auto-t2lz1) ───────────────────────────────
+#
+# What the mission site's own fetch('/api/...') calls become over the
+# relay, where the dashboard's origin does not exist. Called the same way
+# the relay calls it: identity already resolved, body never interpreted
+# by the transport.
+
+
+def test_handle_relay_read_lists_pillars():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    pillar = _pillar_with_site(client, mission_id, name="Dataset")
+    result = _run(mc_api.handle_relay_read("guest:1", mission_id, {"kind": "pillars"}))
+    assert [p["pillar_id"] for p in result["pillars"]] == [pillar["pillar_id"]]
+    assert result["pillars"][0]["name"] == "Dataset"
+
+
+def test_handle_relay_read_lists_mission_questions():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        client.post(
+            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            json={"question": "over the relay?"},
+        )
+    result = _run(mc_api.handle_relay_read("guest:1", mission_id, {"kind": "questions"}))
+    assert [q["question"] for q in result["questions"]] == ["over the relay?"]
+
+
+def test_handle_relay_read_lists_pillar_questions():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    pillar = _pillar_with_site(client, mission_id)
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        client.post(
+            f"/api/pillars/{pillar['pillar_id']}/questions?as={visitor['token']}",
+            json={"question": "pillar q"},
+        )
+    result = _run(mc_api.handle_relay_read(
+        "guest:1", mission_id, {"kind": "questions", "pillar_id": pillar["pillar_id"]},
+    ))
+    assert [q["question"] for q in result["questions"]] == ["pillar q"]
+
+
+def test_handle_relay_read_serves_pillar_site_html():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    pillar = _pillar(client, mission_id)
+    client.post(f"/api/pillars/{pillar['pillar_id']}/site",
+                json={"html": "<html>pillar page</html>"})
+    result = _run(mc_api.handle_relay_read(
+        "guest:1", mission_id, {"kind": "pillar_site", "pillar_id": pillar["pillar_id"]},
+    ))
+    assert result["html"] == "<html>pillar page</html>"
+    assert result["pillar_id"] == pillar["pillar_id"]
+
+
+def test_handle_relay_read_pillar_site_before_any_push_is_refused():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    pillar = _pillar(client, mission_id)  # no site pushed
+    assert _run(mc_api.handle_relay_read(
+        "guest:1", mission_id, {"kind": "pillar_site", "pillar_id": pillar["pillar_id"]},
+    )) is None
+
+
+def test_handle_relay_read_refuses_a_pillar_of_another_mission():
+    """Same cross-mission check the write path makes: a guest's channel is
+    bound to ONE mission and must never reach another's content through a
+    supplied pillar_id."""
+    client = _client()
+    mission_a = _mission_with_site(client)
+    mission_b = client.post("/api/missions", json={"name": "B"}).json()["mission"]["mission_id"]
+    pillar_b = _pillar_with_site(client, mission_b)
+    client.post(f"/api/pillars/{pillar_b['pillar_id']}/site", json={"html": "<html>B</html>"})
+
+    for body in (
+        {"kind": "questions", "pillar_id": pillar_b["pillar_id"]},
+        {"kind": "pillar_site", "pillar_id": pillar_b["pillar_id"]},
+    ):
+        assert _run(mc_api.handle_relay_read("guest:1", mission_a, body)) is None
+
+
+def test_handle_relay_read_unknown_mission_is_refused():
+    assert _run(mc_api.handle_relay_read("guest:1", "nope", {"kind": "pillars"})) is None
+
+
+@pytest.mark.parametrize("body", [
+    {}, {"kind": "delete_everything"}, {"kind": None},
+    {"kind": "pillar_site"},  # no pillar_id
+    {"kind": "pillar_site", "pillar_id": 123},
+])
+def test_handle_relay_read_malformed_bodies_are_refused(body):
+    client = _client()
+    mission_id = _mission_with_site(client)
+    assert _run(mc_api.handle_relay_read("guest:1", mission_id, body)) is None
+
+
+def test_handle_relay_read_presence_returns_a_list():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    result = _run(mc_api.handle_relay_read("guest:1", mission_id, {"kind": "presence"}))
+    assert isinstance(result["presence"], list)
+
+
 # ── Cross-pillar decision log ────────────────────────────────────
 
 
