@@ -440,6 +440,12 @@ just a style preference.
       var menu = document.getElementById("mc-topbar-menu");
       var top = el("div", { style: "padding:8px 10px;cursor:pointer;color:#a5b4fc;" });
       top.textContent = "← Mission overview";
+      // data-mc-* marks the destination declaratively. On the dashboard the
+      // onclick navigates as usual; over the relay the viewer reads the
+      // attribute and swaps in place. Without the marker the viewer would
+      // have to guess a destination the handler builds by concatenation --
+      // it cannot, and the entry silently does nothing.
+      top.setAttribute("data-mc-home", "1");
       top.onclick = function () { window.location.href = "/missions/" + MISSION_ID; };
       menu.appendChild(top);
       pillars.forEach(function (p) {
@@ -447,6 +453,7 @@ just a style preference.
         var dot = el("span", { style: "width:8px;height:8px;border-radius:9999px;background:" + (p.color || "#6b7280") + ";" });
         row.appendChild(dot);
         row.appendChild(document.createTextNode(p.name));
+        row.setAttribute("data-mc-pillar", p.pillar_id);
         row.onclick = function () { window.location.href = "/missions/" + MISSION_ID + "/pillars/" + p.pillar_id; };
         menu.appendChild(row);
       });
