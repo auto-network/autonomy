@@ -28,6 +28,21 @@ main { max-width: 52rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; }
 .markdown-body th, .markdown-body td { padding: .45rem .65rem; border: 1px solid #34404b; }
 .image-unavailable { display: block; padding: 1rem; margin: 1rem 0; border: 1px dashed #596775; color: #aeb9c5; }
 #render-error { color: #f3a6a6; }
+.attachments { margin: 2.5rem 0 0; border-top: 1px solid #303943; padding-top: 1.25rem; }
+.attachments h2 { color: #f0f4f8; font-size: 1.1rem; margin: 0 0 .85rem; }
+.attachment { display: flex; align-items: center; gap: .75rem; width: 100%; box-sizing: border-box;
+  padding: .6rem .8rem; margin: .4rem 0; border: 1px solid #2b3540; border-radius: .5rem;
+  background: #161c22; color: #d8dee6; font: inherit; text-align: left; cursor: pointer; }
+.attachment:hover:not(:disabled) { border-color: #3a5069; background: #1a222b; }
+.attachment:disabled { cursor: default; opacity: .6; }
+.attachment-type { flex: none; width: 2.4rem; height: 2.4rem; display: grid; place-items: center;
+  border-radius: .4rem; background: #202832; color: #8db9ff; font-size: .7rem; font-weight: 600; }
+.attachment-detail { flex: 1 1 auto; min-width: 0; }
+.attachment-name { display: block; color: #f0f4f8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-meta { display: block; color: #aeb9c5; font-size: .85rem; }
+.attachment-status { flex: none; color: #8db9ff; font-size: .85rem; white-space: nowrap; }
+.attachment[data-state="error"] .attachment-status { color: #f3a6a6; }
+.attachment[data-state="complete"] .attachment-status { color: #7ee787; }
 </style>
 </head>
 <body>
@@ -35,6 +50,7 @@ main { max-width: 52rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; }
   <h1 id="note-title"></h1>
   <article id="note-body" class="markdown-body" aria-live="polite"></article>
   <p id="render-error" hidden>This note could not be rendered.</p>
+  <section id="attachments" class="attachments" hidden aria-label="Attachments"></section>
 </main>
 <script>/*__MARKED_JS__*/</script>
 <script>/*__PURIFY_JS__*/</script>
@@ -55,6 +71,180 @@ main { max-width: 52rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; }
     FORBID_ATTR: ['onerror','onload','onclick','onmouseover','onfocus','onblur','style'],
   };
   let rendered = false;
+
+  // Attachment download controls (auto-1cs87). The viewer renders the note's
+  // metadata-only manifest as clickable controls and speaks the frozen
+  // semantic-intent bridge (wire protocol v1, note 072cd1af) to the
+  // same-origin parent: it emits attachment.select/cancel/export carrying only
+  // a ref, and consumes only attachment.state. It receives the authenticated
+  // display name (never a destination path or the parent's sanitized output
+  // filename) and never a token, offset, or byte; the parent owns the channel,
+  // storage, and export. Both the manifest and the state envelope are
+  // validated to their exact frozen shapes as defence in depth.
+  const ATTACHMENT_STATES = new Set([
+    'idle', 'queued', 'downloading', 'ready',
+    'exporting', 'complete', 'cancelled', 'error',
+  ]);
+  const MANIFEST_FIELDS = ['ref', 'name', 'mime', 'raw_sha256', 'total_size', 'oversize'];
+  const STATE_FIELDS = new Set([
+    'v', 'type', 'ref', 'state', 'received', 'total', 'error_code',
+  ]);
+  const SHA256_RE = /^[0-9a-f]{64}$/;
+  // The intent a click emits depends on the control's current state; a state
+  // with no action (in-flight save, terminal complete) is not clickable.
+  const ACTION_BY_STATE = {
+    idle: 'attachment.select',
+    error: 'attachment.select',
+    cancelled: 'attachment.select',
+    queued: 'attachment.cancel',
+    downloading: 'attachment.cancel',
+    ready: 'attachment.export',
+    exporting: null,
+    complete: null,
+  };
+  const controlsByRef = new Map();
+
+  function formatSize(bytes) {
+    if (!Number.isFinite(bytes) || bytes < 0) return '';
+    if (bytes < 1024) return bytes + ' B';
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let value = bytes / 1024;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+    return value.toFixed(value < 10 ? 1 : 0) + ' ' + units[unit];
+  }
+
+  function typeLabel(name, mime) {
+    const ext = String(name || '').split('.').pop();
+    if (ext && ext !== name && /^[A-Za-z0-9]{1,4}$/.test(ext)) return ext.toUpperCase();
+    if (typeof mime === 'string' && mime.includes('/')) {
+      return mime.split('/')[1].slice(0, 4).toUpperCase();
+    }
+    return 'FILE';
+  }
+
+  function statusText(state, received, total, errorCode) {
+    switch (state) {
+      case 'queued': return 'Queued…';
+      case 'downloading': {
+        if (Number.isFinite(total) && total > 0 && Number.isFinite(received)) {
+          return 'Downloading ' + Math.floor((received / total) * 100) + '%';
+        }
+        return 'Downloading…';
+      }
+      case 'ready': return 'Save';
+      case 'exporting': return 'Saving…';
+      case 'complete': return 'Saved';
+      case 'cancelled': return 'Cancelled';
+      case 'error': return errorCode ? 'Error: ' + errorCode : 'Error';
+      default: return 'Download';
+    }
+  }
+
+  function setControlState(control, state, received, total, errorCode) {
+    control.dataset.state = state;
+    const action = ACTION_BY_STATE[state] || null;
+    control.disabled = control.dataset.oversize === '1' || action === null;
+    control.querySelector('.attachment-status').textContent =
+      control.dataset.oversize === '1'
+        ? 'Too large'
+        : statusText(state, received, total, errorCode);
+  }
+
+  function postIntent(type, ref) {
+    parent.postMessage({ v: 1, type, ref }, '*');
+  }
+
+  function renderAttachments(entries) {
+    const section = document.getElementById('attachments');
+    controlsByRef.clear();
+    section.textContent = '';
+    if (!Array.isArray(entries) || entries.length === 0) {
+      section.hidden = true;
+      return;
+    }
+    const heading = document.createElement('h2');
+    heading.textContent = 'Attachments';
+    section.appendChild(heading);
+    let shown = 0;
+    for (const entry of entries) {
+      // Exact frozen manifest shape: the six fields and nothing else, so a
+      // crafted entry cannot smuggle an extra field or a non-canonical value.
+      if (!entry || typeof entry !== 'object'
+          || Object.keys(entry).length !== MANIFEST_FIELDS.length
+          || !MANIFEST_FIELDS.every((k) => Object.prototype.hasOwnProperty.call(entry, k))
+          || typeof entry.ref !== 'string' || !entry.ref || controlsByRef.has(entry.ref)
+          || typeof entry.name !== 'string' || Array.from(entry.name).length > 255
+          || typeof entry.mime !== 'string' || !entry.mime
+          || typeof entry.raw_sha256 !== 'string' || !SHA256_RE.test(entry.raw_sha256)
+          || !Number.isSafeInteger(entry.total_size) || entry.total_size < 0
+          || typeof entry.oversize !== 'boolean') {
+        continue;
+      }
+      const control = document.createElement('button');
+      control.type = 'button';
+      control.className = 'attachment';
+      control.dataset.ref = entry.ref;
+      control.dataset.oversize = entry.oversize ? '1' : '0';
+
+      const badge = document.createElement('span');
+      badge.className = 'attachment-type';
+      badge.textContent = typeLabel(entry.name, entry.mime);
+      control.appendChild(badge);
+
+      const detail = document.createElement('span');
+      detail.className = 'attachment-detail';
+      const nameEl = document.createElement('span');
+      nameEl.className = 'attachment-name';
+      nameEl.textContent = entry.name || 'attachment';
+      const metaEl = document.createElement('span');
+      metaEl.className = 'attachment-meta';
+      metaEl.textContent = formatSize(entry.total_size);
+      detail.appendChild(nameEl);
+      detail.appendChild(metaEl);
+      control.appendChild(detail);
+
+      const status = document.createElement('span');
+      status.className = 'attachment-status';
+      control.appendChild(status);
+
+      control.addEventListener('click', () => {
+        const action = ACTION_BY_STATE[control.dataset.state] || null;
+        if (control.dataset.oversize === '1' || action === null) return;
+        postIntent(action, control.dataset.ref);
+      });
+
+      setControlState(control, 'idle');
+      controlsByRef.set(entry.ref, control);
+      section.appendChild(control);
+      shown += 1;
+    }
+    section.hidden = shown === 0;
+  }
+
+  function applyAttachmentState(message) {
+    // Exact frozen parent->child shape: v===1, only the known keys, a known
+    // state, and safe nonnegative integer progress with received<=total.
+    // Anything else leaves the control unchanged.
+    if (!message || message.v !== 1 || message.type !== 'attachment.state'
+        || typeof message.ref !== 'string'
+        || !ATTACHMENT_STATES.has(message.state)) return;
+    for (const key of Object.keys(message)) {
+      if (!STATE_FIELDS.has(key)) return;
+    }
+    const { received, total } = message;
+    // Progress is optional but only as a PAIR: both present (downloading) or
+    // both absent (idle/ready/complete/...). Half-present is not a coherent
+    // envelope and is rejected.
+    if ((received === undefined) !== (total === undefined)) return;
+    if (received !== undefined && (!Number.isSafeInteger(received) || received < 0)) return;
+    if (total !== undefined && (!Number.isSafeInteger(total) || total < 0)) return;
+    if (received !== undefined && total !== undefined && received > total) return;
+    if ('error_code' in message && typeof message.error_code !== 'string') return;
+    const control = controlsByRef.get(message.ref);
+    if (!control || control.dataset.oversize === '1') return;
+    setControlState(control, message.state, received, total, message.error_code || '');
+  }
 
   function unavailableImage(img) {
     const placeholder = document.createElement('span');
@@ -117,6 +307,7 @@ main { max-width: 52rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; }
           anchor.removeAttribute('href');
         }
       });
+      renderAttachments(content.attachments);
       parent.postMessage({v: 1, op: 'title', title}, '*');
       parent.postMessage({v: 1, op: 'height', height: document.documentElement.scrollHeight}, '*');
     } catch (_error) {
@@ -125,7 +316,13 @@ main { max-width: 52rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; }
   }
 
   window.addEventListener('message', (event) => {
-    if (event.source === parent) render(event.data);
+    if (event.source !== parent) return;
+    const data = event.data;
+    if (data && data.op === 'content') {
+      render(data);
+    } else if (data && data.type === 'attachment.state') {
+      applyAttachmentState(data);
+    }
   });
   parent.postMessage({v: 1, op: 'ready'}, '*');
 })();
