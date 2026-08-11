@@ -23,7 +23,7 @@ from tools.network.registry.relay import (
     Stream,
     Tunnel,
 )
-from tools.network.relaykit.frames import tag_feed_frame
+from tools.network.relaykit.frames import VIEWER_KIND_FEED, tag_viewer_message
 
 
 class _ViewerSocket:
@@ -105,7 +105,7 @@ def test_one_inbound_frame_reaches_every_listener():
         assert tunnel.publish_stream("tok", b"hello", now=0.0) is True
         for socket in sockets:
             await asyncio.wait_for(socket.sent.wait(), timeout=1)
-            assert socket.payloads == [tag_feed_frame(b"hello")]
+            assert socket.payloads == [tag_viewer_message(VIEWER_KIND_FEED, b"hello")]
 
     asyncio.run(run())
 
@@ -162,7 +162,7 @@ def test_stalled_listener_does_not_delay_a_fast_one():
 
         tunnel.publish_stream("tok", b"go", now=0.0)
         await asyncio.wait_for(fast.sent.wait(), timeout=1)
-        assert fast.payloads == [tag_feed_frame(b"go")]
+        assert fast.payloads == [tag_viewer_message(VIEWER_KIND_FEED, b"go")]
         assert slow.payloads == []  # still blocked in send_bytes
         slow.release()
 

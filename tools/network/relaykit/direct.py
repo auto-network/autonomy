@@ -44,6 +44,7 @@ from .channel import (
     verify_server_hello,
 )
 from .connector import echo_handler, serve_channel
+from .viewer import read_viewer_record
 from .peer import SESSION_HEX_LEN
 from .viewer import ViewerChannel
 
@@ -167,6 +168,7 @@ async def direct_connect(
             server_hello = await ws.recv()
             if isinstance(server_hello, str):
                 raise HandshakeError("expected binary SERVER_HELLO")
+            server_hello = read_viewer_record(server_hello)
             server_eph, transcript_hash = verify_server_hello(
                 server_hello, root_pub=root_pub, org=org, token=session,
                 client_eph=client_eph, now=now,

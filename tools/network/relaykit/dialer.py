@@ -40,7 +40,7 @@ from .channel import (
 )
 from .direct import direct_connect, new_session_id
 from .peer import NONCE_HEX_LEN, RELAY_HELLO_VERSION, verify_relay_hello
-from .viewer import ViewerChannel
+from .viewer import ViewerChannel, read_viewer_record
 
 PATH_DIRECT = "direct"
 PATH_PEER_RELAY = "peer-relay"
@@ -157,6 +157,9 @@ async def dial_via_peer_relay(
         server_hello = await ws.recv()
         if isinstance(server_hello, str):
             raise HandshakeError("expected binary SERVER_HELLO")
+        # Direct and peer-relay dials get the same tagged bytes as the
+        # relayed path: serve_channel is transport-agnostic.
+        server_hello = read_viewer_record(server_hello)
         server_eph, transcript_hash = verify_server_hello(
             server_hello, root_pub=root_pub, org=org, token=session,
             client_eph=client_eph, now=now,

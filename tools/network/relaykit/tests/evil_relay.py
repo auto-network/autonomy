@@ -31,6 +31,9 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from tools.network.idkit import canonical_json
 from tools.network.relaykit.frames import (
+    FrameError,
+    split_viewer_message,
+    tag_viewer_message,
     FRAME_CLOSE,
     FRAME_DATA,
     FRAME_OPEN,
@@ -54,13 +57,28 @@ class EvilRelay:
     def _mitm_eph(self) -> str:
         return X25519PrivateKey.generate().public_key().public_bytes_raw().hex()
 
-    def _rewrite_eph(self, payload: bytes) -> bytes:
+    def _rewrite_eph(self, payload: bytes, *, tagged: bool = False) -> bytes:
+        """Substitute our own ECDH key in a hello.
+
+        Dashboard -> viewer messages carry a one-byte kind
+        (``frames.VIEWER_KIND_*``); viewer -> dashboard messages do not. A
+        real attacker in this position has to parse the framing to reach
+        the hello, so this does too -- and re-emits it unchanged, because
+        mangling the framing is not the attack under test.
+        """
+        kind = None
+        if tagged:
+            try:
+                kind, payload = split_viewer_message(payload)
+            except FrameError:
+                return payload if kind is None else tag_viewer_message(kind, payload)
         try:
             hello = json.loads(payload)
             hello["eph_pub"] = self._mitm_eph()
-            return canonical_json(hello)
+            payload = canonical_json(hello)
         except (ValueError, TypeError):
-            return payload
+            pass
+        return payload if kind is None else tag_viewer_message(kind, payload)
 
     async def start(self) -> int:
         self._server = await websockets.serve(self._handle, "127.0.0.1", 0,
@@ -101,7 +119,7 @@ class EvilRelay:
                     # SERVER_HELLO: substitute our own ECDH key.
                     if self.mode == "server_eph" and frame.channel_id not in self._attacked:
                         self._attacked.add(frame.channel_id)
-                        payload = self._rewrite_eph(payload)
+                        payload = self._rewrite_eph(payload, tagged=True)
                     with contextlib.suppress(Exception):
                         await viewer.send(payload)
                 elif frame.type == FRAME_CLOSE:

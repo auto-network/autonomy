@@ -47,6 +47,14 @@ from tools.network.relaykit.peer import (
     build_relay_hello,
     verify_relay_hello,
 )
+from tools.network.relaykit.frames import (
+    split_viewer_message,
+    tag_viewer_message,
+)
+from tools.network.relaykit.frames import (
+    split_viewer_message,
+    tag_viewer_message,
+)
 
 from .conftest import ORG
 
@@ -181,8 +189,13 @@ class EvilPeerRelay(PeerRelay):
     async def _bridge_to_dialer(self, dialer, channel_id, payload):
         if channel_id not in self._attacked:
             self._attacked.add(channel_id)
+            # Serving -> dialer messages carry a one-byte kind
+            # (frames.VIEWER_KIND_*). Parse past it to reach the hello and
+            # re-emit it unchanged: substituting the key is the attack,
+            # corrupting the framing is not.
+            kind, hello_bytes = split_viewer_message(payload)
             with contextlib.suppress(ValueError, TypeError):
-                hello = json.loads(payload)
+                hello = json.loads(hello_bytes)
                 from cryptography.hazmat.primitives.asymmetric.x25519 import (
                     X25519PrivateKey,
                 )
@@ -190,7 +203,8 @@ class EvilPeerRelay(PeerRelay):
                     X25519PrivateKey.generate().public_key()
                     .public_bytes_raw().hex()
                 )
-                payload = canonical_json(hello)
+                hello_bytes = canonical_json(hello)
+            payload = tag_viewer_message(kind, hello_bytes)
         await super()._bridge_to_dialer(dialer, channel_id, payload)
 
 
