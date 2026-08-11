@@ -961,17 +961,21 @@ async def _serve_control_listener(connector, ctl_path: str) -> None:
             _os.remove(ctl_path)
 
 
-async def _run_connector_with_control(connector, ctl_path: str | None) -> None:
-    if ctl_path is None:
-        await connector.run()
-        return
-    listener = asyncio.create_task(_serve_control_listener(connector, ctl_path))
+async def _run_connector_with_control(connector, ctl_path: str | None,
+                                      publish_task_factory=None) -> None:
+    tasks = []
+    if ctl_path is not None:
+        tasks.append(asyncio.create_task(_serve_control_listener(connector, ctl_path)))
+    if publish_task_factory is not None:
+        tasks.append(asyncio.create_task(publish_task_factory()))
     try:
         await connector.run()
     finally:
-        listener.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await listener
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
 
 
 def main() -> None:
@@ -992,6 +996,10 @@ def main() -> None:
                              "(enables D19 publish/revoke over this tunnel)")
     parser.add_argument("--min-backoff", type=float, default=0.2)
     parser.add_argument("--max-backoff", type=float, default=5.0)
+    parser.add_argument("--dashboard-url", default=None,
+                        help="dashboard base URL whose event stream feeds live "
+                             "mission updates to open guest channels (auto-8npih); "
+                             "omitted disables live push, serving is unaffected")
     args = parser.parse_args()
 
     with open(args.key_file) as fh:
@@ -999,12 +1007,32 @@ def main() -> None:
     with open(args.cert_file) as fh:
         cert = DelegationCert.from_json(fh.read().strip())
 
+    from tools.network.relaykit.connector import Publisher
+
     handler = make_grant_handler(args.graph_org)
+    # One Publisher shared by both halves of live push: the connector
+    # reports channel attach/detach into it, and the Mission Control
+    # publish loop emits through it. Without --dashboard-url it is still
+    # constructed and still tracks listeners, it just has nothing
+    # publishing into it.
+    publisher = Publisher()
     connector = TunnelConnector(
         args.relay, args.org, key, cert, handler,
         min_backoff=args.min_backoff, max_backoff=args.max_backoff,
+        publisher=publisher,
     )
-    asyncio.run(_run_connector_with_control(connector, args.control_file))
+    publish_task_factory = None
+    if args.dashboard_url:
+        from tools.dashboard.plugins.mission_control import relay_publisher
+
+        def publish_task_factory():
+            return relay_publisher.run(
+                publisher, dashboard_url=args.dashboard_url, org=args.graph_org,
+            )
+
+    asyncio.run(_run_connector_with_control(
+        connector, args.control_file, publish_task_factory,
+    ))
 
 
 if __name__ == "__main__":
