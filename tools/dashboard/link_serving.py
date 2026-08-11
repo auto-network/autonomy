@@ -770,9 +770,27 @@ async def _serve_write(token: str, org: str | None, request: dict, clock) -> byt
     if result is None:
         return BAD_REQUEST  # the handler rejected this body on its own terms
     try:
-        return canonical_json({"v": 1, "status": "ok", **result}) + b"\n"
+        return _app_json({"v": 1, "status": "ok", **result}) + b"\n"
     except Exception:
         return REFUSED
+
+
+def _app_json(payload: dict) -> bytes:
+    """Serialize an application read/write response.
+
+    Deliberately NOT ``canonical_json``: that encoding exists for bytes
+    something signs or hashes, and it forbids floats precisely because
+    float repr is not canonical across languages. These envelopes are
+    neither signed nor hashed, and Mission Control's payloads carry epoch
+    float timestamps (``created_at``, ``answered_at``) -- passing them
+    through canonical_json raises, and the guest gets a uniform refusal
+    instead of their own question back. Caught by the end-to-end
+    acceptance test, not by unit tests whose stub payloads were int-only.
+
+    The artifact header, ``head``, and the join protocol keep using
+    canonical_json: that is their established on-wire contract.
+    """
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 #: The read mirror of WRITE_OPS (auto-t2lz1). A mission's own page is
@@ -826,7 +844,7 @@ async def _serve_read(token: str, org: str | None, request: dict, clock) -> byte
     if result is None:
         return BAD_REQUEST  # the handler rejected this body on its own terms
     try:
-        return canonical_json({"v": 1, "status": "ok", **result}) + b"\n"
+        return _app_json({"v": 1, "status": "ok", **result}) + b"\n"
     except Exception:
         return REFUSED
 
