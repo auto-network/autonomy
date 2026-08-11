@@ -34,16 +34,16 @@ def _validate(cases: list[dict]) -> list[bool]:
 
 
 def _note_header() -> dict:
+    """A note in the generic shape: viewer plus parts. `content` was note's
+    private block inside the host's validator; it is gone."""
     return {
         "v": 1, "status": "ok", "kind": "note",
         "viewer": {"offset": 0, "length": 10},
-        "content": {
-            "title": "T",
-            "markdown": {"offset": 10, "length": 5},
-            "parts": [
-                {"ref": "image", "mime": "image/png", "offset": 15, "length": 5},
-            ],
-        },
+        "parts": [
+            {"ref": "note", "mime": "application/json", "offset": 10, "length": 2},
+            {"ref": "markdown", "mime": "text/markdown", "offset": 12, "length": 3},
+            {"ref": "image", "mime": "image/png", "offset": 15, "length": 5},
+        ],
     }
 
 
@@ -54,7 +54,6 @@ def test_valid_note_and_design_headers_are_accepted():
         "viewer": {"offset": 0, "length": 20},
     }
     unicode_title = _note_header()
-    unicode_title["content"]["title"] = "😀" * 500
     branded = _note_header()
     branded["branding"] = {
         "name": "Example Org", "color": "#123456", "initial": "E",
@@ -66,14 +65,14 @@ def test_valid_note_and_design_headers_are_accepted():
         "favicon_url": "https://example.test/favicon.png",
     }
     with_manifest = _note_header()
-    with_manifest["content"]["attachments"] = [
+    with_manifest["attachments"] = [
         {"ref": "a1", "name": "doc.txt", "mime": "text/plain",
          "raw_sha256": "a" * 64, "total_size": 100, "oversize": False},
         {"ref": "a2", "name": "", "mime": "application/octet-stream",
          "raw_sha256": _EMPTY_SHA256, "total_size": 0, "oversize": True},
     ]
     empty_manifest = _note_header()
-    empty_manifest["content"]["attachments"] = []
+    empty_manifest["attachments"] = []
     assert _validate([
         {"header": _note_header(), "size": 20},
         {"header": unicode_title, "size": 20},
@@ -98,14 +97,11 @@ def test_malformed_ranges_refs_and_unions_are_rejected():
     add(lambda h: h["viewer"].update(offset=0.5))
     add(lambda h: h["viewer"].update(offset=9007199254740992))
     add(lambda h: h["viewer"].update(length=0))
-    add(lambda h: h["content"]["markdown"].update(offset=19, length=2))
-    add(lambda h: h["content"]["markdown"].update(offset=9, length=3))
-    add(lambda h: h["content"]["markdown"].update(offset=11, length=4))
-    add(lambda h: h["content"]["parts"][0].update(length=4))
-    add(lambda h: h["content"]["parts"].append(dict(h["content"]["parts"][0])))
-    add(lambda h: h.update(kind="design"))
-    add(lambda h: h["content"].update(title="x" * 501))
-    add(lambda h: h["content"].update(title="😀" * 501))
+    add(lambda h: h["parts"][1].update(offset=19, length=2))
+    add(lambda h: h["parts"][1].update(offset=9, length=3))
+    add(lambda h: h["parts"][1].update(offset=11, length=4))
+    add(lambda h: h["parts"][2].update(length=4))
+    add(lambda h: h["parts"].append(dict(h["parts"][2])))   # duplicate ref
     add(lambda h: h.update(extra=True))
 
     add(lambda h: h.update(branding={
@@ -123,18 +119,19 @@ def test_malformed_ranges_refs_and_unions_are_rejected():
         "favicon": {"mime": "image/png", "offset": 19, "length": 1},
     }))
 
-    missing_content = _note_header()
-    del missing_content["content"]
-    cases.append({"header": missing_content, "size": 20})
+    # Slices must exactly cover the body: dropping a part leaves a hole.
+    missing_part = _note_header()
+    del missing_part["parts"][1]
+    cases.append({"header": missing_part, "size": 20})
 
     def add_manifest(mutator):
         # Base entry is valid so each mutation isolates exactly one defect.
         header = _note_header()
-        header["content"]["attachments"] = [{
+        header["attachments"] = [{
             "ref": "a1", "name": "n", "mime": "text/plain",
             "raw_sha256": "a" * 64, "total_size": 1, "oversize": False,
         }]
-        mutator(header["content"])
+        mutator(header)
         cases.append({"header": header, "size": 20})
 
     add_manifest(lambda c: c["attachments"][0].update(total_size=-1))

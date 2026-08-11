@@ -103,6 +103,25 @@ def sliced(body: bytes, descriptor: dict) -> bytes:
     start = descriptor["offset"]
     return body[start:start + descriptor["length"]]
 
+def part(header, ref):
+    """One generic part header by ref. The host no longer knows what a ref
+    means, so tests address parts the way the note viewer does."""
+    for entry in header.get("parts") or []:
+        if entry["ref"] == ref:
+            return entry
+    raise KeyError(ref)
+
+
+def image_parts(header):
+    return [e for e in (header.get("parts") or [])
+            if e["ref"] not in ("note", "markdown")]
+
+
+def note_title(header, body):
+    import json as _json
+    return _json.loads(sliced(body, part(header, "note")).decode())["title"]
+
+
 
 # ── the I9 gate ───────────────────────────────────────────────
 
@@ -242,26 +261,24 @@ class TestHeadOp:
 class TestArtifactSerializer:
     def test_note_offsets_round_trip_and_do_not_overlap(self):
         artifact = {
-            "kind": "note",
-            "viewer": b"VIEWER",
-            "content": {
-                "title": "Title",
-                "markdown": "snowman: ☃",
-                "parts": [
-                    {"ref": "a", "mime": "image/png", "bytes": b"AAA"},
-                    {"ref": "b", "mime": "image/webp", "bytes": b"BBBB"},
-                ],
-            },
+            "kind": "note", "viewer": b"VIEWER",
+            "parts": [
+                {"ref": "note", "mime": "application/json", "bytes": b'{"title": "Title"}'},
+                {"ref": "markdown", "mime": "text/markdown", "bytes": "snowman: \u2603".encode()},
+                {"ref": "a", "mime": "image/png", "bytes": b"AAA"},
+                {"ref": "b", "mime": "image/webp", "bytes": b"BBBB"},
+            ],
         }
         header, body = link_serving._serialize_artifact(artifact)
         descriptors = [
-            header["viewer"], header["content"]["markdown"],
-            *header["content"]["parts"],
+            header["viewer"], part(header, "note"), part(header, "markdown"),
+            *image_parts(header),
         ]
-        assert sliced(body, descriptors[0]) == b"VIEWER"
-        assert sliced(body, descriptors[1]).decode() == "snowman: ☃"
-        assert sliced(body, descriptors[2]) == b"AAA"
-        assert sliced(body, descriptors[3]) == b"BBBB"
+        assert sliced(body, header["viewer"]) == b"VIEWER"
+        assert note_title(header, body) == "Title"
+        assert sliced(body, part(header, "markdown")).decode() == "snowman: ☃"
+        assert sliced(body, part(header, "a")) == b"AAA"
+        assert sliced(body, part(header, "b")) == b"BBBB"
         intervals = sorted((d["offset"], d["offset"] + d["length"]) for d in descriptors)
         assert all(left[1] <= right[0] for left, right in zip(intervals, intervals[1:]))
 
@@ -285,16 +302,16 @@ class TestArtifactSerializer:
         }
 
     @pytest.mark.parametrize("artifact", [
-        {"kind": "note", "viewer": b"v"},
-        {"kind": "design", "viewer": b"v", "content": {}},
+        {"kind": "note", "viewer": b"v", "content": {}},   # `content` is gone
         {"kind": "present", "viewer": b""},
         {"kind": "file", "viewer": b"v"},
-        {"kind": "note", "viewer": b"v", "content": {
-            "title": "t", "markdown": "m", "parts": [
-                {"ref": "x", "mime": "image/png", "bytes": b"1"},
-                {"ref": "x", "mime": "image/png", "bytes": b"2"},
-            ],
-        }},
+        {"kind": "note", "viewer": b"v", "parts": [          # duplicate ref
+            {"ref": "x", "mime": "image/png", "bytes": b"1"},
+            {"ref": "x", "mime": "image/png", "bytes": b"2"},
+        ]},
+        {"kind": "note", "viewer": b"v", "parts": [{"ref": 1, "mime": "image/png", "bytes": b"1"}]},
+        {"kind": "note", "viewer": b"v", "parts": [{"ref": "x", "mime": "image/png", "bytes": "1"}]},
+        {"kind": "note", "viewer": b"v", "parts": {"ref": "x"}},
     ])
     def test_union_and_part_invariants_fail_closed(self, artifact):
         with pytest.raises((TypeError, ValueError)):
@@ -406,8 +423,8 @@ class TestNoteResolver:
         header, body = parse(serve(token))
         assert header["status"] == "ok"
         assert header["kind"] == "note"
-        assert header["content"]["title"] == "Ship <notes>"
-        markdown = sliced(body, header["content"]["markdown"]).decode()
+        assert note_title(header, body) == "Ship <notes>"
+        markdown = sliced(body, part(header, "markdown")).decode()
         assert markdown == "Line one\n\n<script>alert('xss')</script>"
         assert sliced(body, header["viewer"]) == link_serving._note_viewer_bytes()
         assert b"Line one" not in sliced(body, header["viewer"])
@@ -427,12 +444,11 @@ class TestNoteResolver:
         put_grant(token, note["id"], "note")
 
         header, body = parse(serve(token))
-        content = header["content"]
-        markdown = sliced(body, content["markdown"]).decode()
+        markdown = sliced(body, part(header, "markdown")).decode()
         assert f"cid:{current_ref}" in markdown
         assert old_ref not in markdown
-        assert [p["ref"] for p in content["parts"]] == [current_ref]
-        assert sliced(body, content["parts"][0]) == b"PNG-current"
+        assert [p["ref"] for p in image_parts(header)] == [current_ref]
+        assert sliced(body, image_parts(header)[0]) == b"PNG-current"
         assert b"PNG-old" not in body
 
     def test_attachment_must_belong_to_note_and_be_image(self, env, tmp_path):
@@ -447,10 +463,10 @@ class TestNoteResolver:
         token = _token(34)
         put_grant(token, note["id"], "note")
         header, body = parse(serve(token))
-        assert header["content"]["parts"] == []
+        assert image_parts(header) == []
         assert b"FOREIGN" not in body
         assert f"cid:{foreign_ref}" in sliced(
-            body, header["content"]["markdown"]
+            body, part(header, "markdown")
         ).decode()
 
     def test_note_embed_is_not_resolved(self, env):
@@ -461,9 +477,9 @@ class TestNoteResolver:
         token = _token(35)
         put_grant(token, note["id"], "note")
         header, body = parse(serve(token))
-        markdown = sliced(body, header["content"]["markdown"]).decode()
+        markdown = sliced(body, part(header, "markdown")).decode()
         assert "![[aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa]]" in markdown
-        assert header["content"]["parts"] == []
+        assert image_parts(header) == []
 
     def test_non_note_source_refused(self, env):
         from tools.graph.db import GraphDB
@@ -525,7 +541,7 @@ class TestAttachmentManifest:
         put_grant(token, note["id"], "note")
         header, body = parse(serve(token))
 
-        manifest = header["content"]["attachments"]
+        manifest = header["attachments"]
         assert len(manifest) == 3
         assert [e["ref"] for e in manifest] == [
             a["id"] for a in note["attachments"]
@@ -544,7 +560,7 @@ class TestAttachmentManifest:
         # The inline image still renders as a bundled part; the two
         # non-inline attachments are offered for download only — their bytes
         # never appear in the artifact body.
-        assert [p["ref"] for p in header["content"]["parts"]] == [
+        assert [p["ref"] for p in image_parts(header)] == [
             note["attachments"][0]["id"]
         ]
         assert b"PNG-INLINE" in body
@@ -574,11 +590,11 @@ class TestAttachmentManifest:
         put_grant(token, note2["id"], "note")
         header, body = parse(serve(token))
         # Download manifest membership by slots.
-        assert [e["ref"] for e in header["content"]["attachments"]] == [ref1]
+        assert [e["ref"] for e in header["attachments"]] == [ref1]
         # Inline bundling also by slots — the shared image is NOT dropped from
         # note2 even though the row's source_id is note1 (the source_id bug).
-        assert [p["ref"] for p in header["content"]["parts"]] == [ref1]
-        assert sliced(body, header["content"]["parts"][0]) == b"PNG-SHARED-BYTES"
+        assert [p["ref"] for p in image_parts(header)] == [ref1]
+        assert sliced(body, image_parts(header)[0]) == b"PNG-SHARED-BYTES"
 
     def test_marks_oversize_above_the_cap(self, env, tmp_path, monkeypatch):
         big = tmp_path / "big.bin"
@@ -590,7 +606,7 @@ class TestAttachmentManifest:
         token = _token(42)
         put_grant(token, note["id"], "note")
         header, _ = parse(serve(token))
-        manifest = header["content"]["attachments"]
+        manifest = header["attachments"]
         assert len(manifest) == 1
         assert manifest[0]["total_size"] == 100
         assert manifest[0]["oversize"] is True
@@ -613,7 +629,7 @@ class TestAttachmentManifest:
         # No attachment bytes ride in the body, so its size is independent of
         # the attachment file size even as the manifest reports the true size.
         assert len(body_s) == len(body_b)
-        assert header_b["content"]["attachments"][0]["total_size"] == 100_000
+        assert header_b["attachments"][0]["total_size"] == 100_000
         assert b"B" * 100_000 not in body_b
 
     def test_empty_manifest_for_note_without_attachments(self, env):
@@ -621,7 +637,7 @@ class TestAttachmentManifest:
         token = _token(45)
         put_grant(token, note["id"], "note")
         header, _ = parse(serve(token))
-        assert header["content"]["attachments"] == []
+        assert header["attachments"] == []
 
     def test_attachment_with_noncanonical_hash_is_omitted(self, env, tmp_path):
         # raw_sha256 is load-bearing (client verify + resume identity); an
@@ -646,7 +662,7 @@ class TestAttachmentManifest:
         token = _token(46)
         put_grant(token, note["id"], "note")
         header, _ = parse(serve(token))
-        assert header["content"]["attachments"] == []
+        assert header["attachments"] == []
 
 
 class TestManifestSerializerValidation:
@@ -656,10 +672,8 @@ class TestManifestSerializerValidation:
     def _artifact(entries: list) -> dict:
         return {
             "kind": "note", "viewer": b"V",
-            "content": {
-                "title": "T", "markdown": "m", "parts": [],
-                "attachments": entries,
-            },
+            "parts": [{"ref": "markdown", "mime": "text/markdown", "bytes": b"m"}],
+            "attachments": entries,
         }
 
     def test_valid_entry_round_trips(self):
@@ -668,7 +682,7 @@ class TestManifestSerializerValidation:
             "raw_sha256": "a" * 64, "total_size": 0, "oversize": False,
         }
         header, _ = link_serving._serialize_artifact(self._artifact([entry]))
-        assert header["content"]["attachments"] == [entry]
+        assert header["attachments"] == [entry]
 
     @pytest.mark.parametrize("bad", [
         {"raw_sha256": "deadbeef"},        # too short
@@ -809,10 +823,10 @@ class TestMissionResolver:
         put_grant(token, str(uuid.uuid4()), "mission", meta={"participant_id": self._PARTICIPANT})
         assert serve(token) == link_serving.REFUSED
 
-    def test_mission_forbids_content_field(self):
-        """_serialize_artifact's kind-arm rejection -- a mission artifact
-        can never legitimately carry `content` (that's note's shape)."""
-        with pytest.raises(ValueError, match="forbid content"):
+    def test_unknown_artifact_fields_are_rejected(self):
+        """viewer, parts, attachments, branding. `content` was note's private
+        shape and no longer exists at this layer."""
+        with pytest.raises(ValueError, match="unknown fields"):
             link_serving._serialize_artifact(
                 {"kind": "mission", "viewer": b"<html></html>", "content": {}}
             )
