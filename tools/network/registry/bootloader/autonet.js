@@ -1370,6 +1370,174 @@ const autonet = (() => {
     show(ERROR_VIEWS[state.errorKind]);
   }
 
+  // ── mission viewer bridge (auto-t2lz1) ──────────────────────────────
+  //
+  // A mission's page is authored against the dashboard's own origin --
+  // fetch("/api/missions/<id>/questions"), links to
+  // "/missions/<id>/pillars/<pid>". Over the relay the artifact runs in a
+  // sandboxed srcdoc iframe whose base URL is the relay's, where none of
+  // those paths exist: every one is a 404 and every click fails silently.
+  //
+  // The shim below is PREPENDED to the artifact HTML before it becomes
+  // srcdoc, because a sandboxed frame is an opaque origin the parent can
+  // never inject into after load. It lives here rather than in the
+  // server's resolver so the coordinator's own bytes are still served
+  // byte-for-byte, and so the interception exists only in the relay
+  // viewer -- the same page keeps working unchanged on the dashboard.
+  //
+  // Inside the frame it overrides fetch() and intercepts pillar
+  // navigation, turning each into a postMessage the parent answers by
+  // issuing the matching read/write channel op. Pillar navigation becomes
+  // an in-place document swap, never a page load: one link per mission,
+  // navigation stays in-page.
+
+  const MISSION_SHIM = `<script>(function () {
+  var pending = {}, nextId = 1;
+  function ask(op, body) {
+    return new Promise(function (resolve) {
+      var id = String(nextId++);
+      pending[id] = resolve;
+      parent.postMessage({ v: 1, op: "mc-request", id: id, mcOp: op, body: body }, "*");
+    });
+  }
+  window.addEventListener("message", function (event) {
+    if (event.source !== parent || !event.data || event.data.v !== 1) return;
+    if (event.data.op !== "mc-response") return;
+    var resolve = pending[event.data.id];
+    if (!resolve) return;
+    delete pending[event.data.id];
+    resolve(event.data.result);
+  });
+  function reply(payload) {
+    return new Response(JSON.stringify(payload === null ? {} : payload), {
+      status: payload === null ? 502 : 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  var realFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    var url = typeof input === "string" ? input : (input && input.url) || "";
+    var method = ((init && init.method) || (input && input.method) || "GET").toUpperCase();
+    var m;
+    if ((m = url.match(/\\/api\\/(?:missions|pillars)\\/([^\\/?#]+)\\/questions\\/([^\\/?#]+)\\/reopen/))) {
+      var rb = init && init.body ? JSON.parse(init.body) : {};
+      return ask("write", { kind: "reopen", entry_id: m[2], followup: rb.followup }).then(reply);
+    }
+    if ((m = url.match(/\\/api\\/(missions|pillars)\\/([^\\/?#]+)\\/questions/))) {
+      var isPillar = m[1] === "pillars";
+      if (method === "POST") {
+        var qb = init && init.body ? JSON.parse(init.body) : {};
+        return ask("write", {
+          kind: "question", question: qb.question, anchor: qb.anchor,
+          pillar_id: isPillar ? m[2] : undefined,
+        }).then(reply);
+      }
+      return ask("read", {
+        kind: "questions", pillar_id: isPillar ? m[2] : undefined,
+      }).then(reply);
+    }
+    if (url.indexOf("/pillars") !== -1 && url.indexOf("/api/missions/") !== -1) {
+      return ask("read", { kind: "pillars" }).then(reply);
+    }
+    if (url.indexOf("dashboard.surface.presence") !== -1) {
+      return ask("read", { kind: "presence" }).then(function (r) {
+        // Shape-compatible with the Settings endpoint the page expects.
+        return reply({ members: (r && r.presence || []).map(function (p) {
+          return { key: p.participant_id, payload: p };
+        }) });
+      });
+    }
+    return realFetch(input, init);
+  };
+  function openPillar(pillarId) {
+    ask("read", { kind: "pillar_site", pillar_id: pillarId }).then(function (r) {
+      if (!r || !r.html) return;
+      document.open(); document.write(r.html); document.close();
+    });
+  }
+  document.addEventListener("click", function (event) {
+    var el = event.target;
+    while (el && el.tagName !== "A") el = el.parentElement;
+    var href = el && el.getAttribute("href");
+    var m = href && href.match(/\\/missions\\/[^\\/]+\\/pillars\\/([^\\/?#]+)/);
+    if (!m) return;
+    event.preventDefault();
+    openPillar(m[1]);
+  }, true);
+  // The page also navigates by assignment (window.location.href = ...),
+  // which a sandbox without allow-top-navigation blocks outright. Give it
+  // a settable shim that routes to the same in-place swap.
+  try {
+    var realAssign = window.location.assign.bind(window.location);
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      get: function () { return window.__mcLocation; },
+      set: function (value) { window.__mcLocation.href = value; },
+    });
+    window.__mcLocation = {
+      get href() { return document.baseURI; },
+      set href(value) {
+        var m = String(value).match(/\\/missions\\/[^\\/]+\\/pillars\\/([^\\/?#]+)/);
+        if (m) { openPillar(m[1]); return; }
+        realAssign(value);
+      },
+      assign: function (v) { this.href = v; },
+      replace: function (v) { this.href = v; },
+    };
+  } catch (e) { /* a browser refusing the redefinition keeps link clicks */ }
+})();<\/script>`;
+
+  function missionShimmed(html) {
+    return MISSION_SHIM + html;
+  }
+
+  class MissionBridge {
+    /** Answers the shim's requests by issuing channel ops. The frame is
+     * an opaque origin, so every inbound message is checked against the
+     * captured window before it is trusted -- the same discipline the
+     * note viewer's own message handling uses. */
+    constructor({ frame, channel }) {
+      this.childWindow = frame.contentWindow;
+      this.channel = channel;
+      this.queue = Promise.resolve();
+      this.onMessage = this.onMessage.bind(this);
+      window.addEventListener("message", this.onMessage);
+    }
+
+    dispose() {
+      window.removeEventListener("message", this.onMessage);
+    }
+
+    onMessage(event) {
+      if (event.source !== this.childWindow || !event.data) return;
+      const msg = event.data;
+      if (msg.v !== 1 || msg.op !== "mc-request") return;
+      if (msg.mcOp !== "read" && msg.mcOp !== "write") return;
+      // Serialize: one request/response exchange at a time on a channel.
+      this.queue = this.queue.then(() => this.exchange(msg));
+    }
+
+    async exchange(msg) {
+      let result = null;
+      try {
+        await this.channel.sendMessage(te.encode(canonicalJson({
+          v: 1, op: msg.mcOp, body: msg.body && typeof msg.body === "object" ? msg.body : {},
+        })));
+        const raw = await this.channel.recvMessage();
+        const line = new TextDecoder().decode(raw).split("\n")[0];
+        const parsed = JSON.parse(line);
+        if (parsed && parsed.status === "ok") result = parsed;
+      } catch (err) {
+        result = null;  // a failed exchange answers null, never hangs the page
+      }
+      this.childWindow.postMessage(
+        { v: 1, op: "mc-response", id: msg.id, result }, "*",
+      );
+    }
+  }
+
+  let missionBridge = null;
+
   async function renderArtifact(header, body, attachmentContext = null) {
     const artifact = validateArtifact(header, body);
     state.bodyLength = body.length;
@@ -1396,6 +1564,10 @@ const autonet = (() => {
       attachmentController.dispose();
       attachmentController = null;
     }
+    if (missionBridge) {
+      missionBridge.dispose();
+      missionBridge = null;
+    }
     if (artifact.kind === "note" && attachmentContext) {
       attachmentController = new AttachmentController({
         frame,
@@ -1414,7 +1586,17 @@ const autonet = (() => {
     // WebKit can reject blob: HTML navigation in an HTTPS sandboxed iframe,
     // leaving the note viewer unable to emit its ready message. srcdoc keeps
     // the same sandboxed opaque origin without depending on blob navigation.
-    frame.srcdoc = decoder.decode(viewerBytes);
+    const viewerHtml = decoder.decode(viewerBytes);
+    if (artifact.kind === "mission" && attachmentContext) {
+      // The bridge must exist before the document runs, or a shim request
+      // fired on load would find nobody listening.
+      missionBridge = new MissionBridge({
+        frame, channel: attachmentContext.channel,
+      });
+      frame.srcdoc = missionShimmed(viewerHtml);
+    } else {
+      frame.srcdoc = viewerHtml;
+    }
 
     if (artifact.kind === "note") {
       await withTimeout(ready, VIEWER_READY_TIMEOUT_MS, "viewer ready");
@@ -1560,6 +1742,7 @@ const autonet = (() => {
     state, boot, canonicalJson, verifyChain, attemptEndpoints,
     attemptDirectEndpoint, performHandshake, openSocket, fetchArtifact,
     validateArtifact, renderArtifact,
+    MISSION_SHIM, missionShimmed, MissionBridge,
     assembleJoinContext, deliverJoinContext,
     withTimeout, SecureChannel,
     attachmentCursorId, attachmentSinkId, safeAttachmentName,

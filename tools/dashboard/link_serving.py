@@ -775,6 +775,62 @@ async def _serve_write(token: str, org: str | None, request: dict, clock) -> byt
         return REFUSED
 
 
+#: The read mirror of WRITE_OPS (auto-t2lz1). A mission's own page is
+#: authored against same-origin dashboard HTTP, none of which exists on
+#: the relay's origin; this is the channel path those reads take instead.
+#: Same discipline as the write side: the relay learns nothing about what
+#: is being read, only which module owns reads for this target_type.
+READ_OPS = ("read",)
+
+#: target_types allowed to serve reads at all. Default-off, same reason
+#: WRITE_ENABLED_TARGET_TYPES is.
+READ_ENABLED_TARGET_TYPES = frozenset({"mission"})
+
+
+def _read_dispatch(target_type: str):
+    """target_type → the module-owned async read handler, or None."""
+    if target_type not in READ_ENABLED_TARGET_TYPES:
+        return None
+    if target_type == "mission":
+        from tools.dashboard.plugins.mission_control.entrypoints import api as mc_api
+
+        return mc_api.handle_relay_read
+    return None
+
+
+async def _serve_read(token: str, org: str | None, request: dict, clock) -> bytes:
+    """One ``read`` request → the target_type-owned handler's envelope.
+
+    Identical shape to :func:`_serve_write`, and deliberately so: the
+    relay resolves the grant and the identity this channel reads AS, then
+    forwards an opaque ``body`` to whichever module owns reads for this
+    grant's target_type. It never interprets ``body``.
+    """
+    grant = await asyncio.to_thread(check_grant, token, org=org, now=clock())
+    if grant is None:
+        return REFUSED
+    handler = _read_dispatch(grant["target_type"])
+    if handler is None:
+        return REFUSED  # this target_type serves no reads over the channel
+    meta = grant.get("meta") or {}
+    identity = meta.get("participant_id")
+    if not isinstance(identity, str) or not identity:
+        return REFUSED  # no bound identity: nothing to read as
+    body = request.get("body")
+    if not isinstance(body, dict):
+        return BAD_REQUEST
+    try:
+        result = await handler(identity, grant["target_uuid"], body)
+    except Exception:
+        return REFUSED  # handler faults serve nothing, not stack traces
+    if result is None:
+        return BAD_REQUEST  # the handler rejected this body on its own terms
+    try:
+        return canonical_json({"v": 1, "status": "ok", **result}) + b"\n"
+    except Exception:
+        return REFUSED
+
+
 #: Ops that hand a viewer the key to a fan-out stream (auto-albp6.8).
 SUBSCRIBE_OPS = ("subscribe",)
 
@@ -881,6 +937,8 @@ def make_grant_handler(org: str | None = None, *, now=None):
             return await asyncio.to_thread(_join, token, request)
         if op in WRITE_OPS:
             return await _serve_write(token, org, request, clock)
+        if op in READ_OPS:
+            return await _serve_read(token, org, request, clock)
         if op in SUBSCRIBE_OPS:
             return await _serve_subscribe(token, org, clock)
         if op == "attachment.fetch":
