@@ -639,3 +639,21 @@ def test_tunnel_meta_still_drops_unknown_keys():
     )
     assert error is None
     assert meta == {"participant_id": "guest:abc"}
+
+
+def test_participant_id_is_kept_off_the_wire_to_the_registry():
+    """REGRESSION + design invariant: the relay is untrusted and authorizes
+    nothing with participant_id (check_grant reads the LOCAL cache, never
+    the registry), so it must not learn who a link is for. The local grant
+    keeps it; the control frame does not carry it."""
+    from tools.dashboard import link_approvals
+
+    meta, error = link_approvals._tunnel_link_meta(
+        {"meta": {"participant_id": "guest:abc", "label": "Briefing", "ttl": 3600}}, {},
+    )
+    assert error is None
+    # The local grant keeps the binding...
+    assert meta["participant_id"] == "guest:abc"
+    # ...and the wire copy drops it, keeping everything the relay does need.
+    wire = {k: v for k, v in meta.items() if k not in link_approvals._LOCAL_ONLY_META}
+    assert wire == {"label": "Briefing", "ttl": 3600}
