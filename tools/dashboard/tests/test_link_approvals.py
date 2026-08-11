@@ -561,3 +561,74 @@ def test_unkeyed_org_enrich_errors_cleanly_without_codename(tmp_path, monkeypatc
     assert "C1" not in blob and "ceremony" not in blob
     from tools.graph.db import GraphDB
     GraphDB.close_all_pooled()
+
+
+def test_mission_title_names_the_bound_guest(env, tmp_path, monkeypatch):
+    """A mission link is bound to ONE guest, and that binding decides whose
+    name lands on every question and whose access dies when the link is
+    revoked. The operator must see WHO before approving -- the dialog
+    previously showed only the mission name, so a personalized link was
+    approved blind."""
+    from tools.dashboard.dao import mission_control_db as mdb
+    monkeypatch.setattr(mdb, "DB_PATH", tmp_path / "mission_control.db")
+    mission = mdb.create_mission("OSS Insights")
+    guest = mdb.create_visitor_token("Priya (data partner)")
+
+    r = env.post("/api/approvals", json={
+        "kind": "link_publish", "session": SESSION,
+        "request": {
+            "org": ORG,
+            "target_uuid": mission["mission_id"],
+            "target_type": "mission",
+            "meta": {"participant_id": guest["participant_id"]},
+        },
+    })
+    enriched = env.get(f"/api/approvals/{r.json()['id']}").json()
+    assert enriched["target_title"] == "OSS Insights — for Priya (data partner)"
+
+
+def test_mission_link_bound_to_an_unknown_guest_errors(env, tmp_path, monkeypatch):
+    from tools.dashboard.dao import mission_control_db as mdb
+    monkeypatch.setattr(mdb, "DB_PATH", tmp_path / "mission_control.db")
+    mission = mdb.create_mission("OSS Insights")
+
+    r = env.post("/api/approvals", json={
+        "kind": "link_publish", "session": SESSION,
+        "request": {
+            "org": ORG,
+            "target_uuid": mission["mission_id"],
+            "target_type": "mission",
+            "meta": {"participant_id": "guest:not-a-real-participant"},
+        },
+    })
+    enriched = env.get(f"/api/approvals/{r.json()['id']}").json()
+    assert enriched["target_title"] is None
+    assert "not a known participant" in (enriched.get("target_error") or "")
+
+
+def test_tunnel_meta_carries_participant_id():
+    """REGRESSION: the executor's meta allowlist named only ttl and label,
+    so a mission publish lost its participant binding on the way to the
+    grant and then failed NetworkLinkGrantV3 validation AFTER the operator
+    had already approved. Found on a real publish, not by a unit test --
+    the CLI-side tests mocked the approval round trip entirely."""
+    from tools.dashboard import link_approvals
+
+    meta, error = link_approvals._tunnel_link_meta(
+        {"meta": {"participant_id": "guest:abc", "label": "Briefing", "ttl": 3600}},
+        {},
+    )
+    assert error is None
+    assert meta == {"participant_id": "guest:abc", "label": "Briefing", "ttl": 3600}
+
+
+def test_tunnel_meta_still_drops_unknown_keys():
+    """The allowlist is the point: an unknown key must never reach a grant."""
+    from tools.dashboard import link_approvals
+
+    meta, error = link_approvals._tunnel_link_meta(
+        {"meta": {"participant_id": "guest:abc", "require_auth": True, "junk": 1}},
+        {},
+    )
+    assert error is None
+    assert meta == {"participant_id": "guest:abc"}
