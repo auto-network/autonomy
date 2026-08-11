@@ -61,6 +61,7 @@ by the relay is detected, not tolerated.
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 from dataclasses import dataclass
 from typing import Iterator, Optional, Tuple
@@ -443,3 +444,55 @@ class ChannelCrypto:
     def peak_buffered_bytes(self) -> int:
         """Peak compatibility-buffer occupancy (zero in pure stream mode)."""
         return self._peak_buffered_bytes
+
+
+# ── fan-out stream frames (auto-albp6.8) ──────────────────────────────
+#
+# A DIFFERENT shape from the record layer above, for a different job. A
+# record is one leg of a pairwise channel: its key comes from that
+# channel's own handshake and its nonce is a per-direction sequence
+# number, which works precisely because exactly two parties share it.
+#
+# A stream frame is sealed ONCE under a key shared by every viewer of a
+# link, so the relay can fan one ciphertext out to all of them instead of
+# the origin re-sealing per viewer. There is no handshake to bind to and
+# no sequence two parties agree on, so the nonce is random per frame and
+# carried with the ciphertext. That is safe here because exactly one
+# party ever seals with a given stream key -- the origin's own connector
+# process -- so nonces cannot collide across independent senders.
+#
+# What this deliberately does NOT provide: origin authentication. Every
+# viewer holds the key, so a valid tag proves only that SOMEONE holding
+# it sealed the frame. Per-entry signatures are the answer to that and
+# are deferred (auto-albp6.2), which is a recorded operator decision, not
+# an oversight -- see graph://ce07a01f-faa.
+
+STREAM_FRAME_DOMAIN = b"autonomy.network.channel.stream.v1"
+STREAM_KEY_LEN = 32
+_STREAM_NONCE_LEN = 12
+
+
+def seal_stream_frame(stream_key: bytes, plaintext: bytes) -> bytes:
+    """Seal one fan-out frame: ``[12B nonce][AES-256-GCM ciphertext]``."""
+    if not isinstance(stream_key, (bytes, bytearray)) or len(stream_key) != STREAM_KEY_LEN:
+        raise RecordError(f"stream key must be {STREAM_KEY_LEN} bytes")
+    nonce = os.urandom(_STREAM_NONCE_LEN)
+    ciphertext = AESGCM(bytes(stream_key)).encrypt(
+        nonce, bytes(plaintext), STREAM_FRAME_DOMAIN
+    )
+    return nonce + ciphertext
+
+
+def open_stream_frame(stream_key: bytes, sealed: bytes) -> Optional[bytes]:
+    """Open a fan-out frame, or None if it does not authenticate under
+    *stream_key* — including a frame sealed for a different link."""
+    if not isinstance(stream_key, (bytes, bytearray)) or len(stream_key) != STREAM_KEY_LEN:
+        return None
+    if not isinstance(sealed, (bytes, bytearray)) or len(sealed) <= _STREAM_NONCE_LEN:
+        return None
+    sealed = bytes(sealed)
+    nonce, ciphertext = sealed[:_STREAM_NONCE_LEN], sealed[_STREAM_NONCE_LEN:]
+    try:
+        return AESGCM(bytes(stream_key)).decrypt(nonce, ciphertext, STREAM_FRAME_DOMAIN)
+    except InvalidTag:
+        return None
