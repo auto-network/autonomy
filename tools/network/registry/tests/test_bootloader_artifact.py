@@ -155,3 +155,73 @@ def test_malformed_ranges_refs_and_unions_are_rejected():
     add_manifest(lambda c: c.update(attachments="not-a-list"))
 
     assert _validate(cases) == [False] * len(cases)
+
+
+# ── generic host: any kind, any parts (auto-ue9md) ──────────────────────
+#
+# The host used to carry an allowlist of the four viewer kinds it knew, so
+# adding a viewer meant a registry deploy -- and a registry deploy restarts
+# every live link platform-wide. `kind` is now bounded descriptive metadata
+# and `parts` are validated structurally, because what a part MEANS is the
+# viewer's business, not the host's.
+
+
+def _generic_header(kind: str = "quux") -> dict:
+    return {
+        "v": 1, "status": "ok", "kind": kind,
+        "viewer": {"offset": 0, "length": 10},
+        "parts": [
+            {"ref": "state", "mime": "application/json", "offset": 10, "length": 5},
+            {"ref": "body", "mime": "text/html", "offset": 15, "length": 5},
+        ],
+    }
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_an_unknown_kind_with_generic_parts_is_accepted():
+    """A viewer type the host has never heard of renders without a deploy."""
+    assert _validate([
+        {"header": _generic_header(), "size": 20},
+        {"header": _generic_header("mission"), "size": 20},
+        {"header": _generic_header("a" * 64), "size": 20},
+    ]) == [True, True, True]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_kind_is_still_bounded_even_without_an_allowlist():
+    cases = []
+    for bad in ("", "a" * 65, 1, None, ["note"]):
+        header = _generic_header()
+        header["kind"] = bad
+        cases.append({"header": header, "size": 20})
+    assert _validate(cases) == [False] * len(cases)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_generic_parts_are_validated_structurally():
+    duplicate = _generic_header()
+    duplicate["parts"][1]["ref"] = "state"
+
+    out_of_bounds = _generic_header()
+    out_of_bounds["parts"][1]["length"] = 500
+
+    gap = _generic_header()          # slices must exactly cover the body
+    gap["parts"][1]["offset"] = 16
+
+    unknown_key = _generic_header()
+    unknown_key["parts"][0]["role"] = "primary"
+
+    not_a_list = _generic_header()
+    not_a_list["parts"] = {"ref": "state"}
+
+    empty_ref = _generic_header()
+    empty_ref["parts"][0]["ref"] = ""
+
+    assert _validate([
+        {"header": duplicate, "size": 20},
+        {"header": out_of_bounds, "size": 20},
+        {"header": gap, "size": 20},
+        {"header": unknown_key, "size": 20},
+        {"header": not_a_list, "size": 20},
+        {"header": empty_ref, "size": 20},
+    ]) == [False, False, False, False, False, False]
