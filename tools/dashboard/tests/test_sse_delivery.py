@@ -42,7 +42,8 @@ def _init_test_db(db_path: Path) -> None:
         nag_message TEXT DEFAULT '', nag_last_sent REAL DEFAULT 0,
         dispatch_nag INTEGER DEFAULT 0,
         resolution_dir TEXT, session_uuids TEXT DEFAULT '[]',
-        curr_jsonl_file TEXT
+        curr_jsonl_file TEXT,
+        harness TEXT NOT NULL DEFAULT 'claude', model TEXT DEFAULT NULL
     )""")
     conn.commit()
     conn.close()
@@ -89,8 +90,10 @@ def _make_user_entry(text: str = "Hello from user") -> dict:
     }
 
 
-def _make_assistant_entry(text: str = "Hello from assistant") -> dict:
-    return {
+def _make_assistant_entry(
+    text: str = "Hello from assistant", model: str | None = None,
+) -> dict:
+    entry = {
         "type": "assistant",
         "message": {
             "role": "assistant",
@@ -98,6 +101,9 @@ def _make_assistant_entry(text: str = "Hello from assistant") -> dict:
         },
         "timestamp": "2026-03-28T00:00:01Z",
     }
+    if model:
+        entry["message"]["model"] = model
+    return entry
 
 
 class MockEventBus:
@@ -248,7 +254,10 @@ class TestFileWriteToSSE:
             bus.events.clear()
 
             await asyncio.sleep(0.05)
-            _write_jsonl_entry(jsonl, _make_assistant_entry("broadcast test"))
+            _write_jsonl_entry(
+                jsonl,
+                _make_assistant_entry("broadcast test", "claude-opus-4-8"),
+            )
 
             events = await bus.wait_for_event(
                 "session:messages", session_id="auto-sse-1", timeout=2.0,
@@ -257,6 +266,50 @@ class TestFileWriteToSSE:
             _, data = events[0]
             assert data["session_id"] == "auto-sse-1"
             assert len(data["entries"]) >= 1
+            assert data["model"] == "claude-opus-4-8"
+        finally:
+            await _stop_monitor(mon, patcher)
+
+    @pytest.mark.asyncio
+    async def test_codex_turn_context_broadcasts_model_without_message(self, setup_env):
+        """A model-only Codex turn event wakes already-open session cards."""
+        tmp_path, db_path = setup_env
+        sess_dir = tmp_path / "sessions"
+        sess_dir.mkdir()
+        jsonl = sess_dir / "codex-uuid.jsonl"
+        jsonl.touch()
+        _insert_session(db_path, "auto-sse-codex-model", str(jsonl))
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "UPDATE tmux_sessions SET harness='codex' WHERE tmux_name=?",
+            ("auto-sse-codex-model",),
+        )
+        conn.commit()
+        conn.close()
+
+        bus = MockEventBus()
+        mon, patcher = await _start_monitor(bus)
+        try:
+            bus.events.clear()
+            await asyncio.sleep(0.05)
+            _write_jsonl_entry(jsonl, {
+                "type": "turn_context",
+                "payload": {
+                    "model": "gpt-5.6-sol",
+                    "effort": "high",
+                },
+                "timestamp": "2026-08-11T00:00:00Z",
+            })
+
+            events = await bus.wait_for_event(
+                "session:messages",
+                session_id="auto-sse-codex-model",
+                timeout=2.0,
+            )
+            assert events, "model-only turn_context produced no live event"
+            _, data = events[0]
+            assert data["entries"] == []
+            assert data["model"] == "gpt-5.6-sol"
         finally:
             await _stop_monitor(mon, patcher)
 

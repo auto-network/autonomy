@@ -12621,10 +12621,19 @@ HARNESS_API_BADGE_CHECKS = """
     cards.forEach(function(c) {
         var sid = c.getAttribute('data-session-id') || '';
         var harnesses = new Set();
+        var models = new Set();
+        var icons = new Set();
         c.querySelectorAll('[data-testid="session-harness-badge"]').forEach(function(b) {
             harnesses.add(b.getAttribute('data-harness') || '');
+            models.add((b.textContent || '').trim());
+            var icon = b.querySelector('img');
+            if (icon) icons.add(icon.getAttribute('src') || '');
         });
         perCard[sid] = Array.from(harnesses).filter(Boolean);
+        r.model_labels = r.model_labels || {};
+        r.model_labels[sid] = Array.from(models).filter(Boolean);
+        r.provider_icons = r.provider_icons || {};
+        r.provider_icons[sid] = Array.from(icons).filter(Boolean);
     });
     r.harness_per_card = perCard;
     r.total_badge_count = document.querySelectorAll('[data-testid="session-harness-badge"]').length;
@@ -12730,6 +12739,21 @@ class TestSessionHarnessBadge:
         harnesses = (c.get("harness_per_card") or {}).get("auto-sweep-beta") or []
         assert "codex" in harnesses, (
             f"beta card should render a codex harness badge, got {harnesses!r}"
+        )
+
+    def test_cards_render_compact_model_names(self):
+        """Provider prefixes collapse while the distinctive model remains."""
+        labels = self._checks.get("model_labels") or {}
+        assert "Opus-4.7" in (labels.get("auto-sweep-alpha") or [])
+        assert "5-Codex" in (labels.get("auto-sweep-beta") or [])
+
+    def test_cards_use_vendored_official_provider_icons(self):
+        icons = self._checks.get("provider_icons") or {}
+        assert "/static/img/providers/anthropic-32.png" in (
+            icons.get("auto-sweep-alpha") or []
+        )
+        assert "/static/img/providers/openai-32.svg" in (
+            icons.get("auto-sweep-beta") or []
         )
 
     # ── CrossTalk envelope: additive ──────────────────────────────
@@ -12857,6 +12881,25 @@ class TestSessionHarnessBadge:
             "payload": {"originator": "codex-tui", "model": "gpt-5-codex"},
         }
         assert CODEX_HARNESS.extract_model(entry, None) == "gpt-5-codex"
+
+    def test_codex_extract_model_from_each_turn_context(self):
+        """Codex switches are visible immediately in per-turn context."""
+        from tools.dashboard.session_harness import CODEX_HARNESS
+
+        entry = {
+            "type": "turn_context",
+            "payload": {
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+                "collaboration_mode": {
+                    "settings": {
+                        "model": "gpt-5.6-sol",
+                        "reasoning_effort": "high",
+                    },
+                },
+            },
+        }
+        assert CODEX_HARNESS.extract_model(entry, "gpt-5.6-luna") == "gpt-5.6-sol"
 
 
 # ── Coordinator-board parity v2 (bead auto-1aef5) ────────────────────

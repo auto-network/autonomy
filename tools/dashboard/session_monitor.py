@@ -1566,9 +1566,9 @@ class SessionMonitor:
                 # idle) is the honest answer.
                 "activity_state": s.get("attention") or "idle",
                 "harness": s.get("harness", "claude"),
-                # auto-ngis4: surface the most-recent assistant-turn model so
-                # session listings can cite it without a separate lookup.
-                # Stored only — UI does not yet render this.
+                # Most-recent observed model; the canonical session-card
+                # badge renders its compact form and keeps this raw id in the
+                # tooltip/data attribute.
                 "model": s.get("model") or None,
                 # jsonl_path is the legacy bridge; session_uuids is canonical after Phase 4
                 "resolved": bool(s.get("jsonl_path")) or (
@@ -3245,6 +3245,8 @@ class SessionMonitor:
         }
         await self._process_tail_entries(
             tmux_name, row, ts, window["entries"], span=span,
+            observed_model=window["model_to_write"] or row.get("model"),
+            model_changed=bool(window["model_to_write"]),
         )
         await self._graph_appender_tick(tmux_name, Path(window["path"]))
 
@@ -3274,6 +3276,11 @@ class SessionMonitor:
                 tmux_name,
             )
             return False
+        # Publish runs before persistence, so refresh the replay cache only
+        # after this model/offset CAS lands. Open clients receive the model
+        # directly on session:messages; new subscribers get the same value.
+        if self._event_bus:
+            self._event_bus.update_cache("session:registry", self.get_registry())
         if str(row.get("harness") or "claude").strip().lower() == "codex":
             try:
                 _publish_codex_harness_usage_setting(
@@ -3618,6 +3625,8 @@ class SessionMonitor:
         *,
         source_path: Path | None = None,
         span: dict | None = None,
+        observed_model: str | None = None,
+        model_changed: bool = False,
     ) -> None:
         """Dedup, enrich, and broadcast parsed entries from a session tail read.
 
@@ -3631,7 +3640,7 @@ class SessionMonitor:
         committed high-water from contiguous spans, never from entry
         counts, so server-side dedup can never fake progress.
         """
-        if not new_entries:
+        if not new_entries and not model_changed:
             return
         # (The legacy clear-startup_state-on-first-assistant-turn hook lived
         # here. The lifecycle worker now writes `running` (startup_state
@@ -3693,12 +3702,6 @@ class SessionMonitor:
                     )
                     break
 
-        # Soft-update the registry cache so new SSE connections get fresh
-        # metadata. No broadcast — existing clients already have current
-        # data via session:messages.
-        if self._event_bus:
-            self._event_bus.update_cache("session:registry", self.get_registry())
-
         self._enrich_agent_entries(row, ts, new_entries)
         # Warm-up rehydrates task-tracker state from history even when the
         # enricher is not wired. Run it unconditionally so overlays survive
@@ -3713,7 +3716,7 @@ class SessionMonitor:
                 await self._persist_todos_if_changed(tmux_name, ts)
             except Exception:
                 logger.exception("session_monitor: entry_enricher failed for %s", tmux_name)
-        if new_entries and self._event_bus:
+        if (new_entries or model_changed) and self._event_bus:
             # auto-rsvzk: match user-typed echoes back to the original
             # client_id stashed by api_session_send. The optimistic
             # frontend uses the round-tripped id to dedup its locally-
@@ -3767,6 +3770,11 @@ class SessionMonitor:
                     ),
                     "seq": ts.broadcast_seq,
                     "context_tokens": updated["context_tokens"] if updated else 0,
+                    # This tail window may carry a newer model than the DB row
+                    # because broadcast intentionally precedes persistence.
+                    "model": observed_model or (
+                        updated.get("model") if updated else row.get("model")
+                    ),
                     "size_bytes": (
                         batch_path.stat().st_size
                         if batch_path is not None and batch_path.exists() else 0

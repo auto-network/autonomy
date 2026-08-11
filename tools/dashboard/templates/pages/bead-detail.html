@@ -198,7 +198,7 @@
                 <!-- Harness badge — auto-ngis4 / icon-rail. Surfaces only
                      for session-typed provenance rows that carry harness. -->
                 <template x-if="prov.harness">
-                  <span x-data="{ harness: prov.harness }">
+                  <span x-data="{ harness: prov.harness, model: prov.model || null }">
                     {% include 'partials/session-harness-badge.html' %}
                   </span>
                 </template>

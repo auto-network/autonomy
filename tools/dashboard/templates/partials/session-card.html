@@ -78,10 +78,10 @@
             x-show="s.is_live && (s.nag_enabled != null || s.dispatch_nag_enabled != null)">🔔</span>
       <span class="sc-role" :class="typeCls(s.session_type)" x-text="typeBadge(s.session_type)" x-show="typeBadge(s.session_type)" data-testid="session-role"></span>
       <span class="sc-role" x-text="s.role" x-show="s.role" data-testid="session-role"></span>
-      <!-- Harness badge — auto-ngis4 / icon-rail principle 553c7437-036.
-           Surfaces the running CLI (claude / codex) so peers can tell at
-           a glance. Falls through to "?" for legacy / unknown rows. -->
-      <span class="sc-harness-wrap" x-data="{ harness: s.harness }">
+      <!-- Official provider icon + compact active model in one live badge. -->
+      <span class="sc-harness-wrap"
+            x-data="{ harness: null, model: null }"
+            x-effect="harness = s.harness; model = s.model">
         {% include 'partials/session-harness-badge.html' %}
       </span>
       <!-- Startup-phase chip (auto-yfcoc; design rev 63542418). Visible
@@ -198,7 +198,9 @@
       <!-- Harness badge mirrored on the stats row for the same reason
            the role/type badges are duplicated: zoom modes hide one row
            or the other via CSS. -->
-      <span class="sc-harness-wrap" x-data="{ harness: s.harness }">
+      <span class="sc-harness-wrap"
+            x-data="{ harness: null, model: null }"
+            x-effect="harness = s.harness; model = s.model">
         {% include 'partials/session-harness-badge.html' %}
       </span>
       <!-- Startup-phase chip mirrored on the stats row (auto-yfcoc).

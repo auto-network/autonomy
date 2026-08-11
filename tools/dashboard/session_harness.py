@@ -2633,11 +2633,13 @@ def extract_codex_message_text(raw_entry: dict) -> str:
 def extract_codex_model(raw_entry: dict, current_model: str | None) -> str | None:
     """Return the model id observed in a Codex JSONL entry, else ``current_model``.
 
-    Codex serializes the active model in two places:
+    Codex serializes the active model in three places:
       1. ``session_meta`` envelope at session start, under ``payload.cli_version``
          siblings — the model field is ``payload.model`` or, for newer rollouts,
          nested in ``payload.config.model`` / ``payload.originator.model``.
-      2. ``event_msg`` / ``response_item`` envelopes per turn — sometimes carry
+      2. ``turn_context`` at the start of every turn. This is the authoritative
+         live binding and changes immediately when the operator switches model.
+      3. ``event_msg`` / ``response_item`` envelopes per turn — sometimes carry
          a ``model`` field on the payload root for newly-bound models. We pick
          up either to keep the value fresh on per-turn ingest.
     """
@@ -2645,9 +2647,13 @@ def extract_codex_model(raw_entry: dict, current_model: str | None) -> str | Non
     if not isinstance(payload, dict):
         return current_model
     entry_type = raw_entry.get("type")
-    if entry_type == "session_meta":
+    if entry_type in ("session_meta", "turn_context"):
         for candidate in (
             payload.get("model"),
+            payload.get("collaboration_mode", {}).get("settings", {}).get("model")
+            if isinstance(payload.get("collaboration_mode"), dict)
+            and isinstance(payload.get("collaboration_mode", {}).get("settings"), dict)
+            else None,
             (payload.get("config") or {}).get("model") if isinstance(payload.get("config"), dict) else None,
             (payload.get("originator") or {}).get("model") if isinstance(payload.get("originator"), dict) else None,
         ):
