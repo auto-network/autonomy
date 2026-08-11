@@ -1,31 +1,29 @@
-{# Canonical session-harness badge — auto-ngis4.
+{# Canonical session model badge — auto-ngis4 / auto-whrbq.
 
-   Renders a small pill that surfaces a session's harness (claude / codex /
-   future). Per the icon-rail principle (graph://553c7437-036): wherever a
-   session is rendered, its identity-defining metadata should be visible
-   at-a-glance. Unknown harness still gets a placeholder so the affordance
-   doesn't drop on legacy rows.
+   One tight pill: official provider icon plus compact active-model label.
+   The full, unmodified model id remains available in the title/data-model.
 
-   Expects an Alpine scope where ``harness`` is the per-row harness id
-   (e.g. ``s.harness`` on session cards, ``e.sender_harness`` on timeline
-   rows). Drop into a row by setting Alpine context:
+   Expects an Alpine scope containing ``harness`` and ``model``:
 
-       <span x-data="{ harness: s.harness }">
+       <span x-data="{ harness: s.harness, model: s.model }">
          {% include 'partials/session-harness-badge.html' %}
        </span>
-
-   Or pass directly via ``x-data="{ harness: ... }"`` on a wrapping span.
-
-   The partial does NOT surface model in v1 per operator directive — model
-   is queryable via the API contract but not painted on cards.
 #}
 <span class="sc-harness"
       :class="harness === 'codex' ? 'sc-harness-codex' :
               harness === 'claude' ? 'sc-harness-claude' :
               'sc-harness-unknown'"
-      :title="'Harness: ' + (harness || 'unknown')"
+      :title="(harness === 'codex' ? 'Codex' : harness === 'claude' ? 'Claude' : (harness || 'Unknown')) + (model ? ' · ' + model : '')"
       data-testid="session-harness-badge"
       :data-harness="harness || 'unknown'"
-      x-text="harness === 'codex' ? 'codex' :
-              harness === 'claude' ? 'claude' :
-              harness || '?'"></span>
+      :data-model="model || ''">
+  <img class="sc-harness-icon"
+       x-show="harness === 'claude' || harness === 'codex'"
+       :src="harness === 'claude'
+         ? '/static/img/providers/anthropic-32.png'
+         : '/static/img/providers/openai-32.svg'"
+       alt="" aria-hidden="true" width="12" height="12">
+  <span class="sc-model-name"
+        x-show="model || (harness !== 'claude' && harness !== 'codex')"
+        x-text="window.compactSessionModel(model) || '?'"></span>
+</span>

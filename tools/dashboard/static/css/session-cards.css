@@ -152,9 +152,7 @@
 }
 .sc-role-host { background: #1e3a5f; color: #93c5fd; }
 
-/* Harness badge — auto-ngis4. Per-harness brand colour so the operator
-   can tell at a glance which CLI a session is running under. Renders
-   alongside role/type chips in the card-chrome icon rail. */
+/* Provider icon + active model in one compact badge. */
 /* The badge is dropped into the row inside a bare <span x-data> wrapper.
    Without this the wrapper is an inline box at the row's full line-height
    (24px), so the pill baseline-aligns ~1.5px BELOW the row center while the
@@ -164,12 +162,18 @@
 .sc-harness-wrap { display: inline-flex; align-items: center; }
 .sc-harness {
   display: inline-flex; align-items: center;
-  padding: 1px 6px; border-radius: 4px;
-  font-size: 10px; font-weight: 700;
-  letter-spacing: 0.02em; text-transform: lowercase;
+  min-height: 16px; gap: 3px;
+  padding: 1px 5px 1px 3px; border-radius: 4px;
+  font-size: 9.5px; font-weight: 700;
+  letter-spacing: -0.01em;
   white-space: nowrap; flex-shrink: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+.sc-harness-icon {
+  display: block; width: 12px; height: 12px;
+  object-fit: contain; flex: 0 0 12px;
+}
+.sc-model-name { line-height: 1; }
 .sc-harness-claude  { background: #2e1065; color: #c4b5fd; }
 .sc-harness-codex   { background: #052e16; color: #86efac; }
 .sc-harness-unknown { background: #1f2937; color: #6b7280; }

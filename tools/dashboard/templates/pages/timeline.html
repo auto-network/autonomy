@@ -377,7 +377,7 @@
                   <a class="tl-exp-link" :href="'/session/' + e.dispatched_by_session"
                      x-text="'From: ' + e.dispatched_by_session + ' →'"></a>
                   <!-- Harness badge — auto-ngis4 / icon-rail. -->
-                  <span x-data="{ harness: e.sender_harness }">
+                  <span x-data="{ harness: e.sender_harness, model: e.sender_model }">
                     {% include 'partials/session-harness-badge.html' %}
                   </span>
                 </span>

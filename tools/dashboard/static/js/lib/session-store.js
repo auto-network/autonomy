@@ -56,6 +56,40 @@ window.applyTurnCorrection = function(store, correction) {
   return true;
 };
 
+/** Collapse provider model ids into the tight label used on session cards. */
+window.compactSessionModel = function(model) {
+  var raw = String(model || '').trim();
+  if (!raw) return '';
+
+  // Capacity/context suffixes remain in the tooltip but not card chrome.
+  var value = raw.replace(/\[[^\]]+\]$/g, '');
+  var codex = value.match(/^gpt-([0-9]+(?:\.[0-9]+)?)(?:-([a-z0-9.-]+))?$/i);
+  if (codex) {
+    var codexFamily = (codex[2] || '').split('-').filter(Boolean).map(function(part) {
+      return part.charAt(0).toUpperCase() + part.slice(1);
+    }).join('-');
+    return codex[1] + (codexFamily ? '-' + codexFamily : '');
+  }
+
+  var claude = value.match(/^claude-(opus|sonnet|haiku|fable)-([0-9]+)(?:-([0-9]+))?(?:-[0-9]{8})?$/i);
+  if (claude) {
+    return claude[1].charAt(0).toUpperCase() + claude[1].slice(1).toLowerCase()
+      + '-' + claude[2] + (claude[3] ? '.' + claude[3] : '');
+  }
+  var legacyClaude = value.match(/^claude-([0-9]+)-([0-9]+)-(opus|sonnet|haiku)(?:-[0-9]{8})?$/i);
+  if (legacyClaude) {
+    return legacyClaude[3].charAt(0).toUpperCase() + legacyClaude[3].slice(1).toLowerCase()
+      + '-' + legacyClaude[1] + '.' + legacyClaude[2];
+  }
+
+  value = value.replace(/^claude-/i, '').replace(/^gpt-/i, '');
+  return value.split('-').filter(Boolean).map(function(part) {
+    return /^[a-z]/i.test(part)
+      ? part.charAt(0).toUpperCase() + part.slice(1)
+      : part;
+  }).join('-');
+};
+
 document.addEventListener('alpine:init', function() {
   Alpine.store('sessions', {});
 
@@ -859,6 +893,8 @@ window.ensureSessionMessages = function() {
 
     // Update metadata
     if (data.context_tokens !== undefined) store.contextTokens = data.context_tokens;
+    var modelChanged = data.model !== undefined && store.model !== data.model;
+    if (data.model !== undefined) store.model = data.model;
     if (data.size_bytes !== undefined) store.sizeMB = (data.size_bytes / 1048576).toFixed(1);
     store.lastActivity = Date.now() / 1000;
 
@@ -875,6 +911,9 @@ window.ensureSessionMessages = function() {
     if (data.is_live === false) {
       store.isLive = false;
     }
+    // A Codex turn_context can change model without yielding a visible
+    // transcript entry. Wake list/card consumers for that metadata-only SSE.
+    if (modelChanged) _emitSessionStoreChanged('model');
   });
 
   window.registerHandler('session:turn_corrections', function(data) {
