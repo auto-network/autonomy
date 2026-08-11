@@ -250,233 +250,211 @@ def test_bridge_answers_null_when_the_channel_fails():
     assert out["posted"][0]["result"] is None
 
 
-# ── in-page navigation: the srcdoc base-URL trap ────────────────────────
 
-NAV = r"""
-  const asked = [];
+
+# ── the rewriter: link shapes taken from the REAL artifact ──────────────
+#
+# Counted on the live OSS Insights binder rather than imagined:
+#   64 fragments · 29 external · 6 pillar links · 5 inline onclick · 1 no-href
+# The previous round of this file tested pillar links (6 of 59) because that
+# is what was being built, and missed the fragments that dominate the page.
+# These cases come from that inventory.
+
+
+def rewrite(html: str) -> str:
+    return run_js(
+        "console.log(JSON.stringify(autonet.missionShimmed(%s).slice(autonet.MISSION_SHIM.length)))"
+        % json.dumps(html)
+    )
+
+
+def test_a_pillar_href_becomes_a_marker():
+    out = rewrite('<a href="/missions/m1/pillars/p7">Collection Pipeline</a>')
+    assert 'data-mc-pillar="p7"' in out
+    assert "/missions/m1/pillars/p7" not in out
+
+
+def test_a_mission_home_href_becomes_a_marker():
+    out = rewrite('<a href="/missions/m1">Back to mission overview</a>')
+    assert 'data-mc-home="1"' in out
+    assert 'href="/missions/m1"' not in out
+
+
+def test_a_fragment_is_marked_and_keeps_its_href():
+    """64 of these. They must scroll, not navigate: a srcdoc document
+    inherits the PARENT's base URL, so '#s5' resolves to a different
+    document and takes the artifact with it."""
+    out = rewrite('<a href="#s5">5 · Data Acquisition</a>')
+    assert 'data-mc-fragment="s5"' in out
+    assert 'href="#s5"' in out
+
+
+def test_external_links_are_untouched():
+    """29 of these. Breaking them would be a worse regression than the bug
+    being fixed."""
+    html = '<a href="https://github.com/anchore/syft">syft</a>'
+    assert rewrite(html) == html
+
+
+def test_a_static_onclick_naming_a_pillar_becomes_a_marker_and_loses_its_handler():
+    out = rewrite(
+        '<span onclick="window.location.href=\'/missions/m1/pillars/p9\'">Platform</span>'
+    )
+    assert 'data-mc-pillar="p9"' in out
+    assert "onclick" not in out
+
+
+def test_an_anchor_with_no_href_is_untouched():
+    html = "<a>no href at all</a>"
+    assert rewrite(html) == html
+
+
+def test_relative_and_other_paths_are_left_alone():
+    for html in ('<a href="/settings">settings</a>',
+                 '<a href="report.pdf">report</a>',
+                 '<a href="mailto:x@y.z">mail</a>'):
+        assert rewrite(html) == html
+
+
+def test_the_shim_is_still_prepended_and_the_body_follows():
+    out = run_js(
+        "const h='<html><body>coordinator bytes</body></html>';"
+        "const s=autonet.missionShimmed(h);"
+        "console.log(JSON.stringify({has_shim:s.indexOf('mc-request')!==-1,"
+        "ends_with_body:s.endsWith('coordinator bytes</body></html>')}))"
+    )
+    assert out == {"has_shim": True, "ends_with_body": True}
+
+
+# ── the single runtime click rule ───────────────────────────────────────
+
+CLICK = r"""
+  const posted = [];
   const scrolled = [];
-  const written = [];
+  let clickHandlers = [];
   let handler = () => {};
-  let clickHandler = () => {};
   global.parent = { postMessage(msg) {
-    asked.push({ mcOp: msg.mcOp, body: msg.body });
-    handler({ source: global.parent, data: {
-      v: 1, op: "mc-response", id: msg.id,
-      result: { status: "ok", html: "<html>pillar page</html>" } } });
+    posted.push(msg);
+    if (msg.op === "mc-request") {
+      handler({ source: global.parent, data: {
+        v: 1, op: "mc-response", id: msg.id,
+        result: { status: "ok", html: "<html>pillar</html>" } } });
+    }
   } };
-  global.window.addEventListener = (name, fn) => { if (name === "message") handler = fn; };
-  let domReady = () => {};
-  // The shim registers MORE THAN ONE click listener (anchors, then
-  // onclick-carrying rows). Keeping only the last silently disabled the
-  // first and made the anchor tests fail against working code -- collect
-  // them all and dispatch in order, like a real event target.
-  const clickHandlers = [];
-  global.document.addEventListener = (name, fn) => {
-    if (name === "click") clickHandlers.push(fn);
-    if (name === "DOMContentLoaded") domReady = fn;
-  };
-  global.document.documentElement = { outerHTML: "<html>the mission</html>" };
-  global.document.currentScript = { textContent: "/*self*/" };
-  global.document.getElementById = (id) => ({
-    id, scrollIntoView: () => scrolled.push(id),
-  });
+  global.window.addEventListener = (n, fn) => { if (n === "message") handler = fn; };
+  global.document.addEventListener = (n, fn) => { if (n === "click") clickHandlers.push(fn); };
+  global.document.getElementById = (id) => ({ id, scrollIntoView: () => scrolled.push(id) });
   global.document.getElementsByName = () => [];
-  global.document.open = () => {};
-  global.document.write = (h) => written.push(h);
-  global.document.close = () => {};
   global.window.scrollTo = () => scrolled.push("__top__");
-  global.location = {
-    assign: (v) => {}, replace: (v) => {}, href: "about:srcdoc",
-  };
-  global.window.location = global.location;
   const shim = autonet.MISSION_SHIM
     .replace(/^<script>/, "").replace(/<\/script>$/, "").replace("<\\/script>", "");
   eval(shim);
 
-  function dispatch(target) {
-    let prevented = false;
-    let stopped = false;
-    const event = {
-      target,
-      preventDefault: () => { prevented = true; },
-      stopImmediatePropagation: () => { stopped = true; },
+  function click(attrs, opts) {
+    opts = opts || {};
+    let prevented = false, stopped = false;
+    const el = {
+      getAttribute: (k) => (k in attrs ? attrs[k] : null),
+      onclick: opts.onclick || null,
+      textContent: opts.text || "",
+      parentElement: null,
     };
-    for (const fn of clickHandlers) {
-      fn(event);
-      if (stopped) break;
-    }
+    const event = { target: el, preventDefault: () => { prevented = true; },
+                    stopImmediatePropagation: () => { stopped = true; } };
+    for (const fn of clickHandlers) { fn(event); if (stopped) break; }
     return prevented;
-  }
-
-  function clickHref(href) {
-    return dispatch({
-      tagName: "A",
-      getAttribute: (k) => (k === "href" ? href : null),
-      parentElement: null,
-    });
-  }
-
-  function clickRow(onclickSource, text) {
-    return dispatch({
-      tagName: "SPAN",
-      getAttribute: () => null,
-      onclick: onclickSource,
-      textContent: text || "",
-      parentElement: null,
-    });
   }
   __BODY__
 """
 
 
-def nav(body: str):
-    return run_js(NAV.replace("__BODY__", body))
+def click_case(body: str):
+    return run_js(CLICK.replace("__BODY__", body))
 
 
-def test_a_fragment_anchor_scrolls_instead_of_navigating():
-    """THE BUG FOUND ON THE LIVE RELAY: a srcdoc document has no base URL
-    of its own, so "#s5" resolves against the PARENT's URL and navigates
-    the frame off the artifact permanently. The OSS Insights binder has 53
-    of these -- its entire table of contents -- so this broke far more of
-    the page than the pillar links did."""
-    out = nav("""
-      const prevented = clickHref("#s5");
-      console.log(JSON.stringify({ prevented, scrolled, asked }));
+def test_a_pillar_marker_reads_over_the_channel_and_asks_the_parent_to_swap():
+    out = click_case("""
+      const prevented = click({ "data-mc-pillar": "p7" });
+      setTimeout(() => console.log(JSON.stringify({ prevented, posted })), 30);
+    """)
+    assert out["prevented"] is True
+    kinds = [m["op"] for m in out["posted"]]
+    assert "mc-request" in kinds and "mc-swap" in kinds
+    swap = [m for m in out["posted"] if m["op"] == "mc-swap"][0]
+    assert swap["html"] == "<html>pillar</html>"
+
+
+def test_a_home_marker_asks_the_parent_and_costs_no_channel_traffic():
+    """THE BACK-LINK BUG: this used to depend on state captured inside the
+    frame, which a pillar swap clobbered with the pillar's own HTML."""
+    out = click_case("""
+      const prevented = click({ "data-mc-home": "1" });
+      console.log(JSON.stringify({ prevented, posted }));
+    """)
+    assert out["prevented"] is True
+    assert [m["op"] for m in out["posted"]] == ["mc-home"]
+
+
+def test_a_fragment_marker_scrolls_and_costs_no_channel_traffic():
+    out = click_case("""
+      const prevented = click({ "data-mc-fragment": "s5" });
+      console.log(JSON.stringify({ prevented, scrolled, posted }));
     """)
     assert out["prevented"] is True
     assert out["scrolled"] == ["s5"]
-    assert out["asked"] == []  # a scroll costs no channel round trip
+    assert out["posted"] == []
 
 
-def test_an_empty_fragment_goes_to_the_top():
-    out = nav("""
-      const prevented = clickHref("#");
+def test_an_empty_fragment_marker_goes_to_the_top():
+    out = click_case("""
+      const prevented = click({ "data-mc-fragment": "" });
       console.log(JSON.stringify({ prevented, scrolled }));
     """)
     assert out["prevented"] is True
     assert out["scrolled"] == ["__top__"]
 
 
-def test_a_pillar_link_reads_over_the_channel_and_swaps_in_place():
-    out = nav("""
-      const prevented = clickHref("/missions/m1/pillars/p7");
-      setTimeout(() => console.log(JSON.stringify({
-        prevented, asked, wrote: written.length, hasSelf: (written[0]||"").indexOf("/*self*/") !== -1,
-      })), 30);
+def test_a_dynamically_built_row_is_matched_by_label():
+    """The dropdown is built by the SITE'S OWN script after the rewrite, so
+    no marker can exist on it. Requires BOTH an onclick and a roster match."""
+    out = click_case("""
+      window.__mcPillars = [{ pillar_id: "p-platform", name: "Platform" }];
+      const prevented = click({}, { onclick: function () {}, text: "Platform" });
+      setTimeout(() => console.log(JSON.stringify({ prevented, posted })), 30);
     """)
     assert out["prevented"] is True
-    assert out["asked"] == [{"mcOp": "read", "body": {"kind": "pillar_site", "pillar_id": "p7"}}]
-    assert out["wrote"] == 1
-    # The replacement document carries the shim again, or the pillar page
-    # would lose fetch interception and every way back.
-    assert out["hasSelf"] is True
+    assert out["posted"][0]["body"] == {"kind": "pillar_site", "pillar_id": "p-platform"}
 
 
-def test_a_link_back_to_the_mission_restores_it_without_a_fetch():
-    out = nav("""
-      domReady();  // the shim captures the mission document here
-      const prevented = clickHref("/missions/m1");
-      console.log(JSON.stringify({ prevented, asked, wrote: written.length }));
+def test_non_interactive_text_matching_a_pillar_name_is_left_alone():
+    """Prose that happens to say 'Platform' must not become a link."""
+    out = click_case("""
+      window.__mcPillars = [{ pillar_id: "p-platform", name: "Platform" }];
+      const prevented = click({}, { text: "Platform" });
+      console.log(JSON.stringify({ prevented, posted }));
     """)
-    assert out["prevented"] is True
-    assert out["asked"] == []  # already held; nothing to fetch
-    assert out["wrote"] == 1
+    assert out["prevented"] is False
+    assert out["posted"] == []
 
 
-def test_any_other_absolute_path_is_refused_rather_than_destroying_the_page():
-    """A same-site path would land on the relay's origin as a 404 and take
-    the artifact with it. Refusing is strictly better than navigating."""
-    out = nav("""
-      const prevented = clickHref("/settings");
-      console.log(JSON.stringify({ prevented, asked, wrote: written.length }));
-    """)
-    assert out["prevented"] is True
-    assert out["wrote"] == 0
-
-
-def test_an_external_link_is_left_alone():
-    out = nav("""
-      const prevented = clickHref("https://example.com/docs");
-      console.log(JSON.stringify({ prevented }));
+def test_an_unmarked_click_is_left_alone():
+    out = click_case("""
+      const prevented = click({});
+      console.log(JSON.stringify({ prevented, posted }));
     """)
     assert out["prevented"] is False
 
 
-def test_a_click_not_on_a_link_is_ignored():
-    out = nav("""
-      let prevented = false;
-      prevented = dispatch({ tagName: "DIV", getAttribute: () => null,
-                             parentElement: null, textContent: "" });
-      console.log(JSON.stringify({ prevented, asked }));
-    """)
-    assert out["prevented"] is False
-
-
-# ── the pillar dropdown: onclick rows, not anchors ──────────────────────
-
-
-def test_a_dropdown_row_with_a_literal_pillar_path_is_routed():
-    """THE MOBILE BUG: the pillar dropdown builds <span> rows carrying
-    row.onclick = window.location.href = "/missions/<m>/pillars/<p>".
-    They are not anchors, so the anchor walk misses them, and
-    window.location is non-configurable in every engine so the old
-    redefinition silently no-opped. The dropdown opened and closed but
-    nothing could be selected."""
-    out = nav("""
-      const prevented = clickRow(
-        'function () { window.location.href = "/missions/m1/pillars/p7"; }');
-      setTimeout(() => console.log(JSON.stringify({ prevented, asked })), 30);
-    """)
-    assert out["prevented"] is True
-    assert out["asked"] == [
-        {"mcOp": "read", "body": {"kind": "pillar_site", "pillar_id": "p7"}}
-    ]
-
-
-def test_a_dropdown_row_that_concatenates_its_path_is_matched_by_label():
-    """The real site builds the path as "/pillars/" + p.pillar_id, so the
-    handler source carries no literal id. Fall back to matching the row's
-    own text against the cached pillar roster."""
-    out = nav("""
-      window.__mcPillars = [
-        { pillar_id: "p-collection", name: "Collection Pipeline" },
-        { pillar_id: "p-platform", name: "Platform" },
-      ];
-      const prevented = clickRow(
-        'function () { window.location.href = "/missions/" + MISSION_ID + "/pillars/" + p.pillar_id; }',
-        "Platform");
-      setTimeout(() => console.log(JSON.stringify({ prevented, asked })), 30);
-    """)
-    assert out["prevented"] is True
-    assert out["asked"] == [
-        {"mcOp": "read", "body": {"kind": "pillar_site", "pillar_id": "p-platform"}}
-    ]
-
-
-def test_an_unmatched_row_label_is_left_alone():
-    out = nav("""
-      window.__mcPillars = [{ pillar_id: "p1", name: "Known" }];
-      const prevented = clickRow(
-        'function () { window.location.href = "/missions/" + M + "/pillars/" + p.id; }',
-        "Not In The Roster");
-      setTimeout(() => console.log(JSON.stringify({ prevented, asked })), 30);
-    """)
-    assert out["prevented"] is False
-    assert out["asked"] == []
-
-
-def test_location_assign_is_routed_too():
-    out = nav("""
-      window.location.assign("/missions/m1/pillars/p9");
-      setTimeout(() => console.log(JSON.stringify({ asked })), 30);
-    """)
-    assert out["asked"] == [
-        {"mcOp": "read", "body": {"kind": "pillar_site", "pillar_id": "p9"}}
-    ]
-
-
-def test_the_pillar_roster_is_cached_from_the_pillars_read():
-    """The label fallback above depends on this cache being populated as a
-    side effect of the menu's own fetch."""
-    out = route('await window.fetch("/api/missions/m1/pillars");')
-    assert out == [{"mcOp": "read", "body": {"kind": "pillars"}}]
+def test_the_documented_topbar_snippet_marks_both_destinations():
+    """The pillar dropdown IS our own snippet (SKILL.md), copied into
+    coordinator sites. Its rows are built in JS, so no rewriter can reach
+    them -- marking them at the source is what keeps the viewer's rule
+    singular instead of reverse-engineering code we ship. If this drifts,
+    the dropdown silently stops working over the relay, which is exactly
+    how it shipped broken."""
+    from pathlib import Path
+    skill = Path(__file__).resolve().parents[3] / "dashboard" / "plugins" / \
+        "mission_control" / "SKILL.md"
+    text = skill.read_text()
+    assert 'top.setAttribute("data-mc-home", "1")' in text
+    assert 'row.setAttribute("data-mc-pillar", p.pillar_id)' in text

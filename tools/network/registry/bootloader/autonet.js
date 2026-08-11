@@ -1438,17 +1438,16 @@ const autonet = (() => {
     }
     if (url.indexOf("/pillars") !== -1 && url.indexOf("/api/missions/") !== -1) {
       return ask("read", { kind: "pillars" }).then(function (r) {
-        // Cache the roster: the dropdown's row handlers build their target
-        // by concatenation, so there is no literal pillar id in the
-        // handler source to read. Matching the row's own text against
-        // this list is what makes those rows routable.
+        // The pillar dropdown is built by the SITE'S OWN JavaScript, so its
+        // rows never exist in the HTML the rewriter sees. Matching a row's
+        // visible text against this roster is the one runtime rule that
+        // cannot be moved to rewrite time.
         if (r && r.pillars) window.__mcPillars = r.pillars;
         return reply(r);
       });
     }
     if (url.indexOf("dashboard.surface.presence") !== -1) {
       return ask("read", { kind: "presence" }).then(function (r) {
-        // Shape-compatible with the Settings endpoint the page expects.
         return reply({ members: (r && r.presence || []).map(function (p) {
           return { key: p.participant_id, payload: p };
         }) });
@@ -1456,114 +1455,54 @@ const autonet = (() => {
     }
     return realFetch(input, init);
   };
-  // This script's own source, so it can be re-injected into whatever
-  // document replaces this one -- a pillar page needs the same fetch
-  // interception and the same way back.
-  var SELF = document.currentScript && document.currentScript.textContent;
-  var MISSION_HTML = null;
-  document.addEventListener("DOMContentLoaded", function () {
-    MISSION_HTML = document.documentElement.outerHTML;
-  });
-  function swap(html) {
-    document.open();
-    document.write(SELF ? "<scr" + "ipt>" + SELF + "</scr" + "ipt>" + html : html);
-    document.close();
-  }
+
   function openPillar(pillarId) {
     ask("read", { kind: "pillar_site", pillar_id: pillarId }).then(function (r) {
-      if (r && r.html) swap(r.html);
+      if (r && r.html) parent.postMessage({ v: 1, op: "mc-swap", html: r.html }, "*");
     });
   }
-  window.__mcOpenPillar = openPillar;
-  document.addEventListener("click", function (event) {
-    var el = event.target;
-    while (el && el.tagName !== "A") el = el.parentElement;
-    var href = el && el.getAttribute("href");
-    if (!href) return;
-    // A srcdoc document has NO base URL of its own, so it inherits the
-    // parent's -- which means even a bare "#section" resolves to
-    // relay.auto.network/l/<token>#section, a DIFFERENT document, and
-    // navigates the frame off the artifact for good. Every in-page anchor
-    // in the mission (53 of them in the OSS Insights binder: its whole
-    // table of contents) breaks this way, not just pillar links. Scroll
-    // instead of letting the browser navigate.
-    if (href.charAt(0) === "#") {
-      event.preventDefault();
-      var id = href.slice(1);
-      if (!id) { window.scrollTo(0, 0); return; }
-      var target = document.getElementById(id)
-        || document.getElementsByName(id)[0];
-      if (target && target.scrollIntoView) {
-        target.scrollIntoView({ behavior: "smooth", block: "start" });
-      }
-      return;
-    }
-    var pillar = href.match(/\\/missions\\/[^\\/]+\\/pillars\\/([^\\/?#]+)/);
-    if (pillar) { event.preventDefault(); openPillar(pillar[1]); return; }
-    // A link back to the mission itself: restore the artifact we already
-    // hold rather than fetching anything.
-    if (/\\/missions\\/[^\\/?#]+\\/?$/.test(href)) {
-      event.preventDefault();
-      if (MISSION_HTML) swap(MISSION_HTML);
-      return;
-    }
-    // Any other same-site path would navigate the frame off the artifact
-    // into a 404 on the relay's origin. Refuse it rather than destroy the
-    // page; an absolute external link is left alone.
-    if (href.charAt(0) === "/") event.preventDefault();
-  }, true);
-  // The page ALSO navigates by assignment -- the pillar dropdown builds
-  // <span> rows with row.onclick = window.location.href = "/missions/...".
-  // Two reasons the click handler above misses those: they are not <a>
-  // elements, so walking up for an anchor finds nothing, and
-  // window.location is NON-CONFIGURABLE in every engine, so redefining it
-  // (the previous attempt here) silently hit its own catch and did
-  // nothing. On mobile that read as a dropdown that opens and closes but
-  // cannot select anything.
-  //
-  // Intercept the surviving path instead: a same-document navigation the
-  // sandbox is about to perform fires unload. By then the URL is already
-  // known via document.activeElement's own handler, so instead hook the
-  // two APIs that CAN be replaced -- location.assign/replace -- and catch
-  // the href-setter case by watching for the frame trying to leave.
-  try {
-    var realAssign = window.location.assign.bind(window.location);
-    var realReplace = window.location.replace.bind(window.location);
-    function routeOrGo(value, fallback) {
-      var m = String(value).match(/\\/missions\\/[^\\/]+\\/pillars\\/([^\\/?#]+)/);
-      if (m) { openPillar(m[1]); return; }
-      if (/\\/missions\\/[^\\/?#]+\\/?$/.test(String(value))) {
-        if (MISSION_HTML) swap(MISSION_HTML);
-        return;
-      }
-      fallback(value);
-    }
-    window.location.assign = function (v) { routeOrGo(v, realAssign); };
-    window.location.replace = function (v) { routeOrGo(v, realReplace); };
-  } catch (e) { /* assign/replace not replaceable: click handling still applies */ }
-  // The href-setter case cannot be hooked at all, so catch it one level
-  // up: any click whose handler is about to set location gets its target
-  // inspected first. A row carrying an onclick that mentions a pillar
-  // path is routed here and its handler suppressed, which is what makes
-  // the dropdown selectable.
+
+  // ONE click rule. Everything statically knowable was already turned into a
+  // data-mc-* attribute by the rewriter before this document existed, so
+  // there is no href parsing, no handler-source regex, and no location
+  // wrapping here. Two runtime cases remain, and both are irreducible:
+  // fragments (a srcdoc document has no base URL, so "#x" would navigate
+  // away instead of scrolling) and rows the site's own script created after
+  // the rewrite.
   document.addEventListener("click", function (event) {
     var el = event.target;
     while (el && el !== document) {
-      var handler = el.getAttribute && el.getAttribute("onclick");
-      var src = handler || (el.onclick ? String(el.onclick) : "");
-      var m = src && src.match(/\\/missions\\/[^\\/"']+\\/pillars\\/([^\\/"'?#\\s+]+)/);
-      if (m) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        openPillar(m[1]);
-        return;
-      }
-      // A handler that builds the path by concatenation ("/pillars/" +
-      // p.pillar_id) has no literal id to read, so fall back to the
-      // element's own text matched against the pillar list.
-      if (src && src.indexOf("/pillars/") !== -1) {
-        var label = (el.textContent || "").trim();
-        if (label && window.__mcPillars) {
+      if (el.getAttribute) {
+        var pillar = el.getAttribute("data-mc-pillar");
+        if (pillar) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          openPillar(pillar);
+          return;
+        }
+        if (el.getAttribute("data-mc-home")) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          parent.postMessage({ v: 1, op: "mc-home" }, "*");
+          return;
+        }
+        var frag = el.getAttribute("data-mc-fragment");
+        if (frag !== null && frag !== undefined) {
+          event.preventDefault();
+          if (!frag) { window.scrollTo(0, 0); return; }
+          var target = document.getElementById(frag)
+            || document.getElementsByName(frag)[0];
+          if (target && target.scrollIntoView) {
+            target.scrollIntoView({ behavior: "smooth", block: "start" });
+          }
+          return;
+        }
+        // Dynamically built row: interactive (it has a click handler) and its
+        // visible text names a pillar we know about. Both conditions are
+        // required -- plain prose that happens to match a pillar name is not
+        // interactive and is left alone.
+        if (el.onclick && window.__mcPillars) {
+          var label = (el.textContent || "").trim();
           for (var i = 0; i < window.__mcPillars.length; i++) {
             if ((window.__mcPillars[i].name || "").trim() === label) {
               event.preventDefault();
@@ -1579,8 +1518,63 @@ const autonet = (() => {
   }, true);
 })();<\/script>`;
 
+  //: Every same-origin destination a mission page can name, turned into an
+  //: explicit marker BEFORE the document exists. Doing it here rather than
+  //: at click time is what keeps the runtime rule singular: the shim reads
+  //: attributes, it never re-derives intent from hrefs or handler source.
+  //:
+  //: External links (29 of them in the OSS Insights binder) and everything
+  //: else are deliberately untouched.
+  function rewriteMissionLinks(html) {
+    // ORDER IS LOAD-BEARING. onclick is consumed first, or the href rules
+    // below match the URL *inside* a handler's own source and corrupt it.
+    // Fragments are marked before any rule can mint a new href="#", or that
+    // synthetic href gets marked as a fragment too.
+    return String(html)
+      // 1. A static inline handler naming a pillar -> marker, handler
+      //    dropped so it cannot also fire.
+      .replace(
+        /onclick\s*=\s*"[^"]*\/missions\/[^"]*\/pillars\/([^"\/?#'\s+]+)[^"]*"/gi,
+        'data-mc-pillar="$1"'
+      )
+      .replace(
+        /onclick\s*=\s*'[^']*\/missions\/[^']*\/pillars\/([^'\/?#"\s+]+)[^']*'/gi,
+        'data-mc-pillar="$1"'
+      )
+      // 2. Fragments: marked, because they must scroll rather than
+      //    navigate -- a srcdoc document inherits the PARENT's base URL, so
+      //    "#x" resolves to a different document and takes the artifact
+      //    with it. 64 of these in the OSS Insights binder.
+      .replace(
+        /href\s*=\s*"#([^"]*)"/gi,
+        'href="#$1" data-mc-fragment="$1"'
+      )
+      .replace(
+        /href\s*=\s*'#([^']*)'/gi,
+        'href="#$1" data-mc-fragment="$1"'
+      )
+      // 3. A pillar destination -> open it over the channel.
+      .replace(
+        /href\s*=\s*"\/missions\/[^"\/]+\/pillars\/([^"\/?#]+)"/gi,
+        'href="#" data-mc-pillar="$1"'
+      )
+      .replace(
+        /href\s*=\s*'\/missions\/[^'\/]+\/pillars\/([^'\/?#]+)'/gi,
+        'href="#" data-mc-pillar="$1"'
+      )
+      // 4. The mission itself -> restore the artifact the parent holds.
+      .replace(
+        /href\s*=\s*"\/missions\/[^"\/?#]+\/?"/gi,
+        'href="#" data-mc-home="1"'
+      )
+      .replace(
+        /href\s*=\s*'\/missions\/[^'\/?#]+\/?'/gi,
+        'href="#" data-mc-home="1"'
+      );
+  }
+
   function missionShimmed(html) {
-    return MISSION_SHIM + html;
+    return MISSION_SHIM + rewriteMissionLinks(html);
   }
 
   class MissionBridge {
@@ -1588,12 +1582,28 @@ const autonet = (() => {
      * an opaque origin, so every inbound message is checked against the
      * captured window before it is trusted -- the same discipline the
      * note viewer's own message handling uses. */
-    constructor({ frame, channel }) {
+    constructor({ frame, channel, missionHtml }) {
+      this.frame = frame;
       this.childWindow = frame.contentWindow;
       this.channel = channel;
+      // THE PARENT OWNS THE MISSION DOCUMENT. It used to be captured inside
+      // the frame on DOMContentLoaded, which broke the moment a pillar
+      // replaced that document: the re-injected shim captured the PILLAR as
+      // its own "mission", so going back restored the page you were already
+      // on -- and document.write often does not re-fire DOMContentLoaded, so
+      // usually it captured nothing and the link did nothing at all. The
+      // parent already holds these bytes and never loses them to a swap.
+      this.missionHtml = missionHtml;
       this.queue = Promise.resolve();
       this.onMessage = this.onMessage.bind(this);
       window.addEventListener("message", this.onMessage);
+    }
+
+    /** Replace the frame's document, re-injecting the shim so the new one
+     * keeps its channel access and its way back. */
+    render(html) {
+      this.frame.srcdoc = missionShimmed(html);
+      this.childWindow = this.frame.contentWindow;
     }
 
     dispose() {
@@ -1603,7 +1613,16 @@ const autonet = (() => {
     onMessage(event) {
       if (event.source !== this.childWindow || !event.data) return;
       const msg = event.data;
-      if (msg.v !== 1 || msg.op !== "mc-request") return;
+      if (msg.v !== 1) return;
+      if (msg.op === "mc-swap" && typeof msg.html === "string") {
+        this.render(msg.html);
+        return;
+      }
+      if (msg.op === "mc-home") {
+        this.render(this.missionHtml);
+        return;
+      }
+      if (msg.op !== "mc-request") return;
       if (msg.mcOp !== "read" && msg.mcOp !== "write") return;
       // Serialize: one request/response exchange at a time on a channel.
       this.queue = this.queue.then(() => this.exchange(msg));
@@ -1683,7 +1702,7 @@ const autonet = (() => {
       // The bridge must exist before the document runs, or a shim request
       // fired on load would find nobody listening.
       missionBridge = new MissionBridge({
-        frame, channel: attachmentContext.channel,
+        frame, channel: attachmentContext.channel, missionHtml: viewerHtml,
       });
       frame.srcdoc = missionShimmed(viewerHtml);
     } else {
