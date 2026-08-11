@@ -22,7 +22,30 @@ from .channel import (
     build_client_hello,
     verify_server_hello,
 )
-from .frames import is_feed_frame, strip_feed_frame
+from .frames import (
+    VIEWER_KIND_FEED,
+    VIEWER_KIND_RECORD,
+    FrameError,
+    split_viewer_message,
+)
+
+
+def read_viewer_record(raw: bytes) -> bytes:
+    """Payload of a tagged message that must be a pairwise record.
+
+    Used on the handshake, which both this client and ``dialer`` read
+    directly rather than through the demultiplexer. A feed frame cannot
+    appear there -- the channel has no keys yet -- so anything else is a
+    protocol error, surfaced as HandshakeError to keep the handshake's
+    single failure type.
+    """
+    try:
+        kind, payload = split_viewer_message(raw)
+    except FrameError as exc:
+        raise HandshakeError(str(exc)) from exc
+    if kind != VIEWER_KIND_RECORD:
+        raise HandshakeError(f"expected a channel record, got kind {kind:#x}")
+    return payload
 
 
 class ViewerChannel:
@@ -46,22 +69,19 @@ class ViewerChannel:
     async def _next(self, queue: "asyncio.Queue[bytes]") -> bytes:
         """Next payload from *queue*, pumping the socket until it has one.
 
-        A feed frame is marked with a high bit that a record's sequence
-        number can never have, so routing is one branch and records travel
-        exactly as they always did. Without that branch a feed frame went
-        to the pairwise decoder, which read its random nonce as a sequence
-        number, raised "record out of sequence", and tore the channel down
-        -- taking the page with it when this landed during the initial
-        artifact fetch.
+        The kind byte says which queue a message belongs in. Without it a
+        feed frame went to the pairwise decoder, which read its random
+        nonce as a sequence number, raised "record out of sequence", and
+        tore the channel down -- taking the page with it when this landed
+        during the initial artifact fetch.
         """
         while queue.empty():
             raw = await self._ws.recv()
             if isinstance(raw, str):
                 continue
-            if is_feed_frame(raw):
-                self._feed.put_nowait(strip_feed_frame(raw))
-            else:
-                self._records.put_nowait(raw)
+            kind, payload = split_viewer_message(raw)
+            target = self._feed if kind == VIEWER_KIND_FEED else self._records
+            target.put_nowait(payload)
         return queue.get_nowait()
 
     async def recv_feed(self) -> bytes:
@@ -97,6 +117,7 @@ class ViewerChannel:
             server_hello = await ws.recv()
             if isinstance(server_hello, str):
                 raise HandshakeError("expected binary SERVER_HELLO")
+            server_hello = read_viewer_record(server_hello)
             server_eph, transcript_hash = verify_server_hello(
                 server_hello,
                 root_pub=root_pub,

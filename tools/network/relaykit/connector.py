@@ -50,9 +50,11 @@ from .frames import (
     FRAME_CLOSE,
     FRAME_CTRL,
     FRAME_DATA,
+    VIEWER_KIND_RECORD,
     FRAME_OPEN,
     FrameError,
     decode_frame,
+    tag_viewer_message,
     encode_frame,
 )
 from .hello import build_tunnel_hello
@@ -124,6 +126,15 @@ async def serve_channel(key: KeyPair, cert: DelegationCert, *, org: str, token: 
     individual message above its symmetric ``MAX_MESSAGE_SIZE`` backstop, and
     the one-item final-boundary lookahead retains at most two yielded messages.
     """
+    # Everything this end sends a viewer is a pairwise channel record, and
+    # is tagged as one. Tagging here rather than in the registry keeps the
+    # relay forwarding payloads opaquely, and gives every transport --
+    # registry tunnel, peer relay, direct -- one place to get it from.
+    _untagged_send = send
+
+    async def send(payload: bytes) -> None:
+        await _untagged_send(tag_viewer_message(VIEWER_KIND_RECORD, payload))
+
     first = await recv()
     if first is None:
         return

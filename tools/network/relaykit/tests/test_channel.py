@@ -19,6 +19,11 @@ from tools.network.relaykit.channel import (
     parse_client_hello,
     verify_server_hello,
 )
+from tools.network.relaykit.frames import (
+    VIEWER_KIND_LEN,
+    VIEWER_KIND_RECORD,
+    split_viewer_message,
+)
 from tools.network.relaykit.connector import serve_channel
 
 from .conftest import ORG, TOKEN
@@ -320,13 +325,17 @@ async def test_serve_channel_streams_async_iterator_with_bounded_lookahead(
         return await to_server.get()
 
     async def send(payload):
+        # serve_channel tags what it sends a viewer; this stands in for the
+        # viewer, so it strips the kind exactly as a real client does.
         nonlocal completed, largest_wire_record
+        kind, record = split_viewer_message(payload)
+        assert kind == VIEWER_KIND_RECORD
         if observer is not None:
             largest_wire_record = max(largest_wire_record, len(payload))
-            opened = observer.open_stream_record(payload)
+            opened = observer.open_stream_record(record)
             if opened.message_end:
                 completed += 1
-        await from_server.put(payload)
+        await from_server.put(record)
 
     client_priv, client_hello = build_client_hello()
     client_eph = parse_client_hello(client_hello)
@@ -374,5 +383,7 @@ async def test_serve_channel_streams_async_iterator_with_bounded_lookahead(
     assert delivered == app_messages
     assert completed == produced == len(app_messages)
     assert peak_outstanding <= 2
-    assert largest_wire_record <= 8 + 1 + CHUNK_SIZE + 16
+    # kind byte + 8-byte seq + flags byte + chunk + GCM tag. The kind byte
+    # is the framing cost of distinguishing records from feed frames.
+    assert largest_wire_record <= VIEWER_KIND_LEN + 8 + 1 + CHUNK_SIZE + 16
     assert client.peak_buffered_bytes == 0

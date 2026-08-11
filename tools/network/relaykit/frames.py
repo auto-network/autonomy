@@ -90,37 +90,44 @@ def decode_frame(raw: bytes) -> Frame:
     )
 
 
-# ── feed frames on the viewer socket ────────────────────────────────────
+# ── viewer-socket message kinds ─────────────────────────────────────────
 #
 # A DIFFERENT LAYER from the frame types above. Those mux viewer channels
-# down an org's tunnel (connector <-> registry). This marks the one kind of
-# message the registry ITSELF injects into a viewer's socket: a fan-out
-# frame, opened with the link's shared stream key rather than the pairwise
-# channel key.
+# down an org's tunnel (connector <-> registry). These tag every message
+# sent TO a viewer on the public socket, which carries two things decoded
+# by two different keys:
 #
-# Pairwise channel records are NOT tagged and are byte-identical to what
-# they have always been. They do not need to be, because they are already
-# self-distinguishing: a record is [8-byte big-endian seq][ciphertext], and
-# ChannelCrypto caps the sequence at _MAX_SEQ = 2**63 (channel.py, enforced
-# in _seal_record). The high bit of a record's first byte is therefore
-# ALWAYS 0. A marker with the high bit set can never collide with one --
-# provably, not probabilistically.
+#   RECORD  a pairwise channel record: [8-byte seq][ciphertext], opened
+#           with this channel's key, strictly ordered.
+#   FEED    a fan-out frame: [12-byte nonce][ciphertext], opened with the
+#           link's shared stream key, unsolicited and unordered.
 #
-# So the reader's rule is one branch on one bit, and adding feeds changed
-# the wire format of nothing that existed before them.
-FEED_MARKER = 0x80
+# Every message is tagged, including the handshake. The reader switches on
+# the kind and never inspects the payload to guess. Deliberately NOT
+# inferred from any property of the record format: tying the framing layer
+# to the record layer's sequence ceiling would make a change to one
+# silently misroute the other.
+#
+# Viewer -> registry is untagged: it carries records and nothing else.
+VIEWER_KIND_RECORD = 0x00
+VIEWER_KIND_FEED = 0x01
+VIEWER_KIND_LEN = 1
+
+_VIEWER_KINDS = frozenset({VIEWER_KIND_RECORD, VIEWER_KIND_FEED})
 
 
-def tag_feed_frame(payload: bytes) -> bytes:
-    """Mark *payload* as a feed frame for the viewer socket."""
-    return bytes([FEED_MARKER]) + payload
+def tag_viewer_message(kind: int, payload: bytes) -> bytes:
+    """Prefix *payload* with its one-byte viewer-socket kind."""
+    if kind not in _VIEWER_KINDS:
+        raise FrameError(f"unknown viewer message kind: {kind:#x}")
+    return bytes([kind]) + payload
 
 
-def is_feed_frame(raw: bytes) -> bool:
-    """True if this viewer-socket message is a feed frame, not a record."""
-    return bool(raw) and raw[0] & FEED_MARKER != 0
-
-
-def strip_feed_frame(raw: bytes) -> bytes:
-    """The sealed feed payload, without its marker."""
-    return bytes(raw[1:])
+def split_viewer_message(raw: bytes) -> tuple[int, bytes]:
+    """``(kind, payload)`` from a tagged message sent to a viewer."""
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) < VIEWER_KIND_LEN:
+        raise FrameError("viewer message is empty")
+    kind = raw[0]
+    if kind not in _VIEWER_KINDS:
+        raise FrameError(f"unknown viewer message kind: {kind:#x}")
+    return kind, bytes(raw[VIEWER_KIND_LEN:])
