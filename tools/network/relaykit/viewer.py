@@ -10,6 +10,7 @@ Ed25519 verify) exists in ``crypto.subtle``.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from typing import Optional
 
@@ -21,6 +22,7 @@ from .channel import (
     build_client_hello,
     verify_server_hello,
 )
+from .frames import is_feed_frame, strip_feed_frame
 
 
 class ViewerChannel:
@@ -34,6 +36,42 @@ class ViewerChannel:
     def __init__(self, ws, crypto: ChannelCrypto):
         self._ws = ws
         self._crypto = crypto
+        #: One socket, two kinds of message, one reader. Whichever call
+        #: reads next routes what it finds into BOTH queues, so a feed
+        #: frame arriving mid-request and a record arriving while waiting
+        #: on a feed are each buffered rather than dropped or misdecoded.
+        self._records: asyncio.Queue[bytes] = asyncio.Queue()
+        self._feed: asyncio.Queue[bytes] = asyncio.Queue()
+
+    async def _next(self, queue: "asyncio.Queue[bytes]") -> bytes:
+        """Next payload from *queue*, pumping the socket until it has one.
+
+        A feed frame is marked with a high bit that a record's sequence
+        number can never have, so routing is one branch and records travel
+        exactly as they always did. Without that branch a feed frame went
+        to the pairwise decoder, which read its random nonce as a sequence
+        number, raised "record out of sequence", and tore the channel down
+        -- taking the page with it when this landed during the initial
+        artifact fetch.
+        """
+        while queue.empty():
+            raw = await self._ws.recv()
+            if isinstance(raw, str):
+                continue
+            if is_feed_frame(raw):
+                self._feed.put_nowait(strip_feed_frame(raw))
+            else:
+                self._records.put_nowait(raw)
+        return queue.get_nowait()
+
+    async def recv_feed(self) -> bytes:
+        """Next sealed feed frame.
+
+        Returned still sealed: it opens with the LINK's stream key
+        (``open_stream_frame``), obtained via the ``subscribe`` op — not
+        with this channel's pairwise key.
+        """
+        return await self._next(self._feed)
 
     @classmethod
     async def connect(
@@ -80,10 +118,7 @@ class ViewerChannel:
 
     async def recv_message(self) -> bytes:
         while True:
-            record = await self._ws.recv()
-            if isinstance(record, str):
-                continue
-            message = self._crypto.open_record(record)
+            message = self._crypto.open_record(await self._next(self._records))
             if message is not None:
                 return message
 
@@ -99,10 +134,7 @@ class ViewerChannel:
         """
         parts: list[bytes] = []
         while True:
-            record = await self._ws.recv()
-            if isinstance(record, str):
-                continue
-            opened = self._crypto.open_stream_record(record)
+            opened = self._crypto.open_stream_record(await self._next(self._records))
             parts.append(opened.chunk)
             if opened.message_end:
                 message = b"".join(parts)

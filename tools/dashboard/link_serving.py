@@ -1144,4 +1144,17 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # Run the CANONICAL module's main(), not this __main__ copy.
+    #
+    # `python -m tools.dashboard.link_serving` executes this file as the
+    # module `__main__`. Anything that later does `from tools.dashboard
+    # import link_serving` -- relay_publisher does, to seal frames --
+    # imports a SECOND, independent module object. Module-level state is
+    # then duplicated: `_serve_subscribe` hands the guest a key out of one
+    # `_STREAM_KEYS`, the publisher seals with a different key out of the
+    # other, and every pushed frame is undecryptable. Same process, two
+    # modules -- which is why "seal and subscribe must share a process"
+    # was necessary but not sufficient.
+    from tools.dashboard.link_serving import main as _canonical_main
+
+    _canonical_main()
