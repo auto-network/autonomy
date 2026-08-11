@@ -248,3 +248,132 @@ def test_bridge_answers_null_when_the_channel_fails():
       setTimeout(() => console.log(JSON.stringify({ posted })), 50);
     """))
     assert out["posted"][0]["result"] is None
+
+
+# ── in-page navigation: the srcdoc base-URL trap ────────────────────────
+
+NAV = r"""
+  const asked = [];
+  const scrolled = [];
+  const written = [];
+  let handler = () => {};
+  let clickHandler = () => {};
+  global.parent = { postMessage(msg) {
+    asked.push({ mcOp: msg.mcOp, body: msg.body });
+    handler({ source: global.parent, data: {
+      v: 1, op: "mc-response", id: msg.id,
+      result: { status: "ok", html: "<html>pillar page</html>" } } });
+  } };
+  global.window.addEventListener = (name, fn) => { if (name === "message") handler = fn; };
+  let domReady = () => {};
+  global.document.addEventListener = (name, fn) => {
+    if (name === "click") clickHandler = fn;
+    if (name === "DOMContentLoaded") domReady = fn;
+  };
+  global.document.documentElement = { outerHTML: "<html>the mission</html>" };
+  global.document.currentScript = { textContent: "/*self*/" };
+  global.document.getElementById = (id) => ({
+    id, scrollIntoView: () => scrolled.push(id),
+  });
+  global.document.getElementsByName = () => [];
+  global.document.open = () => {};
+  global.document.write = (h) => written.push(h);
+  global.document.close = () => {};
+  global.window.scrollTo = () => scrolled.push("__top__");
+  const shim = autonet.MISSION_SHIM
+    .replace(/^<script>/, "").replace(/<\/script>$/, "").replace("<\\/script>", "");
+  eval(shim);
+
+  function clickHref(href) {
+    let prevented = false;
+    clickHandler({
+      target: { tagName: "A", getAttribute: (k) => (k === "href" ? href : null) },
+      preventDefault: () => { prevented = true; },
+    });
+    return prevented;
+  }
+  __BODY__
+"""
+
+
+def nav(body: str):
+    return run_js(NAV.replace("__BODY__", body))
+
+
+def test_a_fragment_anchor_scrolls_instead_of_navigating():
+    """THE BUG FOUND ON THE LIVE RELAY: a srcdoc document has no base URL
+    of its own, so "#s5" resolves against the PARENT's URL and navigates
+    the frame off the artifact permanently. The OSS Insights binder has 53
+    of these -- its entire table of contents -- so this broke far more of
+    the page than the pillar links did."""
+    out = nav("""
+      const prevented = clickHref("#s5");
+      console.log(JSON.stringify({ prevented, scrolled, asked }));
+    """)
+    assert out["prevented"] is True
+    assert out["scrolled"] == ["s5"]
+    assert out["asked"] == []  # a scroll costs no channel round trip
+
+
+def test_an_empty_fragment_goes_to_the_top():
+    out = nav("""
+      const prevented = clickHref("#");
+      console.log(JSON.stringify({ prevented, scrolled }));
+    """)
+    assert out["prevented"] is True
+    assert out["scrolled"] == ["__top__"]
+
+
+def test_a_pillar_link_reads_over_the_channel_and_swaps_in_place():
+    out = nav("""
+      const prevented = clickHref("/missions/m1/pillars/p7");
+      setTimeout(() => console.log(JSON.stringify({
+        prevented, asked, wrote: written.length, hasSelf: (written[0]||"").indexOf("/*self*/") !== -1,
+      })), 30);
+    """)
+    assert out["prevented"] is True
+    assert out["asked"] == [{"mcOp": "read", "body": {"kind": "pillar_site", "pillar_id": "p7"}}]
+    assert out["wrote"] == 1
+    # The replacement document carries the shim again, or the pillar page
+    # would lose fetch interception and every way back.
+    assert out["hasSelf"] is True
+
+
+def test_a_link_back_to_the_mission_restores_it_without_a_fetch():
+    out = nav("""
+      domReady();  // the shim captures the mission document here
+      const prevented = clickHref("/missions/m1");
+      console.log(JSON.stringify({ prevented, asked, wrote: written.length }));
+    """)
+    assert out["prevented"] is True
+    assert out["asked"] == []  # already held; nothing to fetch
+    assert out["wrote"] == 1
+
+
+def test_any_other_absolute_path_is_refused_rather_than_destroying_the_page():
+    """A same-site path would land on the relay's origin as a 404 and take
+    the artifact with it. Refusing is strictly better than navigating."""
+    out = nav("""
+      const prevented = clickHref("/settings");
+      console.log(JSON.stringify({ prevented, asked, wrote: written.length }));
+    """)
+    assert out["prevented"] is True
+    assert out["wrote"] == 0
+
+
+def test_an_external_link_is_left_alone():
+    out = nav("""
+      const prevented = clickHref("https://example.com/docs");
+      console.log(JSON.stringify({ prevented }));
+    """)
+    assert out["prevented"] is False
+
+
+def test_a_click_not_on_a_link_is_ignored():
+    out = nav("""
+      let prevented = false;
+      clickHandler({ target: { tagName: "DIV", parentElement: null },
+                     preventDefault: () => { prevented = true; } });
+      console.log(JSON.stringify({ prevented, asked }));
+    """)
+    assert out["prevented"] is False

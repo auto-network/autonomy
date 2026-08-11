@@ -1449,20 +1449,61 @@ const autonet = (() => {
     }
     return realFetch(input, init);
   };
+  // This script's own source, so it can be re-injected into whatever
+  // document replaces this one -- a pillar page needs the same fetch
+  // interception and the same way back.
+  var SELF = document.currentScript && document.currentScript.textContent;
+  var MISSION_HTML = null;
+  document.addEventListener("DOMContentLoaded", function () {
+    MISSION_HTML = document.documentElement.outerHTML;
+  });
+  function swap(html) {
+    document.open();
+    document.write(SELF ? "<scr" + "ipt>" + SELF + "</scr" + "ipt>" + html : html);
+    document.close();
+  }
   function openPillar(pillarId) {
     ask("read", { kind: "pillar_site", pillar_id: pillarId }).then(function (r) {
-      if (!r || !r.html) return;
-      document.open(); document.write(r.html); document.close();
+      if (r && r.html) swap(r.html);
     });
   }
+  window.__mcOpenPillar = openPillar;
   document.addEventListener("click", function (event) {
     var el = event.target;
     while (el && el.tagName !== "A") el = el.parentElement;
     var href = el && el.getAttribute("href");
-    var m = href && href.match(/\\/missions\\/[^\\/]+\\/pillars\\/([^\\/?#]+)/);
-    if (!m) return;
-    event.preventDefault();
-    openPillar(m[1]);
+    if (!href) return;
+    // A srcdoc document has NO base URL of its own, so it inherits the
+    // parent's -- which means even a bare "#section" resolves to
+    // relay.auto.network/l/<token>#section, a DIFFERENT document, and
+    // navigates the frame off the artifact for good. Every in-page anchor
+    // in the mission (53 of them in the OSS Insights binder: its whole
+    // table of contents) breaks this way, not just pillar links. Scroll
+    // instead of letting the browser navigate.
+    if (href.charAt(0) === "#") {
+      event.preventDefault();
+      var id = href.slice(1);
+      if (!id) { window.scrollTo(0, 0); return; }
+      var target = document.getElementById(id)
+        || document.getElementsByName(id)[0];
+      if (target && target.scrollIntoView) {
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+      return;
+    }
+    var pillar = href.match(/\\/missions\\/[^\\/]+\\/pillars\\/([^\\/?#]+)/);
+    if (pillar) { event.preventDefault(); openPillar(pillar[1]); return; }
+    // A link back to the mission itself: restore the artifact we already
+    // hold rather than fetching anything.
+    if (/\\/missions\\/[^\\/?#]+\\/?$/.test(href)) {
+      event.preventDefault();
+      if (MISSION_HTML) swap(MISSION_HTML);
+      return;
+    }
+    // Any other same-site path would navigate the frame off the artifact
+    // into a 404 on the relay's origin. Refuse it rather than destroy the
+    // page; an absolute external link is left alone.
+    if (href.charAt(0) === "/") event.preventDefault();
   }, true);
   // The page also navigates by assignment (window.location.href = ...),
   // which a sandbox without allow-top-navigation blocks outright. Give it
