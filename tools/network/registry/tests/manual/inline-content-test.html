@@ -1,0 +1,86 @@
+<!doctype html><html><head><meta charset="utf-8"><title>content inside the viewer document</title>
+<style>body{font:13px ui-monospace,monospace;background:#0d0d0f;color:#e8e8ea;padding:12px}
+.r{padding:7px;border-top:1px solid #2a2a30;white-space:pre-wrap}
+.OK{color:#56d364}.NO{color:#ff7b72}</style></head><body>
+<h3>Coordinator HTML inside the viewer's own document (two origins only)</h3>
+<div id="out">running…</div>
+<script>
+// The VIEWER: sandboxed srcdoc frame, exactly as bootloader.html:112 makes it.
+var viewer = document.createElement("iframe");
+viewer.setAttribute("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox");
+viewer.style.cssText = "width:100%;height:120px;border:1px solid #2a2a30";
+
+// What a coordinator pushes: ordinary HTML with an ordinary script and an anchor.
+var CONTENT =
+  '<h2 id="top">Pillar</h2>'
++ '<div data-mc-anchor="s5">anchored block</div>'
++ '<input id="slider" type="range" min="0" max="10" value="3">'
++ '<div id="calc">uncomputed</div>'
++ '<a id="jump" href="#deep">jump</a><div style="height:700px"></div><div id="deep">DEEP</div>'
++ '<scr'+'ipt>'
++ '  var s = document.getElementById("slider");'
++ '  function recompute(){ document.getElementById("calc").textContent = "feed size: " + (s.value*42) + " MB"; }'
++ '  s.addEventListener("input", recompute); recompute();'
++ '  window.__CALC_RAN__ = true;'
++ '<\/scr'+'ipt>';
+
+var viewerJs = `
+  var out = [];
+  var host = document.getElementById("content");
+  host.innerHTML = ${JSON.stringify(CONTENT).replace(/</g, '\\x3c')};
+
+  out.push("1. after innerHTML, content script ran: " + (window.__CALC_RAN__ ? "YES" : "NO (expected)"));
+  out.push("   #calc text = " + JSON.stringify(document.getElementById("calc").textContent));
+
+  // Re-create script nodes so the browser executes them. This is the whole
+  // mechanism -- DOM API, no parsing, no regex, no rewriting of markup.
+  var n = 0;
+  host.querySelectorAll("script").forEach(function (old) {
+    var s = document.createElement("script");
+    for (var i = 0; i < old.attributes.length; i++)
+      s.setAttribute(old.attributes[i].name, old.attributes[i].value);
+    s.textContent = old.textContent;
+    old.replaceWith(s); n++;
+  });
+  out.push("2. re-created " + n + " script node(s); content script ran: " + (window.__CALC_RAN__ ? "YES" : "NO"));
+  out.push("   #calc text = " + JSON.stringify(document.getElementById("calc").textContent));
+
+  // Does the coordinator's own event handler work afterwards?
+  var sl = document.getElementById("slider");
+  sl.value = 7; sl.dispatchEvent(new Event("input"));
+  out.push("3. slider interaction recomputes: " + JSON.stringify(document.getElementById("calc").textContent));
+
+  // Anchor discovery: plain DOM, same document.
+  out.push("4. viewer reads [data-mc-anchor]: " + document.querySelectorAll("[data-mc-anchor]").length + " found");
+
+  // Fragments, with <base href="about:srcdoc"> in THIS document.
+  var a = document.getElementById("jump");
+  out.push("5. #deep resolves to: " + a.href);
+  // Let layout settle after injection before navigating -- the previous run
+  // clicked in the same tick and the hash changed without a scroll.
+  requestAnimationFrame(function () { requestAnimationFrame(function () { a.click(); }); });
+  setTimeout(function () {
+    var d = document.getElementById("deep");
+    out.push("6. after clicking #deep: scrollY=" + (scrollY||document.documentElement.scrollTop)
+      + " hash=" + location.hash + " targetTop=" + Math.round(d.getBoundingClientRect().top)
+      + " innerHeight=" + innerHeight
+      + " docHeight=" + document.documentElement.scrollHeight);
+    parent.postMessage(out, "*");
+  }, 350);
+`;
+
+viewer.srcdoc = '<!doctype html><html><head><base href="about:srcdoc">'
+  + '<style>body{font:12px ui-monospace;margin:0;padding:6px;background:#0d0d0f;color:#c9c9d1}'
+  + '#deep{color:#56d364}</style></head><body><div id="content"></div>'
+  + '<scr'+'ipt>'+viewerJs+'<\/scr'+'ipt></body></html>';
+document.body.appendChild(viewer);
+
+addEventListener("message", function (e) {
+  if (!Array.isArray(e.data)) return;
+  window.__R__ = e.data;
+  document.getElementById("out").innerHTML = e.data.map(function (x) {
+    var cls = /: YES|found|in view: true|recomputes/.test(x) ? "OK" : /NO$/.test(x) ? "NO" : "";
+    return '<div class="r ' + cls + '">' + x.replace(/</g,"&lt;") + '</div>';
+  }).join("");
+});
+</script></body></html>

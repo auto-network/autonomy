@@ -371,32 +371,55 @@ const autonet = (() => {
     return error;
   }
 
-  /* WebSocket wrapped with an async binary receive queue. */
+  /* A fan-out feed frame is marked with this high bit; a pairwise channel
+   * record can never have it. A record is [8-byte big-endian seq][ct] and
+   * the sequence is capped below 2**63, so the first byte is always <= 0x7f.
+   * Records therefore travel byte-identical to how they always have, and
+   * routing is one branch on one bit. Without that branch a feed frame went
+   * to the pairwise decoder, which read its random nonce as a sequence
+   * number and tore the channel down. */
+  const FEED_MARKER = 0x80;
+
+  /* WebSocket wrapped with async receive queues -- records and feed frames. */
   function openSocket(url) {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
       ws.binaryType = "arraybuffer";
       const queue = [];
       const waiters = [];
+      const feedQueue = [];
+      const feedWaiters = [];
       let closed = null;
       const fail = (err) => {
         closed = err;
         while (waiters.length) waiters.shift().reject(err);
+        while (feedWaiters.length) feedWaiters.shift().reject(err);
+      };
+      const take = (q, w) => {
+        if (q.length) return Promise.resolve(q.shift());
+        if (closed) return Promise.reject(closed);
+        return new Promise((res, rej) => w.push({ resolve: res, reject: rej }));
       };
       ws.onopen = () => resolve({
         send: (bytes) => ws.send(bytes),
         close: () => ws.close(),
-        recvBinary: () => {
-          if (queue.length) return Promise.resolve(queue.shift());
-          if (closed) return Promise.reject(closed);
-          return new Promise((res, rej) => waiters.push({ resolve: res, reject: rej }));
-        },
+        recvBinary: () => take(queue, waiters),
+        /* Sealed feed frame; opens with the stream key from `subscribe`,
+         * NOT this channel's key. */
+        recvFeed: () => take(feedQueue, feedWaiters),
       });
       ws.onmessage = (event) => {
         if (!(event.data instanceof ArrayBuffer)) return;
-        const bytes = new Uint8Array(event.data);
-        if (waiters.length) waiters.shift().resolve(bytes);
-        else queue.push(bytes);
+        const raw = new Uint8Array(event.data);
+        if (!raw.length) return;
+        if (raw[0] & FEED_MARKER) {
+          const frame = raw.subarray(1);
+          if (feedWaiters.length) feedWaiters.shift().resolve(frame);
+          else feedQueue.push(frame);
+          return;
+        }
+        if (waiters.length) waiters.shift().resolve(raw);
+        else queue.push(raw);
       };
       ws.onerror = () => {
         const error = typedError("disconnected", "websocket error");

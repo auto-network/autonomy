@@ -1,0 +1,30 @@
+<!doctype html><html><head><meta charset="utf-8"><title>pushState in sandbox</title>
+<style>body{font:14px monospace;background:#111;color:#eee;padding:10px}
+.r{padding:6px;border-top:1px solid #333}</style></head><body>
+<h3>history.pushState inside sandbox="allow-scripts" (opaque origin)</h3>
+<div id="out">running…</div>
+<script>
+var frame = document.createElement("iframe");
+frame.setAttribute("sandbox", "allow-scripts");
+frame.style.cssText = "width:100%;height:60px;border:1px solid #333";
+var js = `
+  function t(label, fn){ try { fn(); return label + ": OK"; }
+    catch (e) { return label + ": THREW " + e.name + " — " + e.message; } }
+  var r = [
+    t("pushState(state, '', '#p1')", function(){ history.pushState({p:1}, "", "#p1"); }),
+    t("pushState(state, '', null)",  function(){ history.pushState({p:2}, "", null); }),
+    t("pushState(state)",            function(){ history.pushState({p:3}, ""); }),
+    t("location.hash = '#p4'",       function(){ location.hash = "#p4"; })
+  ];
+  r.push("history.length = " + history.length);
+  parent.postMessage(r, "*");
+`;
+frame.srcdoc = '<!doctype html><body><script>' + js + '<\/script></body>';
+document.body.appendChild(frame);
+addEventListener("message", function(e){
+  if (!Array.isArray(e.data)) return;
+  document.getElementById("out").innerHTML =
+    e.data.map(function(x){ return '<div class="r">' + x + '</div>'; }).join("");
+  window.__R__ = e.data;
+});
+</script></body></html>

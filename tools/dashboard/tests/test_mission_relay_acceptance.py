@@ -508,8 +508,9 @@ def test_a_sealed_frame_opens_only_with_the_guests_own_stream_key(stack):
 # crypto and key provenance -- worth keeping, now honestly labelled -- and
 # nothing about delivery.
 #
-# The two tests below cross that boundary. Both currently fail, for the
-# same root cause:
+# The two tests below cross that boundary. Both used to fail, for the
+# same root cause -- now fixed by a one-byte kind tag on every
+# registry -> viewer message (frames.VIEWER_KIND_RECORD / _FEED):
 #
 #   relay.py:262   fans the raw sealed frame onto the SAME viewer socket
 #                  that carries pairwise channel records, with no tag
@@ -520,12 +521,10 @@ def test_a_sealed_frame_opens_only_with_the_guests_own_stream_key(stack):
 #                  sequence" on mismatch, poisoning the channel.
 #
 # A stream frame opens with a 12-byte random nonce, so the seq check
-# essentially never passes. Live push has never delivered a frame to a
-# browser.
-#
-# xfail(strict=True) is deliberate: these must not be silently-failing
-# tests, and when the demux lands they will XPASS and force the marker to
-# be removed rather than quietly going green.
+# essentially never passed, and live push never delivered a frame to a
+# browser. The tag makes the two kinds distinguishable before either
+# decoder sees them; nothing guesses, and the relay still cannot read
+# either payload.
 
 
 def _emit_answer(stack, entry_id="e-transport"):
@@ -539,11 +538,6 @@ def _emit_answer(stack, entry_id="e-transport"):
     })
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "feed frames and pairwise records share one untagged socket; the "
-    "pairwise decoder rejects the stream nonce as 'record out of "
-    "sequence' and closes the channel (relay.py:262 / channel.py:391)"
-))
 def test_a_published_answer_reaches_the_guest_over_the_real_socket(stack):
     """THE loop the epic claimed: dashboard event -> connector publish ->
     tunnel -> registry fan-out -> guest WebSocket -> guest decodes it.
@@ -562,10 +556,11 @@ def test_a_published_answer_reaches_the_guest_over_the_real_socket(stack):
 
             _emit_answer(stack)
 
-            # The guest is a browser: it has ONE socket, and whatever
-            # arrives next has to be routed. Today recv_message() is the
-            # only reader and it assumes everything is a pairwise record.
-            raw = await asyncio.wait_for(channel.recv_message(), timeout=15)
+            # The guest is a browser: ONE socket, two kinds of message.
+            # The leading kind byte is what lets the reader route a feed
+            # frame to the stream decoder instead of handing it to the
+            # pairwise decoder, which used to kill the channel.
+            raw = await asyncio.wait_for(channel.recv_feed(), timeout=15)
 
             opened = open_stream_frame(guest_key, raw)
             assert opened is not None, "guest could not open the pushed frame"
@@ -581,11 +576,6 @@ def test_a_published_answer_reaches_the_guest_over_the_real_socket(stack):
     asyncio.run(main())
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "relay.py:713 attaches every channel as a stream listener at OPEN, "
-    "before the handshake completes and long before subscribe -- so an "
-    "event published while a guest is loading poisons the artifact fetch"
-))
 def test_a_frame_published_during_startup_does_not_break_the_first_fetch(stack):
     """The worse failure mode, and the likely cause of the reported
     'pillar dropdown is empty' bug.

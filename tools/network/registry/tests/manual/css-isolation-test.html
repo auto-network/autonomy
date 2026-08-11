@@ -1,0 +1,61 @@
+<!doctype html><html><head><meta charset="utf-8"><title>chrome vs content CSS</title>
+<style>body{font:13px ui-monospace,monospace;background:#0d0d0f;color:#e8e8ea;padding:12px}
+.r{padding:7px;border-top:1px solid #2a2a30;white-space:pre-wrap}.OK{color:#56d364}.NO{color:#ff7b72}</style>
+</head><body><h3>Does coordinator CSS leak into viewer chrome?</h3><div id="out">running…</div>
+<script>
+var viewer = document.createElement("iframe");
+viewer.setAttribute("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox");
+viewer.style.cssText = "width:100%;height:60px;border:1px solid #2a2a30";
+
+// Hostile-by-accident coordinator CSS: broad selectors a real page would have.
+var CONTENT =
+  '<style>h2{color:rgb(255,0,0)} .bar{display:none} div{letter-spacing:3px}</style>'
++ '<h2>Pillar heading</h2><div data-mc-anchor="s1">body text</div>'
++ '<scr'+'ipt>window.__RAN__=true<\/scr'+'ipt>';
+
+var viewerJs = `
+  var out = [];
+  // Chrome A: ordinary light DOM
+  var lightBar = document.createElement("div");
+  lightBar.className = "bar"; lightBar.id = "lightbar";
+  lightBar.innerHTML = "<h2 id='lighttitle'>Mission</h2>";
+  document.body.appendChild(lightBar);
+
+  // Chrome B: inside a shadow root
+  var shadowHost = document.createElement("div");
+  document.body.appendChild(shadowHost);
+  var root = shadowHost.attachShadow({mode: "open"});
+  root.innerHTML = "<div class='bar'><h2 id='shadowtitle'>Mission</h2></div>";
+
+  var host = document.getElementById("content");
+  host.innerHTML = ${JSON.stringify(CONTENT).replace(/</g, '\\x3c')};
+  host.querySelectorAll("script").forEach(function (o) {
+    var s = document.createElement("script"); s.textContent = o.textContent; o.replaceWith(s);
+  });
+
+  requestAnimationFrame(function () {
+    var lt = getComputedStyle(document.getElementById("lighttitle"));
+    var lb = getComputedStyle(document.getElementById("lightbar"));
+    var st = getComputedStyle(root.getElementById("shadowtitle"));
+    var sb = getComputedStyle(root.querySelector(".bar"));
+    out.push("content script ran: " + (window.__RAN__ ? "YES" : "NO"));
+    out.push("LIGHT chrome h2 color: " + lt.color + "   (red = leaked)");
+    out.push("LIGHT chrome .bar display: " + lb.display + "   (none = leaked)");
+    out.push("SHADOW chrome h2 color: " + st.color + "   (red = leaked)");
+    out.push("SHADOW chrome .bar display: " + sb.display + "   (none = leaked)");
+    parent.postMessage(out, "*");
+  });
+`;
+viewer.srcdoc = '<!doctype html><html><head><base href="about:srcdoc">'
+  + '<style>h2{color:rgb(0,200,255)}</style></head><body><div id="content"></div>'
+  + '<scr'+'ipt>'+viewerJs+'<\/scr'+'ipt></body></html>';
+document.body.appendChild(viewer);
+addEventListener("message", function (e) {
+  if (!Array.isArray(e.data)) return;
+  window.__R__ = e.data;
+  document.getElementById("out").innerHTML = e.data.map(function (x) {
+    return '<div class="r ' + (/red = leaked/.test(x) && /rgb\(255, 0, 0\)/.test(x) ? "NO"
+      : /none = leaked/.test(x) && /: none/.test(x) ? "NO" : "OK") + '">' + x + '</div>';
+  }).join("");
+});
+</script></body></html>

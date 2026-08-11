@@ -49,6 +49,7 @@ from tools.network.relaykit.frames import (
     decode_frame,
     encode_frame,
     new_channel_id,
+    tag_feed_frame,
 )
 from tools.network.relaykit.hello import HelloError, hello_signing_input, parse_tunnel_hello
 
@@ -370,7 +371,9 @@ class Tunnel:
         stream = self.streams.get(token)
         if stream is None:
             return False
-        fallen_behind = stream.publish(payload, now)
+        # Marked once, here, so the retained buffer holds exactly the bytes
+        # a replaying listener will be sent.
+        fallen_behind = stream.publish(tag_feed_frame(payload), now)
         for channel_id, channel in fallen_behind:
             if self.channels.get(channel_id) is channel:
                 del self.channels[channel_id]

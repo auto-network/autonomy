@@ -88,3 +88,39 @@ def decode_frame(raw: bytes) -> Frame:
         channel_id=bytes(raw[1:HEADER_LEN]),
         payload=bytes(raw[HEADER_LEN:]),
     )
+
+
+# ── feed frames on the viewer socket ────────────────────────────────────
+#
+# A DIFFERENT LAYER from the frame types above. Those mux viewer channels
+# down an org's tunnel (connector <-> registry). This marks the one kind of
+# message the registry ITSELF injects into a viewer's socket: a fan-out
+# frame, opened with the link's shared stream key rather than the pairwise
+# channel key.
+#
+# Pairwise channel records are NOT tagged and are byte-identical to what
+# they have always been. They do not need to be, because they are already
+# self-distinguishing: a record is [8-byte big-endian seq][ciphertext], and
+# ChannelCrypto caps the sequence at _MAX_SEQ = 2**63 (channel.py, enforced
+# in _seal_record). The high bit of a record's first byte is therefore
+# ALWAYS 0. A marker with the high bit set can never collide with one --
+# provably, not probabilistically.
+#
+# So the reader's rule is one branch on one bit, and adding feeds changed
+# the wire format of nothing that existed before them.
+FEED_MARKER = 0x80
+
+
+def tag_feed_frame(payload: bytes) -> bytes:
+    """Mark *payload* as a feed frame for the viewer socket."""
+    return bytes([FEED_MARKER]) + payload
+
+
+def is_feed_frame(raw: bytes) -> bool:
+    """True if this viewer-socket message is a feed frame, not a record."""
+    return bool(raw) and raw[0] & FEED_MARKER != 0
+
+
+def strip_feed_frame(raw: bytes) -> bytes:
+    """The sealed feed payload, without its marker."""
+    return bytes(raw[1:])
