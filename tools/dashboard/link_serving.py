@@ -79,7 +79,16 @@ AUTONET_MAX_TITLE_CHARS = 500
 # this is listed in the manifest with ``oversize: true`` and is not
 # downloadable in v1. This is a serving policy, not a structural limit.
 AUTONET_MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024 * 1024
-_NOTE_VIEWER = Path(__file__).resolve().parent / "relay_viewer" / "note-viewer.html"
+_NOTE_VIEWER_DIR = Path(__file__).resolve().parent / "relay_viewer"
+#: Build output, NOT a source file. Generated on demand and gitignored.
+#: It used to be committed, which made the generated artifact look like the
+#: real thing -- it is the one that is a megabyte, full of working code, and
+#: named in this module -- while its source looked like a stub with four
+#: marker comments. Three commits duly edited the output and not the
+#: template, so the template silently stopped producing the artifact and a
+#: rebuild reverted a shipped feature. Nothing to edit, nothing to diverge.
+_NOTE_VIEWER = _NOTE_VIEWER_DIR / ".build" / "note-viewer.html"
+_NOTE_VIEWER_TEMPLATE = _NOTE_VIEWER_DIR / "note-viewer.template.html"
 _DASHBOARD_STATIC = Path(__file__).resolve().parent / "static"
 
 _TOKEN_RE = re.compile(r"^[0-9a-f]{%d}$" % NETWORK_TOKEN_HEX_LEN)
@@ -266,8 +275,30 @@ class _ArtifactTooLarge(ValueError):
     pass
 
 
+_NOTE_VIEWER_CACHE: bytes | None = None
+
+
 def _note_viewer_bytes() -> bytes:
-    return _NOTE_VIEWER.read_bytes()
+    """The note viewer, built on demand from its template.
+
+    Rebuilt whenever the template or a vendored asset is newer than the
+    output, so an edit to the source is picked up without a build step in
+    anyone's deploy path.
+    """
+    global _NOTE_VIEWER_CACHE
+    from tools.dashboard.scripts import build_relay_note_viewer as builder
+
+    sources = [_NOTE_VIEWER_TEMPLATE, *builder.vendor_files()]
+    newest = max(path.stat().st_mtime for path in sources)
+    if (
+        _NOTE_VIEWER_CACHE is None
+        or not _NOTE_VIEWER.exists()
+        or _NOTE_VIEWER.stat().st_mtime < newest
+    ):
+        _NOTE_VIEWER.parent.mkdir(parents=True, exist_ok=True)
+        _NOTE_VIEWER.write_text(builder.build())
+        _NOTE_VIEWER_CACHE = _NOTE_VIEWER.read_bytes()
+    return _NOTE_VIEWER_CACHE
 
 
 def _resolve_org_brand(org: str | None) -> dict | None:
