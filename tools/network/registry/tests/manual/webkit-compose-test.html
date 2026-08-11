@@ -1,0 +1,86 @@
+<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebKit: composed Mission document</title>
+<style>
+ body{font:14px/1.5 -apple-system,system-ui,sans-serif;margin:0;padding:12px;background:#0d0d0f;color:#e8e8ea}
+ h1{font-size:16px;margin:0 0 2px} .sub{color:#8b8b93;font-size:12px;margin-bottom:12px}
+ .phase{border:1px solid #2a2a30;border-radius:8px;margin-bottom:12px;overflow:hidden;background:#141418}
+ .phase h2{font-size:13px;margin:0;padding:8px 10px;background:#1b1b21}
+ .v{padding:9px 10px;font-weight:700}
+ .PASS{color:#56d364;background:#0f2213}.FAIL{color:#ff7b72;background:#241213}.WAIT{color:#8b8b93}
+ table{width:100%;border-collapse:collapse;font-family:ui-monospace,monospace;font-size:11px}
+ td{padding:3px 10px;border-top:1px solid #212127;vertical-align:top}
+ td:first-child{color:#7d7d87;width:52%} .ok{color:#56d364}.no{color:#ff7b72}
+ iframe{width:100%;height:150px;border:0;border-top:1px solid #2a2a30;background:#0d0d0f}
+</style></head><body>
+<h1>Composed Mission document on this browser</h1>
+<div class="sub">Real 1.87&nbsp;MB coordinator page. doctype + &lt;base&gt; + bootstrap prepended, assigned as srcdoc to a sandboxed frame, then navigated by document.open/write/close.</div>
+<div id="phases"></div>
+<script>
+var EXPECT = {
+  compatMode: ["CSS1Compat", "standards mode preserved"],
+  htmlLang: ["en", "authored <html lang> survived"],
+  bodyMargin: ["0px", "author body{} CSS applied"],
+  authorGlobal: [/^object:[1-9]/, "author script executed (window.OQ_DATA)"],
+  scriptsAtBoot: [1, "bootstrap ran before author scripts"],
+  earlyScriptSawLaterElement: [false, "early script did NOT see later element"],
+  domContentLoadedFired: [true, "author DOMContentLoaded fired"],
+  loadFired: [true, "author load fired"],
+  anchorsFound: [6, "data-mc-anchor elements present"],
+  controlsMounted: [6, "controls mounted in closed shadow roots"],
+  fragmentScrolled: [true, "#s1 scrolled natively"],
+  fragmentTarget: [/^#/, "picked an off-screen in-page target"],
+  targetTopBeforeAfter: [/->/, "target offset before -> after (diagnostic)"],
+  leakedGlobal: ["undefined", "bootstrap leaked no global"]
+};
+var ORDER = Object.keys(EXPECT);
+function check(k, v){ var e = EXPECT[k][0];
+  return e instanceof RegExp ? e.test(String(v)) : v === e; }
+
+var frame, composed, phase = 0, ports = 0;
+function panel(id, title){
+  var d = document.createElement("div"); d.className = "phase";
+  d.innerHTML = '<h2>'+title+'</h2><div class="v WAIT" id="v'+id+'">running…</div><table id="t'+id+'"></table>';
+  document.getElementById("phases").appendChild(d); return d;
+}
+function render(id, data){
+  var rows = ORDER.map(function(k){
+    var ok = check(k, data[k]);
+    return '<tr><td>'+EXPECT[k][1]+'</td><td class="'+(ok?'ok':'no')+'">'+String(data[k])+'</td></tr>';
+  }).join("");
+  document.getElementById("t"+id).innerHTML = rows;
+  var allOk = ORDER.every(function(k){ return check(k, data[k]); });
+  var v = document.getElementById("v"+id);
+  v.textContent = allOk ? "PASS — all "+ORDER.length+" checks" : "FAIL — see red rows";
+  v.className = "v " + (allOk ? "PASS" : "FAIL");
+}
+
+addEventListener("message", function(e){
+  if (!e.data || !e.data.mcPort) return;
+  var port = e.ports[0];
+  ports++;
+  var id = ports;                       // 1 = initial load, 2 = after navigation
+  panel(id, id === 1 ? "Phase 1 — initial load (srcdoc)"
+                     : "Phase 2 — after document.open/write/close");
+  port.onmessage = function(ev){
+    if (!ev.data || ev.data.type !== "report") return;
+    render(id, ev.data.data);
+    if (id === 1) port.postMessage({ type: "navigate", html: composed });
+  };
+});
+
+Promise.all([
+  fetch("pillar-sample.html").then(function(r){ return r.text(); }),
+  fetch("mc-bootstrap.js").then(function(r){ return r.text(); })
+]).then(function(parts){
+  var author = parts[0], boot = parts[1];
+  composed = '<!doctype html>'
+           + '<base href="about:srcdoc">'
+           + '<' + 'script>' + boot + '</' + 'script>'
+           + author;
+  frame = document.createElement("iframe");
+  frame.setAttribute("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox");
+  document.body.appendChild(frame);
+  frame.srcdoc = composed;
+});
+</script></body></html>
