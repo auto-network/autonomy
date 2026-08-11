@@ -4,17 +4,34 @@
 (function () {
   "use strict";
   var scriptsAtBoot = document.scripts.length;   // 1 == we are first
+  // Snapshot globals before we do anything, so the check below is a real
+  // diff rather than a probe for one name we chose ourselves.
+  var globalsAtBoot = Object.getOwnPropertyNames(window).length;
   var domFired = false, loadFired = false, earlySawLate = null;
 
   // An early script must NOT see elements the parser has not reached yet.
   earlySawLate = !!document.getElementById("s1");
 
   document.addEventListener("DOMContentLoaded", function () { domFired = true; });
-  window.addEventListener("load", function () { loadFired = true; report(); });
+  window.addEventListener("load", function () {
+    loadFired = true;
+    try { report(); }
+    catch (err) { port.postMessage({ type: "error", msg: String(err && err.stack || err) }); }
+  });
 
   var chan = new MessageChannel();
   var port = chan.port1;                          // never leaves this closure
   parent.postMessage({ mcPort: true }, "*", [chan.port2]);
+
+  // Liveness probe: sent before load, so a stalled phase can be told apart
+  // from a phase that never booted.
+  port.postMessage({ type: "alive", readyState: document.readyState });
+  document.addEventListener("DOMContentLoaded", function () {
+    port.postMessage({ type: "alive", readyState: "DOMContentLoaded" });
+  });
+  window.addEventListener("load", function () {
+    port.postMessage({ type: "alive", readyState: "load" });
+  });
 
   port.onmessage = function (e) {
     if (e.data && e.data.type === "navigate") {
@@ -38,6 +55,7 @@
 
   function report() {
     var mounted = mountControls();
+    scrollAtBoot = window.scrollY;
     var cs = getComputedStyle(document.body);
     // Pick an in-page link that is NOT already the current hash: after a
     // document.write the previous hash survives, and re-clicking the same
@@ -60,19 +78,35 @@
     if (jump) {
       requestAnimationFrame(function () { requestAnimationFrame(function () {
         topBefore = Math.round(target.getBoundingClientRect().top);
+        hashBefore = location.hash;
+        readyAtClick = document.readyState;
         jump.click();
-        // The author document sets scroll-behavior:smooth, so sample after
-        // the animation settles, not during it. It also sets
-        // scroll-margin-top, so the target lands near the top, not at 0.
-        setTimeout(function () {
-          topAfter = Math.round(target.getBoundingClientRect().top);
-          send(mounted, cs, before, window.scrollY);
-        }, 1400);
+        hashAfter = location.hash;
+        // The author sets scroll-behavior:smooth, so poll until the
+        // position stops changing instead of guessing a delay. A fixed
+        // wait was flaky after a 1.8MB document.write: the same target
+        // measured 3880 -> 20 on one run and 3880 -> 3880 on the next.
+        var last = null, stable = 0, tries = 0;
+        (function settle() {
+          var now = Math.round(target.getBoundingClientRect().top);
+          stable = (now === last) ? stable + 1 : 0;
+          last = now;
+          if (stable >= 2 || ++tries > 60) {
+            topAfter = now;
+            settleMs = tries * 100;
+            try { return send(mounted, cs, before, window.scrollY); }
+            catch (err) { return port.postMessage({ type: "error", msg: "send: " + String(err && err.stack || err) }); }
+          }
+          setTimeout(settle, 100);
+        })();
       }); });
     } else { send(mounted, cs, before, before); }
   }
 
-  var jumpHref = null, topBefore = null, topAfter = null;
+  var jumpHref = null, topBefore = null, topAfter = null, settleMs = null;
+  var hashBefore = null, hashAfter = null, hashFired = false, readyAtClick = null;
+  var scrollAtBoot = null;
+  window.addEventListener("hashchange", function () { hashFired = true; });
   function send(mounted, cs, beforeY, afterY) {
     port.postMessage({ type: "report", data: {
       compatMode: document.compatMode,
@@ -93,9 +127,17 @@
       fragmentScrolled: topAfter !== null && topAfter < topBefore
                         && topAfter >= -4 && topAfter < 120,
       fragmentTarget: jumpHref,
-      targetTopBeforeAfter: topBefore + " -> " + topAfter,
+      targetTopBeforeAfter: topBefore + " -> " + topAfter + " (settled " + settleMs + "ms)",
+      hashBeforeAfter: hashBefore + " -> " + hashAfter + (hashFired ? " (hashchange)" : " (NO hashchange)"),
+      readyStateAtClick: readyAtClick,
+      scrollInheritedAtBoot: scrollAtBoot,
       scrollY: afterY,
-      leakedGlobal: typeof window.__MC__
+      // Own-property count on window, boot -> report. Catches any global
+      // this bootstrap adds, not just a name it knows to look for. It does
+      // NOT isolate ours from the author's, so it is only meaningful
+      // alongside reading the IIFE.
+      globalsAddedByAnyone: Object.getOwnPropertyNames(window).length - globalsAtBoot,
+      probeMC: typeof window.__MC__
     }});
   }
 })();

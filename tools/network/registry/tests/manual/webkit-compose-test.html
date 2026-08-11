@@ -31,7 +31,11 @@ var EXPECT = {
   fragmentScrolled: [true, "#s1 scrolled natively"],
   fragmentTarget: [/^#/, "picked an off-screen in-page target"],
   targetTopBeforeAfter: [/->/, "target offset before -> after (diagnostic)"],
-  leakedGlobal: ["undefined", "bootstrap leaked no global"]
+  probeMC: ["undefined", "no __MC__ global (named probe)"],
+  hashBeforeAfter: [/->/, "location.hash before -> after (diagnostic)"],
+  readyStateAtClick: [/./, "document.readyState at click (diagnostic)"],
+  scrollInheritedAtBoot: [/^\d+$/, "scroll offset inherited at boot (diagnostic)"],
+  globalsAddedByAnyone: [/^-?\d+$/, "window own-props added, boot->report (diagnostic)"]
 };
 var ORDER = Object.keys(EXPECT);
 function check(k, v){ var e = EXPECT[k][0];
@@ -62,7 +66,18 @@ addEventListener("message", function(e){
   var id = ports;                       // 1 = initial load, 2 = after navigation
   panel(id, id === 1 ? "Phase 1 — initial load (srcdoc)"
                      : "Phase 2 — after document.open/write/close");
+  var beats = [];
   port.onmessage = function(ev){
+    if (ev.data && ev.data.type === "alive") {
+      beats.push(ev.data.readyState);
+      var el = document.getElementById("v"+id);
+      if (el && el.textContent.indexOf("running") === 0) el.textContent = "running… [" + beats.join(", ") + "]";
+      return;
+    }
+    if (ev.data && ev.data.type === "error") {
+      var ve = document.getElementById("v"+id);
+      ve.textContent = "ERROR — " + ev.data.msg; ve.className = "v FAIL"; return;
+    }
     if (!ev.data || ev.data.type !== "report") return;
     render(id, ev.data.data);
     if (id === 1) port.postMessage({ type: "navigate", html: composed });

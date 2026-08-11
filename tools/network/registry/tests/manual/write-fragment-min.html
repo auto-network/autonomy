@@ -1,0 +1,73 @@
+<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>fragment after document.write</title>
+<style>body{font:14px ui-monospace,monospace;background:#0d0d0f;color:#e8e8ea;padding:12px}
+.r{padding:8px;border-top:1px solid #2a2a30;font-size:15px}
+.PASS{color:#56d364}.FAIL{color:#ff7b72}</style></head><body>
+<h3>Does #fragment scroll after document.open/write/close?</h3>
+<div id="out">running…</div>
+<script>
+// One document, used twice. gen=1 arrives via srcdoc; it rewrites itself with
+// the identical bytes to make gen=2, which is the case under test.
+function doc(gen) {
+  return '<!doctype html><html><head><base href="about:srcdoc">'
+    + '<style>body{margin:0;font:12px ui-monospace;background:#111;color:#ccc}'
+    + '.pad{height:1200px}#target{color:#56d364}</style></head><body>'
+    + '<a id="jump" href="#target">jump</a><div class="pad"></div>'
+    + '<div id="target">TARGET</div><div class="pad"></div>'
+    + '<scr' + 'ipt>(function(){'
+    + 'var gen=' + gen + ';'
+    + 'function measure(cb){'
+    + '  var t=document.getElementById("target");'
+    + '  var inherited=Math.round(window.scrollY);'
+    + '  window.scrollTo(0,0);'          // start from the top, or "already there" hides the result
+    + '  if(location.hash){history.replaceState&&0;}'
+    + '  var before=Math.round(t.getBoundingClientRect().top);'
+    + '  document.getElementById("jump").click();'
+    + '  setTimeout(function(){'
+    + '    cb({gen:gen,before:before,after:Math.round(t.getBoundingClientRect().top),'
+    + '        hash:location.hash,scrollY:Math.round(window.scrollY),inherited:inherited});'
+    + '  },1000);'
+    + '}'
+    + 'window.addEventListener("load",function(){'
+    + '  setTimeout(function(){'
+    + '    measure(function(r){'
+    + '      parent.postMessage(r,"*");'
+    + '    });'
+    + '  },200);'
+    + '});'
+    + 'addEventListener("message",function(ev){'
+    + '  if(ev.data&&ev.data.write){'
+    + '    document.open();document.write(ev.data.write);document.close();'
+    + '  }'
+    + '});'
+    + 'void 0;'
+    + 'function _unused(){'
+    + '}'
+    + '})()<\/scr' + 'ipt></body></html>';
+}
+window.__DOC__ = doc;
+var rows = [];
+addEventListener("message", function (e) {
+  var r = e.data; if (!r || !r.gen) return;
+  // Scrolled == the target moved up to the top of the viewport.
+  var ok = Math.abs(r.after) < 60;   // landed at the target, moved or not
+  rows.push('<div class="r ' + (ok ? "PASS" : "FAIL") + '">gen ' + r.gen
+    + (r.gen === 1 ? " (srcdoc)" : " (document.write)") + ": "
+    + (ok ? "SCROLLED" : "DID NOT SCROLL")
+    + " — target " + r.before + " → " + r.after
+    + ", hash " + (r.hash || "(none)") + ", scrollY " + r.scrollY
+    + ", inherited scroll at boot " + r.inherited + "</div>");
+  document.getElementById("out").innerHTML = rows.join("");
+  window.__R__ = rows.length;
+  // The frame is cross-origin, so hand it the next document by message.
+  if (r.gen === 1) setTimeout(function () {
+    f.contentWindow.postMessage({ write: doc(2) }, "*");
+  }, 300);
+});
+var f = document.createElement("iframe");
+f.setAttribute("sandbox", "allow-scripts");
+f.style.cssText = "width:100%;height:200px;border:1px solid #2a2a30";
+document.body.appendChild(f);
+f.srcdoc = doc(1);
+</script></body></html>

@@ -57,8 +57,13 @@ drives the **real** 1.87 MB OSS Insights document, not a fixture — it has
 `<html lang>`, global `body{}` CSS, two `DOMContentLoaded` registrations, a
 `load` listener, 64 fragment anchors, and `scroll-behavior:smooth`.
 
-Fetches `pillar-sample.html` from the same directory; export a current revision
-there with `mission_control_db.get_current_pillar_site(<pillar_id>)["html"]`.
+Fetches `pillar-sample.html` from this directory. That fixture is committed and
+pinned: pillar `cfd645a0-09e5-4094-9010-6c1f9e946dd2`, revision
+`d81c4ef9-91c6-4d75-84fc-2da0f18fd4a2` (seq 2), 1 871 081 bytes, sha256
+`5d666db3fbded94234cf30432aa06dae6e5d7275fa90c086b3e164e31c2dc76a`. Re-export
+with `mission_control_db.get_current_pillar_site(<pillar_id>)["html"]` only if
+the pin is updated with it — an unpinned fixture makes the recorded result
+unreproducible.
 
 Two phases, 14 checks each. Phase 2 replaces the document with
 `document.open/write/close` and re-runs every check on the replacement, plus
@@ -89,3 +94,26 @@ mounting as a next **sibling** breaks adjacent-sibling (`+`) rules; mounting
 **inside** the anchored element broke none. Scope: selector matching only, not
 layout — an extra child still affects flex/grid geometry, `:empty` and
 `:only-child`.
+
+
+## `write-fragment-min.html`
+
+Answers: **does `#fragment` navigation still work in a document created by
+`document.open/write/close`?** That is the mechanism for every screen change
+after the first, so an author's in-page anchors depend on it.
+
+Minimal by design — no MessageChannel, no polling, two lines of output. It was
+written because the larger harness gave an intermittent answer and could not be
+trusted.
+
+Result 2026-08-11, Chromium headless and iOS Safari: **both generations
+SCROLLED**, target 1214 → 0.
+
+It also surfaced the behaviour the design now depends on: **`document.write`
+inherits the previous document's scroll offset** (1214 px carried into the
+replacement). The runtime must reset scroll when it writes a new screen.
+
+Trap this harness exists to avoid: asserting that the target *moved*. With an
+inherited scroll offset the target can already be at the destination, so a
+working browser reports no movement. Assert where the target **lands**, not
+that it travelled.
