@@ -591,3 +591,59 @@ def test_a_refused_subscribe_leaves_the_page_static_not_broken():
     """)
     assert out["ok"] is False
     assert out["key"] is None
+
+
+def test_concurrent_ops_do_not_clobber_each_other():
+    """THE BUG QA MISSED: there is one pendingOp slot, so two ops in flight
+    clobbered each other and one hung forever. On the live link that meant
+    subscribe raced the page's own load-time fetches and the pillar menu
+    silently never populated -- no error, just an empty dropdown.
+
+    Every earlier test issued ONE op at a time, which is exactly why none
+    of them saw it."""
+    out = live("""
+      (async () => {
+        const a = bridge.op("read", { kind: "pillars" });
+        const b = bridge.op("read", { kind: "presence" });
+        const c = bridge.op("subscribe", null);
+        // Answer each in the order the bridge actually sends them.
+        const answers = [
+          enc({ v: 1, status: "ok", pillars: [{ name: "P" }] }),
+          enc({ v: 1, status: "ok", presence: [] }),
+          enc({ v: 1, status: "ok", stream_key: "ab".repeat(32) }),
+        ];
+        let i = 0;
+        const pump = setInterval(() => {
+          if (sent.length > i && i < answers.length) push(answers[i++]);
+        }, 5);
+        const [ra, rb, rc] = await Promise.all([a, b, c]);
+        clearInterval(pump);
+        console.log(JSON.stringify({
+          pillars: ra && ra.pillars, presence: rb && rb.presence,
+          subscribed: !!(rc && rc.stream_key),
+          order: sent.map((r) => r.op),
+        }));
+      })();
+    """)
+    assert out["pillars"] == [{"name": "P"}], "the first op was clobbered"
+    assert out["presence"] == []
+    assert out["subscribed"] is True
+    assert out["order"] == ["read", "read", "subscribe"]
+
+
+def test_a_failing_op_does_not_silence_the_channel():
+    """The queue chain must survive a rejection, or every later op inherits
+    it and the page goes quiet."""
+    out = live("""
+      (async () => {
+        const original = channel.sendMessage;
+        channel.sendMessage = () => Promise.reject(new Error("boom"));
+        const bad = await bridge.op("read", { kind: "pillars" });
+        channel.sendMessage = original;
+        const good = bridge.op("read", { kind: "presence" });
+        setTimeout(() => push(enc({ v: 1, status: "ok", presence: [] })), 10);
+        console.log(JSON.stringify({ bad, good: (await good) !== null }));
+      })();
+    """)
+    assert out["bad"] is None
+    assert out["good"] is True

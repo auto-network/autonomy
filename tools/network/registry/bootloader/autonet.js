@@ -1705,14 +1705,31 @@ const autonet = (() => {
       }
       if (msg.op !== "mc-request") return;
       if (msg.mcOp !== "read" && msg.mcOp !== "write") return;
-      // Serialize: one request/response exchange at a time on a channel.
-      this.queue = this.queue.then(() => this.exchange(msg));
+      // NOT queued here: op() is the single serialization point. Queueing
+      // at both layers would deadlock -- the outer entry would wait on an
+      // op that is waiting for that same entry to finish.
+      this.exchange(msg);
     }
 
     /** One request/response on the channel. Returns the parsed envelope,
      * or null -- a failed exchange never throws into a caller and never
      * leaves the page waiting. */
-    async op(mcOp, body) {
+    /** Serialization point for EVERY caller. There is exactly ONE
+     * pendingOp slot, so two ops in flight would clobber each other and
+     * one would hang forever -- which is precisely what happened when
+     * startLiveUpdates() called this outside the frame's queue: subscribe
+     * raced the page's own first fetches on load and the pillar menu never
+     * populated. Queueing here rather than at the call sites means no
+     * future caller can reintroduce it. */
+    op(mcOp, body) {
+      const run = this.queue.then(() => this.exchangeOnce(mcOp, body));
+      // Keep the chain alive even if one op rejects, or every later op
+      // inherits the rejection and the channel goes silent.
+      this.queue = run.then(() => {}, () => {});
+      return run;
+    }
+
+    async exchangeOnce(mcOp, body) {
       this.startReading();
       try {
         const request = { v: 1, op: mcOp };
