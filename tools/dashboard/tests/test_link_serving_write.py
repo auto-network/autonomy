@@ -123,3 +123,15 @@ def test_write_enabled_target_types_is_a_real_allowlist():
     for target_type in ("design", "present", "note", "org:join", "file", "nonsense"):
         assert link_serving._write_dispatch(target_type) is None
     assert link_serving._write_dispatch("mission") is not None
+
+
+def test_a_float_bearing_payload_serializes(stub_handler, grants, monkeypatch):
+    """Same regression as the read op's: a written question comes back
+    with a float created_at, and canonical_json would refuse it."""
+    async def handler(identity, target_uuid, body):
+        return {"question": {"entry_id": "e1", "created_at": 1_800_000_000.5}}
+
+    monkeypatch.setattr(link_serving, "_write_dispatch", lambda t: handler)
+    body = envelope(call(TOKEN, {"v": 1, "op": "write", "body": {"kind": "question"}}))
+    assert body["status"] == "ok"
+    assert body["question"]["created_at"] == 1_800_000_000.5

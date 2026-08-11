@@ -112,3 +112,19 @@ def test_read_enabled_target_types_is_a_real_allowlist():
     for target_type in ("design", "present", "note", "org:join", "file", "nonsense"):
         assert link_serving._read_dispatch(target_type) is None
     assert link_serving._read_dispatch("mission") is not None
+
+
+def test_a_float_bearing_payload_serializes(stub_handler, grants, monkeypatch):
+    """REGRESSION (found only by the end-to-end acceptance test): these
+    envelopes must NOT go through canonical_json, which forbids floats by
+    design. Every Mission Control payload carries epoch float timestamps
+    (created_at, answered_at), so a canonical encoder turns a guest's own
+    question into a uniform refusal. The original stub payloads here were
+    int-only, which is exactly why the unit tests missed it."""
+    async def handler(identity, target_uuid, body):
+        return {"questions": [{"entry_id": "e1", "created_at": 1_800_000_000.123}]}
+
+    monkeypatch.setattr(link_serving, "_read_dispatch", lambda t: handler)
+    body = envelope(call(TOKEN, {"v": 1, "op": "read", "body": {"kind": "questions"}}))
+    assert body["status"] == "ok"
+    assert body["questions"][0]["created_at"] == 1_800_000_000.123
