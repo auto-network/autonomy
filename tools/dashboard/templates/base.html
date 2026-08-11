@@ -969,7 +969,15 @@
         padding-bottom: env(safe-area-inset-bottom);
         padding-left: env(safe-area-inset-left);
       }
-      header {
+      /* The PAGE's top chrome only. This was a bare `header` selector, so
+         it hit every <header> on the page -- including the approval
+         sheet's, which is anchored to the BOTTOM of the screen where a
+         top inset means nothing, pushing its grip and close button down
+         by the full notch height. Not caught by specificity intuition
+         either: this block is unlayered and Tailwind ships in @layer, so
+         it beat the sheet's own pt-3/md:pt-6 despite being a weaker
+         selector. */
+      header[data-app-chrome] {
         padding-top: calc(0.75rem + env(safe-area-inset-top));
       }
       main#content, #terminal-page {
@@ -1907,7 +1915,7 @@
   <!-- Main -->
   <div class="flex-1 flex flex-col overflow-hidden">
     <!-- Header -->
-    <header class="bg-gray-800 border-b border-gray-700 px-4 md:px-6 py-3 flex items-center gap-3 md:gap-4">
+    <header data-app-chrome class="bg-gray-800 border-b border-gray-700 px-4 md:px-6 py-3 flex items-center gap-3 md:gap-4">
       <button id="nav-toggle" class="md:hidden relative z-50 bg-gray-800 p-2 rounded-lg border border-gray-700 flex-shrink-0"
               onclick="document.getElementById('sidebar').classList.toggle('-translate-x-full')">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
