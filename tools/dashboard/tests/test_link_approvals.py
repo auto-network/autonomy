@@ -563,12 +563,13 @@ def test_unkeyed_org_enrich_errors_cleanly_without_codename(tmp_path, monkeypatc
     GraphDB.close_all_pooled()
 
 
-def test_mission_title_names_the_bound_guest(env, tmp_path, monkeypatch):
+def test_mission_recipient_is_its_own_field_not_the_title(env, tmp_path, monkeypatch):
     """A mission link is bound to ONE guest, and that binding decides whose
     name lands on every question and whose access dies when the link is
-    revoked. The operator must see WHO before approving -- the dialog
-    previously showed only the mission name, so a personalized link was
-    approved blind."""
+    revoked -- so the operator must see WHO before approving. The person is
+    a FIRST-CLASS FIELD, never folded into the target's name: the target row
+    says what is shared, the recipient row says who it is for, and the view
+    renders the recipient as an identity (avatar + name), not as prose.""" 
     from tools.dashboard.dao import mission_control_db as mdb
     monkeypatch.setattr(mdb, "DB_PATH", tmp_path / "mission_control.db")
     mission = mdb.create_mission("OSS Insights")
@@ -584,7 +585,13 @@ def test_mission_title_names_the_bound_guest(env, tmp_path, monkeypatch):
         },
     })
     enriched = env.get(f"/api/approvals/{r.json()['id']}").json()
-    assert enriched["target_title"] == "OSS Insights — for Priya (data partner)"
+    # The target names the mission ALONE...
+    assert enriched["target_title"] == "OSS Insights"
+    # ...and the person is structured, resolvable, and separate.
+    assert enriched["recipient"] == {
+        "participant_id": guest["participant_id"],
+        "display_name": "Priya (data partner)",
+    }
 
 
 def test_mission_link_bound_to_an_unknown_guest_errors(env, tmp_path, monkeypatch):
@@ -602,7 +609,7 @@ def test_mission_link_bound_to_an_unknown_guest_errors(env, tmp_path, monkeypatc
         },
     })
     enriched = env.get(f"/api/approvals/{r.json()['id']}").json()
-    assert enriched["target_title"] is None
+    assert enriched["recipient"] is None
     assert "not a known participant" in (enriched.get("target_error") or "")
 
 

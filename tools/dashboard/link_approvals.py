@@ -285,25 +285,12 @@ def _resolve_target(
             mission = mission_control_db.get_mission(target_uuid)
             if not mission:
                 return {"title": None, "error": f"mission {target_uuid} not found"}
-            # A mission link is bound to ONE named guest, and that binding is
-            # the whole point: it decides whose name lands on every question
-            # and whose access is revoked when this link is revoked. Name the
-            # guest in the title so the operator cannot approve a
-            # personalized link without seeing who it personalizes to.
-            participant_id = ((request or {}).get("meta") or {}).get("participant_id")
-            name = mission.get("name") or target_uuid
-            if isinstance(participant_id, str) and participant_id:
-                visitor = mission_control_db.get_visitor_by_participant_id(participant_id)
-                if not visitor:
-                    return {"title": None, "error": (
-                        f"guest {participant_id} is not a known participant — "
-                        "nothing to bind this link to"
-                    )}
-                return {
-                    "title": f"{name} — for {visitor['display_name']}",
-                    "error": None,
-                }
-            return {"title": name, "error": None}
+            # The title names the MISSION only. Who the link is prepared for
+            # is a separate fact and gets its own field (see _link_recipient)
+            # -- folding a person into a target's name would make two
+            # different things share one row and render as an explanation
+            # rather than as an identity.
+            return {"title": mission.get("name") or target_uuid, "error": None}
         if target_type == "file":
             from tools.graph import ops as graph_ops
             att = None
@@ -397,6 +384,41 @@ def _staged_registry_request(row: dict, build) -> tuple[dict | None, str | None,
     return staged, None, drift
 
 
+def _link_recipient(req: dict) -> tuple[dict | None, str | None]:
+    """Who a personalized link is being PREPARED FOR — resolved identity,
+    not a decorated target name. Returns (recipient, error).
+
+    A mission grant is bound to exactly one guest (``meta.participant_id``),
+    and that binding decides whose name lands on every question they ask
+    and whose access dies when this link is revoked. The operator is
+    approving a link FOR A PERSON, so the person is a first-class field
+    the dialog renders as an identity — avatar and all — beside the thing
+    being shared, never concatenated into it.
+
+    No color is computed here: ``participantColor`` is deliberately
+    view-side (pitfall graph://73af2694-562), and the browser already has
+    the same deterministic hash in ``surface-presence.js``. Sending
+    ``participant_id`` is what lets the view render the identity, and is
+    also the hook a real profile photo slots into later without changing
+    this contract.
+    """
+    participant_id = (req.get("meta") or {}).get("participant_id")
+    if not isinstance(participant_id, str) or not participant_id:
+        return None, None
+    from tools.dashboard.dao import mission_control_db
+
+    visitor = mission_control_db.get_visitor_by_participant_id(participant_id)
+    if not visitor:
+        return None, (
+            f"guest {participant_id} is not a known participant — nothing to "
+            "bind this link to"
+        )
+    return {
+        "participant_id": visitor["participant_id"],
+        "display_name": visitor["display_name"],
+    }, None
+
+
 def _enrich_link_publish(row: dict) -> dict:
     req = row["request"]
     org = req.get("org")
@@ -434,9 +456,11 @@ def _enrich_link_publish(row: dict) -> dict:
         serve_cert_required = not serve_cert_ok(org)
     except Exception:
         serve_cert_required = True  # fail toward minting; a spurious mint is safe
+    recipient, recipient_error = _link_recipient(req)
     out = {
         "target_title": target["title"],
-        "target_error": target["error"],
+        "target_error": target["error"] or recipient_error,
+        "recipient": recipient,
         "type_label": _TYPE_LABELS.get(req.get("target_type", ""), req.get("target_type")),
         "ttl": meta.get("ttl"),
         "label": meta.get("label"),

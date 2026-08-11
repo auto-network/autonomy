@@ -2459,6 +2459,22 @@
               title: 'Publish a share link', actionLabel: 'Approve & publish',
               action: 'Publish a share link',
               targetType: r.type_label || req.target_type || 'Item', target: title,
+              // Who the link is prepared for, as an identity in its own
+              // right rather than words appended to the target's name. The
+              // color is computed here, view-side, from the same
+              // deterministic hash the rest of the dashboard uses for this
+              // participant — so this face matches their face everywhere
+              // else. A real profile photo slots in here later.
+              recipient: r.recipient
+                ? {
+                  participantId: r.recipient.participant_id,
+                  displayName: r.recipient.display_name,
+                  color: (window.Presence && window.Presence.participantColor)
+                    ? window.Presence.participantColor(r.recipient.participant_id)
+                    : 'hsl(220 70% 60%)',
+                  initial: (r.recipient.display_name || '?').trim().charAt(0).toUpperCase(),
+                }
+                : null,
               service: 'auto.network', orgSlug: req.org || '',
               actingIdentity: acting, actorIdentity: actor,
               duration,
