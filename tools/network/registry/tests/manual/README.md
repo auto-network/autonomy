@@ -44,3 +44,48 @@ broken test, not a working feature.** Any harness added here needs an equivalent
 self-check.
 
 Re-run this when bumping the minimum supported Safari/iOS.
+
+
+## `webkit-compose-test.html` (+ `mc-bootstrap.js`)
+
+Answers: **does a composed Mission document behave as an ordinary document
+in a sandboxed opaque-origin frame, on this engine?**
+
+Composition is doctype + `<base href="about:srcdoc">` + the platform bootstrap,
+prepended to the coordinator's complete HTML and assigned as `srcdoc`. The page
+drives the **real** 1.87 MB OSS Insights document, not a fixture — it has
+`<html lang>`, global `body{}` CSS, two `DOMContentLoaded` registrations, a
+`load` listener, 64 fragment anchors, and `scroll-behavior:smooth`.
+
+Fetches `pillar-sample.html` from the same directory; export a current revision
+there with `mission_control_db.get_current_pillar_site(<pillar_id>)["html"]`.
+
+Two phases, 14 checks each. Phase 2 replaces the document with
+`document.open/write/close` and re-runs every check on the replacement, plus
+confirms the new bootstrap established a fresh `MessagePort`.
+
+Result 2026-08-11: **14/14 both phases, Chromium headless and iOS Safari.**
+Standards mode, authored `<html lang>`, author CSS, the author's own script
+(`window.OQ_DATA`, 36 entries), bootstrap-runs-first, parse ordering,
+`DOMContentLoaded`, `load`, six controls mounted in closed shadow roots, native
+fragment scrolling, and no leaked global.
+
+Two harness traps worth knowing, both of which produced false failures first:
+
+- **Measure where the target lands, not whether `scrollY` changed.** A fragment
+  already at the top of the document cannot move the scroll position.
+- **The author's CSS governs the landing.** `scroll-behavior:smooth` means a
+  sample taken 400 ms after the click catches the animation mid-flight, and
+  `scroll-margin-top:20px` means the target settles at 20, not 0. Both are the
+  author's styling being honoured — evidence the design works, not against it.
+
+## `anchor-mount-test.html`
+
+Answers: **where does the platform mount a control at `data-mc-anchor` without
+disturbing author CSS?**
+
+Measured, against a baseline showing all five author rules matching first:
+mounting as a next **sibling** breaks adjacent-sibling (`+`) rules; mounting
+**inside** the anchored element broke none. Scope: selector matching only, not
+layout — an extra child still affects flex/grid geometry, `:empty` and
+`:only-child`.

@@ -1,0 +1,66 @@
+<!doctype html><html><head><meta charset="utf-8"><title>anchor mount</title>
+<style>body{font:12px ui-monospace,monospace;background:#0d0d0f;color:#e8e8ea;padding:10px}
+table{border-collapse:collapse;width:100%}td,th{border-top:1px solid #2a2a30;padding:4px 6px;text-align:left}
+.OK{color:#56d364}.NO{color:#ff7b72}</style></head><body>
+<h3>Does mounting a control near [data-mc-anchor] break author CSS?</h3>
+<div id="out">running…</div>
+<script>
+var viewer = document.createElement("iframe");
+viewer.setAttribute("sandbox","allow-scripts allow-popups allow-popups-to-escape-sandbox");
+viewer.style.cssText="width:100%;height:40px;border:1px solid #2a2a30";
+
+// Author CSS deliberately uses the positional selectors a mount can disturb.
+var AUTHOR =
+ '<style>'
++' .rows > p:nth-child(2){color:rgb(255,0,0)}'
++' .rows > p:nth-of-type(2){font-weight:700}'
++' [data-mc-anchor] + p{color:rgb(0,255,0)}'
++' [data-mc-anchor] ~ p{text-decoration:underline}'
++' .rows > p:last-child{font-style:italic}'
++'</style>'
++'<div class="rows"><p id="p1">one</p><p id="p2" data-mc-anchor="a">two</p>'
++'<p id="p3">three</p><p id="p4">four</p></div>';
+
+var viewerJs = `
+  var out = [];
+  function snap(tag) {
+    var g = function (id, prop) { return getComputedStyle(document.getElementById(id))[prop]; };
+    return {tag: tag,
+      p2color: g("p2","color"), p2weight: g("p2","fontWeight"),
+      p3color: g("p3","color"), p3deco: g("p3","textDecorationLine"),
+      p4style: g("p4","fontStyle")};
+  }
+  function build() {
+    document.body.innerHTML = ${JSON.stringify(AUTHOR).replace(/</g, '\\x3c')};
+    return document.querySelector("[data-mc-anchor]");
+  }
+  function ctl(){ var b=document.createElement("button"); b.textContent="ask"; return b; }
+
+  var a = build(); var base = snap("baseline (no mount)");
+  a = build(); a.after(ctl());                     var sib = snap("mounted as SIBLING");
+  a = build(); a.appendChild(ctl());               var ins = snap("mounted INSIDE anchor");
+  a = build(); var h = document.createElement("span");
+               h.attachShadow({mode:"closed"}).appendChild(ctl());
+               a.appendChild(h);                    var sh = snap("INSIDE anchor, shadow");
+
+  [sib, ins, sh].forEach(function (s) {
+    var diff = Object.keys(base).filter(function (k) { return k !== "tag" && base[k] !== s[k]; });
+    out.push({tag: s.tag, broke: diff});
+  });
+  out.unshift({tag: "baseline values", broke: Object.keys(base).filter(function(k){return k!=="tag";})
+    .map(function(k){ return k + "=" + base[k]; })});
+  parent.postMessage(out, "*");
+`;
+viewer.srcdoc='<!doctype html><html><head><base href="about:srcdoc"></head><body>'
+  +'<scr'+'ipt>'+viewerJs+'<\/scr'+'ipt></body></html>';
+document.body.appendChild(viewer);
+addEventListener("message", function(e){
+  if(!Array.isArray(e.data)) return; window.__R__=e.data;
+  document.getElementById("out").innerHTML = "<table><tr><th>case</th><th>author rules changed</th></tr>"
+   + e.data.map(function(r){
+       var cls = r.tag.indexOf("baseline")===0 ? "" : (r.broke.length ? "NO":"OK");
+       return "<tr><td>"+r.tag+"</td><td class='"+cls+"'>"
+         +(r.broke.length?r.broke.join(", "):"none")+"</td></tr>"; }).join("")
+   + "</table>";
+});
+</script></body></html>
