@@ -174,6 +174,68 @@ def test_query_attention_includes_claude_platform_sessions(graph_db_env):
     assert rows[0]["content"] == "please check the backfill approval"
 
 
+@pytest.fixture
+def multi_org_env(tmp_path, monkeypatch):
+    """Real, separate per-org DBs — needed to exercise the global-scope
+    fan-out path in list_attention (_iter_org_dbs), not the single-file
+    GRAPH_DB override that ``graph_db_env`` uses."""
+    root = tmp_path / "orgs"
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    GraphDB.create_org_db("autonomy").close()
+    GraphDB.create_org_db("anchore").close()
+    yield root
+    GraphDB.close_all_pooled()
+
+
+def _seed_attention(org: str, *, session_id: str, content: str, created_at: str) -> None:
+    db = GraphDB.open_org_db(org)
+    session = Source(
+        type="session", platform="claude", title=session_id,
+        metadata={"session_id": session_id, "session_type": "terminal"},
+    )
+    db.insert_source(session)
+    db.insert_thought(Thought(
+        source_id=session.id, content=content, role="user",
+        turn_number=1, created_at=created_at,
+    ))
+    db.commit()
+    db.close()
+
+
+def test_list_attention_last_n_is_global_not_per_org(multi_org_env):
+    """--last N must return exactly N rows total across all orgs, not N
+    rows from each org — the bug in auto-qo4iy: --last 3 across 2 orgs
+    with rows in both used to return up to 6 rows."""
+    _seed_attention("autonomy", session_id="auto-a1", content="autonomy msg 1", created_at="2026-08-11T01:00:00Z")
+    _seed_attention("autonomy", session_id="auto-a2", content="autonomy msg 2", created_at="2026-08-11T01:02:00Z")
+    _seed_attention("anchore", session_id="auto-b1", content="anchore msg 1", created_at="2026-08-11T01:01:00Z")
+    _seed_attention("anchore", session_id="auto-b2", content="anchore msg 2", created_at="2026-08-11T01:03:00Z")
+
+    rows = ops.list_attention(last=3)
+
+    assert len(rows) == 3
+    timestamps = [r["created_at"] for r in rows]
+    assert timestamps == sorted(timestamps), "rows must be in monotonic timestamp order"
+    # newest overall (anchore msg 2, 01:03) must be present; oldest (autonomy
+    # msg 1, 01:00) is the one row that should have been dropped by the limit.
+    contents = {r["content"] for r in rows}
+    assert "anchore msg 2" in contents
+    assert "autonomy msg 1" not in contents
+
+
+def test_list_attention_last_1_returns_the_single_most_recent_row(multi_org_env):
+    _seed_attention("autonomy", session_id="auto-a1", content="autonomy msg", created_at="2026-08-11T01:00:00Z")
+    _seed_attention("anchore", session_id="auto-b1", content="anchore msg, newest", created_at="2026-08-11T01:05:00Z")
+
+    rows = ops.list_attention(last=1)
+
+    assert len(rows) == 1
+    assert rows[0]["content"] == "anchore msg, newest"
+
+
 def test_add_tag_returns_true_on_first_application(graph_db_env):
     """Tag is newly added on first call, no-op on second."""
     db = GraphDB(str(graph_db_env))
