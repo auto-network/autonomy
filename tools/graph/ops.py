@@ -1154,17 +1154,34 @@ def list_attention(
 ) -> list[dict]:
     """List human input ('attention') across sessions.
 
-    Scopeless callers union across every org DB. Scoped callers read
-    only their own org.
+    Scopeless callers union across every org DB, then re-sort and re-limit
+    globally. Scoped callers read only their own org.
     """
     resolved_org = _resolve_org(org)
     if _global_scope_active(resolved_org, None):
-        return _union_across_orgs(
-            lambda d: _query_attention(
-                d, since=since, search=search, last=last,
+        merged: list[dict] = []
+        for slug, slug_db in _iter_org_dbs():
+            # Any row within the global top-`last` must also rank within
+            # its own org's top-`last` (an org can't contribute more than
+            # `last` rows above it), so per-org top-`last` is sufficient —
+            # no slop needed. _query_attention returns per-org rows in
+            # chronological (ascending) order when `last` is set; flip
+            # back to descending so the cross-org merge sorts cleanly.
+            rows = _query_attention(
+                slug_db, since=since, search=search, last=last,
                 session=session, context=context,
             )
-        )
+            if last:
+                rows = list(reversed(rows))
+            for r in rows:
+                if isinstance(r, dict):
+                    r.setdefault("org", slug)
+            merged.extend(rows)
+        merged.sort(key=lambda r: (r.get("created_at") or ""), reverse=True)
+        if last:
+            merged = merged[:last]
+            merged.reverse()
+        return merged
     db = _open(org)
     try:
         return _query_attention(
