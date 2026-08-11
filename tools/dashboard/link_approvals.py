@@ -285,7 +285,25 @@ def _resolve_target(
             mission = mission_control_db.get_mission(target_uuid)
             if not mission:
                 return {"title": None, "error": f"mission {target_uuid} not found"}
-            return {"title": mission.get("name") or target_uuid, "error": None}
+            # A mission link is bound to ONE named guest, and that binding is
+            # the whole point: it decides whose name lands on every question
+            # and whose access is revoked when this link is revoked. Name the
+            # guest in the title so the operator cannot approve a
+            # personalized link without seeing who it personalizes to.
+            participant_id = ((request or {}).get("meta") or {}).get("participant_id")
+            name = mission.get("name") or target_uuid
+            if isinstance(participant_id, str) and participant_id:
+                visitor = mission_control_db.get_visitor_by_participant_id(participant_id)
+                if not visitor:
+                    return {"title": None, "error": (
+                        f"guest {participant_id} is not a known participant — "
+                        "nothing to bind this link to"
+                    )}
+                return {
+                    "title": f"{name} — for {visitor['display_name']}",
+                    "error": None,
+                }
+            return {"title": name, "error": None}
         if target_type == "file":
             from tools.graph import ops as graph_ops
             att = None
@@ -879,17 +897,31 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
 
 
 def _tunnel_link_meta(req: dict, decision: dict) -> tuple[dict, str | None]:
-    """The meta a share-link control frame carries — TTL + label only.
+    """The meta a share-link control frame carries.
 
     The approval sheet's duration selection rides the decision as ``ttl``
     (the same edit the HTTP path applies via _publish_payload_for_decision);
     honor it so the operator's chosen link lifetime actually takes effect.
     Absent ``ttl`` keeps the request's own value; JSON null means no
-    expiration and drops meta.ttl. Returns (meta, error)."""
+    expiration and drops meta.ttl. Returns (meta, error).
+
+    ``participant_id`` is carried through because a mission grant is bound
+    to exactly one guest identity and the schema REQUIRES it
+    (NetworkLinkGrantV3). This allowlist previously named only ttl and
+    label, so a mission publish silently lost its binding here and then
+    failed its own validation after the operator had already approved --
+    the operator saw an approval succeed and a publish fail. Adding a new
+    meta key means adding it here too; that is the cost of an allowlist
+    and it is the right cost, since an unknown key must never reach a
+    grant."""
     base = req.get("meta")
     if base is not None and not isinstance(base, dict):
         return {}, "request metadata is malformed"
-    meta = {k: base[k] for k in ("ttl", "label") if k in (base or {})}
+    meta = {
+        k: base[k]
+        for k in ("ttl", "label", "participant_id")
+        if k in (base or {})
+    }
     if "ttl" in decision:
         ttl = decision.get("ttl")
         if ttl is not None and (
