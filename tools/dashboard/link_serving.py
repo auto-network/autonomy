@@ -1037,6 +1037,23 @@ async def _serve_control_listener(connector, ctl_path: str) -> None:
             _os.remove(ctl_path)
 
 
+def _default_dashboard_url() -> str:
+    """Where this connector reaches its own dashboard's event stream.
+
+    Same resolution order as ``graph link publish``
+    (``link_cmd._dash_base``) so one convention covers both, and so the
+    supervisor -- which passes the whole environment through to the
+    subprocess -- needs no new argument to enable live push.
+    """
+    import os as _os
+
+    return (
+        _os.environ.get("AUTONOMY_DASHBOARD")
+        or _os.environ.get("GRAPH_API")
+        or "https://localhost:8080"
+    )
+
+
 async def _run_connector_with_control(connector, ctl_path: str | None,
                                       publish_task_factory=None) -> None:
     tasks = []
@@ -1074,8 +1091,11 @@ def main() -> None:
     parser.add_argument("--max-backoff", type=float, default=5.0)
     parser.add_argument("--dashboard-url", default=None,
                         help="dashboard base URL whose event stream feeds live "
-                             "mission updates to open guest channels (auto-8npih); "
-                             "omitted disables live push, serving is unaffected")
+                             "mission updates to open guest channels (auto-8npih). "
+                             "Defaults to AUTONOMY_DASHBOARD / GRAPH_API / "
+                             "https://localhost:8080 — the same resolution order "
+                             "graph link publish uses. Pass --dashboard-url '' to "
+                             "disable live push; serving is unaffected either way.")
     args = parser.parse_args()
 
     with open(args.key_file) as fh:
@@ -1097,13 +1117,25 @@ def main() -> None:
         min_backoff=args.min_backoff, max_backoff=args.max_backoff,
         publisher=publisher,
     )
+    # Live push is ON by default. It was opt-in behind an explicit
+    # --dashboard-url, which made it unreachable in production: the
+    # supervisor builds this argv itself (link_serving_supervisor.
+    # _connector_command) and never passed the flag, so no deployed
+    # connector could ever publish. Defaulting to the same resolution
+    # order `graph link publish` already uses means the supervisor gets
+    # it for free -- it passes the whole environment to the subprocess.
+    dashboard_url = (
+        args.dashboard_url
+        if args.dashboard_url is not None
+        else _default_dashboard_url()
+    )
     publish_task_factory = None
-    if args.dashboard_url:
+    if dashboard_url:
         from tools.dashboard.plugins.mission_control import relay_publisher
 
         def publish_task_factory():
             return relay_publisher.run(
-                publisher, dashboard_url=args.dashboard_url, org=args.graph_org,
+                publisher, dashboard_url=dashboard_url, org=args.graph_org,
             )
 
     asyncio.run(_run_connector_with_control(

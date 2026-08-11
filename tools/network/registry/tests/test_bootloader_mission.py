@@ -266,8 +266,13 @@ NAV = r"""
   } };
   global.window.addEventListener = (name, fn) => { if (name === "message") handler = fn; };
   let domReady = () => {};
+  // The shim registers MORE THAN ONE click listener (anchors, then
+  // onclick-carrying rows). Keeping only the last silently disabled the
+  // first and made the anchor tests fail against working code -- collect
+  // them all and dispatch in order, like a real event target.
+  const clickHandlers = [];
   global.document.addEventListener = (name, fn) => {
-    if (name === "click") clickHandler = fn;
+    if (name === "click") clickHandlers.push(fn);
     if (name === "DOMContentLoaded") domReady = fn;
   };
   global.document.documentElement = { outerHTML: "<html>the mission</html>" };
@@ -280,17 +285,45 @@ NAV = r"""
   global.document.write = (h) => written.push(h);
   global.document.close = () => {};
   global.window.scrollTo = () => scrolled.push("__top__");
+  global.location = {
+    assign: (v) => {}, replace: (v) => {}, href: "about:srcdoc",
+  };
+  global.window.location = global.location;
   const shim = autonet.MISSION_SHIM
     .replace(/^<script>/, "").replace(/<\/script>$/, "").replace("<\\/script>", "");
   eval(shim);
 
-  function clickHref(href) {
+  function dispatch(target) {
     let prevented = false;
-    clickHandler({
-      target: { tagName: "A", getAttribute: (k) => (k === "href" ? href : null) },
+    let stopped = false;
+    const event = {
+      target,
       preventDefault: () => { prevented = true; },
-    });
+      stopImmediatePropagation: () => { stopped = true; },
+    };
+    for (const fn of clickHandlers) {
+      fn(event);
+      if (stopped) break;
+    }
     return prevented;
+  }
+
+  function clickHref(href) {
+    return dispatch({
+      tagName: "A",
+      getAttribute: (k) => (k === "href" ? href : null),
+      parentElement: null,
+    });
+  }
+
+  function clickRow(onclickSource, text) {
+    return dispatch({
+      tagName: "SPAN",
+      getAttribute: () => null,
+      onclick: onclickSource,
+      textContent: text || "",
+      parentElement: null,
+    });
   }
   __BODY__
 """
@@ -372,8 +405,78 @@ def test_an_external_link_is_left_alone():
 def test_a_click_not_on_a_link_is_ignored():
     out = nav("""
       let prevented = false;
-      clickHandler({ target: { tagName: "DIV", parentElement: null },
-                     preventDefault: () => { prevented = true; } });
+      prevented = dispatch({ tagName: "DIV", getAttribute: () => null,
+                             parentElement: null, textContent: "" });
       console.log(JSON.stringify({ prevented, asked }));
     """)
     assert out["prevented"] is False
+
+
+# ── the pillar dropdown: onclick rows, not anchors ──────────────────────
+
+
+def test_a_dropdown_row_with_a_literal_pillar_path_is_routed():
+    """THE MOBILE BUG: the pillar dropdown builds <span> rows carrying
+    row.onclick = window.location.href = "/missions/<m>/pillars/<p>".
+    They are not anchors, so the anchor walk misses them, and
+    window.location is non-configurable in every engine so the old
+    redefinition silently no-opped. The dropdown opened and closed but
+    nothing could be selected."""
+    out = nav("""
+      const prevented = clickRow(
+        'function () { window.location.href = "/missions/m1/pillars/p7"; }');
+      setTimeout(() => console.log(JSON.stringify({ prevented, asked })), 30);
+    """)
+    assert out["prevented"] is True
+    assert out["asked"] == [
+        {"mcOp": "read", "body": {"kind": "pillar_site", "pillar_id": "p7"}}
+    ]
+
+
+def test_a_dropdown_row_that_concatenates_its_path_is_matched_by_label():
+    """The real site builds the path as "/pillars/" + p.pillar_id, so the
+    handler source carries no literal id. Fall back to matching the row's
+    own text against the cached pillar roster."""
+    out = nav("""
+      window.__mcPillars = [
+        { pillar_id: "p-collection", name: "Collection Pipeline" },
+        { pillar_id: "p-platform", name: "Platform" },
+      ];
+      const prevented = clickRow(
+        'function () { window.location.href = "/missions/" + MISSION_ID + "/pillars/" + p.pillar_id; }',
+        "Platform");
+      setTimeout(() => console.log(JSON.stringify({ prevented, asked })), 30);
+    """)
+    assert out["prevented"] is True
+    assert out["asked"] == [
+        {"mcOp": "read", "body": {"kind": "pillar_site", "pillar_id": "p-platform"}}
+    ]
+
+
+def test_an_unmatched_row_label_is_left_alone():
+    out = nav("""
+      window.__mcPillars = [{ pillar_id: "p1", name: "Known" }];
+      const prevented = clickRow(
+        'function () { window.location.href = "/missions/" + M + "/pillars/" + p.id; }',
+        "Not In The Roster");
+      setTimeout(() => console.log(JSON.stringify({ prevented, asked })), 30);
+    """)
+    assert out["prevented"] is False
+    assert out["asked"] == []
+
+
+def test_location_assign_is_routed_too():
+    out = nav("""
+      window.location.assign("/missions/m1/pillars/p9");
+      setTimeout(() => console.log(JSON.stringify({ asked })), 30);
+    """)
+    assert out["asked"] == [
+        {"mcOp": "read", "body": {"kind": "pillar_site", "pillar_id": "p9"}}
+    ]
+
+
+def test_the_pillar_roster_is_cached_from_the_pillars_read():
+    """The label fallback above depends on this cache being populated as a
+    side effect of the menu's own fetch."""
+    out = route('await window.fetch("/api/missions/m1/pillars");')
+    assert out == [{"mcOp": "read", "body": {"kind": "pillars"}}]
