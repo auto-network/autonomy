@@ -194,7 +194,7 @@ def stack(tmp_path_factory):
     state = {
         "tmp": tmp, "token": token, "registry_port": registry_port,
         "root_pub": root.public_hex, "mission_db": mission_db,
-        "guest": guest, "pillar": pillar,
+        "guest": guest, "pillar": pillar, "mission_id": mission_id,
         "procs": {"registry": registry, "connector": connector},
     }
     yield state
@@ -332,3 +332,84 @@ def test_a_pillar_of_another_mission_is_refused(stack):
         "body": {"kind": "pillar_site", "pillar_id": "99999999-9999-4999-8999-999999999999"},
     }))
     assert raw_result.get("status") != "ok"
+
+
+
+
+# ── live updates, over the real channel ─────────────────────────────────
+
+
+def test_a_coordinators_answer_reaches_the_guest_as_a_sealed_push(stack):
+    """THE FULL LOOP: subscribe over the real channel for this link's stream
+    key, seal an answer the way the connector's publish loop does, and open
+    it with the guest's key.
+
+    This is the half that did not exist while the emit side was deployed
+    twice, so it is asserted end to end here rather than inferred from
+    either side working alone.
+
+    IT ALSO PINS AN INVARIANT NOTHING ELSE ENFORCED: _STREAM_KEYS is an
+    in-memory, per-process dict, so whoever seals a frame MUST be the same
+    process that answered the guest's subscribe. Production holds by
+    construction -- link_serving.main() starts the publish loop inside the
+    connector -- but a later refactor moving the publisher into its own
+    process would emit frames no guest could open, with no error anywhere.
+    The first assertion below is that failure, reproduced on purpose.
+    """
+    from tools.dashboard import link_serving
+    from tools.dashboard.plugins.mission_control import relay_publisher
+    from tools.network.relaykit.channel import open_stream_frame, seal_stream_frame
+    from tools.network.relaykit.connector import Publisher
+
+    async def run():
+        async with await open_channel(stack) as channel:
+            envelope = await op(channel, {"v": 1, "op": "subscribe"})
+            assert envelope["status"] == "ok"
+            guest_key = bytes.fromhex(envelope["stream_key"])
+            assert len(guest_key) == 32
+
+            # A key minted in a DIFFERENT process is a different key, and a
+            # frame sealed with it is unreadable to this guest.
+            other_process_key = link_serving._stream_key(stack["token"])
+            assert other_process_key != guest_key
+            assert open_stream_frame(
+                guest_key, seal_stream_frame(other_process_key, b"{}")
+            ) is None
+
+            # The real path: seal with the key that was handed out.
+            publisher = Publisher()
+            sent = []
+
+            async def send_frame(frame_type, channel_id, payload=b""):
+                sent.append(payload)
+
+            publisher.bind(send_frame)
+            publisher.attached(stack["token"])
+            link_serving._STREAM_KEYS[stack["token"]] = guest_key
+
+            count = await relay_publisher.publish_event(
+                publisher,
+                relay_publisher.CONVERSATION_TOPIC,
+                {
+                    "event": "answered",
+                    "mission_id": stack["mission_id"],
+                    "pillar_id": None,
+                    "entry_id": "e-live",
+                    "question": {"entry_id": "e-live", "answer": "yes, live"},
+                    "update": None,
+                },
+                org=GRAPH_ORG,
+            )
+            assert count == 1, "the answer produced no frame"
+
+            opened = open_stream_frame(guest_key, sent[0])
+            assert opened is not None, "the guest's key did not open the frame"
+            body = json.loads(opened)
+            assert body["kind"] == "conversation"
+            assert body["event"] == "answered"
+            assert body["question"]["answer"] == "yes, live"
+
+            # No other link's key ever opens it.
+            assert open_stream_frame(bytes(32), sent[0]) is None
+
+    asyncio.run(run())
