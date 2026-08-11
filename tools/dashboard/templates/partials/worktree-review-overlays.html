@@ -612,7 +612,12 @@
                  class="grid grid-cols-[6.5rem_minmax(0,1fr)] items-center gap-3 border-b border-slate-800 py-3 text-sm">
               <span class="text-slate-500">Prepared for</span>
               <div class="flex min-w-0 items-center gap-2">
-                <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-gray-950"
+                <img x-show="approvalRequest.recipient?.avatarUrl"
+                     :src="approvalRequest.recipient?.avatarUrl"
+                     :alt="approvalRequest.recipient?.displayName"
+                     class="h-6 w-6 shrink-0 rounded-full object-cover">
+                <span x-show="!approvalRequest.recipient?.avatarUrl"
+                      class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-gray-950"
                       :style="`background:${approvalRequest.recipient?.color}`"
                       x-text="approvalRequest.recipient?.initial"></span>
                 <span class="min-w-0 break-words font-medium text-slate-100"

@@ -413,9 +413,14 @@ def _link_recipient(req: dict) -> tuple[dict | None, str | None]:
             f"guest {participant_id} is not a known participant — nothing to "
             "bind this link to"
         )
+    attachment_id = visitor.get("avatar_attachment_id")
     return {
         "participant_id": visitor["participant_id"],
         "display_name": visitor["display_name"],
+        # A URL into the shared attachment route, never inline bytes: the
+        # photo is stored once, hash-deduped, and cached by the browser
+        # like any other image.
+        "avatar_url": f"/api/attachment/{attachment_id}" if attachment_id else None,
     }, None
 
 

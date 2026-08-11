@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from starlette.background import BackgroundTask
 from starlette.requests import Request
@@ -552,8 +553,98 @@ async def create_visitor_token(request: Request) -> JSONResponse:
     display_name = (body.get("display_name") or "").strip()
     if not display_name:
         return JSONResponse({"error": "display_name is required"}, status_code=400)
-    visitor = db.create_visitor_token(display_name)
-    return JSONResponse({"visitor": visitor}, status_code=201)
+    attachment_id, error = _store_avatar(body.get("avatar"), display_name)
+    if error:
+        return JSONResponse({"error": error}, status_code=400)
+    visitor = db.create_visitor_token(display_name, avatar_attachment_id=attachment_id)
+    return JSONResponse({"visitor": _visitor_payload(visitor)}, status_code=201)
+
+
+#: Inline upload shape for a guest's face. The BYTES do not live here --
+#: they go straight into the graph's content-addressed attachment store,
+#: which dedups by SHA256, serves same-origin at /api/attachment/<id>, and
+#: already has a resumable relay fetch protocol the bootloader speaks.
+#: visitor_tokens keeps only the id.
+_AVATAR_DATA_RE = re.compile(
+    r"^data:image/(png|jpeg|jpg|gif|webp);base64,([A-Za-z0-9+/=\s]+)$"
+)
+_AVATAR_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _store_avatar(value, display_name: str) -> tuple[str | None, str | None]:
+    """data: URL -> attachment id. Returns (attachment_id, error).
+
+    Absent is fine and common: a guest without a photo renders the
+    initial-and-color avatar the dashboard already derives from their
+    participant_id.
+    """
+    if value is None or value == "":
+        return None, None
+    if not isinstance(value, str):
+        return None, "avatar must be a data:image/... base64 URL"
+    match = _AVATAR_DATA_RE.match(value)
+    if not match:
+        return None, (
+            "avatar must be a data:image/<png|jpeg|gif|webp>;base64 URL — the "
+            "bytes are stored once in the attachment store, not on the visitor"
+        )
+    import base64 as _b64
+    import binascii
+    import tempfile
+    from pathlib import Path as _Path
+
+    subtype = match.group(1)
+    try:
+        raw = _b64.b64decode(match.group(2), validate=False)
+    except (binascii.Error, ValueError):
+        return None, "avatar base64 did not decode"
+    if not raw:
+        return None, "avatar is empty"
+    if len(raw) > _AVATAR_MAX_BYTES:
+        return None, f"avatar exceeds {_AVATAR_MAX_BYTES // (1024 * 1024)}MB"
+
+    ext = "jpg" if subtype in ("jpeg", "jpg") else subtype
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", display_name).strip("-") or "guest"
+    with tempfile.TemporaryDirectory() as tmp:
+        staged = _Path(tmp) / f"{safe}.{ext}"
+        staged.write_bytes(raw)
+        from tools.graph import ops as graph_ops
+        att = graph_ops.attach_file(
+            str(staged),
+            # Alt text is not decoration: this face is rendered in the
+            # operator's approval dialog and in every viewer, and a
+            # participant photo with no textual equivalent is unreadable
+            # to anyone using a screen reader.
+            alt_text=f"Profile photo of {display_name}",
+        )
+    return att["id"], None
+
+
+def _visitor_payload(visitor: dict) -> dict:
+    """A visitor as the UI consumes it: the avatar is a URL to the shared
+    attachment route, never inline bytes."""
+    attachment_id = visitor.get("avatar_attachment_id")
+    return {
+        **{k: v for k, v in visitor.items() if k != "avatar_attachment_id"},
+        "avatar_attachment_id": attachment_id,
+        "avatar_url": f"/api/attachment/{attachment_id}" if attachment_id else None,
+    }
+
+
+async def set_visitor_avatar(request: Request) -> JSONResponse:
+    """Attach or replace a guest's photo after the fact."""
+    participant_id = request.path_params["participant_id"]
+    existing = db.get_visitor_by_participant_id(participant_id)
+    if not existing:
+        return JSONResponse({"error": "participant not found"}, status_code=404)
+    body = await request.json()
+    attachment_id, error = _store_avatar(
+        body.get("avatar"), existing["display_name"],
+    )
+    if error:
+        return JSONResponse({"error": error}, status_code=400)
+    visitor = db.set_visitor_avatar(participant_id, attachment_id)
+    return JSONResponse({"visitor": _visitor_payload(visitor)})
 
 
 async def get_visitor_by_participant_id(request: Request) -> JSONResponse:
@@ -1155,6 +1246,10 @@ routes: list[Route] = [
     Route(
         "/api/visitor-tokens/{participant_id}",
         get_visitor_by_participant_id, methods=["GET"],
+    ),
+    Route(
+        "/api/visitor-tokens/{participant_id}/avatar",
+        set_visitor_avatar, methods=["POST"],
     ),
     Route("/api/missions/{mission_id}/questions", ask_question, methods=["POST"]),
     Route("/api/missions/{mission_id}/questions", list_conversation, methods=["GET"]),

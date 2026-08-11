@@ -1781,3 +1781,84 @@ def test_decision_log_missing_mission():
     client = _client()
     resp = client.get("/api/missions/nope/decision-log")
     assert resp.status_code == 404
+
+
+# ── guest avatars go to the attachment store, not into a column ──
+
+
+def test_creating_a_visitor_with_a_photo_stores_it_as_an_attachment(monkeypatch):
+    """The bytes belong in the graph's content-addressed store: hash
+    dedup, one same-origin serving route, alt-text, and a relay fetch
+    protocol the bootloader already speaks. visitor_tokens keeps the id."""
+    seen = {}
+
+    def fake_attach(path, **kw):
+        from pathlib import Path
+        seen["bytes"] = Path(path).read_bytes()
+        seen["alt_text"] = kw.get("alt_text")
+        return {"id": "att-abc"}
+
+    monkeypatch.setattr("tools.graph.ops.attach_file", fake_attach)
+    client = _client()
+    png = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+    resp = client.post("/api/visitor-tokens",
+                       json={"display_name": "Leon Zachery", "avatar": png})
+    assert resp.status_code == 201
+    visitor = resp.json()["visitor"]
+    assert visitor["avatar_attachment_id"] == "att-abc"
+    assert visitor["avatar_url"] == "/api/attachment/att-abc"
+    # Real decoded bytes reached the store, not the base64 text.
+    assert seen["bytes"].startswith(b"\x89PNG")
+    # Alt text is not decoration -- this face renders in the operator's
+    # approval dialog and in every viewer.
+    assert seen["alt_text"] == "Profile photo of Leon Zachery"
+
+
+def test_a_visitor_without_a_photo_has_no_avatar():
+    client = _client()
+    visitor = client.post("/api/visitor-tokens",
+                          json={"display_name": "No Photo"}).json()["visitor"]
+    assert visitor["avatar_attachment_id"] is None
+    assert visitor["avatar_url"] is None
+
+
+@pytest.mark.parametrize("bad", [
+    "javascript:alert(1)",
+    "data:text/html;base64,PHNjcmlwdD4=",
+    "/etc/passwd",
+    "http://insecure.example.com/x.png",
+    12345,
+])
+def test_a_non_image_avatar_is_refused(bad):
+    """This value becomes an <img src> in the operator's own dialog."""
+    client = _client()
+    resp = client.post("/api/visitor-tokens",
+                       json={"display_name": "Sneaky", "avatar": bad})
+    assert resp.status_code == 400
+
+
+def test_setting_an_avatar_after_the_fact(monkeypatch):
+    monkeypatch.setattr("tools.graph.ops.attach_file", lambda p, **kw: {"id": "att-later"})
+    client = _client()
+    visitor = client.post("/api/visitor-tokens",
+                          json={"display_name": "Later Photo"}).json()["visitor"]
+    png = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+    resp = client.post(
+        f"/api/visitor-tokens/{visitor['participant_id']}/avatar",
+        json={"avatar": png},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["visitor"]["avatar_url"] == "/api/attachment/att-later"
+
+
+def test_setting_an_avatar_on_an_unknown_participant_is_404():
+    client = _client()
+    resp = client.post("/api/visitor-tokens/guest:nope/avatar",
+                       json={"avatar": None})
+    assert resp.status_code == 404
