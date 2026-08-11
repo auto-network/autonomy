@@ -1437,14 +1437,7 @@ const autonet = (() => {
       }).then(reply);
     }
     if (url.indexOf("/pillars") !== -1 && url.indexOf("/api/missions/") !== -1) {
-      return ask("read", { kind: "pillars" }).then(function (r) {
-        // The pillar dropdown is built by the SITE'S OWN JavaScript, so its
-        // rows never exist in the HTML the rewriter sees. Matching a row's
-        // visible text against this roster is the one runtime rule that
-        // cannot be moved to rewrite time.
-        if (r && r.pillars) window.__mcPillars = r.pillars;
-        return reply(r);
-      });
+      return ask("read", { kind: "pillars" }).then(reply);
     }
     if (url.indexOf("dashboard.surface.presence") !== -1) {
       return ask("read", { kind: "presence" }).then(function (r) {
@@ -1462,13 +1455,11 @@ const autonet = (() => {
     });
   }
 
-  // ONE click rule. Everything statically knowable was already turned into a
-  // data-mc-* attribute by the rewriter before this document existed, so
-  // there is no href parsing, no handler-source regex, and no location
-  // wrapping here. Two runtime cases remain, and both are irreducible:
-  // fragments (a srcdoc document has no base URL, so "#x" would navigate
-  // away instead of scrolling) and rows the site's own script created after
-  // the rewrite.
+  // ONE click rule: read the marker. Static links were rewritten into
+  // data-mc-* before this document existed; rows the site builds in its own
+  // script mark themselves (SKILL.md section 8). Nothing here parses an
+  // href, scrapes handler source, or wraps location -- if a control is not
+  // marked, it is not ours to route.
   document.addEventListener("click", function (event) {
     var el = event.target;
     while (el && el !== document) {
@@ -1496,21 +1487,6 @@ const autonet = (() => {
             target.scrollIntoView({ behavior: "smooth", block: "start" });
           }
           return;
-        }
-        // Dynamically built row: interactive (it has a click handler) and its
-        // visible text names a pillar we know about. Both conditions are
-        // required -- plain prose that happens to match a pillar name is not
-        // interactive and is left alone.
-        if (el.onclick && window.__mcPillars) {
-          var label = (el.textContent || "").trim();
-          for (var i = 0; i < window.__mcPillars.length; i++) {
-            if ((window.__mcPillars[i].name || "").trim() === label) {
-              event.preventDefault();
-              event.stopImmediatePropagation();
-              openPillar(window.__mcPillars[i].pillar_id);
-              return;
-            }
-          }
         }
       }
       el = el.parentElement;
@@ -1606,6 +1582,7 @@ const autonet = (() => {
       this.childWindow = this.frame.contentWindow;
     }
 
+
     dispose() {
       window.removeEventListener("message", this.onMessage);
     }
@@ -1628,19 +1605,25 @@ const autonet = (() => {
       this.queue = this.queue.then(() => this.exchange(msg));
     }
 
-    async exchange(msg) {
-      let result = null;
+    /** One request/response on the channel. Returns the parsed envelope,
+     * or null -- a failed exchange never throws into a caller and never
+     * leaves the page waiting. */
+    async op(mcOp, body) {
       try {
         await this.channel.sendMessage(te.encode(canonicalJson({
-          v: 1, op: msg.mcOp, body: msg.body && typeof msg.body === "object" ? msg.body : {},
+          v: 1, op: mcOp, body: body && typeof body === "object" ? body : {},
         })));
         const raw = await this.channel.recvMessage();
         const line = new TextDecoder().decode(raw).split("\n")[0];
         const parsed = JSON.parse(line);
-        if (parsed && parsed.status === "ok") result = parsed;
+        return parsed && parsed.status === "ok" ? parsed : null;
       } catch (err) {
-        result = null;  // a failed exchange answers null, never hangs the page
+        return null;
       }
+    }
+
+    async exchange(msg) {
+      const result = await this.op(msg.mcOp, msg.body);
       this.childWindow.postMessage(
         { v: 1, op: "mc-response", id: msg.id, result }, "*",
       );
@@ -1698,6 +1681,8 @@ const autonet = (() => {
     // leaving the note viewer unable to emit its ready message. srcdoc keeps
     // the same sandboxed opaque origin without depending on blob navigation.
     const viewerHtml = decoder.decode(viewerBytes);
+    // A mission owns the whole surface: its own top bar replaces the relay's.
+    document.body.classList.toggle("mission-surface", artifact.kind === "mission");
     if (artifact.kind === "mission" && attachmentContext) {
       // The bridge must exist before the document runs, or a shim request
       // fired on load would find nobody listening.
@@ -1853,7 +1838,7 @@ const autonet = (() => {
     state, boot, canonicalJson, verifyChain, attemptEndpoints,
     attemptDirectEndpoint, performHandshake, openSocket, fetchArtifact,
     validateArtifact, renderArtifact,
-    MISSION_SHIM, missionShimmed, MissionBridge,
+    MISSION_SHIM, missionShimmed, rewriteMissionLinks, MissionBridge,
     assembleJoinContext, deliverJoinContext,
     withTimeout, SecureChannel,
     attachmentCursorId, attachmentSinkId, safeAttachmentName,

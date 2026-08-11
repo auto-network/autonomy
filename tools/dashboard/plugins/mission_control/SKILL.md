@@ -300,6 +300,39 @@ GET    /missions/<mission_id>/pillars/<pillar_id>                  # chromeless 
 bookmarking/refreshing on one pillar once you're already inside a mission —
 **it is never the link you hand out**. See "one link per mission" below.
 
+### Navigation must be declarative, or it dies over the relay
+
+Over auto.network your page runs in a sandboxed `srcdoc` iframe. Such a
+document has **no base URL of its own** — it inherits the relay's — so every
+path you name resolves against `relay.auto.network`, where none of your routes
+exist. The viewer cannot run your handler to find out where a click was going,
+and it cannot read a destination your handler builds by string concatenation:
+
+```js
+// Works on the dashboard. Over the relay the viewer sees a function body and
+// nothing it can resolve — the click silently does nothing.
+row.onclick = function () { window.location.href = "/missions/" + MISSION_ID; };
+```
+
+So say the destination declaratively, next to the handler. Keep the handler:
+it is what still works on the dashboard.
+
+```js
+row.setAttribute("data-mc-pillar", p.pillar_id);   // this pillar
+top.setAttribute("data-mc-home", "1");             // the mission overview
+```
+
+Plain `<a href="/missions/…">` and `<a href="#section">` links need nothing —
+the viewer rewrites those before your page loads. **The rule applies to
+anything you navigate with JavaScript**, which is the case it cannot rewrite.
+Symptom when it is missed: the control looks alive, does nothing when tapped,
+and logs no error.
+
+For the top bar specifically the relay viewer now renders its own chrome
+(screen name, pillar nav, presence) in the shell outside your frame and hides
+`#mc-topbar` there, so that bar is handled for you. The rule still matters for
+any navigation of your own.
+
 ### One link per mission, not one per pillar
 
 The share link you mint (§6) and hand to a person is always the

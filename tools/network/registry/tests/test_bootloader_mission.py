@@ -414,29 +414,6 @@ def test_an_empty_fragment_marker_goes_to_the_top():
     assert out["scrolled"] == ["__top__"]
 
 
-def test_a_dynamically_built_row_is_matched_by_label():
-    """The dropdown is built by the SITE'S OWN script after the rewrite, so
-    no marker can exist on it. Requires BOTH an onclick and a roster match."""
-    out = click_case("""
-      window.__mcPillars = [{ pillar_id: "p-platform", name: "Platform" }];
-      const prevented = click({}, { onclick: function () {}, text: "Platform" });
-      setTimeout(() => console.log(JSON.stringify({ prevented, posted })), 30);
-    """)
-    assert out["prevented"] is True
-    assert out["posted"][0]["body"] == {"kind": "pillar_site", "pillar_id": "p-platform"}
-
-
-def test_non_interactive_text_matching_a_pillar_name_is_left_alone():
-    """Prose that happens to say 'Platform' must not become a link."""
-    out = click_case("""
-      window.__mcPillars = [{ pillar_id: "p-platform", name: "Platform" }];
-      const prevented = click({}, { text: "Platform" });
-      console.log(JSON.stringify({ prevented, posted }));
-    """)
-    assert out["prevented"] is False
-    assert out["posted"] == []
-
-
 def test_an_unmarked_click_is_left_alone():
     out = click_case("""
       const prevented = click({});
@@ -458,3 +435,26 @@ def test_the_documented_topbar_snippet_marks_both_destinations():
     text = skill.read_text()
     assert 'top.setAttribute("data-mc-home", "1")' in text
     assert 'row.setAttribute("data-mc-pillar", p.pillar_id)' in text
+
+
+def test_an_unmarked_interactive_row_is_left_alone():
+    """The label-matching fallback is gone. A control the site did not mark
+    is not ours to route -- guessing was the whole problem."""
+    out = click_case("""
+      const prevented = click({}, { onclick: function () {}, text: "Platform" });
+      console.log(JSON.stringify({ prevented, posted }));
+    """)
+    assert out["prevented"] is False
+    assert out["posted"] == []
+
+
+def test_a_mission_takes_the_whole_surface():
+    """A mission carries its own top bar, so the relay's header is hidden
+    for it -- stacking both left a strip holding one brand letter above the
+    real bar."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1] / "bootloader"
+    assert "body.mission-surface > header { display: none; }" in \
+        (root / "bootloader.html").read_text()
+    assert 'classList.toggle("mission-surface", artifact.kind === "mission")' in \
+        (root / "autonet.js").read_text()
