@@ -498,14 +498,43 @@ const autonet = (() => {
     if (!(body instanceof Uint8Array) || body.length > MAX_ARTIFACT_BYTES) {
       throw new Error("invalid artifact body");
     }
-    if (!hasOnlyKeys(header, ["v", "status", "kind", "viewer", "content", "branding"])
+    // `kind` is bounded descriptive metadata, NOT a code selector. There is
+    // deliberately no allowlist: the host cannot enumerate viewer types
+    // without a registry deploy every time one is added, and it does not
+    // need to -- the artifact arrives over a channel whose server cert
+    // chained to the org root this page pinned before any bytes flowed, so
+    // no third party can declare a kind.
+    if (!hasOnlyKeys(header, ["v", "status", "kind", "viewer", "content", "parts", "branding"])
         || header.v !== 1 || header.status !== "ok"
-        || !["note", "design", "present", "mission"].includes(header.kind)) {
+        || typeof header.kind !== "string" || !header.kind
+        || codePointLength(header.kind) > 64) {
       throw new Error("invalid artifact header");
     }
 
     const ranges = [validateSlice(header.viewer, body.length, "viewer", false)];
     let content = null;
+
+    // Generic parts: any viewer may carry them, and the host never
+    // interprets one. Validation is structural only -- unique refs, slices
+    // inside the body -- because what a part MEANS is the viewer's business.
+    let parts = null;
+    if (Object.prototype.hasOwnProperty.call(header, "parts")) {
+      if (!Array.isArray(header.parts)) throw new Error("invalid artifact parts");
+      const partRefs = new Set();
+      parts = header.parts.map((part) => {
+        if (!hasOnlyKeys(part, ["ref", "mime", "offset", "length"])
+            || typeof part.ref !== "string" || !part.ref || partRefs.has(part.ref)
+            || typeof part.mime !== "string" || !part.mime) {
+          throw new Error("invalid artifact part");
+        }
+        partRefs.add(part.ref);
+        const range = validateSlice(
+          { offset: part.offset, length: part.length }, body.length, "part"
+        );
+        ranges.push(range);
+        return { ref: part.ref, mime: part.mime, ...range };
+      });
+    }
     if (header.kind === "note") {
       if (!Object.prototype.hasOwnProperty.call(header, "content")
           || !hasOnlyKeys(header.content, ["title", "markdown", "parts", "attachments"])
@@ -617,6 +646,7 @@ const autonet = (() => {
       kind: header.kind,
       viewer: ranges[0],
       content,
+      parts,
       branding,
     };
   }
@@ -1792,7 +1822,7 @@ const autonet = (() => {
 
     window.addEventListener("message", (event) => {
       if (event.source !== capturedWindow || !event.data || event.data.v !== 1) return;
-      if (event.data.op === "ready" && artifact.kind === "note" && !readySeen) {
+      if (event.data.op === "ready" && !readySeen) {
         readySeen = true;
         resolveReady();
       } else if (event.data.op === "title" && typeof event.data.title === "string") {
@@ -1845,8 +1875,25 @@ const autonet = (() => {
       frame.srcdoc = viewerHtml;
     }
 
-    if (artifact.kind === "note") {
+    // Wait for `ready` only when there is something to hand over. A viewer
+    // that declares neither parts nor content is a self-contained document
+    // and may never send one; waiting would hang it.
+    if (artifact.parts || artifact.content) {
       await withTimeout(ready, VIEWER_READY_TIMEOUT_MS, "viewer ready");
+    }
+
+    // Generic parts: delivered to ANY viewer, contents never inspected.
+    if (artifact.parts) {
+      const generic = artifact.parts.map((part) => ({
+        ref: part.ref, mime: part.mime,
+        bytes: body.slice(part.offset, part.end).buffer,
+      }));
+      capturedWindow.postMessage(
+        { v: 1, op: "parts", parts: generic }, "*", generic.map((x) => x.bytes)
+      );
+    }
+
+    if (artifact.content) {
       const md = artifact.content.markdown;
       const parts = artifact.content.parts.map((part) => {
         const bytes = body.slice(part.offset, part.end).buffer;

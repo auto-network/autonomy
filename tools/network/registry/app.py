@@ -89,7 +89,14 @@ _BOOTLOADER_DIR = Path(__file__).resolve().parent / "bootloader"
 _BOOTLOADER_CSP = (
     "default-src 'none'; script-src 'self' 'unsafe-inline' blob:; "
     "style-src 'unsafe-inline'; connect-src 'self' https: http: wss: ws:; "
-    "img-src blob: data: https: http:; frame-src blob:; base-uri 'none'; "
+    # base-uri about: -- not 'none'. A composed artifact carries
+    # <base href="about:srcdoc"> so that in-page #fragment links resolve
+    # inside the frame instead of navigating it to the relay page. Under
+    # 'none' the browser IGNORES that <base> silently -- no console error,
+    # no visible difference from omitting it -- and every anchor navigates
+    # away. `about:` is the narrowest allowance that permits it and admits
+    # no network origin.
+    "img-src blob: data: https: http:; frame-src blob:; base-uri about:; "
     "form-action 'none'; frame-ancestors 'none'"
 )
 
