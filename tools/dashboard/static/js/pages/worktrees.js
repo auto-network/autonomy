@@ -2473,6 +2473,7 @@
                     ? window.Presence.participantColor(r.recipient.participant_id)
                     : 'hsl(220 70% 60%)',
                   initial: (r.recipient.display_name || '?').trim().charAt(0).toUpperCase(),
+                  avatarUrl: r.recipient.avatar_url || null,
                 }
                 : null,
               service: 'auto.network', orgSlug: req.org || '',

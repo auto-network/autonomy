@@ -196,6 +196,18 @@ def _get_conn(db_path: Path | str | None = None) -> sqlite3.Connection:
         conn.execute("ALTER TABLE mission_conversation ADD COLUMN pillar_id TEXT")
         conn.execute("ALTER TABLE mission_conversation ADD COLUMN anchor TEXT")
         conn.commit()
+    # Migrate: a guest's face, stored as a REFERENCE into the graph's
+    # content-addressed attachment store -- never as bytes here. That
+    # store already gives hash dedup (one copy however many participants
+    # share a photo), a same-origin serving route, alt-text, and a
+    # resumable relay fetch protocol the bootloader already speaks. NULL
+    # is a real state: a participant without a photo renders the
+    # initial-and-color avatar derived from participant_id.
+    try:
+        conn.execute("SELECT avatar_attachment_id FROM visitor_tokens LIMIT 0")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE visitor_tokens ADD COLUMN avatar_attachment_id TEXT")
+        conn.commit()
     return conn
 
 
@@ -724,7 +736,8 @@ def activate_site_revision(
 
 
 def create_visitor_token(
-    display_name: str, *, db_path: Path | str | None = None,
+    display_name: str, *, avatar_attachment_id: str | None = None,
+    db_path: Path | str | None = None,
 ) -> dict:
     """Mint a token for a person the operator is handing a share link to.
 
@@ -740,9 +753,10 @@ def create_visitor_token(
     conn = _get_conn(db_path)
     try:
         conn.execute(
-            "INSERT INTO visitor_tokens (token, participant_id, display_name, created_at)"
-            " VALUES (?, ?, ?, ?)",
-            (token, participant_id, display_name, created_at),
+            "INSERT INTO visitor_tokens"
+            " (token, participant_id, display_name, created_at, avatar_attachment_id)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (token, participant_id, display_name, created_at, avatar_attachment_id),
         )
         conn.commit()
     finally:
@@ -751,7 +765,29 @@ def create_visitor_token(
         "token": token,
         "participant_id": participant_id,
         "display_name": display_name,
+        "avatar_attachment_id": avatar_attachment_id,
     }
+
+
+def set_visitor_avatar(
+    participant_id: str, avatar_attachment_id: str | None, *,
+    db_path: Path | str | None = None,
+) -> dict | None:
+    """Point a guest at an attachment (or clear it). Stores the reference
+    only -- the bytes live once in the graph's attachment store."""
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE visitor_tokens SET avatar_attachment_id = ? WHERE participant_id = ?",
+            (avatar_attachment_id, participant_id),
+        )
+        conn.commit()
+        changed = cur.rowcount
+    finally:
+        conn.close()
+    if not changed:
+        return None
+    return get_visitor_by_participant_id(participant_id, db_path=db_path)
 
 
 def resolve_visitor(
@@ -796,7 +832,8 @@ def get_visitor_by_participant_id(
     conn = _get_conn(db_path)
     try:
         row = conn.execute(
-            "SELECT participant_id, display_name FROM visitor_tokens WHERE participant_id = ?",
+            "SELECT participant_id, display_name, avatar_attachment_id"
+            " FROM visitor_tokens WHERE participant_id = ?",
             (participant_id,),
         ).fetchone()
     finally:
@@ -806,6 +843,7 @@ def get_visitor_by_participant_id(
     return {
         "participant_id": row["participant_id"],
         "display_name": row["display_name"],
+        "avatar_attachment_id": row["avatar_attachment_id"],
     }
 
 

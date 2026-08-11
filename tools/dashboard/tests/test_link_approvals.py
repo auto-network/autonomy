@@ -591,6 +591,7 @@ def test_mission_recipient_is_its_own_field_not_the_title(env, tmp_path, monkeyp
     assert enriched["recipient"] == {
         "participant_id": guest["participant_id"],
         "display_name": "Priya (data partner)",
+        "avatar_url": None,  # no photo -> the initial-and-color avatar
     }
 
 
@@ -657,3 +658,28 @@ def test_participant_id_is_kept_off_the_wire_to_the_registry():
     # ...and the wire copy drops it, keeping everything the relay does need.
     wire = {k: v for k, v in meta.items() if k not in link_approvals._LOCAL_ONLY_META}
     assert wire == {"label": "Briefing", "ttl": 3600}
+
+
+def test_recipient_avatar_is_a_url_into_the_attachment_store(env, tmp_path, monkeypatch):
+    """The photo's BYTES never ride this payload. They live once in the
+    graph's content-addressed attachment store (hash-deduped, alt-texted,
+    same-origin cacheable, and already fetchable over the relay's own
+    attachment protocol); the recipient carries a reference."""
+    from tools.dashboard.dao import mission_control_db as mdb
+    monkeypatch.setattr(mdb, "DB_PATH", tmp_path / "mission_control.db")
+    mission = mdb.create_mission("OSS Insights")
+    guest = mdb.create_visitor_token("Leon Zachery", avatar_attachment_id="att-123")
+
+    r = env.post("/api/approvals", json={
+        "kind": "link_publish", "session": SESSION,
+        "request": {
+            "org": ORG,
+            "target_uuid": mission["mission_id"],
+            "target_type": "mission",
+            "meta": {"participant_id": guest["participant_id"]},
+        },
+    })
+    enriched = env.get(f"/api/approvals/{r.json()['id']}").json()
+    assert enriched["recipient"]["avatar_url"] == "/api/attachment/att-123"
+    # And nothing image-shaped is inlined anywhere in the payload.
+    assert "data:image" not in json.dumps(enriched)

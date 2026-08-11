@@ -288,6 +288,7 @@ def test_get_visitor_by_participant_id_returns_display_name(tmp_path):
     assert found == {
         "participant_id": visitor["participant_id"],
         "display_name": "Priya (data partner)",
+        "avatar_attachment_id": None,  # no photo is a real state
     }
 
 
@@ -1053,3 +1054,29 @@ def test_list_coordinators_with_open_questions_empty_when_no_coordinator_set(tmp
     mission = db.create_mission("OSS Insights", db_path=path)  # no coordinator_session
     db.ask_question(mission["mission_id"], "q", "guest:a", "A", db_path=path)
     assert db.list_coordinators_with_open_questions(db_path=path) == {}
+
+
+def test_visitor_avatar_stores_a_reference_not_bytes(tmp_path):
+    """The photo lives once in the graph's content-addressed attachment
+    store; this table holds only its id, so two guests sharing a photo
+    cost one copy and nothing re-sends image bytes on every read."""
+    path = _db_path(tmp_path)
+    visitor = db.create_visitor_token(
+        "Leon Zachery", avatar_attachment_id="att-abc", db_path=path,
+    )
+    assert visitor["avatar_attachment_id"] == "att-abc"
+    found = db.get_visitor_by_participant_id(visitor["participant_id"], db_path=path)
+    assert found["avatar_attachment_id"] == "att-abc"
+
+
+def test_set_visitor_avatar_updates_and_clears(tmp_path):
+    path = _db_path(tmp_path)
+    visitor = db.create_visitor_token("Leon Zachery", db_path=path)
+    updated = db.set_visitor_avatar(visitor["participant_id"], "att-1", db_path=path)
+    assert updated["avatar_attachment_id"] == "att-1"
+    cleared = db.set_visitor_avatar(visitor["participant_id"], None, db_path=path)
+    assert cleared["avatar_attachment_id"] is None
+
+
+def test_set_visitor_avatar_on_an_unknown_participant_is_none(tmp_path):
+    assert db.set_visitor_avatar("guest:nope", "att-1", db_path=_db_path(tmp_path)) is None
