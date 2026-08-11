@@ -873,8 +873,17 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
         "target_uuid": req["target_uuid"],
         "target_type": req["target_type"],
     }
-    if meta:
-        args["meta"] = meta
+    # The RELAY IS UNTRUSTED and is told only what it needs to mint and
+    # route a token. participant_id is deliberately withheld from it: the
+    # registry never authorizes anything with it (check_grant consults the
+    # dashboard's own cache and never the registry), so sending it would
+    # hand the relay operator a per-link guest identifier for no gain --
+    # exactly the metadata the accepted set (token, org, timing, volume)
+    # excludes. It stays in the LOCAL grant below, which is the only copy
+    # serving ever reads.
+    wire_meta = {k: v for k, v in meta.items() if k not in _LOCAL_ONLY_META}
+    if wire_meta:
+        args["meta"] = wire_meta
     # First publish is chicken-and-egg: the serving tunnel only runs while a
     # link is live, but the very first link is created BY riding the tunnel.
     # Start serving now (the approve step minted the serve-cert); the
@@ -918,6 +927,13 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
         "serving": {"live": True, "via": "tunnel-control"},
         "actor": _approval_identities(org)["actor_identity"],
     }
+
+
+#: Grant meta the dashboard keeps to itself and never puts on the wire to
+#: the registry. The relay is untrusted (I5) and authorizes nothing with
+#: these — serving reads the LOCAL grant cache only — so shipping them
+#: would leak who a link is for while buying nothing.
+_LOCAL_ONLY_META = frozenset({"participant_id"})
 
 
 def _tunnel_link_meta(req: dict, decision: dict) -> tuple[dict, str | None]:
