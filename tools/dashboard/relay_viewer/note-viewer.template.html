@@ -254,10 +254,46 @@ main { max-width: 52rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; }
     img.replaceWith(placeholder);
   }
 
-  function render(content) {
-    if (rendered || !content || content.v !== 1 || content.op !== 'content') return;
-    if (typeof content.title !== 'string' || Array.from(content.title).length > MAX_TITLE_CHARS) return;
-    if (typeof content.markdown !== 'string' || !Array.isArray(content.parts)) return;
+  // The host hands over generic parts and never inspects them. That ref
+  // 'note' carries a JSON title and ref 'markdown' carries the body is THIS
+  // viewer's business, which is what lets the contract change without a
+  // registry deploy.
+  function render(message) {
+    if (rendered || !message || message.v !== 1 || message.op !== 'parts') return;
+    if (!Array.isArray(message.parts)) return;
+
+    const byRef = new Map();
+    for (const part of message.parts) {
+      if (!part || typeof part.ref !== 'string' || typeof part.mime !== 'string'
+          || !(part.bytes instanceof ArrayBuffer) || byRef.has(part.ref)) continue;
+      byRef.set(part.ref, part);
+    }
+    const partDecoder = new TextDecoder('utf-8', {fatal: true});
+    const markdownPart = byRef.get('markdown');
+    if (!markdownPart) return;
+
+    let noteTitle = '';
+    let markdownText;
+    try {
+      markdownText = partDecoder.decode(markdownPart.bytes);
+      const notePart = byRef.get('note');
+      if (notePart) {
+        const meta = JSON.parse(partDecoder.decode(notePart.bytes));
+        if (meta && typeof meta.title === 'string') noteTitle = meta.title;
+      }
+    } catch (_error) {
+      document.getElementById('render-error').hidden = false;
+      return;
+    }
+    if (Array.from(noteTitle).length > MAX_TITLE_CHARS) return;
+
+    byRef.delete('markdown');
+    byRef.delete('note');
+    const content = {
+      title: noteTitle, markdown: markdownText,
+      parts: Array.from(byRef.values()), attachments: message.attachments,
+    };
+
     rendered = true;
     try {
       const title = content.title || 'Note';
@@ -318,7 +354,7 @@ main { max-width: 52rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; }
   window.addEventListener('message', (event) => {
     if (event.source !== parent) return;
     const data = event.data;
-    if (data && data.op === 'content') {
+    if (data && data.op === 'parts') {
       render(data);
     } else if (data && data.type === 'attachment.state') {
       applyAttachmentState(data);

@@ -504,7 +504,7 @@ const autonet = (() => {
     // need to -- the artifact arrives over a channel whose server cert
     // chained to the org root this page pinned before any bytes flowed, so
     // no third party can declare a kind.
-    if (!hasOnlyKeys(header, ["v", "status", "kind", "viewer", "content", "parts", "branding"])
+    if (!hasOnlyKeys(header, ["v", "status", "kind", "viewer", "parts", "attachments", "branding"])
         || header.v !== 1 || header.status !== "ok"
         || typeof header.kind !== "string" || !header.kind
         || codePointLength(header.kind) > 64) {
@@ -512,7 +512,6 @@ const autonet = (() => {
     }
 
     const ranges = [validateSlice(header.viewer, body.length, "viewer", false)];
-    let content = null;
 
     // Generic parts: any viewer may carry them, and the host never
     // interprets one. Validation is structural only -- unique refs, slices
@@ -535,59 +534,31 @@ const autonet = (() => {
         return { ref: part.ref, mime: part.mime, ...range };
       });
     }
-    if (header.kind === "note") {
-      if (!Object.prototype.hasOwnProperty.call(header, "content")
-          || !hasOnlyKeys(header.content, ["title", "markdown", "parts", "attachments"])
-          || typeof header.content.title !== "string"
-          || codePointLength(header.content.title) > MAX_TITLE_CHARS
-          || !Array.isArray(header.content.parts)) {
-        throw new Error("invalid note content");
+    // Attachment manifest, TOP LEVEL and structural. The host activates its
+    // download controller from this manifest's PRESENCE, never from a kind.
+    let attachments = null;
+    if (Object.prototype.hasOwnProperty.call(header, "attachments")) {
+      if (!Array.isArray(header.attachments)) {
+        throw new Error("invalid attachment manifest");
       }
-      const markdown = validateSlice(
-        header.content.markdown, body.length, "markdown"
-      );
-      ranges.push(markdown);
-      const refs = new Set();
-      const parts = header.content.parts.map((part) => {
-        if (!hasOnlyKeys(part, ["ref", "mime", "offset", "length"])
-            || typeof part.ref !== "string" || !part.ref
-            || refs.has(part.ref) || typeof part.mime !== "string" || !part.mime) {
-          throw new Error("invalid artifact part");
+      const manifestRefs = new Set();
+      attachments = header.attachments.map((entry) => {
+        if (!hasOnlyKeys(entry, ["ref", "name", "mime", "raw_sha256", "total_size", "oversize"])
+            || typeof entry.ref !== "string" || !entry.ref || manifestRefs.has(entry.ref)
+            || typeof entry.name !== "string" || codePointLength(entry.name) > MAX_ATTACHMENT_NAME_CHARS
+            || typeof entry.mime !== "string" || !entry.mime
+            || typeof entry.raw_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.raw_sha256)
+            || !Number.isSafeInteger(entry.total_size) || entry.total_size < 0
+            || typeof entry.oversize !== "boolean") {
+          throw new Error("invalid attachment manifest entry");
         }
-        refs.add(part.ref);
-        const range = validateSlice(
-          { offset: part.offset, length: part.length }, body.length, "part"
-        );
-        ranges.push(range);
-        return { ref: part.ref, mime: part.mime, ...range };
+        manifestRefs.add(entry.ref);
+        return {
+          ref: entry.ref, name: entry.name, mime: entry.mime,
+          raw_sha256: entry.raw_sha256, total_size: entry.total_size,
+          oversize: entry.oversize,
+        };
       });
-      let attachments = [];
-      if (Object.prototype.hasOwnProperty.call(header.content, "attachments")) {
-        if (!Array.isArray(header.content.attachments)) {
-          throw new Error("invalid note attachments");
-        }
-        const manifestRefs = new Set();
-        attachments = header.content.attachments.map((entry) => {
-          if (!hasOnlyKeys(entry, ["ref", "name", "mime", "raw_sha256", "total_size", "oversize"])
-              || typeof entry.ref !== "string" || !entry.ref || manifestRefs.has(entry.ref)
-              || typeof entry.name !== "string" || codePointLength(entry.name) > MAX_ATTACHMENT_NAME_CHARS
-              || typeof entry.mime !== "string" || !entry.mime
-              || typeof entry.raw_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.raw_sha256)
-              || !Number.isSafeInteger(entry.total_size) || entry.total_size < 0
-              || typeof entry.oversize !== "boolean") {
-            throw new Error("invalid attachment manifest entry");
-          }
-          manifestRefs.add(entry.ref);
-          return {
-            ref: entry.ref, name: entry.name, mime: entry.mime,
-            raw_sha256: entry.raw_sha256, total_size: entry.total_size,
-            oversize: entry.oversize,
-          };
-        });
-      }
-      content = { title: header.content.title, markdown, parts, attachments };
-    } else if (Object.prototype.hasOwnProperty.call(header, "content")) {
-      throw new Error("content forbidden for design");
     }
 
     let branding = null;
@@ -645,8 +616,8 @@ const autonet = (() => {
     return {
       kind: header.kind,
       viewer: ranges[0],
-      content,
       parts,
+      attachments,
       branding,
     };
   }
@@ -1840,13 +1811,14 @@ const autonet = (() => {
       missionBridge.dispose();
       missionBridge = null;
     }
-    if (artifact.kind === "note" && attachmentContext) {
+    // Manifest present -> the download controller runs. No kind check.
+    if (artifact.attachments && attachmentContext) {
       attachmentController = new AttachmentController({
         frame,
         channel: attachmentContext.channel,
         token: attachmentContext.token,
         noteId: attachmentContext.noteId,
-        manifest: artifact.content.attachments,
+        manifest: artifact.attachments,
         exportButton: document.getElementById("attachment-export"),
       });
     }
@@ -1878,7 +1850,7 @@ const autonet = (() => {
     // Wait for `ready` only when there is something to hand over. A viewer
     // that declares neither parts nor content is a self-contained document
     // and may never send one; waiting would hang it.
-    if (artifact.parts || artifact.content) {
+    if (artifact.parts) {
       await withTimeout(ready, VIEWER_READY_TIMEOUT_MS, "viewer ready");
     }
 
@@ -1889,23 +1861,14 @@ const autonet = (() => {
         bytes: body.slice(part.offset, part.end).buffer,
       }));
       capturedWindow.postMessage(
-        { v: 1, op: "parts", parts: generic }, "*", generic.map((x) => x.bytes)
+        {
+          v: 1, op: "parts", parts: generic,
+          attachments: artifact.attachments || undefined,
+        },
+        "*", generic.map((x) => x.bytes)
       );
     }
 
-    if (artifact.content) {
-      const md = artifact.content.markdown;
-      const parts = artifact.content.parts.map((part) => {
-        const bytes = body.slice(part.offset, part.end).buffer;
-        return { ref: part.ref, mime: part.mime, bytes };
-      });
-      const transfer = parts.map((part) => part.bytes);
-      capturedWindow.postMessage({
-        v: 1, op: "content", title: artifact.content.title,
-        markdown: decoder.decode(body.slice(md.offset, md.end)), parts,
-        attachments: artifact.content.attachments,
-      }, "*", transfer);
-    }
 
     show("frame-view");
     state.phase = "rendered";

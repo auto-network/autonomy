@@ -486,15 +486,26 @@ def _resolve_note(target_uuid: str, org: str | None):
     title = source.get("title") or "Note"
     if not isinstance(title, str):
         title = "Note"
+    # Generic parts, not a note-shaped `content` block. Only the note viewer
+    # knows that ref "note" carries a title or that ref "markdown" is
+    # markdown -- which is what lets note change its own content contract
+    # without a registry deploy.
+    note_parts = [
+        {
+            "ref": "note",
+            "mime": "application/json",
+            "bytes": json.dumps(
+                {"title": title[:AUTONET_MAX_TITLE_CHARS]}, ensure_ascii=False
+            ).encode("utf-8"),
+        },
+        {"ref": "markdown", "mime": "text/markdown", "bytes": markdown.encode("utf-8")},
+        *parts_by_ref.values(),
+    ]
     return {
         "kind": "note",
         "viewer": viewer,
-        "content": {
-            "title": title[:AUTONET_MAX_TITLE_CHARS],
-            "markdown": markdown,
-            "parts": list(parts_by_ref.values()),
-            "attachments": attachments,
-        },
+        "parts": note_parts,
+        "attachments": attachments,
     }
 
 
@@ -505,7 +516,7 @@ def _serialize_artifact(artifact: dict) -> tuple[dict, bytes]:
     kind = artifact.get("kind")
     if kind not in ("note", "design", "present", "mission"):
         raise ValueError("unsupported artifact kind")
-    if not set(artifact).issubset({"kind", "viewer", "content", "branding"}):
+    if not set(artifact).issubset({"kind", "viewer", "parts", "attachments", "branding"}):
         raise ValueError("artifact carries unknown fields")
     viewer = artifact.get("viewer")
     if not isinstance(viewer, bytes) or not viewer:
@@ -520,89 +531,68 @@ def _serialize_artifact(artifact: dict) -> tuple[dict, bytes]:
         "viewer": {"offset": 0, "length": len(viewer)},
     }
 
-    content = artifact.get("content")
-    if kind != "note":
-        if content is not None:
-            raise ValueError("design, present, and mission forbid content")
-    else:
-        if not isinstance(content, dict):
-            raise ValueError("note requires content")
-
-        if not set(content).issubset({"title", "markdown", "parts", "attachments"}):
-            raise ValueError("note content carries unknown fields")
-        title = content.get("title")
-        markdown = content.get("markdown")
-        parts = content.get("parts")
-        if not isinstance(title, str) or len(title) > AUTONET_MAX_TITLE_CHARS:
-            raise ValueError("invalid note title")
-        if not isinstance(markdown, str) or not isinstance(parts, list):
-            raise ValueError("invalid note content")
-
-        markdown_bytes = markdown.encode("utf-8")
-        markdown_slice = {"offset": cursor, "length": len(markdown_bytes)}
-        chunks.append(markdown_bytes)
-        cursor += len(markdown_bytes)
-
+    # Generic parts: the serializer lays out bytes and records in-bounds
+    # slices. It never learns what a ref means.
+    parts = artifact.get("parts")
+    if parts is not None:
+        if not isinstance(parts, list):
+            raise ValueError("parts must be a list")
         part_headers = []
         seen_refs = set()
         for part in parts:
-            if not isinstance(part, dict):
-                raise ValueError("invalid part")
+            if not isinstance(part, dict) or not set(part).issubset({"ref", "mime", "bytes"}):
+                raise ValueError("invalid artifact part")
             ref, mime, part_bytes = part.get("ref"), part.get("mime"), part.get("bytes")
             if (
                 not isinstance(ref, str) or not ref or ref in seen_refs
                 or not isinstance(mime, str) or not mime
                 or not isinstance(part_bytes, bytes)
             ):
-                raise ValueError("invalid part")
+                raise ValueError("invalid artifact part")
             seen_refs.add(ref)
             part_headers.append({
-                "ref": ref, "mime": mime,
-                "offset": cursor, "length": len(part_bytes),
+                "ref": ref, "mime": mime, "offset": cursor, "length": len(part_bytes),
             })
             chunks.append(part_bytes)
             cursor += len(part_bytes)
+        header["parts"] = part_headers
 
-        header["content"] = {
-            "title": title,
-            "markdown": markdown_slice,
-            "parts": part_headers,
-        }
-
-        manifest = content.get("attachments")
-        if manifest is not None:
-            if not isinstance(manifest, list):
-                raise ValueError("invalid note attachments")
-            manifest_headers = []
-            manifest_refs = set()
-            for entry in manifest:
-                if not isinstance(entry, dict) or not set(entry).issubset({
-                    "ref", "name", "mime", "raw_sha256", "total_size", "oversize",
-                }):
-                    raise ValueError("invalid attachment manifest entry")
-                ref = entry.get("ref")
-                name = entry.get("name")
-                mime = entry.get("mime")
-                raw_sha256 = entry.get("raw_sha256")
-                total_size = entry.get("total_size")
-                oversize = entry.get("oversize")
-                if (
-                    not isinstance(ref, str) or not ref or ref in manifest_refs
-                    or not isinstance(name, str) or len(name) > _MANIFEST_NAME_MAX
-                    or not isinstance(mime, str) or not mime
-                    or not isinstance(raw_sha256, str)
-                    or not _SHA256_HEX_RE.fullmatch(raw_sha256)
-                    or type(total_size) is not int or total_size < 0
-                    or not isinstance(oversize, bool)
-                ):
-                    raise ValueError("invalid attachment manifest entry")
-                manifest_refs.add(ref)
-                manifest_headers.append({
-                    "ref": ref, "name": name, "mime": mime,
-                    "raw_sha256": raw_sha256, "total_size": total_size,
-                    "oversize": oversize,
-                })
-            header["content"]["attachments"] = manifest_headers
+    # The attachment manifest is TOP LEVEL: the host activates its download
+    # controller from the manifest's presence, not from a kind check.
+    manifest = artifact.get("attachments")
+    if manifest is not None:
+        if not isinstance(manifest, list):
+            raise ValueError("invalid attachment manifest")
+        manifest_headers = []
+        manifest_refs = set()
+        for entry in manifest:
+            if not isinstance(entry, dict) or not set(entry).issubset({
+                "ref", "name", "mime", "raw_sha256", "total_size", "oversize",
+            }):
+                raise ValueError("invalid attachment manifest entry")
+            ref = entry.get("ref")
+            name = entry.get("name")
+            mime = entry.get("mime")
+            raw_sha256 = entry.get("raw_sha256")
+            total_size = entry.get("total_size")
+            oversize = entry.get("oversize")
+            if (
+                not isinstance(ref, str) or not ref or ref in manifest_refs
+                or not isinstance(name, str) or len(name) > _MANIFEST_NAME_MAX
+                or not isinstance(mime, str) or not mime
+                or not isinstance(raw_sha256, str)
+                or not _SHA256_HEX_RE.fullmatch(raw_sha256)
+                or type(total_size) is not int or total_size < 0
+                or not isinstance(oversize, bool)
+            ):
+                raise ValueError("invalid attachment manifest entry")
+            manifest_refs.add(ref)
+            manifest_headers.append({
+                "ref": ref, "name": name, "mime": mime,
+                "raw_sha256": raw_sha256, "total_size": total_size,
+                "oversize": oversize,
+            })
+        header["attachments"] = manifest_headers
 
     branding = artifact.get("branding")
     if branding is not None:

@@ -99,9 +99,13 @@ window.addEventListener('message', (e) => {
   }
 });
 function post(msg) { window.postMessage(msg, '*'); }
+function buf(text) { return new TextEncoder().encode(text).buffer; }
 function content(attachments) {
-  post({v: 1, op: 'content', title: 'T', markdown: '# T\\n\\nbody',
-        parts: [], attachments});
+  // Generic parts, the shape the host now delivers.
+  post({v: 1, op: 'parts', attachments, parts: [
+    {ref: 'note', mime: 'application/json', bytes: buf(JSON.stringify({title: 'T'}))},
+    {ref: 'markdown', mime: 'text/markdown', bytes: buf('# T\\n\\nbody')},
+  ]});
 }
 function controls() { return [...document.querySelectorAll('.attachment')]; }
 function only() { return controls()[0]; }
@@ -314,9 +318,14 @@ def test_sandboxed_bridge_delivers_content_across_opaque_boundary(tmp_path):
 (async () => {
   await new Promise(r => setTimeout(r, 300));
   const readyBefore = window.__fromChild.map(m => m.op);
-  window.__post({v:1, op:'content', title:'Sandboxed', markdown:'# Sandboxed\\n\\nbody',
-    parts:[], attachments:[{ref:'a1', name:'x.pdf', mime:'application/pdf',
-      raw_sha256:'a'.repeat(64), total_size:1024, oversize:false}]});
+  const enc = (t) => new TextEncoder().encode(t).buffer;
+  window.__post({v:1, op:'parts',
+    attachments:[{ref:'a1', name:'x.pdf', mime:'application/pdf',
+      raw_sha256:'a'.repeat(64), total_size:1024, oversize:false}],
+    parts:[
+      {ref:'note', mime:'application/json', bytes: enc(JSON.stringify({title:'Sandboxed'}))},
+      {ref:'markdown', mime:'text/markdown', bytes: enc('# Sandboxed\\n\\nbody')},
+    ]});
   await new Promise(r => setTimeout(r, 300));
   return JSON.stringify({ops: window.__fromChild.map(m => m.op)});
 })();
