@@ -12623,17 +12623,24 @@ HARNESS_API_BADGE_CHECKS = """
         var harnesses = new Set();
         var models = new Set();
         var icons = new Set();
+        var iconWidths = new Set();
         c.querySelectorAll('[data-testid="session-harness-badge"]').forEach(function(b) {
             harnesses.add(b.getAttribute('data-harness') || '');
             models.add((b.textContent || '').trim());
             var icon = b.querySelector('img');
-            if (icon) icons.add(icon.getAttribute('src') || '');
+            if (icon) {
+                icons.add(icon.getAttribute('src') || '');
+                var width = Math.round(icon.getBoundingClientRect().width * 10) / 10;
+                if (width > 0) iconWidths.add(width);
+            }
         });
         perCard[sid] = Array.from(harnesses).filter(Boolean);
         r.model_labels = r.model_labels || {};
         r.model_labels[sid] = Array.from(models).filter(Boolean);
         r.provider_icons = r.provider_icons || {};
         r.provider_icons[sid] = Array.from(icons).filter(Boolean);
+        r.provider_icon_widths = r.provider_icon_widths || {};
+        r.provider_icon_widths[sid] = Array.from(iconWidths);
     });
     r.harness_per_card = perCard;
     r.total_badge_count = document.querySelectorAll('[data-testid="session-harness-badge"]').length;
@@ -12749,12 +12756,18 @@ class TestSessionHarnessBadge:
 
     def test_cards_use_vendored_official_provider_icons(self):
         icons = self._checks.get("provider_icons") or {}
-        assert "/static/img/providers/anthropic-32.png" in (
+        assert "/static/img/providers/claude-32.png" in (
             icons.get("auto-sweep-alpha") or []
         )
         assert "/static/img/providers/openai-32.svg" in (
             icons.get("auto-sweep-beta") or []
         )
+
+    def test_openai_blossom_is_optically_scaled(self):
+        """The official SVG's padded canvas must not shrink the visible mark."""
+        widths = self._checks.get("provider_icon_widths") or {}
+        codex_widths = widths.get("auto-sweep-beta") or []
+        assert codex_widths and min(codex_widths) >= 22
 
     # ── CrossTalk envelope: additive ──────────────────────────────
 
