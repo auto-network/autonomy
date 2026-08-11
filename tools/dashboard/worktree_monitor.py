@@ -1174,6 +1174,9 @@ class WorktreeMonitor:
     ) -> list[WorktreeState]:
         """Force a scan and replace the cache.
 
+        The underlying git sweep is binary-safe, including merge-tree
+        eligibility checks for commits that add image assets.
+
         ``force_capabilities=True`` bypasses the per-row TTL and any
         active rate-limit back-off for EVERY live row — fan-out
         capability fetch. Today's only callers are tests; the
