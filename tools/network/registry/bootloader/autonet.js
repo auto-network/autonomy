@@ -1402,6 +1402,19 @@ const autonet = (() => {
   }
   window.addEventListener("message", function (event) {
     if (event.source !== parent || !event.data || event.data.v !== 1) return;
+    if (event.data.op === "mc-update") {
+      // A live update arrived. The page decides what to do with it: this
+      // dispatches a DOM event rather than touching the page's own markup,
+      // because the viewer does not know how a given mission renders its
+      // conversation. A page that does not listen is simply not live --
+      // it is never broken by one.
+      try {
+        window.dispatchEvent(new CustomEvent("mc:update", {
+          detail: event.data.update,
+        }));
+      } catch (e) { /* a page with no listener costs nothing */ }
+      return;
+    }
     if (event.data.op !== "mc-response") return;
     var resolve = pending[event.data.id];
     if (!resolve) return;
@@ -1553,6 +1566,36 @@ const autonet = (() => {
     return MISSION_SHIM + rewriteMissionLinks(html);
   }
 
+  //: Opens one fan-out frame. Mirrors channel.py's seal_stream_frame:
+  //: [12B random nonce][AES-256-GCM ciphertext] with the domain string as
+  //: AAD. Returns null when it does not authenticate -- which is also how
+  //: a request RESPONSE is told apart from a pushed frame on the same
+  //: channel, since a response is not sealed under the stream key.
+  const STREAM_FRAME_DOMAIN = te.encode("autonomy.network.channel.stream.v1");
+  const STREAM_NONCE_LEN = 12;
+
+  async function openStreamFrame(streamKey, sealed) {
+    if (!streamKey || !(sealed instanceof Uint8Array)) return null;
+    if (sealed.length <= STREAM_NONCE_LEN) return null;
+    try {
+      const key = await crypto.subtle.importKey(
+        "raw", streamKey, { name: "AES-GCM" }, false, ["decrypt"],
+      );
+      const plain = await crypto.subtle.decrypt(
+        {
+          name: "AES-GCM",
+          iv: sealed.slice(0, STREAM_NONCE_LEN),
+          additionalData: STREAM_FRAME_DOMAIN,
+        },
+        key,
+        sealed.slice(STREAM_NONCE_LEN),
+      );
+      return new Uint8Array(plain);
+    } catch (err) {
+      return null;  // not ours, or tampered: indistinguishable on purpose
+    }
+  }
+
   class MissionBridge {
     /** Answers the shim's requests by issuing channel ops. The frame is
      * an opaque origin, so every inbound message is checked against the
@@ -1571,8 +1614,67 @@ const autonet = (() => {
       // parent already holds these bytes and never loses them to a swap.
       this.missionHtml = missionHtml;
       this.queue = Promise.resolve();
+      // ONE reader owns the channel. The record layer is strictly
+      // request/response -- recvMessage consumes until STREAM_FINAL -- so a
+      // pushed frame arriving mid-request would otherwise be swallowed as
+      // if it were that request's answer. Every inbound message goes
+      // through this loop, which tells the two apart by whether it opens
+      // under the stream key, and hands each to the right place.
+      this.streamKey = null;
+      this.pendingOp = null;
+      this.reading = false;
       this.onMessage = this.onMessage.bind(this);
       window.addEventListener("message", this.onMessage);
+    }
+
+    startReading() {
+      if (this.reading) return;
+      this.reading = true;
+      (async () => {
+        while (this.reading) {
+          let raw;
+          try {
+            raw = await this.channel.recvMessage();
+          } catch (err) {
+            break;  // channel gone: stop cleanly, the page keeps its content
+          }
+          const pushed = this.streamKey
+            ? await openStreamFrame(this.streamKey, raw)
+            : null;
+          if (pushed) {
+            this.deliverPush(pushed);
+            continue;
+          }
+          const resolve = this.pendingOp;
+          this.pendingOp = null;
+          if (resolve) resolve(raw);
+        }
+      })();
+    }
+
+    /** Ask for this link's stream key, then start listening. Failing is
+     * not fatal: the page simply stays static, exactly as it did before
+     * live updates existed. */
+    async startLiveUpdates() {
+      this.startReading();
+      const envelope = await this.op("subscribe", null);
+      const hex = envelope && envelope.stream_key;
+      if (typeof hex !== "string" || hex.length !== 64) return false;
+      const bytes = new Uint8Array(32);
+      for (let i = 0; i < 32; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+      this.streamKey = bytes;
+      return true;
+    }
+
+    /** A decoded push -> the frame, for the page to apply. */
+    deliverPush(plain) {
+      let update;
+      try {
+        update = JSON.parse(new TextDecoder().decode(plain));
+      } catch (err) {
+        return;  // a malformed frame is dropped, never breaks the stream
+      }
+      this.childWindow.postMessage({ v: 1, op: "mc-update", update }, "*");
     }
 
     /** Replace the frame's document, re-injecting the shim so the new one
@@ -1584,6 +1686,8 @@ const autonet = (() => {
 
 
     dispose() {
+      this.reading = false;
+      this.pendingOp = null;
       window.removeEventListener("message", this.onMessage);
     }
 
@@ -1609,15 +1713,19 @@ const autonet = (() => {
      * or null -- a failed exchange never throws into a caller and never
      * leaves the page waiting. */
     async op(mcOp, body) {
+      this.startReading();
       try {
-        await this.channel.sendMessage(te.encode(canonicalJson({
-          v: 1, op: mcOp, body: body && typeof body === "object" ? body : {},
-        })));
-        const raw = await this.channel.recvMessage();
+        const request = { v: 1, op: mcOp };
+        // subscribe carries no body; read/write always do.
+        if (body !== null) request.body = body && typeof body === "object" ? body : {};
+        const answer = new Promise((resolve) => { this.pendingOp = resolve; });
+        await this.channel.sendMessage(te.encode(canonicalJson(request)));
+        const raw = await answer;
         const line = new TextDecoder().decode(raw).split("\n")[0];
         const parsed = JSON.parse(line);
         return parsed && parsed.status === "ok" ? parsed : null;
       } catch (err) {
+        this.pendingOp = null;
         return null;
       }
     }
@@ -1690,6 +1798,9 @@ const autonet = (() => {
         frame, channel: attachmentContext.channel, missionHtml: viewerHtml,
       });
       frame.srcdoc = missionShimmed(viewerHtml);
+      // Live updates are best-effort: if the subscribe is refused the page
+      // is simply static, which is how it behaved before this existed.
+      missionBridge.startLiveUpdates();
     } else {
       frame.srcdoc = viewerHtml;
     }

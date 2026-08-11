@@ -184,11 +184,23 @@ def test_an_unrelated_url_is_left_to_the_real_fetch():
 
 BRIDGE = r"""
   const sent = [];
+  // The bridge owns a single reader loop now, so the stub must behave like a
+  // real socket: hand back one message per request, then WAIT. Returning a
+  // resolved promise forever would spin the loop.
+  let deliver = null;
   const channel = {
-    sendMessage(bytes) { sent.push(new TextDecoder().decode(bytes)); return Promise.resolve(); },
+    sendMessage(bytes) {
+      sent.push(new TextDecoder().decode(bytes));
+      const d = deliver;
+      deliver = null;
+      if (d) {
+        d(new TextEncoder().encode(
+          JSON.stringify({ v: 1, status: "ok", pillars: [] }) + "\n"));
+      }
+      return Promise.resolve();
+    },
     recvMessage() {
-      return Promise.resolve(new TextEncoder().encode(
-        JSON.stringify({ v: 1, status: "ok", pillars: [] }) + "\n"));
+      return new Promise((resolve) => { deliver = resolve; });
     },
   };
   const posted = [];
@@ -243,6 +255,7 @@ def test_bridge_answers_null_when_the_channel_fails():
     """A failed exchange must answer, not hang the page waiting forever."""
     out = run_js(BRIDGE.replace("__BODY__", """
       channel.sendMessage = () => Promise.reject(new Error("channel died"));
+      // recvMessage keeps waiting; the failure must surface from the send.
       handler({ source: childWindow, data: {
         v: 1, op: "mc-request", id: "1", mcOp: "read", body: {} } });
       setTimeout(() => console.log(JSON.stringify({ posted })), 50);
@@ -458,3 +471,123 @@ def test_a_mission_takes_the_whole_surface():
         (root / "bootloader.html").read_text()
     assert 'classList.toggle("mission-surface", artifact.kind === "mission")' in \
         (root / "autonet.js").read_text()
+
+
+# ── live updates: one reader, two kinds of inbound message ──────────────
+
+
+LIVE = r"""
+  const sent = [];
+  const posted = [];
+  const inbox = [];
+  let deliver = null;
+  function push(bytes) {
+    if (deliver) { const d = deliver; deliver = null; d(bytes); }
+    else inbox.push(bytes);
+  }
+  const channel = {
+    sendMessage(b) { sent.push(JSON.parse(new TextDecoder().decode(b))); return Promise.resolve(); },
+    recvMessage() {
+      if (inbox.length) return Promise.resolve(inbox.shift());
+      return new Promise((r) => { deliver = r; });
+    },
+  };
+  const childWindow = { postMessage(m) { posted.push(m); } };
+  global.window.addEventListener = () => {};
+  global.window.removeEventListener = () => {};
+  const bridge = new autonet.MissionBridge({
+    frame: { contentWindow: childWindow }, channel, missionHtml: "<html>m</html>",
+  });
+  const enc = (o) => new TextEncoder().encode(JSON.stringify(o) + "\n");
+  __BODY__
+"""
+
+
+def live(body: str):
+    return run_js(LIVE.replace("__BODY__", body))
+
+
+def test_a_response_still_resolves_its_request_while_reading():
+    out = live("""
+      const p = bridge.op("read", { kind: "pillars" });
+      setTimeout(() => push(enc({ v: 1, status: "ok", pillars: [{ name: "P" }] })), 5);
+      p.then((r) => console.log(JSON.stringify({ got: r && r.pillars })));
+    """)
+    assert out["got"] == [{"name": "P"}]
+
+
+def test_a_pushed_frame_is_delivered_to_the_page_not_treated_as_a_response():
+    """THE COLLISION THIS DESIGN EXISTS FOR: the record layer is strictly
+    request/response, so before the single reader loop a pushed frame
+    arriving mid-request was consumed as that request's answer."""
+    out = live("""
+      (async () => {
+        // A real 32-byte key and a frame sealed under it, built the same way
+        // channel.py's seal_stream_frame does.
+        const raw = new Uint8Array(32).fill(7);
+        bridge.streamKey = raw;
+        bridge.startReading();
+        const key = await crypto.subtle.importKey("raw", raw, {name:"AES-GCM"}, false, ["encrypt"]);
+        const nonce = new Uint8Array(12).fill(3);
+        const body = new TextEncoder().encode(JSON.stringify({ v: 1, kind: "conversation", event: "answered" }));
+        const ct = new Uint8Array(await crypto.subtle.encrypt(
+          { name: "AES-GCM", iv: nonce,
+            additionalData: new TextEncoder().encode("autonomy.network.channel.stream.v1") },
+          key, body));
+        const sealed = new Uint8Array(12 + ct.length);
+        sealed.set(nonce); sealed.set(ct, 12);
+        push(sealed);
+        setTimeout(() => console.log(JSON.stringify({ posted })), 40);
+      })();
+    """)
+    assert len(out["posted"]) == 1
+    assert out["posted"][0]["op"] == "mc-update"
+    assert out["posted"][0]["update"]["event"] == "answered"
+
+
+def test_a_frame_sealed_under_another_key_is_ignored():
+    """It fails to open, so it falls through as if it were a response --
+    and with no request pending, it is simply dropped. A wrong key can
+    never inject an update."""
+    out = live("""
+      (async () => {
+        bridge.streamKey = new Uint8Array(32).fill(7);
+        bridge.startReading();
+        const other = await crypto.subtle.importKey(
+          "raw", new Uint8Array(32).fill(9), {name:"AES-GCM"}, false, ["encrypt"]);
+        const nonce = new Uint8Array(12).fill(1);
+        const ct = new Uint8Array(await crypto.subtle.encrypt(
+          { name: "AES-GCM", iv: nonce,
+            additionalData: new TextEncoder().encode("autonomy.network.channel.stream.v1") },
+          other, new TextEncoder().encode('{"v":1,"kind":"conversation"}')));
+        const sealed = new Uint8Array(12 + ct.length);
+        sealed.set(nonce); sealed.set(ct, 12);
+        push(sealed);
+        setTimeout(() => console.log(JSON.stringify({ posted })), 40);
+      })();
+    """)
+    assert out["posted"] == []
+
+
+def test_subscribe_stores_the_stream_key():
+    out = live("""
+      const p = bridge.startLiveUpdates();
+      setTimeout(() => push(enc({ v: 1, status: "ok", stream_key: "ab".repeat(32) })), 5);
+      p.then((ok) => console.log(JSON.stringify({
+        ok, keyLen: bridge.streamKey ? bridge.streamKey.length : 0,
+        sentOps: sent.map((r) => r.op),
+      })));
+    """)
+    assert out["ok"] is True
+    assert out["keyLen"] == 32
+    assert out["sentOps"] == ["subscribe"]
+
+
+def test_a_refused_subscribe_leaves_the_page_static_not_broken():
+    out = live("""
+      const p = bridge.startLiveUpdates();
+      setTimeout(() => push(enc({ v: 1, status: "unavailable" })), 5);
+      p.then((ok) => console.log(JSON.stringify({ ok, key: bridge.streamKey })));
+    """)
+    assert out["ok"] is False
+    assert out["key"] is None

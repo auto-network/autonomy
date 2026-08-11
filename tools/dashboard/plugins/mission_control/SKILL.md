@@ -300,6 +300,28 @@ GET    /missions/<mission_id>/pillars/<pillar_id>                  # chromeless 
 bookmarking/refreshing on one pillar once you're already inside a mission —
 **it is never the link you hand out**. See "one link per mission" below.
 
+### Live updates: listen for `mc:update`
+
+Over the relay a guest's page receives conversation and presence changes as
+they happen — an answer posted, a progress update, a reopen — with no polling
+and no reload. The viewer decrypts each one and dispatches a DOM event on
+`window`. It does not touch your markup: only your page knows how your page
+renders.
+
+```js
+window.addEventListener("mc:update", function (e) {
+  var u = e.detail;                     // {v, kind, mission_id, pillar_id, ...}
+  if (u.kind !== "conversation") return; // also: "presence"
+  // u.event is asked | answered | reopened | updated
+  // u.question is the same shape GET .../questions returns
+  renderQuestion(u.question);            // your own rendering
+});
+```
+
+A page that never listens is simply not live; it is never broken by an update.
+On the dashboard the event does not fire — there you already have the
+`/api/events` stream directly.
+
 ### Navigation must be declarative, or it dies over the relay
 
 Over auto.network your page runs in a sandboxed `srcdoc` iframe. Such a
