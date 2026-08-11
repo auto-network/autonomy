@@ -1,0 +1,166 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>srcdoc fragment test</title>
+<style>
+  body { font: 15px/1.5 -apple-system, system-ui, sans-serif; margin: 0; padding: 14px;
+         background:#0d0d0f; color:#e8e8ea; -webkit-text-size-adjust: 100%; }
+  h1 { font-size: 17px; margin: 0 0 2px; }
+  .sub { color:#8b8b93; font-size: 12px; margin-bottom: 16px; }
+  .case { border:1px solid #2a2a30; border-radius:10px; margin-bottom:14px; overflow:hidden; background:#141418; }
+  .case h2 { font-size:13px; margin:0; padding:9px 11px; background:#1b1b21; font-weight:600; }
+  .verdict { padding:10px 11px; font-size:15px; font-weight:700; letter-spacing:.2px; }
+  .PASS { color:#56d364; background:#0f2213; }
+  .FAIL { color:#ff7b72; background:#241213; }
+  .WAIT { color:#8b8b93; }
+  table { width:100%; border-collapse:collapse; font-family: ui-monospace, SFMono-Regular, monospace; font-size:11px; }
+  td { padding:4px 11px; vertical-align:top; border-top:1px solid #212127; word-break:break-all; }
+  td:first-child { color:#7d7d87; width:40%; }
+  iframe { width:100%; height:150px; border:0; border-top:1px solid #2a2a30; background:#0d0d0f; display:block; }
+  .manual { padding:10px 11px; font-size:13px; color:#c9c9d1; background:#17171c; border-top:1px solid #212127; }
+  .manual b { color:#f0c674; }
+</style>
+</head>
+<body>
+<h1>Does <code>&lt;base href="about:srcdoc"&gt;</code> work here?</h1>
+<div class="sub">Both frames are <code>sandbox="allow-scripts"</code> with no <code>allow-same-origin</code> — identical to how the relay renders an artifact. The only difference between them is one line of HTML.</div>
+<div class="verdict WAIT" id="selfcheck" style="border-radius:8px;margin-bottom:14px;">checking harness…</div>
+<div id="cases"></div>
+
+<script>
+var FRAME_JS = `
+(function () {
+  var label = window.__LABEL__;
+  var hashFired = false;
+  window.addEventListener("hashchange", function () { hashFired = true; });
+  function say(stage, extra) {
+    var p = { label: label, stage: stage,
+      documentURL: String(document.URL), baseURI: String(document.baseURI),
+      hashFired: hashFired };
+    for (var k in (extra || {})) p[k] = extra[k];
+    parent.postMessage(p, "*");
+  }
+  function inView() {
+    return document.getElementById("target").getBoundingClientRect().top < window.innerHeight;
+  }
+  say("loaded", { resolvedHref: document.getElementById("jump").href });
+  // Auto-run: click it ourselves so there is a result even without a tap.
+  setTimeout(function () {
+    document.getElementById("jump").click();
+    setTimeout(function () { say("auto", { targetInView: inView() }); }, 400);
+  }, 200);
+  // Manual: the operator taps the second link. A real tap, not a synthetic one.
+  document.getElementById("manual").addEventListener("click", function () {
+    setTimeout(function () { say("manual", { targetInView: inView() }); }, 400);
+  });
+})();
+`;
+
+function frameHtml(withBase, label) {
+  return '<!doctype html><html><head>'
+    + (withBase ? '<base href="about:srcdoc">' : '')
+    + '<style>body{font:12px ui-monospace,monospace;margin:0;padding:8px;background:#0d0d0f;color:#c9c9d1}'
+    + 'a{color:#58a6ff;display:inline-block;padding:6px 0}'
+    + '.pad{height:900px}#target{color:#56d364;font-weight:bold;padding:6px 0}</style></head><body>'
+    + '<a id="jump" href="#target">auto-click target</a><br>'
+    + '<a id="manual" href="#target">&#9654; TAP ME to test a real tap</a>'
+    + '<div class="pad">(scroll space)</div><div id="target">&#9679; TARGET REACHED</div>'
+    + '<div class="pad"></div>'
+    + '<scr' + 'ipt>window.__LABEL__=' + JSON.stringify(label) + ';\n' + FRAME_JS + '\n</scr' + 'ipt>'
+    + '</body></html>';
+}
+
+var CASES = [
+  { id: "A", title: 'A — no <base>   (what production ships today)', base: false },
+  { id: "B", title: 'B — with <base href="about:srcdoc">   (the proposal)', base: true }
+];
+
+var R = {};
+window.__RESULTS__ = R;
+
+CASES.forEach(function (c) {
+  R[c.id] = { loads: 0, loadsAtReady: null, reports: {} };
+  var wrap = document.createElement("div");
+  wrap.className = "case";
+  // The title contains a literal <base ...> tag. It MUST go in as text: via
+  // innerHTML the parser installs a real <base> in THIS document, which every
+  // srcdoc frame then inherits as its fallback base — silently making the
+  // no-base control pass. That defect invalidated the first run of this test.
+  var h2 = document.createElement("h2");
+  h2.textContent = c.title;
+  wrap.appendChild(h2);
+  var rest = document.createElement("div");
+  rest.innerHTML = '<div class="verdict WAIT" id="v' + c.id + '">running…</div>'
+    + '<table id="t' + c.id + '"></table>'
+    + '<div class="manual">Then tap <b>&#9654; TAP ME</b> in the frame below to confirm with a real tap.</div>';
+  wrap.appendChild(rest);
+  document.getElementById("cases").appendChild(wrap);
+  var f = document.createElement("iframe");
+  f.setAttribute("sandbox", "allow-scripts");
+  f.addEventListener("load", function () { R[c.id].loads++; });
+  wrap.appendChild(f);
+  f.srcdoc = frameHtml(c.base, c.id);
+});
+
+window.addEventListener("message", function (e) {
+  var d = e.data;
+  if (!d || !d.label || !R[d.label]) return;
+  var r = R[d.label];
+  if (d.stage === "loaded") r.loadsAtReady = r.loads;
+  r.reports[d.stage] = d;
+  render(d.label);
+});
+
+function render(id) {
+  var r = R[id];
+  var l = r.reports.loaded || {};
+  var auto = r.reports.auto, man = r.reports.manual;
+  // The discriminator: a frame that navigates away destroys its own script,
+  // so the post-click report never arrives. Load counts are unusable here —
+  // the frame reports during parse, before the iframe's load event fires.
+  var verdict, cls;
+  if (!r.reports.loaded) { verdict = window.__DONE__ ? "FAIL — frame never ran its script" : "running…"; cls = window.__DONE__ ? "FAIL" : "WAIT"; }
+  else if (!auto) {
+    verdict = window.__DONE__ ? "FAIL — frame navigated away" : "running…";
+    cls = window.__DONE__ ? "FAIL" : "WAIT";
+  }
+  else if (auto.targetInView) {
+    verdict = "PASS — scrolled in place" + (man ? (man.targetInView ? " (real tap: PASS)" : " (real tap: FAIL)") : "");
+    cls = man && !man.targetInView ? "FAIL" : "PASS";
+  } else { verdict = "FAIL — did not scroll"; cls = "FAIL"; }
+
+  var rows = [
+    ["document.URL", l.documentURL || "—"],
+    ["document.baseURI", l.baseURI || "—"],
+    ["#target resolved to", l.resolvedHref || "—"],
+    ["iframe loads (ready → now)", (r.loadsAtReady === null ? "?" : r.loadsAtReady) + " → " + r.loads],
+    ["auto-click: target in view", auto ? String(auto.targetInView) : "—"],
+    ["auto-click: hashchange fired", auto ? String(auto.hashFired) : "—"],
+    ["real tap: target in view", man ? String(man.targetInView) : "(not tapped yet)"]
+  ];
+  document.getElementById("t" + id).innerHTML = rows.map(function (kv) {
+    return "<tr><td>" + kv[0] + "</td><td>" + String(kv[1]).replace(/</g, "&lt;") + "</td></tr>";
+  }).join("");
+  var v = document.getElementById("v" + id);
+  v.textContent = verdict;
+  v.className = "verdict " + cls;
+}
+
+// Harness self-check: if THIS document's base has been altered, every frame
+// inherits it and the no-base control becomes meaningless. Surface that.
+(function () {
+  var el = document.getElementById("selfcheck");
+  var clean = document.baseURI === location.href && !document.querySelector("base");
+  window.__HARNESS_OK__ = clean;
+  el.textContent = clean
+    ? "harness OK — parent baseURI is its own URL, no <base> in this document"
+    : "HARNESS BROKEN — parent baseURI is " + document.baseURI + " — results below are invalid";
+  el.className = "verdict " + (clean ? "PASS" : "FAIL");
+})();
+
+setTimeout(function () { window.__DONE__ = true; CASES.forEach(function (c) { render(c.id); }); }, 3500);
+</script>
+</body>
+</html>

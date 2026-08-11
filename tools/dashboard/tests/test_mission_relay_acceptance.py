@@ -26,11 +26,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import http.server
 import json
 import os
+import queue
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -53,6 +56,73 @@ def free_port() -> int:
 
 def _iso(ts: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+class _FakeDashboardEvents:
+    """Stand-in for the dashboard's ``GET /api/events`` SSE endpoint.
+
+    The connector subprocess is the real publisher: it subscribes to this
+    stream, and an event pushed here travels the WHOLE production path --
+    ``relay_publisher.publish_event`` -> real seal -> real ``Publisher``
+    -> real tunnel -> real registry fan-out -> the guest's WebSocket.
+
+    That path is the point. Every other test in this epic stubs some part
+    of it, which is how a feature that cannot deliver a single frame in
+    production shipped with 74 passing tests.
+
+    HTTP/1.0 deliberately: an SSE body has no Content-Length, so the
+    stream is framed by connection close, which ``BaseHTTPRequestHandler``
+    gives us for free without implementing chunked encoding.
+    """
+
+    def __init__(self) -> None:
+        self._queue: queue.Queue = queue.Queue()
+        self.port = free_port()
+        self._server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", self.port), self._handler()
+        )
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def _handler(self):
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+
+            def do_GET(self):  # noqa: N802 - stdlib naming
+                if self.path != "/api/events":
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                while True:
+                    try:
+                        topic, data = outer._queue.get(timeout=0.5)
+                        frame = f"event: {topic}\ndata: {json.dumps(data)}\n\n"
+                    except queue.Empty:
+                        frame = ": keepalive\n\n"   # also detects a dead peer
+                    try:
+                        self.wfile.write(frame.encode("utf-8"))
+                        self.wfile.flush()
+                    except Exception:
+                        return
+
+            def log_message(self, *_args):
+                pass
+
+        return Handler
+
+    def emit(self, topic: str, data: dict) -> None:
+        self._queue.put((topic, data))
+
+    def close(self) -> None:
+        with contextlib.suppress(Exception):
+            self._server.shutdown()
+        with contextlib.suppress(Exception):
+            self._server.server_close()
 
 
 @pytest.fixture(scope="module")
@@ -181,11 +251,18 @@ def stack(tmp_path_factory):
     key_file, cert_file = tmp / "session.hex", tmp / "session.cert"
     key_file.write_text(session_key.private_hex)
     cert_file.write_text(session_cert.to_json().decode("ascii"))
+    # The connector's publish loop needs an event source. Without an
+    # explicit --dashboard-url it falls back to _default_dashboard_url(),
+    # which in a dev container resolves to the OPERATOR'S REAL DASHBOARD
+    # on localhost:8080 -- so the test connector would subscribe to live
+    # production events. Point it at our own stream instead.
+    events = _FakeDashboardEvents()
     connector = subprocess.Popen(
         [sys.executable, "-m", "tools.dashboard.link_serving",
          "--relay", f"ws://127.0.0.1:{registry_port}", "--org", ORG_UUID,
          "--key-file", str(key_file), "--cert-file", str(cert_file),
          "--graph-org", GRAPH_ORG,
+         "--dashboard-url", f"http://127.0.0.1:{events.port}",
          "--min-backoff", "0.1", "--max-backoff", "1.0"],
         cwd=str(REPO), env=env,
         stdout=open(tmp / "connector.log", "ab"), stderr=subprocess.STDOUT,
@@ -195,9 +272,11 @@ def stack(tmp_path_factory):
         "tmp": tmp, "token": token, "registry_port": registry_port,
         "root_pub": root.public_hex, "mission_db": mission_db,
         "guest": guest, "pillar": pillar, "mission_id": mission_id,
+        "events": events,
         "procs": {"registry": registry, "connector": connector},
     }
     yield state
+    events.close()
     for proc in state["procs"].values():
         with contextlib.suppress(Exception):
             proc.terminate()
@@ -336,17 +415,22 @@ def test_a_pillar_of_another_mission_is_refused(stack):
 
 
 
-# ── live updates, over the real channel ─────────────────────────────────
+# ── stream-key crypto and provenance (NOT delivery) ─────────────────────
 
 
-def test_a_coordinators_answer_reaches_the_guest_as_a_sealed_push(stack):
-    """THE FULL LOOP: subscribe over the real channel for this link's stream
-    key, seal an answer the way the connector's publish loop does, and open
-    it with the guest's key.
+def test_a_sealed_frame_opens_only_with_the_guests_own_stream_key(stack):
+    """Stream-key crypto and provenance: the subscribe op hands out this
+    link's key over the real channel, a frame sealed with that key opens,
+    and a frame sealed with any other key does not.
 
-    This is the half that did not exist while the emit side was deployed
-    twice, so it is asserted end to end here rather than inferred from
-    either side working alone.
+    SCOPE, HONESTLY -- this test used to claim to be "THE FULL LOOP" and
+    "over the real channel", and it is neither. It binds
+    ``Publisher.send_frame`` to a Python list and opens ``sent[0]``
+    directly, so the frame never touches the tunnel, the registry's
+    fan-out, the guest's WebSocket, or the record decoder. That mislabel
+    is why a feature which cannot deliver a single frame in production sat
+    behind a green suite. Delivery is covered by the two transport tests
+    at the end of this file; this one covers the crypto beneath it.
 
     IT ALSO PINS AN INVARIANT NOTHING ELSE ENFORCED: _STREAM_KEYS is an
     in-memory, per-process dict, so whoever seals a frame MUST be the same
@@ -413,3 +497,114 @@ def test_a_coordinators_answer_reaches_the_guest_as_a_sealed_push(stack):
             assert open_stream_frame(bytes(32), sent[0]) is None
 
     asyncio.run(run())
+
+
+# ── live updates, through the ACTUAL transport (auto-8npih regression) ───
+#
+# The test above is not the end-to-end test its docstring claims. It binds
+# Publisher.send_frame to a Python list and opens list[0] directly, so the
+# frame never touches the tunnel, the registry's fan-out, the guest's
+# WebSocket, or ViewerChannel's record decoder. It proves the sealing
+# crypto and key provenance -- worth keeping, now honestly labelled -- and
+# nothing about delivery.
+#
+# The two tests below cross that boundary. Both currently fail, for the
+# same root cause:
+#
+#   relay.py:262   fans the raw sealed frame onto the SAME viewer socket
+#                  that carries pairwise channel records, with no tag
+#                  distinguishing the two.
+#   channel.py:391 ViewerChannel (and SecureChannel.recvRecord in
+#                  autonet.js, identically) parses every binary message as
+#                  [8-byte seq][ciphertext] and raises "record out of
+#                  sequence" on mismatch, poisoning the channel.
+#
+# A stream frame opens with a 12-byte random nonce, so the seq check
+# essentially never passes. Live push has never delivered a frame to a
+# browser.
+#
+# xfail(strict=True) is deliberate: these must not be silently-failing
+# tests, and when the demux lands they will XPASS and force the marker to
+# be removed rather than quietly going green.
+
+
+def _emit_answer(stack, entry_id="e-transport"):
+    stack["events"].emit("mission_control:conversation", {
+        "event": "answered",
+        "mission_id": stack["mission_id"],
+        "pillar_id": None,
+        "entry_id": entry_id,
+        "question": {"entry_id": entry_id, "answer": "yes, over the wire"},
+        "update": None,
+    })
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "feed frames and pairwise records share one untagged socket; the "
+    "pairwise decoder rejects the stream nonce as 'record out of "
+    "sequence' and closes the channel (relay.py:262 / channel.py:391)"
+))
+def test_a_published_answer_reaches_the_guest_over_the_real_socket(stack):
+    """THE loop the epic claimed: dashboard event -> connector publish ->
+    tunnel -> registry fan-out -> guest WebSocket -> guest decodes it.
+
+    Nothing on this path is stubbed. The only test double is the event
+    SOURCE (an SSE endpoint standing in for the dashboard), because the
+    dashboard itself is not what is under test here.
+    """
+    from tools.network.relaykit.channel import open_stream_frame
+
+    async def main():
+        async with await open_channel(stack) as channel:
+            envelope = await op(channel, {"v": 1, "op": "subscribe"})
+            assert envelope["status"] == "ok"
+            guest_key = bytes.fromhex(envelope["stream_key"])
+
+            _emit_answer(stack)
+
+            # The guest is a browser: it has ONE socket, and whatever
+            # arrives next has to be routed. Today recv_message() is the
+            # only reader and it assumes everything is a pairwise record.
+            raw = await asyncio.wait_for(channel.recv_message(), timeout=15)
+
+            opened = open_stream_frame(guest_key, raw)
+            assert opened is not None, "guest could not open the pushed frame"
+            body = json.loads(opened)
+            assert body["kind"] == "conversation"
+            assert body["question"]["answer"] == "yes, over the wire"
+
+            # And the channel must still work afterwards: a feed frame is
+            # an interleaved event, not the end of the conversation.
+            header = await op(channel, {"v": 1, "op": "head"})
+            assert header["status"] == "ok"
+
+    asyncio.run(main())
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "relay.py:713 attaches every channel as a stream listener at OPEN, "
+    "before the handshake completes and long before subscribe -- so an "
+    "event published while a guest is loading poisons the artifact fetch"
+))
+def test_a_frame_published_during_startup_does_not_break_the_first_fetch(stack):
+    """The worse failure mode, and the likely cause of the reported
+    'pillar dropdown is empty' bug.
+
+    A guest opening a link is registered as a stream listener the instant
+    the socket opens. If a coordinator answers a question in that window,
+    the frame lands mid-fetch, fails the sequence check, and closes the
+    channel -- so the page renders nothing at all, top bar stuck on
+    'Loading...'. No subscribe is issued here precisely because the race
+    does not require one.
+    """
+    async def main():
+        async with await open_channel(stack) as channel:
+            _emit_answer(stack, entry_id="e-race")
+            await asyncio.sleep(0.4)          # let the frame arrive first
+
+            header = await asyncio.wait_for(
+                op(channel, {"v": 1, "op": "head"}), timeout=15
+            )
+            assert header["status"] == "ok", "the artifact fetch was poisoned"
+
+    asyncio.run(main())
