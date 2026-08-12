@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""TLC gate for the relay tunnel-ownership model.
+"""TLC gate for the relay tunnel-pool model.
 
-The stand-down candidate must check clean. Calibrations must fail with a
-real invariant or temporal-property violation: the shipped livelock, finite
-hard-backoff livelock, arbitrary stale winner, and restart herd.
+The cooperative pool must check clean. Calibrations restore singular
+last-writer replacement and arbitrary admission; each must fail its exact
+named property.
 """
 from __future__ import annotations
 
@@ -17,17 +17,14 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
-GREEN = [("StandDownStable.cfg", "ScenRelay")]
+GREEN = [
+    ("PoolGreen.cfg", "ScenRelay"),
+    ("AnycastPoolGreen.cfg", "ScenRelay"),
+]
 
 CALIBRATION = [
-    ("CurrentLivelock.cfg", "ScenRelay", "EventuallyStable"),
-    (
-        "calibration/HardBackoffLivelock.cfg",
-        "ScenRelay",
-        "EventuallyStable",
-    ),
-    ("calibration/StandDownNewest.cfg", "ScenRelay", "EventuallyNewest"),
-    ("calibration/RestartHerd.cfg", "ScenRelay", "NoHerd"),
+    ("CurrentLivelock.cfg", "ScenRelay", "EventuallyAllTunnelsRegistered"),
+    ("calibration/RandomAdmission.cfg", "ScenRelay", "AdmissionUsesLeastLoad"),
 ]
 
 VIOLATION_MARKERS = (
@@ -134,7 +131,7 @@ def main(arguments: list[str]) -> int:
     if failures:
         print(f"SUITE FAILED: {failures} configuration(s) off expectation")
         return 1
-    print("SUITE PASSED: candidate clean; all negative cases rediscovered")
+    print("SUITE PASSED: pool clean; all negative cases rediscovered")
     return 0
 
 

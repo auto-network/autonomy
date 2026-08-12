@@ -1,90 +1,108 @@
-# Relay tunnel ownership — abstraction ledger and findings
+# Relay tunnel pools — abstraction ledger and findings
 
-## Source machine
+This model covers the guaranteed auto.network fallback path. The system's
+preferred data path is direct viewer-to-dashboard connectivity after the tiny
+bootloader/rendezvous phase. A successful direct session never enters this
+relay-pool state machine; a failed or lost direct session does.
 
-The model follows two source paths:
+## Intended machine
 
-- `registry/relay.py::TunnelHub.register` installs the latest authenticated
-  tunnel in an org-keyed dict and returns the displaced tunnel. The endpoint
-  then awaits `close(4409)` on that displaced WebSocket. Its `finally` calls
-  `unregister`, which deletes only when the dict still contains that exact
-  tunnel object.
-- `relaykit/connector.py::TunnelConnector.run` retries every close. A
-  successful hello resets backoff to the minimum before `_serve` waits for
-  the next close.
+There is no singular owner of an org. Every successfully authenticated tunnel
+is a member of that org's pool:
 
-`Register`, `EvictPrevious`, `HelloOK`, `CleanupClosed`, `HandleClose`, and
-`Tick` are separate actions at those observable/await boundaries.
+- registration adds the exact tunnel;
+- disconnect removes the exact tunnel;
+- new viewer admission chooses a least-active-channel member with remaining
+  capacity;
+- an admitted viewer stays pinned, so changing load does not cause migration
+  or tunnel competition;
+- loss of one member reopens only the viewers pinned to it;
+- after a relay restart, every connector retries and rejoins the pool.
 
-The same ownership shape also exists in `relaykit/peer.py::_handle_park`:
-last-writer replacement keyed by node public key, close code 4409, and the
-same inherited `TunnelConnector.run` retry loop. The one-key state machine
-therefore applies to duplicate peer-park connectors as well, although the
-incident configuration names the registry org key.
+The current `TunnelHub` dict assignment and 4409 replacement behavior remains
+in the model only behind `PoolRegistration = FALSE`. That negative
+configuration is a calibration: TLC must rediscover the production lasso or
+the model/runner is not trustworthy.
 
-## Load-bearing model decision
+## Load-bearing initial state
 
-One org is sufficient because hub ownership is keyed independently by org,
-but the configured connector set is not unique per org. `CurrentLivelock.cfg`
-maps both `old` and `new` to `org1`; the three-connector restart scenario maps
-all three to it. This deliberately models the deployment state rather than
-the intended process topology.
+`Init` starts every configured tunnel as an independent connector. Multiple
+connectors for one org are normal capacity, not an exceptional deployment
+state. Assuming connector uniqueness would erase both the incident and the
+desired pool behavior.
+
+`Capacity[t]` is concurrent viewer capacity on a tunnel. `OpenViewer` chooses
+a member with minimum `Load(t)` among those below capacity. Ties are
+nondeterministic; no tie-breaking protocol is required for correct shedding.
+
+## Anycast and multiple relay servers
+
+`TunnelRelay[t]` records the relay node on which an outbound connector
+terminated. `ViewerIngress[v]` records the node selected for a viewer, such as
+by an anycast route. Admission deliberately ranges over the complete org pool,
+not only tunnels terminating at the ingress node.
+
+`AnycastPoolGreen.cfg` makes that assumption observable: the viewer enters
+`r2`, the only tunnel terminates on `r1`, and eventual viewer admission still
+has to pass. Therefore an implementation needs one of:
+
+1. a shared/replicated directory from org to live tunnel endpoints, followed by
+   an internal relay-to-relay hop; or
+2. equivalent routing that brings viewer and selected tunnel to the same
+   forwarding process.
+
+Anycast alone supplies neither. The model treats lookup/handoff as atomic and
+reliable; it does not claim a particular directory design, consensus system,
+or cross-relay transport is already implemented.
+
+Multiple connector sockets to the same anycast name may terminate on different
+relay nodes, but ordinary ECMP does not guarantee diversity. Diversity and
+node steering are deployment questions outside this state machine.
 
 ## Fairness
 
-Connector retry loops, timer progress, and server endpoint continuations are
-weakly fair. Relay restart is an unfair, bounded environment action. Without
-fair retry/timer actions, an infinite stutter could satisfy stability by
-simply refusing to run the connector and would conceal the defect.
+Connector registration/retry, timer progress, and viewer admission are weakly
+fair. Tunnel disconnect and relay restart are bounded, unfair environment
+actions. Without fair connector actions, an infinite stutter could hide a
+broken retry path; without bounded failures, eventual stable service would be
+unprovable for any algorithm.
 
-## Results
+## Checked results
 
-The checked configurations answer the incident questions:
-
-1. **Current behavior does not converge.** With two same-org connectors,
-   TLC finds an infinite lasso: one hello succeeds and resets its backoff;
-   the other retries, registers, closes it with 4409, succeeds, and resets;
-   then the first repeats. Jitter changes which connector wins each turn,
-   not whether another turn occurs.
-2. **Recognizing 4409 and permanently standing down does converge** under
-   the modeled assumptions, including one relay restart. This is the only
-   tested one-line-class candidate that makes `EventuallyStable` true.
-3. **A finite hard backoff does not converge.** Any policy that eventually
-   retries every replaced connector permits the same lasso at a slower rate.
-4. **Stand-down does not select newest code.** Last-writer-wins has no version
-   order. TLC finds a behavior where `old` registers last, `new` stands down,
-   and stale code owns the org forever. Stand-down also removes failover from
-   the losing process until that process is restarted; permanent process loss
-   is outside this model.
-5. **A successful hello does not certify current ownership.** The split
-   endpoint actions admit this real interleaving: connector A registers;
-   connector B registers and becomes the dict holder; A's already-pending
-   `{ok:true}` send completes and resets A's backoff; B then closes A. Thus
-   `connected` is an availability hint, not a linearizable ownership claim.
-6. **Split register-then-evict does not itself empty the hub.** The newly
-   registered tunnel is installed first, and identity-guarded cleanup of the
-   loser cannot delete it. `HolderHasOpenSocket` and `NoUncausedVacuum` hold.
-   A relay restart intentionally clears the in-memory hub and is the modeled
-   source of a temporary no-holder state; fair retry restores availability.
-7. **Jitter does not guarantee herd avoidance.** It is modeled as a
-   nondeterministic delay range. Equal draws are permitted, and TLC finds a
-   restart behavior in which multiple same-org retries become ready together.
-   Jitter may reduce collision probability operationally, but it is not a
-   correctness mechanism.
+1. **Healthy same-org tunnels coexist.** Registration is set insertion and
+   never evicts a healthy peer (`NoHealthyEviction`).
+2. **Admission naturally sheds load.** A viewer cannot be assigned to a tunnel
+   while another available member is less loaded (`AdmissionUsesLeastLoad`).
+   Ties remain free and viewers are not rebalanced after admission.
+3. **Capacity is additive.** Every tunnel retains its own cap and the pool can
+   admit up to their sum (`CapacityRespected`).
+4. **Failure is local.** Disconnect removes exactly one tunnel and only its
+   assigned viewers return to admission. Other assignments remain unchanged.
+5. **Restart recovers.** After the bounded restart/disconnect budget is spent,
+   all connectors eventually rejoin and all provisioned viewers reopen.
+6. **Cross-relay admission is permitted.** An anycast ingress can use a tunnel
+   terminating elsewhere; the necessary directory/handoff is an explicit
+   implementation obligation.
+7. **Current last-writer replacement still livelocks.** TLC's calibration
+   trace alternates the two healthy connectors forever: each successful retry
+   displaces the other and resets its own backoff.
+8. **Arbitrary admission permits avoidable skew.** TLC finds a trace where a
+   new viewer chooses a loaded tunnel while an idle member exists.
 
 ## Deliberate abstractions
 
-- Tunnel payloads, viewer channels, authentication cryptography, and orgs
-  without duplicate connectors are omitted; they do not affect ownership.
-- A connector has at most one current WebSocket attempt. The server endpoint
-  may continue its pending close after that socket is itself displaced, but
-  connector redial waits for endpoint cleanup in the model. The production
-  identity guard makes late cleanup ownership-neutral.
-- `RelayRestart` is an atomic stop/start boundary. It retains existing sleep
-  timers and schedules ordinary retries for sockets live at the boundary.
-  Outage duration and failed TCP dials while the relay is down are omitted.
-- Random jitter is nondeterminism, not probability. The model proves or
-  refutes guarantees; it does not estimate incident frequency.
-- Permanent connector process death and operator process restarts are not
-  modeled. They matter to the availability tradeoff of permanent stand-down
-  and must be considered before adopting it.
+- Tunnel authentication is represented by eligibility to take `Register`; key
+  verification and certificate details do not affect pool membership after a
+  hello succeeds.
+- Viewer payloads, encryption, stream retention, and byte backpressure are
+  omitted. `PERFORMANCE.md` treats those implementation costs separately.
+- A viewer is assigned once per socket. Transparent live migration is not
+  modeled and is not required by the algorithm.
+- Selection observes active viewer count atomically. Distributed implementations
+  can use slightly stale load without compromising membership safety, but the
+  model does not quantify skew from stale observations.
+- The cross-relay directory/handoff, partitions between relay nodes, and stale
+  membership leases are not modeled. They require a later distributed-system
+  model before an anycast deployment is claimed safe.
+- Jitter is nondeterminism, not probability. It can spread reconnect load but
+  is not an ownership or admission correctness mechanism.
