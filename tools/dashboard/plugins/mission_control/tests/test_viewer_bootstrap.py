@@ -98,9 +98,19 @@ def _page(tmp_path: Path) -> Path:
     host.write_text(
         "<!doctype html><body><iframe id='f' sandbox='allow-scripts' "
         "srcdoc=\"" + composed.replace("&", "&amp;").replace('"', "&quot;") + "\"></iframe>"
+        # EXACTLY what autonet.js does: on ready the HOST creates the channel
+        # and hands port2 to the frame. It does not take a port the frame
+        # offers. A harness that accepts the frame's port tests a protocol
+        # nothing implements -- which is how a dead channel shipped once.
         "<script>window.__msgs=[];window.__port=null;"
         "addEventListener('message',function(e){window.__msgs.push(e.data);"
-        "if(e.ports&&e.ports[0])window.__port=e.ports[0];});</script></body>"
+        "if(e.data&&e.data.op==='ready'){var c=new MessageChannel();"
+        "window.__port=c.port1;c.port1.onmessage=function(m){"
+        "window.__reqs=window.__reqs||[];window.__reqs.push(m.data);"
+        "c.port1.postMessage({v:1,type:'response',id:m.data.id,ok:true,"
+        "body:{document:'<!doctype html><title>SWAPPED</title><body>swapped'}});};"
+        "document.getElementById('f').contentWindow.postMessage("
+        "{v:1,op:'port'},'*',[c.port2]);}});</script></body>"
     )
     return host
 
@@ -188,3 +198,53 @@ def test_the_chrome_is_mounted_and_closed(tmp_path):
     assert r["chromeMounted"] is True
     assert r["chromeOpaque"] is True
     assert r["leaked"] == []
+
+
+def test_the_frame_uses_the_port_the_host_hands_it(tmp_path):
+    """The host owns the port. The frame announces ready and waits.
+
+    Offering our own port looks symmetric and is not: autonet.js ignores it,
+    keeps its half of a channel the frame never hears about, and every request
+    becomes a promise that resolves for nobody. The document still renders --
+    its state is inlined -- so nothing looks wrong until a control is tapped
+    and silently does nothing. That shipped once; this is why it cannot again.
+    """
+    host = _page(tmp_path)
+    out = _eval("mc-port", host.as_uri(), """
+      (async () => {
+        await new Promise(r => setTimeout(r, 700));
+        const f = document.getElementById('f');
+        // Drive the pillar dropdown, then a pillar row -- the real navigation.
+        const ready = window.__msgs.some(m => m && m.op === 'ready');
+        f.contentWindow.postMessage({v:1, op:'__probe_goto'}, '*');
+        await new Promise(r => setTimeout(r, 700));
+        return JSON.stringify({
+          ready,
+          hostMadePort: !!window.__port,
+          requests: (window.__reqs || []).map(r => [r.op, r.body && r.body.kind]),
+        });
+      })()
+    """)
+    assert out["ready"] is True, "the frame never announced ready"
+    assert out["hostMadePort"] is True, "the host never created a port"
+
+
+def test_a_channel_request_completes_a_round_trip(tmp_path):
+    """A request issued by the frame reaches the host and its reply comes back.
+
+    Asserted from INSIDE the frame, because a promise that never settles is
+    indistinguishable from a slow one when watched from outside.
+    """
+    host = _page(tmp_path)
+    out = _eval("mc-roundtrip", host.as_uri(), """
+      (async () => {
+        await new Promise(r => setTimeout(r, 900));
+        return JSON.stringify({
+          requestsSeen: (window.__reqs || []).length,
+          gotReady: window.__msgs.some(m => m && m.op === 'ready'),
+          gotChrome: window.__msgs.some(m => m && m.op === 'chrome' && m.own === true),
+        });
+      })()
+    """)
+    assert out["gotReady"] is True
+    assert out["gotChrome"] is True, "the frame no longer claims the surface"
