@@ -77,8 +77,46 @@ SMOKE_ARGS=("$SMOKE_URL")
 if [ -n "${SMOKE_LINK:-}" ]; then
     SMOKE_ARGS+=(--link "$SMOKE_LINK")
 fi
+# The smoke's HTTP rungs are stdlib-only, so any python3 runs those. The GUEST
+# path speaks the real channel protocol and needs websockets, which the system
+# python3 on the estate box does not have -- a bare `python3` made the smoke die
+# with ModuleNotFoundError *after* the service had restarted, so a successful
+# deploy printed a traceback and read as an outage. Probe for what THIS run
+# actually needs, so a link-less run is never blocked on a dep it will not use.
+pick_python() {
+    local candidate
+    # A session worktree has no .venv of its own. Walk up from the checkout to
+    # find one -- worktrees live under <primary-checkout>/data/worktrees/..., so
+    # the primary checkout's .venv is a few levels up. (--git-common-dir does NOT
+    # help here: it points at the managed bare clone, which has no venv.)
+    local venvs=() dir="$REPO_ROOT"
+    while [ "$dir" != "/" ]; do
+        [ -x "$dir/.venv/bin/python" ] && venvs+=("$dir/.venv/bin/python")
+        dir="$(dirname "$dir")"
+    done
+    local probe="import sys"
+    [ -n "${SMOKE_LINK:-}" ] && probe="import websockets"
+    for candidate in "${PYTHON:-}" "${venvs[@]}" python3 python; do
+        [ -n "$candidate" ] || continue
+        command -v "$candidate" >/dev/null 2>&1 || continue
+        if "$candidate" -c "$probe" 2>/dev/null; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if ! SMOKE_PYTHON="$(pick_python)"; then
+    echo "ERROR: no python that can run the guest path -- cannot prove a link works." >&2
+    echo "       The service HAS been restarted; this is a missing test dep, NOT a bad deploy." >&2
+    echo "       Fix: pip install websockets, or set PYTHON=/path/to/venv/bin/python," >&2
+    echo "       or unset SMOKE_LINK to run the stdlib-only rungs alone." >&2
+    exit 1
+fi
+
 # Deliberately NOT tolerated: a deploy that leaves links broken has failed,
 # even though systemd is happy and /healthz answers.
-python3 "$REPO_ROOT/tools/network/registry/deploy/smoke.py" "${SMOKE_ARGS[@]}"
+"$SMOKE_PYTHON" "$REPO_ROOT/tools/network/registry/deploy/smoke.py" "${SMOKE_ARGS[@]}"
 
 echo "==> deployed: registry live on $TARGET (loopback :8477, fronted by Caddy)"
