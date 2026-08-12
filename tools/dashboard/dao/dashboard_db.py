@@ -970,7 +970,13 @@ def update_tail_state(
         parts.append("file_offset=?")
         vals.append(file_offset)
     if last_activity is not None:
-        parts.append("last_activity=?")
+        # Monotonic (auto-7263s): callers pass a transcript file's mtime, and
+        # resuming an idle session replays its OLD transcript — whose mtime
+        # predates the launch by days. A plain assignment let that clobber the
+        # launch's fresh stamp, and the launch-orphan reaper then measured the
+        # session's idle age against a 600s budget and false-failed the resume,
+        # tearing down its file watches. Activity never moves backwards.
+        parts.append("last_activity=MAX(COALESCE(last_activity,0),?)")
         vals.append(last_activity)
     if last_message is not None:
         parts.append("last_message=?")
@@ -1030,7 +1036,13 @@ def persist_tail_state(
     parts = ["file_offset=?", "entry_count=COALESCE(entry_count,0)+?"]
     vals: list[Any] = [file_offset, entry_count_add]
     if last_activity is not None:
-        parts.append("last_activity=?")
+        # Monotonic (auto-7263s): callers pass a transcript file's mtime, and
+        # resuming an idle session replays its OLD transcript — whose mtime
+        # predates the launch by days. A plain assignment let that clobber the
+        # launch's fresh stamp, and the launch-orphan reaper then measured the
+        # session's idle age against a 600s budget and false-failed the resume,
+        # tearing down its file watches. Activity never moves backwards.
+        parts.append("last_activity=MAX(COALESCE(last_activity,0),?)")
         vals.append(last_activity)
     if last_message is not None:
         parts.append("last_message=?")
@@ -1078,7 +1090,13 @@ def increment_entry_count(
         parts.append("last_message=?")
         vals.append(last_message)
     if last_activity is not None:
-        parts.append("last_activity=?")
+        # Monotonic (auto-7263s): callers pass a transcript file's mtime, and
+        # resuming an idle session replays its OLD transcript — whose mtime
+        # predates the launch by days. A plain assignment let that clobber the
+        # launch's fresh stamp, and the launch-orphan reaper then measured the
+        # session's idle age against a 600s budget and false-failed the resume,
+        # tearing down its file watches. Activity never moves backwards.
+        parts.append("last_activity=MAX(COALESCE(last_activity,0),?)")
         vals.append(last_activity)
     vals.append(tmux_name)
     conn.execute(
