@@ -932,7 +932,6 @@ _DASHBOARD_WATCH_PATHS = (
 )
 
 _DISPATCH_STATE_PATH = REPO_ROOT / "data" / "dispatch.state"
-_START_DASHBOARD_SCRIPT = REPO_ROOT / "tools" / "dashboard" / "start-dashboard.sh"
 _START_DISPATCHER_SCRIPT = REPO_ROOT / "agents" / "start-dispatcher.sh"
 _DISPATCHER_WATCH_PATHS = (
     "agents/dispatcher.py",
@@ -941,26 +940,6 @@ _DISPATCHER_WATCH_PATHS = (
     "agents/session_launcher.py",
     "agents/dispatch_db.py",
 )
-
-
-def _dashboard_files_changed(branch_base: str) -> bool:
-    """Return True if the merged commit touched any dashboard-owned paths."""
-    if not branch_base:
-        return False
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--name-only", f"{branch_base}..HEAD"],
-            capture_output=True, text=True, timeout=10,
-            cwd=str(REPO_ROOT),
-        )
-        changed = result.stdout.strip().splitlines()
-        for path in changed:
-            for watch in _DASHBOARD_WATCH_PATHS:
-                if path == watch or path.startswith(watch):
-                    return True
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-    return False
 
 
 def _dispatcher_files_changed(branch_base: str) -> bool:
@@ -996,47 +975,6 @@ def _maybe_restart_dispatcher(branch_base: str) -> None:
         return
     print("  Dispatcher files changed — restart scheduled after cycle completes")
     _restart_scheduled = True
-
-
-def _maybe_restart_dashboard(branch_base: str) -> None:
-    """Restart the dashboard server if merged commit touched dashboard files."""
-    if not _dashboard_files_changed(branch_base):
-        return
-
-    print("  Dashboard files changed — restarting server...", file=sys.stderr)
-
-    if not _START_DASHBOARD_SCRIPT.exists():
-        print("  WARN: start-dashboard.sh not found, skipping restart", file=sys.stderr)
-        return
-
-    try:
-        subprocess.run(
-            [str(_START_DASHBOARD_SCRIPT), "--restart"],
-            capture_output=True, text=True, timeout=30,
-            cwd=str(REPO_ROOT),
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        print(f"  WARN: dashboard restart failed: {e}", file=sys.stderr)
-        return
-
-    # Poll /api/stats up to 10s for readiness
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    try:
-        import requests as _requests
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            try:
-                r = _requests.get("https://localhost:8080/api/stats", verify=False, timeout=2)
-                if r.status_code == 200:
-                    print("  Dashboard ready.", file=sys.stderr)
-                    return
-            except Exception:
-                pass
-            time.sleep(0.5)
-        print("  WARN: dashboard did not become ready within 10s", file=sys.stderr)
-    except ImportError:
-        pass
 
 
 def _pause_dashboard_dispatch(reason: str = "") -> None:
@@ -1171,7 +1109,6 @@ def process_decision(dispatch_result: DispatchResult) -> str:
             smoke_script = REPO_ROOT / "tools/dashboard/smoke.py"
             if "dashboard" in dispatch_result.labels and smoke_script.exists():
                 try:
-                    _maybe_restart_dashboard(dispatch_result.branch_base)
                     smoke_raw = subprocess.run(
                         [sys.executable, str(smoke_script)],
                         capture_output=True, text=True,
