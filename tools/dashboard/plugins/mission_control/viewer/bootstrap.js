@@ -318,15 +318,19 @@
 
   function pillarRows() {
     var onOverview = !(ui.screenId || state.screen);
+    // The overview needs a colour tab like every pillar row has. Without one
+    // it reads as a heading above the list rather than as a destination in it.
+    var overviewSwatch = el("span", {class: "mc-swatch"});
+    overviewSwatch.style.background = "#e2e8f0";
     var rows = [el("button", {
       class: onOverview ? "mc-row mc-row-on" : "mc-row",
       onclick: function () { show(null); if (!onOverview) goto(null); },
     }, [
       el("div", {class: "mc-row-top"}, [
-        el("span", {class: "mc-swatch"}),
+        overviewSwatch,
         el("span", {class: "mc-name", text: state.mission || "Mission overview"}),
       ]),
-      el("p", {class: "mc-last", text: "Where the whole mission stands."}),
+      el("p", {class: "mc-last", text: "Mission overview and current status."}),
     ])];
     return rows.concat(state.pillars.map(function (p) {
       var sw = el("span", {class: "mc-swatch"}); sw.style.background = p.color || "#475569";
@@ -387,7 +391,7 @@
     var body = ui.panel === "pillars" ? pillarRows() : questionRows();
     var kids = [
       el("div", {class: "mc-phead"}, [
-        el("span", {class: "mc-sub", text: ui.panel === "pillars" ? "Pillars" : "Questions"}),
+        el("span", {class: "mc-ptitle", text: ui.panel === "pillars" ? "Pillars" : "Questions"}),
         el("span", {class: "mc-grow"}),
         el("button", {class: "mc-x", text: "\u00d7", onclick: function () { show(null); }}),
       ]),
