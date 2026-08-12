@@ -36,12 +36,19 @@
   }
 
   // ---- transport ----------------------------------------------------------
-  var chan = new MessageChannel();
-  var port = chan.port1;                 // never leaves this closure
+  // THE HOST OWNS THE PORT. We announce ready and it hands one back; we do
+  // not create a channel and offer it. Transferring our own port to the host
+  // looks symmetric and is not: the host ignores it, keeps its half of a
+  // channel we never hear about, and every request becomes a promise that
+  // resolves for nobody. The document still renders, because its state is
+  // inlined -- so the failure is invisible until someone taps something.
+  var port = null;
   var nextId = 0;
   var pending = Object.create(null);
+  var resolvePort;
+  var havePort = new Promise(function (r) { resolvePort = r; });
 
-  port.onmessage = function (e) {
+  function onPortMessage(e) {
     var m = e.data;
     if (!m || m.v !== 1) return;
     if (m.type === "response" && pending[m.id]) {
@@ -50,18 +57,33 @@
     } else if (m.type === "event") {
       applyEvent(m.body);
     }
-  };
-  parent.postMessage({v: 1, op: "ready"}, "*", [chan.port2]);
+  }
+
+  addEventListener("message", function (e) {
+    if (e.source !== parent || !e.data || e.data.v !== 1) return;
+    if (e.data.op !== "port" || !e.ports || !e.ports.length) return;
+    port = e.ports[0];                   // never leaves this closure
+    port.onmessage = onPortMessage;
+    if (typeof port.start === "function") port.start();
+    resolvePort(port);
+  });
+
+  parent.postMessage({v: 1, op: "ready"}, "*");
   // This document renders its own top bar, so it asks the shell for the
   // viewport instead of sitting under a second one. The shell decides
   // whether to honour it; nothing here depends on the answer.
   parent.postMessage({v: 1, op: "chrome", own: true}, "*");
 
+  // Waits for the host's port rather than assuming one is already here: a tap
+  // can land before the handover completes, and dropping that request would
+  // look exactly like a dead control.
   function request(op, body) {
-    return new Promise(function (resolve, reject) {
-      var id = "r" + (++nextId);
-      pending[id] = {resolve: resolve, reject: reject};
-      port.postMessage({v: 1, type: "request", id: id, op: op, body: body});
+    return havePort.then(function (p) {
+      return new Promise(function (resolve, reject) {
+        var id = "r" + (++nextId);
+        pending[id] = {resolve: resolve, reject: reject};
+        p.postMessage({v: 1, type: "request", id: id, op: op, body: body});
+      });
     });
   }
 
