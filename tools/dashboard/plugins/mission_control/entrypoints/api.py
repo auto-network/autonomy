@@ -1122,7 +1122,7 @@ async def handle_relay_read(participant_id: str, mission_id: str, body: dict) ->
     if kind == "mission_site":
         # The way back. Navigation could reach every pillar and never the
         # screen it started on, because only pillars had a read.
-        document = compose.compose_screen(mission_id)
+        document = compose.compose_screen(mission_id, framed=True)
         if document is None:
             return None
         return {"document": document.decode("utf-8")}
@@ -1134,7 +1134,7 @@ async def handle_relay_read(participant_id: str, mission_id: str, body: dict) ->
         pillar_id = body.get("pillar_id")
         if _pillar_of_this_mission(pillar_id, mission_id) is None:
             return None
-        document = compose.compose_screen(mission_id, pillar_id)
+        document = compose.compose_screen(mission_id, pillar_id, framed=True)
         if document is None:
             return None
         return {"pillar_id": pillar_id, "document": document.decode("utf-8")}

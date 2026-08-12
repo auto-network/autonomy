@@ -50,7 +50,6 @@ _HEAD = (
     # that pans sideways. Emitted by the platform so no coordinator has to
     # remember, and harmless when they declare their own -- first one wins.
     '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-    '<base href="about:srcdoc">\n'
     # One oversized element -- a screenshot, a wide table -- otherwise widens
     # the whole DOCUMENT, and then everything pans sideways together: the
     # prose, the gutters, and any bar positioned within the document. These
@@ -238,8 +237,22 @@ def _state_block(state: dict) -> str:
     return f'<script type="application/json" id="mc-state">{text}</script>\n'
 
 
-def compose_screen(mission_id: str, pillar_id: str | None = None) -> bytes | None:
+#: <base href="about:srcdoc"> is what makes in-page #fragment links resolve
+#: inside a sandboxed srcdoc frame, which has no base URL of its own. It is
+#: RELAY-ONLY and actively harmful anywhere else: served at a real URL, that
+#: base makes every relative link in the author's content resolve against
+#: about:srcdoc, and the browser blocks the navigation (about:blank#blocked).
+_SRCDOC_BASE = '<base href="about:srcdoc">\n'
+
+
+def compose_screen(mission_id: str, pillar_id: str | None = None, *,
+                   framed: bool = False) -> bytes | None:
     """One screen as a complete document, or None if there is nothing to serve.
+
+    *framed* is True when this document will be handed to a sandboxed frame as
+    srcdoc — the relay path. The author's content and the state block are
+    identical either way; only the base differs, because the two surfaces
+    genuinely differ in whether the document has a URL of its own.
 
     Order matters: the state block and the bootstrap precede the author's
     HTML so the runtime is mounted before their scripts run.
@@ -252,6 +265,7 @@ def compose_screen(mission_id: str, pillar_id: str | None = None) -> bytes | Non
         return None
     document = (
         _HEAD
+        + (_SRCDOC_BASE if framed else "")
         + _state_block(mission_state(mission_id, pillar_id))
         + "<script>\n" + bootstrap_source() + "\n</script>\n"
         + current["html"]          # byte for byte, never parsed
