@@ -258,7 +258,7 @@ def _resolve_mission(target_uuid: str):
     """
     from tools.dashboard.plugins.mission_control import compose
 
-    document = compose.compose_screen(target_uuid)
+    document = compose.compose_screen(target_uuid, framed=True)
     if document is None:
         return None
     return {"kind": "mission", "viewer": document}

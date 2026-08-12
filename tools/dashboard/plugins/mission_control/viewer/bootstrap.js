@@ -549,6 +549,15 @@
   // pillarId null means the mission overview -- the screen a reader lands on
   // and, until now, the one place navigation could not take them back to.
   function goto(pillarId) {
+    // TWO SURFACES, TWO KINDS OF NAVIGATION. In a frame there is no URL to go
+    // to, so a screen is fetched over the channel and written in place. Served
+    // at a real URL there IS one, and asking a channel that does not exist
+    // leaves every control silently dead -- which is what the dashboard did.
+    if (window.parent === window) {
+      var base = "/missions/" + (state.mission_id || "");
+      location.assign(pillarId ? base + "/pillars/" + pillarId : base);
+      return;
+    }
     var body = pillarId
       ? {kind: "pillar_site", pillar_id: pillarId}
       : {kind: "mission_site"};

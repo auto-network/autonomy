@@ -77,9 +77,24 @@ def test_both_surfaces_produce_identical_bytes():
 
     from tools.dashboard.plugins.mission_control.entrypoints import api as mc_api
 
-    direct = compose.compose_screen(mission_id)
+    # The relay path is FRAMED and carries <base href="about:srcdoc">; the
+    # dashboard path is served at a real URL and must not, or every relative
+    # link in the author's content resolves against about:srcdoc and the
+    # browser blocks it. One function still builds both, which is the property
+    # that matters -- the author's content and the state are identical.
+    framed = compose.compose_screen(mission_id, framed=True)
     via_resolver = link_serving._resolve_mission(mission_id)["viewer"]
-    assert via_resolver == direct
+    assert via_resolver == framed
+    assert b'<base href="about:srcdoc">' in framed
+
+    unframed = compose.compose_screen(mission_id)
+    # Scoped to the HEAD: the bootstrap's own comments mention the tag by
+    # name, so "not anywhere in the document" would be checking the wrong
+    # thing entirely.
+    assert b"<base" not in unframed.split(b"<script")[0]
+    body = b"<html>page</html>"
+    assert body in framed and body in unframed
+    assert framed.replace(b'<base href="about:srcdoc">\n', b"") == unframed
 
     pillar = db.create_pillar(mission_id, "P", "sess", "#4ade80")
     db.push_pillar_site_revision(pillar["pillar_id"], "<html>pillar</html>", "first")
@@ -88,7 +103,7 @@ def test_both_surfaces_produce_identical_bytes():
         {"kind": "pillar_site", "pillar_id": pillar["pillar_id"]},
     ))["document"]
     assert over_channel == compose.compose_screen(
-        mission_id, pillar["pillar_id"]
+        mission_id, pillar["pillar_id"], framed=True
     ).decode("utf-8")
 
 
@@ -147,7 +162,8 @@ def test_the_base_element_precedes_the_authors_markup():
     before anything that resolves a URL."""
     mission = db.create_mission("Base")
     db.push_site_revision(mission["mission_id"], '<a href="#x">x</a>', "first")
-    document = compose.compose_screen(mission["mission_id"]).decode("utf-8")
+    document = compose.compose_screen(
+        mission["mission_id"], framed=True).decode("utf-8")
     assert document.index('<base href="about:srcdoc">') < document.index('href="#x"')
 
 

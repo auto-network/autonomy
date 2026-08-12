@@ -319,7 +319,9 @@ def test_serve_mission_site_carries_the_authors_document_unmodified():
     assert resp.status_code == 200
     assert "<html><body>hello</body></html>" in resp.text
     assert resp.text.startswith("<!doctype html>\n<meta name=\"viewport\"")
-    assert '<base href="about:srcdoc">' in resp.text
+    # Served at a real URL, so NO srcdoc base: with one, every relative link
+    # in the author's content resolves against about:srcdoc and is blocked.
+    assert "<base" not in resp.text.split("<script")[0]
     assert resp.headers["content-type"].startswith("text/html")
 
 
