@@ -391,6 +391,41 @@ async def set_pillar_status(request: Request) -> JSONResponse:
     return JSONResponse({"pillar": _pillar_payload(db.get_pillar(pillar_id))})
 
 
+async def move_question(request: Request) -> JSONResponse:
+    """Point a question at a different anchor, or at none.
+
+    Screens get restructured. Without this the only way to keep a
+    conversation attached to its subject is to freeze the markup it was asked
+    against, which turns last week's question into an argument for keeping
+    content nobody needs.
+    """
+    entry_id = request.path_params["entry_id"]
+    body = await request.json()
+    anchor = body.get("anchor")
+    if anchor is not None and not isinstance(anchor, str):
+        return JSONResponse({"error": "anchor must be a string or null"}, status_code=400)
+    if not db.set_question_anchor(entry_id, anchor):
+        return JSONResponse({"error": "question not found"}, status_code=404)
+    return JSONResponse({"question": _question_payload(db.get_conversation_entry(entry_id))})
+
+
+async def retire_question(request: Request) -> JSONResponse:
+    """Retire a question whose subject stopped being relevant.
+
+    Retires, never deletes: what was asked, and why it stopped mattering, is
+    part of the record. It leaves the screen and stops counting as open. An
+    empty note un-retires it.
+    """
+    entry_id = request.path_params["entry_id"]
+    body = await request.json()
+    note = body.get("note", "")
+    if not isinstance(note, str):
+        return JSONResponse({"error": "note must be a string"}, status_code=400)
+    if not db.retire_question(entry_id, note):
+        return JSONResponse({"error": "question not found"}, status_code=404)
+    return JSONResponse({"question": _question_payload(db.get_conversation_entry(entry_id))})
+
+
 async def set_pillar_last_done(request: Request) -> JSONResponse:
     """The pillar's status line: the last productive thing that finished.
 
@@ -745,6 +780,8 @@ def _question_payload(entry: dict) -> dict:
         "answered_at": entry["answered_at"],
         "relay_status": entry["relay_status"],
         "created_at": entry["created_at"],
+        "retired_at": entry.get("retired_at"),
+        "retired_note": entry.get("retired_note"),
         "updates": updates,
     }
 
@@ -1315,6 +1352,8 @@ routes: list[Route] = [
     Route("/api/pillars/{pillar_id}/seen", mark_pillar_seen, methods=["POST"]),
     Route("/api/pillars/{pillar_id}/status", set_pillar_status, methods=["POST"]),
     Route("/api/pillars/{pillar_id}/last-done", set_pillar_last_done, methods=["POST"]),
+    Route("/api/questions/{entry_id}/anchor", move_question, methods=["POST"]),
+    Route("/api/questions/{entry_id}/retire", retire_question, methods=["POST"]),
     Route("/api/pillars/{pillar_id}/site", push_pillar_site_revision, methods=["POST"]),
     Route("/api/pillars/{pillar_id}/site", get_current_pillar_site, methods=["GET"]),
     Route(

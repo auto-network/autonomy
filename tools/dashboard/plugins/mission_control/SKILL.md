@@ -581,21 +581,42 @@ The control mounts **inside** that element, never as a sibling — a sibling
 would break your own adjacent-sibling (`+`) CSS rules. The value is free text
 that means something to you; it is what the question gets tagged with.
 
-**An anchor with a discussion attached is not yours to rename.** Questions are
-tagged with the anchor value, so changing or dropping one leaves its
-conversation with nowhere to appear beside the content it is about. The
-question survives and still lists, but the reader who would have found it
-next to the thing it discusses no longer does.
+**Restructure freely; move the conversations with you.** Anchors are
+placement hints, not a contract with the past. A question asked last week is
+never a reason to keep content nobody needs — if the subject moved, point the
+question at where it lives now; if the subject is gone, retire the question.
 
-Before you rewrite a screen, check which of your anchors carry questions:
+What is not acceptable is leaving a discussion pointing at an anchor that no
+longer exists. It still lists, but nobody finds it beside the thing it is
+about, and nothing tells you it happened.
+
+Check which of your anchors carry questions before you rewrite:
 
 ```bash
-curl -sk https://host.docker.internal:8080/api/pillars/<pillar_id>/questions \
-  | python3 -c 'import json,sys; [print(q["anchor"], "—", q["question"][:60]) for q in json.load(sys.stdin)["questions"]]'
+curl -sk https://host.docker.internal:8080/api/pillars/<pillar_id>/questions
 ```
 
-Any anchor in that list keeps its exact value, on whichever element now holds
-that subject. Anchors with no questions are free to change.
+Then, for each one, either keep the anchor value on whichever element now
+holds that subject, or move it:
+
+```bash
+curl -sk https://host.docker.internal:8080/api/questions/<entry_id>/anchor \
+  -X POST -H 'Content-Type: application/json' -d '{"anchor": "table:throughput"}'
+# {"anchor": null} detaches it: it stays in the record and in the questions
+# list, it just no longer belongs beside any particular element.
+```
+
+Or retire it, when the subject itself stopped being relevant:
+
+```bash
+curl -sk https://host.docker.internal:8080/api/questions/<entry_id>/retire \
+  -X POST -H 'Content-Type: application/json' \
+  -d '{"note": "the batch view this asked about was replaced"}'
+```
+
+Retiring is not deleting. The entry leaves the screen and stops counting as
+open; what was asked, what it was answered with, and why it stopped mattering
+all stay in the record. Posting an empty note brings it back.
 
 ### The two things that do not work, and why
 
@@ -633,6 +654,14 @@ into a block, spends the one resource the mission cannot replace.
 **Stub what you cannot build yet.** A stand-in that lets the next stage run is
 worth more than a real implementation that never gets exercised, because the
 stand-in tells you whether the stage after it works.
+
+**Some experiments are worth running and not worth keeping.** When the fastest
+way to answer a question is to make the real change and see what happens,
+make it, learn the answer, and take it back out. The finding is the output;
+the artifact was only ever the instrument. Say that you did it and what it
+proved — "tried it, it works, reverted because the shape is not mine to
+decide" is a stronger claim than any amount of arguing that it would probably
+work.
 
 **Three things look like forks and are not all the same.** Choose-and-continue
 applies to the first only:
