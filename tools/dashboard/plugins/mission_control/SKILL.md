@@ -426,6 +426,92 @@ push actually is, not a log of everything you tried before landing on it.
 tried per-ecosystem first, settled on acquisition-run after discussing with
 Jeremy."
 
+### Your pillar's status line — the last productive thing done
+
+One field, on your pillar, replaced whenever something finishes. It is the
+one line an operator reads to decide where to spend their attention, and it
+is rendered in full — never truncated — so its length is your discipline,
+not the UI's.
+
+**Write:** the last thing that was actually finished, in words someone who
+has never opened this repo would understand.
+
+**Two sentences, maximum.** The first says what got done. The second, if you
+use it, says what that means or what it unblocked — in the same plain words.
+
+Every one of these is a hard rule. A summary that breaks any of them is
+wrong and should be rewritten, not shipped:
+
+1. **Past tense, and finished.** Something completed, not something underway.
+   If nothing finished today, the last thing that finished still stands —
+   leave it. A stale true line beats a fresh empty one.
+2. **No identifiers, ever.** No file paths, function or class names, table or
+   column names, bead IDs, session names, branches, PR numbers, routes, env
+   vars, or flags. If it is a token you could grep for, it does not go here.
+3. **No jargon.** No acronym or term that means something different inside
+   this project than it does in general English. Spell out the idea instead.
+4. **No people, and no blockers.** Not who you are waiting on, not who owes
+   what, not "blocked on Jeremy". If you need a human, that is what an open
+   question is for — asking one is the action, saying you are stuck is not.
+5. **No status words as content.** "In progress", "ongoing", "continuing",
+   "working on", "on track", "blocked" carry no information. The row already
+   shows how long it has been and how many questions are open.
+6. **No numbers that need context.** "3 of 8 endpoints", "97% coverage" mean
+   nothing to a reader who does not know the denominator. "About a hundred
+   times faster" is fine, because it stands on its own.
+
+**The test, before you push it:** could someone who has never seen this
+mission read your two sentences and learn something true about where the
+work stands? If it only lands for someone who already knows, rewrite it.
+
+**This replaces; it is not a log.** There is no history and nothing
+accumulates. Push a new one when something new finishes.
+
+#### Worked examples
+
+Good:
+
+> Ran the prototype over a full batch and measured how fast it goes and how
+> much disk it needs. Found and fixed two bugs in a library we depend on,
+> which made it about a hundred times faster.
+
+> Agreed how customers will find out which datasets they can download, and
+> checked that against what the servers actually do today.
+
+> Got the customer-facing interface running and logged into it inside a test
+> container. Confirmed we can demo it without needing the real backend.
+
+Wrong, and why:
+
+| Written | Why it fails |
+|---|---|
+| "Blocked on Jeremy for the S3 decision." | Names a person and states a blocker (4). If you need that answer, ask a question. |
+| "Refactored `_resolve_mission` to call `compose_screen`; tests green." | Identifiers (2); says nothing to anyone outside the code. |
+| "Continuing work on the ingest pipeline." | Nothing finished (1), and "continuing" is a status word (5). |
+| "Made good progress on the schema." | True of every day; carries no fact. |
+| "auto-i9jx7 done, moving to auto-3gwhe." | Bead IDs (2). Reads as an internal ticket queue. |
+| "Landed the DAO layer and wired the FE grid." | Jargon (3). |
+
+**Why the rule is this strict:** computer tokens are infinite, which makes
+their value zero; human attention is the constrained resource this whole
+system exists to protect. Everything else on that row — the age, the open
+count, who is present — the platform computes for free. This one line is the
+only thing on the screen that costs a coordinator anything to produce, and
+it is the only thing on it a human cannot get any other way.
+
+#### Writing one
+
+```bash
+curl -sk https://host.docker.internal:8080/api/pillars/<pillar_id>/last-done \
+  -X POST -H 'Content-Type: application/json' \
+  -d '{"last_done": "Ran the prototype over a full batch and measured how fast it goes and how much disk it needs. Found and fixed two bugs in a library we depend on, which made it about a hundred times faster."}'
+# → 200 {"pillar": {..., "last_done": "...", "last_done_at": <unix ts>}}
+```
+
+Push it in the same breath as the site revision that made it true — the
+screen and this line describing it should never disagree. An empty string
+clears it. 400 characters is the cap, which a real one never approaches.
+
 **Why this matters more here than it might elsewhere:** the decision log
 (§8) is computed straight from these fields — there is no separate
 editorial pass that cleans them up before anyone reads them. Whatever you

@@ -185,7 +185,7 @@
       }, [
         el("div", {class: "mc-row-top"}, [sw, el("span", {class: "mc-name", text: p.name || ""}), faces]),
         // at most two sentences, no jargon: the last productive thing done
-        el("p", {class: "mc-last", text: p.last || ""}),
+        el("p", {class: "mc-last", text: p.last_done || ""}),
         el("div", {class: "mc-row-meta"}, meta),
       ]);
     });
@@ -310,6 +310,18 @@
       .then(function () { render(); });
   }
 
+  // The bar sticks to the top of the VIEWPORT once scrolled, but sits below
+  // the author's body padding before that. Panels dock to its real bottom
+  // edge rather than to a constant, or they cover its own controls.
+  function measureBar() {
+    var bar = chrome.firstChild;
+    if (!bar || !bar.getBoundingClientRect) return;
+    var bottom = Math.max(0, Math.round(bar.getBoundingClientRect().bottom));
+    chrome.style.setProperty("--mc-below", bottom + "px");
+  }
+  addEventListener("scroll", measureBar, {passive: true});
+  addEventListener("resize", measureBar, {passive: true});
+
   function render() {
     chrome.textContent = "";
     chrome.appendChild(barRow());
@@ -317,6 +329,7 @@
     var p = panelNode(); if (p) chrome.appendChild(p);
     var e = entryNode(); if (e) chrome.appendChild(e);
     var a = anchorNode(); if (a) chrome.appendChild(a);
+    measureBar();
   }
 
   // ---- anchored controls --------------------------------------------------

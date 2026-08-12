@@ -149,3 +149,24 @@ def test_the_base_element_precedes_the_authors_markup():
     db.push_site_revision(mission["mission_id"], '<a href="#x">x</a>', "first")
     document = compose.compose_screen(mission["mission_id"]).decode("utf-8")
     assert document.index('<base href="about:srcdoc">') < document.index('href="#x"')
+
+
+def test_the_pillar_status_line_is_passed_through_verbatim():
+    """The one field on that row a human wrote. It is never substituted
+    for, and a pillar without one renders nothing rather than a guess."""
+    mission = db.create_mission("Status")
+    mission_id = mission["mission_id"]
+    db.push_site_revision(mission_id, "<html>page</html>", "first")
+    written = db.create_pillar(mission_id, "Collection", "sess", "#4ade80")
+    silent = db.create_pillar(mission_id, "Delivery", "sess2", "#38bdf8")
+    db.set_pillar_last_done(
+        written["pillar_id"],
+        "Ran the prototype over a full batch and measured how fast it goes. "
+        "Found and fixed two bugs in a library we depend on.",
+    )
+
+    by_name = {p["name"]: p for p in
+               _state_of(compose.compose_screen(mission_id).decode("utf-8"))["pillars"]}
+    assert by_name["Collection"]["last_done"].startswith("Ran the prototype")
+    # Not the status value, not a revision note, not an empty string: None.
+    assert by_name["Delivery"]["last_done"] is None

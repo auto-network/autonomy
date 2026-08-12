@@ -101,7 +101,13 @@ CREATE TABLE IF NOT EXISTS pillars (
     color                    TEXT NOT NULL DEFAULT '',
     created_at               REAL NOT NULL,
     current_revision_id     TEXT,
-    status                   TEXT NOT NULL DEFAULT 'active'
+    status                   TEXT NOT NULL DEFAULT 'active',
+    -- The last productive thing this pillar's coordinator finished, in
+    -- their own words. Current state, NOT a log: a new one replaces the
+    -- previous, and nothing accumulates. NULL means never written, which
+    -- the viewer renders as nothing rather than as a guess.
+    last_done                TEXT,
+    last_done_at             REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_pillars_mission
@@ -203,6 +209,15 @@ def _get_conn(db_path: Path | str | None = None) -> sqlite3.Connection:
     # resumable relay fetch protocol the bootloader already speaks. NULL
     # is a real state: a participant without a photo renders the
     # initial-and-color avatar derived from participant_id.
+    # Migrate: the pillar's own status line (auto-fm22y). Deliberately not
+    # derived from anything -- no summarising of revisions, no inference from
+    # session activity. A coordinator writes it or it stays NULL.
+    try:
+        conn.execute("SELECT last_done, last_done_at FROM pillars LIMIT 0")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE pillars ADD COLUMN last_done TEXT")
+        conn.execute("ALTER TABLE pillars ADD COLUMN last_done_at REAL")
+        conn.commit()
     try:
         conn.execute("SELECT avatar_attachment_id FROM visitor_tokens LIMIT 0")
     except sqlite3.OperationalError:
@@ -373,6 +388,11 @@ def create_pillar(
         "created_at": created_at,
         "current_revision_id": None,
         "status": "active",
+        # Present and NULL, so this dict has the same shape a SELECT gives
+        # back. A hand-built return that omits new columns is a KeyError
+        # waiting in every caller that treats the two as interchangeable.
+        "last_done": None,
+        "last_done_at": None,
     }
 
 
@@ -410,6 +430,36 @@ def set_pillar_status(
         cur = conn.execute(
             "UPDATE pillars SET status = ? WHERE pillar_id = ?",
             (status, pillar_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return cur.rowcount > 0
+
+
+def set_pillar_last_done(
+    pillar_id: str, text: str, *, db_path: Path | str | None = None,
+) -> bool:
+    """Replace this pillar's status line with the last thing that finished.
+
+    REPLACES. There is no history and nothing accumulates -- the row is the
+    current state of the work, and a reader wants what is true now, not the
+    path that got here. Blank clears it back to "never written", which the
+    viewer renders as nothing.
+
+    How to write one is not a matter of taste here: SKILL.md section 9 sets
+    six rules (two sentences, past tense and finished, no identifiers, no
+    jargon, no people or blockers, no context-free numbers). This layer
+    stores what it is given -- the rules are enforced by the coordinator
+    reading them, not by a validator that would reject good writing it
+    failed to parse.
+    """
+    text = (text or "").strip()
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE pillars SET last_done = ?, last_done_at = ? WHERE pillar_id = ?",
+            (text or None, time.time() if text else None, pillar_id),
         )
         conn.commit()
     finally:

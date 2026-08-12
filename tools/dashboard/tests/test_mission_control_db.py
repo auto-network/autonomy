@@ -1101,3 +1101,50 @@ def test_set_visitor_avatar_updates_and_clears(tmp_path):
 
 def test_set_visitor_avatar_on_an_unknown_participant_is_none(tmp_path):
     assert db.set_visitor_avatar("guest:nope", "att-1", db_path=_db_path(tmp_path)) is None
+
+
+def test_set_pillar_last_done_replaces_rather_than_accumulates(tmp_path):
+    """It is current state, not a log. The second write is the whole
+    value -- a reader wants what is true now, not the path here."""
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+
+    assert db.get_pillar(pillar["pillar_id"], db_path=path)["last_done"] is None
+    assert db.set_pillar_last_done(pillar["pillar_id"], "Ran the batch.", db_path=path)
+    assert db.set_pillar_last_done(
+        pillar["pillar_id"], "Agreed the delivery contract.", db_path=path)
+
+    row = db.get_pillar(pillar["pillar_id"], db_path=path)
+    assert row["last_done"] == "Agreed the delivery contract."
+    assert "Ran the batch." not in (row["last_done"] or "")
+    assert isinstance(row["last_done_at"], float)
+
+
+def test_blank_last_done_clears_it_back_to_never_written(tmp_path):
+    """NULL is a real state the viewer renders as nothing. Storing "" would
+    make an empty line indistinguishable from an unwritten one."""
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    db.set_pillar_last_done(pillar["pillar_id"], "Ran the batch.", db_path=path)
+
+    assert db.set_pillar_last_done(pillar["pillar_id"], "   ", db_path=path)
+    row = db.get_pillar(pillar["pillar_id"], db_path=path)
+    assert row["last_done"] is None and row["last_done_at"] is None
+
+
+def test_set_pillar_last_done_on_an_unknown_pillar_reports_it(tmp_path):
+    assert db.set_pillar_last_done("nope", "x", db_path=_db_path(tmp_path)) is False
+
+
+def test_created_pillar_has_the_same_shape_as_a_selected_one(tmp_path):
+    """create_pillar builds its return in Python rather than reading the row
+    back, so a new column added to the table but not to that dict is a
+    KeyError in every caller that treats the two as interchangeable. It
+    already was one."""
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    created = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    selected = db.get_pillar(created["pillar_id"], db_path=path)
+    assert set(created) == set(selected)

@@ -1874,3 +1874,40 @@ def test_setting_an_avatar_on_an_unknown_participant_is_404():
     resp = client.post("/api/visitor-tokens/guest:nope/avatar",
                        json={"avatar": None})
     assert resp.status_code == 404
+
+
+def test_set_pillar_last_done_route():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar(client, mission_id)
+    text = ("Got the interface running and logged into it inside a test container. "
+            "Confirmed we can demo it without the real backend.")
+
+    resp = client.post(f"/api/pillars/{pillar['pillar_id']}/last-done",
+                       json={"last_done": text})
+    assert resp.status_code == 200
+    assert resp.json()["pillar"]["last_done"] == text
+    assert isinstance(resp.json()["pillar"]["last_done_at"], float)
+
+
+def test_last_done_rejects_a_pasted_status_report():
+    """Two sentences, not a report. The cap is generous enough that a real
+    one never reaches it and tight enough that a dumped log does."""
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar(client, mission_id)
+
+    resp = client.post(f"/api/pillars/{pillar['pillar_id']}/last-done",
+                       json={"last_done": "x" * (mc_api.LAST_DONE_MAX + 1)})
+    assert resp.status_code == 400
+    assert "two sentences" in resp.json()["error"]
+
+
+def test_last_done_requires_a_string_and_a_real_pillar():
+    client = _client()
+    mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
+    pillar = _pillar(client, mission_id)
+    assert client.post(f"/api/pillars/{pillar['pillar_id']}/last-done",
+                       json={"last_done": 5}).status_code == 400
+    assert client.post("/api/pillars/nope/last-done",
+                       json={"last_done": "x"}).status_code == 404
