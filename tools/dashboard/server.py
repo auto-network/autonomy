@@ -10178,6 +10178,7 @@ def _worktree_file_json(file: GitFileChange) -> dict:
         "path": file.path,
         "additions": file.additions,
         "deletions": file.deletions,
+        "is_dir": file.is_dir,
     }
 
 def _worktree_commit_json(commit: WorktreeCommit, *, include_patch: bool = False) -> dict:
@@ -10379,7 +10380,11 @@ def _worktree_state_json(row: WorktreeState) -> dict:
             row.branch,
         ),
         "commits": [_worktree_commit_json(commit) for commit in row.commits],
-        "dirty_files": [_worktree_file_json(file) for file in row.dirty_files],
+        # The list payload ships only a 3-entry preview; the true count travels
+        # separately so the UI can render "+N more" without the full array, and
+        # the per-worktree /changes endpoint serves the complete list on demand.
+        "dirty_count": len(row.dirty_files),
+        "dirty_files": [_worktree_file_json(file) for file in row.dirty_files[:3]],
         "net_empty": row.net_empty,
         "orphaned": row.orphaned,
         "duplicate_commits": [

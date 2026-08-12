@@ -1133,7 +1133,9 @@
           var key = r.session_name;
           if (!key) continue;
           if (!by[key]) by[key] = { dirtyCount: 0, commitsAhead: 0 };
-          if (r.is_dirty) by[key].dirtyCount += (r.dirty_files || []).length;
+          if (r.is_dirty) by[key].dirtyCount += (typeof r.dirty_count === 'number')
+            ? r.dirty_count
+            : (r.dirty_files || []).length;
           by[key].commitsAhead += r.commits_ahead || 0;
         }
         for (var k in by) {
