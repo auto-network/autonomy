@@ -622,6 +622,130 @@ const autonet = (() => {
     };
   }
 
+
+  // ---- generic channel broker ---------------------------------------------
+
+  /** One MessagePort per viewer document, brokering channel ops.
+   *
+   * The viewer speaks three shapes and nothing else:
+   *   viewer -> host   {v:1, type:"request",  id, op, body}
+   *   host -> viewer   {v:1, type:"response", id, ok, body|error}
+   *   host -> viewer   {v:1, type:"event",    topic, body}
+   *
+   * The host forwards `op` and `body` opaquely: it does not know what a
+   * pillar or a question is, and gains no per-viewer branch.
+   *
+   * The viewer never receives the bearer token, the socket, the channel key
+   * or the stream key. `subscribe` is answered by the HOST -- it keeps the
+   * stream key, decodes feed frames itself, and posts plaintext events. A
+   * viewer that could issue channel ops with the key in hand would make the
+   * sandbox mean only "cannot read the parent's DOM".
+   */
+  class ChannelBroker {
+    constructor(channel, transport) {
+      this.channel = channel;
+      this.transport = transport;
+      this.port = null;
+      // The record layer is strictly request/response, so exchanges are
+      // serialized. Correlation ids mean the VIEWER may still have several
+      // in flight -- the singleton pendingOp this replaces silently
+      // dropped the first of two concurrent calls.
+      this.queue = Promise.resolve();
+      this.streamKey = null;
+      this.feeding = false;
+      this.closed = false;
+    }
+
+    /** Attach a viewer's port, replacing any previous document's.
+     *
+     * After document.open/write/close the old document is gone and its port
+     * with it, but its in-flight exchanges may still resolve. Those replies
+     * are dropped rather than delivered to the new document, which never
+     * asked for them and has fresh state. */
+    attach(port) {
+      if (this.port && this.port !== port) {
+        try { this.port.close(); } catch (_err) { /* already gone */ }
+      }
+      this.port = port;
+      port.onmessage = (event) => this.onRequest(port, event.data);
+      if (typeof port.start === "function") port.start();
+    }
+
+    onRequest(port, message) {
+      if (!message || message.v !== 1 || message.type !== "request"
+          || typeof message.op !== "string") return;
+      const id = message.id;
+      this.queue = this.queue.then(async () => {
+        if (this.closed || this.port !== port) return;   // stale document
+        let reply;
+        try {
+          const body = await this.exchange({
+            v: 1, op: message.op, body: message.body,
+          });
+          if (message.op === "subscribe" && body && typeof body.stream_key === "string") {
+            // The key stays here. The viewer gets acknowledgement only.
+            this.streamKey = hexToBytes(body.stream_key);
+            delete body.stream_key;
+            this.startFeed();
+          }
+          reply = { v: 1, type: "response", id, ok: true, body };
+        } catch (err) {
+          reply = {
+            v: 1, type: "response", id, ok: false,
+            error: String((err && err.message) || err),
+          };
+        }
+        if (!this.closed && this.port === port) port.postMessage(reply);
+      });
+    }
+
+    async exchange(request) {
+      const encoder = new TextEncoder();
+      await this.channel.sendMessage(encoder.encode(JSON.stringify(request)));
+      const raw = await this.channel.recvMessage();
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+      const newline = text.indexOf("\n");
+      return JSON.parse(newline === -1 ? text : text.slice(0, newline));
+    }
+
+    /** Pump feed frames. They arrive on their own socket queue because the
+     * kind byte separates them from channel records before either decoder
+     * sees one; nothing here guesses by trying a key. */
+    startFeed() {
+      if (this.feeding || !this.transport || typeof this.transport.recvFeed !== "function") return;
+      this.feeding = true;
+      (async () => {
+        while (!this.closed) {
+          let sealed;
+          try {
+            sealed = await this.transport.recvFeed();
+          } catch (_err) {
+            return;   // socket gone: the page keeps whatever it has rendered
+          }
+          const opened = await openStreamFrame(this.streamKey, sealed);
+          if (!opened || !this.port) continue;
+          let body;
+          try {
+            body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(opened));
+          } catch (_err) {
+            continue;   // one bad frame must not end the feed
+          }
+          this.port.postMessage({
+            v: 1, type: "event", topic: (body && body.kind) || "event", body,
+          });
+        }
+      })();
+    }
+
+    dispose() {
+      this.closed = true;
+      if (this.port) {
+        try { this.port.close(); } catch (_err) { /* already gone */ }
+        this.port = null;
+      }
+    }
+  }
+
   // ---- attachment window/resume + parent-owned storage --------------------
 
   function hasExactKeys(value, allowed) {
@@ -1780,6 +1904,7 @@ const autonet = (() => {
   }
 
   let missionBridge = null;
+  let channelBroker = null;
 
   async function renderArtifact(header, body, attachmentContext = null) {
     const artifact = validateArtifact(header, body);
@@ -1793,9 +1918,21 @@ const autonet = (() => {
 
     window.addEventListener("message", (event) => {
       if (event.source !== capturedWindow || !event.data || event.data.v !== 1) return;
-      if (event.data.op === "ready" && !readySeen) {
-        readySeen = true;
-        resolveReady();
+      if (event.data.op === "ready") {
+        // A viewer may announce ready MORE THAN ONCE: after
+        // document.open/write/close the replacement document runs its own
+        // bootstrap and opens a fresh channel. Hand it a new port and drop
+        // the previous document's, whose in-flight replies are no longer
+        // anyone's business.
+        if (channelBroker && attachmentContext && attachmentContext.channel) {
+          const pair = new MessageChannel();
+          channelBroker.attach(pair.port1);
+          capturedWindow.postMessage({ v: 1, op: "port" }, "*", [pair.port2]);
+        }
+        if (!readySeen) {
+          readySeen = true;
+          resolveReady();
+        }
       } else if (event.data.op === "title" && typeof event.data.title === "string") {
         state.artifactTitle = truncateCodePoints(event.data.title, MAX_TITLE_CHARS);
         setStatus(state.artifactTitle);
@@ -1806,6 +1943,15 @@ const autonet = (() => {
     if (attachmentController) {
       attachmentController.dispose();
       attachmentController = null;
+    }
+    if (channelBroker) {
+      channelBroker.dispose();
+      channelBroker = null;
+    }
+    if (attachmentContext && attachmentContext.channel) {
+      channelBroker = new ChannelBroker(
+        attachmentContext.channel, attachmentContext.transport || null
+      );
     }
     if (missionBridge) {
       missionBridge.dispose();
@@ -1987,7 +2133,10 @@ const autonet = (() => {
       state.bodySha256 = bytesToHex(await crypto.subtle.digest("SHA-256", body));
       state.phase = "rendering";
       await renderArtifact(header, body, {
-        channel, token, noteId: envelope.target_uuid,
+        // `transport` carries the socket's feed queue: the broker pumps
+        // fan-out frames from it, separated from channel records by the
+        // kind byte before either decoder sees one.
+        channel, token, transport, noteId: envelope.target_uuid,
       });
     } catch (err) {
       state.error = String(err && err.message || err);
@@ -1998,7 +2147,7 @@ const autonet = (() => {
   return {
     state, boot, canonicalJson, verifyChain, attemptEndpoints,
     attemptDirectEndpoint, performHandshake, openSocket, fetchArtifact,
-    validateArtifact, renderArtifact,
+    validateArtifact, renderArtifact, ChannelBroker,
     MISSION_SHIM, missionShimmed, rewriteMissionLinks, MissionBridge,
     assembleJoinContext, deliverJoinContext,
     withTimeout, SecureChannel,
