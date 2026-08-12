@@ -240,3 +240,88 @@ def test_clicking_a_pillar_swaps_the_document_over_the_relay(server, tmp_path):
         f"fetched but never swapped in (readies={state['readies']})"
     )
     assert "PILLAR SCREEN" in heading, heading[:300]
+
+
+REFUSING_HOST = """<!doctype html><meta charset="utf-8"><body style="margin:0">
+<iframe id="f" style="width:100%;height:100vh;border:0" sandbox="allow-scripts"></iframe>
+<script>
+var SCREEN = __SCREEN__;
+var f = document.getElementById("f");
+window.__writes = 0;
+addEventListener("message", function (e) {
+  if (!e.data || e.data.v !== 1 || e.data.op !== "ready") return;
+  var c = new MessageChannel();
+  c.port1.onmessage = function (m) {
+    var r = m.data;
+    if (!r || r.type !== "request") return;
+    if (r.op === "write") window.__writes++;
+    c.port1.postMessage({v:1, type:"response", id:r.id, ok:true,
+                         body:{v:1, status:"unavailable"}});
+  };
+  f.contentWindow.postMessage({v:1, op:"port"}, "*", [c.port2]);
+});
+f.srcdoc = SCREEN;
+</script></body>"""
+
+
+def test_a_refused_ask_says_so_instead_of_clearing_the_box(tmp_path):
+    """A link with no bound participant gets its writes refused.
+
+    The refusal arrives as a SUCCESSFUL exchange -- the host's broker carries
+    opaque application messages and marks any completed round trip ok:true,
+    correctly, at its layer. So the viewer used to resolve, the ask closed the
+    panel and emptied the textarea, and nothing was written: a tap that looked
+    like it had worked, which is worse than one that visibly does nothing.
+    """
+    import html as _html
+    os.environ["MISSION_CONTROL_DB"] = str(Path(tempfile.mkdtemp()) / "mc.db")
+    sys.path.insert(0, str(REPO))
+    from tools.dashboard.dao import mission_control_db as db
+    from tools.dashboard.plugins.mission_control import compose
+
+    db.DB_PATH = Path(os.environ["MISSION_CONTROL_DB"])
+    db.init_db(db.DB_PATH)
+    mid = db.create_mission("Refusal")["mission_id"]
+    db.push_site_revision(mid, "<body><h1>SCREEN</h1></body>", "r1")
+
+    page = tmp_path / "refusing-host.html"
+    page.write_text(REFUSING_HOST.replace(
+        "__SCREEN__",
+        json.dumps(compose.compose_screen(mid, framed=True).decode()).replace("</", "<\\/")))
+
+    session = "mc-refuse"
+    _run(session, "open", page.as_uri())
+    _run(session, "set", "viewport", "390", "820")
+    time.sleep(2)
+
+    qa = _ref(_run(session, "snapshot", "-i"), "Questions")
+    assert qa, "no questions control in the bar"
+    _run(session, "click", "@" + qa)
+    time.sleep(1)
+
+    box = _ref(_run(session, "snapshot", "-i"), 'textbox "Ask about')
+    assert box, "no composer in the questions panel"
+    # fill targets the element; type goes wherever focus happens to be.
+    _run(session, "fill", "@" + box, "a question that will be refused")
+    time.sleep(0.5)
+
+    # Match the BUTTON by role: the textarea's placeholder is "Ask about
+    # ...", so a bare "Ask" matches the box you just typed into.
+    ask = _ref(_run(session, "snapshot", "-i"), 'button "Ask"')
+    _run(session, "click", "@" + ask)
+    time.sleep(2)
+
+    snap = _run(session, "snapshot", "-i")
+    writes = _run(session, "eval", "String(window.__writes)")
+    _run(session, "close", timeout=30)
+
+    assert "1" in writes, f"the write never reached the host: {writes!r}"
+    # The observable consequence: the question is STILL IN THE BOX. Before
+    # this, a refusal resolved as success -- the box emptied and the panel
+    # closed, so the tap looked like it had worked. (The failure message
+    # itself is a span, and an interactive-elements snapshot cannot see it.)
+    assert "a question that will be refused" in snap, (
+        "a refused write cleared the composer, so it read as success:\n"
+        + snap[:600]
+    )
+    assert 'button "\u00d7"' in snap, "the panel closed on a refused write"
