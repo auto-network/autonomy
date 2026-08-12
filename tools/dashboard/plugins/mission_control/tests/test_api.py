@@ -1942,7 +1942,7 @@ def test_an_unbound_reader_is_named_honestly():
         _run(mc_api.handle_relay_read("", mission_id, {"kind": "here"}))
     assert seen["who"] == "guest:with-the-link"
     assert seen["label"] == "Someone with the link"
-    assert seen["kind"] == "person"
+    assert seen["kind"] == "guest"
     assert seen["surface"] == f"mission:{mission_id}"
 
 
@@ -1953,3 +1953,36 @@ def test_a_reader_cannot_announce_onto_another_missions_pillar():
     pillar_b = _pillar_with_site(client, mission_b)
     assert _run(mc_api.handle_relay_read(
         "", mission_a, {"kind": "here", "pillar_id": pillar_b["pillar_id"]})) is None
+
+
+def test_a_guest_heartbeat_uses_a_kind_presence_actually_accepts():
+    """The REAL Presence, not a mock.
+
+    Every other presence test patches surface.Presence out, so the one thing
+    that validates participant_kind was never asked. The `here` op passed
+    kind="person", which is not one of ('operator', 'agent', 'guest'):
+    Presence raised, _heartbeat_presence swallowed it and logged, and guest
+    presence was never recorded at all while the code looked healthy.
+    """
+    from tools.graph.surface import VALID_PARTICIPANT_KINDS
+
+    seen = {}
+
+    class _Recorder:
+        def __init__(self, **kw):
+            # Exactly the check the real Presence makes.
+            assert kw["participant_kind"] in VALID_PARTICIPANT_KINDS, (
+                f"invalid participant_kind {kw['participant_kind']!r}"
+            )
+            seen.update(kw)
+
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    client = _client()
+    mission_id = _mission_with_site(client)
+    with patch("tools.graph.surface.Presence", _Recorder), \
+         patch.object(mc_api, "_surface_presence", lambda s: []):
+        _run(mc_api.handle_relay_read("", mission_id, {"kind": "here"}))
+
+    assert seen["participant_kind"] == "guest"

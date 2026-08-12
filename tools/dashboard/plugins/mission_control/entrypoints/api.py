@@ -189,9 +189,20 @@ async def delete_mission(request: Request) -> JSONResponse:
 
 def _heartbeat_presence(surface_id: str, participant_id: str,
                         label: str = "", kind: str = "agent") -> None:
-    """Record that someone is on this surface right now. Never raises."""
+    """Record that someone is on this surface right now. Never raises.
+
+    *kind* must be one of surface.VALID_PARTICIPANT_KINDS. Checked here as
+    well as in Presence, because this function deliberately swallows what
+    Presence raises -- a caller passing a kind that does not exist would
+    otherwise get silence rather than a failure, which is exactly what
+    happened.
+    """
     if not participant_id:
         return
+    from tools.graph.surface import VALID_PARTICIPANT_KINDS
+    assert kind in VALID_PARTICIPANT_KINDS, (
+        f"participant_kind {kind!r} is not one of {VALID_PARTICIPANT_KINDS}"
+    )
     try:
         from tools.graph.surface import Presence
         with Presence(
@@ -1116,7 +1127,11 @@ async def handle_relay_read(participant_id: str, mission_id: str, body: dict) ->
         surface_id = f"pillar:{pillar_id}" if pillar_id else f"mission:{mission_id}"
         who = participant_id or "guest:with-the-link"
         label = participant_id or "Someone with the link"
-        _heartbeat_presence(surface_id, who, label, kind="person")
+        # "guest" -- one of the three kinds surface.py accepts. This said
+        # "person", which is not, and Presence rejected every call: the
+        # exception was caught and logged, so guest presence was silently
+        # never recorded while everything looked fine.
+        _heartbeat_presence(surface_id, who, label, kind="guest")
         return {"presence": _surface_presence(surface_id)}
 
     if kind == "mission_site":
