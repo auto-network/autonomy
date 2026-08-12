@@ -592,6 +592,115 @@ the content; the state around it is not yours to fetch.
 Everything else — your layout, your styling, your interactivity, your data
 baked into the page at push time — is entirely yours.
 
+## 11. How to run a pillar
+
+Your job is to drive your pillar's work as deep as it will go, and come back
+knowing what you did not know when you started.
+
+**Build to find out.** You do not discover what is genuinely unresolved by
+planning; you discover it by trying to build the thing and hitting the point
+where you cannot proceed without deciding something nobody has decided. That
+point is the valuable output. Planning finds the questions you already knew to
+ask.
+
+**At a fork you cannot resolve, choose and continue.** Pick the option you
+would defend, write down that you picked it, and keep going. Do not stop and
+wait for an answer — a question you could have answered provisionally, turned
+into a block, spends the one resource the mission cannot replace.
+
+**Stub what you cannot build yet.** A stand-in that lets the next stage run is
+worth more than a real implementation that never gets exercised, because the
+stand-in tells you whether the stage after it works.
+
+**Drive to end-to-end.** The target is the whole flow exercised, start to
+finish, with every unresolved thing standing in as a stub. Every stage having
+run once — even against stand-ins — is what proves the shape is right.
+
+**Then harvest.** Walk back over every stub and every choice you made without
+a specification. Each one is either a decision you took (record what you chose
+and why) or a question you cannot settle (record what it blocks). That set is
+most of what your screen says.
+
+**When to stop.** Stop when driving further would only refine something
+already understood, or when a fork genuinely cannot be guessed and everything
+behind it depends on the answer. Say which of the two you hit. Do not keep
+polishing a stage that already works — depth into the unknown is the point,
+not finish on the known.
+
+A screen with little to say usually means the work has not been driven far
+enough to find out what is unknown, not that it was written up badly.
+
+## 12. What your screen says
+
+Five things, in this order.
+
+**A. Objective and scope.** What this pillar is for, what done looks like, and
+what it explicitly does not own.
+
+**B. The work.** Every unit of development your pillar needs, each with a
+headline and a summary that stand alone, and detail available underneath.
+Someone reading only the headlines should understand the shape of the work.
+
+**C. Decisions.** Every decision taken under uncertainty: what the fork was,
+which way you went, why, and what breaks if the other way turns out to be
+right.
+
+**D. Open questions.** What is still unresolved, what each one blocks, and
+what would settle it. A question a human can answer in one pass — options and
+consequences stated — gets answered. A vague one waits.
+
+**E. Where it stands.** Current state, what is in flight, what is blocked.
+
+C and D are the mission's most valuable output. They are the difference
+between a reader knowing what happened and a reader being able to act.
+
+### What earns a place
+
+Include something only if a reader would act or think differently for knowing
+it. Concretely, it must do at least one of: define or change a deliverable;
+inform a decision somebody still has to make; establish or change a functional
+requirement; surface a real problem with the design; or change the picture of
+what is done, what is left, or what is unknown.
+
+If it does none of those, it is internal record-keeping. It belongs in your
+own notes, not on the screen.
+
+**Effort is not relevance.** That something was hard, took a long time, or was
+finally solved after a struggle argues for its importance to you and says
+nothing about its importance to the reader.
+
+**Relevance decays.** Judge every item against the state of the work now, not
+against how much it mattered when it was written. While you are setting up
+your environment, that is genuinely your current state and belongs on the
+screen; once it is working, it collapses to a line listing what you depend on
+and the fact that it is met. Demoting is not deleting — it moves to your own
+notes.
+
+Keep the screen at the size a human will actually read. That is the target,
+not the smallest possible screen.
+
+## 13. The mission controller
+
+One session coordinates the mission and does none of its work. That is not a
+limitation — every pillar is immersed in its own task, and immersion is
+exactly what makes it a poor judge of which of its own details matter to
+anybody else. The controller is deliberately the one participant who is not
+immersed.
+
+It keeps up with what every pillar is actually doing, holds the only complete
+picture of the mission, owns the mission overview screen, orchestrates the
+interfaces between pillars, and decides anything that crosses a boundary —
+shared schemas, naming, interface shapes. On those, **you propose; the
+controller decides.** That is what lets every pillar move at full speed
+without the mission contradicting itself.
+
+It reviews every revision you push, asking three things you are not positioned
+to ask about your own work: is this redundant with what another pillar already
+says, is it irrelevant to the mission, and is it phrased so that only its
+author can read it?
+
+Expect edits. A review that changes nothing has not happened.
+
 ---
 
 ## How this document is maintained
