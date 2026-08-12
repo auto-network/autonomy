@@ -1119,6 +1119,14 @@ async def handle_relay_read(participant_id: str, mission_id: str, body: dict) ->
         _heartbeat_presence(surface_id, who, label, kind="person")
         return {"presence": _surface_presence(surface_id)}
 
+    if kind == "mission_site":
+        # The way back. Navigation could reach every pillar and never the
+        # screen it started on, because only pillars had a read.
+        document = compose.compose_screen(mission_id)
+        if document is None:
+            return None
+        return {"document": document.decode("utf-8")}
+
     if kind == "pillar_site":
         # A composed screen, not raw author HTML: the viewer document.writes
         # what it receives, so anything short of a complete document would
