@@ -22,6 +22,7 @@ from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from tools.dashboard.dao import mission_control_db as db
+from tools.dashboard.plugins.mission_control import compose
 from tools.dashboard.event_bus import event_bus
 
 logger = logging.getLogger(__name__)
@@ -504,12 +505,15 @@ async def serve_mission_site(request: Request):
     mission_id = request.path_params["mission_id"]
     if not db.get_mission(mission_id):
         return PlainTextResponse("Not Found", status_code=404, headers=_NO_STORE_HEADERS)
-    current = db.get_current_site(mission_id)
-    if not current:
+    # The SAME compose function the relay resolver calls. Two surfaces, one
+    # document: a screen served here and a screen served over the channel
+    # cannot drift, because there is only one place that builds one.
+    document = compose.compose_screen(mission_id)
+    if document is None:
         return PlainTextResponse(
             "Mission has no site revision yet", status_code=404, headers=_NO_STORE_HEADERS
         )
-    response = HTMLResponse(current["html"], headers=_NO_STORE_HEADERS)
+    response = HTMLResponse(document, headers=_NO_STORE_HEADERS)
     # First visit carries ?as=<token> in the share link; resolve once and
     # cookie it so every later visit (and every API call the site's own
     # JS makes) is attributed without the token reappearing in the URL.
@@ -529,12 +533,12 @@ async def serve_pillar_site(request: Request):
     pillar = db.get_pillar(pillar_id)
     if not pillar or pillar["mission_id"] != mission_id:
         return PlainTextResponse("Not Found", status_code=404, headers=_NO_STORE_HEADERS)
-    current = db.get_current_pillar_site(pillar_id)
-    if not current:
+    document = compose.compose_screen(mission_id, pillar_id)
+    if document is None:
         return PlainTextResponse(
             "Pillar has no site revision yet", status_code=404, headers=_NO_STORE_HEADERS
         )
-    response = HTMLResponse(current["html"], headers=_NO_STORE_HEADERS)
+    response = HTMLResponse(document, headers=_NO_STORE_HEADERS)
     as_token = request.query_params.get("as")
     if as_token and db.resolve_visitor(as_token):
         _set_visitor_cookie(response, as_token)
@@ -1002,13 +1006,16 @@ async def handle_relay_read(participant_id: str, mission_id: str, body: dict) ->
         return {"presence": _mission_presence(mission_id)}
 
     if kind == "pillar_site":
+        # A composed screen, not raw author HTML: the viewer document.writes
+        # what it receives, so anything short of a complete document would
+        # land without the runtime that made the navigation possible.
         pillar_id = body.get("pillar_id")
         if _pillar_of_this_mission(pillar_id, mission_id) is None:
             return None
-        current = db.get_current_pillar_site(pillar_id)
-        if not current or not current.get("html"):
+        document = compose.compose_screen(mission_id, pillar_id)
+        if document is None:
             return None
-        return {"pillar_id": pillar_id, "html": current["html"]}
+        return {"pillar_id": pillar_id, "document": document.decode("utf-8")}
 
     return None
 

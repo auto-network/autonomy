@@ -344,7 +344,12 @@ def test_guest_reads_a_pillars_own_page(stack):
         "v": 1, "op": "read", "body": {"kind": "pillar_site", "pillar_id": pillar_id},
     }))
     assert body["status"] == "ok"
-    assert "pillar detail" in body["html"]
+    # A composed screen end to end: the guest's runtime document.writes what
+    # arrives here, so it has to be a complete document carrying the
+    # coordinator's page and the runtime that made the navigation possible.
+    assert "pillar detail" in body["document"]
+    assert body["document"].startswith("<!doctype html>")
+    assert '<base href="about:srcdoc">' in body["document"]
 
 
 def test_guest_reads_presence(stack):

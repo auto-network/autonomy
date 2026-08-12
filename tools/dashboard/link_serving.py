@@ -241,24 +241,27 @@ def _resolve_design(target_uuid: str):
 
 
 def _resolve_mission(target_uuid: str):
-    """Self-contained HTML, like design/present -- the coordinator already
-    fully authors and controls the page via push_site_revision. Unlike
-    design (pinned to the exact approved revision, see _resolve_design's
-    docstring), this always serves the CURRENT revision on every open,
-    matching note's reload-shows-latest behavior: a mission page reflects
-    the live state of the work, not a frozen snapshot from whenever the
-    link was approved. Deliberately not repeating the design bug where
-    the resolver pins to whatever revision existed at grant time.
-    """
-    from tools.dashboard.dao import mission_control_db
+    """One composed screen, from Mission Control's own compose function.
 
-    current = mission_control_db.get_current_site(target_uuid)
-    if not current:
+    This branch stays a plain producer dispatch: a grant carries a
+    target_type and the types genuinely resolve differently (design pins
+    one revision, present follows a stable design, note assembles an
+    artifact). What it must NOT do is know how a mission document is
+    built -- that lives in the owning module, and the same function
+    serves the dashboard path, so the two surfaces cannot drift.
+
+    Unlike design (pinned to the exact approved revision, see
+    _resolve_design's docstring), this always composes the CURRENT
+    revision on every open, matching note's reload-shows-latest
+    behavior: a mission page reflects the live state of the work, not a
+    frozen snapshot from whenever the link was approved.
+    """
+    from tools.dashboard.plugins.mission_control import compose
+
+    document = compose.compose_screen(target_uuid)
+    if document is None:
         return None
-    html_text = current.get("html")
-    if not html_text:
-        return None
-    return {"kind": "mission", "viewer": html_text.encode("utf-8")}
+    return {"kind": "mission", "viewer": document}
 
 
 _GRAPH_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(graph://([^)]+)\)")

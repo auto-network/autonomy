@@ -8,8 +8,15 @@
 
 :host, * { box-sizing: border-box; }
 
+/* Sticky, not fixed: the host is body's first child, so the bar occupies
+   its own 3rem of normal flow and the author's page starts below it
+   instead of underneath it. */
 .mc-bar {
-  position: fixed; top: 0; left: 0; right: 0; z-index: 2147483000;
+  position: sticky; top: 0; z-index: 2147483000;
+  /* Full-bleed: the host sits inside body, so whatever gutter the author
+     put on body would otherwise inset the bar. This spans the viewport
+     without knowing what that gutter is. */
+  width: 100vw; margin-left: calc(50% - 50vw); margin-right: calc(50% - 50vw);
   height: 3rem; display: flex; align-items: center; gap: .5rem; padding: 0 .6rem;
   background: #111318; border-bottom: 1px solid #1e293b;
   font: 15px/1.5 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;

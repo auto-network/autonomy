@@ -949,6 +949,29 @@ def list_conversation(
     return [dict(r) for r in rows]
 
 
+def list_whole_mission_conversation(
+    mission_id: str, *, db_path: Path | str | None = None,
+) -> list[dict]:
+    """Every entry under this mission, mission-level AND pillar-scoped.
+
+    Distinct from list_conversation, which is deliberately pillar_id IS
+    NULL and keeps its pre-pillars meaning. This is the one a reader asking
+    "what is still open here?" needs: open questions do not stop mattering
+    because they were asked against a pillar, and hunting them pillar by
+    pillar is exactly the navigation the viewer chrome removes.
+    """
+    conn = _get_conn(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM mission_conversation WHERE mission_id = ?"
+            " ORDER BY created_at ASC",
+            (mission_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
 def list_pillar_conversation(
     pillar_id: str, *, db_path: Path | str | None = None,
 ) -> list[dict]:

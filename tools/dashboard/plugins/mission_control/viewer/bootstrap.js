@@ -121,9 +121,17 @@
     return f;
   }
 
+  // On a pillar screen, who is on THAT pillar; on the mission overview, who
+  // is on the mission. Both are real presence surfaces (pillar:<id> and
+  // mission:<id>), so neither is a stand-in for the other.
+  function presentHere() {
+    var p = currentPillar();
+    return (p ? p.here : state.here) || [];
+  }
+
   function barRow() {
     var p = currentPillar() || {};
-    var here = p.here || [];
+    var here = presentHere();
     var swatch = el("span", {class: "mc-swatch"});
     swatch.style.background = p.color || "#475569";
     var kids = [
@@ -148,7 +156,7 @@
   }
 
   function whoList() {
-    var here = (currentPillar() || {}).here || [];
+    var here = presentHere();
     return el("div", {class: "mc-who"},
       [el("p", {class: "mc-label", text: here.length + " here"})].concat(
         here.map(function (h) {
@@ -362,7 +370,16 @@
   }
 
   function start() {
-    document.body.appendChild(host);
+    // FIRST child, and the bar is sticky rather than fixed, so it reserves
+    // its own 3rem in normal flow instead of covering the top of whatever
+    // the coordinator wrote. Measured on the real 1.87MB pillar page: a
+    // fixed bar ate its opening heading.
+    document.body.insertBefore(host, document.body.firstChild);
+    // The one property we set on the author's document. A sticky bar still
+    // overlays whatever a #fragment jump lands on, and working fragment
+    // links are the whole reason this document carries a <base>. This
+    // affects scroll landing only -- nothing about how their page paints.
+    document.documentElement.style.scrollPaddingTop = "3rem";
     mountAnchors();
     render();
   }

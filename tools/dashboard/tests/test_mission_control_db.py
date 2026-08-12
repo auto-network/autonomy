@@ -733,6 +733,27 @@ def test_list_conversation_excludes_pillar_scoped_entries(tmp_path):
     assert [e["entry_id"] for e in listed] == [mission_entry["entry_id"]]
 
 
+def test_list_whole_mission_conversation_spans_pillars(tmp_path):
+    """The counterpart to the test above: one call for "what is open
+    anywhere under this mission", which is what the viewer chrome's
+    question list shows. Another mission's entries stay out of it."""
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    other = db.create_mission("Something else", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    mission_entry = db.ask_question(mission["mission_id"], "mission q", "guest:a", "A", db_path=path)
+    pillar_entry = db.ask_question(
+        mission["mission_id"], "pillar q", "guest:b", "B",
+        pillar_id=pillar["pillar_id"], db_path=path,
+    )
+    db.ask_question(other["mission_id"], "other q", "guest:c", "C", db_path=path)
+
+    listed = db.list_whole_mission_conversation(mission["mission_id"], db_path=path)
+    assert [e["entry_id"] for e in listed] == [
+        mission_entry["entry_id"], pillar_entry["entry_id"],
+    ]
+
+
 def test_list_pillar_conversation_returns_only_that_pillars_entries(tmp_path):
     path = _db_path(tmp_path)
     mission = db.create_mission("OSS Insights", db_path=path)
