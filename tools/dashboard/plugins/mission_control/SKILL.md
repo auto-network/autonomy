@@ -641,6 +641,13 @@ actual envelope. Publish a concrete stand-in, marked plainly as provisional,
 as soon as the behaviour is agreed. Two pillars guessing independently produce
 two incompatible guesses, and both find out late.
 
+The same point from the deciding side: **say what level a decision is settled
+at.** A decision marked settled reads as buildable, and one settled on
+behaviour alone is not — whoever builds against it has to invent the interface
+and will not know they were inventing. If the behaviour is agreed and the
+shape is not, say exactly that, so the gap is visible instead of being
+discovered by two pillars separately filling it in.
+
 **Drive to end-to-end.** The target is the whole flow exercised, start to
 finish, with every unresolved thing standing in as a stub. Every stage having
 run once — even against stand-ins — is what proves the shape is right.
