@@ -573,7 +573,7 @@
               <div class="mb-2 flex items-center justify-between gap-3">
                 <div class="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Changed in working tree</div>
                 <div class="flex shrink-0 items-center gap-2 font-mono text-[10px] text-slate-500">
-                  <span x-text="dirtyFiles(row).length + ' files'"></span>
+                  <span x-text="dirtyCount(row) + ' files'"></span>
                 </div>
               </div>
               <div class="divide-y divide-white/10 border-y border-white/10">
@@ -588,8 +588,8 @@
                   </div>
                 </template>
               </div>
-              <template x-if="dirtyFiles(row).length > 3">
-                <div class="mt-2 text-[11px] text-slate-500" x-text="'+' + (dirtyFiles(row).length - 3) + ' more paths in full view'"></div>
+              <template x-if="dirtyCount(row) > 3">
+                <div class="mt-2 text-[11px] text-slate-500" x-text="'+' + (dirtyCount(row) - 3) + ' more paths in full view'"></div>
               </template>
             </div>
           </article>

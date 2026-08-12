@@ -414,6 +414,9 @@
         stats: _commitStats(commit),
       })),
       dirty_files: row.dirty_files || [],
+      dirty_count: (typeof row.dirty_count === 'number')
+        ? row.dirty_count
+        : (row.dirty_files || []).length,
     }));
   }
 
@@ -864,6 +867,14 @@
 
       dirtyFiles(row) {
         return (row && row.dirty_files) || [];
+      },
+
+      // The list payload ships only a 3-entry preview of dirty_files plus an
+      // explicit dirty_count. Trust the count when present; fall back to the
+      // array length for older payloads that predate the count field.
+      dirtyCount(row) {
+        if (row && typeof row.dirty_count === 'number') return row.dirty_count;
+        return ((row && row.dirty_files) || []).length;
       },
 
       shortSha(sha) {

@@ -167,6 +167,7 @@ class TestWorktreeAPI:
                 "path": "tools/dashboard/static/js/pages/worktrees.js",
                 "additions": 12,
                 "deletions": 3,
+                "is_dir": False,
             }],
             "stats": {
                 "files": 1,
@@ -174,6 +175,41 @@ class TestWorktreeAPI:
                 "deletions": 3,
             },
         }]
+
+    def test_get_worktrees_previews_dirty_files_and_reports_true_count(
+        self, test_client, monkeypatch
+    ):
+        # The list payload ships at most 3 dirty entries as a preview plus an
+        # explicit dirty_count carrying the true total, so the UI can render
+        # "+N more" without every path travelling over the wire. Directory
+        # entries (collapsed untracked dirs) are flagged with is_dir.
+        dirty = [
+            GitFileChange(status="??", path="node_modules/", is_dir=True),
+            GitFileChange(status="??", path="build/", is_dir=True),
+            GitFileChange(status="M", path="a.txt"),
+            GitFileChange(status="M", path="b.txt"),
+            GitFileChange(status="M", path="c.txt"),
+        ]
+        _server, _fake = _install_fake_monitor(
+            monkeypatch, [_row(dirty=True, dirty_files=dirty)]
+        )
+
+        resp = test_client.get("/api/worktrees")
+
+        assert resp.status_code == 200
+        row = resp.json()[0]
+        assert row["dirty_count"] == 5
+        assert len(row["dirty_files"]) == 3
+        assert row["dirty_files"][0] == {
+            "status": "??",
+            "path": "node_modules/",
+            "additions": 0,
+            "deletions": 0,
+            "is_dir": True,
+        }
+        assert [f["path"] for f in row["dirty_files"]] == [
+            "node_modules/", "build/", "a.txt",
+        ]
 
     def test_post_worktrees_refresh_forces_live_rescan(self, test_client, monkeypatch):
         _server, fake = _install_fake_monitor(monkeypatch, [_row()])
@@ -564,6 +600,7 @@ class TestWorktreeAPI:
                 "path": "dirty.txt",
                 "additions": 4,
                 "deletions": 1,
+                "is_dir": False,
             }],
             "patch": "diff --git a/dirty.txt b/dirty.txt",
         }
@@ -592,8 +629,8 @@ class TestWorktreeAPI:
         body = resp.json()
         assert body["patch"].startswith("diff --git a/a.txt")
         assert body["files"] == [
-            {"status": "M", "path": "a.txt", "additions": 8, "deletions": 2},
-            {"status": "A", "path": "b.txt", "additions": 3, "deletions": 0},
+            {"status": "M", "path": "a.txt", "additions": 8, "deletions": 2, "is_dir": False},
+            {"status": "A", "path": "b.txt", "additions": 3, "deletions": 0, "is_dir": False},
         ]
 
     def test_pr_diff_endpoint_surfaces_workspace_error_as_404(self, test_client, monkeypatch):

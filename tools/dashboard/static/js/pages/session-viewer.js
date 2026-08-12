@@ -2793,7 +2793,9 @@
         var commitsAhead = 0;
         for (var i = 0; i < matching.length; i++) {
           var r = matching[i];
-          if (r.is_dirty) dirtyCount += (r.dirty_files || []).length;
+          if (r.is_dirty) dirtyCount += (typeof r.dirty_count === 'number')
+            ? r.dirty_count
+            : (r.dirty_files || []).length;
           commitsAhead += r.commits_ahead || 0;
         }
         this._workspaceStatus = {

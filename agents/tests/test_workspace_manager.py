@@ -382,6 +382,57 @@ def test_git_add_and_commit_succeed_in_session_worktree(tmp_path, monkeypatch):
     assert clone_branch_sha == head_after
 
 
+def test_worktree_dirty_files_collapses_untracked_dirs_and_flags_is_dir(tmp_path):
+    """``_worktree_dirty_files`` reports an untracked directory as ONE is_dir
+    entry (git's default), not every file beneath it, while tracked
+    modifications stay per-file. This is the core of the -uall payload fix:
+    dropping the flag must not descend into untracked dirs, and must not hide
+    any tracked change.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    (repo / "tracked.txt").write_text("original\n")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init"],
+        check=True,
+    )
+
+    # A tracked modification (must be reported per-file) ...
+    (repo / "tracked.txt").write_text("changed\n")
+    # ... and an untracked directory full of files (must collapse to one entry).
+    node_modules = repo / "node_modules" / "pkg" / "deep"
+    node_modules.mkdir(parents=True)
+    for i in range(20):
+        (node_modules / f"f{i}.js").write_text("x\n")
+    (repo / "loose.txt").write_text("new\n")  # untracked plain file
+
+    files = wm._worktree_dirty_files(repo)
+    assert files is not None
+    by_path = {f.path: f for f in files}
+
+    # The 20-file directory collapsed to a single is_dir entry.
+    assert "node_modules/" in by_path
+    assert by_path["node_modules/"].is_dir is True
+    assert by_path["node_modules/"].status == "??"
+    assert not any(p.startswith("node_modules/") and p != "node_modules/" for p in by_path)
+
+    # Tracked modification survives, per-file, not flagged as a directory.
+    assert "tracked.txt" in by_path
+    assert by_path["tracked.txt"].status == "M"
+    assert by_path["tracked.txt"].is_dir is False
+
+    # Untracked plain file: reported, not a directory.
+    assert "loose.txt" in by_path
+    assert by_path["loose.txt"].is_dir is False
+
+    # Three entries total, not 22.
+    assert len(files) == 3
+
+
 def test_prepare_session_mounts_empty_for_repoless_project(tmp_path):
     proj = ProjectConfig(
         id="autonomy", name="autonomy", description="",

@@ -970,6 +970,7 @@ class GitFileChange:
     path: str
     additions: int = 0
     deletions: int = 0
+    is_dir: bool = False
 
 
 @dataclass(frozen=True)
@@ -1588,9 +1589,16 @@ def _parse_numstat(value: str) -> int:
 
 
 def _worktree_dirty_files(worktree: Path) -> list[GitFileChange] | None:
-    """Return ``git status --porcelain`` paths for uncommitted worktree files."""
+    """Return ``git status --porcelain`` paths for uncommitted worktree files.
+
+    Untracked directories are collapsed to a single entry (git's default,
+    ``--untracked-files=normal``) rather than exploded into every file
+    beneath them: one ``node_modules/`` row instead of tens of thousands.
+    ``--untracked-files`` affects only untracked reporting — tracked
+    modifications, deletions, and staged changes are always listed per-file.
+    """
     rc, out, _ = _git_output(
-        ["status", "--porcelain", "--untracked-files=all"],
+        ["status", "--porcelain", "--untracked-files=normal"],
         worktree,
         timeout=15,
     )
@@ -1604,7 +1612,10 @@ def _worktree_dirty_files(worktree: Path) -> list[GitFileChange] | None:
         status = line[:2].strip() or line[:2]
         path = line[3:].strip() if len(line) > 3 else ""
         if path:
-            files.append(GitFileChange(status=status, path=path))
+            # git emits a trailing slash on collapsed untracked directories.
+            files.append(GitFileChange(
+                status=status, path=path, is_dir=path.endswith("/"),
+            ))
     return files
 
 
@@ -2356,7 +2367,7 @@ def scan_all_worktrees(
             # Only scan real git worktrees. A half-provisioned workspace dir
             # (e.g. clones not yet landed) has no `.git`; running git there
             # makes git walk UP to the enclosing autonomy superrepo, and
-            # `status --untracked-files=all` then traverses the entire data/
+            # `git status` then traverses the entire data/
             # tree (every worktree, agent-runs, graph.db, …) — pegging CPU and
             # ballooning RSS until the scan never returns and the dashboard
             # startup hook hangs forever. Skip non-worktree dirs.
