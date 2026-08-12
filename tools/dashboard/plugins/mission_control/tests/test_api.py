@@ -1912,3 +1912,42 @@ def test_last_done_requires_a_string_and_a_real_pillar():
                        json={"last_done": 5}).status_code == 400
     assert client.post("/api/pillars/nope/last-done",
                        json={"last_done": "x"}).status_code == 404
+
+
+def test_a_reader_announcing_itself_appears_in_presence():
+    """Presence recorded only sessions that PUSH, so the people a mission is
+    written for never appeared on it. A reader now says it is here and gets
+    back who else is."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    with patch("tools.graph.surface.Presence", MagicMock()), \
+         patch.object(mc_api, "_surface_presence",
+                      lambda s: [{"participant_id": "guest:with-the-link"}]):
+        out = _run(mc_api.handle_relay_read("", mission_id, {"kind": "here"}))
+    assert out["presence"][0]["participant_id"] == "guest:with-the-link"
+
+
+def test_an_unbound_reader_is_named_honestly():
+    """Everyone holding one anonymous link is the same participant as far as
+    anything here can tell, and it says so rather than inventing visitors."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    seen = {}
+    with patch.object(mc_api, "_heartbeat_presence",
+                      lambda s, who, label, kind="agent": seen.update(
+                          surface=s, who=who, label=label, kind=kind)), \
+         patch.object(mc_api, "_surface_presence", lambda s: []):
+        _run(mc_api.handle_relay_read("", mission_id, {"kind": "here"}))
+    assert seen["who"] == "guest:with-the-link"
+    assert seen["label"] == "Someone with the link"
+    assert seen["kind"] == "person"
+    assert seen["surface"] == f"mission:{mission_id}"
+
+
+def test_a_reader_cannot_announce_onto_another_missions_pillar():
+    client = _client()
+    mission_a = _mission_with_site(client)
+    mission_b = client.post("/api/missions", json={"name": "B"}).json()["mission"]["mission_id"]
+    pillar_b = _pillar_with_site(client, mission_b)
+    assert _run(mc_api.handle_relay_read(
+        "", mission_a, {"kind": "here", "pillar_id": pillar_b["pillar_id"]})) is None
