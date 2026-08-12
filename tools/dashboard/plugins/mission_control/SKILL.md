@@ -1,13 +1,15 @@
 # Mission Control — pushing a mission site from an agent session
 
-Mission Control (`/mission-control`) hosts native sites, one per
-mission, with immutable revision history. P1: missions + site hosting. P2
-(§6): visitor Q&A attribution, including reopening an answered question for
-a follow-up round. P3 (§7): presence and "what changed since you last
-looked." P4 (§8): pillars — a mission split into dedicated sub-coordinators,
-each with its own site, presence surface, and anchored conversation. §9:
-how to actually write what goes in the record. **§10 is the contract — what
-you push and what the platform adds. Read it first if you read nothing else.**
+Mission Control (`/mission-control`) hosts native sites, one per mission,
+with immutable revision history.
+
+A mission is a set of screens and a decision log. §6: a visitor asks a
+question, you answer, and the pair becomes the record — reopenable if your
+answer was not right. §7: presence, and what changed since someone last
+looked. §8: pillars — a mission split into dedicated sub-coordinators, each
+with its own screen, presence surface and anchored conversation. §9: how to
+write what goes in the record. **§10 is the contract — what you push and
+what the platform adds. Read it first if you read nothing else.**
 
 Dashboard base URL: `https://localhost:8080` on host-network sessions,
 `https://host.docker.internal:8080` from bridge-network containers (`curl -sk`).
@@ -26,10 +28,10 @@ curl -sk https://host.docker.internal:8080/api/missions \
 ```
 
 The entity is deliberately minimal — `{mission_id, name, coordinator_session,
-created_at}`. `coordinator_session` is plain data, not an invariant: it isn't
-hard-bound anywhere in P1 and can go stale if the coordinator session is
-replaced. There is no PATCH for it yet; that lands with P2 (the Q&A relay
-reads it at message time).
+created_at}`. `coordinator_session` is plain data, not an invariant: nothing
+binds it, and it goes stale if the coordinator session is replaced. The Q&A
+relay reads it at message time, so a stale value delivers messages to a
+session that is gone. Set it correctly at creation.
 
 ## 2. Push a site revision (the only call you need per update)
 
@@ -116,12 +118,12 @@ curl -sk https://host.docker.internal:8080/api/missions/<mission_id>/status \
   -X POST -H 'Content-Type: application/json' -d '{"status": "paused"}'
 ```
 
-## 6. Q&A — visitors ask, you answer (P2)
+## 6. Q&A — visitors ask, you answer
 
 A person viewing the mission site can ask a question; you get notified over
-CrossTalk; you answer via the API; the question + your final answer become
-part of the mission's permanent conversation history. P2 scope is
-attribution only — no live presence integration yet.
+CrossTalk; you answer via the API; the question and your final answer become
+part of the mission's permanent record. Every question is attributed to the
+person who asked it, and every answer to you.
 
 ### Mint a share link for a person (you do this, once per person)
 
@@ -197,7 +199,7 @@ only ever show the current question/answer pair, never the rounds it took
 to get there. This can repeat any number of times; the record stays one
 row regardless.
 
-## 7. Presence and "what changed" (P3)
+## 7. Presence and "what changed"
 
 The dashboard home page shows, per mission, who's currently aware of it and
 what happened since the operator last looked. Neither of these is
@@ -252,7 +254,7 @@ Handlers: `get_mission`/`mark_mission_seen` in
 `tools/dashboard/plugins/mission_control/entrypoints/api.py`, backed by
 `mission_last_seen` in `tools.dashboard.dao.mission_control_db`.
 
-## 8. Pillars — sub-missions with their own coordinator (P4)
+## 8. Pillars — sub-missions with their own coordinator
 
 A large mission (data pipeline + schema + delivery + API/UI, say) doesn't
 have to live in one 55,000-word binder. Split it into **pillars**: each one
@@ -347,8 +349,7 @@ see §9 for how to actually write it.
 `coordinator_session` (you — a reply is expected) **and** the mission's
 top-level `coordinator_session` (copied, tracking only, no reply expected
 from them). A mission-level message (no pillar) goes to the mission's
-coordinator only, unchanged from P2. Your CrossTalk envelope tells you
-which role you're in.
+coordinator only. Your CrossTalk envelope tells you which role you're in.
 
 **Only answer once it's actually correct — not provisionally.** An entry
 with no `answer` yet is simply open; there's no separate "processing"
@@ -553,8 +554,8 @@ You do not build any of this, and you should not duplicate it:
 Two consequences worth stating plainly:
 
 - **Do not build your own pillar navigation, question list or Q&A widget.**
-  Earlier versions of this document told you to; that was before the platform
-  provided them. A hand-rolled one now competes with the real one.
+  The platform renders all three, on every screen, for free. A hand-rolled
+  one competes with the real one for the same job and the same screen space.
 - **Do not position anything fixed at the very top of the page.** That strip
   belongs to the bar.
 
@@ -590,3 +591,43 @@ the content; the state around it is not yours to fetch.
 
 Everything else — your layout, your styling, your interactivity, your data
 baked into the page at push time — is entirely yours.
+
+---
+
+## How this document is maintained
+
+This skill is read by coordinators who have just been created. It is written
+for exactly that reader, always. Three things it defines, and nothing else:
+
+1. **The infrastructure** — what Mission Control is and what it does for you.
+2. **The workflow** — who does what, when.
+3. **The ideal form of the artifacts** — what a good screen, a good answer and
+   a good status line actually look like.
+
+**It never tells stories.** These are not stylistic preferences; a revision
+that breaks one is wrong and should be rewritten before it lands:
+
+- **No history.** Not what a feature replaced, not what an earlier version of
+  this document said, not which release something arrived in. A reader who
+  has never seen the old thing gains nothing and is handed a second, obsolete
+  model of the system to hold in their head.
+- **No transitions.** A guide for moving from how things were to how they are
+  is correct exactly once and misleading forever after. Transitions are
+  delivered directly, by the mission controller to its pillars, for the one
+  set of screens that needs them. They do not belong here.
+- **No futures.** Nothing about what does not exist yet, what is planned, or
+  what will land later. If a capability is absent, either the document is
+  silent about it or it states the present limit plainly, in the present
+  tense, with no promise attached.
+- **No development phases.** Coordinators do not know or care in what order
+  this was built.
+
+**Everything is present tense and current.** Write as though the system has
+always worked exactly this way and this is the first anyone is hearing of it.
+
+**Refine it from evidence.** As practice teaches better ways to run a mission,
+present a screen or write a record, this document absorbs them — and drops
+whatever they replaced, leaving no trace of the earlier advice. Growing more
+accurate is the point; growing longer is not. The best version of this
+document is the shortest one that still specifies, precisely, the best way we
+currently know to run a mission.
