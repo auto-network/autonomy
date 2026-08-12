@@ -581,6 +581,22 @@ The control mounts **inside** that element, never as a sibling — a sibling
 would break your own adjacent-sibling (`+`) CSS rules. The value is free text
 that means something to you; it is what the question gets tagged with.
 
+**An anchor with a discussion attached is not yours to rename.** Questions are
+tagged with the anchor value, so changing or dropping one leaves its
+conversation with nowhere to appear beside the content it is about. The
+question survives and still lists, but the reader who would have found it
+next to the thing it discusses no longer does.
+
+Before you rewrite a screen, check which of your anchors carry questions:
+
+```bash
+curl -sk https://host.docker.internal:8080/api/pillars/<pillar_id>/questions \
+  | python3 -c 'import json,sys; [print(q["anchor"], "—", q["question"][:60]) for q in json.load(sys.stdin)["questions"]]'
+```
+
+Any anchor in that list keeps its exact value, on whichever element now holds
+that subject. Anchors with no questions are free to change.
+
 ### The two things that do not work, and why
 
 **Scripts must be inline.** The relay serves your document under a CSP that
