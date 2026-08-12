@@ -14,7 +14,12 @@
    here pins it to itself and it scrolls away on the first swipe. The host
    is a child of body, so body's whole height is its range. */
 .mc-bar {
-  position: static; z-index: 2147483000;
+  /* FIXED, not sticky. A sticky element is positioned within the document,
+     so it travels sideways with it -- if anything on the page widens the
+     document, the bar scrolls off the left edge. Fixed is positioned
+     against the viewport and cannot. The host below reserves the space so
+     nothing is covered. */
+  position: fixed; top: 0; left: 0; right: 0; z-index: 2147483000;
   /* NOT full-bleed. 100vw plus negative margins spans the viewport and, on
      iOS, overflows it -- 100vw ignores the space the browser reserves, so
      the page gains a horizontal scroll axis with empty gutters on either
