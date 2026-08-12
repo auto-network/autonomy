@@ -208,7 +208,7 @@ def _heartbeat_coordinator_presence(surface_id: str, coordinator_session: str) -
             participant_kind="agent",
             participant_id=coordinator_session,
             label=coordinator_session,
-            org="autonomy",
+            org=compose.PRESENCE_ORG,
         ):
             pass
     except Exception:
@@ -1026,7 +1026,7 @@ def _mission_presence(mission_id: str) -> list[dict]:
     prefix = f"mission:{mission_id}:"
     try:
         rows = settings_ops.read_set(
-            SURFACE_PRESENCE_SET_ID, org=settings_ops.CALLER_ORG,
+            SURFACE_PRESENCE_SET_ID, org=compose.PRESENCE_ORG,
         )
     except (LookupError, OSError, ValueError):
         return []  # store genuinely unavailable; a missing arg is not that

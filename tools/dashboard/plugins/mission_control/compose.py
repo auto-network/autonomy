@@ -19,6 +19,24 @@ import time
 from tools.dashboard.dao import mission_control_db as db
 from tools.dashboard.scripts.build_mission_viewer import bootstrap_source
 
+#: The org whose Settings store holds mission presence.
+#:
+#: Both the writer (a coordinator heartbeat on push or answer) and the reader
+#: (this composer, and the API's presence endpoint) MUST name the same one.
+#: The writer used to hardcode it while the readers used the caller-derived
+#: sentinel, which resolves through a contextvar, then GRAPH_ORG, then None --
+#: so in a process with no GRAPH_ORG the two sides used different databases
+#: and the bar said "nobody here" while the rows sat exactly where they were
+#: written. See graph://53f7412f-51e for the general shape of that hazard;
+#: the guard there does not cover it, because the side that opted out of the
+#: cascade was the WRITER.
+#:
+#: A literal, and honestly so: missions are not org-scoped -- there is one
+#: mission_control.db and no org column on a mission -- so their presence
+#: surface cannot be either. When a mission carries an org, this derives from
+#: the mission and stops being a constant.
+PRESENCE_ORG = "autonomy"
+
 #: ``<base href="about:srcdoc">`` is what makes ``#fragment`` links resolve
 #: in-document inside a sandboxed srcdoc frame; without it they resolve
 #: against the bootloader's URL and navigate the frame away. The registry
@@ -48,11 +66,31 @@ _HEAD = (
 )
 
 
-def _ago(then: float | None, now: float) -> str:
-    """A duration a human reads at a glance: 40s, 12m, 4h, 3d."""
+def _ago(then, now: float) -> str:
+    """A duration a human reads at a glance: 40s, 12m, 4h, 3d.
+
+    Accepts either epoch seconds or an ISO 8601 timestamp, because the two
+    sources here genuinely differ: revision rows carry epoch floats, and
+    presence rows carry strings like "2026-08-12T18:34:18Z". Doing arithmetic
+    on the string raises, and it raises INSIDE the loop that builds the
+    who-list -- so the first time presence actually returned a row, every
+    screen would have failed to render.
+    """
     if not then:
         return ""
-    seconds = max(0, int(now - then))
+    if isinstance(then, str):
+        from datetime import datetime, timezone
+        try:
+            parsed = datetime.fromisoformat(then.replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        then = parsed.timestamp()
+    try:
+        seconds = max(0, int(now - float(then)))
+    except (TypeError, ValueError):
+        return ""
     if seconds < 60:
         return f"{seconds}s"
     if seconds < 3600:
@@ -85,7 +123,7 @@ def _presence(surface_id: str, now: float) -> list[dict]:
         # here" -- silently, forever, on every screen. Presence being
         # decoration is a reason to degrade, never a reason not to look.
         rows = settings_ops.read_set(
-            SURFACE_PRESENCE_SET_ID, org=settings_ops.CALLER_ORG,
+            SURFACE_PRESENCE_SET_ID, org=PRESENCE_ORG,
         )
     except (LookupError, OSError, ValueError):
         return []          # store genuinely unavailable: render nobody
