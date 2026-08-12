@@ -22,15 +22,23 @@ import argparse
 import asyncio
 import json
 import sys
+import urllib.error
+import urllib.request
 from urllib.parse import urlparse
-
-import httpx
 
 REPO_ROOT = __file__.rsplit("/tools/", 1)[0]
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from tools.network.relaykit.viewer import ViewerChannel  # noqa: E402
+# The HTTP rungs use nothing but the standard library ON PURPOSE. A proof
+# step that cannot run is worse than no proof step: the first real use of
+# this script died on a missing dependency AFTER the service had restarted,
+# so a successful deploy printed a traceback and read as an outage.
+#
+# The guest path genuinely cannot be dependency-free -- it speaks the real
+# channel protocol -- so ViewerChannel is imported lazily, inside the
+# function that needs it. Under a bare interpreter the HTTP rungs still run
+# and prove something; only --link degrades, and it says why.
 
 #: Directives whose absence is a real regression, not a style change.
 #: Frame isolation is the iframe's own sandbox attribute, NOT a CSP
@@ -53,45 +61,74 @@ def _check(name: str, ok: bool, detail: str = "") -> None:
         raise SmokeFailure(name)
 
 
+class Response:
+    """status + headers + body, whether or not the status was a success.
+
+    urlopen raises on 4xx/5xx, and HTTPError IS the response -- which
+    matters here, because a 404 carrying the whole shell is exactly what
+    one of these rungs asserts.
+    """
+
+    def __init__(self, status: int, headers, body: bytes):
+        self.status = status
+        self.headers = headers
+        self.body = body
+
+    def header(self, name: str, default: str = "") -> str:
+        return self.headers.get(name, default) or default
+
+
+def get(url: str, timeout: float = 15.0) -> Response:
+    request = urllib.request.Request(url, headers={"User-Agent": "autonomy-smoke/1"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return Response(response.status, response.headers, response.read())
+    except urllib.error.HTTPError as error:
+        return Response(error.code, error.headers, error.read())
+
+
 def http_rungs(base: str) -> None:
-    with httpx.Client(base_url=base.rstrip("/"), timeout=15.0,
-                      follow_redirects=True) as client:
-        health = client.get("/healthz")
-        _check("healthz", health.status_code == 200, f"{health.status_code}")
+    base = base.rstrip("/")
+    health = get(f"{base}/healthz")
+    _check("healthz", health.status == 200, f"{health.status}")
 
-        asset = client.get("/l-assets/autonet.js")
-        _check("bootloader asset serves", asset.status_code == 200,
-               f"{len(asset.content)} bytes")
-        # A deploy that shipped a truncated or wrong file still returns 200.
-        _check("bootloader is the real one",
-               b"performHandshake" in asset.content
-               and b"ChannelBroker" in asset.content)
-        _check("bootloader is uncacheable",
-               asset.headers.get("cache-control") == "no-store",
-               asset.headers.get("cache-control", "<missing>"))
+    asset = get(f"{base}/l-assets/autonet.js")
+    _check("bootloader asset serves", asset.status == 200,
+           f"{len(asset.body)} bytes")
+    # A deploy that shipped a truncated or wrong file still returns 200.
+    _check("bootloader is the real one",
+           b"performHandshake" in asset.body and b"ChannelBroker" in asset.body)
+    _check("bootloader is uncacheable",
+           asset.header("cache-control") == "no-store",
+           asset.header("cache-control", "<missing>"))
 
-        # ONE byte sequence for every token; only the STATUS differs, and it
-        # mirrors the envelope endpoint's liveness rule so the shell opens no
-        # oracle the envelope does not already. An unknown token is a 404
-        # that still carries the whole shell -- asserting 200 here would be
-        # asserting a leak.
-        shell = client.get("/l/not-a-real-token")
-        _check("unknown token is 404, not an oracle", shell.status_code == 404,
-               f"{shell.status_code}")
-        _check("shell bytes served anyway",
-               b"/l-assets/autonet.js" in shell.content,
-               f"{len(shell.content)} bytes")
-        csp = shell.headers.get("content-security-policy", "")
-        for directive in REQUIRED_CSP:
-            _check(f"CSP carries {directive!r}", directive in csp)
+    # ONE byte sequence for every token; only the STATUS differs, and it
+    # mirrors the envelope endpoint's liveness rule so the shell opens no
+    # oracle the envelope does not already. An unknown token is a 404 that
+    # still carries the whole shell -- asserting 200 would be asserting a leak.
+    shell = get(f"{base}/l/not-a-real-token")
+    _check("unknown token is 404, not an oracle", shell.status == 404,
+           f"{shell.status}")
+    _check("shell bytes served anyway",
+           b"/l-assets/autonet.js" in shell.body, f"{len(shell.body)} bytes")
+    csp = shell.header("content-security-policy")
+    for directive in REQUIRED_CSP:
+        _check(f"CSP carries {directive!r}", directive in csp)
 
 
 async def channel_rungs(base: str, token: str) -> None:
-    with httpx.Client(base_url=base.rstrip("/"), timeout=15.0) as client:
-        response = client.get(f"/v1/links/{token}/envelope")
-        _check("link envelope resolves", response.status_code == 200,
-               f"{response.status_code}")
-        envelope = response.json()
+    # Lazily, so a bare interpreter still runs everything above this.
+    try:
+        from tools.network.relaykit.viewer import ViewerChannel
+    except ImportError as error:
+        raise SmokeFailure(
+            f"guest path needs the relaykit deps ({error.name}); run this with "
+            "the repo venv, or set PYTHON=/path/to/venv/bin/python"
+        ) from None
+
+    response = get(f"{base.rstrip('/')}/v1/links/{token}/envelope")
+    _check("link envelope resolves", response.status == 200, f"{response.status}")
+    envelope = json.loads(response.body)
 
     scheme = "wss" if urlparse(base).scheme == "https" else "ws"
     relay = f"{scheme}://{urlparse(base).netloc}"
