@@ -375,15 +375,40 @@
     // the panel has to be re-measured -- the resize event alone can land
     // before the browser has settled on a height.
     ta.addEventListener("focus", function () { setTimeout(measureKeyboard, 250); });
+    // Grow with what is typed. A fixed two rows meant a long question
+    // scrolled inside a box the size of two lines, with the beginning of
+    // your own sentence hidden above the fold while you wrote the end.
+    function grow() {
+      ta.style.height = "auto";
+      ta.style.height = Math.min(ta.scrollHeight, window.innerHeight * 0.4) + "px";
+    }
+    ta.addEventListener("input", grow);
+    setTimeout(grow, 0);
+    // With no channel there is nothing to send to, and a button that looks
+    // live and does nothing is worse than one that says so.
+    var status = el("span", {class: "mc-sub", text: ui.noChannel
+      ? "Cannot reach the mission from here \u2014 asking is unavailable."
+      : note});
+    var send = el("button", {
+      class: "mc-send", text: label,
+      onclick: function () {
+        var text = ta.value.trim();
+        if (!text) return;
+        status.textContent = "Sending\u2026";
+        Promise.resolve(onSend(text)).then(function () {
+          ta.value = ""; grow(); status.textContent = note;
+        }, function (err) {
+          // Never silent. A refused write used to reject a promise nobody
+          // was listening to, so the tap did nothing and said nothing.
+          status.textContent = "Not sent: " + ((err && err.message) || "refused");
+        });
+      },
+    });
+    if (ui.noChannel) send.disabled = true;
     return el("div", {class: "mc-foot"}, [
       ta,
       el("div", {class: "mc-foot-row"}, [
-        el("span", {class: "mc-sub", text: note}),
-        el("button", {class: "mc-send", text: label,
-                      onclick: function () { if (ta.value.trim()) onSend(ta.value.trim()); }}),
-        // A textarea keeps focus while a button is tapped on some mobile
-        // browsers, so the keyboard never closes and the panel never
-        // re-measures. Blur on submit and re-measure either way.
+        status, send,
       ]),
     ]);
   }

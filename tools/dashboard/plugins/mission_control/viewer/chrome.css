@@ -104,8 +104,14 @@
 .mc-foot { flex: none; border-top: 1px solid #1e293b; padding: .75rem;
            padding-bottom: calc(.75rem + env(safe-area-inset-bottom)); }
 .mc-foot-row { display: flex; align-items: center; justify-content: space-between; margin-top: .5rem; }
+/* 16px is NOT a style choice. iOS Safari zooms the page when a focused
+   input's text is smaller than that, and the zoom persists after the
+   keyboard closes -- the page stays panned, the top bar scrolls out of
+   reach, and the send button ends up off-screen to the right. Anything
+   below 16px here breaks the whole layout on a phone. */
 .mc-ta { width: 100%; background: #0f172a; border: 1px solid #334155; border-radius: .4rem;
-         color: #e2e8f0; padding: .5rem .65rem; font: inherit; font-size: .9rem; resize: none; }
+         color: #e2e8f0; padding: .5rem .65rem; font: inherit; font-size: 16px;
+         line-height: 1.4; resize: none; max-height: 40vh; overflow-y: auto; }
 /* A comfortable tap target. The old padding gave roughly 28px of height,
    under every mobile guideline and easy to miss with a thumb. */
 .mc-send { background: #0ea5e933; border: 1px solid #0ea5e966; color: #bae6fd;
