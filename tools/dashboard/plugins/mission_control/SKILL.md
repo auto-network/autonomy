@@ -618,6 +618,28 @@ Retiring is not deleting. The entry leaves the screen and stops counting as
 open; what was asked, what it was answered with, and why it stopped mattering
 all stay in the record. Posting an empty note brings it back.
 
+### Sections
+
+Mark each top-level section of your screen and the platform pins a navigator
+under the bar: a horizontal strip of section names that scrolls sideways
+within itself, marks the section you are currently reading, and keeps that
+one in view as you scroll.
+
+```html
+<section data-mc-section="Objective and scope"> ... </section>
+<section data-mc-section="The work"> ... </section>
+<section data-mc-section="Decisions"> ... </section>
+```
+
+One attribute. You decide what a section is, what it is called and what goes
+in it; the platform decides how that behaves on a phone. Declare none and
+there is no strip.
+
+**Do not build your own.** Not because yours would be worse, but because two
+pinned bars that do not know about each other collide: yours pins at the top
+of the viewport, the platform's bar is already there, and yours disappears
+underneath it. The platform can stack them only when it owns both.
+
 ### The two things that do not work, and why
 
 **Scripts must be inline.** The relay serves your document under a CSP that
