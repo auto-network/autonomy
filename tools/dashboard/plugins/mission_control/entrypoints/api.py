@@ -1,6 +1,6 @@
 """Mission Control backend API.
 
-P1: missions + native chromeless site hosting. Entity model is deliberately
+P1: missions + native site hosting. Entity model is deliberately
 minimal — a mission is ``{mission_id, name, coordinator_session,
 created_at, current_revision_id, status}``. Resources and live data feeds
 arrive with their own phases and are not guessed at here.
@@ -511,7 +511,7 @@ async def get_decision_log(request: Request) -> JSONResponse:
     return JSONResponse({"decision_log": entries})
 
 
-# ── Chromeless public serving ────────────────────────────────────
+# ── Public serving: one composed screen (see compose.py) ─────────
 #
 # No dashboard chrome, stable URL across every future revision push. The
 # freshness requirement is explicit (a coordinator watching work-in-progress
