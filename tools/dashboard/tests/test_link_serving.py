@@ -805,7 +805,8 @@ class TestMissionResolver:
         served = sliced(body, header["viewer"])
         # The author's document, byte for byte, inside the composed screen.
         assert b"<html>rev one</html>" in served
-        assert served.startswith(b'<!doctype html>\n<base href="about:srcdoc">')
+        assert served.startswith(b'<!doctype html>\n<meta name="viewport"')
+        assert b'<base href="about:srcdoc">' in served
 
         # Same grant, same token -- push two more revisions and re-fetch.
         # A `design`-style pinned resolver would still show rev one here;
