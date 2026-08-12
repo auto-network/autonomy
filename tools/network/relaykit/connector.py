@@ -35,6 +35,7 @@ import asyncio
 import contextlib
 import inspect
 import json
+import logging
 import random
 import secrets
 import time
@@ -58,6 +59,8 @@ from .frames import (
     encode_frame,
 )
 from .hello import build_tunnel_hello
+
+logger = logging.getLogger(__name__)
 
 
 async def echo_handler(token: str, message: bytes) -> bytes:
@@ -359,6 +362,11 @@ class TunnelConnector:
         """Dial, serve, and re-dial until :meth:`stop`."""
         backoff = self._min_backoff
         while not self._stop.is_set():
+            # Lifetime of THIS attempt. A tunnel that handshakes and then dies
+            # instantly is indistinguishable from a healthy one at the hello,
+            # so the duration is the only thing that tells them apart — it is
+            # both what gets logged and what a reset-on-healthy backoff needs.
+            served_at = None
             try:
                 # compression=None: mux frames are E2E ciphertext (I5) —
                 # incompressible anyway, and literal bytes keep the
@@ -367,6 +375,7 @@ class TunnelConnector:
                                               compression=None) as ws:
                     await self._handshake(ws)
                     backoff = self._min_backoff
+                    served_at = time.monotonic()
                     self.connected.set()
                     try:
                         await self._serve(ws)
@@ -374,12 +383,36 @@ class TunnelConnector:
                         self.connected.clear()
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                pass  # transient by assumption; backoff decides the pace
+            except Exception as exc:
+                # NOT silent: every close the relay sends — 1001 going away,
+                # 4409 replaced, a rejected hello — arrives here. Swallowing it
+                # made a saturating reconnect storm undiagnosable from the
+                # connector side while it was actively happening.
+                self._log_disconnect(exc, served_at)
+            else:
+                self._log_disconnect(None, served_at)
             if self._stop.is_set():
                 return
             await asyncio.sleep(backoff * (1 + random.random() * 0.25))
             backoff = min(backoff * 2, self._max_backoff)
+
+    def _log_disconnect(self, exc: BaseException | None, served_at: float | None) -> None:
+        """One line per tunnel death: how long it lived, and why it ended.
+
+        ``lived`` is None when the connection never got past the handshake —
+        which distinguishes "cannot connect at all" from "connects then drops",
+        the two failure modes that look identical in a bare reconnect count.
+        """
+        lived = None if served_at is None else time.monotonic() - served_at
+        code = getattr(exc, "code", None)
+        reason = getattr(exc, "reason", None)
+        logger.warning(
+            "tunnel disconnected: lived=%s close_code=%s reason=%r err=%s: %s",
+            "never-served" if lived is None else f"{lived:.3f}s",
+            code, reason,
+            type(exc).__name__ if exc is not None else "clean-exit",
+            exc if exc is not None else "",
+        )
 
     async def _handshake(self, ws) -> None:
         """Authenticate a fresh tunnel. The peer-relay park connector
