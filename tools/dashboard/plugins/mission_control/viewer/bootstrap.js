@@ -84,6 +84,20 @@
   // Waits for the host's port rather than assuming one is already here: a tap
   // can land before the handover completes, and dropping that request would
   // look exactly like a dead control.
+  // Tell the mission we are reading it, and take back the current list of who
+  // else is. Presence otherwise only ever recorded sessions that PUSH, so the
+  // people a mission is written FOR never appeared on it at all.
+  function announceHere() {
+    var p = currentPillar();
+    var body = {kind: "here"};
+    if (p) body.pillar_id = p.pillar_id;
+    return request("read", body).then(function (r) {
+      if (!r || !r.presence) return;
+      if (p) { p.here = r.presence; } else { state.here = r.presence; }
+      render();
+    }, function () { /* a refused touch costs nothing and shows nothing */ });
+  }
+
   function request(op, body) {
     return havePort.then(function (p) {
       return new Promise(function (resolve, reject) {
@@ -525,6 +539,16 @@
     mountAnchors();
     collectSections();
     render();
+    announceHere();
+    // Presence is a claim with a shelf life, so it is re-stated rather than
+    // set once. Paused while the tab is hidden: nobody is reading a screen
+    // they cannot see, and saying otherwise is the lie this is meant to end.
+    setInterval(function () {
+      if (!document.hidden) announceHere();
+    }, 45000);
+    addEventListener("visibilitychange", function () {
+      if (!document.hidden) announceHere();
+    });
   }
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", start);

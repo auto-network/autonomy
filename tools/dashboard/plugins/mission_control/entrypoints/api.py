@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 
 from starlette.background import BackgroundTask
 from starlette.requests import Request
@@ -184,6 +185,30 @@ async def delete_mission(request: Request) -> JSONResponse:
     if not deleted:
         return JSONResponse({"error": "mission not found"}, status_code=404)
     return JSONResponse({"ok": True})
+
+
+def _heartbeat_presence(surface_id: str, participant_id: str,
+                        label: str = "", kind: str = "agent") -> None:
+    """Record that someone is on this surface right now. Never raises."""
+    if not participant_id:
+        return
+    try:
+        from tools.graph.surface import Presence
+        with Presence(
+            surface_id=surface_id, participant_kind=kind,
+            participant_id=participant_id, label=label or participant_id,
+            org=compose.PRESENCE_ORG,
+        ):
+            pass
+    except Exception:
+        logger.warning("presence heartbeat failed for surface=%s participant=%s",
+                       surface_id, participant_id, exc_info=True)
+
+
+def _surface_presence(surface_id: str) -> list[dict]:
+    """Everyone currently on one surface, mission or pillar."""
+    from tools.dashboard.plugins.mission_control import compose as _c
+    return _c._presence(surface_id, time.time())
 
 
 def _heartbeat_coordinator_presence(surface_id: str, coordinator_session: str) -> None:
@@ -1075,6 +1100,24 @@ async def handle_relay_read(participant_id: str, mission_id: str, body: dict) ->
 
     if kind == "presence":
         return {"presence": _mission_presence(mission_id)}
+
+    if kind == "here":
+        # A reader saying "I am looking at this". Presence otherwise only
+        # records sessions that PUSH -- so the people a mission is written for
+        # never appeared on it, and a coordinator reading for an hour without
+        # pushing looked absent.
+        #
+        # An unbound link has no participant, and everyone holding it is the
+        # same participant as far as anything here can tell. It says so
+        # plainly rather than inventing distinct visitors.
+        pillar_id = body.get("pillar_id")
+        if pillar_id is not None and _pillar_of_this_mission(pillar_id, mission_id) is None:
+            return None
+        surface_id = f"pillar:{pillar_id}" if pillar_id else f"mission:{mission_id}"
+        who = participant_id or "guest:with-the-link"
+        label = participant_id or "Someone with the link"
+        _heartbeat_presence(surface_id, who, label, kind="person")
+        return {"presence": _surface_presence(surface_id)}
 
     if kind == "pillar_site":
         # A composed screen, not raw author HTML: the viewer document.writes
