@@ -454,8 +454,11 @@ wrong and should be rewritten, not shipped:
 2. **No identifiers, ever.** No file paths, function or class names, table or
    column names, bead IDs, session names, branches, PR numbers, routes, env
    vars, or flags. If it is a token you could grep for, it does not go here.
-3. **No jargon.** No acronym or term that means something different inside
-   this project than it does in general English. Spell out the idea instead.
+3. **No jargon.** The test is your reader, not the word. A term someone
+   working in this field already uses is not jargon — write it. A term that
+   only means what it means inside this project — a component name, an
+   internal abbreviation, something you coined — does not go in, however
+   natural it has become to you.
 4. **No people, and no blockers.** Not who you are waiting on, not who owes
    what, not "blocked on Jeremy". If you need a human, that is what an open
    question is for — asking one is the action, saying you are stuck is not.
@@ -556,6 +559,9 @@ Two consequences worth stating plainly:
 - **Do not build your own pillar navigation, question list or Q&A widget.**
   The platform renders all three, on every screen, for free. A hand-rolled
   one competes with the real one for the same job and the same screen space.
+  This is about duplicating the chrome, not about linking: a link to another
+  screen from inside your prose, where it belongs to the sentence around it,
+  is content. Write those freely.
 - **Do not position anything fixed at the very top of the page.** That strip
   belongs to the bar.
 
@@ -630,9 +636,21 @@ not finish on the known.
 A screen with little to say usually means the work has not been driven far
 enough to find out what is unknown, not that it was written up badly.
 
+**Not every pillar builds.** A pillar whose deliverable is a record, a
+decision, or a body of research has no loop to run: there is nothing to stub
+and nothing to drive end-to-end. Neither does the coordinator, which does none
+of the mission's work by design (§13). If that is you, the depth that matters
+is in the material itself — is the record complete, is it accurate, does it
+still say something a reader needs. Say plainly that the loop does not apply
+rather than performing it. A thin screen backed by that statement is a
+correct outcome, not an under-driven one.
+
 ## 12. What your screen says
 
-Five things, in this order.
+Five things, in this order — a shape, not a form to fill in. A section with
+nothing real in it fails the relevance test below as surely as any other empty
+content, so leave it out rather than writing a heading over a blank. Most
+pillars have all five; some honestly have two.
 
 **A. Objective and scope.** What this pillar is for, what done looks like, and
 what it explicitly does not own.
@@ -700,6 +718,11 @@ says, is it irrelevant to the mission, and is it phrased so that only its
 author can read it?
 
 Expect edits. A review that changes nothing has not happened.
+
+A review outcome goes two places: to you, so you can act on it, and into the
+mission's own signpost note, so the mission keeps a record of what was cut and
+why. A judgement that lives only in a conversation is lost to the next pillar
+that would have made the same mistake.
 
 ---
 
