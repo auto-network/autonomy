@@ -15,10 +15,12 @@
    is a child of body, so body's whole height is its range. */
 .mc-bar {
   position: static; z-index: 2147483000;
-  /* Full-bleed: the host sits inside body, so whatever gutter the author
-     put on body would otherwise inset the bar. This spans the viewport
-     without knowing what that gutter is. */
-  width: 100vw; margin-left: calc(50% - 50vw); margin-right: calc(50% - 50vw);
+  /* NOT full-bleed. 100vw plus negative margins spans the viewport and, on
+     iOS, overflows it -- 100vw ignores the space the browser reserves, so
+     the page gains a horizontal scroll axis with empty gutters on either
+     side. The bar takes the width its host has and any gutter the author
+     set stays visible, which costs a few pixels and no scroll axis. */
+  width: 100%;
   height: 3rem; display: flex; align-items: center; gap: .5rem; padding: 0 .6rem;
   background: #111318; border-bottom: 1px solid #1e293b;
   font: 15px/1.5 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;

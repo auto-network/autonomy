@@ -24,7 +24,16 @@ from tools.dashboard.scripts.build_mission_viewer import bootstrap_source
 #: against the bootloader's URL and navigate the frame away. The registry
 #: serves ``base-uri about:`` for it -- under ``base-uri 'none'`` the browser
 #: ignores the element silently, with nothing in the console.
-_HEAD = '<!doctype html>\n<base href="about:srcdoc">\n'
+_HEAD = (
+    "<!doctype html>\n"
+    # These screens are read on phones more than anywhere else. Without this
+    # a mobile browser lays the page out at a notional desktop width and then
+    # scales it down, which is why an author who forgets it gets a document
+    # that pans sideways. Emitted by the platform so no coordinator has to
+    # remember, and harmless when they declare their own -- first one wins.
+    '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+    '<base href="about:srcdoc">\n'
+)
 
 
 def _ago(then: float | None, now: float) -> str:

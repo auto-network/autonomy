@@ -449,6 +449,10 @@
     // links are the whole reason this document carries a <base>. This
     // affects scroll landing only -- nothing about how their page paints.
     document.documentElement.style.scrollPaddingTop = "3rem";
+    // Published so a page's own sticky header can sit UNDER this bar instead
+    // of behind it: `top: var(--mc-bar-height)` stacks them. Without it both
+    // stick at 0 and ours, which is above in paint order, hides theirs.
+    document.documentElement.style.setProperty("--mc-bar-height", "3rem");
     mountAnchors();
     render();
   }

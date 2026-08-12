@@ -318,7 +318,8 @@ def test_serve_mission_site_carries_the_authors_document_unmodified():
     resp = client.get(f"/missions/{mission_id}")
     assert resp.status_code == 200
     assert "<html><body>hello</body></html>" in resp.text
-    assert resp.text.startswith("<!doctype html>\n<base href=\"about:srcdoc\">")
+    assert resp.text.startswith("<!doctype html>\n<meta name=\"viewport\"")
+    assert '<base href="about:srcdoc">' in resp.text
     assert resp.headers["content-type"].startswith("text/html")
 
 
