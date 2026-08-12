@@ -169,7 +169,7 @@
     var n = openCount();
     var q = el("button", {class: n ? "mc-q mc-q-hot" : "mc-q",
                           onclick: function () { show(ui.panel === "questions" ? null : {panel: "questions"}); }},
-               [svg("M12 8v5M12 16.5v.5"), el("span", {text: n ? n + " open" : "Q&A"})]);
+               [svg(CHAT), el("span", {text: n ? n + " open" : "Q&A"})]);
     kids.push(q);
     if (here.length) {
       var cluster = el("button", {class: "mc-faces", onclick: function () { show(ui.who ? null : {who: true}); }},

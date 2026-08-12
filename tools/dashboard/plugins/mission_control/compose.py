@@ -59,16 +59,20 @@ def _presence(surface_id: str, now: float) -> list[dict]:
 
     prefix = f"{surface_id}:"
     try:
-        rows = settings_ops.read_set(SURFACE_PRESENCE_SET_ID)
-    except Exception:
-        return []
+        # org= is REQUIRED and has no default. Omitting it raises TypeError,
+        # and a bare `except Exception` here turned that into "nobody is ever
+        # here" -- silently, forever, on every screen. Presence being
+        # decoration is a reason to degrade, never a reason not to look.
+        rows = settings_ops.read_set(
+            SURFACE_PRESENCE_SET_ID, org=settings_ops.CALLER_ORG,
+        )
+    except (LookupError, OSError, ValueError):
+        return []          # store genuinely unavailable: render nobody
     here = []
     for member in rows.members:
         if not isinstance(member.key, str) or not member.key.startswith(prefix):
             continue
         payload = member.payload if isinstance(member.payload, dict) else {}
-        if payload.get("state") != "active":
-            continue
         label = payload.get("participant_label")
         here.append({
             "participant_id": payload.get("participant_id"),
