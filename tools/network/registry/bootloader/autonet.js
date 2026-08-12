@@ -499,7 +499,7 @@ const autonet = (() => {
       throw new Error("invalid artifact body");
     }
     // `kind` is bounded descriptive metadata, NOT a code selector. There is
-    // deliberately no allowlist: the host cannot enumerate viewer types
+    // deliberately no allowlist: autonet.js cannot enumerate viewer types
     // without a registry deploy every time one is added, and it does not
     // need to -- the artifact arrives over a channel whose server cert
     // chained to the org root this page pinned before any bytes flowed, so
@@ -513,7 +513,7 @@ const autonet = (() => {
 
     const ranges = [validateSlice(header.viewer, body.length, "viewer", false)];
 
-    // Generic parts: any viewer may carry them, and the host never
+    // Generic parts: any viewer may carry them, and autonet.js never
     // interprets one. Validation is structural only -- unique refs, slices
     // inside the body -- because what a part MEANS is the viewer's business.
     let parts = null;
