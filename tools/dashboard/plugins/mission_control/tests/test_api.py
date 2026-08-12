@@ -302,7 +302,7 @@ def test_activate_revision_not_found():
     assert resp.status_code == 404
 
 
-# ── Chromeless public serving ────────────────────────────────────
+# ── Public serving: one composed screen ──────────────────────────
 
 
 def test_serve_mission_site_carries_the_authors_document_unmodified():
@@ -476,7 +476,7 @@ def test_ask_question_sets_cookie_from_as_param_for_next_request():
 
 
 def test_view_site_with_as_param_sets_cookie_then_ask_question_uses_it():
-    """The documented flow: visit the chromeless site once with ?as=,
+    """The documented flow: visit the site once with ?as=,
     then the site's own JS can POST a question relying on the cookie
     alone, no token in the request."""
     client = _https_client()
@@ -904,7 +904,7 @@ def test_pillar_site_revisions_list_and_activate():
     assert current["html"] == "<html>good</html>"
 
 
-def test_serve_pillar_site_chromeless():
+def test_serve_pillar_site_carries_the_authors_document():
     client = _client()
     mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
     pillar = _pillar(client, mission_id)

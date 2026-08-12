@@ -1,6 +1,6 @@
 # Mission Control — pushing a mission site from an agent session
 
-Mission Control (`/mission-control`) hosts chromeless native sites, one per
+Mission Control (`/mission-control`) hosts native sites, one per
 mission, with immutable revision history. P1: missions + site hosting. P2
 (§6): visitor Q&A attribution, including reopening an answered question for
 a follow-up round. P3 (§7): presence and "what changed since you last
@@ -65,16 +65,21 @@ current-revision pointer in the same transaction.
 https://host.docker.internal:8080/missions/<mission_id>
 ```
 
-Chromeless — raw HTML, no dashboard furniture, stable across every future
-push. The response is marked uncacheable end to end
-(`Cache-Control: no-store, no-cache, must-revalidate, max-age=0`) and always
-reads the current revision fresh from storage: a push is visible on the next
-request, with no caching window to wait out.
+No dashboard furniture, stable across every future push. The response is
+marked uncacheable end to end (`Cache-Control: no-store, no-cache,
+must-revalidate, max-age=0`) and always reads the current revision fresh from
+storage: a push is visible on the next request, with no caching window to wait
+out.
 
-Your HTML is served as-is, unlike Present's viewer — there is **no iframe
-rebuild, no injected Tailwind/Alpine CDN, no scroll-snap slide chopping**.
-Ship a complete, self-contained document (`<!doctype html>` through
-`</html>`) exactly as you want it rendered.
+**Your document is carried byte for byte, with the platform's navigation
+composed around it** (§10). Nothing rebuilds it in an iframe, injects a
+Tailwind/Alpine CDN, chops it into slides, or rewrites a single tag of what
+you wrote — unlike Present's viewer. What is added is a top bar and the Q&A
+surfaces, prepended as their own runtime; your markup is untouched and your
+scripts, load events and in-page anchors all behave normally.
+
+The same is true over the relay: one composed document, one function building
+it, so the two surfaces cannot disagree.
 
 ## 4. Roll back without re-pushing
 
@@ -294,7 +299,7 @@ GET    /api/pillars/<pillar_id>/site
 GET    /api/pillars/<pillar_id>/site/revisions
 GET    /api/pillars/<pillar_id>/site/revisions/<revision_id>
 POST   /api/pillars/<pillar_id>/site/revisions/<revision_id>/activate
-GET    /missions/<mission_id>/pillars/<pillar_id>                  # chromeless direct-serve
+GET    /missions/<mission_id>/pillars/<pillar_id>                  # direct-serve one screen
 ```
 
 `GET /missions/<mission_id>/pillars/<pillar_id>` is a convenience URL for
