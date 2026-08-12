@@ -240,7 +240,7 @@ def _resolve_design(target_uuid: str):
     return {"kind": "design", "viewer": html_text.encode("utf-8")}
 
 
-def _resolve_mission(target_uuid: str):
+def _resolve_mission(target_uuid: str, grant: dict | None = None):
     """One composed screen, from Mission Control's own compose function.
 
     This branch stays a plain producer dispatch: a grant carries a
@@ -258,7 +258,13 @@ def _resolve_mission(target_uuid: str):
     """
     from tools.dashboard.plugins.mission_control import compose
 
-    document = compose.compose_screen(target_uuid, framed=True)
+    # A grant with no bound participant cannot write -- _serve_write refuses
+    # it, correctly, because an attributed record has nobody to attribute to.
+    # The DOCUMENT is told, so the controls that cannot work are disabled with
+    # a reason instead of being offered and failing on tap.
+    meta = (grant or {}).get("meta") or {}
+    may_write = bool(meta.get("participant_id"))
+    document = compose.compose_screen(target_uuid, framed=True, may_write=may_write)
     if document is None:
         return None
     return {"kind": "mission", "viewer": document}
@@ -660,7 +666,7 @@ def resolve_target(grant: dict, *, org: str | None = None):
         if target_type == "note":
             return _resolve_note(target_uuid, org)
         if target_type == "mission":
-            return _resolve_mission(target_uuid)
+            return _resolve_mission(target_uuid, grant)
         # file is deliberately deferred from the rich-render v1 grammar.
     except Exception:
         return None  # resolver errors serve nothing, not stack traces

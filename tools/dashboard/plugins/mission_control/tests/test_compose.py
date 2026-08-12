@@ -82,8 +82,11 @@ def test_both_surfaces_produce_identical_bytes():
     # link in the author's content resolves against about:srcdoc and the
     # browser blocks it. One function still builds both, which is the property
     # that matters -- the author's content and the state are identical.
-    framed = compose.compose_screen(mission_id, framed=True)
-    via_resolver = link_serving._resolve_mission(mission_id)["viewer"]
+    # The resolver also tells the document whether this channel may write, so
+    # compare against the same call it makes: a grant with a bound participant.
+    grant = {"meta": {"participant_id": "guest:someone"}}
+    framed = compose.compose_screen(mission_id, framed=True, may_write=True)
+    via_resolver = link_serving._resolve_mission(mission_id, grant)["viewer"]
     assert via_resolver == framed
     assert b'<base href="about:srcdoc">' in framed
 
@@ -211,3 +214,20 @@ def test_a_retired_question_leaves_the_screen_but_not_the_record():
     assert [q["question"] for q in state["questions"]] == ["still matters"]
     # ...and it is still there for anyone reading the record.
     assert db.get_conversation_entry(gone["entry_id"])["question"].startswith("about a view")
+
+
+def test_a_link_with_no_identity_is_told_it_cannot_write():
+    """A grant with no bound participant has its writes refused by
+    _serve_write -- correctly, since an attributed record has nobody to
+    attribute to. The DOCUMENT is told, so a control that cannot work is
+    disabled with a reason rather than offered and failing on tap."""
+    mission = db.create_mission("Read Only")
+    mission_id = mission["mission_id"]
+    db.push_site_revision(mission_id, "<html>page</html>", "first")
+
+    anonymous = link_serving._resolve_mission(mission_id, {"meta": {}})["viewer"]
+    assert b'"may_write":false' in anonymous.replace(b" ", b"")
+
+    named = link_serving._resolve_mission(
+        mission_id, {"meta": {"participant_id": "guest:jeremy"}})["viewer"]
+    assert b'"may_write":true' in named.replace(b" ", b"")

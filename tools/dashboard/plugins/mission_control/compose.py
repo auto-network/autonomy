@@ -246,7 +246,7 @@ _SRCDOC_BASE = '<base href="about:srcdoc">\n'
 
 
 def compose_screen(mission_id: str, pillar_id: str | None = None, *,
-                   framed: bool = False) -> bytes | None:
+                   framed: bool = False, may_write: bool = True) -> bytes | None:
     """One screen as a complete document, or None if there is nothing to serve.
 
     *framed* is True when this document will be handed to a sandboxed frame as
@@ -266,7 +266,8 @@ def compose_screen(mission_id: str, pillar_id: str | None = None, *,
     document = (
         _HEAD
         + (_SRCDOC_BASE if framed else "")
-        + _state_block(mission_state(mission_id, pillar_id))
+        + _state_block(dict(mission_state(mission_id, pillar_id),
+                            may_write=may_write))
         + "<script>\n" + bootstrap_source() + "\n</script>\n"
         + current["html"]          # byte for byte, never parsed
     )

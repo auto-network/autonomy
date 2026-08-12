@@ -48,12 +48,31 @@
   var resolvePort;
   var havePort = new Promise(function (r) { resolvePort = r; });
 
+  // What "ok" means at each layer, and why this check has to exist HERE.
+  // The host's broker carries opaque application messages by design -- it
+  // delivers whatever came back and marks it ok:true because the exchange
+  // itself succeeded. A refusal IS a successful exchange at that layer. So a
+  // server saying {"status":"unavailable"} arrived as a resolved promise,
+  // the ask closed the panel and cleared the box, and nothing was written:
+  // a tap that looked like it worked. Only the application knows that
+  // status is the answer.
+  function settle(p, body) {
+    var status = body && body.status;
+    if (status && status !== "ok") {
+      p.reject(new Error(status === "unavailable"
+        ? "this link cannot post to the mission"
+        : String(status)));
+      return;
+    }
+    p.resolve(body);
+  }
+
   function onPortMessage(e) {
     var m = e.data;
     if (!m || m.v !== 1) return;
     if (m.type === "response" && pending[m.id]) {
       var p = pending[m.id]; delete pending[m.id];
-      m.ok ? p.resolve(m.body) : p.reject(new Error(m.error || "refused"));
+      m.ok ? settle(p, m.body) : p.reject(new Error(m.error || "refused"));
     } else if (m.type === "event") {
       applyEvent(m.body);
     }
@@ -386,9 +405,15 @@
     setTimeout(grow, 0);
     // With no channel there is nothing to send to, and a button that looks
     // live and does nothing is worse than one that says so.
-    var status = el("span", {class: "mc-sub", text: ui.noChannel
+    // Three reasons a control cannot work, known BEFORE it is offered: no
+    // channel at all, or a link carrying no identity to attribute a question
+    // to. Both were previously discovered by tapping.
+    var why = ui.noChannel
       ? "Cannot reach the mission from here \u2014 asking is unavailable."
-      : note});
+      : (state.may_write === false
+         ? "This is a read-only link \u2014 it carries no identity to post as."
+         : null);
+    var status = el("span", {class: "mc-sub", text: why || note});
     var send = el("button", {
       class: "mc-send", text: label,
       onclick: function () {
@@ -404,7 +429,7 @@
         });
       },
     });
-    if (ui.noChannel) send.disabled = true;
+    if (why) send.disabled = true;
     return el("div", {class: "mc-foot"}, [
       ta,
       el("div", {class: "mc-foot-row"}, [
