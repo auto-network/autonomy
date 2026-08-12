@@ -13,8 +13,6 @@ artifact instead of its source.
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 from pathlib import Path
 
 VIEWER = Path(__file__).resolve().parents[1] / "plugins" / "mission_control" / "viewer"
@@ -29,19 +27,11 @@ def sources() -> list[Path]:
 
 
 def build() -> str:
-    binary = shutil.which("tailwindcss")
-    if not binary:
-        raise RuntimeError(
-            "tailwindcss not on PATH; the dashboard image bakes it in and "
-            "mock_server._ensure_tailwind_css downloads it otherwise"
-        )
+    # chrome.css is plain CSS, not a Tailwind input: the chrome is ~30
+    # semantic classes inside a closed shadow root, where a utility framework
+    # buys nothing and costs a build dependency. Inlining is the whole build.
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    css_out = OUTPUT.parent / "chrome.css"
-    subprocess.run(
-        [binary, "--cwd", str(VIEWER), "-i", CSS_IN.name, "-o", str(css_out)],
-        check=True, timeout=180,
-    )
-    css = css_out.read_text()
+    css = CSS_IN.read_text()
     text = SOURCE.read_text()
     if text.count(MARKER) != 1:
         raise RuntimeError(f"expected exactly one {MARKER} in bootstrap.js")
