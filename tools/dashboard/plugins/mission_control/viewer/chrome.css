@@ -50,7 +50,11 @@
   position: fixed; z-index: 2147483002; background: #141418; display: flex; flex-direction: column;
   font: 15px/1.5 -apple-system, system-ui, sans-serif; color: #cbd5e1;
 }
-.mc-panel { left: 0; right: 0; bottom: 0; top: 3rem; border-top: 1px solid #1e293b; border-radius: .9rem .9rem 0 0; }
+/* --mc-below is the bar's measured bottom edge, not an assumed 3rem: the
+   bar is sticky inside the author's body, so before the page scrolls it
+   starts below whatever top padding they gave it. Assuming 3rem drew the
+   panel over the bar's own controls. */
+.mc-panel { left: 0; right: 0; bottom: 0; top: var(--mc-below, 3rem); border-top: 1px solid #1e293b; border-radius: .9rem .9rem 0 0; }
 .mc-view { inset: 0; z-index: 2147483003; }
 .mc-phead { display: flex; align-items: center; gap: .5rem; height: 2.9rem; padding: 0 .75rem;
             border-bottom: 1px solid #1e293b; flex: none; }

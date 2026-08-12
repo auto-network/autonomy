@@ -287,6 +287,11 @@ async def activate_site_revision(request: Request) -> JSONResponse:
 # here is a structural mirror of its mission-level counterpart above.
 
 
+#: Two sentences of plain language. Generous enough that a legitimate one
+#: never hits it, tight enough that a pasted status report does.
+LAST_DONE_MAX = 400
+
+
 def _pillar_payload(pillar: dict) -> dict:
     return {
         "pillar_id": pillar["pillar_id"],
@@ -297,6 +302,8 @@ def _pillar_payload(pillar: dict) -> dict:
         "created_at": pillar["created_at"],
         "current_revision_id": pillar["current_revision_id"],
         "status": pillar["status"],
+        "last_done": pillar["last_done"],
+        "last_done_at": pillar["last_done_at"],
     }
 
 
@@ -380,6 +387,31 @@ async def set_pillar_status(request: Request) -> JSONResponse:
         )
     ok = db.set_pillar_status(pillar_id, status)
     if not ok:
+        return JSONResponse({"error": "pillar not found"}, status_code=404)
+    return JSONResponse({"pillar": _pillar_payload(db.get_pillar(pillar_id))})
+
+
+async def set_pillar_last_done(request: Request) -> JSONResponse:
+    """The pillar's status line: the last productive thing that finished.
+
+    Free text on purpose. SKILL.md section 9 sets six rules for writing one
+    and they are worth following, but none of them is machine-checkable
+    without rejecting good writing a validator failed to parse -- an
+    identifier and a proper noun look identical to a regex. The rules are
+    for the coordinator to apply; this route only bounds the length.
+    """
+    pillar_id = request.path_params["pillar_id"]
+    body = await request.json()
+    text = body.get("last_done")
+    if not isinstance(text, str):
+        return JSONResponse({"error": "last_done must be a string"}, status_code=400)
+    if len(text) > LAST_DONE_MAX:
+        return JSONResponse(
+            {"error": f"last_done must be at most {LAST_DONE_MAX} characters —"
+                      " it is two sentences, not a report"},
+            status_code=400,
+        )
+    if not db.set_pillar_last_done(pillar_id, text):
         return JSONResponse({"error": "pillar not found"}, status_code=404)
     return JSONResponse({"pillar": _pillar_payload(db.get_pillar(pillar_id))})
 
@@ -1282,6 +1314,7 @@ routes: list[Route] = [
     Route("/api/pillars/{pillar_id}", delete_pillar, methods=["DELETE"]),
     Route("/api/pillars/{pillar_id}/seen", mark_pillar_seen, methods=["POST"]),
     Route("/api/pillars/{pillar_id}/status", set_pillar_status, methods=["POST"]),
+    Route("/api/pillars/{pillar_id}/last-done", set_pillar_last_done, methods=["POST"]),
     Route("/api/pillars/{pillar_id}/site", push_pillar_site_revision, methods=["POST"]),
     Route("/api/pillars/{pillar_id}/site", get_current_pillar_site, methods=["GET"]),
     Route(

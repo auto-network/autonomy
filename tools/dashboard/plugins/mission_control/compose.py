@@ -83,12 +83,12 @@ def _presence(surface_id: str, now: float) -> list[dict]:
 def _pillar_state(pillar: dict, now: float) -> dict:
     """One pillar as the chrome needs it.
 
-    ``age`` is time since the coordinator last pushed this pillar's site --
-    the freshest thing the schema actually records. There is deliberately no
-    field here the data model cannot fill: the two-sentence "last productive
-    thing done" the chrome renders under the name is a coordinator-written
-    affordance that does not exist yet (auto-fm22y), and until it does the
-    chrome renders nothing there rather than a plausible guess.
+    ``age`` is time since the coordinator last pushed this pillar's site.
+    ``last_done`` is the only field here a human wrote: the last productive
+    thing that finished, in their own words. It is passed through verbatim
+    and NEVER substituted for -- no status value, no revision note, no
+    inference. A pillar whose coordinator has not written one renders
+    nothing there, which is honest; a plausible guess would not be.
     """
     pillar_id = pillar["pillar_id"]
     current = db.get_current_pillar_site(pillar_id)
@@ -99,6 +99,7 @@ def _pillar_state(pillar: dict, now: float) -> dict:
         "status": pillar["status"],
         "age": _ago((current or {}).get("created_at"), now),
         "open": db.count_open_pillar_questions(pillar_id),
+        "last_done": pillar["last_done"],
         "here": _presence(f"pillar:{pillar_id}", now),
     }
 
