@@ -414,6 +414,7 @@ def run_graph(argv: list) -> tuple:
             capture_output=True, text=True, timeout=GRAPH_TIMEOUT, env=env,
         )
     except FileNotFoundError:
+        print(f"graph CLI not found ({GRAPH_BIN}) argv={argv} PATH={os.environ.get('PATH','')}", file=sys.stderr, flush=True)
         return False, f"graph CLI not found ({GRAPH_BIN})"
     except subprocess.TimeoutExpired:
         return False, f"graph command timed out after {GRAPH_TIMEOUT}s"
