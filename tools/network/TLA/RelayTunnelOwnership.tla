@@ -1,76 +1,77 @@
 ----------------------- MODULE RelayTunnelOwnership -----------------------
 (***************************************************************************)
-(* Relay tunnel ownership for tools/network/registry/relay.py and          *)
-(* tools/network/relaykit/connector.py.                                     *)
+(* Relay tunnel POOL semantics. Multiple authenticated connectors for the  *)
+(* same org are cooperating capacity, not rival owners.                    *)
 (*                                                                         *)
-(* The critical deployment-fidelity decision is in Init: CONNECTORS may    *)
-(* contain two or more processes mapped by ConnectorOrg to the SAME org.   *)
-(* The intended deployment has one connector per org, but the production   *)
-(* algorithm does not enforce that premise; excluding it would make the    *)
-(* observed replacement livelock unreachable by construction.             *)
+(* The green design stores a set of live tunnels per org. Register adds;   *)
+(* disconnect removes exactly that tunnel; a viewer is admitted to a       *)
+(* least-loaded tunnel with capacity and remains pinned there.             *)
 (*                                                                         *)
-(* Registration and eviction are deliberately separate actions.           *)
-(* TunnelHub.register installs the new tunnel synchronously, then the       *)
-(* endpoint awaits close(4409) on the displaced WebSocket before sending   *)
-(* the successful hello. The model preserves that interval and the         *)
-(* identity-guarded unregister rule: closing an old tunnel never clears a   *)
-(* newer holder.                                                            *)
+(* PoolRegistration = FALSE restores the shipped singular last-writer      *)
+(* replacement algorithm solely as a calibration. TLC must rediscover its  *)
+(* replacement lasso. LeastLoadedAdmission = FALSE similarly restores      *)
+(* arbitrary admission and must expose avoidable skew.                     *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS
     ORGS,
-    CONNECTORS,
-    ConnectorOrg,       \* [CONNECTORS -> ORGS]
-    Version,            \* [CONNECTORS -> Nat], observation only
+    RELAYS,
+    TUNNELS,
+    VIEWERS,
+    TunnelOrg,              \* [TUNNELS -> ORGS]
+    TunnelRelay,            \* [TUNNELS -> RELAYS], outbound termination
+    ViewerOrg,              \* [VIEWERS -> ORGS]
+    ViewerIngress,          \* [VIEWERS -> RELAYS], e.g. anycast landing
+    Capacity,               \* [TUNNELS -> Nat \ {0}]
     MinBackoff,
-    MaxRetryBackoff,
-    HardBackoff,
+    MaxBackoff,
     Jitter,
     MaxDelay,
-    EvictionPolicy,     \* "redial" | "standDown" | "hardBackoff"
-    RestartBudget
+    PoolRegistration,       \* TRUE = intended pool; FALSE = old replacement
+    LeastLoadedAdmission,   \* TRUE = shed new viewers to least-loaded member
+    RestartBudget,
+    DisconnectBudget
 
-NoConnector == "none"
+NoTunnel == "none"
 
-ClientStates == {
-    "dialing", "handshaking", "connected", "closed",
-    "sleeping", "stoodDown"
-}
-ServerStates == {"idle", "evict", "ack", "serve"}
-CloseReasons == {"none", "replaced"}
+ConnectorStates == {"dialing", "connected", "sleeping"}
+ViewerStates == {"new", "open"}
 
 ASSUME ORGS # {}
-ASSUME CONNECTORS # {}
-ASSUME ConnectorOrg \in [CONNECTORS -> ORGS]
-ASSUME Version \in [CONNECTORS -> Nat]
-ASSUME \A o \in ORGS : \E c \in CONNECTORS : ConnectorOrg[c] = o
+ASSUME RELAYS # {}
+ASSUME TUNNELS # {}
+ASSUME TunnelOrg \in [TUNNELS -> ORGS]
+ASSUME TunnelRelay \in [TUNNELS -> RELAYS]
+ASSUME ViewerOrg \in [VIEWERS -> ORGS]
+ASSUME ViewerIngress \in [VIEWERS -> RELAYS]
+ASSUME Capacity \in [TUNNELS -> Nat \ {0}]
+ASSUME \A o \in ORGS : \E t \in TUNNELS : TunnelOrg[t] = o
 ASSUME MinBackoff \in Nat \ {0}
-ASSUME MaxRetryBackoff \in Nat
-ASSUME MinBackoff <= MaxRetryBackoff
-ASSUME HardBackoff \in Nat
-ASSUME MaxRetryBackoff <= HardBackoff
+ASSUME MaxBackoff \in Nat
+ASSUME MinBackoff <= MaxBackoff
 ASSUME Jitter \in Nat
-ASSUME MaxDelay \in Nat
-ASSUME HardBackoff + Jitter <= MaxDelay
-ASSUME EvictionPolicy \in {"redial", "standDown", "hardBackoff"}
+ASSUME MaxBackoff + Jitter <= MaxDelay
+ASSUME PoolRegistration \in BOOLEAN
+ASSUME LeastLoadedAdmission \in BOOLEAN
 ASSUME RestartBudget \in Nat
+ASSUME DisconnectBudget \in Nat
 
 VARIABLES
-    holder,             \* [ORGS -> CONNECTORS \cup {NoConnector}]
-    client,             \* connector-loop state
-    server,             \* endpoint state for the connector's current WS
-    victim,             \* tunnel object displaced by this registration
-    socketOpen,
-    closeReason,
+    pool,                   \* [ORGS -> SUBSET TUNNELS]
+    connector,              \* connector process state
     backoff,
     wait,
+    viewer,
+    assignment,             \* [VIEWERS -> TUNNELS \cup {NoTunnel}]
     restartsLeft,
-    everHeld,           \* ghost: org has had a holder at least once
-    herdSeen            \* ghost: >=2 same-org retries became ready together
+    disconnectsLeft,
+    healthyEvictionSeen,    \* ghost: register removed another live tunnel
+    badAdmissionSeen        \* ghost: viewer bypassed a less-loaded tunnel
 
-vars == << holder, client, server, victim, socketOpen, closeReason,
-           backoff, wait, restartsLeft, everHeld, herdSeen >>
+vars == << pool, connector, backoff, wait, viewer, assignment,
+           restartsLeft, disconnectsLeft,
+           healthyEvictionSeen, badAdmissionSeen >>
 
 (***************************************************************************)
 (* Helpers                                                                 *)
@@ -78,280 +79,231 @@ vars == << holder, client, server, victim, socketOpen, closeReason,
 
 Min(a, b) == IF a <= b THEN a ELSE b
 
-NextBackoff(b) == Min(2 * b, MaxRetryBackoff)
-
-RetryBase(c) ==
-    IF closeReason[c] = "replaced" /\ EvictionPolicy = "hardBackoff"
-    THEN HardBackoff
-    ELSE backoff[c]
+NextBackoff(b) == Min(2 * b, MaxBackoff)
 
 DelayRange(base) == base..Min(base + Jitter, MaxDelay)
 
-OrgConnectors(o) == {c \in CONNECTORS : ConnectorOrg[c] = o}
+OrgTunnels(o) == {t \in TUNNELS : TunnelOrg[t] = o}
 
-ActiveSockets == {c \in CONNECTORS : socketOpen[c]}
+Load(t) == Cardinality({v \in VIEWERS : assignment[v] = t})
 
-Collision(connectors, delays) ==
-    \E o \in ORGS, d \in 0..MaxDelay :
-        Cardinality({c \in connectors :
-                       ConnectorOrg[c] = o /\ delays[c] = d}) > 1
+Available(o) ==
+    {t \in pool[o] : connector[t] = "connected" /\ Load(t) < Capacity[t]}
+
+LeastLoaded(t, o) ==
+    t \in Available(o)
+    /\ \A other \in Available(o) : Load(t) <= Load(other)
+
+CrossRelay(v) ==
+    assignment[v] # NoTunnel
+    /\ ViewerIngress[v] # TunnelRelay[assignment[v]]
+
+\* The model deliberately does not require ingress and tunnel termination to
+\* be the same relay. Anycast chooses an ingress edge; a directory/internal
+\* handoff makes every logical pool member selectable from that edge.
 
 (***************************************************************************)
-(* Init                                                                    *)
+(* Init: every configured tunnel is an independent connector for its org.  *)
+(* Multiple same-org connectors are required, not an exceptional state.    *)
 (***************************************************************************)
 
 Init ==
-    /\ holder = [o \in ORGS |-> NoConnector]
-    \* Every configured connector starts independently. In the incident
-    \* configuration both "old" and "new" map to "org1"; neither the
-    \* model nor the production hello gate assumes uniqueness.
-    /\ client = [c \in CONNECTORS |-> "dialing"]
-    /\ server = [c \in CONNECTORS |-> "idle"]
-    /\ victim = [c \in CONNECTORS |-> NoConnector]
-    /\ socketOpen = [c \in CONNECTORS |-> FALSE]
-    /\ closeReason = [c \in CONNECTORS |-> "none"]
-    /\ backoff = [c \in CONNECTORS |-> MinBackoff]
-    /\ wait = [c \in CONNECTORS |-> 0]
+    /\ pool = [o \in ORGS |-> {}]
+    /\ connector = [t \in TUNNELS |-> "dialing"]
+    /\ backoff = [t \in TUNNELS |-> MinBackoff]
+    /\ wait = [t \in TUNNELS |-> 0]
+    /\ viewer = [v \in VIEWERS |-> "new"]
+    /\ assignment = [v \in VIEWERS |-> NoTunnel]
     /\ restartsLeft = RestartBudget
-    /\ everHeld = [o \in ORGS |-> FALSE]
-    /\ herdSeen = FALSE
+    /\ disconnectsLeft = DisconnectBudget
+    /\ healthyEvictionSeen = FALSE
+    /\ badAdmissionSeen = FALSE
 
 (***************************************************************************)
-(* Relay endpoint and connector loop                                       *)
+(* Tunnel membership                                                       *)
 (***************************************************************************)
 
-\* A valid hello has reached TunnelHub.register. This is the synchronous
-\* dict assignment: the new tunnel becomes visible before its predecessor
-\* is closed and before the new connector receives {ok:true}.
-Register(c) ==
-    /\ client[c] = "dialing"
-    /\ server[c] = "idle"
-    /\ wait[c] = 0
-    /\ LET o == ConnectorOrg[c]
-           old == holder[o]
-       IN /\ holder' = [holder EXCEPT ![o] = c]
-          /\ client' = [client EXCEPT ![c] = "handshaking"]
-          /\ server' = [server EXCEPT ![c] =
-                           IF old = NoConnector THEN "ack" ELSE "evict"]
-          /\ victim' = [victim EXCEPT ![c] = old]
-          /\ socketOpen' = [socketOpen EXCEPT ![c] = TRUE]
-          /\ closeReason' = [closeReason EXCEPT ![c] = "none"]
-          /\ everHeld' = [everHeld EXCEPT ![o] = TRUE]
-    /\ UNCHANGED << backoff, wait, restartsLeft, herdSeen >>
+\* A successful authenticated hello. Green behavior is a set insertion.
+\* The calibration branch is the current dict assignment plus 4409 close:
+\* all previous members are removed and their connector loops sleep/retry.
+Register(t) ==
+    /\ connector[t] = "dialing"
+    /\ wait[t] = 0
+    /\ LET o == TunnelOrg[t]
+           displaced == pool[o] \ {t}
+       IN IF PoolRegistration
+          THEN /\ pool' = [pool EXCEPT ![o] = @ \cup {t}]
+               /\ connector' = [connector EXCEPT ![t] = "connected"]
+               /\ backoff' = [backoff EXCEPT ![t] = MinBackoff]
+               /\ wait' = [wait EXCEPT ![t] = 0]
+               /\ UNCHANGED << viewer, assignment,
+                               healthyEvictionSeen >>
+          ELSE /\ pool' = [pool EXCEPT ![o] = {t}]
+               /\ connector' = [q \in TUNNELS |->
+                    IF q = t THEN "connected"
+                    ELSE IF q \in displaced THEN "sleeping"
+                    ELSE connector[q]]
+               /\ backoff' = [q \in TUNNELS |->
+                    IF q = t THEN MinBackoff
+                    ELSE IF q \in displaced THEN NextBackoff(backoff[q])
+                    ELSE backoff[q]]
+               /\ wait' = [q \in TUNNELS |->
+                    IF q = t THEN 0
+                    ELSE IF q \in displaced THEN MinBackoff
+                    ELSE wait[q]]
+               /\ viewer' = [v \in VIEWERS |->
+                    IF assignment[v] \in displaced THEN "new" ELSE viewer[v]]
+               /\ assignment' = [v \in VIEWERS |->
+                    IF assignment[v] \in displaced
+                    THEN NoTunnel ELSE assignment[v]]
+               /\ healthyEvictionSeen' =
+                    (healthyEvictionSeen \/ displaced # {})
+    /\ UNCHANGED << restartsLeft, disconnectsLeft, badAdmissionSeen >>
 
-\* The awaited close(4409). The victim may already have been closed by a
-\* later registration; close_quietly makes that a no-op. Crucially this
-\* action never clears holder: unregister(old_tunnel) is identity guarded.
-EvictPrevious(c) ==
-    /\ server[c] = "evict"
-    /\ victim[c] \in CONNECTORS
-    /\ LET old == victim[c] IN
-       /\ IF socketOpen[old]
-          THEN /\ socketOpen' = [socketOpen EXCEPT ![old] = FALSE]
-               /\ client' = [client EXCEPT ![old] = "closed"]
-               /\ closeReason' = [closeReason EXCEPT ![old] = "replaced"]
-          ELSE /\ UNCHANGED socketOpen
-               /\ UNCHANGED client
-               /\ UNCHANGED closeReason
-       /\ server' = [server EXCEPT ![c] = "ack"]
-       /\ victim' = [victim EXCEPT ![c] = NoConnector]
-    /\ UNCHANGED << holder, backoff, wait, restartsLeft,
-                    everHeld, herdSeen >>
+\* Exact-instance unregister plus ordinary connector retry. Only viewers
+\* pinned to this tunnel are returned to admission; every other assignment
+\* is untouched.
+Disconnect(t) ==
+    /\ disconnectsLeft > 0
+    /\ connector[t] = "connected"
+    /\ t \in pool[TunnelOrg[t]]
+    /\ \E d \in DelayRange(backoff[t]) :
+         /\ pool' = [pool EXCEPT ![TunnelOrg[t]] = @ \ {t}]
+         /\ connector' = [connector EXCEPT ![t] = "sleeping"]
+         /\ wait' = [wait EXCEPT ![t] = d]
+         /\ backoff' = [backoff EXCEPT ![t] = NextBackoff(@)]
+         /\ viewer' = [v \in VIEWERS |->
+              IF assignment[v] = t THEN "new" ELSE viewer[v]]
+         /\ assignment' = [v \in VIEWERS |->
+              IF assignment[v] = t THEN NoTunnel ELSE assignment[v]]
+    /\ disconnectsLeft' = disconnectsLeft - 1
+    /\ UNCHANGED << restartsLeft, healthyEvictionSeen, badAdmissionSeen >>
 
-\* The connector sees a successful hello only here. This is the production
-\* backoff reset that turns the two-connector replacement cycle into a
-\* tight livelock rather than an exponentially slowing failure loop.
-HelloOK(c) ==
-    /\ server[c] = "ack"
-    /\ socketOpen[c]
-    /\ client[c] = "handshaking"
-    /\ server' = [server EXCEPT ![c] = "serve"]
-    /\ client' = [client EXCEPT ![c] = "connected"]
-    /\ backoff' = [backoff EXCEPT ![c] = MinBackoff]
-    /\ victim' = [victim EXCEPT ![c] = NoConnector]
-    /\ UNCHANGED << holder, socketOpen, closeReason, wait,
-                    restartsLeft, everHeld, herdSeen >>
-
-\* A displaced endpoint reaches finally. If a newer tunnel is now in the
-\* hub, production unregister(old_tunnel) does nothing; that identity test
-\* is abstracted by leaving holder unchanged here.
-CleanupClosed(c) ==
-    /\ ~socketOpen[c]
-    /\ server[c] \in {"ack", "serve"}
-    /\ client[c] = "closed"
-    /\ server' = [server EXCEPT ![c] = "idle"]
-    /\ victim' = [victim EXCEPT ![c] = NoConnector]
-    /\ UNCHANGED << holder, client, socketOpen, closeReason,
-                    backoff, wait, restartsLeft, everHeld, herdSeen >>
-
-\* Connector.run handles the close. Production uses the first branch for
-\* every close, including 4409. The two candidate variants are explicit:
-\* standDown makes 4409 terminal; hardBackoff still retries after a finite
-\* delay. Relay-restart closes are scheduled directly by RelayRestart and
-\* never take the 4409-only stand-down branch.
-HandleClose(c) ==
-    /\ client[c] = "closed"
-    /\ server[c] = "idle"
-    /\ IF closeReason[c] = "replaced" /\ EvictionPolicy = "standDown"
-       THEN /\ client' = [client EXCEPT ![c] = "stoodDown"]
-            /\ wait' = [wait EXCEPT ![c] = 0]
-            /\ closeReason' = [closeReason EXCEPT ![c] = "none"]
-            /\ UNCHANGED backoff
-       ELSE \E d \in DelayRange(RetryBase(c)) :
-            /\ client' = [client EXCEPT ![c] = "sleeping"]
-            /\ wait' = [wait EXCEPT ![c] = d]
-            /\ backoff' = [backoff EXCEPT ![c] =
-                              IF closeReason[c] = "replaced"
-                                 /\ EvictionPolicy = "hardBackoff"
-                              THEN MaxRetryBackoff
-                              ELSE NextBackoff(@)]
-            /\ closeReason' = [closeReason EXCEPT ![c] = "none"]
-    /\ UNCHANGED << holder, server, victim, socketOpen,
-                    restartsLeft, everHeld, herdSeen >>
-
-\* One clock step for all connector retry timers. Jitter is represented by
-\* nondeterministic delay selection, not probability; equal random draws
-\* remain a permitted behavior and therefore cannot prove herd avoidance.
 Tick ==
-    /\ \E c \in CONNECTORS : client[c] = "sleeping" /\ wait[c] > 0
-    /\ LET readyTogether == {c \in CONNECTORS :
-                               client[c] = "sleeping" /\ wait[c] = 1}
-       IN /\ wait' = [c \in CONNECTORS |->
-                        IF client[c] = "sleeping" /\ wait[c] > 0
-                        THEN wait[c] - 1 ELSE wait[c]]
-          /\ herdSeen' = (herdSeen \/
-               (\E o \in ORGS :
-                   Cardinality(readyTogether \cap OrgConnectors(o)) > 1))
-    /\ UNCHANGED << holder, client, server, victim, socketOpen,
-                    closeReason, backoff, restartsLeft, everHeld >>
+    /\ \E t \in TUNNELS : connector[t] = "sleeping" /\ wait[t] > 0
+    /\ wait' = [t \in TUNNELS |->
+         IF connector[t] = "sleeping" /\ wait[t] > 0
+         THEN wait[t] - 1 ELSE wait[t]]
+    /\ UNCHANGED << pool, connector, backoff, viewer, assignment,
+                    restartsLeft, disconnectsLeft,
+                    healthyEvictionSeen, badAdmissionSeen >>
 
-Wake(c) ==
-    /\ client[c] = "sleeping"
-    /\ wait[c] = 0
-    /\ client' = [client EXCEPT ![c] = "dialing"]
-    /\ UNCHANGED << holder, server, victim, socketOpen, closeReason,
-                    backoff, wait, restartsLeft, everHeld, herdSeen >>
+Wake(t) ==
+    /\ connector[t] = "sleeping"
+    /\ wait[t] = 0
+    /\ connector' = [connector EXCEPT ![t] = "dialing"]
+    /\ UNCHANGED << pool, backoff, wait, viewer, assignment,
+                    restartsLeft, disconnectsLeft,
+                    healthyEvictionSeen, badAdmissionSeen >>
 
-(***************************************************************************)
-(* Relay restart                                                          *)
-(***************************************************************************)
-
-\* An atomic stop/start abstraction: in-memory hub ownership and endpoint
-\* tasks disappear; connector retry timers survive. Every socket that was
-\* live at the boundary schedules an ordinary transient retry. This is
-\* sufficient for ownership and retry-alignment questions; outage duration
-\* and failed TCP attempts while the relay is down are deliberately absent.
+\* Atomic relay stop/start abstraction. The in-memory pool disappears;
+\* live connector sockets retry. Existing sleeping timers remain intact.
 RelayRestart ==
     /\ restartsLeft > 0
-    /\ LET active == ActiveSockets IN
-       \E delays \in [CONNECTORS -> 0..MaxDelay] :
-         /\ \A c \in CONNECTORS :
-              IF c \in active
-              THEN delays[c] \in DelayRange(backoff[c])
-              ELSE delays[c] = 0
-         /\ holder' = [o \in ORGS |-> NoConnector]
-         /\ client' = [c \in CONNECTORS |->
-                         IF c \in active THEN "sleeping" ELSE client[c]]
-         /\ server' = [c \in CONNECTORS |-> "idle"]
-         /\ victim' = [c \in CONNECTORS |-> NoConnector]
-         /\ socketOpen' = [c \in CONNECTORS |-> FALSE]
-         /\ closeReason' = [c \in CONNECTORS |-> "none"]
-         /\ wait' = [c \in CONNECTORS |->
-                       IF c \in active THEN delays[c] ELSE wait[c]]
-         /\ backoff' = [c \in CONNECTORS |->
-                          IF c \in active THEN NextBackoff(backoff[c])
-                          ELSE backoff[c]]
-         /\ herdSeen' = (herdSeen \/ Collision(active, delays))
+    /\ LET live == {t \in TUNNELS : connector[t] = "connected"} IN
+       \E delays \in [TUNNELS -> 0..MaxDelay] :
+         /\ \A t \in TUNNELS :
+              IF t \in live
+              THEN delays[t] \in DelayRange(backoff[t])
+              ELSE delays[t] = 0
+         /\ pool' = [o \in ORGS |-> {}]
+         /\ connector' = [t \in TUNNELS |->
+              IF t \in live THEN "sleeping" ELSE connector[t]]
+         /\ wait' = [t \in TUNNELS |->
+              IF t \in live THEN delays[t] ELSE wait[t]]
+         /\ backoff' = [t \in TUNNELS |->
+              IF t \in live THEN NextBackoff(backoff[t]) ELSE backoff[t]]
+         /\ viewer' = [v \in VIEWERS |-> "new"]
+         /\ assignment' = [v \in VIEWERS |-> NoTunnel]
     /\ restartsLeft' = restartsLeft - 1
-    /\ UNCHANGED everHeld
+    /\ UNCHANGED << disconnectsLeft,
+                    healthyEvictionSeen, badAdmissionSeen >>
 
 (***************************************************************************)
-(* Next / fairness                                                        *)
+(* Viewer admission                                                        *)
 (***************************************************************************)
 
-ConnectorActs ==
-    \E c \in CONNECTORS :
-        Register(c) \/ EvictPrevious(c) \/ HelloOK(c)
-        \/ CleanupClosed(c) \/ HandleClose(c) \/ Wake(c)
+\* Selection happens once, at channel open. The assignment is never moved
+\* merely because another tunnel later joins or becomes less loaded.
+OpenViewer(v) ==
+    /\ viewer[v] = "new"
+    /\ Available(ViewerOrg[v]) # {}
+    /\ \E t \in Available(ViewerOrg[v]) :
+         /\ (LeastLoadedAdmission => LeastLoaded(t, ViewerOrg[v]))
+         /\ viewer' = [viewer EXCEPT ![v] = "open"]
+         /\ assignment' = [assignment EXCEPT ![v] = t]
+         /\ badAdmissionSeen' =
+              (badAdmissionSeen \/ ~LeastLoaded(t, ViewerOrg[v]))
+    /\ UNCHANGED << pool, connector, backoff, wait,
+                    restartsLeft, disconnectsLeft, healthyEvictionSeen >>
 
-Next == ConnectorActs \/ Tick \/ RelayRestart
+(***************************************************************************)
+(* Next / fairness                                                         *)
+(***************************************************************************)
+
+Next ==
+    \/ \E t \in TUNNELS : Register(t) \/ Disconnect(t) \/ Wake(t)
+    \/ \E v \in VIEWERS : OpenViewer(v)
+    \/ Tick
+    \/ RelayRestart
 
 Spec == Init /\ [][Next]_vars
 
-\* Connector loops, endpoint continuations, and timer progress are weakly
-\* fair. RelayRestart is an unfair, bounded environment action.
+\* Connector registration/retry, timers, and viewer admission are reliable.
+\* Tunnel disconnect and relay restart are bounded, unfair environment acts.
 FairSpec ==
     /\ Spec
-    /\ \A c \in CONNECTORS :
-         /\ WF_vars(Register(c))
-         /\ WF_vars(EvictPrevious(c))
-         /\ WF_vars(HelloOK(c))
-         /\ WF_vars(CleanupClosed(c))
-         /\ WF_vars(HandleClose(c))
-         /\ WF_vars(Wake(c))
+    /\ \A t \in TUNNELS :
+         /\ WF_vars(Register(t))
+         /\ WF_vars(Wake(t))
+    /\ \A v \in VIEWERS : WF_vars(OpenViewer(v))
     /\ WF_vars(Tick)
 
 (***************************************************************************)
-(* Safety                                                                 *)
+(* Safety                                                                  *)
 (***************************************************************************)
 
 TypeOK ==
-    /\ holder \in [ORGS -> CONNECTORS \cup {NoConnector}]
-    /\ client \in [CONNECTORS -> ClientStates]
-    /\ server \in [CONNECTORS -> ServerStates]
-    /\ victim \in [CONNECTORS -> CONNECTORS \cup {NoConnector}]
-    /\ socketOpen \in [CONNECTORS -> BOOLEAN]
-    /\ closeReason \in [CONNECTORS -> CloseReasons]
-    /\ backoff \in [CONNECTORS -> MinBackoff..MaxRetryBackoff]
-    /\ wait \in [CONNECTORS -> 0..MaxDelay]
+    /\ pool \in [ORGS -> SUBSET TUNNELS]
+    /\ connector \in [TUNNELS -> ConnectorStates]
+    /\ backoff \in [TUNNELS -> MinBackoff..MaxBackoff]
+    /\ wait \in [TUNNELS -> 0..MaxDelay]
+    /\ viewer \in [VIEWERS -> ViewerStates]
+    /\ assignment \in [VIEWERS -> TUNNELS \cup {NoTunnel}]
     /\ restartsLeft \in 0..RestartBudget
-    /\ everHeld \in [ORGS -> BOOLEAN]
-    /\ herdSeen \in BOOLEAN
+    /\ disconnectsLeft \in 0..DisconnectBudget
+    /\ healthyEvictionSeen \in BOOLEAN
+    /\ badAdmissionSeen \in BOOLEAN
 
-\* Dict ownership always names the newest registered tunnel's open socket.
-HolderHasOpenSocket ==
+PoolCoherent ==
     \A o \in ORGS :
-        holder[o] # NoConnector => socketOpen[holder[o]]
+        pool[o] = {t \in OrgTunnels(o) : connector[t] = "connected"}
 
-\* Before the first modeled relay restart, register-then-evict can never
-\* create a no-holder gap after an org has acquired a holder. This is the
-\* identity-guarded unregister result the non-atomic split is meant to test.
-NoUncausedVacuum ==
-    \A o \in ORGS :
-        (everHeld[o] /\ restartsLeft = RestartBudget)
-            => holder[o] # NoConnector
+AssignmentsUseLiveTunnel ==
+    \A v \in VIEWERS :
+        viewer[v] = "open" =>
+            /\ assignment[v] \in pool[ViewerOrg[v]]
+            /\ TunnelOrg[assignment[v]] = ViewerOrg[v]
 
-\* Even with 4409 stand-down, a no-holder state always retains at least one
-\* connector that can recover without restarting a stood-down process.
-NoTerminalVacuum ==
-    \A o \in ORGS :
-        holder[o] = NoConnector =>
-            \E c \in OrgConnectors(o) : client[c] # "stoodDown"
+CapacityRespected ==
+    \A t \in TUNNELS : Load(t) <= Capacity[t]
 
-NoHerd == ~herdSeen
+NoHealthyEviction == ~healthyEvictionSeen
+
+AdmissionUsesLeastLoad == ~badAdmissionSeen
 
 (***************************************************************************)
-(* Liveness / selection                                                    *)
+(* Liveness                                                                *)
 (***************************************************************************)
 
-\* The ownership value eventually becomes constant. The current production
-\* policy violates this with two same-org connectors: TLC finds a lasso in
-\* which each successful hello resets its backoff before the peer evicts it.
-EventuallyStable ==
-    \A o \in ORGS :
-        \E h \in CONNECTORS \cup {NoConnector} : <>[](holder[o] = h)
+\* After bounded failures/restart, every healthy connector is a pool member.
+\* The old replacement algorithm violates this with the known retry lasso.
+EventuallyAllTunnelsRegistered ==
+    <>[](\A t \in TUNNELS :
+          connector[t] = "connected" /\ t \in pool[TunnelOrg[t]])
 
-EventuallyAvailable ==
-    <>[](\A o \in ORGS : holder[o] # NoConnector)
-
-IsNewest(c) ==
-    \A other \in OrgConnectors(ConnectorOrg[c]) :
-        Version[c] >= Version[other]
-
-\* Last-writer-wins has no version order. Even the stabilizing stand-down
-\* variant permits the older process to register last and hold forever.
-EventuallyNewest ==
-    <>[](\A o \in ORGS :
-          holder[o] # NoConnector /\ IsNewest(holder[o]))
+\* Green configs provision enough aggregate capacity for their viewers.
+EventuallyEveryViewerAssigned ==
+    <>[](\A v \in VIEWERS : viewer[v] = "open")
 
 ===========================================================================
