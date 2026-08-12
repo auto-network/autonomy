@@ -305,14 +305,20 @@ def test_activate_revision_not_found():
 # ── Chromeless public serving ────────────────────────────────────
 
 
-def test_serve_mission_site_renders_current_revision_raw():
+def test_serve_mission_site_carries_the_authors_document_unmodified():
+    """The author's HTML goes into the composed screen byte for byte.
+
+    That substring assertion IS the contract: the composer concatenates,
+    it never parses, rewrites or reserialises what the coordinator wrote.
+    """
     client = _client()
     mission_id = client.post("/api/missions", json={"name": "A"}).json()["mission"]["mission_id"]
     client.post(f"/api/missions/{mission_id}/site", json={"html": "<html><body>hello</body></html>"})
 
     resp = client.get(f"/missions/{mission_id}")
     assert resp.status_code == 200
-    assert resp.text == "<html><body>hello</body></html>"
+    assert "<html><body>hello</body></html>" in resp.text
+    assert resp.text.startswith("<!doctype html>\n<base href=\"about:srcdoc\">")
     assert resp.headers["content-type"].startswith("text/html")
 
 
@@ -324,12 +330,13 @@ def test_serve_mission_site_no_stale_serve_window():
     client.post(f"/api/missions/{mission_id}/site", json={"html": "<html>v1</html>"})
 
     first = client.get(f"/missions/{mission_id}")
-    assert first.text == "<html>v1</html>"
+    assert "<html>v1</html>" in first.text
     assert "no-store" in first.headers["cache-control"]
 
     client.post(f"/api/missions/{mission_id}/site", json={"html": "<html>v2</html>"})
     second = client.get(f"/missions/{mission_id}")
-    assert second.text == "<html>v2</html>"
+    assert "<html>v2</html>" in second.text
+    assert "<html>v1</html>" not in second.text
 
 
 def test_serve_mission_site_missing_mission_is_404():
@@ -905,7 +912,9 @@ def test_serve_pillar_site_chromeless():
 
     resp = client.get(f"/missions/{mission_id}/pillars/{pillar['pillar_id']}")
     assert resp.status_code == 200
-    assert resp.text == "<html><body>pillar content</body></html>"
+    assert "<html><body>pillar content</body></html>" in resp.text
+    # The screen knows which pillar it is, so the chrome opens on it.
+    assert f'"screen":"{pillar["pillar_id"]}"' in resp.text
 
 
 def test_serve_pillar_site_wrong_mission_is_404():
@@ -1698,7 +1707,7 @@ def test_handle_relay_read_lists_pillar_questions():
     assert [q["question"] for q in result["questions"]] == ["pillar q"]
 
 
-def test_handle_relay_read_serves_pillar_site_html():
+def test_handle_relay_read_serves_a_composed_pillar_screen():
     client = _client()
     mission_id = _mission_with_site(client)
     pillar = _pillar(client, mission_id)
@@ -1707,7 +1716,10 @@ def test_handle_relay_read_serves_pillar_site_html():
     result = _run(mc_api.handle_relay_read(
         "guest:1", mission_id, {"kind": "pillar_site", "pillar_id": pillar["pillar_id"]},
     ))
-    assert result["html"] == "<html>pillar page</html>"
+    # A composed screen, not raw HTML: the viewer document.writes what it
+    # receives, so a bare fragment would land without its runtime.
+    assert "<html>pillar page</html>" in result["document"]
+    assert result["document"].startswith("<!doctype html>")
     assert result["pillar_id"] == pillar["pillar_id"]
 
 

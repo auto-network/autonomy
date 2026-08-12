@@ -802,7 +802,10 @@ class TestMissionResolver:
         put_grant(token, mission_id, "mission", meta={"participant_id": self._PARTICIPANT})
         header, body = parse(serve(token))
         assert header["kind"] == "mission" and "content" not in header
-        assert sliced(body, header["viewer"]) == b"<html>rev one</html>"
+        served = sliced(body, header["viewer"])
+        # The author's document, byte for byte, inside the composed screen.
+        assert b"<html>rev one</html>" in served
+        assert served.startswith(b'<!doctype html>\n<base href="about:srcdoc">')
 
         # Same grant, same token -- push two more revisions and re-fetch.
         # A `design`-style pinned resolver would still show rev one here;
@@ -810,7 +813,9 @@ class TestMissionResolver:
         self.mdb.push_site_revision(mission_id, "<html>rev two</html>", "second")
         self.mdb.push_site_revision(mission_id, "<html>rev three</html>", "third")
         header2, body2 = parse(serve(token))
-        assert sliced(body2, header2["viewer"]) == b"<html>rev three</html>"
+        served2 = sliced(body2, header2["viewer"])
+        assert b"<html>rev three</html>" in served2
+        assert b"<html>rev one</html>" not in served2
 
     def test_mission_with_no_revision_yet_refused(self):
         mission = self.mdb.create_mission("Empty Mission")
