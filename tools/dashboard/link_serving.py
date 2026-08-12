@@ -843,10 +843,19 @@ def _read_dispatch(target_type: str):
 async def _serve_read(token: str, org: str | None, request: dict, clock) -> bytes:
     """One ``read`` request → the target_type-owned handler's envelope.
 
-    Identical shape to :func:`_serve_write`, and deliberately so: the
-    relay resolves the grant and the identity this channel reads AS, then
-    forwards an opaque ``body`` to whichever module owns reads for this
-    grant's target_type. It never interprets ``body``.
+    Same dispatch shape as :func:`_serve_write` -- resolve the grant, hand
+    an opaque ``body`` to whichever module owns reads for this target_type,
+    never interpret it -- but NOT the same identity rule.
+
+    A write needs a bound participant because it is attributed: the whole
+    point is that the record says who asked. A READ does not. Holding the
+    link is the authorisation, and requiring meta.participant_id here meant
+    every anonymous link could fetch its first screen (that arrives with the
+    artifact) and then silently fail at everything else -- navigation
+    refused, questions refused -- while looking completely intact.
+
+    An unbound channel reads as the empty identity. Handlers receive it and
+    are free to refuse anything that genuinely needs to know who is asking.
     """
     grant = await asyncio.to_thread(check_grant, token, org=org, now=clock())
     if grant is None:
@@ -856,8 +865,8 @@ async def _serve_read(token: str, org: str | None, request: dict, clock) -> byte
         return REFUSED  # this target_type serves no reads over the channel
     meta = grant.get("meta") or {}
     identity = meta.get("participant_id")
-    if not isinstance(identity, str) or not identity:
-        return REFUSED  # no bound identity: nothing to read as
+    if not isinstance(identity, str):
+        identity = ""
     body = request.get("body")
     if not isinstance(body, dict):
         return BAD_REQUEST

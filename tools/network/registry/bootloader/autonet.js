@@ -1560,8 +1560,17 @@ const autonet = (() => {
     let resolveReady;
     const ready = new Promise((resolve) => { resolveReady = resolve; });
 
+    // Compare against the frame's window AT EVENT TIME. capturedWindow is
+    // read before srcdoc is assigned, and whether a frame keeps its
+    // contentWindow identity across that navigation is not something to bet
+    // the channel on: if it does not match, `ready` is dropped, the port is
+    // never handed over, and the viewer renders perfectly while every control
+    // in it does nothing.
+    const fromFrame = (event) =>
+      event.source === frame.contentWindow || event.source === capturedWindow;
+
     window.addEventListener("message", (event) => {
-      if (event.source !== capturedWindow || !event.data || event.data.v !== 1) return;
+      if (!fromFrame(event) || !event.data || event.data.v !== 1) return;
       if (event.data.op === "ready") {
         // A viewer may announce ready MORE THAN ONCE: after
         // document.open/write/close the replacement document runs its own
@@ -1571,7 +1580,9 @@ const autonet = (() => {
         if (channelBroker && attachmentContext && attachmentContext.channel) {
           const pair = new MessageChannel();
           channelBroker.attach(pair.port1);
-          capturedWindow.postMessage({ v: 1, op: "port" }, "*", [pair.port2]);
+          (frame.contentWindow || capturedWindow).postMessage(
+            { v: 1, op: "port" }, "*", [pair.port2],
+          );
         }
         if (!readySeen) {
           readySeen = true;

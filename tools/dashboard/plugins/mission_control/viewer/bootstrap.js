@@ -69,6 +69,13 @@
   });
 
   parent.postMessage({v: 1, op: "ready"}, "*");
+  // If the host never hands a port over, every control in this chrome is a
+  // promise that resolves for nobody. Say so on the bar rather than looking
+  // fine and doing nothing -- a silent dead control costs more to diagnose
+  // than any amount of visible degradation.
+  setTimeout(function () {
+    if (!port) { ui.noChannel = true; render(); }
+  }, 6000);
   // This document renders its own top bar, so it asks the shell for the
   // viewport instead of sitting under a second one. The shell decides
   // whether to honour it; nothing here depends on the answer.
@@ -171,6 +178,11 @@
                           onclick: function () { show(ui.panel === "questions" ? null : {panel: "questions"}); }},
                [svg(CHAT), el("span", {text: n ? n + " open" : "Q&A"})]);
     kids.push(q);
+    if (ui.noChannel) {
+      kids.push(el("span", {class: "mc-nobody", title:
+        "This page cannot reach the mission. Navigation and questions are unavailable.",
+        text: "no link"}));
+    }
     if (here.length) {
       var cluster = el("button", {class: "mc-faces", onclick: function () { show(ui.who ? null : {who: true}); }},
                        here.map(function (h) { return face(h); }));

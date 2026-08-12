@@ -871,3 +871,29 @@ def test_check_grant_reads_owning_scope_not_composed(monkeypatch):
     # Composed would return the valid peer grant; owning scope makes it
     # unservable. If check_grant regressed to read_set this returns non-None.
     assert link_serving.check_grant(token, org=ORG) is None
+
+
+class TestAnonymousLinkCanRead:
+    """Holding the link is the authorisation for a READ.
+
+    A write is attributed and needs a bound participant. A read is not.
+    Requiring one meant an anonymous link rendered its first screen -- that
+    arrives inside the artifact -- and then silently failed at everything
+    else: navigation refused, questions refused, nothing visibly wrong.
+    """
+
+    def test_a_grant_with_no_participant_still_serves_reads(self, tmp_path):
+        from unittest.mock import patch
+
+        from tools.dashboard import link_serving as ls
+
+        async def handler(identity, target_uuid, body):
+            return {"saw_identity": identity, "kind": body.get("kind")}
+
+        with patch.object(ls, "_read_dispatch", lambda t: handler), \
+             patch.object(ls, "check_grant", lambda *a, **k: {
+                 "target_type": "mission", "target_uuid": "m-1", "meta": {}}):
+            out = asyncio.run(ls._serve_read(
+                "tok", None, {"body": {"kind": "pillars"}}, lambda: 0))
+        assert out != ls.REFUSED
+        assert json.loads(out.split(b"\n")[0])["saw_identity"] == ""
