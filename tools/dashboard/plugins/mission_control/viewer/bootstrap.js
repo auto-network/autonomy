@@ -205,6 +205,65 @@
     return el("header", {class: "mc-bar"}, kids);
   }
 
+  // ---- section strip ------------------------------------------------------
+  // Built from [data-mc-section] in the author's own markup. One optional
+  // attribute: they decide what a section is and what it is called, the
+  // platform decides how it behaves on a phone. No sections declared, no
+  // strip -- nothing is imposed on a page that does not want one.
+  var sections = [];
+  function collectSections() {
+    sections = [];
+    document.querySelectorAll("[data-mc-section]").forEach(function (el) {
+      var label = (el.getAttribute("data-mc-section") || "").trim();
+      if (label) sections.push({el: el, label: label});
+    });
+    return sections.length;
+  }
+
+  function stripNode() {
+    if (!sections.length) return null;
+    var strip = el("nav", {class: "mc-strip"}, sections.map(function (s, i) {
+      return el("button", {
+        class: "mc-chip", "data-i": String(i), text: s.label,
+        onclick: function () {
+          s.el.scrollIntoView({behavior: "smooth", block: "start"});
+        },
+      });
+    }));
+    return strip;
+  }
+
+  // The strip follows the reader: the chip for the section they are in is
+  // marked, and the strip scrolls itself so that chip stays visible. Without
+  // that second half a strip wider than the screen hides exactly the part
+  // you need once you are past the third section.
+  function syncStrip() {
+    if (!sections.length) return;
+    var strip = root.querySelector(".mc-strip");
+    if (!strip) return;
+    var top = barHeight() + 8;
+    var active = 0;
+    for (var i = 0; i < sections.length; i++) {
+      if (sections[i].el.getBoundingClientRect().top <= top) active = i;
+    }
+    var chips = strip.querySelectorAll(".mc-chip");
+    for (var j = 0; j < chips.length; j++) {
+      var on = j === active;
+      chips[j].className = on ? "mc-chip mc-chip-on" : "mc-chip";
+      if (on) {
+        var c = chips[j], want = c.offsetLeft - 12;
+        if (Math.abs(strip.scrollLeft - want) > 4) {
+          strip.scrollTo({left: Math.max(0, want), behavior: "smooth"});
+        }
+      }
+    }
+  }
+
+  function barHeight() {
+    var bar = root.querySelector(".mc-bar");
+    return bar ? Math.round(bar.getBoundingClientRect().height) : 48;
+  }
+
   function whoList() {
     var here = presentHere();
     return el("div", {class: "mc-who"},
@@ -359,23 +418,32 @@
   // The bar sticks to the top of the VIEWPORT once scrolled, but sits below
   // the author's body padding before that. Panels dock to its real bottom
   // edge rather than to a constant, or they cover its own controls.
+  // Everything pinned is fixed to the viewport, so the host in normal flow
+  // has to reserve exactly their combined height -- otherwise the first
+  // thing the author wrote sits underneath them.
   function measureBar() {
-    var bar = chrome.firstChild;
-    if (!bar || !bar.getBoundingClientRect) return;
-    var bottom = Math.max(0, Math.round(bar.getBoundingClientRect().bottom));
-    chrome.style.setProperty("--mc-below", bottom + "px");
+    var strip = root.querySelector(".mc-strip");
+    var total = barHeight() + (strip ? Math.round(strip.getBoundingClientRect().height) : 0);
+    chrome.style.setProperty("--mc-below", total + "px");
+    chrome.style.setProperty("--mc-bar-only", barHeight() + "px");
+    host.style.height = total + "px";
+    document.documentElement.style.scrollPaddingTop = (total + 8) + "px";
+    document.documentElement.style.setProperty("--mc-bar-height", total + "px");
   }
+  addEventListener("scroll", syncStrip, {passive: true});
   addEventListener("scroll", measureBar, {passive: true});
   addEventListener("resize", measureBar, {passive: true});
 
   function render() {
     chrome.textContent = "";
     chrome.appendChild(barRow());
+    var strip = stripNode(); if (strip) chrome.appendChild(strip);
     if (ui.who) chrome.appendChild(whoList());
     var p = panelNode(); if (p) chrome.appendChild(p);
     var e = entryNode(); if (e) chrome.appendChild(e);
     var a = anchorNode(); if (a) chrome.appendChild(a);
     measureBar();
+    syncStrip();
   }
 
   // ---- anchored controls --------------------------------------------------
@@ -455,6 +523,7 @@
     // stick at 0 and ours, which is above in paint order, hides theirs.
     document.documentElement.style.setProperty("--mc-bar-height", "3rem");
     mountAnchors();
+    collectSections();
     render();
   }
   if (document.readyState === "loading") {

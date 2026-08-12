@@ -119,3 +119,22 @@
 /* Two counters: how many questions are open, how many are answered. Open is
    the one that wants attention, so only it is coloured. */
 .mc-count-done { background: #1e293b; color: #64748b; }
+
+/* The section strip: pinned directly under the bar because the platform owns
+   both and can stack them. Scrolls horizontally WITHIN ITSELF -- the page
+   never gains a horizontal axis because of it. */
+.mc-strip {
+  position: fixed; top: var(--mc-bar-only, 3rem); left: 0; right: 0;
+  z-index: 2147482999; display: flex; gap: .35rem; align-items: center;
+  padding: .35rem .6rem; background: #0e1015;
+  border-bottom: 1px solid #1e293b;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.mc-strip::-webkit-scrollbar { display: none; }
+.mc-chip {
+  flex: none; font: inherit; font-size: 12px; white-space: nowrap;
+  color: #94a3b8; background: #171a21; border: 1px solid #1e293b;
+  border-radius: 999px; padding: .25rem .6rem; cursor: pointer;
+}
+.mc-chip-on { color: #e2e8f0; background: #1e293b; border-color: #334155; }
