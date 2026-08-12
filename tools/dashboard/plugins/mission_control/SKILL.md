@@ -618,6 +618,29 @@ into a block, spends the one resource the mission cannot replace.
 worth more than a real implementation that never gets exercised, because the
 stand-in tells you whether the stage after it works.
 
+**Three things look like forks and are not all the same.** Choose-and-continue
+applies to the first only:
+
+- **A fresh fork** — nobody has decided this. Pick the option you would
+  defend, record it, keep going.
+- **A standing decision you now think is wrong.** Do not quietly choose
+  against it: propose the correction, say plainly what evidence changed your
+  mind, and leave the decision where it lives. Reversing someone else's
+  settled call silently is how two pillars end up building incompatible
+  things while both believe they are compliant.
+- **Something you cannot do at all** — no write access to the repository the
+  code belongs in, a tool the work requires that is absent, a dependency that
+  does not exist yet. This is not a choice and no stand-in substitutes for it.
+  Record it as a blocker with the evidence, and say what it stops. Trying
+  harder is not the answer and neither is picking an option.
+
+**If others will build against something you own, publish its literal shape
+early.** A decision about how an interface behaves is not enough for anyone
+writing against it: they need the actual field names, the actual path, the
+actual envelope. Publish a concrete stand-in, marked plainly as provisional,
+as soon as the behaviour is agreed. Two pillars guessing independently produce
+two incompatible guesses, and both find out late.
+
 **Drive to end-to-end.** The target is the whole flow exercised, start to
 finish, with every unresolved thing standing in as a stub. Every stage having
 run once — even against stand-ins — is what proves the shape is right.
@@ -628,8 +651,11 @@ and why) or a question you cannot settle (record what it blocks). That set is
 most of what your screen says.
 
 **When to stop.** Stop when driving further would only refine something
-already understood, or when a fork genuinely cannot be guessed and everything
-behind it depends on the answer. Say which of the two you hit. Do not keep
+already understood; when a fork genuinely cannot be guessed and everything
+behind it depends on the answer; or when the next thing to resolve sits across
+a boundary you do not own. Say which you hit. The third is not a failure to go
+deeper — it is the work correctly reaching its edge, and it belongs to the
+coordinator to route rather than to you to guess. Do not keep
 polishing a stage that already works — depth into the unknown is the point,
 not finish on the known.
 
