@@ -144,11 +144,20 @@
     var id = ui.screenId || state.screen;
     return state.pillars.filter(function (p) { return p.pillar_id === id; })[0] || null;
   }
+  // The bar describes the screen you are on. On a pillar that means that
+  // pillar's questions; on the overview it means all of them. A count that
+  // never changes as you navigate is not telling you anything about where
+  // you are.
+  function questionsHere() {
+    var p = currentPillar();
+    if (!p) return state.questions;
+    return state.questions.filter(function (q) { return q.pillar_id === p.pillar_id; });
+  }
   function openCount() {
-    return state.questions.filter(function (q) { return !q.answer; }).length;
+    return questionsHere().filter(function (q) { return !q.answer; }).length;
   }
   function answeredCount() {
-    return state.questions.filter(function (q) { return !!q.answer; }).length;
+    return questionsHere().filter(function (q) { return !!q.answer; }).length;
   }
   function atAnchor(a) {
     return state.questions.filter(function (q) { return q.anchor === a; });
@@ -225,6 +234,7 @@
   // platform decides how it behaves on a phone. No sections declared, no
   // strip -- nothing is imposed on a page that does not want one.
   var sections = [];
+  var jumpedTo = -1, jumpedAt = 0;
   function collectSections() {
     sections = [];
     document.querySelectorAll("[data-mc-section]").forEach(function (el) {
@@ -240,7 +250,13 @@
       return el("button", {
         class: "mc-chip", "data-i": String(i), text: s.label,
         onclick: function () {
+          // Mark it now. Scroll-spy cannot: a smooth scroll has not moved
+          // anywhere yet at the moment of the tap, so the previous section is
+          // still the one under the line and the wrong pill lights up until
+          // the reader nudges the page.
+          jumpedTo = i; jumpedAt = Date.now();
           s.el.scrollIntoView({behavior: "smooth", block: "start"});
+          syncStrip();
         },
       });
     }));
@@ -260,6 +276,9 @@
     for (var i = 0; i < sections.length; i++) {
       if (sections[i].el.getBoundingClientRect().top <= top) active = i;
     }
+    // A tap wins until the scroll it started has had time to land.
+    if (jumpedTo >= 0 && Date.now() - jumpedAt < 1200) active = jumpedTo;
+    else jumpedTo = -1;
     var chips = strip.querySelectorAll(".mc-chip");
     for (var j = 0; j < chips.length; j++) {
       var on = j === active;
@@ -292,7 +311,18 @@
   }
 
   function pillarRows() {
-    return state.pillars.map(function (p) {
+    var onOverview = !(ui.screenId || state.screen);
+    var rows = [el("button", {
+      class: onOverview ? "mc-row mc-row-on" : "mc-row",
+      onclick: function () { show(null); if (!onOverview) goto(null); },
+    }, [
+      el("div", {class: "mc-row-top"}, [
+        el("span", {class: "mc-swatch"}),
+        el("span", {class: "mc-name", text: state.mission || "Mission overview"}),
+      ]),
+      el("p", {class: "mc-last", text: "Where the whole mission stands."}),
+    ])];
+    return rows.concat(state.pillars.map(function (p) {
       var sw = el("span", {class: "mc-swatch"}); sw.style.background = p.color || "#475569";
       var faces = el("span", {class: "mc-faces"}, (p.here || []).map(function (h) { return face(h, true); }));
       var meta = [el("span", {class: "mc-age", text: p.age || ""})];
@@ -307,13 +337,15 @@
         el("p", {class: "mc-last", text: p.last_done || ""}),
         el("div", {class: "mc-row-meta"}, meta),
       ]);
-    });
+    }));
   }
 
   function questionRows() {
-    var sorted = state.questions.slice().sort(function (a, b) { return (!!a.answer) - (!!b.answer); });
+    var sorted = questionsHere().slice().sort(function (a, b) { return (!!a.answer) - (!!b.answer); });
     if (!sorted.length) {
-      return [el("p", {class: "mc-empty", text: "No questions yet. Ask the first one below."})];
+      return [el("p", {class: "mc-empty", text: currentPillar()
+        ? "No questions on this screen yet. Ask the first one below."
+        : "No questions yet. Ask the first one below."})];
     }
     return sorted.map(function (q) {
       return el("button", {class: "mc-row", onclick: function () { show({entry: q.entry_id}); }}, [
@@ -451,7 +483,12 @@
   function render() {
     chrome.textContent = "";
     chrome.appendChild(barRow());
-    var strip = stripNode(); if (strip) chrome.appendChild(strip);
+    // Hidden while a panel or view is up. Choosing a pillar is a full-screen
+    // act; leaving the current pillar's own section names showing behind the
+    // chooser makes it unclear which screen you are even looking at.
+    var covered = ui.panel || ui.entry || ui.anchor;
+    var strip = covered ? null : stripNode();
+    if (strip) chrome.appendChild(strip);
     if (ui.who) chrome.appendChild(whoList());
     var p = panelNode(); if (p) chrome.appendChild(p);
     var e = entryNode(); if (e) chrome.appendChild(e);
@@ -499,8 +536,13 @@
   }
 
   // ---- navigation ---------------------------------------------------------
+  // pillarId null means the mission overview -- the screen a reader lands on
+  // and, until now, the one place navigation could not take them back to.
   function goto(pillarId) {
-    return request("read", {kind: "pillar_site", pillar_id: pillarId})
+    var body = pillarId
+      ? {kind: "pillar_site", pillar_id: pillarId}
+      : {kind: "mission_site"};
+    return request("read", body)
       .then(function (screen) {
         if (!screen || typeof screen.document !== "string") return;
         document.open();
