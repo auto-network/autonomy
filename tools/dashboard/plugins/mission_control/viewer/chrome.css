@@ -109,11 +109,13 @@
 .mc-count { font-size: 11px; line-height: 1; color: #64748b; }
 .mc-count-open { color: #fcd34d; }
 
-/* Desktop: dock to the right instead of covering the author's page. */
+/* On a wide screen the panel and the discussion dock to the LEFT edge. The
+   controls that open them live on the left of the bar, so opening one no
+   longer throws the reader's eye across the whole window and back. */
 @media (min-width: 768px) {
-  .mc-panel { left: auto; right: 0; top: 0; bottom: 0; width: 24rem;
-              border-radius: 0; border-top: 0; border-left: 1px solid #1e293b; }
-  .mc-view { left: auto; right: 0; width: 32rem; border-left: 1px solid #1e293b; }
+  .mc-panel { right: auto; left: 0; top: 0; bottom: 0; width: 24rem;
+              border-radius: 0; border-top: 0; border-right: 1px solid #1e293b; }
+  .mc-view { right: auto; left: 0; width: 32rem; border-right: 1px solid #1e293b; }
 }
 
 /* Two counters: how many questions are open, how many are answered. Open is
