@@ -133,6 +133,9 @@
   function openCount() {
     return state.questions.filter(function (q) { return !q.answer; }).length;
   }
+  function answeredCount() {
+    return state.questions.filter(function (q) { return !!q.answer; }).length;
+  }
   function atAnchor(a) {
     return state.questions.filter(function (q) { return q.anchor === a; });
   }
@@ -173,10 +176,19 @@
       el("span", {class: "mc-age", text: p.age || ""}),
       el("span", {class: "mc-grow"}),
     ];
-    var n = openCount();
-    var q = el("button", {class: n ? "mc-q mc-q-hot" : "mc-q",
+    var n = openCount(), done = answeredCount();
+    // The bubble says what this is; the numbers say how much of it there is.
+    // Open is the count that wants a human, so it is the only coloured one.
+    var qKids = [svg(CHAT)];
+    if (n || done) {
+      qKids.push(el("span", {class: n ? "mc-count mc-count-open" : "mc-count",
+                             title: n + " open", text: String(n)}));
+      qKids.push(el("span", {class: "mc-count mc-count-done",
+                             title: done + " answered", text: String(done)}));
+    }
+    var q = el("button", {class: n ? "mc-q mc-q-hot" : "mc-q", title: "Questions",
                           onclick: function () { show(ui.panel === "questions" ? null : {panel: "questions"}); }},
-               [svg(CHAT), el("span", {text: n ? n + " open" : "Q&A"})]);
+               qKids);
     kids.push(q);
     if (ui.noChannel) {
       kids.push(el("span", {class: "mc-nobody", title:
@@ -425,6 +437,12 @@
     // its own 3rem in normal flow instead of covering the top of whatever
     // the coordinator wrote. Measured on the real 1.87MB pillar page: a
     // fixed bar ate its opening heading.
+    // Sticky HERE, on the host: this element is a child of body, so body's
+    // full height is the range it can stick across. Setting it on the bar
+    // inside the shadow root pins the bar to its own height, which is the
+    // same as not pinning it at all.
+    host.style.cssText =
+      "position:sticky;top:0;z-index:2147483000;display:block";
     document.body.insertBefore(host, document.body.firstChild);
     // The one property we set on the author's document. A sticky bar still
     // overlays whatever a #fragment jump lands on, and working fragment

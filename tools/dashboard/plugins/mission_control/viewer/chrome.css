@@ -8,11 +8,13 @@
 
 :host, * { box-sizing: border-box; }
 
-/* Sticky, not fixed: the host is body's first child, so the bar occupies
-   its own 3rem of normal flow and the author's page starts below it
-   instead of underneath it. */
+/* The HOST is the sticky element, not this bar. A sticky element only
+   sticks within its containing block, and this bar's containing block is
+   the shadow root inside a host whose height IS the bar -- so sticking it
+   here pins it to itself and it scrolls away on the first swipe. The host
+   is a child of body, so body's whole height is its range. */
 .mc-bar {
-  position: sticky; top: 0; z-index: 2147483000;
+  position: static; z-index: 2147483000;
   /* Full-bleed: the host sits inside body, so whatever gutter the author
      put on body would otherwise inset the bar. This spans the viewport
      without knowing what that gutter is. */
@@ -106,3 +108,7 @@
               border-radius: 0; border-top: 0; border-left: 1px solid #1e293b; }
   .mc-view { left: auto; right: 0; width: 32rem; border-left: 1px solid #1e293b; }
 }
+
+/* Two counters: how many questions are open, how many are answered. Open is
+   the one that wants attention, so only it is coloured. */
+.mc-count-done { background: #1e293b; color: #64748b; }
