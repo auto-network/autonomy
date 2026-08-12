@@ -170,3 +170,13 @@ def test_the_pillar_status_line_is_passed_through_verbatim():
     assert by_name["Collection"]["last_done"].startswith("Ran the prototype")
     # Not the status value, not a revision note, not an empty string: None.
     assert by_name["Delivery"]["last_done"] is None
+
+
+def test_the_overview_screen_carries_the_missions_name():
+    """The bar is where a reader confirms which mission they are in. On the
+    overview there is no pillar to name it, and the literal "Mission" told
+    them nothing -- which is what the live link showed."""
+    mission = db.create_mission("OSS Insights")
+    db.push_site_revision(mission["mission_id"], "<html>page</html>", "first")
+    state = _state_of(compose.compose_screen(mission["mission_id"]).decode("utf-8"))
+    assert state["mission"] == "OSS Insights"
