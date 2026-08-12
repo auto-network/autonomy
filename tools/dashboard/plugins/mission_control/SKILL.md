@@ -652,6 +652,13 @@ discovered by two pillars separately filling it in.
 finish, with every unresolved thing standing in as a stub. Every stage having
 run once — even against stand-ins — is what proves the shape is right.
 
+**A gate on shipping is not a gate on prototyping.** A mission that holds code
+until contracts land is holding what gets committed, merged and depended on —
+it is not telling you to stop finding things out. Build the throwaway outside
+the repositories it would eventually live in, commit nothing, and say plainly
+that is what you did. Running the thing once is how a contract gets written
+from evidence instead of from argument.
+
 **Then harvest.** Walk back over every stub and every choice you made without
 a specification. Each one is either a decision you took (record what you chose
 and why) or a question you cannot settle (record what it blocks). That set is
@@ -691,6 +698,13 @@ what it explicitly does not own.
 **B. The work.** Every unit of development your pillar needs, each with a
 headline and a summary that stand alone, and detail available underneath.
 Someone reading only the headlines should understand the shape of the work.
+
+The writing rules bite hardest at the top. A headline and a summary have to
+carry a reader who knows nothing about the internals, so they hold no
+identifiers at all. The detail underneath is where someone has chosen to go
+deeper: it can name real things, and where an exact string, message or value
+IS the evidence, quote it verbatim rather than describing it. Plain language
+is still the default there — technical is not permission to be unreadable.
 
 **C. Decisions.** Every decision taken under uncertainty: what the fork was,
 which way you went, why, and what breaks if the other way turns out to be
