@@ -441,8 +441,9 @@
     // full height is the range it can stick across. Setting it on the bar
     // inside the shadow root pins the bar to its own height, which is the
     // same as not pinning it at all.
-    host.style.cssText =
-      "position:sticky;top:0;z-index:2147483000;display:block";
+    // A plain block that occupies the bar's height. The bar itself is fixed
+    // to the viewport; this is what stops it covering the top of the page.
+    host.style.cssText = "display:block;height:3rem";
     document.body.insertBefore(host, document.body.firstChild);
     // The one property we set on the author's document. A sticky bar still
     // overlays whatever a #fragment jump lands on, and working fragment

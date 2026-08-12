@@ -33,6 +33,18 @@ _HEAD = (
     # remember, and harmless when they declare their own -- first one wins.
     '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
     '<base href="about:srcdoc">\n'
+    # One oversized element -- a screenshot, a wide table -- otherwise widens
+    # the whole DOCUMENT, and then everything pans sideways together: the
+    # prose, the gutters, and any bar positioned within the document. These
+    # rules keep the overflow inside the element that has it. They are the
+    # platform's only opinion about the author's content, and they set no
+    # colours, fonts or spacing.
+    "<style>\n"
+    "  html { overflow-x: hidden; }\n"
+    "  img, svg, video, canvas, iframe { max-width: 100%; height: auto; }\n"
+    "  pre { max-width: 100%; overflow-x: auto; }\n"
+    "  table { display: block; max-width: 100%; overflow-x: auto; }\n"
+    "</style>\n"
 )
 
 
