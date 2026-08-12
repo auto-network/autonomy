@@ -52,6 +52,10 @@
     }
   };
   parent.postMessage({v: 1, op: "ready"}, "*", [chan.port2]);
+  // This document renders its own top bar, so it asks the shell for the
+  // viewport instead of sitting under a second one. The shell decides
+  // whether to honour it; nothing here depends on the answer.
+  parent.postMessage({v: 1, op: "chrome", own: true}, "*");
 
   function request(op, body) {
     return new Promise(function (resolve, reject) {

@@ -98,12 +98,10 @@ class TestBootloaderBytes:
         script = client.get("/l-assets/autonet.js").text
         # The property under test is that the viewer document is handed to
         # the frame via srcdoc and NEVER by navigating it to a blob: URL.
-        # Asserted as "every assignment goes to srcdoc" rather than one
-        # exact line: auto-t2lz1 added a second srcdoc assignment (the
-        # mission branch prepends its bridge shim first), and pinning the
-        # old literal would have failed on a change that upholds the rule.
+        # There is now exactly ONE assignment, and it hands over the bytes
+        # unmodified: no viewer's HTML is rewritten on the way in.
+        assert script.count("frame.srcdoc") == 1
         assert "frame.srcdoc = viewerHtml" in script
-        assert "frame.srcdoc = missionShimmed(viewerHtml)" in script
         assert "frame.src = URL.createObjectURL" not in script
 
     def test_shell_busts_legacy_asset_cache_without_fallback(self, client):

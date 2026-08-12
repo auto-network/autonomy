@@ -1518,202 +1518,6 @@ const autonet = (() => {
     show(ERROR_VIEWS[state.errorKind]);
   }
 
-  // ── mission viewer bridge (auto-t2lz1) ──────────────────────────────
-  //
-  // A mission's page is authored against the dashboard's own origin --
-  // fetch("/api/missions/<id>/questions"), links to
-  // "/missions/<id>/pillars/<pid>". Over the relay the artifact runs in a
-  // sandboxed srcdoc iframe whose base URL is the relay's, where none of
-  // those paths exist: every one is a 404 and every click fails silently.
-  //
-  // The shim below is PREPENDED to the artifact HTML before it becomes
-  // srcdoc, because a sandboxed frame is an opaque origin the parent can
-  // never inject into after load. It lives here rather than in the
-  // server's resolver so the coordinator's own bytes are still served
-  // byte-for-byte, and so the interception exists only in the relay
-  // viewer -- the same page keeps working unchanged on the dashboard.
-  //
-  // Inside the frame it overrides fetch() and intercepts pillar
-  // navigation, turning each into a postMessage the parent answers by
-  // issuing the matching read/write channel op. Pillar navigation becomes
-  // an in-place document swap, never a page load: one link per mission,
-  // navigation stays in-page.
-
-  const MISSION_SHIM = `<script>(function () {
-  var pending = {}, nextId = 1;
-  function ask(op, body) {
-    return new Promise(function (resolve) {
-      var id = String(nextId++);
-      pending[id] = resolve;
-      parent.postMessage({ v: 1, op: "mc-request", id: id, mcOp: op, body: body }, "*");
-    });
-  }
-  window.addEventListener("message", function (event) {
-    if (event.source !== parent || !event.data || event.data.v !== 1) return;
-    if (event.data.op === "mc-update") {
-      // A live update arrived. The page decides what to do with it: this
-      // dispatches a DOM event rather than touching the page's own markup,
-      // because the viewer does not know how a given mission renders its
-      // conversation. A page that does not listen is simply not live --
-      // it is never broken by one.
-      try {
-        window.dispatchEvent(new CustomEvent("mc:update", {
-          detail: event.data.update,
-        }));
-      } catch (e) { /* a page with no listener costs nothing */ }
-      return;
-    }
-    if (event.data.op !== "mc-response") return;
-    var resolve = pending[event.data.id];
-    if (!resolve) return;
-    delete pending[event.data.id];
-    resolve(event.data.result);
-  });
-  function reply(payload) {
-    return new Response(JSON.stringify(payload === null ? {} : payload), {
-      status: payload === null ? 502 : 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-  var realFetch = window.fetch.bind(window);
-  window.fetch = function (input, init) {
-    var url = typeof input === "string" ? input : (input && input.url) || "";
-    var method = ((init && init.method) || (input && input.method) || "GET").toUpperCase();
-    var m;
-    if ((m = url.match(/\\/api\\/(?:missions|pillars)\\/([^\\/?#]+)\\/questions\\/([^\\/?#]+)\\/reopen/))) {
-      var rb = init && init.body ? JSON.parse(init.body) : {};
-      return ask("write", { kind: "reopen", entry_id: m[2], followup: rb.followup }).then(reply);
-    }
-    if ((m = url.match(/\\/api\\/(missions|pillars)\\/([^\\/?#]+)\\/questions/))) {
-      var isPillar = m[1] === "pillars";
-      if (method === "POST") {
-        var qb = init && init.body ? JSON.parse(init.body) : {};
-        return ask("write", {
-          kind: "question", question: qb.question, anchor: qb.anchor,
-          pillar_id: isPillar ? m[2] : undefined,
-        }).then(reply);
-      }
-      return ask("read", {
-        kind: "questions", pillar_id: isPillar ? m[2] : undefined,
-      }).then(reply);
-    }
-    if (url.indexOf("/pillars") !== -1 && url.indexOf("/api/missions/") !== -1) {
-      return ask("read", { kind: "pillars" }).then(reply);
-    }
-    if (url.indexOf("dashboard.surface.presence") !== -1) {
-      return ask("read", { kind: "presence" }).then(function (r) {
-        return reply({ members: (r && r.presence || []).map(function (p) {
-          return { key: p.participant_id, payload: p };
-        }) });
-      });
-    }
-    return realFetch(input, init);
-  };
-
-  function openPillar(pillarId) {
-    ask("read", { kind: "pillar_site", pillar_id: pillarId }).then(function (r) {
-      if (r && r.html) parent.postMessage({ v: 1, op: "mc-swap", html: r.html }, "*");
-    });
-  }
-
-  // ONE click rule: read the marker. Static links were rewritten into
-  // data-mc-* before this document existed; rows the site builds in its own
-  // script mark themselves (SKILL.md section 8). Nothing here parses an
-  // href, scrapes handler source, or wraps location -- if a control is not
-  // marked, it is not ours to route.
-  document.addEventListener("click", function (event) {
-    var el = event.target;
-    while (el && el !== document) {
-      if (el.getAttribute) {
-        var pillar = el.getAttribute("data-mc-pillar");
-        if (pillar) {
-          event.preventDefault();
-          event.stopImmediatePropagation();
-          openPillar(pillar);
-          return;
-        }
-        if (el.getAttribute("data-mc-home")) {
-          event.preventDefault();
-          event.stopImmediatePropagation();
-          parent.postMessage({ v: 1, op: "mc-home" }, "*");
-          return;
-        }
-        var frag = el.getAttribute("data-mc-fragment");
-        if (frag !== null && frag !== undefined) {
-          event.preventDefault();
-          if (!frag) { window.scrollTo(0, 0); return; }
-          var target = document.getElementById(frag)
-            || document.getElementsByName(frag)[0];
-          if (target && target.scrollIntoView) {
-            target.scrollIntoView({ behavior: "smooth", block: "start" });
-          }
-          return;
-        }
-      }
-      el = el.parentElement;
-    }
-  }, true);
-})();<\/script>`;
-
-  //: Every same-origin destination a mission page can name, turned into an
-  //: explicit marker BEFORE the document exists. Doing it here rather than
-  //: at click time is what keeps the runtime rule singular: the shim reads
-  //: attributes, it never re-derives intent from hrefs or handler source.
-  //:
-  //: External links (29 of them in the OSS Insights binder) and everything
-  //: else are deliberately untouched.
-  function rewriteMissionLinks(html) {
-    // ORDER IS LOAD-BEARING. onclick is consumed first, or the href rules
-    // below match the URL *inside* a handler's own source and corrupt it.
-    // Fragments are marked before any rule can mint a new href="#", or that
-    // synthetic href gets marked as a fragment too.
-    return String(html)
-      // 1. A static inline handler naming a pillar -> marker, handler
-      //    dropped so it cannot also fire.
-      .replace(
-        /onclick\s*=\s*"[^"]*\/missions\/[^"]*\/pillars\/([^"\/?#'\s+]+)[^"]*"/gi,
-        'data-mc-pillar="$1"'
-      )
-      .replace(
-        /onclick\s*=\s*'[^']*\/missions\/[^']*\/pillars\/([^'\/?#"\s+]+)[^']*'/gi,
-        'data-mc-pillar="$1"'
-      )
-      // 2. Fragments: marked, because they must scroll rather than
-      //    navigate -- a srcdoc document inherits the PARENT's base URL, so
-      //    "#x" resolves to a different document and takes the artifact
-      //    with it. 64 of these in the OSS Insights binder.
-      .replace(
-        /href\s*=\s*"#([^"]*)"/gi,
-        'href="#$1" data-mc-fragment="$1"'
-      )
-      .replace(
-        /href\s*=\s*'#([^']*)'/gi,
-        'href="#$1" data-mc-fragment="$1"'
-      )
-      // 3. A pillar destination -> open it over the channel.
-      .replace(
-        /href\s*=\s*"\/missions\/[^"\/]+\/pillars\/([^"\/?#]+)"/gi,
-        'href="#" data-mc-pillar="$1"'
-      )
-      .replace(
-        /href\s*=\s*'\/missions\/[^'\/]+\/pillars\/([^'\/?#]+)'/gi,
-        'href="#" data-mc-pillar="$1"'
-      )
-      // 4. The mission itself -> restore the artifact the parent holds.
-      .replace(
-        /href\s*=\s*"\/missions\/[^"\/?#]+\/?"/gi,
-        'href="#" data-mc-home="1"'
-      )
-      .replace(
-        /href\s*=\s*'\/missions\/[^'\/?#]+\/?'/gi,
-        'href="#" data-mc-home="1"'
-      );
-  }
-
-  function missionShimmed(html) {
-    return MISSION_SHIM + rewriteMissionLinks(html);
-  }
-
   //: Opens one fan-out frame. Mirrors channel.py's seal_stream_frame:
   //: [12B random nonce][AES-256-GCM ciphertext] with the domain string as
   //: AAD. Returns null when it does not authenticate -- which is also how
@@ -1744,166 +1548,6 @@ const autonet = (() => {
     }
   }
 
-  class MissionBridge {
-    /** Answers the shim's requests by issuing channel ops. The frame is
-     * an opaque origin, so every inbound message is checked against the
-     * captured window before it is trusted -- the same discipline the
-     * note viewer's own message handling uses. */
-    constructor({ frame, channel, missionHtml }) {
-      this.frame = frame;
-      this.childWindow = frame.contentWindow;
-      this.channel = channel;
-      // THE PARENT OWNS THE MISSION DOCUMENT. It used to be captured inside
-      // the frame on DOMContentLoaded, which broke the moment a pillar
-      // replaced that document: the re-injected shim captured the PILLAR as
-      // its own "mission", so going back restored the page you were already
-      // on -- and document.write often does not re-fire DOMContentLoaded, so
-      // usually it captured nothing and the link did nothing at all. The
-      // parent already holds these bytes and never loses them to a swap.
-      this.missionHtml = missionHtml;
-      this.queue = Promise.resolve();
-      // ONE reader owns the channel. The record layer is strictly
-      // request/response -- recvMessage consumes until STREAM_FINAL -- so a
-      // pushed frame arriving mid-request would otherwise be swallowed as
-      // if it were that request's answer. Every inbound message goes
-      // through this loop, which tells the two apart by whether it opens
-      // under the stream key, and hands each to the right place.
-      this.streamKey = null;
-      this.pendingOp = null;
-      this.reading = false;
-      this.onMessage = this.onMessage.bind(this);
-      window.addEventListener("message", this.onMessage);
-    }
-
-    startReading() {
-      if (this.reading) return;
-      this.reading = true;
-      (async () => {
-        while (this.reading) {
-          let raw;
-          try {
-            raw = await this.channel.recvMessage();
-          } catch (err) {
-            break;  // channel gone: stop cleanly, the page keeps its content
-          }
-          const pushed = this.streamKey
-            ? await openStreamFrame(this.streamKey, raw)
-            : null;
-          if (pushed) {
-            this.deliverPush(pushed);
-            continue;
-          }
-          const resolve = this.pendingOp;
-          this.pendingOp = null;
-          if (resolve) resolve(raw);
-        }
-      })();
-    }
-
-    /** Ask for this link's stream key, then start listening. Failing is
-     * not fatal: the page simply stays static, exactly as it did before
-     * live updates existed. */
-    async startLiveUpdates() {
-      this.startReading();
-      const envelope = await this.op("subscribe", null);
-      const hex = envelope && envelope.stream_key;
-      if (typeof hex !== "string" || hex.length !== 64) return false;
-      const bytes = new Uint8Array(32);
-      for (let i = 0; i < 32; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
-      this.streamKey = bytes;
-      return true;
-    }
-
-    /** A decoded push -> the frame, for the page to apply. */
-    deliverPush(plain) {
-      let update;
-      try {
-        update = JSON.parse(new TextDecoder().decode(plain));
-      } catch (err) {
-        return;  // a malformed frame is dropped, never breaks the stream
-      }
-      this.childWindow.postMessage({ v: 1, op: "mc-update", update }, "*");
-    }
-
-    /** Replace the frame's document, re-injecting the shim so the new one
-     * keeps its channel access and its way back. */
-    render(html) {
-      this.frame.srcdoc = missionShimmed(html);
-      this.childWindow = this.frame.contentWindow;
-    }
-
-
-    dispose() {
-      this.reading = false;
-      this.pendingOp = null;
-      window.removeEventListener("message", this.onMessage);
-    }
-
-    onMessage(event) {
-      if (event.source !== this.childWindow || !event.data) return;
-      const msg = event.data;
-      if (msg.v !== 1) return;
-      if (msg.op === "mc-swap" && typeof msg.html === "string") {
-        this.render(msg.html);
-        return;
-      }
-      if (msg.op === "mc-home") {
-        this.render(this.missionHtml);
-        return;
-      }
-      if (msg.op !== "mc-request") return;
-      if (msg.mcOp !== "read" && msg.mcOp !== "write") return;
-      // NOT queued here: op() is the single serialization point. Queueing
-      // at both layers would deadlock -- the outer entry would wait on an
-      // op that is waiting for that same entry to finish.
-      this.exchange(msg);
-    }
-
-    /** One request/response on the channel. Returns the parsed envelope,
-     * or null -- a failed exchange never throws into a caller and never
-     * leaves the page waiting. */
-    /** Serialization point for EVERY caller. There is exactly ONE
-     * pendingOp slot, so two ops in flight would clobber each other and
-     * one would hang forever -- which is precisely what happened when
-     * startLiveUpdates() called this outside the frame's queue: subscribe
-     * raced the page's own first fetches on load and the pillar menu never
-     * populated. Queueing here rather than at the call sites means no
-     * future caller can reintroduce it. */
-    op(mcOp, body) {
-      const run = this.queue.then(() => this.exchangeOnce(mcOp, body));
-      // Keep the chain alive even if one op rejects, or every later op
-      // inherits the rejection and the channel goes silent.
-      this.queue = run.then(() => {}, () => {});
-      return run;
-    }
-
-    async exchangeOnce(mcOp, body) {
-      this.startReading();
-      try {
-        const request = { v: 1, op: mcOp };
-        // subscribe carries no body; read/write always do.
-        if (body !== null) request.body = body && typeof body === "object" ? body : {};
-        const answer = new Promise((resolve) => { this.pendingOp = resolve; });
-        await this.channel.sendMessage(te.encode(canonicalJson(request)));
-        const raw = await answer;
-        const line = new TextDecoder().decode(raw).split("\n")[0];
-        const parsed = JSON.parse(line);
-        return parsed && parsed.status === "ok" ? parsed : null;
-      } catch (err) {
-        this.pendingOp = null;
-        return null;
-      }
-    }
-
-    async exchange(msg) {
-      const result = await this.op(msg.mcOp, msg.body);
-      this.childWindow.postMessage(
-        { v: 1, op: "mc-response", id: msg.id, result }, "*",
-      );
-    }
-  }
-
-  let missionBridge = null;
   let channelBroker = null;
 
   async function renderArtifact(header, body, attachmentContext = null) {
@@ -1938,6 +1582,20 @@ const autonet = (() => {
         setStatus(state.artifactTitle);
       } else if (event.data.op === "height" && Number.isSafeInteger(event.data.height)) {
         state.artifactHeight = Math.max(0, Math.min(event.data.height, 1000000));
+      } else if (event.data.op === "chrome") {
+        // A viewer that renders its own top bar asks for the viewport, and
+        // the shell drops its header rather than stacking two bars. Declared
+        // BY THE VIEWER, not inferred from a kind -- any viewer can own its
+        // surface, and the shell learns nothing about what it is showing.
+        //
+        // Refused while an attachment export is offered: that button lives
+        // in the shell's header, so hiding it would leave the download with
+        // no way to be started.
+        const exportButton = document.getElementById("attachment-export");
+        const exportOffered = exportButton && !exportButton.hidden;
+        document.body.classList.toggle(
+          "surface-owned", event.data.own === true && !exportOffered,
+        );
       }
     });
     if (attachmentController) {
@@ -1952,10 +1610,6 @@ const autonet = (() => {
       channelBroker = new ChannelBroker(
         attachmentContext.channel, attachmentContext.transport || null
       );
-    }
-    if (missionBridge) {
-      missionBridge.dispose();
-      missionBridge = null;
     }
     // Manifest present -> the download controller runs. No kind check.
     if (artifact.attachments && attachmentContext) {
@@ -1977,21 +1631,12 @@ const autonet = (() => {
     // leaving the note viewer unable to emit its ready message. srcdoc keeps
     // the same sandboxed opaque origin without depending on blob navigation.
     const viewerHtml = decoder.decode(viewerBytes);
-    // A mission owns the whole surface: its own top bar replaces the relay's.
-    document.body.classList.toggle("mission-surface", artifact.kind === "mission");
-    if (artifact.kind === "mission" && attachmentContext) {
-      // The bridge must exist before the document runs, or a shim request
-      // fired on load would find nobody listening.
-      missionBridge = new MissionBridge({
-        frame, channel: attachmentContext.channel, missionHtml: viewerHtml,
-      });
-      frame.srcdoc = missionShimmed(viewerHtml);
-      // Live updates are best-effort: if the subscribe is refused the page
-      // is simply static, which is how it behaved before this existed.
-      missionBridge.startLiveUpdates();
-    } else {
-      frame.srcdoc = viewerHtml;
-    }
+    // Every viewer takes the same path: the artifact's bytes become the
+    // frame's document, unmodified. There is no per-kind branch here and
+    // nothing rewrites a viewer's HTML -- a viewer that needs the channel
+    // asks for a port like any other.
+    document.body.classList.remove("surface-owned");
+    frame.srcdoc = viewerHtml;
 
     // Wait for `ready` only when there is something to hand over. A viewer
     // that declares neither parts nor content is a self-contained document
@@ -2148,7 +1793,6 @@ const autonet = (() => {
     state, boot, canonicalJson, verifyChain, attemptEndpoints,
     attemptDirectEndpoint, performHandshake, openSocket, fetchArtifact,
     validateArtifact, renderArtifact, ChannelBroker,
-    MISSION_SHIM, missionShimmed, rewriteMissionLinks, MissionBridge,
     assembleJoinContext, deliverJoinContext,
     withTimeout, SecureChannel,
     attachmentCursorId, attachmentSinkId, safeAttachmentName,

@@ -55,12 +55,12 @@
   .error-view h1 { font-size: 20px; margin: 0; color: #e8e8f0; }
   .error-view p { max-width: 42ch; margin: 0; color: #8a8a96; }
   #artifact-frame { flex: 1; border: 0; width: 100%; background: #fff; }
-  /* A mission carries its own top bar (SKILL.md section 8: name, pillar
-     nav, presence) and it is sticky within the frame. Stacking the relay's
-     own header above it left a strip holding one brand letter and pushed
-     the real bar down into looking like a subheading. A mission is a full
-     surface, not an artifact framed by chrome, so it gets the viewport. */
-  body.mission-surface > header { display: none; }
+  /* A viewer that renders its own top bar asks for the viewport (op:
+     "chrome"), and the shell drops its header rather than stacking two.
+     Stacking left a strip holding one brand letter and pushed the real bar
+     down into looking like a subheading. Nothing here knows which viewers
+     do this -- they declare it. */
+  body.surface-owned > header { display: none; }
   .spinner {
     width: 22px; height: 22px; border-radius: 50%;
     border: 2px solid #33333d; border-top-color: #d6d6de;
