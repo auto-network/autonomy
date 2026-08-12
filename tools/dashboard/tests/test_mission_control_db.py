@@ -1148,3 +1148,44 @@ def test_created_pillar_has_the_same_shape_as_a_selected_one(tmp_path):
     created = db.create_pillar(mission["mission_id"], "P", db_path=path)
     selected = db.get_pillar(created["pillar_id"], db_path=path)
     assert set(created) == set(selected)
+
+
+def test_a_question_follows_its_subject_to_a_new_anchor(tmp_path):
+    """Screens get restructured. Without this the only way to keep a
+    conversation attached is to freeze the markup it was asked against,
+    which makes last week's question an argument for keeping content
+    nobody needs."""
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    entry = db.ask_question(mission["mission_id"], "how fast?", "guest:a", "A",
+                            anchor="section:s5", db_path=path)
+
+    assert db.set_question_anchor(entry["entry_id"], "table:throughput", db_path=path)
+    assert db.get_conversation_entry(entry["entry_id"], db_path=path)["anchor"] == "table:throughput"
+    # Detaching is legal: it belongs to no element, and is still in the record.
+    assert db.set_question_anchor(entry["entry_id"], None, db_path=path)
+    assert db.get_conversation_entry(entry["entry_id"], db_path=path)["anchor"] is None
+
+
+def test_retiring_a_question_keeps_it_but_stops_it_counting(tmp_path):
+    """Retires, never deletes: what was asked and why it stopped mattering is
+    part of the record. It just leaves the screen."""
+    path = _db_path(tmp_path)
+    mission = db.create_mission("OSS Insights", db_path=path)
+    pillar = db.create_pillar(mission["mission_id"], "P", db_path=path)
+    entry = db.ask_question(mission["mission_id"], "still relevant?", "guest:a", "A",
+                            pillar_id=pillar["pillar_id"], db_path=path)
+    assert db.count_open_pillar_questions(pillar["pillar_id"], db_path=path) == 1
+
+    assert db.retire_question(entry["entry_id"], "that view was replaced", db_path=path)
+    assert db.count_open_pillar_questions(pillar["pillar_id"], db_path=path) == 0
+
+    row = db.get_conversation_entry(entry["entry_id"], db_path=path)
+    assert row["question"] == "still relevant?"          # still readable
+    assert row["retired_note"] == "that view was replaced"
+    assert isinstance(row["retired_at"], float)
+
+    # An empty note brings it back.
+    assert db.retire_question(entry["entry_id"], "", db_path=path)
+    assert db.get_conversation_entry(entry["entry_id"], db_path=path)["retired_at"] is None
+    assert db.count_open_pillar_questions(pillar["pillar_id"], db_path=path) == 1

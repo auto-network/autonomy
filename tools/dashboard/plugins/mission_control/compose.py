@@ -149,9 +149,14 @@ def mission_state(mission_id: str, pillar_id: str | None = None) -> dict:
         "mission": mission.get("name") or "",
         "screen": pillar_id,
         "pillars": pillars,
+        # Retired entries leave the screen. They stay in the record and in
+        # the API listing -- what was asked, and why it stopped mattering, is
+        # worth keeping -- but a reader looking at the work now should not
+        # have to read past questions about subjects that no longer exist.
         "questions": [
             _question_state(e)
             for e in db.list_whole_mission_conversation(mission_id)
+            if not e.get("retired_at")
         ],
         "here": _presence(f"mission:{mission_id}", now),
     }

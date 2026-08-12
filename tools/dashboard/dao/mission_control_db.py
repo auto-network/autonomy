@@ -71,7 +71,12 @@ CREATE TABLE IF NOT EXISTS mission_conversation (
     answered_by_session       TEXT,
     answered_at                REAL,
     relay_status                TEXT NOT NULL DEFAULT 'pending',
-    created_at                  REAL NOT NULL
+    created_at                  REAL NOT NULL,
+    -- Retired: the subject stopped being relevant. NOT deleted -- the record
+    -- of what was asked and answered is the point of the log. A retired entry
+    -- leaves the screen and stops counting as open; it stays readable.
+    retired_at                   REAL,
+    retired_note                 TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_mission_conversation_mission
@@ -209,6 +214,16 @@ def _get_conn(db_path: Path | str | None = None) -> sqlite3.Connection:
     # resumable relay fetch protocol the bootloader already speaks. NULL
     # is a real state: a participant without a photo renders the
     # initial-and-color avatar derived from participant_id.
+    # Migrate: re-anchoring and retiring a conversation entry. Screens get
+    # restructured, and a question must be able to follow its subject to a new
+    # anchor or be retired when the subject stops mattering -- otherwise old
+    # questions freeze the layout of the page they were asked about.
+    try:
+        conn.execute("SELECT retired_at, retired_note FROM mission_conversation LIMIT 0")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE mission_conversation ADD COLUMN retired_at REAL")
+        conn.execute("ALTER TABLE mission_conversation ADD COLUMN retired_note TEXT")
+        conn.commit()
     # Migrate: the pillar's own status line (auto-fm22y). Deliberately not
     # derived from anything -- no summarising of revisions, no inference from
     # session activity. A coordinator writes it or it stays NULL.
@@ -1048,7 +1063,8 @@ def count_open_questions(
     try:
         row = conn.execute(
             "SELECT COUNT(*) FROM mission_conversation"
-            " WHERE mission_id = ? AND pillar_id IS NULL AND answer IS NULL",
+            " WHERE mission_id = ? AND pillar_id IS NULL AND answer IS NULL"
+            " AND retired_at IS NULL",
             (mission_id,),
         ).fetchone()
     finally:
@@ -1063,7 +1079,7 @@ def count_open_pillar_questions(
     try:
         row = conn.execute(
             "SELECT COUNT(*) FROM mission_conversation"
-            " WHERE pillar_id = ? AND answer IS NULL",
+            " WHERE pillar_id = ? AND answer IS NULL AND retired_at IS NULL",
             (pillar_id,),
         ).fetchone()
     finally:
@@ -1224,6 +1240,68 @@ def answer_question(
 # Interim visibility on a still-open conversation entry -- "still working,
 # capturing the new screenshot" -- without closing it out. Any number of
 # these per entry; exactly one `answer` (or none yet) ultimately closes it.
+
+
+def get_conversation_entry(
+    entry_id: str, *, db_path: Path | str | None = None,
+) -> dict | None:
+    """One entry by its own id. get_question() requires the mission too,
+    which callers holding only an entry_id (it is a primary key) do not have
+    and should not have to look up first."""
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM mission_conversation WHERE entry_id = ?", (entry_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def set_question_anchor(
+    entry_id: str, anchor: str | None, *, db_path: Path | str | None = None,
+) -> bool:
+    """Move a question to a different anchor, or to none at all.
+
+    A screen gets restructured and a question has to be able to follow its
+    subject. Without this, the only way to keep a conversation attached is to
+    freeze the markup it was asked against, which makes last week's question
+    an argument for keeping content nobody needs.
+    """
+    anchor = (anchor or "").strip() or None
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE mission_conversation SET anchor = ? WHERE entry_id = ?",
+            (anchor, entry_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return cur.rowcount > 0
+
+
+def retire_question(
+    entry_id: str, note: str = "", *, db_path: Path | str | None = None,
+) -> bool:
+    """The subject stopped being relevant. Retires, never deletes.
+
+    A retired entry leaves the screen and stops counting as open, and stays
+    readable in the record: what was asked, and why it stopped mattering, is
+    itself worth keeping. Passing an empty note un-retires it.
+    """
+    note = (note or "").strip()
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE mission_conversation SET retired_at = ?, retired_note = ?"
+            " WHERE entry_id = ?",
+            (time.time() if note else None, note or None, entry_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return cur.rowcount > 0
 
 
 def add_conversation_update(

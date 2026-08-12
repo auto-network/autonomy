@@ -180,3 +180,18 @@ def test_the_overview_screen_carries_the_missions_name():
     db.push_site_revision(mission["mission_id"], "<html>page</html>", "first")
     state = _state_of(compose.compose_screen(mission["mission_id"]).decode("utf-8"))
     assert state["mission"] == "OSS Insights"
+
+
+def test_a_retired_question_leaves_the_screen_but_not_the_record():
+    mission = db.create_mission("Retire")
+    mission_id = mission["mission_id"]
+    db.push_site_revision(mission_id, "<html>page</html>", "first")
+    kept = db.ask_question(mission_id, "still matters", "guest:1", "Jeremy")
+    gone = db.ask_question(mission_id, "about a view that no longer exists",
+                           "guest:1", "Jeremy")
+    db.retire_question(gone["entry_id"], "that view was replaced")
+
+    state = _state_of(compose.compose_screen(mission_id).decode("utf-8"))
+    assert [q["question"] for q in state["questions"]] == ["still matters"]
+    # ...and it is still there for anyone reading the record.
+    assert db.get_conversation_entry(gone["entry_id"])["question"].startswith("about a view")
