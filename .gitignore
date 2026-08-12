@@ -158,3 +158,5 @@ agents/.build-state
 
 # Generated relay viewers: built on demand from their templates.
 tools/dashboard/relay_viewer/.build/
+
+tools/dashboard/plugins/mission_control/viewer/.build/
