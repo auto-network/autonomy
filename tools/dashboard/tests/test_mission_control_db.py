@@ -1189,3 +1189,20 @@ def test_retiring_a_question_keeps_it_but_stops_it_counting(tmp_path):
     assert db.retire_question(entry["entry_id"], "", db_path=path)
     assert db.get_conversation_entry(entry["entry_id"], db_path=path)["retired_at"] is None
     assert db.count_open_pillar_questions(pillar["pillar_id"], db_path=path) == 1
+
+
+def test_ago_reads_both_time_shapes():
+    """Revisions store epoch seconds; presence stores ISO strings.
+
+    _ago sits between them and did arithmetic on whatever it was handed, so
+    the first presence row to reach it would have raised inside the loop that
+    builds the who-list — taking the whole screen down, on the day presence
+    started working.
+    """
+    from tools.dashboard.plugins.mission_control import compose
+
+    now = 1_000_000.0
+    assert compose._ago(now - 90, now) == "1m"          # epoch float
+    assert compose._ago("1970-01-12T13:46:00Z", 1_000_000.0 + 3600) == "1h"
+    assert compose._ago(None, now) == ""
+    assert compose._ago("not a timestamp", now) == ""   # never raises
