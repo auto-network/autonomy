@@ -133,7 +133,13 @@
       // Runtime values are DATA. textContent, never innerHTML -- question
       // text, display names and presence fields are untrusted input no matter
       // who authored the page they land in.
-      else if (k === "text") n.textContent = attrs[k];
+      // Guard against the whole class of bug this belongs to: a missing
+      // value concatenated into a string renders as the WORD "undefined",
+      // which looks like content and reads like a defect.
+      else if (k === "text") {
+        var v = attrs[k];
+        n.textContent = (v === undefined || v === null) ? "" : String(v);
+      }
       else n.setAttribute(k, attrs[k]);
     }
     (kids || []).forEach(function (c) { if (c) n.appendChild(c); });
@@ -388,8 +394,12 @@
       el("div", {class: "mc-pbody"}, body),
     ];
     if (ui.panel === "questions") {
-      kids.push(composer("Ask about " + (currentPillar() || {}).name + "\u2026",
-                         "goes to " + (currentPillar() || {}).name, "Ask", ask));
+      // On the overview there is no pillar to name, and `(x || {}).name` is
+      // undefined, not absent -- string concatenation renders that as the
+      // word. Say where the question actually goes instead.
+      var target = (currentPillar() || {}).name || state.mission || "this mission";
+      kids.push(composer("Ask about " + target + "\u2026",
+                         "goes to " + target, "Ask", ask));
     }
     return el("aside", {class: "mc-panel"}, kids);
   }

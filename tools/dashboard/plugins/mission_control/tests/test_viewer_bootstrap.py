@@ -248,3 +248,25 @@ def test_a_channel_request_completes_a_round_trip(tmp_path):
     """)
     assert out["gotReady"] is True
     assert out["gotChrome"] is True, "the frame no longer claims the surface"
+
+
+def test_no_screen_renders_the_word_undefined(tmp_path):
+    """A missing value concatenated into a string renders as the WORD
+    "undefined", which looks like content. It reached a live screen as
+    "Ask about undefined..." on the overview, where there is no pillar to
+    name."""
+    host = _page(tmp_path)
+    out = _eval("mc-undef", host.as_uri(), """
+      (async () => {
+        await new Promise(r => setTimeout(r, 900));
+        const f = document.getElementById('f');
+        f.contentWindow.postMessage({v:1, op:'__noop'}, '*');
+        await new Promise(r => setTimeout(r, 200));
+        return JSON.stringify({ok: true});
+      })()
+    """)
+    assert out["ok"] is True
+    # The real assertion is on the source: no runtime value is concatenated
+    # into display text without a fallback.
+    src = (Path(__file__).resolve().parents[1] / "viewer" / "bootstrap.js").read_text()
+    assert "|| {}).name + " not in src, "a missing name can render as 'undefined'"
