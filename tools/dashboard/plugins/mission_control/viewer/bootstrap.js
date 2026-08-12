@@ -140,7 +140,7 @@
     swatch.style.background = p.color || "#475569";
     var kids = [
       el("button", {class: "mc-pill", onclick: function () { show(ui.panel === "pillars" ? null : {panel: "pillars"}); }},
-         [swatch, el("span", {class: "mc-name", text: p.name || "Mission"}), el("span", {class: "mc-caret", text: "\u25be"})]),
+         [swatch, el("span", {class: "mc-name", text: p.name || state.mission || "Mission"}), el("span", {class: "mc-caret", text: "\u25be"})]),
       el("span", {class: "mc-age", text: p.age || ""}),
       el("span", {class: "mc-grow"}),
     ];
