@@ -14,6 +14,12 @@
 #   2. create a venv and install runtime deps (fastapi, uvicorn, cryptography)
 #   3. install + enable the systemd unit, restart the service
 #   4. probe /healthz through the loopback bind
+#   5. run deploy/smoke.py against the PUBLIC url -- /healthz only proves
+#      the process started; the smoke test proves a link still works
+#
+# Set SMOKE_LINK to a real link URL to include the guest path (envelope,
+# handshake, artifact header). Without it the smoke test says out loud that
+# it did not prove a link works.
 #
 # TLS/routing is the estate's Caddy front (reverse_proxy 127.0.0.1:8477);
 # this script deliberately does not touch it.
@@ -64,5 +70,15 @@ curl -fsS http://127.0.0.1:8477/healthz
 echo
 systemctl --no-pager --lines=5 status autonomy-registry
 EOF
+
+SMOKE_URL="${SMOKE_URL:-https://relay.auto.network}"
+echo "==> smoke test against $SMOKE_URL"
+SMOKE_ARGS=("$SMOKE_URL")
+if [ -n "${SMOKE_LINK:-}" ]; then
+    SMOKE_ARGS+=(--link "$SMOKE_LINK")
+fi
+# Deliberately NOT tolerated: a deploy that leaves links broken has failed,
+# even though systemd is happy and /healthz answers.
+python3 "$REPO_ROOT/tools/network/registry/deploy/smoke.py" "${SMOKE_ARGS[@]}"
 
 echo "==> deployed: registry live on $TARGET (loopback :8477, fronted by Caddy)"
