@@ -371,12 +371,19 @@
 
   function composer(placeholder, note, label, onSend) {
     var ta = el("textarea", {class: "mc-ta", rows: "2", placeholder: placeholder});
+    // Focusing a textarea is what opens the keyboard, so that is the moment
+    // the panel has to be re-measured -- the resize event alone can land
+    // before the browser has settled on a height.
+    ta.addEventListener("focus", function () { setTimeout(measureKeyboard, 250); });
     return el("div", {class: "mc-foot"}, [
       ta,
       el("div", {class: "mc-foot-row"}, [
         el("span", {class: "mc-sub", text: note}),
         el("button", {class: "mc-send", text: label,
                       onclick: function () { if (ta.value.trim()) onSend(ta.value.trim()); }}),
+        // A textarea keeps focus while a button is tapped on some mobile
+        // browsers, so the keyboard never closes and the panel never
+        // re-measures. Blur on submit and re-measure either way.
       ]),
     ]);
   }
@@ -490,6 +497,23 @@
     document.documentElement.style.scrollPaddingTop = (total + 8) + "px";
     document.documentElement.style.setProperty("--mc-bar-height", total + "px");
   }
+  // The on-screen keyboard covers the bottom of the screen without changing
+  // the layout viewport, so anything pinned to bottom:0 -- including the
+  // composer's send button -- ends up underneath it. visualViewport is the
+  // only thing that reports the covered height; publish it and the panels
+  // sit above the keyboard instead of behind it.
+  function measureKeyboard() {
+    var vv = window.visualViewport;
+    if (!vv) return;
+    var covered = Math.max(0, Math.round(
+      window.innerHeight - vv.height - vv.offsetTop));
+    chrome.style.setProperty("--mc-kb", covered + "px");
+  }
+  if (window.visualViewport) {
+    visualViewport.addEventListener("resize", measureKeyboard);
+    visualViewport.addEventListener("scroll", measureKeyboard);
+  }
+
   addEventListener("scroll", syncStrip, {passive: true});
   addEventListener("scroll", measureBar, {passive: true});
   addEventListener("resize", measureBar, {passive: true});

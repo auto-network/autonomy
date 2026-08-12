@@ -63,8 +63,13 @@
    bar is sticky inside the author's body, so before the page scrolls it
    starts below whatever top padding they gave it. Assuming 3rem drew the
    panel over the bar's own controls. */
-.mc-panel { left: 0; right: 0; bottom: 0; top: var(--mc-below, 3rem); border-top: 1px solid #1e293b; }
-.mc-view { inset: 0; z-index: 2147483003; }
+/* --mc-kb is how much of the screen the on-screen keyboard is covering.
+   `bottom: 0` resolves against the LAYOUT viewport, which does not shrink
+   when a keyboard opens -- so the footer holding the send button sits
+   behind it, and the control you need after typing is the one you cannot
+   reach. */
+.mc-panel { left: 0; right: 0; bottom: var(--mc-kb, 0px); top: var(--mc-below, 3rem); border-top: 1px solid #1e293b; }
+.mc-view { top: 0; left: 0; right: 0; bottom: var(--mc-kb, 0px); z-index: 2147483003; }
 .mc-phead { display: flex; align-items: center; gap: .5rem; height: 3rem; padding: 0 .75rem;
             border-bottom: 1px solid #1e293b; flex: none; }
 /* The panel's own title. It names what you are choosing between, so it reads
@@ -101,8 +106,12 @@
 .mc-foot-row { display: flex; align-items: center; justify-content: space-between; margin-top: .5rem; }
 .mc-ta { width: 100%; background: #0f172a; border: 1px solid #334155; border-radius: .4rem;
          color: #e2e8f0; padding: .5rem .65rem; font: inherit; font-size: .9rem; resize: none; }
+/* A comfortable tap target. The old padding gave roughly 28px of height,
+   under every mobile guideline and easy to miss with a thumb. */
 .mc-send { background: #0ea5e933; border: 1px solid #0ea5e966; color: #bae6fd;
-           border-radius: .4rem; padding: .35rem .8rem; font-size: .85rem; }
+           border-radius: .4rem; padding: .6rem 1.1rem; font-size: .9rem;
+           min-height: 44px; }
+.mc-send:disabled { opacity: .45; }
 
 /* the anchored control, in its own closed root inside the author's element */
 .mc-anchor-btn { display: inline-flex; align-items: center; gap: .25rem; vertical-align: middle;
