@@ -371,14 +371,13 @@ const autonet = (() => {
     return error;
   }
 
-  /* A fan-out feed frame is marked with this high bit; a pairwise channel
-   * record can never have it. A record is [8-byte big-endian seq][ct] and
-   * the sequence is capped below 2**63, so the first byte is always <= 0x7f.
-   * Records therefore travel byte-identical to how they always have, and
-   * routing is one branch on one bit. Without that branch a feed frame went
-   * to the pairwise decoder, which read its random nonce as a sequence
-   * number and tore the channel down. */
-  const FEED_MARKER = 0x80;
+  /* Every message the serving end sends carries a one-byte kind:
+   *   0x00 pairwise channel record, opened with this channel's key
+   *   0x01 fan-out feed frame, opened with the link's shared stream key
+   * The handshake is tagged too -- a feed frame can arrive during it, because
+   * the relay attaches a listener at channel OPEN, before subscribe. */
+  const VIEWER_KIND_RECORD = 0x00;
+  const VIEWER_KIND_FEED = 0x01;
 
   /* WebSocket wrapped with async receive queues -- records and feed frames. */
   function openSocket(url) {
@@ -410,16 +409,17 @@ const autonet = (() => {
       });
       ws.onmessage = (event) => {
         if (!(event.data instanceof ArrayBuffer)) return;
-        const raw = new Uint8Array(event.data);
-        if (!raw.length) return;
-        if (raw[0] & FEED_MARKER) {
-          const frame = raw.subarray(1);
-          if (feedWaiters.length) feedWaiters.shift().resolve(frame);
-          else feedQueue.push(frame);
+        const tagged = new Uint8Array(event.data);
+        if (!tagged.length) return;
+        const payload = tagged.subarray(1);
+        if (tagged[0] === VIEWER_KIND_FEED) {
+          if (feedWaiters.length) feedWaiters.shift().resolve(payload);
+          else feedQueue.push(payload);
           return;
         }
-        if (waiters.length) waiters.shift().resolve(raw);
-        else queue.push(raw);
+        if (tagged[0] !== VIEWER_KIND_RECORD) return;   // unknown kind: ignore
+        if (waiters.length) waiters.shift().resolve(payload);
+        else queue.push(payload);
       };
       ws.onerror = () => {
         const error = typedError("disconnected", "websocket error");
