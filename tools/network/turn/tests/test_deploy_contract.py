@@ -145,3 +145,10 @@ def test_ipv4_only_contract_is_explicit_and_ipv6_requires_a_new_review():
 def test_shell_scripts_parse():
     for script in DEPLOY.glob("*.sh"):
         subprocess.run(["bash", "-n", str(script)], check=True)
+
+
+def test_certificate_issuance_enables_automatic_renewal():
+    script = (DEPLOY / "issue-certificate.sh").read_text()
+    assert "--http-01-address \"$TURN_PUBLIC_IP\"" in script
+    assert "systemctl enable --now certbot.timer" in script
+    assert "systemctl is-enabled --quiet certbot.timer" in script
