@@ -140,7 +140,7 @@ def test_orgless_host_token_is_local(server_mod, monkeypatch):
 def test_is_local_caller_requires_a_positive_host_assertion(server_mod, monkeypatch):
     from tools.dashboard.dao import dashboard_db
     rows = {
-        "host-1": {"type": "host", "project": "-home-jeremy-workspace-autonomy"},
+        "host-1": {"type": "host", "project": "-home-operator-workspace-checkout"},
         "auto-c": {"type": "container", "project": "autonomy-developer"},
         "auto-d": {"type": "dispatch", "project": "-workspace-repo"},
         "auto-l": {"type": "librarian", "project": "-workspace-repo"},
