@@ -209,3 +209,77 @@ def test_writer_and_reader_converge_on_the_orgs_store(monkeypatch, tmp_path):
     writer_root = tmp_path / "somewhere-else"
     assert _org_db_path("acme", writer_root).parent == env_orgs
     assert org_ledger_db_path("acme", writer_root).parent == env_orgs
+
+
+# ── AUTONOMY_DATA_ROOT: the ambient volume base (auto-fm4zz) ────────────────
+
+
+def test_data_root_precedence_sits_between_store_env_and_root_arg(
+    monkeypatch, tmp_path
+):
+    from tools.data_paths import resolve_store
+
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path / "base"))
+
+    # Ambient base beats the explicit root argument (env-outranks-root,
+    # the manifest's standing convergence rule)…
+    assert resolve_store("graph", root=tmp_path / "other") == (
+        tmp_path / "base" / "graph.db"
+    )
+    # …and the store's own variable beats the ambient base.
+    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "pinned.db"))
+    assert resolve_store("graph") == tmp_path / "pinned.db"
+
+
+def test_data_root_satisfies_the_refuse_guard(monkeypatch, tmp_path):
+    """The exact gap that motivated the bead: under the guard with no
+    store env, the graph store previously had NO resolvable path on a
+    node (auto-5jbqa fallout); the ambient base closes it in-volume."""
+    from tools.data_paths import resolve_store
+
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.setenv("AUTONOMY_REFUSE_REAL_DATA_FALLBACK", "1")
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
+    assert resolve_store("graph") == tmp_path / "graph.db"
+
+
+def test_data_root_composes_with_org_routing_never_pins(monkeypatch, tmp_path):
+    """A base directory, never a whole-DB pin: org routing goes THROUGH
+    the base (base/orgs/<org>.db) — the org argument is honored, which is
+    the property whose absence was the GRAPH_DB collapse (auto-23d9m)."""
+    from tools.graph.db import resolve_caller_db_path
+
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("AUTONOMY_ORGS_DIR", raising=False)
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
+    assert resolve_caller_db_path("demo") == tmp_path / "orgs" / "demo.db"
+    assert resolve_caller_db_path("other") == tmp_path / "orgs" / "other.db"
+    assert resolve_caller_db_path(None) == tmp_path / "orgs" / "personal.db"
+
+
+def test_relative_data_root_is_refused_fail_closed(monkeypatch):
+    import pytest
+
+    from tools.data_paths import AmbiguousDataRoot, resolve_store
+
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", "relative/base")
+    with pytest.raises(AmbiguousDataRoot):
+        resolve_store("graph")
+
+
+def test_data_root_does_not_disturb_the_pin_conflict_semantics(
+    monkeypatch, tmp_path
+):
+    """23d9m's refusal is orthogonal and survives: an explicit org against
+    a contradicting GRAPH_DB pin refuses regardless of the ambient base."""
+    import pytest
+
+    from tools.graph.db import OrgResolutionConflict, resolve_caller_db_path
+
+    monkeypatch.delenv("AUTONOMY_ORGS_DIR", raising=False)
+    monkeypatch.setenv("AUTONOMY_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "elsewhere.db"))
+    with pytest.raises(OrgResolutionConflict):
+        resolve_caller_db_path("demo")

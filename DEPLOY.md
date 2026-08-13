@@ -23,6 +23,19 @@ The dashboard's own startup runs the same org bootstrap, honoring
 `AUTONOMY_FIRST_ORG` / `AUTONOMY_FIRST_ORG_NAME`, so exporting those before
 first launch is equivalent to passing `--org`/`--org-name`.
 
+## One root for the whole volume
+
+`AUTONOMY_DATA_ROOT` names the base directory every persistent store
+resolves under (`<root>/graph.db`, `<root>/orgs/<org>.db`, …). It is a
+base directory, never a single-file pin: per-org routing composes through
+it, so it cannot recreate the org-collapsing failure a whole-database
+`GRAPH_DB` pin causes. Precedence everywhere: a store's own variable →
+`AUTONOMY_DATA_ROOT` → the caller's explicit root → the repository-local
+default (refused under `AUTONOMY_REFUSE_REAL_DATA_FALLBACK`). Relative
+values are refused. An ambient-rooted deployment never falls back to the
+repository-relative legacy database. The node containers the multi-node
+harness generates set it to `/app/data`.
+
 ## Sovereign distribution (Docker Compose)
 
 The container path packages the first-run story above into one command:

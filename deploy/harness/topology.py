@@ -52,6 +52,13 @@ def _rooted_environment(*, secure_dashboard: bool = False) -> dict[str, str]:
     """Every manifest store is explicitly rooted inside the node volume."""
     environment = {
         REFUSE_REAL_DATA_FALLBACK_ENV: "1",
+        # The ambient volume base (auto-fm4zz): a base DIRECTORY that
+        # composes with every store and with org routing — never a
+        # whole-DB pin. It closes the one guard gap the per-store loop
+        # below cannot (the deliberately-unpinned graph store resolves to
+        # /app/data/graph.db instead of refusing), and any store the
+        # manifest gains later is rooted in-volume by default.
+        "AUTONOMY_DATA_ROOT": "/app/data",
         "DASHBOARD_HOST": "0.0.0.0",
         "DASHBOARD_PORT": "8080",
         "AUTONOMY_NETWORK_REGISTRY_URL": "http://relay:8477",
