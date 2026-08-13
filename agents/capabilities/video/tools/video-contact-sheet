@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Render a tiled contact sheet of evenly spaced frames from a video.
+# Usage: video-contact-sheet <in-video> <out-image> [--tiles COLSxROWS] [--width PX]
+set -euo pipefail
+BIN="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)/bin"
+[ -x "$BIN/ffmpeg" ] || { echo "video capability not provisioned: $BIN/ffmpeg missing (host-install pending)" >&2; exit 3; }
+
+IN=${1:?usage: video-contact-sheet <in-video> <out-image> [--tiles COLSxROWS] [--width PX]}
+OUT=${2:?missing output image path}
+shift 2
+TILES="4x3"; WIDTH=320
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tiles) TILES=$2; shift 2 ;;
+    --width) WIDTH=$2; shift 2 ;;
+    *) echo "unknown option $1" >&2; exit 2 ;;
+  esac
+done
+COLS=${TILES%x*}; ROWS=${TILES#*x}
+N=$((COLS * ROWS))
+DUR=$("$BIN/ffprobe" -v error -show_entries format=duration -of csv=p=0 "$IN")
+# One frame per evenly spaced slice: sample at N/duration frames per second.
+FPS=$(python3 -c "print($N / float('$DUR'))")
+"$BIN/ffmpeg" -y -loglevel error -i "$IN" \
+  -vf "fps=$FPS,scale=$WIDTH:-1,tile=${COLS}x${ROWS}" \
+  -frames:v 1 -update 1 "$OUT"
+echo "$OUT"

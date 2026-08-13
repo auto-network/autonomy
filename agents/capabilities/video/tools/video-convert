@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Convert between video formats, or compile an image sequence into a video.
+# Usage:
+#   video-convert <in-video> <out.{mp4,webm,gif}>          format conversion
+#   video-convert --frames '<glob>' <out.{mp4,gif}> [--fps N]
+#       compile matching images (sorted) into a video; N frames per second
+#       (default 1 — one second per step, the evidence-gallery case)
+set -euo pipefail
+BIN="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)/bin"
+[ -x "$BIN/ffmpeg" ] || { echo "video capability not provisioned: $BIN/ffmpeg missing (host-install pending)" >&2; exit 3; }
+
+if [ "${1:-}" = "--frames" ]; then
+  GLOB=${2:?usage: video-convert --frames '<glob>' <out> [--fps N]}
+  OUT=${3:?missing output path}
+  FPS=${5:-1}; [ "${4:-}" = "--fps" ] && FPS=$5
+  LIST=$(mktemp --suffix=.txt)
+  trap 'rm -f "$LIST"' EXIT
+  python3 - "$GLOB" "$FPS" > "$LIST" <<'PYEOF'
+import glob, sys
+files = sorted(glob.glob(sys.argv[1]))
+if not files:
+    sys.exit("no files match the glob")
+dur = 1.0 / float(sys.argv[2])
+for f in files:
+    print(f"file '{f}'\nduration {dur}")
+print(f"file '{files[-1]}'")  # concat demuxer needs the last frame restated
+PYEOF
+  case "$OUT" in
+    *.gif) "$BIN/ffmpeg" -y -loglevel error -f concat -safe 0 -i "$LIST" \
+             -vf "scale=800:-1:flags=lanczos" "$OUT" ;;
+    *)     "$BIN/ffmpeg" -y -loglevel error -f concat -safe 0 -i "$LIST" \
+             -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p" "$OUT" ;;
+  esac
+else
+  IN=${1:?usage: video-convert <in> <out>}
+  OUT=${2:?missing output path}
+  case "$OUT" in
+    *.gif) "$BIN/ffmpeg" -y -loglevel error -i "$IN" \
+             -vf "fps=8,scale=640:-1:flags=lanczos" "$OUT" ;;
+    *)     "$BIN/ffmpeg" -y -loglevel error -i "$IN" \
+             -vf "format=yuv420p" "$OUT" ;;
+  esac
+fi
+echo "$OUT"
