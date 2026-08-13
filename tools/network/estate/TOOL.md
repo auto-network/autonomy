@@ -11,9 +11,58 @@ Every box must be reproducible from these scripts — nothing hand-configured.
 | `provision-vm.sh <name> [--role r] [--type cpx11] [--location ash]` | Clean Ubuntu 24.04 VM with caddy/rsync/python3-venv, estate-labeled, firewalled (22/80/443/icmp). Prints IPv4 on stdout. Idempotent on name |
 | `teardown-vm.sh <name>` | Deletes the VM. Refuses non-estate-labeled servers and the legacy pet unconditionally. Volumes untouched |
 | `list-vms.sh` | Project inventory: estate VMs + the pet, one line each |
+| `namecheap_dns.py {gethosts,add-record}` | Safe Namecheap read-modify-write. `add-record` appends EXACTLY ONE record: reads the live set, refuses unless the critical mail records survived, `%2B`-encodes DKIM, writes the full set, and re-reads to prove +1/−0. Runs on auto-ash-1 (whitelisted IP). Unit-tested in `tests/` |
+| `add-apex-a-record.sh [--dry-run]` | Pinned wrapper: adds the one authorized apex A `@ → 5.161.219.195` via `namecheap_dns.py`. Run on auto-ash-1 |
+| `deploy-apex-vhost.sh [ssh-target]` | Installs the `auto.network → 127.0.0.1:8477` vhost on registry-ash-1's Caddy: captures the live Caddyfile, backs it up, appends only the marked apex block, `caddy validate`, reload, re-capture. Refuses until DNS resolves. Default target `root@5.161.219.195` |
+| `verify-apex.sh` | End-to-end proof: apex DNS across 4 public resolvers, valid cert, `/healthz` 200, `/install` content contract, and that share links still issue on relay.auto.network |
 
 Consumers: `tools/network/registry/deploy/` (share-links registry), the
 H2 clean-VM deployment harness, H6 clean-machine acceptance.
+
+## Public front door: auto.network apex (bead auto-9q7a5)
+
+The canonical public front door — the agent-first `/install` URL and
+`/healthz` — is served at `https://auto.network` from **registry-ash-1**
+(`5.161.219.195`), the SAME box and process (`127.0.0.1:8477`) that already
+answers `registry.auto.network` and `relay.auto.network`. The hostname split
+is a naming/contract boundary, decided and fixed:
+
+| Host | Serves |
+|---|---|
+| `auto.network` | public front door + agent-first `/install` + `/healthz` |
+| `registry.auto.network` | registry / control API compatibility |
+| `relay.auto.network` | issued share links + viewer WebSockets |
+
+Adding the front door does **not** change the registry `--base-url`: newly
+minted share links keep issuing on `relay.auto.network`. See `caddy/README.md`.
+
+### Runbook — order matters (DNS before cert)
+
+Caddy mints the auto.network certificate over HTTP-01, which needs the apex to
+already resolve to the box. So DNS lands first, then the vhost:
+
+```bash
+# 1. On auto-ash-1 (5.161.179.179) — its IP is Namecheap's whitelisted client.
+ssh -o IdentitiesOnly=yes -i ~/.ssh/auto root@5.161.179.179
+cd <repo>/tools/network/estate
+./add-apex-a-record.sh --dry-run     # read + gate + encoding-check, no write
+./add-apex-a-record.sh               # read → gate → write → verify +1/−0
+#    pre-change set saved verbatim to /var/backups/namecheap/auto.network.before.xml
+
+# 2. Anywhere with public DNS — wait until the apex has propagated.
+dig +short @1.1.1.1 auto.network A   # expect 5.161.219.195
+
+# 3. Install the apex Caddy vhost on registry-ash-1 (refuses until DNS resolves).
+./deploy-apex-vhost.sh               # backup → append → validate → reload → capture
+
+# 4. Prove it end to end (multi-resolver — never trust one).
+./verify-apex.sh
+```
+
+**Rollback.** DNS: re-apply `auto.network.before.xml` (the saved full set) via
+setHosts. Caddy: `cp /etc/caddy/Caddyfile.bak.<ts> /etc/caddy/Caddyfile &&
+systemctl reload caddy` on registry-ash-1 (the backup path is printed by the
+deploy).
 
 ## The Hetzner project — shared with a pet
 
@@ -44,6 +93,11 @@ into graph notes, never mount all of `~/.config/hcloud` into a container
   the stock-image + cloud-init path; provision contract unchanged.
 - Site assembly (`build-site.sh`): multi-VM rollout from snapshots.
 - Namecheap DNS scripting (read-modify-write the FULL record set —
-  `setHosts` replaces all records).
+  `setHosts` replaces all records). **Landed** as `namecheap_dns.py` +
+  `add-apex-a-record.sh` (bead auto-9q7a5); generalise to a full DNS
+  cutover script reusing the same safety gates.
+- Fold the captured `caddy/registry-ash-1.Caddyfile.captured` into the
+  golden-snapshot build so the whole Caddy config — not just the apex
+  vhost — is reproducible rather than host-only.
 - Validation + full-site teardown, mirroring the BlindHash script set
   (`graph://c3d2061c-aee`, personal org).
