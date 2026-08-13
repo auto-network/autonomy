@@ -13078,37 +13078,64 @@ def _graph_validate_source_id(value: str) -> str | None:
 _MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 
 
-def _caller_org(request) -> str | None:
-    """Resolve caller org for a dashboard write: header > None.
+def _token_org_or_none(request) -> str | None:
+    """The org from a valid bearer session token, or ``None``.
 
-    Returns the ``X-Graph-Org`` header value when present, else ``None``.
-    Per graph://bcce359d-a1d §Cross-org write semantics, explicit caller
-    org selects the destination DB.
+    Invariant 1, derive-when-present (auto-h4kzx): a remote caller that
+    presents a valid session-token bearer carrying an org is scoped to THAT
+    org — the ``X-Graph-Org`` header and ``?org=`` query can no longer
+    override it, closing the caller-picks-its-own-org spoofing surface. A
+    caller with no bearer, an invalid/revoked token, or a genuine local
+    (org-less) token returns ``None``, so the existing header/env cascade
+    still applies unchanged.
+
+    This is the additive half of the flip: it never refuses. Every container
+    caller sends the bearer as of auto-w1ktf; the no-bearer REFUSE is a later
+    hardening, safe only once all live sessions run that client.
+    """
+    identity, err = authenticate_session_request(request)
+    if err is not None or identity is None:
+        return None
+    _session, org = identity
+    return org  # slug for a container, None for a genuine local caller
+
+
+def _caller_org(request) -> str | None:
+    """Resolve caller org for a dashboard write.
+
+    The authenticated session-token org wins when present (auto-h4kzx); else
+    the ``X-Graph-Org`` header; else ``None``. Per graph://bcce359d-a1d
+    §Cross-org write semantics, an explicit caller org selects the
+    destination DB.
 
     .. note:: The Settings public API (auto-cfb8u) requires ``org=``, and
        a literal ``None`` means *scopeless* — the bug this contract
        prevents. Settings handlers should pass
        ``_settings_caller_org(request)`` instead, which returns
-       :data:`graph_ops.CALLER_ORG` on no-header so the env-cascade is
-       used (matches pre-cfb8u behavior, just made explicit).
+       :data:`graph_ops.CALLER_ORG` on no-token/no-header so the env-cascade
+       is used (matches pre-cfb8u behavior, just made explicit).
     """
-    return request.headers.get("X-Graph-Org") or None
+    return _token_org_or_none(request) or request.headers.get("X-Graph-Org") or None
 
 
 def _settings_caller_org(request):
     """Resolve caller org for a Settings public-API call.
 
-    Returns the ``X-Graph-Org`` header value when present, else
-    :data:`graph_ops.CALLER_ORG` — a sentinel that opts the Settings
-    call into the env-cascade resolver (per-request contextvar →
-    ``GRAPH_ORG`` env → scopeless default).
+    The authenticated session-token org wins when present (auto-h4kzx); else
+    the ``X-Graph-Org`` header; else :data:`graph_ops.CALLER_ORG` — a
+    sentinel that opts the Settings call into the env-cascade resolver
+    (per-request contextvar → ``GRAPH_ORG`` env → scopeless default).
 
     Forgetting this on a Settings write inside a handler used to land
     the row silently in the scopeless DB while readers carrying
     ``X-Graph-Org`` saw nothing (graph://53f7412f-51e). Required-org +
     this helper makes the intent loud at every call site.
     """
-    return request.headers.get("X-Graph-Org") or graph_ops.CALLER_ORG
+    return (
+        _token_org_or_none(request)
+        or request.headers.get("X-Graph-Org")
+        or graph_ops.CALLER_ORG
+    )
 
 
 class _FallbackUpload:
