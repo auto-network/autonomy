@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the auto.network registry backup hourly
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5m
+Persistent=true
+Unit=autonomy-registry-backup.service
+
+[Install]
+WantedBy=timers.target

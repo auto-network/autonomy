@@ -487,6 +487,7 @@ def create_app(
     base_url: str = "https://relay.auto.network",
     witness_key: Optional[KeyPair] = None,
     secure_cookies: bool = True,
+    build_info: Optional[dict] = None,
 ) -> FastAPI:
     """Build the registry app.
 
@@ -500,6 +501,8 @@ def create_app(
     detection. Discover/pin it via ``GET /v1/witness/pubkey``. *secure_cookies*
     marks session cookies ``Secure`` (production default); tests over
     plain-http ``testserver`` set it False so the client keeps the cookie.
+    *build_info* is deploy provenance exposed by ``GET /versionz`` for
+    diagnostics only; it is never used for protocol or trust decisions.
     """
     app = FastAPI(title="auto.network registry", version="1")
     store = RegistryStore(db_path)
@@ -507,6 +510,9 @@ def create_app(
     hub = TunnelHub()
     witness_key = witness_key or KeyPair.generate()
     challenge_hub = ChallengeHub()
+    build_info = dict(build_info or {
+        "commit": "unknown", "dirty": None, "built_at": None,
+    })
     app.state.store = store
     app.state.now_fn = now_fn
     app.state.tunnel_hub = hub
@@ -1713,5 +1719,10 @@ def create_app(
     @app.get("/healthz")
     async def healthz():
         return {"ok": True}
+
+    @app.get("/versionz")
+    async def versionz(response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return {"service": "auto.network-registry", **build_info}
 
     return app

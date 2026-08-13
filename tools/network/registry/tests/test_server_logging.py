@@ -10,11 +10,11 @@ from tools.network.registry import __main__ as registry_main
 
 def test_entrypoint_disables_http_and_websocket_route_logging(monkeypatch):
     app = object()
-    app_calls: list[tuple[str, str]] = []
+    app_calls: list[tuple[str, str, dict]] = []
     run_calls: list[tuple[object, dict[str, object]]] = []
 
-    def fake_create_app(db: str, *, base_url: str):
-        app_calls.append((db, base_url))
+    def fake_create_app(db: str, *, base_url: str, build_info: dict):
+        app_calls.append((db, base_url, build_info))
         return app
 
     monkeypatch.setattr(registry_main, "create_app", fake_create_app)
@@ -36,12 +36,18 @@ def test_entrypoint_disables_http_and_websocket_route_logging(monkeypatch):
             "18477",
             "--base-url",
             "https://relay.test",
+            "--version-file",
+            "/missing/revision.json",
         ],
     )
 
     registry_main.main()
 
-    assert app_calls == [("/tmp/registry-test.db", "https://relay.test")]
+    assert app_calls == [(
+        "/tmp/registry-test.db",
+        "https://relay.test",
+        {"commit": "unknown", "dirty": None, "built_at": None},
+    )]
     assert run_calls == [
         (
             app,

@@ -1,0 +1,22 @@
+# auto.network registry v1 — fronted by Caddy.
+# This complete file is the deploy source of truth (auto-oyqlw).
+
+# registry.auto.network: automatic HTTPS (Let's Encrypt) -> loopback registry.
+registry.auto.network {
+	reverse_proxy 127.0.0.1:8477
+}
+
+# Raw-IP HTTP access for pre-DNS / off-tailnet reachability testing.
+:80 {
+	reverse_proxy 127.0.0.1:8477
+}
+
+# relay.auto.network: public share hostname -> same loopback registry.
+relay.auto.network {
+	reverse_proxy 127.0.0.1:8477
+}
+
+# auto.network apex: TLS ingress to the same loopback registry (auto-9q7a5).
+auto.network {
+	reverse_proxy 127.0.0.1:8477
+}

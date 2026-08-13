@@ -14,7 +14,7 @@
 # ORDERING (why DNS is first): registry-ash-1's Caddy mints the auto.network
 #        certificate over HTTP-01, which requires auto.network to ALREADY
 #        resolve to 5.161.219.195. So this DNS record must land and propagate
-#        BEFORE the apex Caddy vhost is deployed (deploy-apex-vhost.sh) — never
+#        BEFORE the apex Caddy vhost is deployed (deploy-caddy.sh) — never
 #        the other way round, or cert issuance fails against a name that does
 #        not yet point at the box.
 #
