@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<title>Set up your assistant</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="manifest" href="/static/manifest.json?v=__STATIC_VERSION__">
+<style>
+  /* Copied verbatim from the committed "Harness bootstrap flow" design
+     (graph://776c5e05-8e8f — 4 variants: choose / install / sign-in / ready). */
+  :root { --bg:#0f1117; --panel:#171a23; --line:#2a2f3d; --ink:#e5e7eb; --dim:#9ca3af; --accent:#6366f1; --ok:#34d399; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width:560px; margin:0 auto; padding:3.5rem 1.25rem 4rem; }
+  h1 { font-size:1.5rem; margin:0 0 .35rem; } .sub { color:var(--dim); margin-bottom:1.8rem; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:1.4rem 1.5rem; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:.7rem 1.6rem; font-size:1rem; font-weight:600; cursor:pointer; }
+  button[disabled] { opacity:.5; cursor:default; }
+  .opt { display:flex; align-items:center; justify-content:space-between; gap:1rem; padding:1rem 0; }
+  .opt + .opt { border-top:1px solid var(--line); }
+  .opt h2 { margin:0; font-size:1.05rem; } .opt p { margin:.15rem 0 0; color:var(--dim); font-size:.88rem; }
+  .badge { font-size:.8rem; color:var(--ok); }
+  .bar { height:8px; background:#0b0d12; border:1px solid var(--line); border-radius:99px; overflow:hidden; margin:1.1rem 0 .6rem; }
+  .bar i { display:block; height:100%; width:62%; background:var(--accent); border-radius:99px; }
+  .dot { display:inline-block; width:.6rem; height:.6rem; border-radius:50%; margin-right:.5rem; }
+  .check { width:56px; height:56px; border-radius:50%; background:rgba(52,211,153,.12); color:var(--ok); display:flex; align-items:center; justify-content:center; font-size:1.6rem; margin-bottom:1rem; }
+  code { background:#0b0d12; border:1px solid var(--line); border-radius:6px; padding:.15rem .45rem; font-size:.85rem; color:var(--ink); }
+  .cmd { display:block; margin:.9rem 0 0; padding:.7rem .9rem; }
+  .err { color:#f87171; font-size:.85rem; margin-top:.8rem; }
+</style>
+<script defer src="/static/vendor/alpine.min.js?v=__STATIC_VERSION__"></script>
+</head>
+<body>
+<main x-data="harnessBootstrap()" x-init="init()">
+
+  <!-- ── CHOOSE (design variant 0) ─────────────────────────────── -->
+  <template x-if="screen === 'choose'">
+    <div>
+      <h1>Set up your assistant</h1>
+      <p class="sub">Autonomy works through a coding assistant on this machine. Pick one to set up.</p>
+      <div class="card">
+        <template x-for="h in harnesses" :key="h.harness">
+          <div class="opt">
+            <div>
+              <h2 x-text="h.label"></h2>
+              <p class="badge" x-show="h.state === 'ready'">Found on this machine — signed in</p>
+              <p x-show="h.state === 'installed-needs-sign-in'">Installed — not signed in</p>
+              <p x-show="h.state === 'not-installed'">Not installed</p>
+            </div>
+            <button x-show="h.state === 'ready'" @click="use(h)">Use this</button>
+            <button x-show="h.state === 'installed-needs-sign-in'" @click="startSignin(h)">Sign in</button>
+            <button x-show="h.state === 'not-installed'" style="background:#262b38" @click="install(h)">Install</button>
+          </div>
+        </template>
+      </div>
+      <p class="err" x-show="error" x-text="error"></p>
+    </div>
+  </template>
+
+  <!-- ── INSTALLING (design variant 1) ─────────────────────────── -->
+  <template x-if="screen === 'installing'">
+    <div>
+      <h1 x-text="'Installing ' + (selected ? selected.label : '')"></h1>
+      <p class="sub">This usually takes a minute or two.</p>
+      <div class="card">
+        <div class="bar"><i></i></div>
+        <p style="color:var(--dim);font-size:.9rem;margin:0" x-text="progress || 'Downloading…'"></p>
+        <template x-if="selected">
+          <code class="cmd" x-text="selected.install_cmd"></code>
+        </template>
+      </div>
+      <p class="err" x-show="error" x-text="error"></p>
+    </div>
+  </template>
+
+  <!-- ── SIGN IN (design variant 3) ────────────────────────────── -->
+  <template x-if="screen === 'signin'">
+    <div>
+      <h1 x-text="'Sign in to ' + (selected ? selected.label : '')"></h1>
+      <p class="sub">Sign-in happens inside the assistant's own tool — run its command, finish in your browser, and come back. This page notices on its own.</p>
+      <div class="card">
+        <p style="margin:0"><span class="dot" style="background:#fbbf24"></span>Waiting for you to finish signing in…</p>
+        <template x-if="selected">
+          <code class="cmd" x-text="selected.signin_cmd"></code>
+        </template>
+      </div>
+      <p class="err" x-show="error" x-text="error"></p>
+    </div>
+  </template>
+
+  <!-- ── READY (design variant 2) ──────────────────────────────── -->
+  <template x-if="screen === 'ready'">
+    <div>
+      <div class="check">✓</div>
+      <h1>Ready</h1>
+      <p class="sub" x-text="(selected ? selected.label : 'Your assistant') + ' is installed and signed in.'"></p>
+      <button @click="start()">Start</button>
+    </div>
+  </template>
+
+</main>
+
+<script>
+function harnessBootstrap() {
+  return {
+    screen: 'choose',
+    harnesses: [],
+    selected: null,
+    error: '',
+    progress: '',
+    _poll: null,
+
+    async init() {
+      await this.refresh();
+      // Idempotent entry: if a harness is already verified, the server would
+      // not have rendered this page — but if one flips to ready mid-probe,
+      // still let the operator through the choose screen.
+    },
+
+    async refresh() {
+      try {
+        const r = await fetch('/api/bootstrap/probe');
+        const data = await r.json();
+        this.harnesses = data.harnesses || [];
+        return this.harnesses;
+      } catch (e) {
+        this.error = 'Could not probe this machine: ' + e;
+        return [];
+      }
+    },
+
+    _find(slug) { return this.harnesses.find(h => h.harness === slug) || null; },
+
+    async use(h) {
+      this.error = '';
+      // Confirm via a live verify (records the discovery row on success).
+      const res = await this._verify(h.harness);
+      if (res && res.auth === 'ok') {
+        this.selected = res;
+        this.screen = 'ready';
+      } else if (res) {
+        this.selected = res;
+        this.startSignin(res);
+      }
+    },
+
+    async install(h) {
+      this.error = '';
+      this.selected = h;
+      this.screen = 'installing';
+      this.progress = 'Downloading…';
+      try {
+        const r = await fetch('/api/bootstrap/install', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({harness: h.harness}),
+        });
+        const data = await r.json();
+        if (!r.ok || data.ok === false) {
+          this.error = data.error || 'Install failed. Try running the command yourself.';
+          this.screen = 'choose';
+          await this.refresh();
+          return;
+        }
+        // Re-probe: installed → sign-in; installed+authed → ready.
+        const probe = data.result || await this._verify(h.harness);
+        this.selected = probe;
+        if (probe.auth === 'ok') { this.screen = 'ready'; }
+        else { this.startSignin(probe); }
+      } catch (e) {
+        this.error = 'Install failed: ' + e;
+        this.screen = 'choose';
+      }
+    },
+
+    startSignin(h) {
+      this.selected = h;
+      this.screen = 'signin';
+      // Poll the live no-op verification until the harness reports authed.
+      if (this._poll) clearInterval(this._poll);
+      this._poll = setInterval(async () => {
+        const res = await this._verify(h.harness);
+        if (res && res.auth === 'ok') {
+          clearInterval(this._poll); this._poll = null;
+          this.selected = res;
+          this.screen = 'ready';
+        }
+      }, 4000);
+    },
+
+    async _verify(slug) {
+      try {
+        const r = await fetch('/api/bootstrap/verify', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({harness: slug}),
+        });
+        return await r.json();
+      } catch (e) {
+        this.error = 'Verification failed: ' + e;
+        return null;
+      }
+    },
+
+    start() {
+      if (this._poll) clearInterval(this._poll);
+      window.location.href = '/';
+    },
+  };
+}
+</script>
+</body>
+</html>
