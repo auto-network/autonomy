@@ -942,7 +942,8 @@ def _stub_workspace(monkeypatch, tmp_path, overrides=QUERY_OVERRIDES,
     from tools.dashboard.dao import auth_db
 
     auth_db.init_db(tmp_path / "auth.db")
-    auth_db.insert_token(hashlib.sha256(token.encode()).hexdigest(), session)
+    auth_db.insert_token(
+        hashlib.sha256(token.encode()).hexdigest(), session, "enterprise-ng")
     seen = {}
 
     def resolve(s):
@@ -1048,7 +1049,8 @@ def test_named_query_unresolvable_session_is_403(jira_env, monkeypatch,
 
     auth_db.init_db(tmp_path / "auth.db")
     auth_db.insert_token(
-        hashlib.sha256(_QUERY_TOKEN.encode()).hexdigest(), "auto-ghost")
+        hashlib.sha256(_QUERY_TOKEN.encode()).hexdigest(), "auto-ghost",
+        "enterprise-ng")
 
     def boom(session):
         raise LookupError(f"session {session!r} does not map to a workspace")
