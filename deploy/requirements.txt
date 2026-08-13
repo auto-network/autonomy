@@ -34,23 +34,24 @@ cbor2==6.1.3
 # github.com/cberner/raptorq" (no upstream NOTICE file).
 raptorq==2.0.0
 
-# ── WebRTC (aiortc) — PINNED, NOT YET ACTIVE ─────────────────────────────
-# Ready-to-activate transitive set for the frozen WebRTC stack selection
-# (tools/network/ICE_STACK_SELECTION.md, tracked by auto-zg3ue). Resolved
-# against the pins above on 2026-08-13; cryptography stays at 49.0.0
-# (pyOpenSSL 26.4.0 accepts it). Dashboard suite verified in this exact
-# environment: no failure attributable to aiortc/av (81/97 shared with the
-# no-aiortc baseline, remaining 16 pass deterministically in isolation).
-# DO NOT ACTIVATE until the PyAV/FFmpeg license disposition clears — the
-# PyPI av wheel bundles a GPL-linked FFmpeg self-labeled LGPL; see the
-# decision brief graph://42e64126-23d. Uncomment as one block, never
-# partially.
-# aiortc==1.15.0
-# aioice==0.10.2
-# av==17.1.0
-# pylibsrtp==1.0.0
-# pyee==14.0.0
-# ifaddr==0.2.0
-# dnspython==2.8.0
-# google-crc32c==1.8.0
-# pyOpenSSL==26.4.0
+# ── WebRTC (aiortc) — ACTIVE, user-side installs only ────────────────────
+# Transitive set for the frozen WebRTC stack selection
+# (tools/network/ICE_STACK_SELECTION.md, auto-zg3ue). Resolved against the
+# pins above on 2026-08-13; cryptography stays at 49.0.0. Dashboard suite
+# verified in this exact environment: no failure attributable to aiortc/av.
+#
+# LICENSE DISPOSITION (operator, 2026-08-13): av's PyPI wheel bundles an
+# FFmpeg that links GPL x264/x265 while self-labeling LGPL (brief:
+# graph://42e64126-23d). Installing it user-side from PyPI is fine — we
+# distribute nothing. STANDING RULE: av never ships inside an artifact we
+# publish (prebuilt images exclude it or install it first-boot on the
+# user's side). Revisit only if that rule ever has to break.
+aiortc==1.15.0
+aioice==0.10.2
+av==17.1.0
+pylibsrtp==1.0.0
+pyee==14.0.0
+ifaddr==0.2.0
+dnspython==2.8.0
+google-crc32c==1.8.0
+pyOpenSSL==26.4.0
