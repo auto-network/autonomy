@@ -180,6 +180,27 @@
     await _postJson('/api/identity/unlock/password', {
       challenge: minted.challenge, signature: sig,
     });
+
+    // Access authentication has succeeded.  Reuse this password-backed root
+    // ceremony to maintain the unattended serving credential if necessary.
+    // The normal case is a cheap local status read; repair failures never
+    // turn successful dashboard access into a lockout.  The access-only
+    // passkey path does not run this because it releases no signing material.
+    var networkSession = window.AutonomyNetworkSession;
+    if (networkSession &&
+        typeof networkSession.repairServeCredential === 'function') {
+      try {
+        if (typeof networkSession.ready === 'function') {
+          await networkSession.ready();
+        }
+        await networkSession.repairServeCredential(password, {});
+      } catch (e) {
+        if (window.console && console.warn) {
+          console.warn('serving credential maintenance failed after unlock:',
+                       (e && e.message) || e);
+        }
+      }
+    }
   }
 
   // ── rendering (markup mirrors the mockup's Unlock state) ───────────
