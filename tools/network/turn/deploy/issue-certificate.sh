@@ -17,7 +17,7 @@ if ss -ltnH "sport = :80" | awk -v ip="$TURN_PUBLIC_IP" '
     exit 1
 fi
 
-exec certbot certonly \
+certbot certonly \
     --standalone \
     --non-interactive \
     --agree-tos \
@@ -27,3 +27,6 @@ exec certbot certonly \
     --http-01-port 80 \
     --deploy-hook 'systemctl try-restart autonomy-coturn.service' \
     -d turn.auto.network
+
+systemctl enable --now certbot.timer
+systemctl is-enabled --quiet certbot.timer
