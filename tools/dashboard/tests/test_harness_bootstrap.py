@@ -169,6 +169,28 @@ def test_bootstrap_page_always_served(test_client):
     assert "Set up your assistant" in r.text
 
 
+def test_screens_speak_interface_not_engineering():
+    """User-facing copy states what to do, never how the system works.
+
+    Operator product rule (ruled repeatedly): no engineering narration in
+    UI. The screen may instruct ("Run this in a terminal") and report state
+    ("Signed in", "Waiting…"); it may never explain mechanism, describe its
+    own behavior, or leak internal vocabulary. This is the same guard the
+    invitation pages carry, extended to setup.
+    """
+    from pathlib import Path
+
+    template = (
+        Path(__file__).resolve().parents[1] / "templates" / "bootstrap.html"
+    ).read_text(encoding="utf-8")
+    visible = template[template.index("<body"):template.index("</main>")]
+    visible = visible.lower()
+    for leaked in ("this page", "own tool", "notices", "no-op", "oauth",
+                   "run its command", "probe", "verif", "endpoint",
+                   "record", "gate"):
+        assert leaked not in visible, leaked
+
+
 def test_existing_install_passes_through_without_interaction():
     """A machine with a signed-in harness must never be stopped by setup.
 

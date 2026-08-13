@@ -40,14 +40,14 @@
   <template x-if="screen === 'choose'">
     <div>
       <h1>Set up your assistant</h1>
-      <p class="sub">Autonomy works through a coding assistant on this machine. Pick one to set up.</p>
+      <p class="sub">Pick the coding assistant to use on this machine.</p>
       <div class="card">
         <template x-for="h in harnesses" :key="h.harness">
           <div class="opt">
             <div>
               <h2 x-text="h.label"></h2>
-              <p class="badge" x-show="h.state === 'ready'">Found on this machine — signed in</p>
-              <p x-show="h.state === 'installed-needs-sign-in'">Installed — not signed in</p>
+              <p class="badge" x-show="h.state === 'ready'">Signed in</p>
+              <p x-show="h.state === 'installed-needs-sign-in'">Not signed in</p>
               <p x-show="h.state === 'not-installed'">Not installed</p>
             </div>
             <button x-show="h.state === 'ready'" @click="use(h)">Use this</button>
@@ -68,9 +68,6 @@
       <div class="card">
         <div class="bar"><i></i></div>
         <p style="color:var(--dim);font-size:.9rem;margin:0" x-text="progress || 'Downloading…'"></p>
-        <template x-if="selected">
-          <code class="cmd" x-text="selected.install_cmd"></code>
-        </template>
       </div>
       <p class="err" x-show="error" x-text="error"></p>
     </div>
@@ -80,12 +77,12 @@
   <template x-if="screen === 'signin'">
     <div>
       <h1 x-text="'Sign in to ' + (selected ? selected.label : '')"></h1>
-      <p class="sub">Sign-in happens inside the assistant's own tool — run its command, finish in your browser, and come back. This page notices on its own.</p>
       <div class="card">
-        <p style="margin:0"><span class="dot" style="background:#fbbf24"></span>Waiting for you to finish signing in…</p>
+        <p style="margin:0 0 .3rem" x-text="selected ? selected.signin_how : ''"></p>
         <template x-if="selected">
           <code class="cmd" x-text="selected.signin_cmd"></code>
         </template>
+        <p style="margin:.9rem 0 0"><span class="dot" style="background:#fbbf24"></span>Waiting…</p>
       </div>
       <p class="err" x-show="error" x-text="error"></p>
     </div>
@@ -137,7 +134,7 @@ function harnessBootstrap() {
         this.harnesses = data.harnesses || [];
         return this.harnesses;
       } catch (e) {
-        this.error = 'Could not probe this machine: ' + e;
+        this.error = 'Could not check this machine. Reload to try again.';
         return [];
       }
     },
@@ -170,7 +167,7 @@ function harnessBootstrap() {
         });
         const data = await r.json();
         if (!r.ok || data.ok === false) {
-          this.error = data.error || 'Install failed. Try running the command yourself.';
+          this.error = 'Install did not finish. You can run it yourself: ' + h.install_cmd;
           this.screen = 'choose';
           await this.refresh();
           return;
@@ -181,7 +178,7 @@ function harnessBootstrap() {
         if (probe.auth === 'ok') { this.screen = 'ready'; }
         else { this.startSignin(probe); }
       } catch (e) {
-        this.error = 'Install failed: ' + e;
+        this.error = 'Install did not finish. You can run it yourself: ' + h.install_cmd;
         this.screen = 'choose';
       }
     },
@@ -210,7 +207,7 @@ function harnessBootstrap() {
         });
         return await r.json();
       } catch (e) {
-        this.error = 'Verification failed: ' + e;
+        this.error = 'Could not check sign-in. Try again.';
         return null;
       }
     },
