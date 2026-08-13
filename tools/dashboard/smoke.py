@@ -43,6 +43,12 @@ def run_tier1(base_url: str) -> dict:
     """Run Tier 1 API sanity checks (pure HTTP, no browser)."""
     session = requests.Session()
     session.verify = False
+    # The human-gate (HumanGateMiddleware) locks /pages/* behind an unlock
+    # session; mint a revocable smoke session so the fragment checks aren't 401'd.
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from tools.dashboard.unlock_routes import mint_session_token, SESSION_COOKIE
+    session.cookies.set(SESSION_COOKIE, mint_session_token(method="smoke"))
 
     checks = []
 
