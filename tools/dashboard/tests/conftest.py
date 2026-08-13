@@ -369,6 +369,14 @@ def test_app(test_db, mock_tmux, tmp_path):
     # Redirect EventBus snapshot path so the TestClient lifespan never
     # reads or writes the real repo's data/event_bus.state.
     os.environ["DASHBOARD_EVENT_BUS_STATE"] = str(tmp_path / "event_bus.state")
+    # Hermetic personal scope: the repo checkout carries the operator's real
+    # data/orgs/personal.db, whose enrolled identity flips the sign-in gate
+    # to enforcing and 401s every gated page these tests fetch. An empty
+    # orgs dir keeps the gate in its unenrolled fail-open state; tests that
+    # exercise the gate itself enroll their own identity into this dir.
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir(exist_ok=True)
+    os.environ["AUTONOMY_ORGS_DIR"] = str(orgs_dir)
     # Reload DAO to pick up new DB path
     import importlib
     from tools.dashboard.dao import dashboard_db as db_mod

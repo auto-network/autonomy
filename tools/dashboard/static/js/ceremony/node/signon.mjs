@@ -9,7 +9,7 @@ import {
   configure,
   signOn,
   signRegistryRequest,
-} from '../../network-signon.js';
+} from '../../network-signon.mjs';
 
 if (!globalThis.crypto) {
   globalThis.crypto = webcrypto;
