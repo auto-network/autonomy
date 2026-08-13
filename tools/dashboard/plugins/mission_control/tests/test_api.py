@@ -2399,3 +2399,35 @@ def test_an_unidentified_reader_is_one_presence_not_a_new_person_each_time():
         client.post(f"/api/missions/{mission_id}/here")
     who = {c.args[1] for c in beat.call_args_list}
     assert len(who) == 1, f"each visit invented a different participant: {who}"
+
+
+def test_the_operator_is_one_person_on_the_presence_list():
+    """Attribution and presence are different namespaces for the same human.
+    Writing the attribution id onto a presence surface put the operator on the
+    list twice, under two ids with the same name -- on the one surface whose
+    whole job is showing who is here."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    with patch.object(mc_api, "_operator_identity") as ident, \
+         patch.object(mc_api, "_heartbeat_presence") as beat:
+        ident.return_value = {
+            "participant_id": mc_api.OPERATOR_PARTICIPANT_ID,
+            "participant_label": "Jeremy Spilman",
+        }
+        client.post(f"/api/missions/{mission_id}/here")
+    who, kind = beat.call_args.args[1], beat.call_args.kwargs["kind"]
+    assert who == mc_api.OPERATOR_PRESENCE_ID
+    assert kind == "operator"
+
+
+def test_the_operator_presence_id_matches_the_one_every_page_uses():
+    """No shared source for the two, so drift is only visible as the operator
+    appearing twice on a live screen. Pin them instead."""
+    js = (
+        Path(__file__).resolve().parents[3]
+        / "static" / "js" / "identity-indicator.js"
+    ).read_text()
+    assert f"Autonomy.operatorId = '{mc_api.OPERATOR_PRESENCE_ID}'" in js, (
+        "the dashboard's operator presence id changed; mission screens will "
+        "now record the operator as a second, separate person"
+    )

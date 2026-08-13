@@ -859,6 +859,14 @@ def _viewer_id(request: Request) -> str | None:
 #: authentication behind it is what makes it true.
 OPERATOR_PARTICIPANT_ID = "operator"
 
+#: The operator's id in PRESENCE, which is a different namespace from the one
+#: above: that one says who a question is attributed to, this one says who is
+#: on a surface. Every dashboard page writes the operator's presence row under
+#: this value, set in static/js/identity-indicator.js as Autonomy.operatorId.
+#: The two are pinned together by a test, because there is no shared source
+#: for them and drift shows up as one person appearing twice.
+OPERATOR_PRESENCE_ID = "operator:personal"
+
 
 def _operator_identity(request: Request) -> dict | None:
     """The signed-in operator, or None.
@@ -1532,10 +1540,17 @@ async def _here_impl(request: Request, *, surface_id: str) -> JSONResponse:
     identity = _resolve_visitor_identity(request)
     who = (identity or {}).get("participant_id") or "guest:signed-out"
     label = (identity or {}).get("participant_label") or "Someone here"
-    _heartbeat_presence(
-        surface_id, who, label,
-        kind="operator" if who == OPERATOR_PARTICIPANT_ID else "guest",
-    )
+    # TWO NAMESPACES, ONE HUMAN. OPERATOR_PARTICIPANT_ID is who a question is
+    # attributed to; presence is keyed separately, and every other surface on
+    # the dashboard writes the operator under OPERATOR_PRESENCE_ID. Recording
+    # the attribution id here put the same person on the list twice under two
+    # ids with the same name -- on the one surface whose entire job is showing
+    # who is here.
+    if who == OPERATOR_PARTICIPANT_ID:
+        who, kind = OPERATOR_PRESENCE_ID, "operator"
+    else:
+        kind = "guest"
+    _heartbeat_presence(surface_id, who, label, kind=kind)
     return JSONResponse({"presence": _surface_presence(surface_id)})
 
 
