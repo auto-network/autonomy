@@ -257,3 +257,73 @@ def test_the_no_channel_timer_is_armed_only_inside_a_frame():
         "the noChannel timer must sit INSIDE a `window.parent !== window` "
         "guard; unguarded it disables posting on every top-level surface"
     )
+
+
+# ── the status feed (pillar status posts kept, not replaced) ──────
+
+
+def _mission_with_pillar(tmp_path):
+    from tools.dashboard.dao import mission_control_db as mdb
+
+    path = tmp_path / "mc.db"
+    mdb.init_db(path)
+    mission_id = mdb.create_mission("M", "sess", db_path=path)["mission_id"]
+    pillar_id = mdb.create_pillar(
+        mission_id, "Infra", coordinator_session="s", color="#34d399", db_path=path
+    )["pillar_id"]
+    return path, mission_id, pillar_id
+
+
+def test_status_lines_accumulate_instead_of_overwriting(tmp_path):
+    """The line was already being written to a standard, on a cadence, by
+    every pillar — and every one but the latest was discarded. Keeping them
+    is the difference between knowing what is true now and being able to see
+    what has been happening.
+    """
+    from tools.dashboard.dao import mission_control_db as mdb
+
+    path, mission_id, pillar_id = _mission_with_pillar(tmp_path)
+    mdb.set_pillar_last_done(pillar_id, "First thing finished.", db_path=path)
+    mdb.set_pillar_last_done(pillar_id, "Second thing finished.", db_path=path)
+
+    feed = mdb.list_mission_status_posts(mission_id, db_path=path)
+    assert [p["text"] for p in feed] == [
+        "Second thing finished.", "First thing finished.",
+    ], "newest first, and nothing discarded"
+    assert feed[0]["pillar_name"] == "Infra", "a merged feed must say who wrote each line"
+
+
+def test_clearing_the_line_posts_nothing(tmp_path):
+    """Clearing is not an event. It resets the card to 'never written'; it is
+    not a thing that happened and must not appear in the account of what did.
+    """
+    from tools.dashboard.dao import mission_control_db as mdb
+
+    path, mission_id, pillar_id = _mission_with_pillar(tmp_path)
+    mdb.set_pillar_last_done(pillar_id, "Something finished.", db_path=path)
+    mdb.set_pillar_last_done(pillar_id, "", db_path=path)
+
+    assert len(mdb.list_mission_status_posts(mission_id, db_path=path)) == 1
+
+
+def test_a_write_against_an_unknown_pillar_leaves_no_orphan(tmp_path):
+    """The post is only true if the pillar it names exists."""
+    from tools.dashboard.dao import mission_control_db as mdb
+
+    path, mission_id, _ = _mission_with_pillar(tmp_path)
+    assert mdb.set_pillar_last_done("no-such-pillar", "orphan", db_path=path) is False
+    assert mdb.list_mission_status_posts(mission_id, db_path=path) == []
+
+
+def test_age_follows_the_status_line_when_it_is_newer_than_the_push(tmp_path):
+    """A pillar reporting steadily for an hour used to read as untouched
+    since its last revision — the opposite of the truth, on the one field a
+    reader glances at to decide whether anything is happening.
+    """
+    from tools.dashboard.plugins.mission_control import compose
+
+    older_push = {"created_at": 1_000.0}
+    assert compose._latest_sign_of_life(older_push, {"last_done_at": 2_000.0}) == 2_000.0
+    assert compose._latest_sign_of_life(older_push, {"last_done_at": None}) == 1_000.0
+    assert compose._latest_sign_of_life(None, {"last_done_at": 2_000.0}) == 2_000.0
+    assert compose._latest_sign_of_life(None, {}) is None

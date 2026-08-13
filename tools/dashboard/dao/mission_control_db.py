@@ -131,6 +131,24 @@ CREATE TABLE IF NOT EXISTS pillar_site_revisions (
 CREATE INDEX IF NOT EXISTS idx_pillar_site_revisions_pillar
     ON pillar_site_revisions(pillar_id);
 
+-- Every status line a pillar has ever written, oldest to newest. The
+-- pillars.last_done column keeps the CURRENT one because the card reads it
+-- on every render and should not pay for a query; this table keeps the rest.
+--
+-- One line per thing that finished, so read together they are the account of
+-- what happened that no single current-state field can give. The reason this
+-- exists is that a reader could see what is true now and still have no way to
+-- see what had been going on.
+CREATE TABLE IF NOT EXISTS pillar_status_posts (
+    post_id     TEXT PRIMARY KEY,
+    pillar_id   TEXT NOT NULL,
+    text        TEXT NOT NULL,
+    created_at  REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pillar_status_posts_pillar
+    ON pillar_status_posts(pillar_id, created_at DESC);
+
 -- Same single-implicit-watermark posture as mission_last_seen, one level
 -- down.
 CREATE TABLE IF NOT EXISTS pillar_last_seen (
@@ -455,12 +473,16 @@ def set_pillar_status(
 def set_pillar_last_done(
     pillar_id: str, text: str, *, db_path: Path | str | None = None,
 ) -> bool:
-    """Replace this pillar's status line with the last thing that finished.
+    """Record the last productive thing this pillar finished.
 
-    REPLACES. There is no history and nothing accumulates -- the row is the
-    current state of the work, and a reader wants what is true now, not the
-    path that got here. Blank clears it back to "never written", which the
-    viewer renders as nothing.
+    APPENDS, and updates the current line in the same breath. The column is
+    the newest post so the card can render without a query; the history table
+    keeps every earlier one. Current state alone could say what is true now
+    and still leave a reader unable to see what had been happening, which is
+    the whole reason the history exists.
+
+    Blank clears the current line back to "never written" -- the viewer then
+    renders nothing -- and appends no post. Clearing is not an event.
 
     How to write one is not a matter of taste here: SKILL.md section 9 sets
     six rules (two sentences, past tense and finished, no identifiers, no
@@ -470,16 +492,58 @@ def set_pillar_last_done(
     failed to parse.
     """
     text = (text or "").strip()
+    now = time.time()
     conn = _get_conn(db_path)
     try:
         cur = conn.execute(
             "UPDATE pillars SET last_done = ?, last_done_at = ? WHERE pillar_id = ?",
-            (text or None, time.time() if text else None, pillar_id),
+            (text or None, now if text else None, pillar_id),
         )
+        # Only when the pillar exists AND something was actually said. A write
+        # against an unknown pillar must not leave an orphan post behind.
+        if text and cur.rowcount > 0:
+            conn.execute(
+                "INSERT INTO pillar_status_posts (post_id, pillar_id, text, created_at)"
+                " VALUES (?, ?, ?, ?)",
+                (str(uuid.uuid4()), pillar_id, text, now),
+            )
         conn.commit()
     finally:
         conn.close()
     return cur.rowcount > 0
+
+
+def list_mission_status_posts(
+    mission_id: str, *, limit: int = 100, db_path: Path | str | None = None,
+) -> list[dict]:
+    """Every pillar's status posts for one mission, newest first.
+
+    Carries the pillar's name and colour so a reader can tell at a glance who
+    said what, which is the only thing that makes a merged feed legible.
+
+    This is deliberately NOT the decision log. That log is what LANDED --
+    revisions pushed and questions answered -- and its worth is that
+    everything in it demonstrably happened. A status post is what a pillar
+    SAYS is happening. Merging them would make a claim indistinguishable from
+    a fact.
+    """
+    conn = _get_conn(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT s.post_id, s.pillar_id, s.text, s.created_at,
+                   p.name AS pillar_name, p.color AS pillar_color
+            FROM pillar_status_posts s
+            JOIN pillars p ON p.pillar_id = s.pillar_id
+            WHERE p.mission_id = ?
+            ORDER BY s.created_at DESC, s.post_id DESC
+            LIMIT ?
+            """,
+            (mission_id, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
 
 
 def delete_pillar(pillar_id: str, *, db_path: Path | str | None = None) -> bool:

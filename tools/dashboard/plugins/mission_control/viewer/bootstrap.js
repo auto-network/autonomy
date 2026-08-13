@@ -31,6 +31,7 @@
   // rather than opening a panel underneath the view that covers it.
   function show(next) {
     ui.panel = null; ui.entry = null; ui.anchor = null; ui.who = false;
+    ui.view = null;
     if (next) Object.assign(ui, next);
     render();
   }
@@ -293,6 +294,37 @@
     return (p ? p.here : state.here) || [];
   }
 
+  // Newest first, each line owned by the pillar that wrote it. No grouping
+  // and no collapsing: the value is reading them in order, and any grouping
+  // hides exactly the interleaving that shows what a week actually looked
+  // like.
+  function feedView() {
+    var posts = state.status_posts || [];
+    var body = posts.length
+      ? posts.map(function (post) {
+          var dot = el("span", {class: "mc-swatch"});
+          dot.style.background = post.color || "#475569";
+          return el("article", {class: "mc-post"}, [
+            el("div", {class: "mc-post-head"}, [
+              dot,
+              el("span", {class: "mc-post-who", text: post.pillar_name || ""}),
+              el("span", {class: "mc-age", text: post.ago || ""}),
+            ]),
+            el("p", {class: "mc-post-text", text: post.text || ""}),
+          ]);
+        })
+      : [el("p", {class: "mc-empty",
+                  text: "No pillar has reported anything yet."})];
+    return el("section", {class: "mc-view"}, [
+      el("div", {class: "mc-phead"}, [
+        el("span", {class: "mc-ptitle", text: "What is happening"}),
+        el("span", {class: "mc-grow"}),
+        el("button", {class: "mc-x", text: "\u00d7", onclick: function () { show(null); }}),
+      ]),
+      el("div", {class: "mc-pbody"}, body),
+    ]);
+  }
+
   function barRow() {
     var p = currentPillar() || {};
     var here = presentHere();
@@ -301,7 +333,13 @@
     var kids = [
       el("button", {class: "mc-pill", onclick: function () { show(ui.panel === "pillars" ? null : {panel: "pillars"}); }},
          [swatch, el("span", {class: "mc-name", text: p.name || state.mission || "Mission"}), el("span", {class: "mc-caret", text: "\u25be"})]),
-      el("span", {class: "mc-age", text: p.age || ""}),
+      // The age was the only thing on the bar already answering "when did
+      // anything last happen", so it is where "what happened" belongs. A
+      // span that now opens a surface has to look like a control, or it is a
+      // secret.
+      el("button", {class: "mc-age mc-age-btn", text: p.age || "",
+                    title: "What every pillar has been reporting",
+                    onclick: function () { show(ui.view === "feed" ? null : {view: "feed"}); }}),
       el("span", {class: "mc-grow"}),
     ];
     var n = openCount(), done = answeredCount();
@@ -664,13 +702,14 @@
     // Hidden while a panel or view is up. Choosing a pillar is a full-screen
     // act; leaving the current pillar's own section names showing behind the
     // chooser makes it unclear which screen you are even looking at.
-    var covered = ui.panel || ui.entry || ui.anchor;
+    var covered = ui.panel || ui.entry || ui.anchor || ui.view;
     var strip = covered ? null : stripNode();
     if (strip) chrome.appendChild(strip);
     if (ui.who) chrome.appendChild(whoList());
     var p = panelNode(); if (p) chrome.appendChild(p);
     var e = entryNode(); if (e) chrome.appendChild(e);
     var a = anchorNode(); if (a) chrome.appendChild(a);
+    if (ui.view === "feed") chrome.appendChild(feedView());
     measureBar();
     syncStrip();
   }

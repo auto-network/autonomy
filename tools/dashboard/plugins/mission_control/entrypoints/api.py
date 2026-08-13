@@ -573,6 +573,23 @@ def _decision_log_payload(entry: dict, pillar_names: dict) -> dict:
     }
 
 
+async def get_status_feed(request: Request) -> JSONResponse:
+    """Every pillar status post for this mission, newest first.
+
+    Separate from the decision log on purpose: that log is what landed, this
+    is what pillars say is happening, and a reader must be able to tell those
+    apart.
+    """
+    mission_id = request.path_params["mission_id"]
+    if not db.get_mission(mission_id):
+        return JSONResponse({"error": "mission not found"}, status_code=404)
+    try:
+        limit = min(int(request.query_params.get("limit", 100)), 500)
+    except (TypeError, ValueError):
+        limit = 100
+    return JSONResponse({"status_posts": db.list_mission_status_posts(mission_id, limit=limit)})
+
+
 async def get_decision_log(request: Request) -> JSONResponse:
     mission_id = request.path_params["mission_id"]
     if not db.get_mission(mission_id):
@@ -1473,6 +1490,7 @@ routes: list[Route] = [
         reopen_question, methods=["POST"],
     ),
     Route("/api/missions/{mission_id}/decision-log", get_decision_log, methods=["GET"]),
+    Route("/api/missions/{mission_id}/status-feed", get_status_feed, methods=["GET"]),
     Route("/missions/{mission_id}", serve_mission_site, methods=["GET"]),
 
     # ── Pillars ──────────────────────────────────────────────────

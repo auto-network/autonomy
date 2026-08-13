@@ -161,3 +161,17 @@
 
 /* Shown instead of the composer when this reader cannot post at all. */
 .mc-readonly { margin: 0; font-size: 13px; line-height: 1.5; color: #64748b; text-align: center; }
+
+/* The age doubles as the way into the feed, so it has to read as a control
+   rather than as one more piece of grey furniture on the bar. */
+.mc-age-btn { cursor: pointer; border-radius: .25rem; padding: .1rem .3rem; }
+.mc-age-btn:hover { background: #1e293b66; color: #94a3b8; }
+
+/* One status line as posted. The pillar owns the line, so its colour leads
+   and its name sits beside the time -- a merged feed is only legible when
+   every entry says who wrote it. */
+.mc-post { border-bottom: 1px solid #1e293b; padding: .7rem .1rem; }
+.mc-post:last-child { border-bottom: 0; }
+.mc-post-head { display: flex; align-items: center; gap: .45rem; }
+.mc-post-who { font-size: 12px; color: #94a3b8; font-weight: 600; }
+.mc-post-text { margin: .35rem 0 0; font-size: .95rem; line-height: 1.5; color: #e2e8f0; }
