@@ -2,7 +2,7 @@ import { webcrypto } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 
-globalThis.crypto = webcrypto;
+if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
 const mode = process.argv[2];
 const moduleUrl = pathToFileURL(path.join(

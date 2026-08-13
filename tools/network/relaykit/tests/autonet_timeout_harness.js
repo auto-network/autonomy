@@ -13,7 +13,7 @@ const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 
-globalThis.crypto = require("crypto").webcrypto;
+if (!globalThis.crypto) globalThis.crypto = require("crypto").webcrypto;
 // readyState 'loading' so the file registers a DOMContentLoaded listener
 // instead of auto-booting at load — we drive one function ourselves.
 globalThis.window = {};
