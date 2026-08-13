@@ -57,11 +57,21 @@ def _restore_dashboard_env():
     try:
         yield
     finally:
+        store_env_changed = any(
+            os.environ.get(key) != snapshot[key]
+            for key in ("AUTONOMY_ORGS_DIR", "GRAPH_DB")
+        )
         for key, value in snapshot.items():
             if value is None:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+        if store_env_changed:
+            # A test that re-pointed the graph stores leaves pooled
+            # connections bound to ITS paths; the next test would read and
+            # write through the stale pool instead of its own env.
+            from tools.graph.db import GraphDB
+            GraphDB.close_all_pooled()
 
 
 # ── Read-only workspace auto-redirect ──────────────────────────────────
@@ -103,6 +113,49 @@ def _configure_writable_dbs_if_readonly():
 
 
 _configure_writable_dbs_if_readonly()
+
+
+# ── Hermetic stores (bead auto-5l5zt) ──────────────────────────────────
+# The container's ambient env points GRAPH_API / GRAPH_DB / AUTONOMY_ORGS_DIR
+# at the LIVE stores, so any test that touches a store without provisioning
+# its own writes real data (the audit caught eager graph-source writes and
+# ambient-store reads). Tests therefore get a hermetic per-worker data root
+# for EVERY store in tools/data_paths.py::STORE_MANIFEST, and the
+# refuse-real-data guard so a store this block ever misses fails loudly by
+# name instead of silently touching the repo's data/.
+#
+# Org isolation is a real per-org TREE (AUTONOMY_ORGS_DIR), never a single
+# pinned DB: pinning collapses org resolution to one database and makes
+# every org-scope assertion pass regardless of the code under test (the
+# manufactured-evidence tautology, methodology note 73bad14e).
+#
+# Escape hatch for deliberate live-integration runs only:
+#   AUTONOMY_TESTS_USE_AMBIENT_STORES=1
+def _configure_hermetic_stores():
+    if _os.environ.get("AUTONOMY_TESTS_USE_AMBIENT_STORES") == "1":
+        return
+    from tools.data_paths import STORE_MANIFEST
+
+    worker = _os.environ.get("PYTEST_XDIST_WORKER", "master")
+    root = _Path(_tempfile.gettempdir()) / f"pytest-stores-{_os.getpid()}-{worker}"
+    root.mkdir(parents=True, exist_ok=True)
+    for store in STORE_MANIFEST:
+        if _os.environ.get(store.env, "").startswith(str(root)):
+            continue
+        dst = root / store.relative
+        if store.kind == "dir":
+            dst.mkdir(parents=True, exist_ok=True)
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+        _os.environ[store.env] = str(dst)
+    # The API pointer routes graph writes to the live dashboard; tests never
+    # want that (suites that test the HTTP contract boot their own app).
+    _os.environ.pop("GRAPH_API", None)
+    _os.environ.pop("GRAPH_ORG", None)
+    _os.environ["AUTONOMY_REFUSE_REAL_DATA_FALLBACK"] = "1"
+
+
+_configure_hermetic_stores()
 
 
 # ── Default EventBus snapshot redirect ─────────────────────────────────
