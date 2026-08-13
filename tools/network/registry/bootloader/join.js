@@ -7,9 +7,10 @@
  * flow) or hands their own coding agent the install primer plus the
  * invite link. All crypto stays local/E2E; the July trust ruling that a
  * relay-served page must not run the join ceremony holds by construction.
- * Per the operator's ingress ruling there is NO auto-detection: this
- * page makes no network calls at all (CSP: no connect targets); both
- * affordances always render and the user picks.
+ * Per the operator's ingress ruling there is NO auto-detection of local
+ * nodes; both affordances always render and the user picks. The page's
+ * ONE network interaction is the root-pinned E2E join channel, over
+ * which the ORG self-describes (name/description/icon) — auto-r7kk4.
  *
  * Inputs, all read from the current URL:
  *   query     org, root_pub, invite_ref — public context from the bootloader
@@ -108,9 +109,83 @@
 
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", render);
-  } else {
-    render();
+  // ── Org self-description over the E2E join channel (auto-r7kk4) ────
+  // The one network interaction this page performs, and it is the same
+  // authenticated read the join flow is built on: open the root-pinned
+  // channel to the ORG'S OWN node and ask for the invitation context.
+  // The reply's org_name/org_description/org_icon are trustworthy because the
+  // org said them over a channel pinned to the root key the invitation
+  // itself carries — a link can claim anything; this cannot. The BEARER
+  // is not involved anywhere in this read (channel token only).
+
+  function safeIcon(value) {
+    return (typeof value === "string" &&
+            /^data:image\/(png|jpeg|gif|webp|svg\+xml);base64,[A-Za-z0-9+/=]+$/
+              .test(value) && value.length <= 300000)
+      ? value : null;
+  }
+
+  function renderOrgHeader(context, inputs) {
+    var name = typeof context.org_name === "string"
+      ? context.org_name.slice(0, 120) : "";
+    if (!name) return;
+    $("org-name").textContent = name;
+    var byline = typeof context.org_description === "string"
+      ? context.org_description.slice(0, 300) : "";
+    if (byline) $("org-byline").textContent = byline;
+    var icon = safeIcon(context.org_icon);
+    if (icon) {
+      $("org-icon").src = icon;
+      $("org-icon").classList.remove("hidden");
+    }
+    $("org-header").classList.remove("hidden");
+    $("invite-line").textContent =
+      name + " has invited you. Two ways in — pick whichever fits.";
+  }
+
+  function enrichFromOrg(inputs) {
+    var a = window.autonet;
+    if (!a || !a.openSocket || !a.performHandshake) return;
+    var scheme = location.protocol === "https:" ? "wss" : "ws";
+    var url = scheme + "://" + location.host +
+      "/v1/links/" + inputs.channelToken + "/channel";
+    a.openSocket(url).then(function (ws) {
+      return a.performHandshake(ws, {
+        org: inputs.org,
+        token: inputs.channelToken,
+        rootPub: inputs.rootPub,
+      });
+    }).then(function (channel) {
+      var request = new TextEncoder().encode(
+        a.canonicalJson({ v: 1, op: "context" }));
+      return channel.sendMessage(request).then(function () {
+        return channel.recvMessage();
+      });
+    }).then(function (bytes) {
+      var reply = JSON.parse(new TextDecoder().decode(bytes));
+      if (reply && reply.status === "ok") renderOrgHeader(reply, inputs);
+    }).catch(function () {
+      // Org unreachable or an older node without the fields: the minimal
+      // display stands. Enrichment must never break the page.
+    });
+  }
+
+  var _renderBase = render;
+  render = function () {
+    _renderBase();
+    var inputs = readInputs();
+    if (looksComplete(inputs)) enrichFromOrg(inputs);
+  };
+
+  if (typeof module === "object" && module.exports) {
+    module.exports = { safeIcon: safeIcon };
+  }
+
+  if (typeof document !== "undefined") {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", render);
+    } else {
+      render();
+    }
   }
 })();

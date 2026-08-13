@@ -39,10 +39,18 @@ class TestJoinShell:
         response = client.get("/network/join")
         csp = response.headers["content-security-policy"]
         assert "default-src 'none'" in csp
-        # No connect targets AT ALL: with no connect-src carve-out,
-        # default-src 'none' means the page structurally cannot probe,
-        # forward, or exfiltrate (operator ingress ruling).
-        assert "connect-src" not in csp
+        # DELIBERATE CHANGE (auto-r7kk4, operator-directed): the page now
+        # performs exactly ONE network interaction — the root-pinned E2E
+        # join channel over which the ORG self-describes. connect-src
+        # admits it; localhost is deliberately NOT a connect target (the
+        # no-auto-detection ruling stands — this is the org connection,
+        # not a probe). Icons arrive as bounded data URIs only.
+        assert "connect-src 'self';" in csp
+        # Scheme-wide sources would permit ANY host (relay review): the
+        # channel is same-origin and 'self' is the whole allowance.
+        assert "wss:" not in csp and "ws:" not in csp
+        assert "localhost" not in csp
+        assert "img-src data:" in csp
         assert "frame-ancestors 'none'" in csp
         assert response.headers["cache-control"] == "no-store"
         assert response.headers["referrer-policy"] == "no-referrer"
@@ -58,15 +66,24 @@ class TestJoinShell:
 class TestClientSourceContract:
     """Structural assertions on the client code's trust properties."""
 
-    def test_no_network_calls_at_all(self):
-        # Operator ingress ruling: no auto-detection of any kind. The page
-        # makes zero network calls — the bearer is read from location.hash
-        # and appears only in URL CONSTRUCTION (the blurb's invite link,
-        # the local-node handoff), never in a request.
+    def test_only_network_path_is_the_authenticated_channel(self):
+        # DELIBERATE CHANGE (auto-r7kk4): the page's one network
+        # interaction is the E2E join channel, reached ONLY through the
+        # audited autonet primitives (openSocket/performHandshake) — no
+        # raw fetch/XHR/WebSocket/beacon in this file, ever. The BEARER
+        # is read from location.hash and appears only in URL construction
+        # (blurb, local handoff); the channel setup uses the CHANNEL
+        # token and the root pin, never the bearer.
         assert "location.hash" in JOIN_JS
-        for forbidden in ("fetch(", "xmlhttprequest", "websocket",
+        for forbidden in ("fetch(", "xmlhttprequest", "new websocket",
                           "sendbeacon"):
             assert forbidden not in JOIN_JS.lower(), forbidden
+        assert "openSocket" in JOIN_JS and "performHandshake" in JOIN_JS
+        handshake = JOIN_JS[JOIN_JS.index("performHandshake(ws"):][:220]
+        assert "bearer" not in handshake
+        assert 'op: "context"' in JOIN_JS
+        for claim_op in ('"submit"', '"status"'):
+            assert claim_op not in JOIN_JS, claim_op
 
     def test_no_ceremony_code(self):
         # The July trust ruling: a relay-served page must not run the join
@@ -103,3 +120,39 @@ class TestBootloaderPassThrough:
         assert 'query.get("t")' not in JOIN_JS
         assert 'fragment.get("channel_token")' in JOIN_JS
         assert 'fragment.get("t")' in JOIN_JS
+
+
+class TestOrgSelfDescription:
+    def test_icon_guard_accepts_only_bounded_data_uris(self):
+        import json as _json
+        import shutil as _shutil
+        import subprocess as _subprocess
+
+        if _shutil.which("node") is None:
+            import pytest as _pytest
+            _pytest.skip("node not on PATH")
+        module = str(BOOTLOADER_DIR / "join.js")
+        script = (
+            f"const api = require({_json.dumps(module)});"
+            "const cases = {"
+            "  good: api.safeIcon('data:image/png;base64,iVBORw0KGgo='),"
+            "  remote: api.safeIcon('https://evil.example/icon.png'),"
+            "  local: api.safeIcon('/static/orgs/x.png'),"
+            "  script: api.safeIcon('data:text/html;base64,PHNjcmlwdD4='),"
+            "  junk: api.safeIcon(12345),"
+            "};"
+            "process.stdout.write(JSON.stringify(cases));"
+        )
+        result = _subprocess.run(["node", "-e", script],
+                                 capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        out = _json.loads(result.stdout)
+        assert out["good"] == "data:image/png;base64,iVBORw0KGgo="
+        for bad in ("remote", "local", "script", "junk"):
+            assert out[bad] is None, bad
+
+    def test_autonet_boots_only_on_share_links(self):
+        # The bridge loads autonet.js for its channel primitives; the /l/
+        # flow must not auto-boot there (it would render its error state
+        # into a page with no bootloader UI).
+        assert r'/^\/l\/[0-9a-f]{32}$/.test(location.pathname)' in AUTONET_JS
