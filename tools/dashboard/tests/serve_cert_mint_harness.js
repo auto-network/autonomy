@@ -23,6 +23,7 @@ const ROOT_PUB = process.env.AUTONOMY_ROOT_PUB;
 const MODE = process.env.AUTONOMY_MODE || "explicit";
 
 let captured = null;
+let serveStatusReads = 0;
 globalThis.fetch = async (url, opts) => {
   opts = opts || {};
   if (url.indexOf("/api/network/org-key") !== -1) {
@@ -49,8 +50,12 @@ globalThis.fetch = async (url, opts) => {
   }
   if (url.indexOf("/api/network/serve-cert") !== -1) {
     if ((opts.method || "GET").toUpperCase() === "GET") {
+      serveStatusReads += 1;
       return { ok: true, status: 200,
-        json: async () => ({ required: true, status: "missing" }) };
+        json: async () => ({
+          required: MODE !== "repair-ready",
+          status: MODE === "repair-ready" ? "ready" : "missing",
+        }) };
     }
     captured = JSON.parse(opts.body);
     return { ok: true, json: async () => ({ ok: true }) };
@@ -80,8 +85,17 @@ globalThis.window.fetch = globalThis.fetch;
       transport: { fetch: globalThis.fetch },
     });
     await session.signOn(PW, { org: null });
+  } else if (MODE === "repair" || MODE === "repair-ready") {
+    await session.repairServeCredential(PW, { org: null });
   } else {
     await session.provisionServeCert(PW, { org: null, orgUuid: ORG_UUID });
+  }
+  if (MODE === "repair-ready") {
+    process.stdout.write(JSON.stringify({
+      captured: captured,
+      serve_status_reads: serveStatusReads,
+    }), () => process.exit(0));
+    return;
   }
   if (!captured) {
     console.error("provisionServeCert did not POST a serve-cert");

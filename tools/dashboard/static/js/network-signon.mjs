@@ -49,8 +49,9 @@ if (!CryptoKeyConstructor) {
  * failure. The L2.B sweep cross-checks a vector against the Python side.
  *
  * Invariants enforced client-side (the registry re-enforces its own):
- *   I1 — root plaintext exists only inside signOn()/revoke step-up; zeroed
- *        and dropped before either returns. Nothing root-shaped is stored.
+ *   I1 — root plaintext exists only inside signOn(), serving provisioning,
+ *        or revoke step-up; it is zeroed and dropped before those functions
+ *        return. Nothing root-shaped is stored.
  *   §6.3 — the session private key is created with extractable:false and
  *        _installSession refuses any key claiming otherwise.
  *   I7 — the cert validity window is enforced on load: an expired or
@@ -384,6 +385,17 @@ var signRegistryRequestCore;
     }
   }
 
+  // Cheap, read-only repair decision shared by ordinary organization sign-on
+  // and the dashboard password-unlock hook.  It never opens a root key.
+  async function _serveCredentialRepairState(orgSlug, binding) {
+    if (!(binding && binding.org_uuid && binding.root_pub &&
+          binding.registry_url)) {
+      return { required: false, status: 'unregistered' };
+    }
+    var orgQ = orgSlug ? ('?org=' + encodeURIComponent(orgSlug)) : '';
+    return await _fetchJson('/api/network/serve-cert' + orgQ, orgSlug);
+  }
+
   // Passphrase → decrypt root ONCE → mint session key + cert → drop root.
   async function signOn(passphrase, opts) {
     opts = opts || {};
@@ -414,8 +426,7 @@ var signRegistryRequestCore;
     var serveCredentialRequired = false;
     if (bound) {
       try {
-        var serveState = await _fetchJson(
-          '/api/network/serve-cert' + orgQ, opts.org);
+        var serveState = await _serveCredentialRepairState(opts.org, binding);
         serveCredentialRequired = !!serveState.required;
       } catch (e) {
         // Unlocking local authority must never depend on registry-serving
@@ -524,10 +535,11 @@ var signRegistryRequestCore;
     };
   }
 
-  // Explicit serving-credential provisioning seam used by focused tests and
-  // recovery tooling. Normal production repair is integrated into signOn():
-  // every organization-root unlock first performs the cheap status check and
-  // signs a replacement in that same root-key window when required.
+  // Explicit serving-credential provisioning seam used by focused tests,
+  // recovery tooling, and repairServeCredential(). Normal production repair
+  // is reached from both organization sign-on and password-backed dashboard
+  // unlock. Each first performs the cheap status check and signs a replacement
+  // only when required.
   //
   // The delegate is ROOT-signed: a 30-day serving TTL cannot nest inside the
   // 24h session cert, so a session-key sub-delegate will not do. It signs the
@@ -585,6 +597,31 @@ var signRegistryRequestCore;
     } finally {
       if (opened && opened.seed) { opened.seed.fill(0); opened.seed = null; }
     }
+  }
+
+  // Opportunistic maintenance after an ordinary password-backed dashboard
+  // unlock.  The common path performs only two local reads (binding + status)
+  // and returns.  Root decryption and signing happen only when the stored
+  // serving credential is missing, expired, or has the obsolete schema.
+  async function repairServeCredential(passphrase, opts) {
+    opts = opts || {};
+    var orgSlug = opts.org || null;
+    var orgQ = orgSlug ? ('?org=' + encodeURIComponent(orgSlug)) : '';
+    var binding = await _fetchJsonOrNull(
+      '/api/network/binding' + orgQ, orgSlug);
+    var state = await _serveCredentialRepairState(orgSlug, binding);
+    if (!state.required) {
+      return {
+        checked: true,
+        repaired: false,
+        status: state.status || 'ready',
+      };
+    }
+    await provisionServeCert(passphrase, {
+      org: orgSlug,
+      orgUuid: binding.org_uuid,
+    });
+    return { checked: true, repaired: true, status: state.status || 'required' };
   }
 
   // Sign-out destroys the key and cert locally (spec §6.3): the store is
@@ -757,6 +794,7 @@ var signRegistryRequestCore;
     signOn: signOn,
     signOut: signOut,
     provisionServeCert: provisionServeCert,
+    repairServeCredential: repairServeCredential,
     revokeCurrentKey: revokeCurrentKey,
     listKeys: listKeys,
     // Internals exposed for the L2.B sweep + cross-language vectors; the
@@ -766,6 +804,7 @@ var signRegistryRequestCore;
       decryptArmor: decryptArmor,
       openOrgRoot: _openOrgRoot,
       provisionServeCert: provisionServeCert,
+      repairServeCredential: repairServeCredential,
       installSession: _installSession,
       loadFromStore: _loadFromStore,
       hexToBytes: hexToBytes,
