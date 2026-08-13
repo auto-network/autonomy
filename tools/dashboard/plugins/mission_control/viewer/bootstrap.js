@@ -117,12 +117,84 @@
     }, function () { /* a refused touch costs nothing and shows nothing */ });
   }
 
+  // TWO SURFACES, TWO TRANSPORTS -- the same split goto() makes, for the same
+  // reason. In a frame the host hands us a MessagePort. Served at a real URL
+  // NOBODY EVER DOES, so `havePort` never resolves and every ask, answer and
+  // reopen became a promise waiting on a channel that does not exist. The
+  // document still rendered, because its state is inlined -- so the dashboard
+  // looked completely healthy and the compose button did nothing at all,
+  // forever, with no error anywhere. goto() was taught this split and request()
+  // was not, which is the whole of that bug.
   function request(op, body) {
+    if (window.parent === window) return httpRequest(op, body);
     return havePort.then(function (p) {
       return new Promise(function (resolve, reject) {
         var id = "r" + (++nextId);
         pending[id] = {resolve: resolve, reject: reject};
         p.postMessage({v: 1, type: "request", id: id, op: op, body: body});
+      });
+    });
+  }
+
+  // The same operations against the real routes. Identity is still NEVER in
+  // the payload: at a real URL the dashboard session cookie rides the request
+  // and the server resolves who that is, exactly as the grant carries it over
+  // the relay. There is no field here to claim one.
+  function httpRequest(op, body) {
+    var mid = state.mission_id || "";
+    var kind = body && body.kind;
+
+    // Which collection an entry belongs to is a property OF THE ENTRY, not of
+    // whatever screen happens to be open -- answering from the overview must
+    // still hit the pillar's route.
+    function ownerPath(entryId) {
+      var q = (state.questions || []).filter(function (x) {
+        return x.entry_id === entryId;
+      })[0];
+      return q && q.pillar_id
+        ? "/api/pillars/" + q.pillar_id
+        : "/api/missions/" + mid;
+    }
+
+    var url, payload;
+    if (op === "write" && kind === "question") {
+      url = (body.pillar_id ? "/api/pillars/" + body.pillar_id
+                            : "/api/missions/" + mid) + "/questions";
+      payload = {question: body.body, anchor: body.anchor || null};
+    } else if (op === "write" && kind === "answer") {
+      url = ownerPath(body.entry_id) + "/questions/" + body.entry_id + "/answer";
+      payload = {answer: body.body};
+    } else if (op === "write" && kind === "reopen") {
+      url = ownerPath(body.entry_id) + "/questions/" + body.entry_id + "/reopen";
+      payload = {followup: body.body};
+    } else if (op === "read" && kind === "here") {
+      // Presence has no HTTP route yet; it is decoration, and announceHere
+      // already treats an empty answer as "show nothing". Resolving quietly
+      // beats inventing a route from the client.
+      return Promise.resolve({});
+    } else {
+      // Screens are reached by navigating, not by fetching, when there is a
+      // URL to navigate to -- goto() branches before ever getting here.
+      return Promise.reject(new Error("no top-level transport for " + op + "/" + kind));
+    }
+
+    return fetch(url, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      // The dashboard session cookie is the whole identity story here.
+      credentials: "same-origin",
+      body: JSON.stringify(payload),
+    }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (data) {
+        // A REFUSAL IS NOT A SUCCESS. The relay broker marks a completed
+        // exchange ok:true even when the application refused, which once made
+        // a rejected ask close the panel and clear the box as though it had
+        // worked. HTTP hands us a real status; throwing on it is what keeps
+        // the two transports behaving identically at the surface.
+        if (!res.ok) {
+          throw new Error(data && data.error ? data.error : "HTTP " + res.status);
+        }
+        return data;
       });
     });
   }

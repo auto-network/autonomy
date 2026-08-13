@@ -775,8 +775,71 @@ def _resolve_visitor_identity(request: Request) -> dict | None:
     has been set."""
     token = request.cookies.get(VISITOR_COOKIE) or request.query_params.get("as")
     if not token:
-        return None
+        return _operator_identity(request)
     return db.resolve_visitor(token)
+
+
+#: The node's own operator, as a participant. One node has one operator, so
+#: this needs no allocation and no registry row — it is a constant, and the
+#: authentication behind it is what makes it true.
+OPERATOR_PARTICIPANT_ID = "operator"
+
+
+def _operator_identity(request: Request) -> dict | None:
+    """The signed-in operator, or None.
+
+    A visitor token is a share-link artifact; on the dashboard there is no
+    such token and there never was, so every ask from the operator's own SPA
+    was refused with "visitor identity required" — the surface offered a
+    composer that the server would never accept from.
+
+    Identity comes from the Gate-1 session cookie, verified against the
+    durable session store (revocation and expiry are checked there, and store
+    failure is fail-closed). It is NEVER read from a request field: a caller
+    cannot name who they are, only present a credential that says it.
+
+    The participant id is a constant rather than a key. It must not be the
+    personal root public key: participant_id is deliberately display-safe and
+    appears in GET .../questions to every reader of the mission, and that key
+    is the cross-org master — publishing it beside a question would correlate
+    the operator across every org they belong to, which is exactly what the
+    per-org persona derivation exists to prevent. Attribution onto persona
+    keys is auto-dzsqd, and it needs missions to carry an org first (row 117).
+    """
+    from tools.dashboard import unlock_routes
+
+    try:
+        session = unlock_routes.session_from_request(request)
+    except Exception:  # noqa: BLE001 — an unreadable session is not an identity
+        return None
+    if not session:
+        return None
+    return {
+        "participant_id": OPERATOR_PARTICIPANT_ID,
+        "participant_label": _operator_label(),
+    }
+
+
+def _operator_label() -> str:
+    """The operator's display name, or a plain fallback.
+
+    A name is for reading, never for authenticating — the session cookie
+    already settled who this is before we got here.
+    """
+    try:
+        from tools.graph import settings_ops
+        from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
+
+        for member in settings_ops.read_owned_set(
+            PERSONAL_IDENTITY_SET_ID, org=None
+        ).members:
+            if isinstance(member.payload, dict):
+                name = member.payload.get("display_name")
+                if isinstance(name, str) and name.strip():
+                    return name.strip()
+    except Exception:  # noqa: BLE001 — a missing name must not block asking
+        pass
+    return "Operator"
 
 
 # ── Mission conversation (P2 Q&A) ─────────────────────────────────

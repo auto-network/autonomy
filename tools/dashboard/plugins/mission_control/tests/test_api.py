@@ -1986,3 +1986,77 @@ def test_a_guest_heartbeat_uses_a_kind_presence_actually_accepts():
         _run(mc_api.handle_relay_read("", mission_id, {"kind": "here"}))
 
     assert seen["participant_kind"] == "guest"
+
+
+# ── the operator asking from their own SPA (auto-q3jb6) ──────────
+
+
+def _mission() -> str:
+    return db.create_mission("Mission", "auto-test")["mission_id"]
+
+
+def test_the_operator_can_ask_from_the_dashboard_with_no_visitor_token():
+    """A visitor token is a share-link artifact. The dashboard never has one.
+
+    Every ask from the operator's own SPA was refused 401 "visitor identity
+    required" while the surface still rendered a composer — an interface that
+    invites an action the server will always reject.
+    """
+    mission_id = _mission()
+    with patch.object(
+        mc_api, "_operator_identity",
+        return_value={"participant_id": "operator", "participant_label": "Jeremy"},
+    ):
+        r = _client().post(
+            f"/api/missions/{mission_id}/questions", json={"question": "Does this work?"}
+        )
+    assert r.status_code == 201, r.text
+    entry = r.json()["question"]
+    assert entry["asked_by_label"] == "Jeremy"
+
+
+def test_an_unauthenticated_caller_is_still_refused():
+    """The control. If the fallback resolved an identity for everyone, the
+    test above would pass while the ask route became open to the world.
+    """
+    mission_id = _mission()
+    with patch.object(mc_api, "_operator_identity", return_value=None):
+        r = _client().post(
+            f"/api/missions/{mission_id}/questions", json={"question": "Anyone?"}
+        )
+    assert r.status_code == 401
+
+
+def test_operator_identity_comes_from_the_session_not_a_request_field():
+    """Identity is presented as a credential, never named in the payload.
+
+    A caller claiming to be the operator by body, header or query gets
+    nothing; only a session the store still considers active resolves.
+    """
+    from starlette.requests import Request
+
+    def _req(**cookies):
+        scope = {
+            "type": "http", "method": "POST", "path": "/", "query_string": b"as=operator",
+            "headers": [(b"x-participant-id", b"operator")]
+            + ([(b"cookie", b"autonomy_dashboard_session=forged")] if cookies else []),
+        }
+        return Request(scope)
+
+    with patch("tools.dashboard.unlock_routes.session_from_request", return_value=None):
+        assert mc_api._operator_identity(_req(session=True)) is None
+
+    with patch("tools.dashboard.unlock_routes.session_from_request",
+               return_value={"sid": "s1", "method": "passkey"}):
+        who = mc_api._operator_identity(_req(session=True))
+    assert who["participant_id"] == "operator"
+
+
+def test_the_operator_id_is_never_the_personal_root_key():
+    """participant_id is display-safe and appears in GET .../questions to
+    every reader. The personal root public key is the cross-org master;
+    publishing it beside a question would correlate the operator across every
+    org they belong to — the exact linkage per-org personas exist to prevent.
+    """
+    assert mc_api.OPERATOR_PARTICIPANT_ID == "operator"
+    assert len(mc_api.OPERATOR_PARTICIPANT_ID) != 64
