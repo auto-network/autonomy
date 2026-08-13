@@ -274,7 +274,20 @@
   // Control already publishes conversation events onto it. This subscribes,
   // keeps the frames for THIS mission, and hands them to the same handler the
   // relay path uses, wrapped in the same shape the relay builds.
+  //
+  // THE SOCKET IS GIVEN BACK WHEN THE PAGE STOPS BEING LOOKED AT. Navigating
+  // away does not destroy this page -- it goes into the back/forward cache
+  // alive, holding its connections. Served over HTTP/1.1 a browser allows
+  // about six sockets to one origin, and an open event stream owns one for as
+  // long as it lives. Six visited screens later every socket belongs to a page
+  // nobody is looking at, and the next navigation waits for one to come free:
+  // seconds of white screen, while everything already inside the document
+  // stays instant because it needs no socket at all. Force-quitting the app
+  // cured it because that is what finally dropped them.
+  var live = null;
+
   function subscribeLive() {
+    if (live) return;                          // one stream, never a stack
     if (window.parent !== window) return;      // framed: the host feeds us
     if (typeof EventSource !== "function") return;
     if (!state.mission_id) return;
@@ -284,6 +297,7 @@
     } catch (_e) {
       return;    // no stream is the status quo, not a failure worth showing
     }
+    live = source;
     // Work landing, not conversation: a pillar wrote its status line or
     // published a new screen. Without this a live page shows people talking
     // and never shows anything being done, which is most of what there is to
@@ -305,6 +319,25 @@
     // EventSource reconnects on its own. A stream that never opens leaves the
     // page exactly as it is today, which is why nothing here reports an error.
   }
+
+  function releaseLive() {
+    if (!live) return;
+    live.close();
+    live = null;
+  }
+
+  // pagehide, not unload: unload never fires for a page going into the
+  // back/forward cache, which is the only case that was leaking. pageshow
+  // fires on a restore as well as a fresh load, so the stream comes back for
+  // a reader who simply pressed Back -- and comes back ONCE, because
+  // subscribeLive refuses to open a second.
+  addEventListener("pagehide", releaseLive);
+  addEventListener("pageshow", subscribeLive);
+  // Backgrounding the app is the same situation: a stream nobody can see,
+  // holding a connection the next navigation needs.
+  addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "hidden") releaseLive(); else subscribeLive();
+  });
 
   // ---- chrome, in a CLOSED shadow root ------------------------------------
   var host = document.createElement("div");
