@@ -181,13 +181,22 @@ def test_ws_voice_rejects_when_flag_disabled(voice_route_env):
 def test_ws_voice_start_then_mute_then_unmute(voice_route_env):
     """Three valid transitions in sequence each emit no acknowledgement
     frame — the state machine reports successful transitions silently
-    (the client tracks state by remembering what it sent)."""
+    (the client tracks state by remembering what it sent).
+
+    Falsifiability probe: a second 'start' MUST answer already_started,
+    and websocket ordering means it arrives after anything the silent
+    sequence emitted — so it being the FIRST received frame proves the
+    sequence was silent AND the session survived mute/unmute started."""
     client = voice_route_env["client"]
     with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
         # No server-initiated frame on connect (per spec).
         ws.send_text(json.dumps({"type": "start"}))
         ws.send_text(json.dumps({"type": "mute"}))
         ws.send_text(json.dumps({"type": "unmute"}))
+        ws.send_text(json.dumps({"type": "start"}))
+        first = ws.receive_json()
+        assert first["type"] == "error"
+        assert first["code"] == "already_started"
         ws.send_text(json.dumps({"type": "end"}))
 
 
@@ -272,19 +281,30 @@ def test_ws_voice_audio_frames_silently_dropped_in_s32(voice_route_env):
 
 
 def test_ws_voice_ended_state_rejects_subsequent_commands(voice_route_env):
+    """'end' tears the connection down — the route's main loop breaks on
+    state==ENDED, so the observable rejection of subsequent commands is
+    the socket closing, which the next receive must surface."""
+    from starlette.websockets import WebSocketDisconnect
+
     client = voice_route_env["client"]
     with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
         ws.send_text(json.dumps({"type": "end"}))
-        # The route's main loop breaks on state==ENDED after the end
-        # transition, so this connection is already torn down. Trying
-        # to send more would race the close; we just confirm the end
-        # was processed without an error frame.
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_json()
 
 
 def test_ws_voice_discard_from_idle_is_silent_noop(voice_route_env):
+    """Probe: commit-from-idle must answer not_started as the FIRST
+    frame — proving the preceding discard emitted nothing and left the
+    session idle (a discard that wrongly started or errored would put a
+    different frame ahead of it)."""
     client = voice_route_env["client"]
     with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
         ws.send_text(json.dumps({"type": "discard"}))
+        ws.send_text(json.dumps({"type": "commit"}))
+        first = ws.receive_json()
+        assert first["type"] == "error"
+        assert first["code"] == "not_started"
         ws.send_text(json.dumps({"type": "end"}))
 
 
@@ -337,9 +357,14 @@ def test_ws_voice_reconnect_with_no_prior_buffer_sends_no_buffer_state(voice_rou
     buffer — sending an empty buffer_state would be noise."""
     client = voice_route_env["client"]
     with client.websocket_connect("/ws/voice?bind=auto-test-designer") as ws:
-        # Start the session — no preceding buffer_state means the
-        # first activity is whatever the operator sends.
+        # Probe: double-start answers already_started; it being the
+        # FIRST received frame proves no buffer_state preceded it on
+        # this fresh, bufferless connect.
         ws.send_text(json.dumps({"type": "start"}))
+        ws.send_text(json.dumps({"type": "start"}))
+        first = ws.receive_json()
+        assert first["type"] == "error"
+        assert first["code"] == "already_started"
         ws.send_text(json.dumps({"type": "end"}))
 
 
