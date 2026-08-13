@@ -616,7 +616,13 @@
       if (qFilter === "done") return !!q.answer;
       return true;
     });
-    var sorted = shown.slice().sort(function (a, b) { return (!!a.answer) - (!!b.answer); });
+    // NEWEST FIRST. The list used to lead with everything unanswered and,
+    // inside that, with the oldest -- so the question just asked landed at the
+    // bottom of the screen, furthest from the reader who had only now sent it.
+    // Which state to look at is the filter's job; this is only about when.
+    var sorted = shown.slice().sort(function (a, b) {
+      return (parseFloat(b.created_at) || 0) - (parseFloat(a.created_at) || 0);
+    });
     if (!sorted.length) {
       // Do not invite an action this reader cannot take.
       var canAsk = state.may_write !== false && !ui.noChannel;
@@ -706,26 +712,34 @@
     return p ? p.name : "Mission";
   }
 
-  // Counts on the chips, because a filter you cannot see the size of makes
-  // you click it to find out whether it was worth clicking.
-  function filterChips() {
+  // ONE control, not three. The header is a fixed-height row that does not
+  // wrap, so three text filters spent the whole width and pushed the close
+  // control off the side of a phone -- still in the DOM, still working, and
+  // impossible to reach. This states the filter it is currently on and its
+  // size, and cycles; the count is kept because a filter whose size you
+  // cannot see has to be tried to find out whether it was worth trying.
+  var FILTERS = [
+    {key: "all", label: "All"},
+    {key: "open", label: "Unanswered"},
+    {key: "done", label: "Answered"},
+  ];
+
+  function filterToggle() {
     var all = questionsHere();
     var open = all.filter(function (q) { return !q.answer; }).length;
-    var done = all.length - open;
-    return [
-      chip("all", "All", all.length),
-      chip("open", "Unanswered", open),
-      chip("done", "Answered", done),
-    ];
-  }
-
-  function chip(key, label, n) {
-    return el("button", {
-      class: qFilter === key ? "mc-chip mc-chip-on" : "mc-chip",
-      title: label,
-      text: n ? label + " " + n : label,
-      onclick: function () { qFilter = key; render(); },
-    });
+    var counts = {all: all.length, open: open, done: all.length - open};
+    var i = FILTERS.findIndex(function (f) { return f.key === qFilter; });
+    if (i === -1) i = 0;
+    var cur = FILTERS[i];
+    var next = FILTERS[(i + 1) % FILTERS.length];
+    return [el("button", {
+      class: qFilter === "all" ? "mc-chip" : "mc-chip mc-chip-on",
+      // Says what one more tap does, because a control that cycles gives no
+      // hint of its other states from looking at it.
+      title: "Showing " + cur.label.toLowerCase() + " — tap for " + next.label.toLowerCase(),
+      text: cur.label + " " + counts[cur.key],
+      onclick: function () { qFilter = next.key; render(); },
+    })];
   }
 
   function panelNode() {
@@ -734,7 +748,7 @@
     var kids = [
       el("div", {class: "mc-phead"}, [
         el("span", {class: "mc-ptitle", text: ui.panel === "pillars" ? "Pillars" : "Questions"}),
-      ].concat(ui.panel === "questions" ? filterChips() : []).concat([
+      ].concat(ui.panel === "questions" ? filterToggle() : []).concat([
         el("span", {class: "mc-grow"}),
         el("button", {class: "mc-x", text: "\u00d7", onclick: function () { show(null); }}),
       ])),

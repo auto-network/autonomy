@@ -73,10 +73,18 @@
 .mc-phead { display: flex; align-items: center; gap: .5rem; height: 3rem; padding: 0 .75rem;
             border-bottom: 1px solid #1e293b; flex: none; }
 /* The panel's own title. It names what you are choosing between, so it reads
-   as a heading rather than as one more piece of small grey furniture. */
-.mc-ptitle { font-size: 1.05rem; font-weight: 600; color: #e2e8f0; }
+   as a heading rather than as one more piece of small grey furniture.
+   It is also the ONLY thing in this row allowed to lose width: the header
+   does not wrap and has a fixed height, so anything that overflows is simply
+   gone. Three text filters pushed the close control off a phone screen while
+   leaving it in the DOM -- present, correct, and unreachable. */
+.mc-ptitle { font-size: 1.05rem; font-weight: 600; color: #e2e8f0;
+             min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mc-pbody { flex: 1; overflow-y: auto; padding: .75rem; }
-.mc-x { color: #64748b; font-size: 1.3rem; line-height: 1; }
+/* Never shrinks, never wraps out. The way out of a surface cannot be the
+   thing that gets dropped when the surface gets busy. */
+.mc-x { color: #64748b; font-size: 1.3rem; line-height: 1; flex: 0 0 auto;
+        min-width: 2rem; text-align: right; }
 .mc-back { display: flex; align-items: center; gap: .4rem; font-size: .9rem; }
 
 .mc-row { display: block; width: 100%; text-align: left; border: 1px solid #334155; background: #161a22;

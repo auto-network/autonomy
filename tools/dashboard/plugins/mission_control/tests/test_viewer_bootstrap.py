@@ -270,3 +270,50 @@ def test_no_screen_renders_the_word_undefined(tmp_path):
     # into display text without a fallback.
     src = (Path(__file__).resolve().parents[1] / "viewer" / "bootstrap.js").read_text()
     assert "|| {}).name + " not in src, "a missing name can render as 'undefined'"
+
+
+# The chrome's shadow root is closed, so none of the three below can be probed
+# through the DOM from a test page -- that opacity is itself under test above.
+# They assert the source and the stylesheet, which is where each property is
+# actually decided.
+
+def _viewer(name: str) -> str:
+    return (Path(__file__).resolve().parents[1] / "viewer" / name).read_text()
+
+
+def test_the_way_out_of_a_panel_cannot_be_squeezed_off_screen():
+    """The panel header is a fixed-height flex row that does not wrap, so
+    anything overflowing it is gone from the screen while staying in the DOM.
+    Three text filters landed in that row and spent the width; the close
+    control was pushed off the side of a phone -- present, working, and
+    unreachable, which reads exactly like it was removed. The title is the
+    only thing in the row allowed to give up width."""
+    css = _viewer("chrome.css")
+    assert "flex: 0 0 auto" in css.split(".mc-x")[1].split("}")[0], (
+        "the close control can shrink again"
+    )
+    title = css.split(".mc-ptitle")[1].split("}")[0]
+    assert "min-width: 0" in title and "text-overflow: ellipsis" in title, (
+        "the title no longer absorbs the overflow the close control must not"
+    )
+
+
+def test_the_questions_filter_is_one_control_not_three():
+    """Same row, same fixed width. Filtering is worth header space; three
+    labels spelling out every state it could be in is not."""
+    src = _viewer("bootstrap.js")
+    assert "function filterToggle()" in src
+    assert "filterChips" not in src, "the three-button filter is back in the header"
+    # It still says how many, because a filter whose size you cannot see has
+    # to be tried to find out whether it was worth trying.
+    assert "text: cur.label + \" \" + counts[cur.key]" in src
+
+
+def test_questions_are_listed_newest_first():
+    """The list led with unanswered and, inside that, oldest-first -- so a
+    question just asked appeared at the BOTTOM, furthest from the person who
+    had only now sent it. Which state to show is the filter's job."""
+    src = _viewer("bootstrap.js")
+    assert "(parseFloat(b.created_at) || 0) - (parseFloat(a.created_at) || 0)" in src, (
+        "the question list is no longer sorted newest-first"
+    )
