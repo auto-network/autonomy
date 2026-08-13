@@ -10,12 +10,12 @@ FROM ubuntu:24.04
 # Avoid interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System packages: Python 3.12 (ships with 24.04), git, sqlite3, node, tmux,
-# plus Chrome shared-library dependencies (24 libs from ldd)
+# System packages: Python 3.12 (ships with 24.04), git, sqlite3, tmux,
+# plus Chrome shared-library dependencies (24 libs from ldd).
+# Node deliberately NOT from the Ubuntu archive — see the NodeSource block.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-pip git sqlite3 ca-certificates curl rsync \
         openssh-client gnupg \
-        nodejs npm \
         gh \
         jq \
         tmux \
@@ -25,6 +25,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libnss3 libnspr4 libasound2t64 \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --break-system-packages --no-cache-dir pytest pytest-xdist pyyaml python-gnupg cryptography "pydantic>=2,<3"
+
+# ── Node 22 from NodeSource (auto-p7pt9; npm ships inside the package) ──
+# Ubuntu 24.04's archive Node is 18, which refuses require() of the
+# dashboard's ESM static/js modules — every Presence/Schema JS test times
+# out (~40% of the dashboard suite's wall time) instead of reporting.
+# Node >= 22 is the ruled floor for autonomy-developer sessions, and 22
+# supports require(esm) natively. The version assertion makes a silent
+# regression to the archive package unbuildable.
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+         | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+         > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version | grep -q "^v22\." \
+    && npm --version > /dev/null
 
 # ── bd CLI (Go binary, statically-ish linked — just needs libc) ──
 COPY bin/bd /usr/local/bin/bd
