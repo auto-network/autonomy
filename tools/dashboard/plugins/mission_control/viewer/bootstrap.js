@@ -834,6 +834,7 @@
     var e = entryNode(); if (e) chrome.appendChild(e);
     var a = anchorNode(); if (a) chrome.appendChild(a);
     if (ui.view === "feed") chrome.appendChild(feedView());
+    repaintAnchors();
     if (typing) {
       var ta = root.querySelector("textarea");
       if (ta) {
@@ -850,6 +851,47 @@
   // Mounted INSIDE the anchored element, never as a sibling: a next sibling
   // breaks the author's adjacent-sibling (+) CSS rules. Each gets its own
   // closed root so author CSS cannot restyle it either.
+  // Every mounted control, kept so their counts can be refreshed. The shadow
+  // root is CLOSED, so it cannot be reached again from the holder element --
+  // if the reference is not kept here it is gone.
+  var anchorControls = [];
+
+  var BUBBLE_SVG =
+    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+    '<path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.5 8.5 0 0 1-3.8-.9L3 21l1.9-5.1A8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z"/></svg>';
+
+  // Two counts, not one: unanswered and answered say different things, and a
+  // single total cannot tell "three still waiting on me" from "three already
+  // settled". Same convention as the bar, so a reader learns it once. Neither
+  // is drawn at zero -- an anchor nobody has asked about is a bare bubble, and
+  // printing 0 next to it would be noise on every marked element on the page.
+  function paintAnchor(control) {
+    var here = atAnchor(control.ref);
+    var open = 0, done = 0;
+    here.forEach(function (q) { q.answer ? done++ : open++; });
+    control.btn.innerHTML = BUBBLE_SVG;
+    if (open) {
+      control.btn.appendChild(el("span", {
+        class: "mc-count mc-count-open", title: open + " unanswered",
+        text: String(open),
+      }));
+    }
+    if (done) {
+      control.btn.appendChild(el("span", {
+        class: "mc-count mc-count-done", title: done + " answered",
+        text: String(done),
+      }));
+    }
+  }
+
+  // Recount every control. mountAnchors only ever ADDS -- it skips an element
+  // that already carries one -- so a control mounted before a question was
+  // asked kept showing the count it was born with, while the bar recounted on
+  // every render. The anchor was frozen, not miscounted.
+  function repaintAnchors() {
+    anchorControls.forEach(paintAnchor);
+  }
+
   function mountAnchors() {
     var n = 0;
     document.querySelectorAll("[data-mc-anchor]").forEach(function (target) {
@@ -859,24 +901,13 @@
       holder.setAttribute("data-mc-control", "");
       var r = holder.attachShadow({mode: "closed"});
       r.innerHTML = "<style>" + CSS + "</style>";
-      var here = atAnchor(ref);
-      var count = here.length;
-      var open = here.some(function (q) { return !q.answer; });
       var btn = el("button", {
         class: "mc-anchor-btn", title: "Discuss",
         onclick: function () { show({anchor: ref}); },
       });
-      btn.innerHTML =
-        '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
-        '<path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.5 8.5 0 0 1-3.8-.9L3 21l1.9-5.1A8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z"/></svg>';
-      if (count) {
-        // icon alone when nothing is there; icon + count when there is;
-        // coloured only while something is still open.
-        btn.appendChild(el("span", {
-          class: open ? "mc-count mc-count-open" : "mc-count",
-          text: String(count),
-        }));
-      }
+      var control = {ref: ref, btn: btn};
+      anchorControls.push(control);
+      paintAnchor(control);
       r.appendChild(btn);
       target.appendChild(holder);
       n++;
