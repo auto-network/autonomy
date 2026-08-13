@@ -34,7 +34,9 @@ video-convert --frames '<glob>' <out.{mp4,gif}> [--fps N]
 Exit code 3 with "not provisioned" means the host-install has not run on
 this host yet — the pinned ffmpeg is populated by the Capability
 Host-Install Runner (protocol graph://149705db-a39), never by sessions.
-Report it; do not install ffmpeg yourself.
+Report it; do not install ffmpeg yourself. On the host, an operator runs
+the runner on demand with `graph capability host-install autonomy/video`
+(idempotent: it fingerprints `install/ffmpeg.pin` and skips when current).
 
 ## If the host install fails with a hash mismatch
 
