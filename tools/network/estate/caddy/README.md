@@ -16,6 +16,11 @@ All three front the **same** registry uvicorn process on `127.0.0.1:8477`
 (`tools/network/registry`, `autonomy-registry.service`). Splitting them is a
 naming/contract boundary, not three processes.
 
+Every listener is bound explicitly to `5.161.219.195`. The same machine also
+has a second public IPv4 for coturn; wildcard Caddy listeners would take that
+address's TCP 80/443 and make TURN/TLS plus standalone certificate renewal
+impossible.
+
 **The base-url is not a routing concern.** The registry issues share links on
 `https://relay.auto.network` via the service unit's `--base-url`. Adding the
 apex vhost does not, and must not, touch that: a link minted after the apex

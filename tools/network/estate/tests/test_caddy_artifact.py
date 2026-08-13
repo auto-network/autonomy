@@ -16,11 +16,15 @@ def test_complete_caddyfile_has_exact_current_routes():
     blocks = re.findall(r"(?m)^([^#\s][^\s{]*) \{\n([^}]*)\}", text)
     assert [address for address, _ in blocks] == [
         "registry.auto.network",
-        ":80",
+        "5.161.219.195:80",
         "relay.auto.network",
         "auto.network",
     ]
-    assert all(body.strip() == "reverse_proxy 127.0.0.1:8477" for _, body in blocks)
+    for address, body in blocks:
+        directives = [line.strip() for line in body.splitlines() if line.strip()]
+        assert directives[-1] == "reverse_proxy 127.0.0.1:8477"
+        if address != "5.161.219.195:80":
+            assert directives[0] == "bind 5.161.219.195"
     assert "encode " not in text
     assert "base-url" not in text
 

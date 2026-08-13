@@ -1,0 +1,57 @@
+[Unit]
+Description=auto.network coturn STUN/TURN service
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+AssertPathIsReadWrite=/run
+AssertPathExists=/etc/autonomy-coturn/runtime.env
+AssertPathExists=/etc/autonomy-coturn/turn-rest-secrets
+AssertPathExists=/etc/letsencrypt/live/turn.auto.network/fullchain.pem
+AssertPathExists=/etc/letsencrypt/live/turn.auto.network/privkey.pem
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/autonomy-coturn/runtime.env
+RuntimeDirectory=autonomy-coturn
+RuntimeDirectoryMode=0750
+LoadCredential=turn-rest-secrets:/etc/autonomy-coturn/turn-rest-secrets
+LoadCredential=tls-cert.pem:/etc/letsencrypt/live/turn.auto.network/fullchain.pem
+LoadCredential=tls-key.pem:/etc/letsencrypt/live/turn.auto.network/privkey.pem
+ExecStartPre=/usr/bin/chown root:autonomy-coturn /run/autonomy-coturn
+ExecStartPre=/opt/autonomy-coturn/render_config.py \
+    --template /opt/autonomy-coturn/turnserver.conf.in \
+    --secrets %d/turn-rest-secrets \
+    --cert %d/tls-cert.pem \
+    --key %d/tls-key.pem \
+    --output /run/autonomy-coturn \
+    --runtime-gid ${TURN_RUNTIME_GID} \
+    --public-ip ${TURN_PUBLIC_IP} \
+    --min-port ${TURN_RELAY_MIN_PORT} \
+    --max-port ${TURN_RELAY_MAX_PORT} \
+    --user-quota ${TURN_USER_QUOTA} \
+    --total-quota ${TURN_TOTAL_QUOTA} \
+    --max-bps ${TURN_MAX_BPS} \
+    --bps-capacity ${TURN_BPS_CAPACITY}
+ExecStartPre=-/usr/bin/docker rm -f autonomy-coturn
+ExecStart=/opt/autonomy-coturn/run-coturn.sh
+ExecStop=/usr/bin/docker stop --time 30 autonomy-coturn
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=90
+TimeoutStopSec=45
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+ReadWritePaths=/run/autonomy-coturn
+
+[Install]
+WantedBy=multi-user.target

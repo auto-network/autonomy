@@ -3,20 +3,23 @@
 
 # registry.auto.network: automatic HTTPS (Let's Encrypt) -> loopback registry.
 registry.auto.network {
+	bind 5.161.219.195
 	reverse_proxy 127.0.0.1:8477
 }
 
 # Raw-IP HTTP access for pre-DNS / off-tailnet reachability testing.
-:80 {
+5.161.219.195:80 {
 	reverse_proxy 127.0.0.1:8477
 }
 
 # relay.auto.network: public share hostname -> same loopback registry.
 relay.auto.network {
+	bind 5.161.219.195
 	reverse_proxy 127.0.0.1:8477
 }
 
 # auto.network apex: TLS ingress to the same loopback registry (auto-9q7a5).
 auto.network {
+	bind 5.161.219.195
 	reverse_proxy 127.0.0.1:8477
 }
