@@ -64,8 +64,15 @@ def _rooted_environment(*, secure_dashboard: bool = False) -> dict[str, str]:
     else:
         environment["DASHBOARD_TLS"] = "off"
     for store in STORE_MANIFEST:
-        if store.env:
-            environment[store.env] = f"/app/data/{store.relative}"
+        if not store.env or store.key == "graph":
+            # GRAPH_DB is the single-database TEST pin: when set, every
+            # settings scope collapses into that one file while the ledger
+            # and open_org_db keep using data/orgs/<slug>.db — a split-brain
+            # node whose join channel and note serving both refuse
+            # (auto-sb0g8). The production compose never sets it; graph data
+            # routes per-org through AUTONOMY_ORGS_DIR, rooted above.
+            continue
+        environment[store.env] = f"/app/data/{store.relative}"
     return environment
 
 

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -497,6 +498,20 @@ def _discover_startup_orgs() -> list[str | None]:
     """
     configured = os.environ.get("GRAPH_ORG") or None
     if os.environ.get("GRAPH_DB"):
+        # A pinned GRAPH_DB is the single-database test world; per-org DBs
+        # alongside it mean a mis-shaped deployment whose org connectors can
+        # never reconcile (auto-sb0g8) — say so instead of failing silently.
+        try:
+            from tools.graph import org_ops as _org_ops
+            if _org_ops.list_orgs():
+                logging.getLogger(__name__).warning(
+                    "GRAPH_DB is pinned but per-org databases exist under the "
+                    "orgs dir; serving reconciles ONLY the pinned scope %r — "
+                    "org connectors will not start (unset GRAPH_DB on "
+                    "multi-org nodes)", configured,
+                )
+        except Exception:
+            pass
         return [configured]
 
     from tools.graph import org_ops

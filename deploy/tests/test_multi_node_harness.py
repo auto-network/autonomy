@@ -44,10 +44,14 @@ def test_compose_topology_is_manifest_rooted_and_has_no_host_data_mounts(tmp_pat
     assert sorted(model["services"]) == [
         "node-3", "node-4", "node-5", "node-a", "node-b", "node-c", "relay",
     ]
-    assert model["networks"]["harness"]["internal"] is True
+    # internal:false since ee85b1c5 — an internal bridge blocked host port
+    # publishing on the real-Docker run, timing out every node wait.
+    assert model["networks"]["harness"]["internal"] is False
     assert len(model["volumes"]) == 8  # registry + artifacts + A/B/C + 3 peers
 
-    expected_envs = {store.env for store in STORE_MANIFEST if store.env}
+    expected_envs = {
+        store.env for store in STORE_MANIFEST if store.env and store.key != "graph"
+    }
     for name, service in model["services"].items():
         rendered = json.dumps(service, sort_keys=True)
         assert "/var/run/docker.sock" not in rendered
@@ -57,8 +61,13 @@ def test_compose_topology_is_manifest_rooted_and_has_no_host_data_mounts(tmp_pat
         environment = service["environment"]
         assert environment[REFUSE_REAL_DATA_FALLBACK_ENV] == "1"
         assert expected_envs <= set(environment)
+        # The single-database test pin must never ship on a node: it
+        # collapses every settings scope into one file while the ledger and
+        # open_org_db stay per-org, so the join channel and note serving
+        # both refuse (auto-sb0g8).
+        assert "GRAPH_DB" not in environment
         for store in STORE_MANIFEST:
-            if store.env:
+            if store.env and store.key != "graph":
                 assert environment[store.env] == f"/app/data/{store.relative}"
         for mount in service["volumes"]:
             source, target = mount.split(":", 1)
@@ -318,11 +327,14 @@ def test_linux_ci_runs_the_public_real_docker_command():
 
 
 def _root_all_stores(monkeypatch, root: Path) -> None:
+    # Mirrors the node environment topology generates: every store rooted
+    # EXCEPT the graph pin — GRAPH_DB collapses org scoping (auto-sb0g8).
     for store in STORE_MANIFEST:
-        if store.env:
+        if store.env and store.key != "graph":
             monkeypatch.setenv(store.env, str(root / store.relative))
     monkeypatch.setenv(REFUSE_REAL_DATA_FALLBACK_ENV, "1")
     monkeypatch.delenv("GRAPH_ORG", raising=False)
+    monkeypatch.delenv("GRAPH_DB", raising=False)
 
 
 def test_fixture_founds_real_crypto_ledger_and_registry_rows(tmp_path, monkeypatch):

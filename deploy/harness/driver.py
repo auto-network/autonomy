@@ -424,14 +424,25 @@ class Harness:
         last = ""
         while time.monotonic() < deadline:
             try:
-                return ViewerJoinTransport(
+                reply = ViewerJoinTransport(
                     self._invitation,
                     relay_url=self.config.relay_ws,
                     timeout=5,
                 ).request({"v": 1, "op": "context"})
+                # A reachable channel that REFUSES (status "unavailable") is
+                # not an open join channel — accepting it here deferred the
+                # auto-sb0g8 serving failure into phase_join with a
+                # misleading symptom. Only a served context counts.
+                if isinstance(reply, dict) and reply.get("status") == "ok":
+                    return reply
+                status = (
+                    reply.get("status") if isinstance(reply, dict)
+                    else type(reply).__name__
+                )
+                last = f"context status={status!r}"
             except Exception as exc:
                 last = type(exc).__name__
-                time.sleep(0.5)
+            time.sleep(0.5)
         raise HarnessError(f"A never opened the production join channel: {last}")
 
     def phase_join(self) -> None:
