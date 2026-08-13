@@ -45,6 +45,9 @@ Primary browser data-channel reference:
 
 - WebRTC Data Channels: https://www.rfc-editor.org/rfc/rfc8831.html
 
+The exercised dashboard WebRTC stack selection is recorded in
+`tools/network/ICE_STACK_SELECTION.md`.
+
 ## Anycast relay pool
 
 `relay.auto.network` can be an anycast ingress while one org maintains several
