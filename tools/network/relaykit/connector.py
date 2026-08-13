@@ -5,9 +5,11 @@ authenticates with a ``tunnel:serve`` hello, then serves E2E channels
 muxed down it. Zero inbound ports on the dashboard.
 
 Reconnect: exponential backoff with jitter (``min_backoff`` doubling to
-``max_backoff``), reset after a successful hello. A rejected hello is
-retried at max backoff rather than treated as fatal — certs renew and
-bindings heal without operator involvement.
+``max_backoff``), reset only after an authenticated tunnel has served for at
+least one ``max_backoff`` interval. A successful hello alone is not health:
+an immediately failing serve loop must keep backing off. A rejected hello is
+retried rather than treated as fatal — certs renew and bindings heal without
+operator involvement.
 
 Each viewer channel runs its own task: OPEN spawns it, DATA frames feed
 its queue, and the E2E handshake + record layer (``channel.py``) happen
@@ -374,7 +376,6 @@ class TunnelConnector:
                 async with websockets.connect(self._url, max_size=2**22,
                                               compression=None) as ws:
                     await self._handshake(ws)
-                    backoff = self._min_backoff
                     served_at = time.monotonic()
                     self.connected.set()
                     try:
@@ -388,9 +389,19 @@ class TunnelConnector:
                 # 4409 replaced, a rejected hello — arrives here. Swallowing it
                 # made a saturating reconnect storm undiagnosable from the
                 # connector side while it was actively happening.
+                served_for = (None if served_at is None
+                              else time.monotonic() - served_at)
                 self._log_disconnect(exc, served_at)
             else:
+                served_for = (None if served_at is None
+                              else time.monotonic() - served_at)
                 self._log_disconnect(None, served_at)
+            # Authentication proves who answered, not that the connection was
+            # useful. Reset only after it stayed up long enough to distinguish
+            # ordinary churn from a post-hello flap. Reuse max_backoff as the
+            # stability interval: no second timing knob or policy surface.
+            if served_for is not None and served_for >= self._max_backoff:
+                backoff = self._min_backoff
             if self._stop.is_set():
                 return
             await asyncio.sleep(backoff * (1 + random.random() * 0.25))

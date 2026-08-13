@@ -19,6 +19,13 @@ is a member of that org's pool:
 - loss of one member reopens only the viewers pinned to it;
 - after a relay restart, every connector retries and rejoins the pool.
 
+Registration proves authentication, not retry health. `Register` preserves the
+connector's accumulated backoff. `MarkStable` is the separate abstraction of
+one authenticated `MaxBackoff` service interval; only a later disconnect of a
+stable tunnel uses `MinBackoff` for its next retry. A connector that repeatedly
+registers and disconnects before `MarkStable` therefore reaches and stays at
+`MaxBackoff` instead of resetting to the minimum on every hello.
+
 The current `TunnelHub` dict assignment and 4409 replacement behavior remains
 in the model only behind `PoolRegistration = FALSE`. That negative
 configuration is a calibration: TLC must rediscover the production lasso or
@@ -84,16 +91,22 @@ unprovable for any algorithm.
    terminating elsewhere; the necessary directory/handoff is an explicit
    implementation obligation.
 7. **Current last-writer replacement still livelocks.** TLC's calibration
-   trace alternates the two healthy connectors forever: each successful retry
-   displaces the other and resets its own backoff.
+   trace alternates the two connectors forever: each retry displaces the other.
+   Stability-gated backoff bounds the attempt rate but cannot repair singular
+   ownership; cooperative pool membership removes the cycle.
 8. **Arbitrary admission permits avoidable skew.** TLC finds a trace where a
    new viewer chooses a loaded tunnel while an idle member exists.
+9. **Hello alone never resets retry health.** The transition that authenticates
+   a tunnel leaves `backoff` unchanged. Only a service interval represented by
+   `MarkStable` earns a minimum-delay reconnect after later loss. This preserves
+   prompt ordinary recovery without letting a post-hello flap hammer the relay.
 
 ## Deliberate abstractions
 
 - Tunnel authentication is represented by eligibility to take `Register`; key
   verification and certificate details do not affect pool membership after a
-  hello succeeds.
+  hello succeeds. Useful lifetime is reduced to the separate `MarkStable`
+  transition; the model does not count wall-clock seconds.
 - Viewer payloads, encryption, stream retention, and byte backpressure are
   omitted. `PERFORMANCE.md` treats those implementation costs separately.
 - A viewer is assigned once per socket. Transparent live migration is not
