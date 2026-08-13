@@ -175,3 +175,40 @@
 .mc-post-head { display: flex; align-items: center; gap: .45rem; }
 .mc-post-who { font-size: 12px; color: #94a3b8; font-weight: 600; }
 .mc-post-text { margin: .35rem 0 0; font-size: .95rem; line-height: 1.5; color: #e2e8f0; }
+
+/* READING, not scanning. A question and its answer are two different things
+   by two different people; rendering both as small grey paragraphs in one
+   column makes a considered reply indistinguishable from the thing it
+   replies to. The answer gets its own block, its own rule, and room. */
+.mc-answer-block {
+  margin: .4rem 0 0; padding: .75rem .85rem;
+  background: #11161f; border: 1px solid #1e293b;
+  border-left: 3px solid #0ea5e9aa; border-radius: 0 .45rem .45rem 0;
+}
+.mc-answer-block .mc-answer { margin: 0 0 .75rem; }
+.mc-answer-block .mc-answer:last-child { margin-bottom: 0; }
+
+/* Prose at reading size, not chrome size. .9rem was chosen for labels and
+   metadata and then inherited by the one thing on the screen someone
+   actually reads end to end. */
+.mc-answer { font-size: .95rem; line-height: 1.65; color: #dbe4ee; }
+.mc-qbig { margin: 0 0 .55rem; }
+.mc-qbig:last-of-type { margin-bottom: .2rem; }
+
+/* Answering must ADD a signal. Previously the only visible change was the
+   amber "open" chip turning grey -- emphasis going away, which reads as
+   nothing having happened. */
+.mc-chip-done { background: #064e3b55; color: #34d399; border: 1px solid #065f4677; }
+
+/* The first line of the reply, on the row, so an answer's arrival is visible
+   without opening it. */
+.mc-answer-peek {
+  margin: .45rem 0 0; padding-left: .6rem;
+  border-left: 2px solid #0ea5e955;
+  font-size: .85rem; line-height: 1.45; color: #94a3b8;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* An update is a note in passing, not part of the record -- keep it visibly
+   lighter than either the question or the answer. */
+.mc-update { font-size: .88rem; color: #8b9bb0; }
