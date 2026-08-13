@@ -9,7 +9,9 @@ Reconnect: exponential backoff with jitter (``min_backoff`` doubling to
 least one ``max_backoff`` interval. A successful hello alone is not health:
 an immediately failing serve loop must keep backing off. A rejected hello is
 retried rather than treated as fatal — certs renew and bindings heal without
-operator involvement.
+operator involvement. With the defaults, health therefore means 5 seconds of
+continuous service and a capped retry can sleep for up to 6.25 seconds after
+jitter; :meth:`TunnelConnector.stop` takes effect after that current sleep.
 
 Each viewer channel runs its own task: OPEN spawns it, DATA frames feed
 its queue, and the E2E handshake + record layer (``channel.py``) happen
@@ -369,6 +371,7 @@ class TunnelConnector:
             # so the duration is the only thing that tells them apart — it is
             # both what gets logged and what a reset-on-healthy backoff needs.
             served_at = None
+            disconnect_exc = None
             try:
                 # compression=None: mux frames are E2E ciphertext (I5) —
                 # incompressible anyway, and literal bytes keep the
@@ -389,13 +392,13 @@ class TunnelConnector:
                 # 4409 replaced, a rejected hello — arrives here. Swallowing it
                 # made a saturating reconnect storm undiagnosable from the
                 # connector side while it was actively happening.
-                served_for = (None if served_at is None
-                              else time.monotonic() - served_at)
-                self._log_disconnect(exc, served_at)
-            else:
-                served_for = (None if served_at is None
-                              else time.monotonic() - served_at)
-                self._log_disconnect(None, served_at)
+                disconnect_exc = exc
+            # One calculation for both a clean serve-loop return and an
+            # exceptional disconnect. Measure before logging: a blocked log
+            # sink is not useful tunnel service and must not reset health.
+            served_for = (None if served_at is None
+                          else time.monotonic() - served_at)
+            self._log_disconnect(disconnect_exc, served_at)
             # Authentication proves who answered, not that the connection was
             # useful. Reset only after it stayed up long enough to distinguish
             # ordinary churn from a post-hello flap. Reuse max_backoff as the

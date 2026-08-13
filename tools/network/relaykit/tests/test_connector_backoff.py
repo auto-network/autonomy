@@ -95,6 +95,35 @@ def test_useful_service_resets_the_next_reconnect_to_minimum(monkeypatch):
     assert clock.sleeps == [0.2, 0.4, 0.8, 0.2]
 
 
+def test_clean_serve_return_uses_the_same_stability_gate(monkeypatch):
+    connector = _connector()
+    clock = _Clock()
+    _install_common_fakes(monkeypatch, connector, clock)
+    attempts = 0
+
+    async def serve(_ws):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionError("first attempt fails")
+        clock.now += connector._max_backoff
+        return None
+
+    async def sleep(delay):
+        clock.sleeps.append(delay)
+        clock.now += delay
+        if len(clock.sleeps) == 2:
+            connector.stop()
+
+    connector._serve = serve
+    monkeypatch.setattr(connector_module.asyncio, "sleep", sleep)
+
+    asyncio.run(connector.run())
+
+    assert attempts == 2
+    assert clock.sleeps == [0.2, 0.2]
+
+
 def test_disconnect_logging_time_does_not_count_as_useful_service(monkeypatch):
     connector = _connector()
     clock = _Clock()

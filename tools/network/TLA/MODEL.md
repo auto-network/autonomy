@@ -106,7 +106,10 @@ unprovable for any algorithm.
 - Tunnel authentication is represented by eligibility to take `Register`; key
   verification and certificate details do not affect pool membership after a
   hello succeeds. Useful lifetime is reduced to the separate `MarkStable`
-  transition; the model does not count wall-clock seconds.
+  transition; the model does not count wall-clock seconds. TLC therefore
+  validates the qualitative separation and its pool consequences, while the
+  runtime's exact `served_for >= max_backoff` threshold is established by the
+  deterministic connector tests.
 - Viewer payloads, encryption, stream retention, and byte backpressure are
   omitted. `PERFORMANCE.md` treats those implementation costs separately.
 - A viewer is assigned once per socket. Transparent live migration is not
