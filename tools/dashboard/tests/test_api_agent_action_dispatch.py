@@ -70,7 +70,9 @@ def per_org_universe(tmp_path, monkeypatch):
     """Create per-org DBs for autonomy + anchore with seeded actions and a
     workspace registered for each."""
     orgs_dir = tmp_path / "orgs"
-    orgs_dir.mkdir()
+    # test_app's hermetic-orgs fixture may have created this same path
+    # already; both fixtures share tmp_path.
+    orgs_dir.mkdir(exist_ok=True)
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
     # Avoid stomping on the live single-DB graph by clearing GRAPH_DB.
     monkeypatch.delenv("GRAPH_DB", raising=False)

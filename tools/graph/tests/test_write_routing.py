@@ -665,11 +665,18 @@ def test_session_launcher_exports_graph_org_env(tmp_path, monkeypatch):
     import subprocess
     monkeypatch.setattr(subprocess, "run", _capture_run)
 
+    # The launcher mints a session token on the way to the docker cmd —
+    # keep that write off the ambient auth store.
+    from tools.dashboard.dao import auth_db
+    auth_db.init_db(tmp_path / "auth.db")
+
     launcher.launch_session(
         session_type="dispatch",
         name="env-session",
         prompt=None,
-        metadata={"graph_project": "anchore"},
+        # The canonical org key: the launcher refuses to mint a session
+        # token from the legacy graph_org/graph_project fallbacks.
+        metadata={"org": "anchore"},
         detach=True,
     )
 
@@ -684,3 +691,47 @@ def test_session_launcher_exports_graph_org_env(tmp_path, monkeypatch):
                 break
     assert idx is not None, f"GRAPH_ORG env not exported; cmd: {cmd}"
     assert cmd[idx + 1] == "GRAPH_ORG=anchore"
+
+
+def test_session_launcher_refuses_legacy_only_org_metadata(tmp_path, monkeypatch):
+    """Legacy ``graph_project``/``graph_org`` metadata alone must NOT launch:
+    the session token is stamped only from canonical ``metadata['org']``, and
+    a container that cannot be org-stamped is refused rather than minted an
+    org-less token (agents/session_launcher.py's canonical-metadata rule)."""
+    import agents.session_launcher as launcher
+
+    monkeypatch.setattr(launcher, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(launcher, "_resolve_credentials",
+                        lambda: {"type": "token", "token": "x"})
+    monkeypatch.setattr(launcher, "_setup_auth_docker_args",
+                        lambda creds, run_dir: [])
+
+    from tools.dashboard.dao import auth_db
+    auth_db.init_db(tmp_path / "auth.db")
+
+    calls: list = []
+
+    def _capture_run(cmd, *a, **kw):
+        calls.append(cmd)
+        class R:
+            returncode = 0
+            stdout = "CONTAINER_ID=refuse-test\n"
+            stderr = ""
+        return R()
+
+    import subprocess
+    monkeypatch.setattr(subprocess, "run", _capture_run)
+
+    result = launcher.launch_session(
+        session_type="dispatch",
+        name="legacy-only-session",
+        prompt=None,
+        metadata={"graph_project": "anchore", "graph_org": "anchore"},
+        detach=True,
+    )
+
+    assert result is None, "legacy-only metadata must refuse the launch"
+    # Pre-refusal git/worktree setup may run; the CONTAINER must not.
+    docker_calls = [c for c in calls
+                    if c and isinstance(c[0], str) and "docker" in c[0]]
+    assert not docker_calls, f"no docker command may run after the refusal: {docker_calls}"
