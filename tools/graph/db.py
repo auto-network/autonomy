@@ -623,6 +623,34 @@ class GraphDB:
         # reached seven live bases and how overrides aimed at the "wrong" base
         # went dead. The API now upserts, so this is the backstop that keeps it
         # true for any future caller.
+        # Self-heal legacy duplicates BEFORE the unique index is built, so an
+        # org DB carrying pre-index same-state duplicate base rows opens and
+        # converges instead of bricking on CREATE UNIQUE INDEX — a fail-closed on
+        # the org-DB-open path the whole platform depends on (auto-55jwx). For
+        # each (set_id, schema_revision, key, publication_state) group of live
+        # bases, keep the newest (created_at DESC, id DESC — the same row
+        # upsert_by_key updates and the resolver's within-state tiebreak picks)
+        # and deprecate the rest. Deprecated rows leave the partial index's WHERE
+        # clause, so the index below succeeds; they are retained, not deleted, so
+        # the history survives. Correlated "a newer live sibling exists" so the
+        # winner (no newer sibling) is never touched whatever the row order;
+        # no-op on an already-clean DB.
+        self.conn.execute(
+            "UPDATE settings SET deprecated = 1 "
+            "WHERE supersedes IS NULL AND excludes IS NULL AND deprecated = 0 "
+            "AND EXISTS ("
+            "  SELECT 1 FROM settings AS newer "
+            "  WHERE newer.set_id = settings.set_id "
+            "    AND newer.schema_revision = settings.schema_revision "
+            "    AND newer.key = settings.key "
+            "    AND newer.publication_state = settings.publication_state "
+            "    AND newer.supersedes IS NULL AND newer.excludes IS NULL "
+            "    AND newer.deprecated = 0 "
+            "    AND (newer.created_at > settings.created_at "
+            "         OR (newer.created_at = settings.created_at "
+            "             AND newer.id > settings.id))"
+            ")"
+        )
         self.conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_one_base "
             "ON settings(set_id, schema_revision, key, publication_state) "
