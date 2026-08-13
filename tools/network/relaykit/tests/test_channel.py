@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from tools.network.idkit import KeyPair, Subject, canonical_json, issue_cert
 from tools.network.relaykit.channel import (
     CHUNK_SIZE,
+    MAX_RECORD_CHUNK_SIZE,
     ChannelCrypto,
     HandshakeError,
     RecordError,
@@ -146,6 +147,24 @@ class TestHandshake:
 
 
 class TestRecordLayer:
+    def test_new_records_fit_smallest_webrtc_message_limit(
+        self, root, session_key, session_cert, now
+    ):
+        client, _server = handshake(root, session_key, session_cert, now)
+        records = client.seal_message(b"x" * (CHUNK_SIZE + 1))
+        assert len(records) == 2
+        # 8-byte sequence + 1-byte encrypted flags + plaintext + 16-byte tag.
+        assert max(map(len, records)) <= 65_536
+
+    def test_receiver_keeps_previous_record_ceiling(
+        self, root, session_key, session_cert, now
+    ):
+        client, server = handshake(root, session_key, session_cert, now)
+        legacy_record = client._seal_record(
+            0x03, b"x" * MAX_RECORD_CHUNK_SIZE
+        )
+        assert server.open_record(legacy_record) == b"x" * MAX_RECORD_CHUNK_SIZE
+
     def test_chunked_soak_1_55mb(self, root, session_key, session_cert, now):
         """Q3 in-memory: a binder-sized message survives chunking intact."""
         client, server = handshake(root, session_key, session_cert, now)

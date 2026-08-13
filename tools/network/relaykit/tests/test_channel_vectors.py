@@ -78,6 +78,7 @@ def test_top_level_schema(vectors):
     c = vectors["constants"]
     assert c["handshake_version"] == 1
     assert c["chunk_size"] == ch.CHUNK_SIZE
+    assert c["max_record_chunk_size"] == ch.MAX_RECORD_CHUNK_SIZE
     assert c["max_message_size"] == ch.MAX_MESSAGE_SIZE
     assert c["known_flags_mask"] == 0x03
 
