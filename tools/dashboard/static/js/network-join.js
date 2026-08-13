@@ -1,12 +1,14 @@
-/* Local-origin invite display/consent shell (auto-1ihgz).
+/* The accept-invitation flow (auto-1ihgz).
  *
- * Display and consent ONLY: reads the invitation from the URL the bridge
- * (or bootloader) minted — public context in the query, both credentials
- * in the fragment — renders it, and gates everything behind an explicit
- * action that currently leads to an honest held state. No password field,
- * no network calls, no ceremony code: acceptance mechanics await the
- * ceremony-workflow ruling (auto-9rw91), and the passphrase must never
- * gain an HTTP ingress (I1).
+ * Stepped, as a user walks it: opened bare, the page IS the paste step —
+ * a full screen with a visible field and a Next button (parsing via the
+ * network-free accept-invitation.js module; the pasted value never leaves
+ * this page). Opened with an invitation in the URL, the page is the
+ * organization step. Controls appear only when their function exists: the
+ * accept action arrives WITH the acceptance ceremony (auto-9rw91), and
+ * the organization's verified name/description/icon light up when the
+ * org-context read lands on this origin (auto-r7kk4). No password
+ * anything, ever (I1).
  */
 (function () {
   "use strict";
@@ -25,6 +27,10 @@
     };
   }
 
+  function hasInvitationParams() {
+    return location.search.length > 1 || location.hash.length > 1;
+  }
+
   function looksComplete(inputs) {
     return (
       /^[0-9a-f-]{32,36}$/.test(inputs.org) &&
@@ -33,19 +39,42 @@
     );
   }
 
-  function render() {
-    var inputs = readInputs();
-    if (!looksComplete(inputs)) {
-      $("status-line").textContent =
-        "This link is missing part of its invitation.";
-      $("incomplete").classList.remove("hidden");
-      return;
+  function showPasteStep() {
+    $("step-paste").classList.remove("hidden");
+    var input = $("invite-input");
+    var hint = $("paste-hint");
+    input.focus();
+    function go() {
+      var api = window.AutonomyAcceptInvitation;
+      if (!api) { hint.textContent = "Something went wrong loading this page — reload and try again."; return; }
+      var result = api.acceptPastedLink(input.value);
+      if (result.kind === "error") hint.textContent = result.reason;
     }
-    $("status-line").textContent =
-      "You've been invited to join an organization.";
+    $("next").addEventListener("click", go);
+    input.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") go();
+    });
+  }
+
+  function showOrgStep(inputs) {
+    $("step-org").classList.remove("hidden");
     $("org-id").textContent = inputs.org;
     $("invite-ref").textContent = inputs.inviteRef.slice(0, 16) + "…";
-    $("invitation").classList.remove("hidden");
+    $("org-fallback").textContent =
+      inputs.org.slice(0, 1).toUpperCase() || "?";
+  }
+
+  function render() {
+    if (!hasInvitationParams()) {
+      showPasteStep();
+      return;
+    }
+    var inputs = readInputs();
+    if (!looksComplete(inputs)) {
+      $("step-broken").classList.remove("hidden");
+      return;
+    }
+    showOrgStep(inputs);
   }
 
   if (document.readyState === "loading") {
