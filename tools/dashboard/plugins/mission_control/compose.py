@@ -142,10 +142,25 @@ def _presence(surface_id: str, now: float) -> list[dict]:
     return here
 
 
+def _latest_sign_of_life(current: dict | None, pillar: dict) -> float | None:
+    """The more recent of the last site push and the last status line.
+
+    Either may be absent -- a pillar can post before it ever pushes, or push
+    without ever writing a line -- so this returns whichever exists, and None
+    only when neither does.
+    """
+    stamps = [t for t in ((current or {}).get("created_at"), pillar.get("last_done_at"))
+              if isinstance(t, (int, float))]
+    return max(stamps) if stamps else None
+
+
 def _pillar_state(pillar: dict, now: float) -> dict:
     """One pillar as the chrome needs it.
 
-    ``age`` is time since the coordinator last pushed this pillar's site.
+    ``age`` is time since this pillar last showed a sign of life -- the more
+    recent of its last site push and its last status line. Reading only the
+    push made a pillar that had been reporting steadily for an hour look
+    untouched since its last revision, which is the opposite of the truth.
     ``last_done`` is the only field here a human wrote: the last productive
     thing that finished, in their own words. It is passed through verbatim
     and NEVER substituted for -- no status value, no revision note, no
@@ -159,7 +174,7 @@ def _pillar_state(pillar: dict, now: float) -> dict:
         "name": pillar["name"],
         "color": pillar["color"],
         "status": pillar["status"],
-        "age": _ago((current or {}).get("created_at"), now),
+        "age": _ago(_latest_sign_of_life(current, pillar), now),
         "open": db.count_open_pillar_questions(pillar_id),
         "last_done": pillar["last_done"],
         "here": _presence(f"pillar:{pillar_id}", now),
@@ -221,6 +236,20 @@ def mission_state(mission_id: str, pillar_id: str | None = None) -> dict:
             if not e.get("retired_at")
         ],
         "here": _presence(f"mission:{mission_id}", now),
+        # Every pillar's status line, newest first, with the time already
+        # rendered. Inlined with the rest of the state because it is small
+        # and a reader opening the feed should not wait on a round trip.
+        "status_posts": [
+            {
+                "post_id": post["post_id"],
+                "pillar_id": post["pillar_id"],
+                "pillar_name": post["pillar_name"],
+                "color": post["pillar_color"],
+                "text": post["text"],
+                "ago": _ago(post["created_at"], now),
+            }
+            for post in db.list_mission_status_posts(mission_id, limit=200)
+        ],
     }
 
 
