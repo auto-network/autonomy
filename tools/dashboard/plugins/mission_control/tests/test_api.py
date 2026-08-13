@@ -2060,3 +2060,65 @@ def test_the_operator_id_is_never_the_personal_root_key():
     """
     assert mc_api.OPERATOR_PARTICIPANT_ID == "operator"
     assert len(mc_api.OPERATOR_PARTICIPANT_ID) != 64
+
+
+# ── activity events: work landing, not conversation (auto-xjajk) ──
+
+
+def _pillar_for_activity():
+    mid = db.create_mission("M", "auto-test")["mission_id"]
+    pid = db.create_pillar(mid, "Infra", coordinator_session="s",
+                           color="#34d399")["pillar_id"]
+    return mid, pid
+
+
+def test_a_status_line_is_published_as_an_event():
+    """A pillar finishing something is the main thing a reader wants to see.
+    Only the conversation was published, so a live screen showed people
+    talking and never showed work landing.
+    """
+    mid, pid = _pillar_for_activity()
+    with patch.object(mc_api, "_publish_activity_event", new=AsyncMock()) as pub:
+        r = _client().post(f"/api/pillars/{pid}/last-done",
+                           json={"last_done": "Finished the thing."})
+    assert r.status_code == 200, r.text
+    pub.assert_awaited_once()
+    kwargs = pub.await_args.kwargs
+    assert pub.await_args.args[0] == "status"
+    assert pub.await_args.args[1] == mid
+    assert kwargs["text"] == "Finished the thing."
+
+
+def test_clearing_the_status_line_publishes_nothing():
+    """Clearing resets the card to 'never written'. That is not a thing that
+    happened, so it is not announced as one.
+    """
+    _mid, pid = _pillar_for_activity()
+    _client().post(f"/api/pillars/{pid}/last-done", json={"last_done": "Done."})
+    with patch.object(mc_api, "_publish_activity_event", new=AsyncMock()) as pub:
+        r = _client().post(f"/api/pillars/{pid}/last-done", json={"last_done": ""})
+    assert r.status_code == 200
+    pub.assert_not_awaited()
+
+
+def test_pushing_a_screen_is_published_as_an_event():
+    _mid, pid = _pillar_for_activity()
+    with patch.object(mc_api, "_publish_activity_event", new=AsyncMock()) as pub:
+        r = _client().post(f"/api/pillars/{pid}/site",
+                           json={"html": "<p>hi</p>", "note": "rev1"})
+    assert r.status_code == 201, r.text
+    pub.assert_awaited_once()
+    assert pub.await_args.args[0] == "revision"
+
+
+def test_a_publish_failure_never_fails_the_write():
+    """The record matters more than the notification. A missed event costs a
+    reader one stale line; a failed status write costs the record itself.
+    """
+    _mid, pid = _pillar_for_activity()
+    with patch.object(mc_api.event_bus, "broadcast",
+                      new=AsyncMock(side_effect=RuntimeError("bus down"))):
+        r = _client().post(f"/api/pillars/{pid}/last-done",
+                           json={"last_done": "Still recorded."})
+    assert r.status_code == 200, r.text
+    assert db.get_pillar(pid)["last_done"] == "Still recorded."

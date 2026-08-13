@@ -36,6 +36,11 @@ logger = logging.getLogger(__name__)
 #: unfiltered subscription plus a comparison" shape already settled for
 #: live session sharing (graph://248d2e36-4cc).
 MISSION_CONVERSATION_TOPIC = "mission_control:conversation"
+#: A pillar finished something and said so, or published a new screen. Kept
+#: SEPARATE from the conversation topic because a reader must be able to tell
+#: a pillar's claim about its own work from a question someone asked, without
+#: inspecting the payload to find out which arrived.
+MISSION_ACTIVITY_TOPIC = "mission_control:activity"
 
 
 async def _publish_conversation_event(
@@ -62,6 +67,30 @@ async def _publish_conversation_event(
             "mission_control conversation event publish failed for %s/%s",
             mission_id, entry_id, exc_info=True,
         )
+
+async def _publish_activity_event(
+    event: str, mission_id: str, pillar_id: str | None, **fields,
+) -> None:
+    """A pillar's work landing, published for any screen that is listening.
+
+    Best-effort in the same sense as the conversation publish: it must never
+    block or fail the write that triggered it, and it is never retried. A
+    missed event costs a reader one stale line until their next load; a
+    failed status write costs the record itself.
+    """
+    try:
+        await event_bus.broadcast(MISSION_ACTIVITY_TOPIC, {
+            "event": event,
+            "mission_id": mission_id,
+            "pillar_id": pillar_id,
+            **fields,
+        }, dedup=False)
+    except Exception:
+        logger.warning(
+            "mission_control activity event publish failed for %s/%s",
+            mission_id, pillar_id, exc_info=True,
+        )
+
 
 #: Cookie carrying the visitor's bearer TOKEN (never the display-safe
 #: participant_id -- see resolve_visitor()'s docstring for why that
@@ -484,7 +513,16 @@ async def set_pillar_last_done(request: Request) -> JSONResponse:
         )
     if not db.set_pillar_last_done(pillar_id, text):
         return JSONResponse({"error": "pillar not found"}, status_code=404)
-    return JSONResponse({"pillar": _pillar_payload(db.get_pillar(pillar_id))})
+    pillar = db.get_pillar(pillar_id)
+    # An empty string clears the line back to "never written". That is not a
+    # thing that happened, so it is not announced as one.
+    if text.strip():
+        await _publish_activity_event(
+            "status", pillar["mission_id"], pillar_id,
+            text=text.strip(), pillar_name=pillar.get("name"),
+            color=pillar.get("color"), at=pillar.get("last_done_at"),
+        )
+    return JSONResponse({"pillar": _pillar_payload(pillar)})
 
 
 async def delete_pillar(request: Request) -> JSONResponse:
@@ -509,6 +547,13 @@ async def push_pillar_site_revision(request: Request) -> JSONResponse:
     _heartbeat_coordinator_presence(
         f"pillar:{pillar_id}", pillar.get("coordinator_session") if pillar else "",
     )
+    if pillar:
+        await _publish_activity_event(
+            "revision", pillar["mission_id"], pillar_id,
+            revision_seq=revision.get("revision_seq"), note=note,
+            pillar_name=pillar.get("name"), color=pillar.get("color"),
+            at=revision.get("created_at"),
+        )
     return JSONResponse(
         {"revision": _revision_payload({**revision, "byte_size": len(html)}, include_html=False)},
         status_code=201,
