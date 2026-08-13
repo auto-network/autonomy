@@ -97,3 +97,22 @@ def test_store_sealed_org_key_rejects_bad_payload_and_unknown_org(orgs):
         org_ops.store_sealed_org_key("anchore", {**blob, "root_pub": "nothex!"})
     with pytest.raises(org_ops.OrgNotFoundError):
         org_ops.store_sealed_org_key("ghost", blob)
+
+
+def test_store_sealed_org_key_locked_once_founded(orgs):
+    from tools.network.idkit import KeyPair
+    from tools.network.ledger.found import found_org_ledger
+    from tools.network.ledger.store import LedgerStore, org_ledger_db_path
+
+    ref = org_ops.create_org_shell("anchore", type_="shared")
+    _root_pub, blob = _real_sealed_blob()
+    org_ops.store_sealed_org_key("anchore", blob)  # un-founded: allowed
+    # Found the ledger -> the root is now committed and locked.
+    r, personal = KeyPair.generate(), KeyPair.generate()
+    with LedgerStore(org_ledger_db_path("anchore")) as store:
+        found_org_ledger(
+            store, org_id=ref.id, org_root=r,
+            personal_root_seed=bytes.fromhex(personal.private_hex), now=1,
+        )
+    with pytest.raises(org_ops.OrgExistsError):
+        org_ops.store_sealed_org_key("anchore", blob)  # founded: refused

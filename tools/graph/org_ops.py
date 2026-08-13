@@ -799,6 +799,26 @@ def store_sealed_org_key(slug: str, sealed_payload: dict) -> None:
     if get_org(slug) is None:
         raise OrgNotFoundError(f"org shell does not exist: {slug}")
 
+    # The org root key is LOCKED at founding: idempotent (re)store is allowed
+    # only while the ledger is UN-FOUNDED — the seal-first-then-fold window and
+    # its retries. Once founded, the ledger has committed to this root and the
+    # key can never be replaced (mirrors put_org_key's no-overwrite protection,
+    # scoped to the founding window so the retry path still works).
+    from tools.network.ledger.store import LedgerStore, org_ledger_db_path
+
+    ledger_path = org_ledger_db_path(slug)
+    founded = False
+    if ledger_path.exists():
+        try:
+            with LedgerStore(ledger_path) as store:
+                founded = len(store) > 0
+        except Exception:
+            founded = True  # unreadable ledger -> treat as founded; refuse.
+    if founded:
+        raise OrgExistsError(
+            f"org {slug} is founded — its root key is locked and cannot be replaced"
+        )
+
     settings_ops.upsert_by_key(
         NETWORK_ORG_KEY_SET_ID,
         NETWORK_ORG_KEY_REVISION_2,
