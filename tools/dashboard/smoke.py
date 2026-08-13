@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -283,8 +284,45 @@ def run_tier1(base_url: str) -> dict:
 def run_tier2(base_url: str) -> dict:
     """Run Tier 2 browser sweep using agent-browser."""
     if not shutil.which("agent-browser"):
-        print("  WARN: agent-browser not on PATH — skipping tier 2", file=sys.stderr)
-        return {"pass": True, "skipped": True, "reason": "agent-browser not found"}
+        # Skip-as-pass is the tautology the test-value standard names: the
+        # dispatcher's shell never had agent-browser on PATH, so this tier
+        # reported PASS for its whole life without executing once. The skip
+        # is now LOUD in the result either way, and SMOKE_BROWSER_REQUIRED=1
+        # (set in the gate env once the dispatcher PATH carries the browser)
+        # makes it a FAILURE — the deploy-safe route to failing by default.
+        required = os.environ.get("SMOKE_BROWSER_REQUIRED") == "1"
+        print(
+            "  WARN: agent-browser not on PATH — browser tier "
+            + ("FAILED (required)" if required else "SKIPPED, NOT RUN"),
+            file=sys.stderr,
+        )
+        return {"pass": not required, "skipped": True,
+                "reason": "agent-browser not found",
+                "required": required}
+
+    # The human-auth gate 401s /pages/* for unauthenticated callers, and
+    # SESSION_COOKIE is HttpOnly — page JS cannot set it. Mint the smoke
+    # session host-side (same path tier 1 uses) and inject it at the
+    # browser level before any navigation.
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+    from tools.dashboard.unlock_routes import mint_session_token, SESSION_COOKIE
+    token = mint_session_token(method="smoke")
+    subprocess.run(
+        ["agent-browser", "open", "about:blank", "--ignore-https-errors"],
+        capture_output=True, text=True, timeout=30,
+    )
+    cookie_cmd = ["agent-browser", "cookies", "set", SESSION_COOKIE, token,
+                  "--url", base_url, "--httpOnly"]
+    if base_url.startswith("https"):
+        cookie_cmd.append("--secure")
+    r_cookie = subprocess.run(cookie_cmd, capture_output=True, text=True,
+                              timeout=15)
+    if r_cookie.returncode != 0:
+        return {"pass": False, "skipped": False,
+                "reason": f"session cookie injection failed: "
+                          f"{r_cookie.stderr.strip()}"}
 
     pages = ["/dispatch", "/timeline", "/beads"]
     page_results = []
