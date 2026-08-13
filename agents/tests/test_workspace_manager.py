@@ -108,6 +108,19 @@ def test_api_managed_local_repo_round_trips_through_session_merge(tmp_path, monk
         "sess-one", "idea-board", "session/sess-one",
         worktrees_dir=worktrees_dir,
     ) == "main"
+    # The sweep resolves the same label once per row and carries it on the
+    # WorktreeState so the request-path serializer never spawns git for it
+    # (auto-yq27f). It must be byte-identical to the standalone helper, even
+    # for a non-autonomy managed-local repo (the git-heavy branch).
+    scan_rows = wm.scan_all_worktrees(worktrees_dir=worktrees_dir)
+    scan_row = next(
+        r for r in scan_rows
+        if r.session_name == "sess-one" and r.repo_name == "idea-board"
+    )
+    assert scan_row.target_branch == "main"
+    assert scan_row.target_branch == wm.worktree_target_branch_name(
+        "sess-one", "idea-board", scan_row.branch, worktrees_dir=worktrees_dir,
+    )
     (first / "IDEAS.md").write_text("# Ideas\n\n- Durable local workspaces\n")
     subprocess.run(["git", "-C", str(first), "add", "IDEAS.md"], check=True)
     subprocess.run(

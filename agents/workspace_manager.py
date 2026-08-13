@@ -1015,6 +1015,12 @@ class WorktreeState:
     session_live: bool
     cherry_pick_eligible: bool = False
     cherry_pick_commit: str | None = None
+    # The dashboard target-branch label (``worktree_target_branch_name``).
+    # Resolved once per sweep on the worker thread and carried on the row
+    # so the request-path serializer never spawns git for it (auto-yq27f).
+    # ``None`` only on rows built outside ``scan_all_worktrees`` (e.g. test
+    # fixtures); the serializer emits it verbatim.
+    target_branch: str | None = None
     commits: list[WorktreeCommit] = field(default_factory=list)
     dirty_files: list[GitFileChange] = field(default_factory=list)
     net_empty: bool = False
@@ -1428,23 +1434,62 @@ def _sync_managed_clone_branch_ref(
         _git_output(["update-ref", "-d", temp_ref], clone, timeout=15)
 
 
+_TARGET_BRANCH_UNSET = object()
+
+
 def worktree_target_branch_name(
     session_name: str,
     repo_name: str,
     branch: str | None,
     *,
     worktrees_dir: Path = WORKTREES_DIR,
+    target_branch_and_head: tuple[str | None, str | None] | None = None,
+    clone: Path | None | object = _TARGET_BRANCH_UNSET,
+    clone_target_memo: dict[Path, tuple[bool, str | None]] | None = None,
 ) -> str:
-    """Return the dashboard target-branch label for a worktree."""
-    target_branch, _target_head = _autonomy_target_branch_and_head()
-    default_branch = target_branch or "main"
+    """Return the dashboard target-branch label for a worktree.
+
+    ``target_branch_and_head`` lets a caller that already resolved
+    :func:`_autonomy_target_branch_and_head` once (e.g. ``scan_all_worktrees``
+    doing it once per sweep instead of once per row) pass it in; standalone
+    callers omit it and it's resolved internally, unchanged. For the
+    dominant ``repo_name == "autonomy"`` case this means the answer is
+    produced with **zero git** when the value is passed in.
+
+    ``clone`` similarly lets the scan pass the managed clone it already
+    resolved for the row, skipping the ``.git`` re-read. ``clone_target_memo``
+    (keyed by clone path) memoizes the non-autonomy local-target default-branch
+    lookup across a sweep so several worktrees of one repo resolve it once —
+    the same per-sweep-resolution pattern used elsewhere in this file. The
+    computed label is byte-identical to the un-memoized path (auto-yq27f).
+    """
+    resolved_target, _target_head = (
+        target_branch_and_head if target_branch_and_head is not None
+        else _autonomy_target_branch_and_head()
+    )
+    default_branch = resolved_target or "main"
     if repo_name == "autonomy":
         return default_branch
-    worktree = _session_worktree_dir(worktrees_dir, session_name, repo_name)
-    clone = _find_managed_clone_for_worktree(worktree)
-    local_target = _local_workspace_target_for_clone(clone) if clone else None
-    if local_target is not None:
-        return _repo_default_branch(local_target) or default_branch
+    if clone is _TARGET_BRANCH_UNSET:
+        worktree = _session_worktree_dir(worktrees_dir, session_name, repo_name)
+        clone = _find_managed_clone_for_worktree(worktree)
+    clone_path = clone if isinstance(clone, Path) else None
+    if clone_target_memo is not None and clone_path is not None \
+            and clone_path in clone_target_memo:
+        has_local_target, local_default = clone_target_memo[clone_path]
+    else:
+        local_target = (
+            _local_workspace_target_for_clone(clone_path)
+            if clone_path is not None else None
+        )
+        has_local_target = local_target is not None
+        local_default = (
+            _repo_default_branch(local_target) if has_local_target else None
+        )
+        if clone_target_memo is not None and clone_path is not None:
+            clone_target_memo[clone_path] = (has_local_target, local_default)
+    if has_local_target:
+        return local_default or default_branch
     if branch and branch != f"{SESSION_BRANCH_PREFIX}{session_name}":
         return branch
     return default_branch
@@ -2338,6 +2383,12 @@ def scan_all_worktrees(
     live = set(live_session_names) if live_session_names is not None else _live_session_names()
     out: list[WorktreeState] = []
     clone_sha_memo: dict[Path | None, str | None] = {}
+    # Per-sweep memo for the non-autonomy local-target default-branch lookup
+    # behind ``worktree_target_branch_name`` — keyed by managed clone so
+    # several worktrees of one repo resolve it once (auto-yq27f). Autonomy
+    # rows never touch it: their label comes straight from
+    # ``target_branch_and_head`` below with no git.
+    clone_target_memo: dict[Path, tuple[bool, str | None]] = {}
 
     # Resolved once per sweep rather than once per row (previously ~2-4
     # identical git spawns per row just to answer "what's the host
@@ -2478,6 +2529,20 @@ def scan_all_worktrees(
             if commits_ahead == 0:
                 cherry_pick_eligible = False
                 cherry_pick_commit = None
+            # Resolve the dashboard target-branch label HERE, on the sweep's
+            # worker thread, and carry it on the row — the request-path
+            # serializer must never spawn git for it (auto-yq27f). Reuses the
+            # per-sweep ``target_branch_and_head`` and the clone we already
+            # resolved above, so autonomy rows (the dominant case) add no git.
+            row_target_branch = worktree_target_branch_name(
+                session_dir.name,
+                logical_name,
+                branch,
+                worktrees_dir=worktrees_dir,
+                target_branch_and_head=target_branch_and_head,
+                clone=clone,
+                clone_target_memo=clone_target_memo,
+            )
             row = WorktreeState(
                 session_name=session_dir.name,
                 repo_name=logical_name,
@@ -2492,6 +2557,7 @@ def scan_all_worktrees(
                 session_live=row_is_live if use_cache else (session_dir.name in live),
                 cherry_pick_eligible=cherry_pick_eligible,
                 cherry_pick_commit=cherry_pick_commit,
+                target_branch=row_target_branch,
                 commits=commits,
                 dirty_files=dirty_files,
                 net_empty=net_empty,
