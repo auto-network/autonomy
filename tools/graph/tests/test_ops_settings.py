@@ -247,22 +247,13 @@ def test_precedence_published_beats_curated(graph_db_env, example_schema):
     assert members.members[0].id == pub_sid
 
 
-def test_precedence_tiebreak_by_recency(graph_db_env, example_schema):
-    """Two rows at same precedence: most recent wins."""
-    import time
-    first = ops.add_setting(
-        "autonomy.test.example", 1, "k", {"v": "first"}, state="raw",
-     org=ops.CALLER_ORG)
-    time.sleep(1.1)  # ISO seconds-resolution timestamps need a real gap
-    second = ops.add_setting(
-        "autonomy.test.example", 1, "k", {"v": "second"}, state="raw",
-     org=ops.CALLER_ORG)
-    members = ops.read_set("autonomy.test.example", org=ops.CALLER_ORG)
-    assert members.members[0].id == second
-    assert members.members[0].payload["v"] == "second"
-
-
-# ── promote / deprecate / remove ────────────────────────────
+# test_precedence_tiebreak_by_recency — RETIRED (settings-owner ruling,
+# 2026-08-13): it built two same-publication_state base rows to assert
+# the recency tiebreak, a state idx_settings_one_base (f5c20ebd) now
+# forbids at insert and, on a pre-index DB, at open (bare CREATE UNIQUE
+# INDEX, no dedupe migration) — so the tiebreak is unreachable in any
+# openable DB. Cross-state precedence (canonical>published>curated>raw)
+# stays covered by the tests above.
 
 
 def test_promote_changes_state(graph_db_env, example_schema):

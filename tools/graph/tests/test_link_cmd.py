@@ -62,8 +62,26 @@ class OperatorFixture:
             return
         enriched = self.client.get(f"/api/approvals/{rid}").json()
         rr = enriched["registry_request"]
+        # D19: share-link publish/revoke ride the org tunnel, so the
+        # executor verifies the signature over the fixed tunnel-control
+        # PoP bytes, not the registry method/path. Mirrors the browser's
+        # signing branch (worktrees.js) exactly — the crypto pillar
+        # verified this block against the executor.
+        is_revoke = rr["method"] == "DELETE"
+        target_type = (
+            enriched.get("target_type") if is_revoke
+            else (rr.get("payload") or {}).get("target_type")
+        )
+        is_share_link = (
+            target_type is not None and target_type != "org:join"
+            if is_revoke else target_type != "org:join"
+        )
+        method, path = rr["method"], rr["path"]
+        if is_share_link:
+            method = "TUNNEL"
+            path = "/control/revoke-link" if is_revoke else "/control/create-link"
         envelope = sign_request(
-            self.session_key, rr["method"], rr["path"], rr["payload"],
+            self.session_key, method, path, rr["payload"],
             ts=int(time.time()), cert=self.session_cert,
         )
         self.client.post(f"/api/approvals/{rid}/decision",
@@ -74,6 +92,30 @@ class OperatorFixture:
 def operator_env(tmp_path, monkeypatch):
     """Approvals app + registry + settings + CLI transport, fully wired."""
     from tools.graph.db import GraphDB
+
+    # D19: publish/revoke ride the org tunnel, not the registry HTTP mock.
+    # Stub the supervisor seam at the executor's expectations: start() says
+    # running, create-link mints a well-formed grant (32-hex token, HTTPS
+    # /l/ url per NetworkLinkGrantV3), revoke-link acks. The executor's
+    # imports are function-local, so module-attribute patches take effect.
+    import tools.dashboard.link_serving_supervisor as _sup_mod
+
+    fixture_token = "cafe" * 8  # 32 lowercase hex, matches _TOKEN_RE
+
+    class _TunnelStub:
+        def start(self, org):
+            return {"running": True}
+
+    def _control_stub(org, op, args, *, timeout=12.0):
+        if op == "create-link":
+            return {"ok": True, "token": fixture_token,
+                    "url": f"https://relay.auto.network/l/{fixture_token}"}
+        if op == "revoke-link":
+            return {"ok": True}
+        return {"ok": False, "error": f"unexpected control op {op}"}
+
+    monkeypatch.setattr(_sup_mod, "get_supervisor", lambda: _TunnelStub())
+    monkeypatch.setattr(_sup_mod, "control", _control_stub)
 
     root = KeyPair.generate()
     personal_root = KeyPair.generate()
@@ -326,13 +368,19 @@ def test_publish_prints_url(operator_env, capsys):
     link_cmd.cmd_link_publish(_publish_args())
     out = capsys.readouterr().out
     assert "✓ share-link published: " + PUBLIC_LINK_URL + "/l/" in out
-    assert "token: " in out
+    # The token is deliberately NOT printed on its own line — it is the
+    # URL's last path segment (link_cmd.py's own comment), and the CLI
+    # prints the URL bare so it stays selectable.
+    url = out.split("✓ share-link published: ")[1].split()[0]
+    token = url.rsplit("/", 1)[1]
+    assert len(token) == 32 and all(c in "0123456789abcdef" for c in token)
 
 
 def test_publish_then_list_then_revoke(operator_env, capsys):
     link_cmd.cmd_link_publish(_publish_args())
     out = capsys.readouterr().out
-    token = out.split("token: ")[1].strip().split()[0]
+    url = out.split("✓ share-link published: ")[1].split()[0]
+    token = url.rsplit("/", 1)[1]
 
     link_cmd.cmd_link_list(argparse.Namespace(org=ORG))
     listed = capsys.readouterr().out

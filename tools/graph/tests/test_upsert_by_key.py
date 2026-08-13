@@ -373,50 +373,17 @@ def test_emit_hook_swallows_exceptions(graph_db_env, upsert_schema):
     assert isinstance(sid, str)
 
 
-# ── Acceptance #6: legacy duplicates ─────────────────────────
-
-
-def test_upsert_picks_newest_when_legacy_duplicates_exist(
-    graph_db_env, upsert_schema, monkeypatch,
-):
-    """``add_setting`` callers may have left multiple base rows for the
-    same composite key. Upsert MUST pick the newest by ``created_at``
-    and update it in place — never raise.
-    """
-    set_id, _ = upsert_schema
-
-    # Stamp old/new ``created_at`` deterministically so we know which
-    # row the newest-wins SELECT will land on.
-    monkeypatch.setattr(
-        settings_ops, "_now_iso", lambda: "2026-05-01T08:00:00Z",
-    )
-    older_id = settings_ops.add_setting(
-        set_id, 1, "k", {"name": "older"},
-     org=settings_ops.CALLER_ORG)
-    monkeypatch.setattr(
-        settings_ops, "_now_iso", lambda: "2026-05-01T09:00:00Z",
-    )
-    newer_id = settings_ops.add_setting(
-        set_id, 1, "k", {"name": "newer"},
-     org=settings_ops.CALLER_ORG)
-
-    assert older_id != newer_id
-    monkeypatch.setattr(
-        settings_ops, "_now_iso", lambda: "2026-05-01T10:00:00Z",
-    )
-    sid = settings_ops.upsert_by_key(
-        set_id, 1, "k", {"name": "post-upsert"},
-     org=settings_ops.CALLER_ORG)
-
-    # Newest-wins: the upsert updates ``newer_id`` in place; ``older_id``
-    # is left untouched (still discoverable by raw SELECT, still
-    # carrying its original payload).
-    assert sid == newer_id
-    rows = _all_base_rows(set_id, "k")
-    assert len(rows) == 2  # legacy duplicate not deleted
-    by_id = {r["id"]: r for r in rows}
-    assert json.loads(by_id[newer_id]["payload"]) == {"name": "post-upsert"}
-    assert json.loads(by_id[older_id]["payload"]) == {"name": "older"}
+# ── Acceptance #6: legacy duplicates — RETIRED ───────────────
+#
+# test_upsert_picks_newest_when_legacy_duplicates_exist asserted the
+# recency tiebreak over same-publication_state duplicate base rows. The
+# one-live-base-row index (idx_settings_one_base, f5c20ebd) forbids
+# constructing that state, and there is no dedupe migration: a pre-index
+# DB still holding such duplicates fails at index creation on open and
+# never reaches the resolver. The settings owner ruled the scenario
+# unreachable (2026-08-13): no openable DB exists in which the tiebreak
+# runs. Precedence across DIFFERENT publication states remains live and
+# keeps its tests.
 
 
 def test_upsert_ignores_override_and_exclude_rows(
