@@ -602,7 +602,8 @@ class TestLibrarianRecentTitle:
     """
 
     @pytest.fixture(scope="class")
-    def librarian_fixture_ready(self, h):
+    @classmethod
+    def librarian_fixture_ready(cls, h):
         fixture = sessions_page_fixture()
         fixture["recent_sessions"] = list(fixture["recent_sessions"]) + [
             {

@@ -638,7 +638,8 @@ class TestMixedEntryTypes:
     """Verify every entry type survives the gap recovery path. Tests 10-13."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def _setup_gap(self, harness):
+    @classmethod
+    def _setup_gap(cls, harness):
         """Set up a fresh gap recovery scenario with mixed entry types."""
         # Restart server for clean state (TestServerRestart may have restarted it)
         harness.restart_server()
