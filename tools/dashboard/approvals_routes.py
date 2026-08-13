@@ -45,13 +45,33 @@ SIGN_KEY_SET_ID = _sign_key_schema.SIGN_KEY_SET_ID
 
 
 async def get_sign_key(request: Request) -> PlainTextResponse:
-    """GET /api/sign-key -> the org's passphrase-encrypted armored private key,
-    or 404 if none is configured. Read-only; serves an already-encrypted value."""
-    org = request.query_params.get("org") or None
+    """GET /api/sign-key -> the CALLER'S OWN org passphrase-encrypted armored
+    private key, or 404 if none is configured. Read-only; serves an
+    already-encrypted value.
+
+    auto-h4kzx (live-exposure fix): read the OWNING org DB only
+    (``read_owned_set``), never the federated cross-org ``read_set``. The
+    federated read returns another org's ``published``/``canonical`` rows by
+    design, so a signing-key row that is canonical (a real state found in the
+    fleet) was being served cross-org to any subscribing org. Owning-DB-only
+    makes that impossible regardless of the row's publication_state — a
+    returned row belongs to ``org`` by construction — and an explicit ``?org=``
+    that names a different org than the caller's own is refused rather than
+    honored. (The caller's org is the settings caller-cascade today; it becomes
+    token-derived with the h4kzx server flip + the client bearer-send
+    auto-w1ktf.)
+    """
+    from tools.graph import settings_ops
+    requested = request.query_params.get("org") or None
+    caller = settings_ops._resolve_settings_caller(None)
+    if requested is not None and requested != caller:
+        return PlainTextResponse(
+            "cross-org signing-key access is not permitted", status_code=403
+        )
+    org = requested or caller
     try:
-        from tools.graph import ops as graph_ops
-        members = graph_ops.read_set(SIGN_KEY_SET_ID, org=org)
-        for m in (getattr(members, "members", []) or []):
+        members = settings_ops.read_owned_set(SIGN_KEY_SET_ID, org=org).members
+        for m in (members or []):
             payload = m.payload if isinstance(m.payload, dict) else {}
             armored = payload.get("armored_private_key") or payload.get("armored")
             if isinstance(armored, str) and "PRIVATE KEY" in armored:
