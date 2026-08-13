@@ -14284,7 +14284,7 @@ class TestNetworkSignOn:
     ):
         source = (
             Path(__file__).parents[1]
-            / "static" / "js" / "network-signon.js"
+            / "static" / "js" / "network-signon.mjs"
         ).read_text()
         body = source.split(function_start, 1)[1].split(function_end, 1)[0]
         forbidden = re.compile(

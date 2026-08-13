@@ -11,7 +11,7 @@
 const path = require("path");
 const url = require("url");
 
-globalThis.crypto = require("crypto").webcrypto;
+if (!globalThis.crypto) globalThis.crypto = require("crypto").webcrypto;
 globalThis.window = {};
 globalThis.localStorage = { getItem: () => null, setItem: () => {} };
 
