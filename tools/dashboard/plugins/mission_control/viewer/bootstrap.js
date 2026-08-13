@@ -643,6 +643,20 @@
     return line.length > 120 ? line.slice(0, 117) + "\u2026" : line;
   }
 
+  function rowChipText(q) {
+    if (q.answer) return "answered";
+    if (q.relay_status === "failed") return "not delivered";
+    if ((q.updates || []).length) return "working";
+    return "open";
+  }
+
+  function rowChipClass(q) {
+    if (q.answer) return "mc-chip mc-chip-done";
+    if (q.relay_status === "failed") return "mc-chip mc-chip-bad";
+    if ((q.updates || []).length) return "mc-chip mc-chip-working";
+    return "mc-chip mc-chip-open";
+  }
+
   function questionRows() {
     var shown = questionsHere().filter(function (q) {
       if (qFilter === "open") return !q.answer;
@@ -670,8 +684,10 @@
         show({entry: q.entry_id, from: {panel: "questions"}});
       }}, [
         el("div", {class: "mc-row-top"}, [
-          el("span", {class: q.answer ? "mc-chip mc-chip-done" : "mc-chip mc-chip-open",
-                      text: q.answer ? "answered" : "open"}),
+          // Three states, not two. "Open" covered a question being actively
+          // worked on and one that never reached anybody, which are the two
+          // things a reader most needs told apart.
+          el("span", {class: rowChipClass(q), text: rowChipText(q)}),
           el("span", {class: "mc-sub", text: pillarName(q.pillar_id)}),
         ]),
         el("p", {class: "mc-qtext", text: q.question || ""}),
@@ -836,9 +852,39 @@
     body.push(el("p", {class: "mc-sub",
                        text: (q.asked_by_label || "") + (q.created_at ? " \u00b7 " + when(q.created_at) : "")}));
     if (q.anchor) body.push(el("p", {class: "mc-sub", text: q.anchor}));
-    if (!q.answer && (q.updates || []).length) {
-      body.push(el("p", {class: "mc-label mc-mt", text: "While this is open"}));
-      (q.updates || []).forEach(function (u) { body.push(el("p", {class: "mc-update", text: u.text || ""})); });
+    if (!q.answer) {
+      // DID IT REACH ANYONE. Whether the question was actually delivered has
+      // always been recorded and never shown, so a question that failed to
+      // reach its coordinator looked exactly like one being thought about:
+      // both were nothing at all on the screen, for as long as you cared to
+      // wait.
+      var relay = q.relay_status;
+      if (relay === "failed") {
+        body.push(el("p", {class: "mc-relay mc-relay-bad",
+                           text: "Not delivered — nobody has been told about this yet."}));
+      } else if (relay === "sent") {
+        body.push(el("p", {class: "mc-relay", text: "Delivered"}));
+      } else {
+        body.push(el("p", {class: "mc-relay", text: "Sending…"}));
+      }
+      var steps = q.updates || [];
+      if (steps.length) {
+        body.push(el("p", {class: "mc-label mc-mt", text: "While this is open"}));
+        steps.forEach(function (u, i) {
+          // Newest is the live one; everything above it became a tick when the
+          // next arrived. Nothing marks itself finished -- being superseded is
+          // what finishing looks like.
+          var last = i === steps.length - 1;
+          body.push(el("div", {class: last ? "mc-step mc-step-live" : "mc-step"}, [
+            el("span", {class: "mc-step-ic", text: last ? "●" : "✓"}),
+            el("div", {}, [
+              el("div", {class: "mc-step-tx", text: u.text || ""}),
+              el("div", {class: "mc-step-at",
+                         text: when(u.created_at) + (last ? " · now" : "")}),
+            ]),
+          ]));
+        });
+      }
     }
     if (q.answer) {
       body.push(el("p", {class: "mc-label mc-mt", text: "Answer"}));
