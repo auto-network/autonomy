@@ -98,6 +98,20 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+class OrgResolutionConflict(RuntimeError):
+    """A ``GRAPH_DB`` pin was set while an explicit ``org`` named a different
+    home. Refuse loudly rather than silently discarding the org (auto-23d9m).
+
+    A ``GRAPH_DB`` pin is a whole-process single-store override, legitimate for
+    the test suite, the ``graph --db`` CLI, and the multi-node harness — all of
+    which pass ``org=None``. Letting it silently override an *explicit* org is
+    exactly how a re-run create-org ceremony minted a second org key
+    (auto-c46me): the overwrite guard's read landed in the pinned store instead
+    of the org's own DB, so it truthfully reported "no key here" while looking
+    in the wrong file.
+    """
+
+
 def resolve_caller_db_path(
     org: str | None = None,
     *,
@@ -106,18 +120,39 @@ def resolve_caller_db_path(
     """Resolve the DB path for a given ``org``.
 
     Priority:
-      1. ``GRAPH_DB`` env (test override / explicit pin) → that path.
-      2. ``data/orgs/<org>.db`` — ``org`` defaults to
-         ``'personal'`` (scopeless convergence, auto-txg5.3): every write
-         without an explicit org lands in the operator's personal DB.
+      1. ``GRAPH_DB`` env (test override / explicit whole-DB pin) → that path,
+         but ONLY when it does not contradict an explicit ``org``. When an
+         explicit ``org`` resolves to a *different* file than the pin, raise
+         :class:`OrgResolutionConflict` instead of silently discarding the org.
+         The legitimate pin callers (tests, ``graph --db``, harness) pass
+         ``org=None`` and are unaffected.
+      2. ``data/orgs/<org>.db`` — ``org`` defaults to ``'personal'``
+         (scopeless convergence, auto-txg5.3). NOTE (auto-23d9m follow-on):
+         this ``org or 'personal'`` default is itself a silent default; making
+         callers pin their home explicitly is the settings-read/caller-pin
+         work tracked under auto-ogj1e, not changed here.
       3. Legacy ``data/graph.db`` (``DEFAULT_DB``) when the per-org DB
          file is absent — preserves pre-migration fallback so existing
          installations keep reading their legacy store until bootstrap
          has materialised the per-org files.
+
+    ``root`` (packaging's ``AUTONOMY_DATA_ROOT`` base directory, auto-fm4zz) is
+    a *base* that composes with the org via :func:`_org_db_path` — never a
+    whole-DB pin — so it has no org-discarding failure mode and needs no
+    conflict check here.
     """
     env_db = os.environ.get("GRAPH_DB")
     if env_db:
-        return Path(env_db)
+        env_path = Path(env_db)
+        if org is not None:
+            expected = _org_db_path(org, root)
+            if env_path.resolve() != expected.resolve():
+                raise OrgResolutionConflict(
+                    f"GRAPH_DB={env_db!r} contradicts explicit org {org!r} "
+                    f"(which resolves to {expected}); refusing rather than "
+                    f"discarding the org. Unset GRAPH_DB or pass org=None."
+                )
+        return env_path
     slug = org or "personal"
     org_path = _org_db_path(slug, root)
     if org_path.exists():

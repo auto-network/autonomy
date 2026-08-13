@@ -84,7 +84,8 @@ def test_explicit_db_path_wins_over_org(orgs_root, tmp_path):
 
 def test_graph_db_env_overrides_default_routing(orgs_root, tmp_path, monkeypatch):
     """``GRAPH_DB`` env wins even when a per-org DB exists — preserves the
-    test-pinning pattern used across ``test_ops.py``."""
+    test-pinning pattern used across ``test_ops.py``. (org is None here, so
+    the auto-23d9m conflict check never fires.)"""
     GraphDB.create_org_db("personal", type_="personal").close()
     pinned = tmp_path / "pinned.db"
     monkeypatch.setenv("GRAPH_DB", str(pinned))
@@ -94,3 +95,42 @@ def test_graph_db_env_overrides_default_routing(orgs_root, tmp_path, monkeypatch
         assert db.db_path == pinned
     finally:
         db.close()
+
+
+# ── auto-23d9m: a GRAPH_DB pin must not silently discard an explicit org ──
+
+
+def test_graph_db_pin_conflicting_with_explicit_org_refuses(
+    orgs_root, tmp_path, monkeypatch
+):
+    """An ambient ``GRAPH_DB`` pin that names a DIFFERENT file than an explicit
+    org's own DB must refuse loudly, not discard the org.
+
+    This is the mechanism behind the auto-c46me double-mint: the create-org
+    overwrite guard read ``org='autonomy'`` while ``GRAPH_DB`` pointed at the
+    scopeless store, so it truthfully reported "no key here" — in the wrong DB.
+
+    RED-first: before the fix, ``resolve_caller_db_path`` returned the pin and
+    discarded the org, so this ``pytest.raises`` would fail.
+    """
+    pinned = tmp_path / "pinned.db"
+    monkeypatch.setenv("GRAPH_DB", str(pinned))
+    with pytest.raises(graph_db.OrgResolutionConflict):
+        graph_db.resolve_caller_db_path("autonomy")
+
+
+def test_graph_db_pin_matching_explicit_org_is_honored(orgs_root, monkeypatch):
+    """No conflict when the pin already points at the org's own DB — the pin is
+    returned, no refusal."""
+    expected = orgs_root / "autonomy.db"
+    monkeypatch.setenv("GRAPH_DB", str(expected))
+    assert graph_db.resolve_caller_db_path("autonomy") == expected
+
+
+def test_graph_db_pin_with_org_none_is_honored(orgs_root, tmp_path, monkeypatch):
+    """The legitimate pin callers (tests, ``graph --db`` CLI, harness) pass
+    ``org=None`` and are unaffected by the conflict check."""
+    pinned = tmp_path / "pinned.db"
+    monkeypatch.setenv("GRAPH_DB", str(pinned))
+    assert graph_db.resolve_caller_db_path(None) == pinned
+    assert graph_db.resolve_caller_db_path() == pinned

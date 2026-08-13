@@ -523,9 +523,17 @@ def test_open_db_for_session_returns_none_when_no_meta(orgs_root, tmp_path):
     assert _open_db_for_session(jsonl) is None
 
 
-def test_open_db_for_session_graph_db_env_still_wins(orgs_root, tmp_path, monkeypatch):
-    """``GRAPH_DB`` env pins the target even for per-session routing — so
-    tests that pin a single DB keep working as written."""
+def test_open_db_for_session_refuses_graph_db_pin_conflicting_with_session_org(
+    orgs_root, tmp_path, monkeypatch
+):
+    """auto-23d9m: a ``GRAPH_DB`` pin that contradicts the session's OWN org no
+    longer silently wins for per-session routing — it refuses loudly
+    (``OrgResolutionConflict``) rather than landing the session's data in the
+    wrong DB. Single-DB test routing uses ``AUTONOMY_ORGS_DIR`` (a base root that
+    composes the org), not a ``GRAPH_DB`` whole-DB pin over an explicit org.
+
+    Previously this asserted the pin "still wins" — that was the collapse
+    behaviour behind the auto-c46me double-mint, now removed."""
     GraphDB.create_org_db("anchore").close()
     pinned = tmp_path / "pinned.db"
     monkeypatch.setenv("GRAPH_DB", str(pinned))
@@ -535,11 +543,8 @@ def test_open_db_for_session_graph_db_env_still_wins(orgs_root, tmp_path, monkey
     jsonl = sessions / "s.jsonl"
     jsonl.touch()
 
-    db = _open_db_for_session(jsonl)
-    try:
-        assert Path(db.db_path) == pinned
-    finally:
-        db.close()
+    with pytest.raises(graph_db_mod.OrgResolutionConflict):
+        _open_db_for_session(jsonl)
 
 
 # ── session_launcher emits graph_org in session meta + GRAPH_ORG env ──
