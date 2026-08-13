@@ -62,9 +62,22 @@ from .frames import (
     tag_viewer_message,
     encode_frame,
 )
-from .hello import build_tunnel_hello
+from .hello import HELLO_VERSION, build_tunnel_hello
 
 logger = logging.getLogger(__name__)
+
+
+class TunnelProtocolVersionError(ConnectionError):
+    """The connector and registry implement different strict wire versions."""
+
+    def __init__(self, remote_version):
+        self.local_version = HELLO_VERSION
+        self.remote_version = remote_version
+        remote = "missing" if remote_version is None else repr(remote_version)
+        super().__init__(
+            "tunnel protocol version mismatch: "
+            f"connector={self.local_version} registry={remote}"
+        )
 
 
 async def echo_handler(token: str, message: bytes) -> bytes:
@@ -443,7 +456,17 @@ class TunnelConnector:
             self._key, self._cert, org=self._org, ts=int(time.time())
         ))
         reply = json.loads(await ws.recv())
-        if not (isinstance(reply, dict) and reply.get("ok")):
+        if not isinstance(reply, dict):
+            raise ConnectionError(f"hello rejected: {reply!r}")
+        if reply.get("ok") is True:
+            remote_version = reply.get("v")
+            if type(remote_version) is not int or remote_version != HELLO_VERSION:
+                raise TunnelProtocolVersionError(remote_version)
+            return
+        error = reply.get("error")
+        if isinstance(error, dict) and error.get("code") == "protocol_version_mismatch":
+            raise TunnelProtocolVersionError(error.get("registry_version"))
+        else:
             raise ConnectionError(f"hello rejected: {reply!r}")
 
     async def _serve(self, ws) -> None:

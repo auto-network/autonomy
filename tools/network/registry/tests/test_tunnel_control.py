@@ -12,6 +12,8 @@ from __future__ import annotations
 import contextlib
 import json
 
+import pytest
+
 from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.relaykit.frames import (
     CTRL_CHANNEL_ID,
@@ -19,7 +21,16 @@ from tools.network.relaykit.frames import (
     decode_frame,
     encode_frame,
 )
-from tools.network.relaykit.hello import build_tunnel_hello
+from tools.network.relaykit.hello import (
+    HELLO_VERSION,
+    build_tunnel_hello,
+    hello_signing_input,
+)
+from tools.network.registry.relay import (
+    CLOSE_PROTOCOL_MISMATCH,
+    CLOSE_UNAUTHENTICATED,
+)
+from starlette.websockets import WebSocketDisconnect
 
 from .conftest import DAY, NOW, ORG, ORG_NONE, TARGET, register
 
@@ -47,7 +58,7 @@ def _open_tunnel(client, clock, root, org=ORG):
     with client.websocket_connect(f"/t/{org}") as ws:
         ws.send_text(hello)
         ack = ws.receive_json()
-        assert ack == {"ok": True}, ack
+        assert ack == {"ok": True, "v": HELLO_VERSION}, ack
         yield ws
 
 
@@ -59,6 +70,62 @@ def _ctrl(ws, correlation, op, args):
     assert frame.type == FRAME_CTRL
     assert frame.channel_id == CTRL_CHANNEL_ID
     return json.loads(frame.payload.decode("utf-8"))
+
+
+def _hello_with_version(serve_key, cert, *, org, ts, version):
+    payload = json.loads(build_tunnel_hello(
+        serve_key, cert, org=org, ts=ts))
+    payload["v"] = version
+    payload["sig"] = serve_key.sign_hex(hello_signing_input(
+        org, serve_key.public_hex, ts, version=version))
+    return json.dumps(payload)
+
+
+def test_authenticated_old_connector_gets_typed_version_mismatch(
+    client, clock, root, app,
+):
+    register(client, clock, root, org_uuid=ORG)
+    serve_key = KeyPair.generate()
+    cert = _serve_cert(root, serve_key)
+    hello = _hello_with_version(
+        serve_key, cert, org=ORG, ts=clock.now, version=HELLO_VERSION - 1)
+
+    with client.websocket_connect(f"/t/{ORG}") as ws:
+        ws.send_text(hello)
+        assert ws.receive_json() == {
+            "ok": False,
+            "error": {
+                "code": "protocol_version_mismatch",
+                "connector_version": HELLO_VERSION - 1,
+                "registry_version": HELLO_VERSION,
+            },
+        }
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_text()
+        assert closed.value.code == CLOSE_PROTOCOL_MISMATCH
+    assert app.state.tunnel_hub.get(ORG) is None
+
+
+def test_tampered_connector_version_fails_signature_not_version_negotiation(
+    client, clock, root, app,
+):
+    register(client, clock, root, org_uuid=ORG)
+    serve_key = KeyPair.generate()
+    cert = _serve_cert(root, serve_key)
+    payload = json.loads(build_tunnel_hello(
+        serve_key, cert, org=ORG, ts=clock.now))
+    payload["v"] = HELLO_VERSION - 1  # signature still covers HELLO_VERSION
+
+    with client.websocket_connect(f"/t/{ORG}") as ws:
+        ws.send_text(json.dumps(payload))
+        reply = ws.receive_json()
+        assert reply["ok"] is False
+        assert isinstance(reply["error"], str)
+        assert "signature" in reply["error"].lower()
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_text()
+        assert closed.value.code == CLOSE_UNAUTHENTICATED
+    assert app.state.tunnel_hub.get(ORG) is None
 
 
 def test_create_link_mints_org_tunnel_grant(client, clock, root):

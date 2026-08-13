@@ -94,7 +94,7 @@ from .frames import (
     encode_frame,
     new_channel_id,
 )
-from .hello import HelloError, hello_signing_input, parse_tunnel_hello
+from .hello import HELLO_VERSION, HelloError, hello_signing_input, parse_tunnel_hello
 
 RELAY_HELLO_DOMAIN = b"autonomy.network.relay.hello.v1\n"
 RELAY_HELLO_VERSION = 1
@@ -366,7 +366,7 @@ class PeerRelay:
         if replaced is not None:
             with contextlib.suppress(Exception):
                 await replaced.ws.close(code=CLOSE_REPLACED)
-        await ws.send(json.dumps({"ok": True}))
+        await ws.send(json.dumps({"ok": True, "v": HELLO_VERSION}))
 
         try:
             async for raw in ws:
