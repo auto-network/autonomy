@@ -926,30 +926,15 @@ class TestBackfillFailureModes:
 # ── TestBackfillSSEHandoff (L2.B — browser-based) ───────────────────
 
 
-class TestBackfillSSEHandoff:
-    """The _loading → _pendingSSE → flush path. Needs browser."""
-
-    @pytest.mark.skip(reason="L2.B test — requires agent-browser + live server")
-    async def test_no_duplicates_after_backfill_and_sse(self):
-        """Open session viewer page. While backfill loading, SSE events arrive
-        (same entries). After page renders, count entries. No duplicates."""
-        pass
-
-    @pytest.mark.skip(reason="L2.B test — requires agent-browser + live server")
-    async def test_no_gaps_after_backfill_and_sse(self):
-        """Same setup but SSE delivers entries AFTER backfill snapshot.
-        After flush, all entries present in order."""
-        pass
-
-
-# ── TestSSEGapRecovery L2.B ──────────────────────────────────────────
-
-
-class TestSSEGapRecoveryBrowser:
-    """Client-side gap detection + replay. Needs browser."""
-
-    @pytest.mark.skip(reason="L2.B test — requires agent-browser + live server")
-    async def test_client_detects_gap_and_replays(self):
-        """Open page, establish SSE. Simulate gap by broadcasting events
-        with non-contiguous seq. Assert client calls replay endpoint."""
-        pass
+# ── Backfill/SSE handoff + client gap replay: covered elsewhere ───────
+#
+# Three L2.B specs once lived here as skip-marked placeholders with empty
+# bodies. They are now REAL tests in test_sse_gap_recovery.py, which owns
+# the browser + live-server harness this file's in-process machinery
+# deliberately lacks:
+#   - no-duplicates / no-gaps across the backfill→SSE seam:
+#       TestBackfillSSEHandoff (exact-count + store-wide uniqueness —
+#       the recovery tests' >= assertions cannot fail on a duplicate)
+#   - client detects a gap and replays:
+#       TestSmallGapRecovery (disconnect → gap events → reconnect →
+#       high-seq trigger → replay; count, order, tool matching, banner)
