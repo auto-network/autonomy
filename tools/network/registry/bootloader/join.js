@@ -7,6 +7,9 @@
  * flow) or hands their own coding agent the install primer plus the
  * invite link. All crypto stays local/E2E; the July trust ruling that a
  * relay-served page must not run the join ceremony holds by construction.
+ * Per the operator's ingress ruling there is NO auto-detection: this
+ * page makes no network calls at all (CSP: no connect targets); both
+ * affordances always render and the user picks.
  *
  * Inputs, all read from the current URL:
  *   query     org, root_pub, invite_ref — public context from the bootloader
@@ -20,7 +23,6 @@
   "use strict";
 
   var LOCAL_NODE = "https://localhost:8080";
-  var PROBE_TIMEOUT_MS = 1500;
 
   function $(id) { return document.getElementById(id); }
 
@@ -77,26 +79,6 @@
       "#" + fragment.toString();
   }
 
-  function probeLocalNode() {
-    // Best-effort ONLY: from an https page a self-signed local cert makes
-    // this fail indistinguishably from no-node, so the page always shows
-    // both affordances and a success merely swaps the emphasis.
-    var controller = new AbortController();
-    var timer = setTimeout(function () { controller.abort(); },
-                           PROBE_TIMEOUT_MS);
-    return fetch(LOCAL_NODE + "/api/ping", {
-      signal: controller.signal,
-      mode: "cors",
-      credentials: "omit",
-    }).then(function (response) {
-      clearTimeout(timer);
-      return response.ok;
-    }).catch(function () {
-      clearTimeout(timer);
-      return false;
-    });
-  }
-
   function render() {
     var inputs = readInputs();
     if (!looksComplete(inputs)) {
@@ -124,19 +106,6 @@
       }
     });
 
-    probeLocalNode().then(function (alive) {
-      if (!alive) return;
-      // Hint-grade copy only: the probe cannot PROVE availability
-      // (cross-origin opacity, untrusted local TLS, Private Network
-      // Access) — successful navigation is the proof (relay review).
-      $("node-title").textContent =
-        "This machine may be running Autonomy — the link below will tell you for sure";
-      var main = document.querySelector("main");
-      var node = $("node-panel");
-      var agent = $("agent-panel");
-      node.parentNode.insertBefore(node, agent);
-      main.setAttribute("id", "node-first");
-    });
   }
 
   if (document.readyState === "loading") {

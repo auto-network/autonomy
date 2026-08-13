@@ -39,9 +39,10 @@ class TestJoinShell:
         response = client.get("/network/join")
         csp = response.headers["content-security-policy"]
         assert "default-src 'none'" in csp
-        # Only the visitor's own local node is a permitted connect target —
-        # the probe can never exfiltrate anywhere else.
-        assert "connect-src https://localhost:8080 http://localhost:8080" in csp
+        # No connect targets AT ALL: with no connect-src carve-out,
+        # default-src 'none' means the page structurally cannot probe,
+        # forward, or exfiltrate (operator ingress ruling).
+        assert "connect-src" not in csp
         assert "frame-ancestors 'none'" in csp
         assert response.headers["cache-control"] == "no-store"
         assert response.headers["referrer-policy"] == "no-referrer"
@@ -57,18 +58,15 @@ class TestJoinShell:
 class TestClientSourceContract:
     """Structural assertions on the client code's trust properties."""
 
-    def test_bearer_is_fragment_only_and_never_sent(self):
-        # The bearer is read from location.hash and appears only in URL
-        # CONSTRUCTION (the blurb's invite link, the local-node handoff) —
-        # never in a network call. The only fetch in the file is the
-        # localhost liveness probe.
+    def test_no_network_calls_at_all(self):
+        # Operator ingress ruling: no auto-detection of any kind. The page
+        # makes zero network calls — the bearer is read from location.hash
+        # and appears only in URL CONSTRUCTION (the blurb's invite link,
+        # the local-node handoff), never in a request.
         assert "location.hash" in JOIN_JS
-        fetches = [
-            line for line in JOIN_JS.splitlines() if "fetch(" in line
-        ]
-        assert len(fetches) == 1
-        assert "/api/ping" in fetches[0]
-        assert "bearer" not in fetches[0]
+        for forbidden in ("fetch(", "xmlhttprequest", "websocket",
+                          "sendbeacon"):
+            assert forbidden not in JOIN_JS.lower(), forbidden
 
     def test_no_ceremony_code(self):
         # The July trust ruling: a relay-served page must not run the join
@@ -85,11 +83,11 @@ class TestClientSourceContract:
         assert 'location.origin + "/l/"' in JOIN_JS
         assert "auto.network" not in JOIN_JS
 
-    def test_probe_is_progressive_enhancement(self):
-        # A failed/blocked probe must leave both affordances rendered —
-        # the code path only ever swaps emphasis on success.
-        assert "PROBE_TIMEOUT_MS" in JOIN_JS
-        assert "catch" in JOIN_JS
+    def test_both_affordances_are_static(self):
+        # No probe, no emphasis swap: both ways in always render and the
+        # user picks (the ruled paste-and-explicit-action model).
+        assert "probe" not in JOIN_JS.lower()
+        assert "PROBE_TIMEOUT_MS" not in JOIN_JS
 
 
 class TestBootloaderPassThrough:
