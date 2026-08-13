@@ -773,3 +773,96 @@ class TestMixedEntryTypes:
         assert any("graph note" in s for s in result), (
             f"Semantic bash 'graph note' not found in {result}"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# TestBackfillSSEHandoff — the backfill→SSE seam delivers every entry
+# exactly once (the spec the retired test_cross_boundary placeholders
+# named; the recovery tests above assert >=, which a double-delivery
+# passes — this class is the no-duplicates guard).
+# ═══════════════════════════════════════════════════════════════════════
+
+HANDOFF_MARKERS = [f"handoff marker {n:02d}" for n in range(1, 9)]
+
+
+class TestBackfillSSEHandoff:
+    """Open the page (backfill), then deliver live events (SSE): the store
+    must end with exactly backfill + live entries, each present once, the
+    live ones in write order."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _handoff_state(cls, harness):
+        # Fresh server + page: no state from earlier classes on this worker.
+        harness.restart_server()
+        harness.open_session_page()
+
+        # Backfill settles: poll the store to a stable count.
+        baseline = None
+        for _ in range(30):
+            got = ab_eval(f"""
+                var s = Alpine.store('sessions')['{TEST_SESSION_ID}'];
+                return s ? s.entries.length : null;
+            """)
+            if got is not None and got >= len(INITIAL_ENTRIES):
+                baseline = got
+                break
+            time.sleep(0.5)
+        assert baseline is not None, "backfill never populated the store"
+
+        # Live entries over the SSE path, distinct + ordered.
+        live = [_assistant_entry(m, 30 + i) for i, m in enumerate(HANDOFF_MARKERS)]
+        harness.write_gap_events(live)
+
+        final = None
+        for _ in range(30):
+            got = ab_eval(f"""
+                var s = Alpine.store('sessions')['{TEST_SESSION_ID}'];
+                return s ? s.entries.length : null;
+            """)
+            if got is not None and got >= baseline + len(HANDOFF_MARKERS):
+                final = got
+                break
+            time.sleep(0.5)
+        assert final is not None, "live SSE entries never reached the store"
+
+        # One round-trip captures everything the assertions read: the
+        # count, an identity key per entry, and the marker order.
+        state = ab_eval(f"""
+            var s = Alpine.store('sessions')['{TEST_SESSION_ID}'];
+            var keys = [];
+            var markers = [];
+            for (var i = 0; i < s.entries.length; i++) {{
+                var e = s.entries[i];
+                keys.push((e.type || '') + '|' + (e.timestamp || '') + '|' +
+                          (typeof e.content === 'string' ? e.content : ''));
+                if (typeof e.content === 'string' &&
+                    e.content.indexOf('handoff marker') === 0) {{
+                    markers.push(e.content);
+                }}
+            }}
+            return {{ total: s.entries.length, keys: keys, markers: markers }};
+        """)
+        assert state is not None, "failed to capture handoff end state"
+        cls.baseline = baseline
+        cls.state = state
+
+    def test_no_duplicates_after_backfill_and_sse(self):
+        """Exactly backfill + live entries — a double delivery on either
+        side of the seam exceeds; >= would hide it."""
+        assert self.state["total"] == self.baseline + len(HANDOFF_MARKERS), (
+            f"expected exactly {self.baseline} backfill + "
+            f"{len(HANDOFF_MARKERS)} live entries, got {self.state['total']}"
+        )
+        keys = self.state["keys"]
+        assert len(set(keys)) == len(keys), (
+            "duplicate entries in the store: "
+            f"{[k for k in keys if keys.count(k) > 1][:4]}"
+        )
+
+    def test_no_gaps_after_backfill_and_sse(self):
+        """Every live entry arrived, in write order — a dropped or
+        reordered SSE delivery fails here."""
+        assert self.state["markers"] == HANDOFF_MARKERS, (
+            f"live entries missing or misordered: {self.state['markers']}"
+        )
