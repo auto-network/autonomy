@@ -1516,6 +1516,43 @@ async def answer_pillar_question(request: Request) -> JSONResponse:
     )
 
 
+async def _here_impl(request: Request, *, surface_id: str) -> JSONResponse:
+    """A reader on the dashboard saying "I am looking at this".
+
+    The relay has always had this; the dashboard never did, so the app showed
+    an empty list of who is here on every mission, always. Five pillars can be
+    working and it reads as abandoned, which on its own sends a reader back to
+    opening sessions one at a time.
+
+    An unidentified reader is recorded as one anonymous presence rather than
+    invented as a distinct person -- the same call the relay makes for an
+    unbound link, and for the same reason: nothing here can tell two of them
+    apart, so claiming otherwise would inflate the count with strangers.
+    """
+    identity = _resolve_visitor_identity(request)
+    who = (identity or {}).get("participant_id") or "guest:signed-out"
+    label = (identity or {}).get("participant_label") or "Someone here"
+    _heartbeat_presence(
+        surface_id, who, label,
+        kind="operator" if who == OPERATOR_PARTICIPANT_ID else "guest",
+    )
+    return JSONResponse({"presence": _surface_presence(surface_id)})
+
+
+async def mission_here(request: Request) -> JSONResponse:
+    mission_id = request.path_params["mission_id"]
+    if not db.get_mission(mission_id):
+        return JSONResponse({"error": "mission not found"}, status_code=404)
+    return await _here_impl(request, surface_id=f"mission:{mission_id}")
+
+
+async def pillar_here(request: Request) -> JSONResponse:
+    pillar_id = request.path_params["pillar_id"]
+    if not db.get_pillar(pillar_id):
+        return JSONResponse({"error": "pillar not found"}, status_code=404)
+    return await _here_impl(request, surface_id=f"pillar:{pillar_id}")
+
+
 async def _followup_impl(
     request: Request, *, mission_id: str, entry_id: str, label: str,
 ) -> JSONResponse:
@@ -1741,6 +1778,8 @@ routes: list[Route] = [
         "/api/visitor-tokens/{participant_id}/avatar",
         set_visitor_avatar, methods=["POST"],
     ),
+    Route("/api/missions/{mission_id}/here", mission_here, methods=["POST"]),
+    Route("/api/pillars/{pillar_id}/here", pillar_here, methods=["POST"]),
     Route("/api/missions/{mission_id}/questions", ask_question, methods=["POST"]),
     Route("/api/missions/{mission_id}/questions", list_conversation, methods=["GET"]),
     Route(

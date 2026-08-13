@@ -2364,3 +2364,38 @@ def test_the_screen_is_told_which_reader_it_is_for():
     assert '"me":"guest:abc"' in doc.replace(" ", "")
     anon = compose.compose_screen(mission_id).decode()
     assert '"me":null' in anon.replace(" ", "")
+
+
+def test_the_dashboard_can_say_it_is_here():
+    """The relay recorded a reader on a screen from the start; the dashboard
+    had no route to. So in the app the list of who is here was empty on every
+    mission, always -- five pillars can be working and it reads as abandoned,
+    which on its own sends a reader back to opening sessions one at a time."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    pillar = db.create_pillar(mission_id, "P", "sess", "#4ade80")
+
+    with patch.object(mc_api, "_heartbeat_presence") as beat:
+        assert client.post(f"/api/missions/{mission_id}/here").status_code == 200
+        assert client.post(f"/api/pillars/{pillar['pillar_id']}/here").status_code == 200
+
+    surfaces = [c.args[0] for c in beat.call_args_list]
+    assert surfaces == [f"mission:{mission_id}", f"pillar:{pillar['pillar_id']}"], (
+        "presence was recorded against the wrong surface"
+    )
+    # The convention the whole plugin shares: one surface per mission, one per
+    # pillar -- not one for the page.
+    assert client.post("/api/missions/nope/here").status_code == 404
+    assert client.post("/api/pillars/nope/here").status_code == 404
+
+
+def test_an_unidentified_reader_is_one_presence_not_a_new_person_each_time():
+    """Nothing here can tell two signed-out readers apart, so claiming
+    otherwise would inflate the count with strangers."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    with patch.object(mc_api, "_heartbeat_presence") as beat:
+        client.post(f"/api/missions/{mission_id}/here")
+        client.post(f"/api/missions/{mission_id}/here")
+    who = {c.args[1] for c in beat.call_args_list}
+    assert len(who) == 1, f"each visit invented a different participant: {who}"

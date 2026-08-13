@@ -187,10 +187,12 @@
       url = ownerPath(body.entry_id) + "/questions/" + body.entry_id + "/close";
       payload = {};
     } else if (op === "read" && kind === "here") {
-      // Presence has no HTTP route yet; it is decoration, and announceHere
-      // already treats an empty answer as "show nothing". Resolving quietly
-      // beats inventing a route from the client.
-      return Promise.resolve({});
+      // The relay has always recorded this and the dashboard never did, so
+      // in the app the list of who is here was empty on every mission,
+      // always -- an actively worked mission read as abandoned.
+      url = (body.pillar_id ? "/api/pillars/" + body.pillar_id
+                            : "/api/missions/" + mid) + "/here";
+      payload = {};
     } else {
       // Screens are reached by navigating, not by fetching, when there is a
       // URL to navigate to -- goto() branches before ever getting here.
