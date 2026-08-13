@@ -264,7 +264,13 @@ def _resolve_mission(target_uuid: str, grant: dict | None = None):
     # a reason instead of being offered and failing on tap.
     meta = (grant or {}).get("meta") or {}
     may_write = bool(meta.get("participant_id"))
-    document = compose.compose_screen(target_uuid, framed=True, may_write=may_write)
+    # The same bound identity the write path attributes to, handed to the
+    # composer so the screen can tell a question this guest asked from one
+    # asked of them. Display only -- _serve_write re-reads it from the grant
+    # and never from anything the page sends back.
+    document = compose.compose_screen(
+        target_uuid, framed=True, may_write=may_write,
+        viewer=meta.get("participant_id"))
     if document is None:
         return None
     return {"kind": "mission", "viewer": document}

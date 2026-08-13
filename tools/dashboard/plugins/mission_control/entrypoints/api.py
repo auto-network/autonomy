@@ -673,7 +673,7 @@ async def serve_mission_site(request: Request):
     # The SAME compose function the relay resolver calls. Two surfaces, one
     # document: a screen served here and a screen served over the channel
     # cannot drift, because there is only one place that builds one.
-    document = compose.compose_screen(mission_id)
+    document = compose.compose_screen(mission_id, viewer=_viewer_id(request))
     if document is None:
         return PlainTextResponse(
             "Mission has no site revision yet", status_code=404, headers=_NO_STORE_HEADERS
@@ -698,7 +698,8 @@ async def serve_pillar_site(request: Request):
     pillar = db.get_pillar(pillar_id)
     if not pillar or pillar["mission_id"] != mission_id:
         return PlainTextResponse("Not Found", status_code=404, headers=_NO_STORE_HEADERS)
-    document = compose.compose_screen(mission_id, pillar_id)
+    document = compose.compose_screen(
+        mission_id, pillar_id, viewer=_viewer_id(request))
     if document is None:
         return PlainTextResponse(
             "Pillar has no site revision yet", status_code=404, headers=_NO_STORE_HEADERS
@@ -841,6 +842,18 @@ def _resolve_visitor_identity(request: Request) -> dict | None:
     return db.resolve_visitor(token)
 
 
+def _viewer_id(request: Request) -> str | None:
+    """Who this screen is being drawn FOR, or None for an unidentified reader.
+
+    Used only to decide which control a question offers -- your own gets a
+    follow-up, one asked of you gets an answer. Never an authorization input:
+    every write re-resolves identity server-side, so a page rendered with the
+    wrong viewer draws the wrong button and still cannot perform it.
+    """
+    identity = _resolve_visitor_identity(request)
+    return (identity or {}).get("participant_id")
+
+
 #: The node's own operator, as a participant. One node has one operator, so
 #: this needs no allocation and no registry row — it is a constant, and the
 #: authentication behind it is what makes it true.
@@ -923,9 +936,13 @@ def _question_payload(entry: dict) -> dict:
     # what guests see. The answer itself is the only thing meant to
     # persist. See reopen_question's docstring for the same call on the
     # write side.
+    # Keyed on closed, not on answered. The two used to be the same thing;
+    # they no longer are, and it is being FINISHED WITH that ends the working
+    # trail -- an entry closed without an answer keeps no more of a diary than
+    # one closed with it.
     updates = (
         []
-        if entry["answer"] is not None
+        if entry.get("closed_at") is not None
         else [_update_payload(u) for u in db.list_conversation_updates(entry["entry_id"])]
     )
     return {
@@ -940,6 +957,11 @@ def _question_payload(entry: dict) -> dict:
         "answered_by_session": entry["answered_by_session"],
         "answered_at": entry["answered_at"],
         "relay_status": entry["relay_status"],
+        # Open or closed is its own fact now. A reader deciding whether this
+        # still wants something from anybody must not have to infer it from
+        # whether text happens to be sitting in `answer`.
+        "closed_at": entry.get("closed_at"),
+        "closed_by": entry.get("closed_by"),
         "created_at": entry["created_at"],
         "retired_at": entry.get("retired_at"),
         "retired_note": entry.get("retired_note"),
@@ -1142,6 +1164,28 @@ async def handle_relay_write(participant_id: str, mission_id: str, body: dict) -
             return None
         entry = db.reopen_question(mission_id, entry_id, followup, participant_label)
         event = "reopened"
+    elif kind in ("followup", "close"):
+        # ONLY YOUR OWN. Adding to a question and closing one are the asker's
+        # moves; a channel is bound to one identity, and without this check
+        # any guest could amend or close anybody else's question on a mission
+        # they can merely see. The identity compared here is the one the relay
+        # resolved from the grant -- never a value out of this body.
+        entry_id = body.get("entry_id")
+        if not isinstance(entry_id, str) or not entry_id:
+            return None
+        existing = db.get_question(mission_id, entry_id)
+        if not existing or existing["asked_by_participant_id"] != participant_id:
+            return None
+        if kind == "close":
+            entry = db.close_question(mission_id, entry_id, participant_label)
+            event = "closed"
+        else:
+            followup = body.get("followup")
+            if not isinstance(followup, str) or not followup.strip():
+                return None
+            entry = db.followup_question(
+                mission_id, entry_id, followup, participant_label)
+            event = "followed-up"
     else:
         return None
 
@@ -1154,9 +1198,15 @@ async def handle_relay_write(participant_id: str, mission_id: str, body: dict) -
     )
     # Fire-and-forget, same contract as the HTTP path's BackgroundTask: a
     # slow/hung CrossTalk send must never stall the guest's response.
-    asyncio.create_task(
-        _relay_question(mission_id=mission_id, entry_id=entry["entry_id"])
-    )
+    #
+    # Not on close. Every other kind leaves a coordinator holding a question
+    # that has changed under them and needing to be told; a closed entry wants
+    # nothing from anybody, and relaying it would ask for an answer to a
+    # question that has just stopped being asked.
+    if event != "closed":
+        asyncio.create_task(
+            _relay_question(mission_id=mission_id, entry_id=entry["entry_id"])
+        )
     return {"question": entry_payload}
 
 
@@ -1204,6 +1254,21 @@ def _mission_presence(mission_id: str) -> list[dict]:
             "heartbeat_at": payload.get("heartbeat_at"),
         })
     return out
+
+
+def _reader_kwargs(participant_id: str | None) -> dict:
+    """What a composed screen must be told about the reader it is FOR.
+
+    Navigating between screens over a link went through this path and passed
+    neither, so moving to another pillar lost who you were -- your own
+    questions started offering to answer themselves again -- and offered a
+    composer on an unbound link that _serve_write would always refuse. The
+    entry document got both right; every screen after it did not.
+
+    may_write mirrors _serve_write's own rule exactly: no bound participant,
+    no writing.
+    """
+    return {"may_write": bool(participant_id), "viewer": participant_id}
 
 
 async def handle_relay_read(participant_id: str, mission_id: str, body: dict) -> dict | None:
@@ -1262,7 +1327,8 @@ async def handle_relay_read(participant_id: str, mission_id: str, body: dict) ->
     if kind == "mission_site":
         # The way back. Navigation could reach every pillar and never the
         # screen it started on, because only pillars had a read.
-        document = compose.compose_screen(mission_id, framed=True)
+        document = compose.compose_screen(
+            mission_id, framed=True, **_reader_kwargs(participant_id))
         if document is None:
             return None
         return {"document": document.decode("utf-8")}
@@ -1274,7 +1340,8 @@ async def handle_relay_read(participant_id: str, mission_id: str, body: dict) ->
         pillar_id = body.get("pillar_id")
         if _pillar_of_this_mission(pillar_id, mission_id) is None:
             return None
-        document = compose.compose_screen(mission_id, pillar_id, framed=True)
+        document = compose.compose_screen(
+            mission_id, pillar_id, framed=True, **_reader_kwargs(participant_id))
         if document is None:
             return None
         return {"pillar_id": pillar_id, "document": document.decode("utf-8")}
@@ -1449,6 +1516,110 @@ async def answer_pillar_question(request: Request) -> JSONResponse:
     )
 
 
+async def _followup_impl(
+    request: Request, *, mission_id: str, entry_id: str, label: str,
+) -> JSONResponse:
+    """The asker adding to their own still-open question.
+
+    Not an answer and not a new question -- it amends what is being asked,
+    because the record is one question and one answer. Relay goes back to
+    pending: the coordinator was sent a question that is no longer the one on
+    the record, so they are told again.
+    """
+    body = await request.json()
+    followup = body.get("followup")
+    if not isinstance(followup, str) or not followup.strip():
+        return JSONResponse({"error": "followup is required"}, status_code=400)
+    entry = db.followup_question(mission_id, entry_id, followup, label)
+    if entry is None:
+        return JSONResponse(
+            {"error": "not found, or already closed"}, status_code=404)
+    payload = _question_payload(entry)
+    await _publish_conversation_event(
+        "followed-up", mission_id, entry.get("pillar_id"), entry_id,
+        question=payload,
+    )
+    return JSONResponse(
+        {"question": payload},
+        background=BackgroundTask(
+            _relay_question, mission_id=mission_id, entry_id=entry_id),
+    )
+
+
+async def _close_impl(
+    request: Request, *, mission_id: str, entry_id: str, closed_by: str,
+) -> JSONResponse:
+    """Close an entry without answering it.
+
+    For a question that stopped needing an answer. Writing one just to close
+    it would put words in the record nobody said.
+    """
+    entry = db.close_question(mission_id, entry_id, closed_by)
+    if entry is None:
+        return JSONResponse(
+            {"error": "not found, or already closed"}, status_code=404)
+    payload = _question_payload(entry)
+    await _publish_conversation_event(
+        "closed", mission_id, entry.get("pillar_id"), entry_id, question=payload,
+    )
+    return JSONResponse({"question": payload})
+
+
+async def followup_question(request: Request) -> JSONResponse:
+    mission_id = request.path_params["mission_id"]
+    if not db.get_mission(mission_id):
+        return JSONResponse({"error": "mission not found"}, status_code=404)
+    identity = _operator_identity(request)
+    if not identity:
+        return JSONResponse({"error": "identity required"}, status_code=403)
+    return await _followup_impl(
+        request, mission_id=mission_id,
+        entry_id=request.path_params["entry_id"],
+        label=identity["participant_label"],
+    )
+
+
+async def followup_pillar_question(request: Request) -> JSONResponse:
+    pillar = db.get_pillar(request.path_params["pillar_id"])
+    if not pillar:
+        return JSONResponse({"error": "pillar not found"}, status_code=404)
+    identity = _operator_identity(request)
+    if not identity:
+        return JSONResponse({"error": "identity required"}, status_code=403)
+    return await _followup_impl(
+        request, mission_id=pillar["mission_id"],
+        entry_id=request.path_params["entry_id"],
+        label=identity["participant_label"],
+    )
+
+
+async def close_question(request: Request) -> JSONResponse:
+    mission_id = request.path_params["mission_id"]
+    mission = db.get_mission(mission_id)
+    if not mission:
+        return JSONResponse({"error": "mission not found"}, status_code=404)
+    identity = _operator_identity(request)
+    return await _close_impl(
+        request, mission_id=mission_id,
+        entry_id=request.path_params["entry_id"],
+        closed_by=(identity or {}).get("participant_label")
+        or mission.get("coordinator_session") or "",
+    )
+
+
+async def close_pillar_question(request: Request) -> JSONResponse:
+    pillar = db.get_pillar(request.path_params["pillar_id"])
+    if not pillar:
+        return JSONResponse({"error": "pillar not found"}, status_code=404)
+    identity = _operator_identity(request)
+    return await _close_impl(
+        request, mission_id=pillar["mission_id"],
+        entry_id=request.path_params["entry_id"],
+        closed_by=(identity or {}).get("participant_label")
+        or pillar.get("coordinator_session") or "",
+    )
+
+
 async def _reopen_question_impl(
     request: Request, *, mission_id: str, pillar_id: str | None, entry_id: str,
 ) -> JSONResponse:
@@ -1581,6 +1752,14 @@ routes: list[Route] = [
         answer_question, methods=["POST"],
     ),
     Route(
+        "/api/missions/{mission_id}/questions/{entry_id}/followup",
+        followup_question, methods=["POST"],
+    ),
+    Route(
+        "/api/missions/{mission_id}/questions/{entry_id}/close",
+        close_question, methods=["POST"],
+    ),
+    Route(
         "/api/missions/{mission_id}/questions/{entry_id}/update",
         add_question_update, methods=["POST"],
     ),
@@ -1625,6 +1804,14 @@ routes: list[Route] = [
     Route(
         "/api/pillars/{pillar_id}/questions/{entry_id}/answer",
         answer_pillar_question, methods=["POST"],
+    ),
+    Route(
+        "/api/pillars/{pillar_id}/questions/{entry_id}/followup",
+        followup_pillar_question, methods=["POST"],
+    ),
+    Route(
+        "/api/pillars/{pillar_id}/questions/{entry_id}/close",
+        close_pillar_question, methods=["POST"],
     ),
     Route(
         "/api/pillars/{pillar_id}/questions/{entry_id}/update",
