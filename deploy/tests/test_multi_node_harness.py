@@ -243,8 +243,12 @@ def test_full_phase_machine_is_redrivable_secret_safe_and_tears_down(
     ]
 
     # A PASS is self-evidencing (auto-qqlz5): the driver PRINTS the values
-    # it asserts, and container logs are captured on success too.
+    # it asserts, and container logs are captured on success too. The
+    # transcript also names the code it proves (instance.commit).
     evidence = "\n".join(announced)
+    assert any(
+        line.startswith("harness source commit: ") for line in announced
+    )
     assert "join context served: status=ok granted_role=member" in evidence
     assert "relay serving evidence: link_sessions live=1 ever=2" in evidence
     assert "node-b staged pending claim: state=pending have=0 need=2" in evidence
