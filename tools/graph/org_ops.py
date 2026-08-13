@@ -753,6 +753,66 @@ def _seal_org_root_setting(slug: str, org_root, personal_seed: bytes) -> None:
     )
 
 
+def store_sealed_org_key(slug: str, sealed_payload: dict) -> None:
+    """Persist an org root key SEALED IN THE BROWSER (I1) — the client-driven
+    counterpart to :func:`_seal_org_root_setting`. The browser generates the org
+    root and seals it to the owner's derived encapsulation key locally, then
+    submits only the sealed material: no root plaintext and no passphrase ever
+    reach the server.
+
+    Stored at ``raw`` (a secret's home): the sealed org key is owner-local and
+    must never reach the cross-org read-through surface. Every reader is
+    owning-DB-only (``read_owned_set``), so raw is both correct and reader-safe
+    — the legacy server-side seal wrote ``canonical`` (harmless only because no
+    federated reader exists; the browser path does it right).
+
+    Idempotent (upsert): the seal-first-then-fold retry path may resubmit the
+    same sealed key after a founding that failed before the fold, so resubmitting
+    must be a no-op.
+    """
+    from . import settings_ops
+    from .schemas.network_identity import (
+        NETWORK_ORG_KEY_REVISION_2,
+        NETWORK_ORG_KEY_SET_ID,
+        ORG_ROOT_ARMOR_PURPOSE,
+    )
+
+    if not isinstance(sealed_payload, dict):
+        raise OrgError("sealed org-key payload must be an object")
+    required = ("root_pub", "sealed_root_key", "owner_kem_pub", "seal_purpose")
+    missing = [
+        k for k in required
+        if not isinstance(sealed_payload.get(k), str) or not sealed_payload.get(k)
+    ]
+    if missing:
+        raise OrgError(f"sealed org-key payload missing/empty fields: {missing}")
+    for k in ("root_pub", "sealed_root_key", "owner_kem_pub"):
+        try:
+            bytes.fromhex(sealed_payload[k])
+        except ValueError as e:
+            raise OrgError(f"sealed org-key field {k!r} must be hex") from e
+    if sealed_payload["seal_purpose"] != ORG_ROOT_ARMOR_PURPOSE:
+        raise OrgError(
+            f"seal_purpose must be {ORG_ROOT_ARMOR_PURPOSE!r}, "
+            f"got {sealed_payload['seal_purpose']!r}"
+        )
+    if get_org(slug) is None:
+        raise OrgNotFoundError(f"org shell does not exist: {slug}")
+
+    settings_ops.upsert_by_key(
+        NETWORK_ORG_KEY_SET_ID,
+        NETWORK_ORG_KEY_REVISION_2,
+        "default",
+        {
+            "root_pub": sealed_payload["root_pub"],
+            "sealed_root_key": sealed_payload["sealed_root_key"],
+            "owner_kem_pub": sealed_payload["owner_kem_pub"],
+            "seal_purpose": ORG_ROOT_ARMOR_PURPOSE,
+        },
+        org=slug,
+    )
+
+
 @dataclass
 class RetrofitReport:
     """Per-org outcomes of :func:`retrofit_found_ledgers`."""
