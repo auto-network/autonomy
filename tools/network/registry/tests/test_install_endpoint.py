@@ -15,6 +15,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[4]
 INSTALL_DIR = REPO / "deploy" / "install"
+DEPLOY_SCRIPT = REPO / "tools" / "network" / "registry" / "deploy" / "deploy.sh"
 
 
 class TestInstallNegotiation:
@@ -54,6 +55,12 @@ class TestInstallNegotiation:
 
 
 class TestInstallSubDocuments:
+    def test_deploy_copies_canonical_install_tree(self):
+        """The production service is an rsync tree, not a full checkout."""
+        script = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+        assert '"$REPO_ROOT/deploy/install"' in script
+        assert '"$TARGET:$APP_DIR/deploy/"' in script
+
     def test_every_repo_doc_is_served(self, client):
         docs = sorted(
             p.relative_to(INSTALL_DIR).as_posix()
