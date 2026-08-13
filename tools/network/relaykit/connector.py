@@ -203,7 +203,14 @@ async def serve_channel(key: KeyPair, cert: DelegationCert, *, org: str, token: 
 
     try:
         while True:
-            record = await recv()
+            receive_timeout = getattr(channel_handler, "receive_timeout", None)
+            if receive_timeout is None:
+                record = await recv()
+            else:
+                timeout = receive_timeout()
+                if inspect.isawaitable(timeout):
+                    raise TypeError("channel receive timeout must be synchronous")
+                record = await asyncio.wait_for(recv(), timeout=timeout)
             if record is None:
                 return
             message = crypto.open_record(record)
@@ -223,6 +230,19 @@ async def serve_channel(key: KeyPair, cert: DelegationCert, *, org: str, token: 
                         await send(out)
             finally:
                 await response_messages.aclose()
+            # A stateful capability can transfer ownership only after every
+            # encrypted record in its response has actually reached the
+            # transport.  Keep this hook synchronous: after the final send
+            # await returns, no cancellation can interleave with an
+            # event-loop-local ownership change.  A true result closes the
+            # short-lived capability channel immediately.
+            sent = getattr(channel_handler, "on_response_sent", None)
+            if sent is not None:
+                close_after_response = sent()
+                if inspect.isawaitable(close_after_response):
+                    raise TypeError("channel response confirmation must be synchronous")
+                if close_after_response:
+                    return
     finally:
         close = getattr(channel_handler, "aclose", None)
         if close is not None:
@@ -647,6 +667,12 @@ class TunnelConnector:
                 handler=self._handler,
             )
         except Exception:  # HandshakeError, RecordError, transport failures
+            with contextlib.suppress(Exception):
+                await send_frame(FRAME_CLOSE, channel_id)
+        else:
+            # Normal completion can be server-initiated (the bounded ICE
+            # exchange is the first case). Tell the registry to close its
+            # viewer side instead of relying on a cooperative viewer to do it.
             with contextlib.suppress(Exception):
                 await send_frame(FRAME_CLOSE, channel_id)
         finally:

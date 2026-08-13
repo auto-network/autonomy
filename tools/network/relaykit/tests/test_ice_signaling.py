@@ -70,6 +70,12 @@ def test_duplicate_json_key_is_refused_before_interpretation():
                       ATTEMPT.encode() + b'"}')
 
 
+def test_pathologically_deep_json_is_a_typed_signaling_error():
+    raw = (b'{"v":' + b'[' * 10_000 + b'0' + b']' * 10_000 + b'}')
+    with pytest.raises(IceSignalingError, match="valid JSON"):
+        parse_message(raw)
+
+
 def test_public_direct_candidates_allow_mdns_reflexive_and_relay():
     lines = [
         "candidate:1 1 udp 2122260223 host-a.local 50000 typ host generation 0",
@@ -194,10 +200,11 @@ def test_total_attempt_byte_budget_includes_begin_and_offer():
 
 
 @pytest.mark.asyncio
-async def test_session_emits_frozen_config_then_one_answer_and_closes_adapter():
+async def test_session_transfers_only_after_terminal_answer_is_confirmed_sent():
     class Adapter:
         def __init__(self):
             self.closed = False
+            self.transferred = False
             self.seen = None
 
         async def answer(self, offer, *, timeout):
@@ -213,8 +220,11 @@ async def test_session_emits_frozen_config_then_one_answer_and_closes_adapter():
         async def aclose(self):
             self.closed = True
 
+        def transfer(self):
+            self.transferred = True
+
     adapter = Adapter()
-    capacity = IceCapacity(1)
+    capacity = IceCapacity(4, per_token_limit=2)
     session = IceSignalingSession(
         token="a" * 32,
         policy="direct_allowed",
@@ -237,6 +247,7 @@ async def test_session_emits_frozen_config_then_one_answer_and_closes_adapter():
         "expires_at": 2000,
     }
     assert capacity.active == 1
+    assert session.on_response_sent() is False
 
     answer_reply = json.loads(await session(
         "a" * 32,
@@ -251,6 +262,11 @@ async def test_session_emits_frozen_config_then_one_answer_and_closes_adapter():
     assert answer_reply["op"] == "ice.answer"
     assert "a=candidate:" not in answer_reply["sdp"]
     assert len(answer_reply["candidates"]) == 1
+    assert adapter.transferred is False
+    assert capacity.active == 1
+    assert session.on_response_sent() is True
+    assert adapter.transferred is True
+    assert capacity.active == 0
     with pytest.raises(IceSignalingError, match="complete"):
         await session("a" * 32, json.dumps({
             "v": 1, "op": "ice.offer", "attempt_id": ATTEMPT,
@@ -258,13 +274,60 @@ async def test_session_emits_frozen_config_then_one_answer_and_closes_adapter():
         }).encode())
 
     await session.aclose()
+    assert adapter.closed is False
+    assert capacity.active == 0
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_answer_remains_session_owned_and_is_closed():
+    class Adapter:
+        def __init__(self):
+            self.closed = False
+            self.transferred = False
+
+        async def answer(self, offer, *, timeout):
+            return IceAnswer(sdp="v=0\r\n", candidates=())
+
+        async def aclose(self):
+            self.closed = True
+
+        def transfer(self):
+            self.transferred = True
+
+    adapter = Adapter()
+    capacity = IceCapacity(2, per_token_limit=1)
+    session = IceSignalingSession(
+        token="a" * 32,
+        policy="direct_allowed",
+        configuration_provider=lambda token, policy: configuration(),
+        responder_factory=lambda config, policy: adapter,
+        capacity=capacity,
+        monotonic=lambda: 10.0,
+        wall_clock=lambda: 1000,
+    )
+    await session(
+        "a" * 32,
+        json.dumps({"v": 1, "op": "ice.begin", "attempt_id": ATTEMPT}).encode(),
+    )
+    assert session.on_response_sent() is False
+    await session(
+        "a" * 32,
+        json.dumps({
+            "v": 1, "op": "ice.offer", "attempt_id": ATTEMPT,
+            "sdp": "v=0\r\n", "candidates": [],
+        }).encode(),
+    )
+    # This models transport failure or cancellation before the connector's
+    # post-send confirmation hook runs.
+    await session.aclose()
+    assert adapter.transferred is False
     assert adapter.closed is True
     assert capacity.active == 0
 
 
 @pytest.mark.asyncio
 async def test_capacity_exhaustion_refuses_upgrade_without_affecting_other_session():
-    capacity = IceCapacity(1)
+    capacity = IceCapacity(3, per_token_limit=1)
     first = IceSignalingSession(
         token="a" * 32,
         policy="direct_allowed",
@@ -288,8 +351,22 @@ async def test_capacity_exhaustion_refuses_upgrade_without_affecting_other_sessi
     with pytest.raises(IceSignalingError, match="capacity"):
         await second("a" * 32, begin)
     assert capacity.active == 1
+
+    other_token = "b" * 32
+    other = IceSignalingSession(
+        token=other_token,
+        policy="direct_allowed",
+        configuration_provider=lambda token, policy: configuration(),
+        responder_factory=lambda config, policy: None,
+        capacity=capacity,
+        monotonic=lambda: 10.0,
+        wall_clock=lambda: 1000,
+    )
+    await other(other_token, begin)
+    assert capacity.active == 2
     await first.aclose()
     await second.aclose()
+    await other.aclose()
     assert capacity.active == 0
 
 
@@ -308,7 +385,7 @@ async def test_timeout_cancels_answer_and_teardown_releases_capacity():
             self.closed = True
 
     adapter = SlowAdapter()
-    capacity = IceCapacity(1)
+    capacity = IceCapacity(2, per_token_limit=1)
     session = IceSignalingSession(
         token="a" * 32,
         policy="direct_allowed",
@@ -323,6 +400,7 @@ async def test_timeout_cancels_answer_and_teardown_releases_capacity():
         "a" * 32,
         json.dumps({"v": 1, "op": "ice.begin", "attempt_id": ATTEMPT}).encode(),
     )
+    assert session.on_response_sent() is False
     with pytest.raises(asyncio.TimeoutError):
         await session(
             "a" * 32,

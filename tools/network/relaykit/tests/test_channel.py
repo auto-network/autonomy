@@ -26,6 +26,14 @@ from tools.network.relaykit.frames import (
     split_viewer_message,
 )
 from tools.network.relaykit.connector import serve_channel
+from tools.network.relaykit.ice_signaling import (
+    IceAnswer,
+    IceCapacity,
+    IceConfiguration,
+    IceSignalingSession,
+    STUN_URL,
+    TURN_URLS,
+)
 
 from .conftest import ORG, TOKEN
 
@@ -489,3 +497,172 @@ async def test_serve_channel_isolates_and_closes_per_connection_handler_state(
     await task
     assert len(opened) == 1
     assert opened[0].closed is True
+
+
+def _test_ice_configuration():
+    return IceConfiguration(
+        ice_servers=(
+            {"urls": [STUN_URL]},
+            {
+                "urls": list(TURN_URLS),
+                "username": "2000:synthetic-test-user",
+                "credential": "synthetic-test-credential",
+                "credentialType": "password",
+            },
+        ),
+        expires_at=2000,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_terminal_send", [False, True])
+async def test_serve_channel_transfers_ice_only_after_terminal_wire_send(
+    root, session_key, session_cert, now, fail_terminal_send
+):
+    """The transport confirmation is the ownership linearization point."""
+    to_server: asyncio.Queue = asyncio.Queue()
+    from_server: asyncio.Queue = asyncio.Queue()
+    capacity = IceCapacity(2, per_token_limit=1)
+
+    class Adapter:
+        def __init__(self):
+            self.transferred = False
+            self.closed = False
+
+        async def answer(self, offer, *, timeout):
+            return IceAnswer(sdp="v=0\r\n", candidates=())
+
+        def transfer(self):
+            self.transferred = True
+
+        async def aclose(self):
+            self.closed = True
+
+    adapter = Adapter()
+
+    class Factory:
+        def for_channel(self, token):
+            return IceSignalingSession(
+                token=token,
+                policy="direct_allowed",
+                configuration_provider=lambda _token, _policy: _test_ice_configuration(),
+                responder_factory=lambda _config, _policy: adapter,
+                capacity=capacity,
+                wall_clock=lambda: 1000,
+            )
+
+    async def recv():
+        return await to_server.get()
+
+    sends = 0
+
+    async def send(payload):
+        nonlocal sends
+        sends += 1
+        kind, record = split_viewer_message(payload)
+        assert kind == VIEWER_KIND_RECORD
+        # SERVER_HELLO, config record, then terminal answer record.
+        if fail_terminal_send and sends == 3:
+            raise OSError("synthetic terminal transport failure")
+        await from_server.put(record)
+
+    client_priv, client_hello = build_client_hello()
+    client_eph = parse_client_hello(client_hello)
+    await to_server.put(client_hello)
+    task = asyncio.create_task(serve_channel(
+        session_key, session_cert, org=ORG, token=TOKEN,
+        recv=recv, send=send, handler=Factory(),
+    ))
+    server_hello = await from_server.get()
+    server_eph, transcript_hash = verify_server_hello(
+        server_hello, root_pub=root.public_hex, org=ORG, token=TOKEN,
+        client_eph=client_eph, now=now,
+    )
+    client = ChannelCrypto.client(client_priv, server_eph, transcript_hash)
+
+    async def exchange(value):
+        for record in client.seal_message(canonical_json(value)):
+            await to_server.put(record)
+        response = None
+        while response is None:
+            response = client.open_record(await from_server.get())
+        return json.loads(response)
+
+    config = await exchange({"v": 1, "op": "ice.begin", "attempt_id": "ab" * 16})
+    assert config["op"] == "ice.config"
+    offer = {
+        "v": 1, "op": "ice.offer", "attempt_id": "ab" * 16,
+        "sdp": "v=0\r\n", "candidates": [],
+    }
+    if fail_terminal_send:
+        for record in client.seal_message(canonical_json(offer)):
+            await to_server.put(record)
+        with pytest.raises(OSError, match="terminal transport failure"):
+            await task
+        assert adapter.transferred is False
+        assert adapter.closed is True
+    else:
+        answer = await exchange(offer)
+        assert answer["op"] == "ice.answer"
+        await task
+        assert adapter.transferred is True
+        assert adapter.closed is False
+    assert capacity.active == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("send_begin", [False, True])
+async def test_serve_channel_deadline_closes_silent_signaling_peer(
+    root, session_key, session_cert, now, send_begin
+):
+    """Silence before begin or after config cannot retain a coroutine/cap."""
+    to_server: asyncio.Queue = asyncio.Queue()
+    from_server: asyncio.Queue = asyncio.Queue()
+    capacity = IceCapacity(2, per_token_limit=1)
+
+    class Factory:
+        def for_channel(self, token):
+            return IceSignalingSession(
+                token=token,
+                policy="direct_allowed",
+                configuration_provider=lambda _token, _policy: _test_ice_configuration(),
+                responder_factory=lambda _config, _policy: None,
+                capacity=capacity,
+                wall_clock=lambda: 1000,
+                deadline_seconds=0.2,
+            )
+
+    async def recv():
+        return await to_server.get()
+
+    async def send(payload):
+        kind, record = split_viewer_message(payload)
+        assert kind == VIEWER_KIND_RECORD
+        await from_server.put(record)
+
+    client_priv, client_hello = build_client_hello()
+    client_eph = parse_client_hello(client_hello)
+    await to_server.put(client_hello)
+    task = asyncio.create_task(serve_channel(
+        session_key, session_cert, org=ORG, token=TOKEN,
+        recv=recv, send=send, handler=Factory(),
+    ))
+    server_hello = await from_server.get()
+    server_eph, transcript_hash = verify_server_hello(
+        server_hello, root_pub=root.public_hex, org=ORG, token=TOKEN,
+        client_eph=client_eph, now=now,
+    )
+    client = ChannelCrypto.client(client_priv, server_eph, transcript_hash)
+    if send_begin:
+        for record in client.seal_message(canonical_json({
+            "v": 1, "op": "ice.begin", "attempt_id": "ab" * 16,
+        })):
+            await to_server.put(record)
+        response = None
+        while response is None:
+            response = client.open_record(await from_server.get())
+        assert json.loads(response)["op"] == "ice.config"
+        assert capacity.active == 1
+    with pytest.raises(asyncio.TimeoutError):
+        await task
+    assert capacity.active == 0

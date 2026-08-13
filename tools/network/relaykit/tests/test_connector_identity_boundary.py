@@ -9,7 +9,12 @@ import time
 from tools.network.idkit import DelegationCert, KeyPair, Subject, issue_cert
 from tools.network.relaykit.channel import build_client_hello
 from tools.network.relaykit.connector import TunnelConnector
-from tools.network.relaykit.frames import FRAME_DATA, VIEWER_KIND_RECORD, split_viewer_message
+from tools.network.relaykit.frames import (
+    FRAME_CLOSE,
+    FRAME_DATA,
+    VIEWER_KIND_RECORD,
+    split_viewer_message,
+)
 from tools.network.relaykit.hello import HELLO_VERSION
 
 
@@ -89,6 +94,7 @@ def test_actual_registry_and_viewer_hello_bytes_use_distinct_certificates():
         if frame_type == FRAME_DATA
     ]
     assert viewer_payloads
+    assert sum(frame_type == FRAME_CLOSE for frame_type, _channel_id, _payload in emitted) == 1
     kind, server_hello_bytes = split_viewer_message(viewer_payloads[0])
     assert kind == VIEWER_KIND_RECORD
     assert PERSONA.encode("ascii") not in server_hello_bytes
