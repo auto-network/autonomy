@@ -162,15 +162,21 @@ def main() -> int:
             "provenance": {"session": spec.get("provenance_session")},
         }
     session = spec.get("session", f"evidence-{capture_id}")
+    sessions_used = set()
 
     failed = False
     for i, step in enumerate(spec["steps"], start=start_seq):
         slug = step.get("slug", f"step{i}")
         shot = steps_dir / f"{i:02d}-{slug}.png"
         status = "ok"
+        # Multi-device ceremonies: a step may run in its own named browser
+        # session ("device-a", "device-b"); screenshots interleave into one
+        # gallery in ceremony order.
+        step_session = step.get("session", session)
+        sessions_used.add(step_session)
         for action in step.get("actions", []):
             argv = [substitute(a, spec) for a in action]
-            proc = run_ab(argv, session)
+            proc = run_ab(argv, step_session)
             if proc.returncode != 0:
                 status = "failed"
                 step_err = proc.stderr.strip() or proc.stdout.strip()
@@ -179,7 +185,7 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 break
-        shot_proc = run_ab(["screenshot", str(shot)], session)
+        shot_proc = run_ab(["screenshot", str(shot)], step_session)
         if shot_proc.returncode != 0 and status == "ok":
             status = "failed"
             print(f"step {i} ({slug}): screenshot failed: {shot_proc.stderr.strip()}", file=sys.stderr)
@@ -188,6 +194,8 @@ def main() -> int:
             "file": f"steps/{shot.name}",
             "caption": step["caption"],
         }
+        if step_session != session:
+            entry["session"] = step_session
         if status != "ok":
             entry["status"] = "failed"
         manifest["steps"].append(entry)
@@ -196,7 +204,8 @@ def main() -> int:
             break
 
     if not args.keep_open:
-        run_ab(["close"], session)
+        for s in sessions_used:
+            run_ab(["close"], s)
 
     (capture_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     write_gallery(capture_dir, manifest)
