@@ -218,6 +218,34 @@
     render();
   }
 
+  // A pillar's own claim about its work. The status line shown on its card is
+  // replaced, its age resets because something just happened, and the feed
+  // gains an entry -- the feed is what the reader opens to see the sequence.
+  function applyActivity(data) {
+    var p = (state.pillars || []).filter(function (x) {
+      return x.pillar_id === data.pillar_id;
+    })[0];
+    if (data.event === "status") {
+      if (p) { p.last_done = data.text; p.age = "just now"; }
+      state.status_posts = state.status_posts || [];
+      state.status_posts.unshift({
+        post_id: "live-" + (data.at || Math.random()),
+        pillar_id: data.pillar_id,
+        pillar_name: data.pillar_name || (p && p.name) || "",
+        color: data.color || (p && p.color) || "",
+        text: data.text || "",
+        ago: "just now",
+      });
+    } else if (data.event === "revision") {
+      // A new screen is why the age exists: it is the answer to "when did
+      // this pillar last do something visible".
+      if (p) p.age = "just now";
+    } else {
+      return;                       // an event kind we do not render
+    }
+    render();
+  }
+
   // ---- live updates at a real URL -----------------------------------------
   // The framed path is handed events over its channel. At a real URL nothing
   // fed applyEvent at all, so a screen showed whatever was true when it
@@ -238,6 +266,16 @@
     } catch (_e) {
       return;    // no stream is the status quo, not a failure worth showing
     }
+    // Work landing, not conversation: a pillar wrote its status line or
+    // published a new screen. Without this a live page shows people talking
+    // and never shows anything being done, which is most of what there is to
+    // see on a mission.
+    source.addEventListener("mission_control:activity", function (e) {
+      var data;
+      try { data = JSON.parse(e.data); } catch (_err) { return; }
+      if (!data || data.mission_id !== state.mission_id) return;
+      applyActivity(data);
+    });
     source.addEventListener("mission_control:conversation", function (e) {
       var data;
       try { data = JSON.parse(e.data); } catch (_err) { return; }
