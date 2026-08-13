@@ -179,3 +179,111 @@ def test_cli_requires_a_password(env, monkeypatch, capsys):
     assert excinfo.value.code == 2
     assert "personal-identity password" in capsys.readouterr().err
     assert all(o.slug != "acme" for o in org_ops.list_orgs())
+
+
+# ── the persona record (auto-6n3we) ──────────────────────────
+
+
+def _persona_rows():
+    from tools.graph.schemas.network_identity import NETWORK_PERSONA_SET_ID
+
+    return [
+        m
+        for m in settings_ops.read_owned_set(NETWORK_PERSONA_SET_ID, org=None).members
+        if isinstance(m.payload, dict)
+    ]
+
+
+def test_founding_records_the_persona_keyed_by_genesis(env):
+    """The founder's persona is written down at the one moment it is free.
+
+    It is derived during founding and was previously discarded, leaving
+    "which member am I?" answerable only by unsealing the personal seed.
+    """
+    result = org_ops.create_org_with_identity("acme", PASSWORD, root=env.orgs.parent)
+
+    rows = _persona_rows()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.key == result.genesis_id, "keyed by the genesis VALUE, not a label"
+    assert row.payload["persona_pub"] == result.founder_persona_pub
+    assert row.payload["genesis_id"] == result.genesis_id
+    assert row.payload["org_slug"] == "acme"
+    assert row.payload["source"] == "found"
+
+
+def test_the_recorded_persona_is_a_member_of_the_folded_ledger(env):
+    """Recorded, and true: the value must be one the org actually admitted."""
+    result = org_ops.create_org_with_identity("acme", PASSWORD, root=env.orgs.parent)
+
+    store = LedgerStore(org_ledger_db_path("acme", env.orgs.parent))
+    try:
+        state = store.fold()
+    finally:
+        store.close()
+    assert _persona_rows()[0].payload["persona_pub"] in state.members
+
+
+def test_the_recorded_persona_matches_a_fresh_derivation(env):
+    """Independent of the ceremony's own bookkeeping: derive it again."""
+    result = org_ops.create_org_with_identity("acme", PASSWORD, root=env.orgs.parent)
+
+    expected = derive_persona(env.personal_seed, result.genesis_id).public_hex
+    assert _persona_rows()[0].payload["persona_pub"] == expected
+
+
+def test_no_secret_material_reaches_the_persona_row(env):
+    """The one assertion that fails loudly if a later edit widens the record.
+
+    The row is public-only by design; the private half is re-derived from the
+    personal seed when a signature is actually needed.
+    """
+    result = org_ops.create_org_with_identity("acme", PASSWORD, root=env.orgs.parent)
+
+    blob = json.dumps(_persona_rows()[0].payload)
+    assert env.personal_root.private_hex not in blob
+    assert derive_persona(env.personal_seed, result.genesis_id).private_hex not in blob
+
+
+def test_founding_twice_leaves_one_row_and_refuses_a_changed_persona(env):
+    """Derivation is deterministic, so a re-record is a no-op. A DIFFERENT
+    persona under the same genesis means the seed changed underneath us —
+    overwriting would strand every record already attributed to the old one.
+    """
+    result = org_ops.create_org_with_identity("acme", PASSWORD, root=env.orgs.parent)
+
+    org_ops._record_persona_setting(
+        "acme", result.genesis_id, result.founder_persona_pub, source="found"
+    )
+    assert len(_persona_rows()) == 1
+
+    other = derive_persona(
+        bytes.fromhex(KeyPair.generate().private_hex), result.genesis_id
+    ).public_hex
+    with pytest.raises(ValueError, match="refusing to overwrite"):
+        org_ops._record_persona_setting(
+            "acme", result.genesis_id, other, source="found"
+        )
+
+
+def test_two_seeds_yield_different_personas_under_one_genesis(env):
+    """Why scope, not key, is what prevents the collision: two members of the
+    SAME org derive different personas from the same genesis. Only separate
+    per-operator stores keep them apart.
+    """
+    result = org_ops.create_org_with_identity("acme", PASSWORD, root=env.orgs.parent)
+
+    theirs = derive_persona(
+        bytes.fromhex(KeyPair.generate().private_hex), result.genesis_id
+    ).public_hex
+    assert theirs != result.founder_persona_pub
+
+
+def test_persona_pub_for_org_reads_it_back_and_refuses_to_guess(env):
+    """The read helper takes a genesis because the genesis IS the identifier.
+    An unknown one returns None — never a lookalike row.
+    """
+    result = org_ops.create_org_with_identity("acme", PASSWORD, root=env.orgs.parent)
+
+    assert org_ops.persona_pub_for_org(result.genesis_id) == result.founder_persona_pub
+    assert org_ops.persona_pub_for_org("f" * 64) is None

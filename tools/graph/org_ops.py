@@ -548,6 +548,9 @@ def create_org_with_identity(
         finally:
             store.close()
         _seal_org_root_setting(slug, org_root, personal_seed)
+        _record_persona_setting(
+            slug, founded.genesis_id, founded.founder_persona_pub, source="found"
+        )
         return OrgCeremonyResult(
             org=ref,
             root_pub=org_root.public_hex,
@@ -568,6 +571,97 @@ def create_org_with_identity(
         except Exception:
             pass
         raise
+
+
+def _record_persona_setting(
+    slug: str,
+    genesis_id: str,
+    persona_pub: str,
+    *,
+    source: str,
+    invite_ref: str | None = None,
+) -> None:
+    """Write down which persona this node holds the seed for in *slug*.
+
+    Called at the only moments the value exists without a passphrase: the
+    founding ceremony and the join claim. The ledger already records that this
+    persona is a member; what it cannot say is which member is us, because
+    that depends on who holds which seed.
+
+    ``org=None`` — deliberately, and this is the load-bearing part. That
+    resolves to personal.db, this operator's own database. Writing it into the
+    org's shared DB would put two members' different personas on one
+    (set_id, key, org) row, and each would then read the other's identity.
+    """
+    from . import settings_ops
+    from .schemas.network_identity import (
+        NETWORK_PERSONA_REVISION,
+        NETWORK_PERSONA_SET_ID,
+    )
+
+    payload = {
+        "persona_pub": persona_pub,
+        "genesis_id": genesis_id,
+        "org_slug": slug,
+        "derived_at": _now_iso(),
+        "source": source,
+    }
+    if invite_ref:
+        payload["invite_ref"] = invite_ref
+
+    existing = _persona_member(genesis_id)
+    if existing is not None:
+        stored = existing.payload.get("persona_pub")
+        if stored and stored != persona_pub:
+            # Deterministic derivation means this cannot happen from the same
+            # seed and the same genesis. It means the seed changed underneath
+            # us, and silently overwriting would strand every record already
+            # attributed to the old persona.
+            raise ValueError(
+                f"persona for genesis {genesis_id[:16]}… is already recorded as "
+                f"{stored[:16]}…, refusing to overwrite with {persona_pub[:16]}…"
+            )
+        settings_ops.upsert_by_key(
+            NETWORK_PERSONA_SET_ID, NETWORK_PERSONA_REVISION, genesis_id,
+            payload, org=None,
+        )
+        return
+    settings_ops.add_setting(
+        NETWORK_PERSONA_SET_ID, NETWORK_PERSONA_REVISION, genesis_id,
+        payload, org=None, state="raw",
+    )
+
+
+def _persona_member(genesis_id: str):
+    """The recorded persona row for one genesis, or None."""
+    from . import settings_ops
+    from .schemas.network_identity import NETWORK_PERSONA_SET_ID
+
+    for member in settings_ops.read_owned_set(
+        NETWORK_PERSONA_SET_ID, org=None
+    ).members:
+        if member.key == genesis_id and isinstance(member.payload, dict):
+            return member
+    return None
+
+
+def persona_pub_for_org(genesis_id: str) -> str | None:
+    """This node's persona public key in the org with *genesis_id*, or None.
+
+    Takes the genesis id rather than a slug because the genesis IS the
+    identifier — a caller that does not know which genesis it means is asking
+    an ambiguous question and must not be handed a guess. Resolve a slug to
+    its genesis by folding that org's ledger.
+
+    No side effects: never derives, never prompts, never touches the seed.
+    Returning None means "not recorded on this node", never "you are not a
+    member" — membership is the ledger's answer to give, not this row's.
+    """
+    member = _persona_member(genesis_id)
+    if member is None:
+        return None
+    pub = member.payload.get("persona_pub")
+    return pub if isinstance(pub, str) and pub else None
 
 
 def _seal_org_root_setting(slug: str, org_root, personal_seed: bytes) -> None:
@@ -727,6 +821,14 @@ def retrofit_found_ledgers(
                 store.refresh_projections()
                 entry["outcome"] = "keyed_and_founded" if minted else "founded"
                 entry["genesis_id"] = founded.genesis_id
+                # Covers BOTH arms above: a fresh founding and a resumed one
+                # return the same FoundedLedger shape, so the record is
+                # written once here rather than duplicated in each branch.
+                _record_persona_setting(
+                    org.slug, founded.genesis_id, founded.founder_persona_pub,
+                    source="found",
+                )
+                entry["persona"] = founded.founder_persona_pub
             finally:
                 store.close()
         except Exception as e:  # abort THIS org, name it, continue the run
