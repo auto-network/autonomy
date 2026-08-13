@@ -169,6 +169,31 @@ def test_bootstrap_page_always_served(test_client):
     assert "Set up your assistant" in r.text
 
 
+def test_existing_install_passes_through_without_interaction():
+    """A machine with a signed-in harness must never be stopped by setup.
+
+    The gate opens once on an established install (the recording set is new
+    and empty there). The page's init must handle that case itself: when the
+    gate rendered it (pathname "/"), a probe that finds a ready harness gets
+    verified — which records the row and closes the gate — and the page
+    reloads straight into the session UI. Interaction is only for machines
+    where nothing is ready. A deliberate /bootstrap visit never auto-leaves.
+    """
+    from pathlib import Path
+
+    template = (
+        Path(__file__).resolve().parents[1] / "templates" / "bootstrap.html"
+    ).read_text(encoding="utf-8")
+    assert "screen: 'checking'" in template          # no setup-UI flash
+    assert "location.pathname === '/'" in template   # gate-rendered only
+    assert "window.location.replace('/')" in template
+    # The pass-through path runs before any screen is shown.
+    init_body = template[template.index("async init()"):
+                         template.index("async refresh()")]
+    assert "state === 'ready'" in init_body
+    assert "_verify" in init_body
+
+
 def test_probe_endpoint_returns_harnesses(test_client, monkeypatch):
     _install(monkeypatch, present={"claude"}, noop_ok=True)
     r = test_client.get("/api/bootstrap/probe")
