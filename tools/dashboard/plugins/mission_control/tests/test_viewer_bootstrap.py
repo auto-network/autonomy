@@ -317,3 +317,21 @@ def test_questions_are_listed_newest_first():
     assert "(parseFloat(b.created_at) || 0) - (parseFloat(a.created_at) || 0)" in src, (
         "the question list is no longer sorted newest-first"
     )
+
+
+def test_the_live_stream_gives_its_connection_back():
+    """Navigating away does not destroy this page -- it goes into the
+    back/forward cache alive, holding its connections. Served over HTTP/1.1 a
+    browser allows about six sockets to one origin and an open event stream
+    owns one for as long as it lives, so six visited screens later every
+    socket belongs to a page nobody is looking at and the next navigation
+    waits for one to come free. Measured off a screen recording: a mission
+    navigation held a white screen for 6.7s early in a session, and the
+    session viewer sat on "Loading..." for 42s later in the same one."""
+    src = _viewer("bootstrap.js")
+    assert "live.close()" in src, "the event stream is never closed"
+    # pagehide, not unload: unload does not fire for a page entering the
+    # back/forward cache, which is the only case that leaked.
+    assert 'addEventListener("pagehide", releaseLive)' in src
+    assert 'addEventListener("pageshow", subscribeLive)' in src
+    assert 'if (live) return;' in src, "nothing stops a second stream opening"
