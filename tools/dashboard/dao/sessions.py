@@ -22,15 +22,11 @@ from tools.graph.duration import parse_duration
 
 logger = logging.getLogger(__name__)
 
-_GRAPH_DB = resolve_store("graph")   # was repo-relative: ignored GRAPH_DB
-
 # Dropdown values → seconds. `all` disables the filter. Keys match the
 # `recent_sessions?since=` query param and the `graph sessions --status --since`
 # CLI (auto-0r86); see design acb2829b-4fc0 revision b39626f2.
 _SINCE_WINDOWS = {"6h": "6h", "1d": "1d", "1w": "1w"}
 _VALID_RECENT_SORTS = {"lastActivity", "created", "turns", "ctx", "duration"}
-
-_DISPATCH_DB = resolve_store("dispatch")  # was repo-relative: ignored DISPATCH_DB
 
 # Session-type → group mapping. The DAO emits 'interactive', 'dispatch',
 # or 'librarian' from _derive_session_type, but extra values are routed
@@ -325,11 +321,23 @@ def _librarian_targets_by_job_id(job_ids: list[str]) -> dict[str, dict]:
     each job_id that exists in the table. Missing job_ids are simply absent
     from the result. Best-effort — a missing/broken dispatch.db returns {}.
     """
-    if not job_ids or not _DISPATCH_DB.exists():
+    # Resolved at use, not import: a module-level resolve_store can raise
+    # under the real-data refusal guard when the store env is absent, which
+    # made the whole dashboard unimportable on unpinned nodes (auto-5jbqa).
+    # NOTE this except swallows RealDataFallbackRefused — a SAFETY refusal,
+    # not just a missing file. Defensible here only because this path is
+    # read-only and its contract is already "missing/broken dispatch.db
+    # returns {}"; anything that ever WRITES through this lookup must not
+    # inherit the swallow, or the guard silently stops guarding.
+    try:
+        dispatch_db = resolve_store("dispatch")
+    except Exception:
+        return {}
+    if not job_ids or not dispatch_db.exists():
         return {}
     out: dict[str, dict] = {}
     try:
-        conn = sqlite3.connect(str(_DISPATCH_DB))
+        conn = sqlite3.connect(str(dispatch_db))
         conn.row_factory = sqlite3.Row
         placeholders = ",".join("?" * len(job_ids))
         rows = conn.execute(

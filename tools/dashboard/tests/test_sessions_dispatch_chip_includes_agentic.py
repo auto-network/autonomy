@@ -125,7 +125,6 @@ def isolated_sessions_dao(tmp_path, monkeypatch):
     ddb.init_db(dashboard_db_path)
 
     from tools.dashboard.dao import sessions as sessions_dao
-    monkeypatch.setattr(sessions_dao, "_GRAPH_DB", graph_db_path)
 
     return sessions_dao
 

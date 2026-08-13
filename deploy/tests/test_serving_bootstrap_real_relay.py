@@ -43,6 +43,31 @@ def _node_env_from_topology(tmp_path: Path) -> dict:
     return rebased
 
 
+def test_dashboard_imports_under_generated_node_env(tmp_path):
+    """auto-5jbqa: the server must IMPORT under the node env — no GRAPH_DB pin,
+    refusal guard on. A module-level resolve_store that raises kills uvicorn
+    before it binds, and the ladder dies at phase 1 with connection-refused."""
+    env_file = tmp_path / "node-env.json"
+    env_file.write_text(json.dumps(_node_env_from_topology(tmp_path)))
+
+    probe = (
+        "import json, os, sys; "
+        f"env = json.load(open({str(env_file)!r})); "
+        "[os.environ.pop(k) for k in list(os.environ) "
+        " if k.startswith(('AUTONOMY_', 'DASHBOARD_', 'GRAPH_'))]; "
+        "os.environ.update(env); "
+        "import tools.dashboard.server; print('imported-ok')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=str(REPO), capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0 and "imported-ok" in result.stdout, (
+        f"dashboard did not import under the generated node env:\n"
+        f"{result.stderr[-3000:]}"
+    )
+
+
 def test_generated_node_env_serves_join_context_after_bootstrap(tmp_path):
     env_file = tmp_path / "node-env.json"
     env_file.write_text(json.dumps(_node_env_from_topology(tmp_path)))
