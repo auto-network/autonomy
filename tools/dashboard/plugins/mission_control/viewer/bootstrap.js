@@ -453,16 +453,30 @@
     return bar ? Math.round(bar.getBoundingClientRect().height) : 48;
   }
 
+  // An agent in the list IS a session, and its participant id is that
+  // session's name -- so the row can go straight to the session viewer.
+  // Only where there is a dashboard to navigate to: inside a relay frame the
+  // origin is opaque and a dashboard-relative path resolves to nothing, so
+  // the row stays plain text rather than becoming a link that fails.
+  function sessionHref(h) {
+    if (window.parent !== window) return null;
+    if (!h || h.kind !== "agent") return null;          // a person is not a session
+    var id = h.participant_id;
+    return id ? "/session/" + encodeURIComponent(id) : null;
+  }
+
   function whoList() {
     var here = presentHere();
     return el("div", {class: "mc-who"},
       [el("p", {class: "mc-label", text: here.length + " here"})].concat(
         here.map(function (h) {
-          return el("div", {class: "mc-who-row"}, [
-            face(h),
-            el("span", {class: "mc-who-name", text: h.label || ""}),
-            el("span", {class: "mc-who-seen", text: h.seen || ""}),
-          ]);
+          var href = sessionHref(h);
+          var name = href
+            ? el("a", {class: "mc-who-name mc-who-link", href: href,
+                       title: "Open this session"}, [el("span", {text: h.label || ""})])
+            : el("span", {class: "mc-who-name", text: h.label || ""});
+          return el("div", {class: "mc-who-row"}, [face(h), name,
+            el("span", {class: "mc-who-seen", text: h.seen || ""})]);
         })));
   }
 
