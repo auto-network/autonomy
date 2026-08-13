@@ -212,3 +212,9 @@
 /* An update is a note in passing, not part of the record -- keep it visibly
    lighter than either the question or the answer. */
 .mc-update { font-size: .88rem; color: #8b9bb0; }
+
+/* An agent in the presence list is a session you can open. Underlined on
+   hover only: the list is read at a glance, and a row of permanently
+   underlined names turns a roster into a link farm. */
+.mc-who-link { color: #7dd3fc; text-decoration: none; cursor: pointer; }
+.mc-who-link:hover { text-decoration: underline; }

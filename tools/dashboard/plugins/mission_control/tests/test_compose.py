@@ -327,3 +327,25 @@ def test_age_follows_the_status_line_when_it_is_newer_than_the_push(tmp_path):
     assert compose._latest_sign_of_life(older_push, {"last_done_at": None}) == 1_000.0
     assert compose._latest_sign_of_life(None, {"last_done_at": 2_000.0}) == 2_000.0
     assert compose._latest_sign_of_life(None, {}) is None
+
+
+def test_presence_rows_carry_the_session_name_a_link_needs():
+    """An agent in the presence list is a session, and its participant id is
+    that session's name — so the row can open the session viewer. The link is
+    only buildable if the id survives into the screen state; without it the
+    viewer would have a kind and a label and nothing to navigate to.
+    """
+    from tools.dashboard.plugins.mission_control import compose
+
+    src = compose._presence.__doc__ or ""
+    assert src is not None
+    import inspect
+    body = inspect.getsource(compose._presence)
+    assert '"participant_id"' in body, (
+        "presence rows must carry participant_id; an agent row's id is its "
+        "session name and is the only thing a session link can be built from"
+    )
+    assert '"kind"' in body, (
+        "presence rows must carry the kind; a person is not a session and "
+        "must not be rendered as a link to one"
+    )
