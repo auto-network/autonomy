@@ -188,27 +188,47 @@ async def serve_channel(key: KeyPair, cert: DelegationCert, *, org: str, token: 
     await send(server_hello)
     crypto = ChannelCrypto.server(eph_priv, client_eph, transcript_hash)
 
-    while True:
-        record = await recv()
-        if record is None:
-            return
-        message = crypto.open_record(record)
-        if message is None:
-            continue
-        response = handler(token, message)
-        if inspect.isawaitable(response):
-            response = await response
-        if response is None:
-            continue
-        response_messages = _response_messages(response)
-        try:
-            async for response_message, stream_final in response_messages:
-                for out in crypto.iter_seal_message(
-                    response_message, stream_final=stream_final
-                ):
-                    await send(out)
-        finally:
-            await response_messages.aclose()
+    # Most application handlers are stateless callables and remain byte-for-
+    # byte compatible. Stateful channel capabilities (ICE signaling is the
+    # first) expose ``for_channel(token)`` so each independently handshaken
+    # viewer connection gets isolated, teardown-aware state. Token alone is
+    # deliberately not used as the state key: several people may hold one
+    # public link and open concurrent signaling channels.
+    channel_handler = handler
+    factory = getattr(handler, "for_channel", None)
+    if factory is not None:
+        channel_handler = factory(token)
+        if inspect.isawaitable(channel_handler):
+            channel_handler = await channel_handler
+
+    try:
+        while True:
+            record = await recv()
+            if record is None:
+                return
+            message = crypto.open_record(record)
+            if message is None:
+                continue
+            response = channel_handler(token, message)
+            if inspect.isawaitable(response):
+                response = await response
+            if response is None:
+                continue
+            response_messages = _response_messages(response)
+            try:
+                async for response_message, stream_final in response_messages:
+                    for out in crypto.iter_seal_message(
+                        response_message, stream_final=stream_final
+                    ):
+                        await send(out)
+            finally:
+                await response_messages.aclose()
+    finally:
+        close = getattr(channel_handler, "aclose", None)
+        if close is not None:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
 
 def file_handler(path: str, content_type: str):
