@@ -412,10 +412,12 @@
     // Three reasons a control cannot work, known BEFORE it is offered: no
     // channel at all, or a link carrying no identity to attribute a question
     // to. Both were previously discovered by tapping.
+    // Say what is true, not how it works. The earlier wording explained
+    // grant metadata to someone who just wanted to ask a question.
     var why = ui.noChannel
-      ? "Cannot reach the mission from here \u2014 asking is unavailable."
+      ? "Not connected. Posting is disabled."
       : (state.may_write === false
-         ? "This is a read-only link \u2014 it carries no identity to post as."
+         ? "Posting is disabled on this anonymous read-only link."
          : null);
     // A control you cannot use should not be there. Disabling the button
     // while leaving an inviting text box is worse than either: it opens the
