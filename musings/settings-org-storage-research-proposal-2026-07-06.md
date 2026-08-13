@@ -158,8 +158,15 @@ From the three-axis model (`graph://8cf067e3-ca3`), the per-org-DB decision
 
 1. **Physical org isolation** — each org has its own `data/orgs/<org>.db`. Rule:
    *"Settings live in the org-DB whose entity they describe."* The **personal** org
-   is the operator's sovereign private graph — it is never a federation peer, so
-   personal-org content is never shared, at any publication_state.
+   is the operator's sovereign private graph. CORRECTION (2026-08-13): the earlier
+   claim here — "never a federation peer, never shared at any publication_state" —
+   is WRONG, and verified so in code: `personal` IS a default read peer
+   (`cross_org.list_org_slugs` globs it in), and its `published`/`canonical` rows
+   ARE read-through-able cross-org — which is *intended* (e.g. a published personal
+   identity a peer must verify). The real personal invariant is on axis 3 (**sync**),
+   not read: personal content never *synchronizes* onto a **different user's**
+   machine, at any publication_state — but it *does* synchronize across the
+   operator's **own fleet**. Read-through ≠ sync. See the rubric `graph://4d88c2ad-625`.
 2. **`publication_state`** (`raw → curated → published → canonical`) — the
    visibility/maturity axis. NOT access control, NOT propagation. The rule that
    matters: **the public surface of an org DB = rows where `publication_state IN

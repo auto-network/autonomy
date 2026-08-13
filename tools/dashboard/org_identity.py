@@ -3,7 +3,7 @@
 Implements the design from ``graph://497cdc20-d43``: render an org's visual
 identity (name, byline, color, favicon) by cascading per-field through
 
-    1. operator-local override   (``agents/projects.yaml:orgs:<slug>``)
+    1. operator-local override   (org overrides via ``workspace_settings.load_org_overrides()``, from ``autonomy.org#1``)
     2. subscribed canonical      (the org's own graph.db, post auto-hoi4)
     3. generated fallback        (deterministic from slug)
 

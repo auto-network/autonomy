@@ -23,6 +23,13 @@ from tools.graph.schemas.feature_flags import FEATURE_FLAGS_SET_ID
 _cache_lock = threading.RLock()
 _flags_by_org: dict[str | None, dict[str, dict[str, Any]]] = {}
 
+# Feature flags are OPERATOR-LOCAL config (rubric graph://4d88c2ad-625): their
+# correct value depends on this operator's own machine/instance, so they live in
+# personal.db. Reads must PIN to personal — not inherit the process's ambient
+# GRAPH_ORG (the dashboard runs GRAPH_ORG=autonomy, which read them from the wrong
+# org and silently disabled voice dictation). Mirrors _credentials_org().
+_FLAGS_ORG = "personal"
+
 
 def _resolved_org(
     org: "str | None | settings_ops._CallerOrgSentinel",
@@ -59,7 +66,7 @@ def _flags_snapshot(
 def is_enabled(
     name: str,
     *,
-    org: "str | None | settings_ops._CallerOrgSentinel" = settings_ops.CALLER_ORG,
+    org: "str | None | settings_ops._CallerOrgSentinel" = _FLAGS_ORG,
     default: bool = False,
 ) -> bool:
     """Return True if the flag named *name* is enabled.
@@ -75,8 +82,9 @@ def is_enabled(
     raises on a read-shaped error so downstream consumers can gate
     freely.
 
-    ``org`` defaults to :data:`settings_ops.CALLER_ORG` (env-cascade
-    resolution). Tests pass an explicit slug.
+    ``org`` defaults to ``_FLAGS_ORG`` (``personal``) — feature flags are
+    operator-local; reads pin to personal, not the ambient GRAPH_ORG. Tests
+    (and any genuinely org-scoped flag) pass an explicit slug.
     """
     payload = _flags_snapshot(org).get(name)
     if payload is None:
@@ -86,7 +94,7 @@ def is_enabled(
 
 def all_flags(
     *,
-    org: "str | None | settings_ops._CallerOrgSentinel" = settings_ops.CALLER_ORG,
+    org: "str | None | settings_ops._CallerOrgSentinel" = _FLAGS_ORG,
 ) -> dict[str, dict[str, Any]]:
     """Return a snapshot ``{flag_name: payload}`` of all known flag rows.
 
