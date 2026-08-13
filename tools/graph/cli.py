@@ -6182,6 +6182,11 @@ def main():
     from .claude_cmd import attach_claude_subparser
     attach_claude_subparser(sub)
 
+    # credentials — Layer-0 outer-agent import of local Claude/Codex auth
+    # into the substrate credential Settings (bead auto-5bq85)
+    from .credential_import import attach_credentials_subparser
+    attach_credentials_subparser(sub)
+
     # maintenance — substrate housekeeping verbs (cache GC, etc.)
     p_maint = sub.add_parser(
         "maintenance",
