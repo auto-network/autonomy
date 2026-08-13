@@ -158,3 +158,6 @@
   border-radius: 999px; padding: .25rem .6rem; cursor: pointer;
 }
 .mc-chip-on { color: #e2e8f0; background: #1e293b; border-color: #334155; }
+
+/* Shown instead of the composer when this reader cannot post at all. */
+.mc-readonly { margin: 0; font-size: 13px; line-height: 1.5; color: #64748b; text-align: center; }

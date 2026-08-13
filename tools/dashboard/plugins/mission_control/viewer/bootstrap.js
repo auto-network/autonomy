@@ -372,9 +372,13 @@
   function questionRows() {
     var sorted = questionsHere().slice().sort(function (a, b) { return (!!a.answer) - (!!b.answer); });
     if (!sorted.length) {
-      return [el("p", {class: "mc-empty", text: currentPillar()
-        ? "No questions on this screen yet. Ask the first one below."
-        : "No questions yet. Ask the first one below."})];
+      // Do not invite an action this reader cannot take.
+      var canAsk = state.may_write !== false && !ui.noChannel;
+      return [el("p", {class: "mc-empty", text: canAsk
+        ? (currentPillar()
+           ? "No questions on this screen yet. Ask the first one below."
+           : "No questions yet. Ask the first one below.")
+        : "No questions yet."})];
     }
     return sorted.map(function (q) {
       return el("button", {class: "mc-row", onclick: function () { show({entry: q.entry_id}); }}, [
@@ -413,6 +417,10 @@
       : (state.may_write === false
          ? "This is a read-only link \u2014 it carries no identity to post as."
          : null);
+    // A control you cannot use should not be there. Disabling the button
+    // while leaving an inviting text box is worse than either: it opens the
+    // keyboard, asks you to compose something, and then refuses to send it.
+    if (why) return el("div", {class: "mc-foot"}, [el("p", {class: "mc-readonly", text: why})]);
     var status = el("span", {class: "mc-sub", text: why || note});
     var send = el("button", {
       class: "mc-send", text: label,
