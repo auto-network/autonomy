@@ -2803,6 +2803,12 @@ async def api_workspace_local_create(request):
         return JSONResponse(
             {"error": "X-Graph-Org header is required"}, status_code=400,
         )
+    # The four Settings calls below must stay off a bare ``_caller_org``
+    # value: a missing org has to route through the CALLER_ORG resolver, not
+    # silently land scopeless (graph://53f7412f-51e). The guard above already
+    # rejects a missing org, so this only ever resolves to the concrete slug —
+    # it pins the required-org contract uniformly across every call site.
+    org = org or graph_ops.CALLER_ORG
     try:
         body = await request.json()
     except Exception:
