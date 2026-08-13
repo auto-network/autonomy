@@ -35,3 +35,14 @@ Exit code 3 with "not provisioned" means the host-install has not run on
 this host yet — the pinned ffmpeg is populated by the Capability
 Host-Install Runner (protocol graph://149705db-a39), never by sessions.
 Report it; do not install ffmpeg yourself.
+
+## If the host install fails with a hash mismatch
+
+The pin's url is upstream's rolling "latest release" archive (no versioned
+archive exists there), so the sha256 in `install/ffmpeg.pin` stops matching
+whenever upstream publishes a new build. A hash mismatch here therefore
+usually means UPSTREAM RELEASED, not compromise — the install failing
+closed is correct. The fix is a deliberate pin refresh: download the new
+tarball, verify it runs, update url-implied version + sha256 in
+`ffmpeg.pin` in one reviewed commit. The changed pin re-fingerprints the
+install, so the runner reinstalls everywhere on its next pass.
