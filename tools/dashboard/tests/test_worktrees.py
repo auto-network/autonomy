@@ -47,6 +47,15 @@ class _FakeMonitor:
         self.bound_calls = getattr(self, "bound_calls", [])
         self.bound_calls.append([r.session_name for r in rows])
 
+    def get_rendered_json(self, org: str = ""):
+        # Force the per-request fallback render so these tests exercise the
+        # faked rows, not whatever the real singleton's lifespan sweep left
+        # in its pre-encoded cache (auto-yq27f).
+        return None
+
+    async def refresh_rendered_cache(self):
+        return None
+
 
 def _row(
     session="auto-test",
@@ -62,6 +71,7 @@ def _row(
     dirty_files=None,
     cherry_pick_eligible=False,
     cherry_pick_commit=None,
+    target_branch="master",
 ):
     if commits is None and ahead:
         commits = [_commit()]
@@ -79,6 +89,7 @@ def _row(
         session_live=live,
         cherry_pick_eligible=cherry_pick_eligible,
         cherry_pick_commit=cherry_pick_commit,
+        target_branch=target_branch,
         commits=commits or [],
         dirty_files=dirty_files or [],
     )
@@ -112,6 +123,10 @@ def _install_fake_monitor(monkeypatch, rows):
     monkeypatch.setattr(server.worktree_monitor, "refresh", fake.refresh)
     monkeypatch.setattr(server.worktree_monitor, "discover_prs", fake.discover_prs)
     monkeypatch.setattr(server.worktree_monitor, "refresh_bound_rows", fake.refresh_bound_rows)
+    # Force the /api/worktrees fallback render so the faked ``get_all`` rows
+    # are what the handler serializes, not the singleton's pre-encoded cache.
+    monkeypatch.setattr(server.worktree_monitor, "get_rendered_json", fake.get_rendered_json)
+    monkeypatch.setattr(server.worktree_monitor, "refresh_rendered_cache", fake.refresh_rendered_cache)
     return server, fake
 
 
@@ -3340,6 +3355,9 @@ class TestWorktreeApiSourceControlBlock:
 
         monkeypatch.setattr(server.worktree_monitor, "get_all", lambda: list(rows))
         monkeypatch.setattr(
+            server.worktree_monitor, "get_rendered_json", lambda org="": None,
+        )
+        monkeypatch.setattr(
             server.worktree_monitor,
             "get_source_control",
             lambda session, repo: snapshot if (session, repo) == ("auto-live", "autonomy") else None,
@@ -3360,6 +3378,9 @@ class TestWorktreeApiSourceControlBlock:
         rows = [_row(session="auto-dead", live=False)]
         monkeypatch.setattr(server.worktree_monitor, "get_all", lambda: list(rows))
         monkeypatch.setattr(
+            server.worktree_monitor, "get_rendered_json", lambda org="": None,
+        )
+        monkeypatch.setattr(
             server.worktree_monitor, "get_source_control", lambda *_: None,
         )
 
@@ -3369,6 +3390,130 @@ class TestWorktreeApiSourceControlBlock:
         data = resp.json()
         assert len(data) == 1
         assert "source_control" not in data[0]
+
+
+# ── Serializer purity + pre-rendered payload (auto-yq27f) ─────────────
+
+
+class TestWorktreeSerializerOffLoop:
+    """The ~0.5s /api/worktrees event-loop stall came from the request-path
+    serializer spawning ~400 git subprocesses to resolve ``target_branch``,
+    plus a per-request json.dumps of a 6.5 MiB payload. Both now happen once
+    per sweep on the worker thread; the request path is git-free and reuses
+    pre-encoded bytes.
+    """
+
+    def test_worktree_state_json_is_pure_no_git(self, monkeypatch):
+        """The row serializer must spawn zero git. Belt-and-braces: make
+        ``_git_output`` explode and assert the serializer still returns.
+
+        This test FAILS against ``master`` (where the serializer calls
+        ``worktree_target_branch_name`` → ``_repo_default_branch`` → git) and
+        passes once the label is read off the row.
+        """
+        from tools.dashboard import server
+        from agents import workspace_manager
+
+        def _boom(*_a, **_k):
+            raise AssertionError(
+                "git spawned from the request-path worktree serializer"
+            )
+
+        monkeypatch.setattr(workspace_manager, "_git_output", _boom)
+        monkeypatch.setattr(workspace_manager, "_git_output_bytes", _boom)
+        # Isolate from the sessions DB so the test asserts serializer purity,
+        # not DB wiring — the org/meta lookup is a DB read, never git.
+        monkeypatch.setattr(server, "_session_meta_for_tmux", lambda _name: {
+            "title": "", "project": "", "harness": None, "model": None,
+            "org": {
+                "slug": "autonomy", "name": "Autonomy", "color": "#000",
+                "initial": "A", "favicon": None, "resolved": True,
+            },
+        })
+        monkeypatch.setattr(
+            server.worktree_monitor, "get_source_control", lambda *_: None,
+        )
+
+        payload = server._worktree_state_json(_row(target_branch="master"))
+
+        assert payload["target_branch"] == "master"
+
+    def test_api_worktrees_serves_prerendered_bytes(self, test_client, monkeypatch):
+        """The polling endpoint returns the sweep's pre-encoded bytes and does
+        NOT re-serialize rows per request (acceptance #2b)."""
+        from tools.dashboard import server
+
+        sentinel = [{
+            "session_name": "auto-pre",
+            "target_branch": "master",
+            "org": {"slug": "autonomy"},
+        }]
+        raw = json.dumps(
+            sentinel, ensure_ascii=False, allow_nan=False, indent=None,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        monkeypatch.setattr(
+            server.worktree_monitor, "get_rendered_json",
+            lambda org="": raw if org == "" else b"[]",
+        )
+
+        def _boom(*_a, **_k):
+            raise AssertionError("row serializer ran on the request path")
+
+        monkeypatch.setattr(server, "_worktree_state_json", _boom)
+
+        resp = test_client.get("/api/worktrees")
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/json")
+        assert resp.content == raw
+        assert resp.json() == sentinel
+
+    def test_api_worktrees_falls_back_when_no_render_yet(self, test_client, monkeypatch):
+        """Before the first sweep renders (``get_rendered_json`` → None) the
+        handler renders per-request from ``get_all`` so a cold cache still
+        serves correct data."""
+        _server, _fake = _install_fake_monitor(monkeypatch, [_row(session="auto-cold")])
+
+        resp = test_client.get("/api/worktrees")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [r["session_name"] for r in data] == ["auto-cold"]
+        assert data[0]["target_branch"] == "master"
+
+    def test_build_rendered_payload_partitions_and_is_byte_identical(self):
+        """The sweep's per-org pre-encode is byte-identical to what a
+        per-request ``JSONResponse`` would have produced, so caching it is a
+        pure performance move (acceptance #4)."""
+        from starlette.responses import JSONResponse
+        from tools.dashboard.worktree_monitor import WorktreeMonitor
+
+        mon = WorktreeMonitor()
+        rows = [
+            _row(session="auto-a", repo="autonomy"),
+            _row(session="auto-b", repo="enterprise_ng"),
+        ]
+        mon._cache = rows
+        org_by_session = {"auto-a": "autonomy", "auto-b": "anchore"}
+
+        def _render(row):
+            return {
+                "session_name": row.session_name,
+                "target_branch": row.target_branch,
+                "org": {"slug": org_by_session[row.session_name]},
+            }
+
+        mon.set_row_renderer(_render)
+        by_org = mon._build_rendered_payload()
+
+        assert set(by_org) == {"", "autonomy", "anchore"}
+        full = [_render(r) for r in rows]
+        assert by_org[""] == JSONResponse(full).body
+        assert by_org["autonomy"] == JSONResponse([full[0]]).body
+        assert by_org["anchore"] == JSONResponse([full[1]]).body
+        assert json.loads(by_org[""]) == full
 
 
 # ── Watch / nag mode persistence (P4) ─────────────────────────────────
