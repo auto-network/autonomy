@@ -12,6 +12,7 @@ from starlette.responses import JSONResponse
 
 from tools.dashboard import server
 from tools.graph import ops as graph_ops
+from tools.graph import settings_ops
 
 
 class _Req:
@@ -63,3 +64,41 @@ def test_local_token_org_none_falls_back_to_cascade():
     with _with_token("host-1", None):
         assert server._caller_org(_Req(xorg="anchore")) == "anchore"
         assert server._settings_caller_org(_Req()) is graph_ops.CALLER_ORG
+
+
+# ── network_routes._scoped_org: same derive-when-present, the network-key path ──
+
+from tools.dashboard import network_routes  # noqa: E402
+
+
+def _scoped_token(org):
+    return patch.object(server, "_token_org_or_none", lambda request: org)
+
+
+def test_scoped_org_bearer_refuses_cross_org_request():
+    """A bearer for 'beta' asking ?org=anchore is refused — the caller can no
+    longer name its own org, closing the another-org's-network-key leak."""
+    with _scoped_token("beta"):
+        org, refused = network_routes._scoped_org("anchore", request=_Req())
+    assert org is None
+    assert refused is not None and refused.status_code == 403
+
+
+def test_scoped_org_bearer_own_org_honored_and_returns_token_slug():
+    with _scoped_token("beta"):
+        org, refused = network_routes._scoped_org("beta", request=_Req())
+        assert refused is None and org == "beta"
+        org2, refused2 = network_routes._scoped_org(None, request=_Req())
+        assert refused2 is None and org2 == "beta"
+
+
+def test_scoped_org_no_bearer_falls_back_to_cascade():
+    """No bearer: compares ?org= against the env-cascade (unchanged), returning
+    the CALLER_ORG sentinel — additive, never refused for a matching caller."""
+    with _scoped_token(None), patch.object(
+        settings_ops, "_resolve_settings_caller", lambda _x: "anchore"
+    ):
+        org, refused = network_routes._scoped_org("anchore", request=_Req())
+        assert refused is None and org is settings_ops.CALLER_ORG
+        org2, refused2 = network_routes._scoped_org("beta", request=_Req())
+        assert org2 is None and refused2.status_code == 403
