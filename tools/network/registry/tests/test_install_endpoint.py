@@ -40,10 +40,23 @@ class TestInstallNegotiation:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/html")
         # The wrapper's one job: hand the URL to a coding agent, then show
-        # the primer verbatim (escaped).
+        # the primer verbatim (escaped). The CTA names the host that served
+        # the page, so the copied prompt resolves at every deployment stage
+        # (registry.auto.network before bare-domain DNS lands, auto-9q7a5).
         assert "Tell your coding agent" in response.text
+        assert "Please install Autonomy from https://testserver/install" in response.text
+        # The primer body itself still names the canonical address.
         assert "auto.network/install" in response.text
         assert "Your contract as the installing agent" in response.text
+
+    def test_cta_falls_back_to_canonical_on_junk_host(self, client):
+        response = client.get(
+            "/install",
+            headers={"Accept": "text/html", "Host": "evil host\"<script>"},
+        )
+        assert response.status_code == 200
+        assert "https://auto.network/install" in response.text
+        assert "evil host" not in response.text
         # Self-contained: the CSP forbids every external origin.
         assert "default-src 'none'" in response.headers["content-security-policy"]
 
