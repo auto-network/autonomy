@@ -1,9 +1,21 @@
-"""``autonomy.commit.signing-key#1`` — the org's passphrase-encrypted signing key.
+"""``autonomy.commit.signing-key#1`` — the operator's passphrase-encrypted signing key.
 
 Holds the armored, passphrase-encrypted OpenPGP private key the operator signs
 commits with. The server only ever stores and serves the ENCRYPTED blob; the
 passphrase is entered in the operator's browser, where the key is decrypted and
 used to sign. Nothing here is usable without the passphrase.
+
+Authority: PERSONAL (auto-bsbaf). This is the operator's own key — decrypted only
+with the operator's passphrase, used to sign the operator's commits, and never
+shared outside the operator's own fleet. Per the settings scope/publication-state
+rubric (graph://4d88c2ad-625, authority axis: "whose fact is this?"), a personal
+secret lives in ``personal.db`` and is read/written pinned to ``personal`` (like
+``dashboard.claude.credentials``), NOT in an org DB — where it would sit on that
+org's cross-org read-through surface. The ``autonomy.commit.*`` set_id is a legacy
+name; the home is personal. Being a personal secret it must never reach a
+read-through publication_state — pin to ``raw`` once the schema publication-band
+enforcement lands (tracked). Re-vaulting under standard vault secrecy, dropping
+the bespoke PGP armor, is the successor: bead auto-wu2al.
 """
 
 from .registry import (
