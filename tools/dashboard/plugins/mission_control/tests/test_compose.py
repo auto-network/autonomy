@@ -231,3 +231,29 @@ def test_a_link_with_no_identity_is_told_it_cannot_write():
     named = link_serving._resolve_mission(
         mission_id, {"meta": {"participant_id": "guest:jeremy"}})["viewer"]
     assert b'"may_write":true' in named.replace(b" ", b"")
+
+
+def test_the_no_channel_timer_is_armed_only_inside_a_frame():
+    """At a real URL no MessagePort is ever transferred and none is wanted —
+    the transport is HTTP. Arming the port timeout unconditionally made the
+    dashboard declare "Not connected. Posting is disabled." six seconds after
+    every load, hide the composer and flag the bar "no link", while the HTTP
+    path underneath worked perfectly.
+
+    Asserted on the source because the defect is a MISSING GUARD, not a value:
+    the symptom only appears after a six-second timer in a real browser, and a
+    test that waits for it would be slower and no more truthful.
+    """
+    from tools.dashboard.scripts import build_mission_viewer as builder
+
+    src = builder.bootstrap_source()
+    marker = "if (!port) { ui.noChannel = true; render(); }"
+    assert marker in src, "the port-timeout guard moved; re-read this test"
+
+    before = src[: src.index(marker)]
+    guard = before.rindex("window.parent !== window")
+    timer = before.rindex("setTimeout")
+    assert guard < timer, (
+        "the noChannel timer must sit INSIDE a `window.parent !== window` "
+        "guard; unguarded it disables posting on every top-level surface"
+    )

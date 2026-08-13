@@ -92,9 +92,17 @@
   // promise that resolves for nobody. Say so on the bar rather than looking
   // fine and doing nothing -- a silent dead control costs more to diagnose
   // than any amount of visible degradation.
-  setTimeout(function () {
-    if (!port) { ui.noChannel = true; render(); }
-  }, 6000);
+  // ONLY IN A FRAME. At a real URL no port is ever transferred and none is
+  // wanted -- the transport is HTTP. Arming this timer everywhere meant the
+  // dashboard told the operator "Not connected. Posting is disabled." six
+  // seconds after every load, hid the composer, and flagged the bar "no link",
+  // while the HTTP path underneath worked perfectly. The transport was fixed
+  // and the question "is there a transport?" went on asking about the old one.
+  if (window.parent !== window) {
+    setTimeout(function () {
+      if (!port) { ui.noChannel = true; render(); }
+    }, 6000);
+  }
   // This document renders its own top bar, so it asks the shell for the
   // viewport instead of sitting under a second one. The shell decides
   // whether to honour it; nothing here depends on the answer.
