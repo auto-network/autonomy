@@ -50,14 +50,16 @@ HARNESS_SPECS: dict[str, dict[str, Any]] = {
         # One authenticated no-op: exit 0 proves the CLI runs AND is signed in.
         "noop_cmd": ["claude", "-p", "ok", "--max-turns", "1"],
         "install_cmd": "npm install -g @anthropic-ai/claude-code",
-        "signin_cmd": "claude  (then run /login and finish in the browser)",
+        "signin_cmd": "claude",
+        "signin_how": "Run this in a terminal, type /login, and finish in your browser.",
     },
     "codex": {
         "label": "Codex",
         "version_cmd": ["codex", "--version"],
         "noop_cmd": ["codex", "exec", "--skip-git-repo-check", "ok"],
         "install_cmd": "npm install -g @openai/codex",
-        "signin_cmd": "codex login  (finish in the browser)",
+        "signin_cmd": "codex login",
+        "signin_how": "Run this in a terminal and finish in your browser.",
     },
 }
 
@@ -132,6 +134,7 @@ def probe_harness(slug: str) -> dict[str, Any]:
           "state": "not-installed" | "installed-needs-sign-in" | "ready",
           "install_cmd": str,
           "signin_cmd": str,
+          "signin_how": str,   # one user-facing sentence for the sign-in step
         }
     """
     if slug not in HARNESS_SPECS:
@@ -147,6 +150,7 @@ def probe_harness(slug: str) -> dict[str, Any]:
         "state": STATE_NOT_INSTALLED,
         "install_cmd": spec["install_cmd"],
         "signin_cmd": spec["signin_cmd"],
+        "signin_how": spec["signin_how"],
     }
 
     path = _which(slug)
