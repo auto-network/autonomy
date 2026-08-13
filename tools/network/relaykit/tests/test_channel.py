@@ -387,3 +387,86 @@ async def test_serve_channel_streams_async_iterator_with_bounded_lookahead(
     # is the framing cost of distinguishing records from feed frames.
     assert largest_wire_record <= VIEWER_KIND_LEN + 8 + 1 + CHUNK_SIZE + 16
     assert client.peak_buffered_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_serve_channel_isolates_and_closes_per_connection_handler_state(
+    root, session_key, session_cert, now
+):
+    """A stateful capability is scoped to one handshaken connection.
+
+    It must not use the bearer token as a session key: two browsers can hold
+    the same public link concurrently. Teardown also has to run on ordinary
+    EOF so a peer connection or capacity slot cannot leak.
+    """
+    to_server: asyncio.Queue = asyncio.Queue()
+    from_server: asyncio.Queue = asyncio.Queue()
+    opened = []
+
+    class PerConnection:
+        def __init__(self):
+            self.requests = 0
+            self.closed = False
+
+        async def __call__(self, token, request):
+            assert token == TOKEN
+            self.requests += 1
+            return f"{self.requests}:".encode() + request
+
+        async def aclose(self):
+            self.closed = True
+
+    class Factory:
+        def for_channel(self, token):
+            assert token == TOKEN
+            state = PerConnection()
+            opened.append(state)
+            return state
+
+        async def __call__(self, token, request):  # pragma: no cover
+            raise AssertionError("factory itself must not serve channel messages")
+
+    async def recv():
+        return await to_server.get()
+
+    async def send(payload):
+        kind, record = split_viewer_message(payload)
+        assert kind == VIEWER_KIND_RECORD
+        await from_server.put(record)
+
+    client_priv, client_hello = build_client_hello()
+    client_eph = parse_client_hello(client_hello)
+    await to_server.put(client_hello)
+    task = asyncio.create_task(serve_channel(
+        session_key,
+        session_cert,
+        org=ORG,
+        token=TOKEN,
+        recv=recv,
+        send=send,
+        handler=Factory(),
+    ))
+
+    server_hello = await from_server.get()
+    server_eph, transcript_hash = verify_server_hello(
+        server_hello,
+        root_pub=root.public_hex,
+        org=ORG,
+        token=TOKEN,
+        client_eph=client_eph,
+        now=now,
+    )
+    client = ChannelCrypto.client(client_priv, server_eph, transcript_hash)
+
+    for request, expected in ((b"one", b"1:one"), (b"two", b"2:two")):
+        for record in client.seal_message(request):
+            await to_server.put(record)
+        response = None
+        while response is None:
+            response = client.open_record(await from_server.get())
+        assert response == expected
+
+    await to_server.put(None)
+    await task
+    assert len(opened) == 1
+    assert opened[0].closed is True
