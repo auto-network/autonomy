@@ -122,6 +122,8 @@ function fakeWs(records) {
         unhex(hs2.transcript_hash_hex));
       tx.sendSeq = step.start_sequence;
       await tx.sendMessage(unhex(step.message_hex));
+      check('client_stream_record_limit:' + st.name,
+        ws.sent.every(h => Buffer.from(h, 'hex').length <= 65536));
       const rx2 = new A.SecureChannel(fakeWs(ws.sent), await importAes(hs2.key_s2c_hex),
         await importAes(hs2.key_c2s_hex), unhex(hs2.transcript_hash_hex));
       rx2.recvDir = C2S; rx2.recvSeq = step.start_sequence;

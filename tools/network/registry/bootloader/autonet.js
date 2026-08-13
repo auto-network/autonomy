@@ -22,7 +22,8 @@ const autonet = (() => {
   const KEYS_INFO = "autonomy.network.channel.keys.v1";
   const DIR_C2S = "c2s\x00";
   const DIR_S2C = "s2c\x00";
-  const CHUNK_SIZE = 128 * 1024;
+  const SEND_CHUNK_SIZE = 60 * 1024;
+  const MAX_RECORD_CHUNK_SIZE = 128 * 1024;
   const ATTACHMENT_CHUNK_SIZE = 1024 * 1024;
   const ATTACHMENT_WINDOW_SIZE = 8 * ATTACHMENT_CHUNK_SIZE;
   const ATTACHMENT_LAST_IN_WINDOW = 0x01;
@@ -268,9 +269,9 @@ const autonet = (() => {
     }
 
     async sendMessage(bytes) {
-      for (let offset = 0; ; offset += CHUNK_SIZE) {
-        const chunk = bytes.slice(offset, offset + CHUNK_SIZE);
-        const final = offset + CHUNK_SIZE >= bytes.length;
+      for (let offset = 0; ; offset += SEND_CHUNK_SIZE) {
+        const chunk = bytes.slice(offset, offset + SEND_CHUNK_SIZE);
+        const final = offset + SEND_CHUNK_SIZE >= bytes.length;
         const seq = seqBytes(this.sendSeq++);
         const plaintext = concatBytes(new Uint8Array([final ? 1 : 0]), chunk);
         const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
@@ -305,7 +306,7 @@ const autonet = (() => {
         const flags = plaintext[0];
         const chunk = plaintext.slice(1);
         if (flags & ~KNOWN_RECORD_FLAGS) throw new Error("record has unknown flags");
-        if (chunk.length > CHUNK_SIZE) throw new Error("record chunk exceeds maximum size");
+        if (chunk.length > MAX_RECORD_CHUNK_SIZE) throw new Error("record chunk exceeds maximum size");
         return { flags, chunk };
       } catch (err) {
         // Authentication, sequence, and record-framing failures poison the

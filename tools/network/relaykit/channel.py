@@ -51,9 +51,11 @@ clients while separating message and exchange boundaries:
 One-shot messages set both bits.  A legacy peer that sends only 0x01 is
 accepted as ending both its message and exchange.
 
-Messages are chunked at ``CHUNK_SIZE`` (128 KiB) so a 1.5 MB+ artifact
-never occupies one giant WS message anywhere on the path; senders await
-each record's transmission, which surfaces TCP backpressure naturally.
+New messages are chunked at ``SEND_CHUNK_SIZE`` (60 KiB), keeping each
+encrypted record below aiortc's 65,536-byte DataChannel message limit.  The
+receiver continues to accept the previous 128 KiB record ceiling so an
+already-loaded relay client remains readable during deployment.  Senders await
+each record's transmission, which surfaces transport backpressure naturally.
 Receivers enforce strictly sequential ``seq`` — reorder, replay, or drop
 by the relay is detected, not tolerated.
 """
@@ -91,7 +93,11 @@ HANDSHAKE_VERSION = 1
 DIR_C2S = b"c2s\x00"
 DIR_S2C = b"s2c\x00"
 
-CHUNK_SIZE = 128 * 1024
+SEND_CHUNK_SIZE = 60 * 1024
+MAX_RECORD_CHUNK_SIZE = 128 * 1024
+# Compatibility import used by the existing vector/attachment generators.
+# It describes what current senders emit, not the more generous receive cap.
+CHUNK_SIZE = SEND_CHUNK_SIZE
 MAX_MESSAGE_SIZE = 64 * 1024 * 1024
 _SEQ_LEN = 8
 _FLAG_STREAM_FINAL = 0x01
@@ -330,7 +336,7 @@ class ChannelCrypto:
     def _seal_record(self, flags: int, chunk: bytes) -> bytes:
         if flags & ~_KNOWN_FLAGS:
             raise RecordError("record has unknown flags")
-        if len(chunk) > CHUNK_SIZE:
+        if len(chunk) > MAX_RECORD_CHUNK_SIZE:
             raise RecordError("record chunk exceeds maximum size")
         if self._send_seq >= _MAX_SEQ:
             raise RecordError("send sequence exhausted; channel must be re-keyed")
@@ -360,8 +366,8 @@ class ChannelCrypto:
         plaintext = bytes(plaintext)
         offset = 0
         while True:
-            chunk = plaintext[offset:offset + CHUNK_SIZE]
-            offset += CHUNK_SIZE
+            chunk = plaintext[offset:offset + SEND_CHUNK_SIZE]
+            offset += SEND_CHUNK_SIZE
             message_end = offset >= len(plaintext)
             flags = 0
             if message_end:
@@ -402,7 +408,7 @@ class ChannelCrypto:
         flags, chunk = plaintext[0], plaintext[1:]
         if flags & ~_KNOWN_FLAGS:
             raise RecordError("record has unknown flags")
-        if len(chunk) > CHUNK_SIZE:
+        if len(chunk) > MAX_RECORD_CHUNK_SIZE:
             raise RecordError("record chunk exceeds maximum size")
 
         self._incoming_message_size += len(chunk)
