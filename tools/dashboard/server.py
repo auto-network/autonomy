@@ -40,6 +40,7 @@ from starlette.applications import Starlette
 from starlette.background import BackgroundTask
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Route, Mount, WebSocketRoute
 from starlette.staticfiles import StaticFiles
@@ -17888,6 +17889,23 @@ app = Starlette(
     },
     middleware=[
         Middleware(_RequestDurationMiddleware),
+        # Nothing was compressed. A mission screen is one self-contained
+        # document -- its state, the platform runtime and the author's own
+        # markup all inline, by design, because over a share link there is no
+        # origin to fetch a second file from. That document went over the wire
+        # at its full size on every open, and mission pages are deliberately
+        # no-store, so every open paid it again: seconds of white screen on a
+        # phone before anything drew.
+        #
+        # Inside the duration middleware so the time spent compressing is
+        # inside the number that reports how long the request took.
+        #
+        # Streaming is safe rather than lucky: Starlette excludes
+        # `text/event-stream` by default and strips the `; charset` parameter
+        # before matching, so the live-update stream is passed straight
+        # through uncompressed. Non-HTTP scopes -- websockets -- never reach
+        # the responder at all.
+        Middleware(GZipMiddleware, minimum_size=1024),
         # Outer: bind X-Graph-Org to the ops-layer contextvar for every
         # request. Every ``graph_ops.X()`` made while a handler is on the
         # stack picks up the caller org automatically.
