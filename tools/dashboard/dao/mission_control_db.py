@@ -251,6 +251,21 @@ def _get_conn(db_path: Path | str | None = None) -> sqlite3.Connection:
         conn.execute("ALTER TABLE pillars ADD COLUMN last_done TEXT")
         conn.execute("ALTER TABLE pillars ADD COLUMN last_done_at REAL")
         conn.commit()
+    # A question's wording can be corrected. The pair is read later by
+    # someone working out where the mission stands, and a framing that cannot
+    # be fixed stops being worth reading -- the same reason answers have
+    # always been overwritable.
+    try:
+        conn.execute(
+            "SELECT question_edited_at, question_edited_by_session"
+            " FROM mission_conversation LIMIT 0")
+    except sqlite3.OperationalError:
+        conn.execute(
+            "ALTER TABLE mission_conversation ADD COLUMN question_edited_at REAL")
+        conn.execute(
+            "ALTER TABLE mission_conversation"
+            " ADD COLUMN question_edited_by_session TEXT")
+        conn.commit()
     try:
         conn.execute("SELECT avatar_attachment_id FROM visitor_tokens LIMIT 0")
     except sqlite3.OperationalError:
@@ -1259,6 +1274,49 @@ def mark_question_relay_status(
         conn.commit()
     finally:
         conn.close()
+
+
+def rephrase_question(
+    mission_id: str,
+    entry_id: str,
+    question: str,
+    by_session: str,
+    *,
+    db_path: Path | str | None = None,
+) -> dict | None:
+    """Rewrite a question's text in place. Returns None if it doesn't exist.
+
+    The same entry, the same id, the same answer and the same anchor -- only
+    the wording changes. It is NOT a new question: a rephrase that started a
+    fresh entry would strand the answer that already belongs to this one.
+
+    Who last changed it is recorded, because a reader finding wording that
+    does not match the answer beneath it needs to know whether the asker
+    tightened their own question or somebody else rewrote it for them.
+    """
+    question = (question or "").strip()
+    if not question:
+        return None
+    edited_at = time.time()
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE mission_conversation"
+            " SET question = ?, question_edited_at = ?,"
+            "     question_edited_by_session = ?"
+            " WHERE mission_id = ? AND entry_id = ?",
+            (question, edited_at, by_session, mission_id, entry_id),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return None
+        row = conn.execute(
+            "SELECT * FROM mission_conversation WHERE mission_id = ? AND entry_id = ?",
+            (mission_id, entry_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
 
 
 def answer_question(

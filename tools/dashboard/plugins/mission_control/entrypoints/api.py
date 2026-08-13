@@ -1386,6 +1386,56 @@ async def answer_question(request: Request) -> JSONResponse:
     )
 
 
+async def _rephrase_impl(
+    request: Request, *, mission_id: str, entry_id: str, by_session: str,
+) -> JSONResponse:
+    """Rewrite a question's wording in place.
+
+    The same entry, the same answer, the same anchor -- only the words
+    change. Not a new question: starting a fresh entry would strand the
+    answer that already belongs to this one.
+    """
+    body = await request.json()
+    question = body.get("question")
+    if not isinstance(question, str) or not question.strip():
+        return JSONResponse({"error": "question is required"}, status_code=400)
+    entry = db.rephrase_question(mission_id, entry_id, question, by_session)
+    if entry is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    payload = _question_payload(entry)
+    # Anyone reading the thread should see the new wording without a reload;
+    # the existing conversation handler replaces the entry it already has.
+    await _publish_conversation_event(
+        "rephrased", mission_id, entry.get("pillar_id"), entry_id,
+        question=payload,
+    )
+    return JSONResponse({"question": payload})
+
+
+async def rephrase_question(request: Request) -> JSONResponse:
+    mission_id = request.path_params["mission_id"]
+    mission = db.get_mission(mission_id)
+    if not mission:
+        return JSONResponse({"error": "mission not found"}, status_code=404)
+    return await _rephrase_impl(
+        request, mission_id=mission_id,
+        entry_id=request.path_params["entry_id"],
+        by_session=mission.get("coordinator_session") or "",
+    )
+
+
+async def rephrase_pillar_question(request: Request) -> JSONResponse:
+    pillar_id = request.path_params["pillar_id"]
+    pillar = db.get_pillar(pillar_id)
+    if not pillar:
+        return JSONResponse({"error": "pillar not found"}, status_code=404)
+    return await _rephrase_impl(
+        request, mission_id=pillar["mission_id"],
+        entry_id=request.path_params["entry_id"],
+        by_session=pillar.get("coordinator_session") or "",
+    )
+
+
 async def answer_pillar_question(request: Request) -> JSONResponse:
     pillar_id = request.path_params["pillar_id"]
     entry_id = request.path_params["entry_id"]
@@ -1523,6 +1573,10 @@ routes: list[Route] = [
     Route("/api/missions/{mission_id}/questions", ask_question, methods=["POST"]),
     Route("/api/missions/{mission_id}/questions", list_conversation, methods=["GET"]),
     Route(
+        "/api/missions/{mission_id}/questions/{entry_id}/rephrase",
+        rephrase_question, methods=["POST"],
+    ),
+    Route(
         "/api/missions/{mission_id}/questions/{entry_id}/answer",
         answer_question, methods=["POST"],
     ),
@@ -1564,6 +1618,10 @@ routes: list[Route] = [
     ),
     Route("/api/pillars/{pillar_id}/questions", ask_pillar_question, methods=["POST"]),
     Route("/api/pillars/{pillar_id}/questions", list_pillar_conversation, methods=["GET"]),
+    Route(
+        "/api/pillars/{pillar_id}/questions/{entry_id}/rephrase",
+        rephrase_pillar_question, methods=["POST"],
+    ),
     Route(
         "/api/pillars/{pillar_id}/questions/{entry_id}/answer",
         answer_pillar_question, methods=["POST"],

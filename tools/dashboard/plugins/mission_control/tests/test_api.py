@@ -2122,3 +2122,57 @@ def test_a_publish_failure_never_fails_the_write():
                            json={"last_done": "Still recorded."})
     assert r.status_code == 200, r.text
     assert db.get_pillar(pid)["last_done"] == "Still recorded."
+
+
+# ── rephrasing a question (auto-srgag) ───────────────────────────
+
+
+def test_a_question_can_be_reworded_without_losing_its_answer():
+    """The same entry, the same answer, the same anchor — only the words
+    change. Starting a fresh entry would strand the answer that already
+    belongs to this one, which is the whole reason this is an edit and not a
+    re-ask.
+    """
+    mid = db.create_mission("M", "coord-session")["mission_id"]
+    entry = db.ask_question(mid, "wat r teh implickatons", "guest:1", "Jamie")
+    db.answer_question(mid, entry["entry_id"], "Q3 2026.", "coord-session")
+
+    r = _client().post(
+        f"/api/missions/{mid}/questions/{entry['entry_id']}/rephrase",
+        json={"question": "What are the implications?"},
+    )
+    assert r.status_code == 200, r.text
+    q = r.json()["question"]
+    assert q["question"] == "What are the implications?"
+    assert q["entry_id"] == entry["entry_id"], "same entry, not a new one"
+    assert q["answer"] == "Q3 2026.", "the answer must survive a rewording"
+
+
+def test_rephrasing_records_who_changed_it():
+    """A reader finding wording that does not match the answer beneath it
+    needs to know whether the asker tightened their own question or somebody
+    else rewrote it for them.
+    """
+    mid = db.create_mission("M", "coord-session")["mission_id"]
+    entry = db.ask_question(mid, "original", "guest:1", "Jamie")
+    _client().post(
+        f"/api/missions/{mid}/questions/{entry['entry_id']}/rephrase",
+        json={"question": "clearer"},
+    )
+    row = db.get_conversation_entry(entry["entry_id"])
+    assert row["question_edited_by_session"] == "coord-session"
+    assert row["question_edited_at"] is not None
+
+
+def test_an_empty_rephrase_is_refused():
+    """Blank is not a rewording. Accepting it would erase the question and
+    leave an answer with nothing above it.
+    """
+    mid = db.create_mission("M", "coord-session")["mission_id"]
+    entry = db.ask_question(mid, "original", "guest:1", "Jamie")
+    r = _client().post(
+        f"/api/missions/{mid}/questions/{entry['entry_id']}/rephrase",
+        json={"question": "   "},
+    )
+    assert r.status_code == 400
+    assert db.get_conversation_entry(entry["entry_id"])["question"] == "original"
