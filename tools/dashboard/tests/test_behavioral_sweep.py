@@ -3628,22 +3628,6 @@ class TestSessionsPageBehavior:
                 f"synthetic tmux value leaked into {stype} footer: {f['values']}"
 
 
-class TestResumeButtonStateTransition:
-    """Resume-button state-transition tests (auto-eefr, auto-6x6c) are retired.
-
-    auto-ycry3 consolidated the Resume affordance into the sc-org sc-actions
-    actions menu — there is no standalone resume-btn in the DOM anymore.
-    The underlying `resumeSession()` function is unchanged; the action sheet
-    menu entry calls it through the same optimistic-move flow. State visible
-    to the user (spinner/“Live ●”/error pill) lives on the card, covered by
-    the surrounding behavioral tests.
-    """
-
-    def test_noop_sentinel(self):
-        """Sentinel test to keep the class in the report with a passing marker."""
-        assert True
-
-
 class TestRecentSortAndSinceBehavior:
     """Recent Sessions sort + since — reordering and filter behaviors.
 
