@@ -325,6 +325,19 @@
     ]);
   }
 
+  // PROSE KEEPS ITS SHAPE. Answers and questions are written with blank
+  // lines between paragraphs and lists on their own lines. Setting all of it
+  // as one node's text collapses every break, so a considered answer arrives
+  // as one unreadable run-on -- which is exactly how the first real answer on
+  // this platform rendered.
+  function paras(text, cls) {
+    return String(text || "")
+      .split(/\n\s*\n/)
+      .map(function (block) { return block.trim(); })
+      .filter(Boolean)
+      .map(function (block) { return el("p", {class: cls, text: block}); });
+  }
+
   function barRow() {
     var p = currentPillar() || {};
     var here = presentHere();
@@ -487,6 +500,14 @@
     }));
   }
 
+  // The opening of a reply, enough to recognise it by. Never the whole
+  // thing: the row is an index, and a row that grows to the length of its
+  // answer stops being one.
+  function firstLine(text) {
+    var line = String(text || "").split(/\n/)[0].trim();
+    return line.length > 120 ? line.slice(0, 117) + "\u2026" : line;
+  }
+
   function questionRows() {
     var sorted = questionsHere().slice().sort(function (a, b) { return (!!a.answer) - (!!b.answer); });
     if (!sorted.length) {
@@ -501,12 +522,17 @@
     return sorted.map(function (q) {
       return el("button", {class: "mc-row", onclick: function () { show({entry: q.entry_id}); }}, [
         el("div", {class: "mc-row-top"}, [
-          el("span", {class: q.answer ? "mc-chip" : "mc-chip mc-chip-open", text: q.answer ? "answered" : "open"}),
+          el("span", {class: q.answer ? "mc-chip mc-chip-done" : "mc-chip mc-chip-open",
+                      text: q.answer ? "answered" : "open"}),
           el("span", {class: "mc-sub", text: pillarName(q.pillar_id)}),
         ]),
         el("p", {class: "mc-qtext", text: q.question || ""}),
         el("p", {class: "mc-sub", text: q.asked_by_label || ""}),
-      ]);
+        // An answer you cannot see is one you do not know arrived. The row
+        // showed only the question, so the whole visible change on being
+        // answered was a colour going away -- which reads as nothing having
+        // happened. The first line of the reply is the signal.
+      ].concat(q.answer ? [el("p", {class: "mc-answer-peek", text: firstLine(q.answer)})] : []));
     });
   }
 
@@ -597,11 +623,10 @@
     if (!ui.entry) return null;
     var q = state.questions.filter(function (x) { return x.entry_id === ui.entry; })[0];
     if (!q) return null;
-    var body = [
-      el("p", {class: "mc-label", text: "Question"}),
-      el("p", {class: "mc-qbig", text: q.question || ""}),
-      el("p", {class: "mc-sub", text: (q.asked_by_label || "") + (q.created_at ? " \u00b7 " + q.created_at : "")}),
-    ];
+    var body = [el("p", {class: "mc-label", text: "Question"})];
+    paras(q.question, "mc-qbig").forEach(function (n) { body.push(n); });
+    body.push(el("p", {class: "mc-sub",
+                       text: (q.asked_by_label || "") + (q.created_at ? " \u00b7 " + q.created_at : "")}));
     if (q.anchor) body.push(el("p", {class: "mc-sub", text: q.anchor}));
     if (!q.answer && (q.updates || []).length) {
       body.push(el("p", {class: "mc-label mc-mt", text: "While this is open"}));
@@ -609,7 +634,10 @@
     }
     if (q.answer) {
       body.push(el("p", {class: "mc-label mc-mt", text: "Answer"}));
-      body.push(el("p", {class: "mc-answer", text: q.answer}));
+      // The answer gets its own block, not another paragraph in the same
+      // column of grey. Question and answer reading as one undifferentiated
+      // pile is the difference between a record and a wall of text.
+      body.push(el("div", {class: "mc-answer-block"}, paras(q.answer, "mc-answer")));
     }
     return el("section", {class: "mc-view"}, [
       el("div", {class: "mc-phead"}, [
