@@ -51,6 +51,7 @@ from . import mount  # noqa: F401 — autonomy.workspace.mount#1
 from . import agent_actions  # noqa: F401 — dashboard.agent-actions#1
 from . import capability_contract  # noqa: F401 — autonomy.capability.contract#1
 from . import capability_impl  # noqa: F401 — autonomy.capability.impl#1
+from . import host_install_state  # noqa: F401 — dashboard.capability.host_install_state#1
 from . import org_capability_install  # noqa: F401 — autonomy.org.capability.install#1
 from . import workspace_capability_enable  # noqa: F401 — autonomy.workspace.capability.enable#1
 from . import commit_policy  # noqa: F401 — autonomy.commit.policy#1 + operation_policy#1
