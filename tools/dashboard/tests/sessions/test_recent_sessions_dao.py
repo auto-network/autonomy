@@ -131,7 +131,6 @@ def isolated_dao(tmp_path, monkeypatch):
 
     # ── Reload sessions DAO with new graph.db path ──
     from tools.dashboard.dao import sessions as sessions_dao
-    monkeypatch.setattr(sessions_dao, "_GRAPH_DB", graph_db_path)
 
     yield sessions_dao
 
@@ -355,7 +354,6 @@ def duration_dao(tmp_path, monkeypatch):
     ddb.init_db(dashboard_db_path)
 
     from tools.dashboard.dao import sessions as sessions_dao
-    monkeypatch.setattr(sessions_dao, "_GRAPH_DB", graph_db_path)
     yield sessions_dao
 
 
@@ -461,8 +459,7 @@ def librarian_dao(tmp_path, monkeypatch):
     ddb.init_db(dashboard_db_path)
 
     from tools.dashboard.dao import sessions as sessions_dao
-    monkeypatch.setattr(sessions_dao, "_GRAPH_DB", graph_db_path)
-    monkeypatch.setattr(sessions_dao, "_DISPATCH_DB", dispatch_db_path)
+    monkeypatch.setenv("DISPATCH_DB", str(dispatch_db_path))
     yield sessions_dao
 
 
@@ -554,8 +551,7 @@ class TestLibrarianTitleFields:
         importlib.reload(ddb)
         ddb.init_db(dashboard_db_path)
         from tools.dashboard.dao import sessions as sessions_dao
-        monkeypatch.setattr(sessions_dao, "_GRAPH_DB", graph_db_path)
-        monkeypatch.setattr(sessions_dao, "_DISPATCH_DB", dispatch_db_path)
+        monkeypatch.setenv("DISPATCH_DB", str(dispatch_db_path))
 
         results = sessions_dao.get_recent_sessions(since="all")
         orphan = next(r for r in results if r["id"] == "src-orphan")
@@ -689,7 +685,6 @@ def quota_dao(tmp_path, monkeypatch):
     ddb.init_db(dashboard_db_path)
 
     from tools.dashboard.dao import sessions as sessions_dao
-    monkeypatch.setattr(sessions_dao, "_GRAPH_DB", graph_db_path)
     yield sessions_dao
 
 

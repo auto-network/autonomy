@@ -37,6 +37,11 @@ os.environ.update(json.loads(ENV_FILE.read_text()))
 os.environ["PYTHONPATH"] = str(REPO)
 sys.path.insert(0, str(REPO))
 
+# The node's first act is importing the server; an import-time store
+# resolution that raises kills uvicorn before it binds (auto-5jbqa). Import
+# it here so this acceptance dies exactly where the real node would.
+import tools.dashboard.server  # noqa: E402,F401
+
 import httpx  # noqa: E402
 
 
