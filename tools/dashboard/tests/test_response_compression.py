@@ -72,9 +72,16 @@ def test_the_live_update_stream_is_never_compressed():
 
 
 def test_the_dashboard_app_has_compression_installed():
-    """The middleware is on the real app, not just possible in principle."""
-    from tools.dashboard import server
+    """The middleware is on the real app, not just possible in principle.
 
-    assert any(
-        m.cls is GZipMiddleware for m in server.app.user_middleware
-    ), "the dashboard serves everything uncompressed again"
+    Read rather than imported. Importing the server module here re-resolves
+    the data paths inside whichever parallel worker happens to run this file,
+    which left every other test in that worker without an initialised store --
+    a failure that appeared in unrelated suites and pointed nowhere near here.
+    """
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "server.py").read_text()
+    assert "Middleware(GZipMiddleware" in src, (
+        "the dashboard serves everything uncompressed again"
+    )
