@@ -162,6 +162,7 @@ from tools.dashboard.plugin_api import loader as plugin_loader  # noqa: E402
 # loop itself starts inside the lifespan hook.
 from tools.dashboard import settings_mediator as _settings_mediator  # noqa: E402, F401
 from tools.dashboard import harness_usage_settings as _harness_usage_settings  # noqa: E402, F401
+from tools.dashboard import harness_bootstrap as _harness_bootstrap  # noqa: E402, F401
 from tools.dashboard import session_upload_settings as _session_upload  # noqa: E402, F401
 from tools.dashboard import session_orientation_settings as _session_orientation_settings  # noqa: E402, F401
 from tools.dashboard import voice_transcription_settings as _voice_transcription_settings  # noqa: E402
@@ -10128,8 +10129,107 @@ def _load_template(name: str) -> str:
 async def api_version(request):
     return JSONResponse({"version": _static_version()})
 
+def _bootstrap_gate_open() -> bool:
+    """True when Layer-0 harness bootstrap is still required.
+
+    Server-side gate (bead auto-n130b): while no harness row carries
+    ``auth == "ok"`` in ``autonomy.harness.bootstrap#1``, the first-launch
+    walkthrough renders instead of the session UI. Once a harness is verified
+    it never intercepts again. Any read error fails OPEN (gate closed) so a
+    substrate hiccup never bricks the dashboard behind bootstrap.
+    """
+    try:
+        return not _harness_bootstrap.has_verified_harness()
+    except Exception:
+        logger.exception("bootstrap gate check failed; not gating")
+        return False
+
+
 async def page_index(request):
+    # First-launch gate: with no verified harness recorded, render the
+    # deterministic bootstrap walkthrough rather than the session UI. This is
+    # a server-side decision (not a client redirect) so a clean machine lands
+    # on setup, not on a session-create board it cannot use yet.
+    if _bootstrap_gate_open():
+        return HTMLResponse(_load_template("bootstrap.html"))
     return RedirectResponse(url="/beads")
+
+
+async def page_bootstrap(request):
+    """GET /bootstrap — the Layer-0 harness setup walkthrough.
+
+    Always serves the walkthrough shell; the page probes on load and, once a
+    harness verifies, its Start button lands on ``/`` (which then falls
+    through to the session UI). Reachable directly so an operator can revisit
+    setup even after the gate has closed.
+    """
+    return HTMLResponse(_load_template("bootstrap.html"))
+
+
+async def api_bootstrap_probe(request):
+    """GET /api/bootstrap/probe — discover claude/codex state on this host.
+
+    Discovery only: resolves each CLI on PATH, parses --version, and runs one
+    authenticated no-op to classify not-installed / needs-sign-in / ready.
+    Writes nothing.
+    """
+    harnesses = await asyncio.to_thread(_harness_bootstrap.probe_all)
+    return JSONResponse({"harnesses": list(harnesses.values())})
+
+
+async def _bootstrap_harness_arg(request) -> str | None:
+    try:
+        body = await request.json()
+    except Exception:
+        return None
+    slug = (body or {}).get("harness")
+    if slug in _harness_bootstrap.HARNESS_SPECS:
+        return slug
+    return None
+
+
+async def api_bootstrap_verify(request):
+    """POST /api/bootstrap/verify {harness} — verify + record one harness.
+
+    Runs the live probe (version + authenticated no-op) and, when the CLI is
+    present, upserts its ``autonomy.harness.bootstrap#1`` discovery row. The
+    row carries discovery results ONLY — never any credential material.
+    Returns the probe result.
+    """
+    slug = await _bootstrap_harness_arg(request)
+    if not slug:
+        return JSONResponse(
+            {"error": "harness must be 'claude' or 'codex'"}, status_code=400,
+        )
+    result = await asyncio.to_thread(_harness_bootstrap.verify_and_record, slug)
+    return JSONResponse(result)
+
+
+async def api_bootstrap_install(request):
+    """POST /api/bootstrap/install {harness} — run the guided install.
+
+    Runs the harness's own installer command on the host, then re-probes and
+    records. Auth is NOT attempted here — sign-in stays inside the harness's
+    own tooling. Returns ``{ok, result, error}``.
+    """
+    slug = await _bootstrap_harness_arg(request)
+    if not slug:
+        return JSONResponse(
+            {"error": "harness must be 'claude' or 'codex'"}, status_code=400,
+        )
+    spec = _harness_bootstrap.HARNESS_SPECS[slug]
+    cmd = spec["install_cmd"].split()
+    code, out = await asyncio.to_thread(
+        _harness_bootstrap._run, cmd, 600,
+    )
+    if code != 0:
+        return JSONResponse(
+            {"ok": False, "error": out or "install command failed",
+             "install_cmd": spec["install_cmd"]},
+            status_code=502,
+        )
+    result = await asyncio.to_thread(_harness_bootstrap.verify_and_record, slug)
+    return JSONResponse({"ok": True, "result": result})
 
 async def page_network_join(request):
     """The invite bridge's local-origin half (auto-1ihgz): display/consent
@@ -17011,6 +17111,11 @@ routes = [
     Route("/api/voice/trace", api_voice_trace, methods=["POST"]),
     # Pages
     Route("/", page_index),
+    # Layer-0 harness bootstrap (bead auto-n130b) — pre-agent first-launch gate.
+    Route("/bootstrap", page_bootstrap),
+    Route("/api/bootstrap/probe", api_bootstrap_probe),
+    Route("/api/bootstrap/verify", api_bootstrap_verify, methods=["POST"]),
+    Route("/api/bootstrap/install", api_bootstrap_install, methods=["POST"]),
     Route("/beads", page_beads),
     Route("/pages/beads", page_beads_fragment),
     Route("/dispatch", page_dispatch),
