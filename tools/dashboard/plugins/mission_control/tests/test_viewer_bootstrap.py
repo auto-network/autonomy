@@ -335,3 +335,25 @@ def test_the_live_stream_gives_its_connection_back():
     assert 'addEventListener("pagehide", releaseLive)' in src
     assert 'addEventListener("pageshow", subscribeLive)' in src
     assert 'if (live) return;' in src, "nothing stops a second stream opening"
+
+
+def test_an_undelivered_question_does_not_look_like_a_considered_one():
+    """Whether a question reached its coordinator has always been recorded and
+    was never shown. A question that never arrived and one being thought about
+    were the same thing on screen -- nothing -- for as long as you cared to
+    wait. Three states now, because 'open' was covering the two a reader most
+    needs told apart."""
+    src = _viewer("bootstrap.js")
+    assert 'q.relay_status === "failed"' in src, "delivery failure is invisible again"
+    assert "Not delivered" in src
+    assert '"working"' in src, "a question being actively worked on is not distinguishable"
+
+
+def test_progress_steps_stack_with_only_the_newest_live():
+    """Being superseded is what finishing looks like -- no step marks itself
+    done. Only the newest animates."""
+    src = _viewer("bootstrap.js")
+    assert "mc-step-live" in src
+    assert "i === steps.length - 1" in src, "every step renders the same"
+    css = _viewer("chrome.css")
+    assert "prefers-reduced-motion" in css, "the live step animates unconditionally"
