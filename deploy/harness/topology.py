@@ -109,8 +109,12 @@ def _node_service(
         # The value is supplied only to the `up node-b` subprocess.  It is
         # never rendered into the generated file or written to artifacts.
         environment["AUTONOMY_INVITE"] = "${AUTONOMY_HARNESS_INVITE_B:-}"
-        environment["AUTONOMY_PERSONAL_PASSWORD_FILE"] = (
-            "/app/data/harness-personal-password"
+        # TEST AUTOMATION ONLY: production has no mounted-personal-password
+        # interface. Both gates are explicit so copying this variable alone
+        # into a deployment cannot activate the test input.
+        environment["AUTONOMY_TEST_AUTOMATION"] = "1"
+        environment["AUTONOMY_TEST_PERSONAL_PASSWORD_FILE"] = (
+            "/app/data/test-automation-personal-password"
         )
     service = {
         "image": config.image,

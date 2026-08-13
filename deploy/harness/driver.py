@@ -469,11 +469,12 @@ class Harness:
     def phase_join(self) -> None:
         if self._invitation is None:
             raise HarnessError("found phase did not create an invitation")
-        # The password crosses stdin into a mode-0600 file in B's named
-        # volume. It is absent from Compose, argv, and preserved logs.
+        # TEST AUTOMATION ONLY. The synthetic password crosses stdin into a
+        # mode-0600 file in B's isolated named volume. Production has no
+        # corresponding mounted-password interface.
         self._compose(
             "run", "--rm", "--no-deps", "--entrypoint", "sh", "node-b",
-            "-c", "umask 077; cat > /app/data/harness-personal-password",
+            "-c", "umask 077; cat > /app/data/test-automation-personal-password",
             input_text=self._password + "\n",
         )
         env = dict(os.environ)

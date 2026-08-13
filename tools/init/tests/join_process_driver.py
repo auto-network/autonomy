@@ -115,7 +115,8 @@ def main() -> int:
     invitation = decode_invitation(args.invite)
     os.environ[REFUSE_REAL_DATA_FALLBACK_ENV] = "1"
     os.environ["AUTONOMY_INVITE"] = args.invite
-    os.environ["AUTONOMY_PERSONAL_PASSWORD_FILE"] = str(args.password_file)
+    os.environ["AUTONOMY_TEST_AUTOMATION"] = "1"
+    os.environ["AUTONOMY_TEST_PERSONAL_PASSWORD_FILE"] = str(args.password_file)
     os.environ.pop("AUTONOMY_FIRST_ORG", None)
     for store in STORE_MANIFEST:
         if store.env:

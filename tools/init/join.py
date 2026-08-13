@@ -14,11 +14,13 @@ The order matters and is enforced:
    silently joining the invitee somewhere else.
 2. **Mint locally, or not at all.** The personal root is the asset that
    unlocks every persona in every org this identity will ever join, so
-   its password is never taken from the environment (it would persist
-   in ``docker inspect`` for the node's life). It comes from a mounted
-   secret file or stdin, read ONCE — or, with no password source, the
-   node stages the validated invitation and mints NOTHING, leaving
-   identity setup to the dashboard's local prompt.
+   its password is never taken from an environment value (it would persist
+   in ``docker inspect`` for the node's life). Production accepts only a
+   one-time stdin value. The mounted-file source exists solely for the
+   isolated multi-node test harness and is guarded by explicit test mode
+   plus refusal of every real-data fallback. With no password source, the
+   node stages the validated invitation and mints NOTHING, leaving identity
+   setup to an interactive browser ceremony.
 3. **Claim over the channel**, reusing the membership flow unchanged:
    derive the persona from the org's real ``genesis_id``, mint the
    credential-carrying claim, submit. A token-bound invite stages
@@ -80,28 +82,59 @@ class JoinTransport(Protocol):
     def request(self, payload: dict) -> dict: ...
 
 
-# -- the password source (ruling: file/stdin only, never the environment) -----------
+# -- the password source ------------------------------------------------------------
 
-PASSWORD_FILE_ENV = "AUTONOMY_PERSONAL_PASSWORD_FILE"
+# TEST AUTOMATION ONLY. The production name previously used for a mounted
+# plaintext personal passphrase is rejected below rather than retained as an
+# undocumented compatibility alias. A personal passphrase unlocks every
+# persona this identity derives, so making a persistent server-side copy must
+# never become a production convenience by accident.
+TEST_AUTOMATION_ENV = "AUTONOMY_TEST_AUTOMATION"
+TEST_PASSWORD_FILE_ENV = "AUTONOMY_TEST_PERSONAL_PASSWORD_FILE"
+LEGACY_PASSWORD_FILE_ENV = "AUTONOMY_PERSONAL_PASSWORD_FILE"
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def test_automation_enabled() -> bool:
+    """Whether isolated test-only secret inputs are explicitly enabled."""
+    return os.environ.get(TEST_AUTOMATION_ENV, "").strip().lower() in _TRUE_VALUES
 
 
 def read_personal_password(*, stdin_ok: bool = True) -> Optional[str]:
     """The first-run personal-root password, or None to stage instead.
 
-    A mounted secret file, else stdin when it is not a terminal. NEVER
-    the environment: unlike the invitation's channel and claim credentials
-    (host access already implies node control), this unlocks every persona in
-    every org this identity will ever join, and an environment variable would
-    keep it in ``docker inspect`` for the node's whole life.
+    Production may supply one line over stdin. A mounted file is accepted
+    ONLY by isolated test automation with both ``AUTONOMY_TEST_AUTOMATION``
+    and ``AUTONOMY_REFUSE_REAL_DATA_FALLBACK`` enabled. The latter ensures
+    the same process cannot resolve any operator data through a default path.
+
+    The password itself is NEVER an environment value: unlike the invitation's
+    channel and claim credentials, it unlocks every persona in every org this
+    identity will ever join, and an environment value would remain visible in
+    ``docker inspect`` for the node's whole life.
     """
-    path = os.environ.get(PASSWORD_FILE_ENV)
+    if LEGACY_PASSWORD_FILE_ENV in os.environ:
+        raise JoinError(
+            f"{LEGACY_PASSWORD_FILE_ENV} is not a supported production input; "
+            "mounted personal-passphrase files are test automation only"
+        )
+
+    path = os.environ.get(TEST_PASSWORD_FILE_ENV)
     if path:
+        from tools.data_paths import refuse_real_data_fallback_enabled
+
+        if not test_automation_enabled() or not refuse_real_data_fallback_enabled():
+            raise JoinError(
+                f"{TEST_PASSWORD_FILE_ENV} is TEST AUTOMATION ONLY and requires "
+                f"{TEST_AUTOMATION_ENV}=1 plus "
+                "AUTONOMY_REFUSE_REAL_DATA_FALLBACK=1"
+            )
         try:
             value = Path(path).read_text().splitlines()[0].strip()
         except (OSError, IndexError) as exc:
-            raise JoinError(f"cannot read {PASSWORD_FILE_ENV}: {exc}") from exc
+            raise JoinError(f"cannot read {TEST_PASSWORD_FILE_ENV}: {exc}") from exc
         if not value:
-            raise JoinError(f"{PASSWORD_FILE_ENV} is empty")
+            raise JoinError(f"{TEST_PASSWORD_FILE_ENV} is empty")
         return value
     if stdin_ok:
         try:
@@ -212,7 +245,7 @@ def _open_personal_identity(password: str) -> bytes:
     try:
         root = decrypt_root_key(member.payload["armored_private_key"], password)
     except ArmorError:
-        raise JoinError("the mounted personal password did not unlock the identity") from None
+        raise JoinError("the supplied personal password did not unlock the identity") from None
     return bytes.fromhex(root.private_hex)
 
 

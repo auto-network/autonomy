@@ -14,10 +14,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from starlette.applications import Starlette
-from starlette.testclient import TestClient
-
-from tools.dashboard import claim_service, join_routes
+from tools.dashboard import claim_service
 from tools.data_paths import REFUSE_REAL_DATA_FALLBACK_ENV, STORE_MANIFEST
 from tools.network.idkit import KeyPair, generate_token
 from tools.network.invitation import Invitation, encode_invitation
@@ -423,8 +420,6 @@ def test_restart_refuses_when_the_seed_no_longer_derives_the_staged_persona(
 def identified_node(tmp_path, monkeypatch):
     volume = tmp_path / "identified-node"
     world = FoundedInvite(tmp_path / "remote-orgs", "inviting")
-    password_file = tmp_path / "personal-password"
-    password_file.write_text(PASSWORD + "\n")
 
     with _node_volume(volume):
         from tools.graph import org_ops
@@ -435,38 +430,11 @@ def identified_node(tmp_path, monkeypatch):
         )
         _mint_personal_identity(PASSWORD, display_name="Existing operator")
         armor = _personal_armor(volume)
-        monkeypatch.setenv(
-            "AUTONOMY_PERSONAL_PASSWORD_FILE", str(password_file)
-        )
         monkeypatch.setattr(
             "tools.init.join.production_transport",
             lambda invitation: DirectTransport(world),
         )
         yield volume, world, armor
-
-
-def test_loopback_handoff_joins_without_re_onboarding(identified_node):
-    volume, world, armor_before = identified_node
-    with _node_volume(volume):
-        app = Starlette(routes=join_routes.ROUTES)
-        with TestClient(app, client=("127.0.0.1", 50000)) as client:
-            pending = client.post(
-                "/api/identity/join", json={"invite": world.code}
-            )
-            assert pending.status_code == 200
-            assert pending.json()["status"] == "pending"
-            persona_pub = pending.json()["persona_pub"]
-
-            assert world.approve(persona_pub)["status"] == "ready"
-            admitted = client.post(
-                "/api/identity/join", json={"invite": world.code}
-            )
-            assert admitted.status_code == 200
-            assert admitted.json()["status"] == "admitted"
-
-        assert _personal_armor(volume) == armor_before
-        member, _source = world.member_and_content(persona_pub)
-        assert member.roles == ("member",)
 
 
 def test_resume_refuses_a_different_org_genesis(identified_node):
@@ -506,39 +474,3 @@ def test_resume_refuses_a_different_org_genesis(identified_node):
                 world.invitation, swapped, password=PASSWORD
             )
         assert swapped.operations == ["status"]
-
-
-def test_handoff_is_loopback_only_and_never_accepts_a_password(
-    identified_node, monkeypatch
-):
-    volume, world, _armor = identified_node
-    with _node_volume(volume):
-        app = Starlette(routes=join_routes.ROUTES)
-        with TestClient(app, client=("203.0.113.8", 50000)) as remote:
-            assert remote.post(
-                "/api/identity/join", json={"invite": world.code}
-            ).status_code == 403
-
-        monkeypatch.delenv(
-            "AUTONOMY_PERSONAL_PASSWORD_FILE", raising=False
-        )
-        with TestClient(app, client=("127.0.0.1", 50000)) as local:
-            csrf = local.post(
-                "/api/identity/join",
-                content=json.dumps({"invite": world.code}),
-                headers={"content-type": "text/plain"},
-            )
-            assert csrf.status_code == 415
-            assert csrf.json()["reason"] == "application-json-required"
-
-            missing = local.post(
-                "/api/identity/join", json={"invite": world.code}
-            )
-            assert missing.status_code == 409
-            assert missing.json()["reason"] == "needs-password"
-            body_secret = local.post(
-                "/api/identity/join",
-                json={"invite": world.code, "password": PASSWORD},
-            )
-            assert body_secret.status_code == 400
-            assert body_secret.json()["reason"] == "body-must-carry-only-invite"

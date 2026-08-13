@@ -9,9 +9,11 @@ import pytest
 from tools.data_paths import REFUSE_REAL_DATA_FALLBACK_ENV, STORE_MANIFEST
 from tools.init.join import (
     ADMITTED,
-    PASSWORD_FILE_ENV,
+    LEGACY_PASSWORD_FILE_ENV,
     PENDING,
     STAGED,
+    TEST_AUTOMATION_ENV,
+    TEST_PASSWORD_FILE_ENV,
     AnchorMismatch,
     JoinError,
     ViewerJoinTransport,
@@ -82,7 +84,9 @@ def volume(tmp_path, monkeypatch):
     (tmp_path / "data" / "orgs").mkdir(parents=True, exist_ok=True)
     GraphDB.create_org_db("personal", type_="personal",
                           root=tmp_path / "data" / "orgs").close()
-    monkeypatch.delenv(PASSWORD_FILE_ENV, raising=False)
+    monkeypatch.delenv(LEGACY_PASSWORD_FILE_ENV, raising=False)
+    monkeypatch.delenv(TEST_AUTOMATION_ENV, raising=False)
+    monkeypatch.delenv(TEST_PASSWORD_FILE_ENV, raising=False)
     yield tmp_path
     GraphDB.close_all_pooled()
 
@@ -93,27 +97,43 @@ def volume(tmp_path, monkeypatch):
 def test_password_never_comes_from_the_environment(monkeypatch):
     """The personal root unlocks every persona in every org this identity
     ever joins; an env var would keep it in docker inspect for the node's
-    life. Only a mounted file or stdin is accepted."""
+    life. Production accepts only one-time stdin."""
     monkeypatch.setenv("AUTONOMY_PERSONAL_PASSWORD", "should-be-ignored")
-    monkeypatch.delenv(PASSWORD_FILE_ENV, raising=False)
+    monkeypatch.delenv(LEGACY_PASSWORD_FILE_ENV, raising=False)
+    monkeypatch.delenv(TEST_PASSWORD_FILE_ENV, raising=False)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)  # no stdin source
     assert read_personal_password() is None
 
 
-def test_password_from_a_mounted_file(tmp_path, monkeypatch):
+def test_legacy_production_password_file_is_refused(tmp_path, monkeypatch):
     secret = tmp_path / "personal-password"
     secret.write_text(PASSWORD + "\n")
-    monkeypatch.setenv(PASSWORD_FILE_ENV, str(secret))
+    monkeypatch.setenv(LEGACY_PASSWORD_FILE_ENV, str(secret))
+    with pytest.raises(JoinError, match="not a supported production input"):
+        read_personal_password()
+
+
+def test_password_file_requires_both_test_automation_gates(tmp_path, monkeypatch):
+    secret = tmp_path / "personal-password"
+    secret.write_text(PASSWORD + "\n")
+    monkeypatch.setenv(TEST_PASSWORD_FILE_ENV, str(secret))
+    with pytest.raises(JoinError, match="TEST AUTOMATION ONLY"):
+        read_personal_password()
+
+    monkeypatch.setenv(TEST_AUTOMATION_ENV, "1")
+    monkeypatch.setenv(REFUSE_REAL_DATA_FALLBACK_ENV, "1")
     assert read_personal_password() == PASSWORD
 
 
 def test_unreadable_or_empty_password_file_fails_loudly(tmp_path, monkeypatch):
-    monkeypatch.setenv(PASSWORD_FILE_ENV, str(tmp_path / "nope"))
+    monkeypatch.setenv(TEST_AUTOMATION_ENV, "1")
+    monkeypatch.setenv(REFUSE_REAL_DATA_FALLBACK_ENV, "1")
+    monkeypatch.setenv(TEST_PASSWORD_FILE_ENV, str(tmp_path / "nope"))
     with pytest.raises(JoinError):
         read_personal_password()
     empty = tmp_path / "empty"
     empty.write_text("\n")
-    monkeypatch.setenv(PASSWORD_FILE_ENV, str(empty))
+    monkeypatch.setenv(TEST_PASSWORD_FILE_ENV, str(empty))
     with pytest.raises(JoinError):
         read_personal_password()
 
