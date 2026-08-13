@@ -129,6 +129,22 @@ NAG_MAX_DURATION_SECONDS = 14400.0      # 4-hour absolute ceiling
 NAG_DONE_TIMEOUT_SECONDS = 7200.0       # 2 hours
 
 
+def _encode_json(payload) -> bytes:
+    """Encode ``payload`` to compact UTF-8 JSON bytes.
+
+    Matches Starlette's ``JSONResponse`` wire format (``ensure_ascii`` off,
+    ``(",", ":")`` separators) so pre-encoded sweep bytes are byte-identical
+    to what a per-request ``JSONResponse`` would have produced (auto-yq27f).
+    """
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        indent=None,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
 def _watch_key(session_name: str, repo_name: str) -> str:
     """Composite Settings key for one Worktrees row's watch state."""
     return f"{session_name}:{repo_name}"
@@ -942,6 +958,81 @@ class WorktreeMonitor:
         self._task: asyncio.Task | None = None
         self._lock: asyncio.Lock | None = None
         self._started = False
+        # Row → JSON dict renderer, registered by the server at startup
+        # (``_worktree_state_json``). Kept as a hook rather than an import to
+        # avoid a monitor→server cycle. When set, each sweep renders + encodes
+        # the whole payload on the worker thread so the request path serves
+        # pre-encoded bytes with neither git nor json.dumps (auto-yq27f).
+        self._row_renderer: Callable[[WorktreeState], dict] | None = None
+        # Pre-encoded payload bytes keyed by org slug ("" = all orgs). ``None``
+        # until the first sweep renders; callers fall back to per-request
+        # rendering while it's None so a cold cache still serves correct data.
+        self._rendered_json_by_org: dict[str, bytes] | None = None
+
+    def set_row_renderer(
+        self, renderer: Callable[[WorktreeState], dict] | None,
+    ) -> None:
+        """Register the row→JSON renderer used to pre-encode the payload.
+
+        Server startup passes ``_worktree_state_json``; tests may pass a
+        stub or ``None`` (which disables pre-rendering, so the request path
+        falls back to rendering per call). Idempotent.
+        """
+        self._row_renderer = renderer
+
+    def get_rendered_json(self, org: str = "") -> bytes | None:
+        """Return pre-encoded ``/api/worktrees`` bytes for ``org``.
+
+        ``org=""`` is the full payload. Returns ``None`` when no sweep has
+        rendered yet (caller renders per-request as a fallback); returns
+        ``b"[]"`` for a known-but-empty org once a render exists.
+        """
+        by_org = self._rendered_json_by_org
+        if by_org is None:
+            return None
+        return by_org.get(org, b"[]")
+
+    def _build_rendered_payload(self) -> dict[str, bytes]:
+        """Render + encode the payload, partitioned per org. Worker-thread only.
+
+        Runs the registered serializer (DB reads + json encode, no git — the
+        target-branch label already lives on the row) once per sweep instead
+        of once per request. Groups rows by resolved org slug so the
+        one-org-at-a-time worktrees page serves its slice without re-encoding.
+        """
+        renderer = self._row_renderer
+        rows = list(self._cache)
+        payload = [renderer(row) for row in rows] if renderer else []
+        by_org: dict[str, bytes] = {"": _encode_json(payload)}
+        groups: dict[str, list[dict]] = {}
+        for entry in payload:
+            slug = ((entry.get("org") or {}).get("slug") or "")
+            if slug:
+                groups.setdefault(slug, []).append(entry)
+        for slug, entries in groups.items():
+            by_org[slug] = _encode_json(entries)
+        return by_org
+
+    async def refresh_rendered_cache(self) -> None:
+        """Rebuild the pre-encoded payload cache off the event loop.
+
+        Called at the end of every sweep, and by operator-refresh handlers
+        after they hydrate extra capability state, so the cached bytes track
+        the current ``self._cache`` + source-control snapshots. A no-op when
+        no renderer is registered (e.g. bare unit tests).
+        """
+        if self._row_renderer is None:
+            return
+        try:
+            self._rendered_json_by_org = await asyncio.to_thread(
+                self._build_rendered_payload,
+            )
+        except Exception:
+            # A render hiccup must not fail the sweep (or an operator refresh
+            # that called us). Keep the previous pre-encoded cache — the
+            # request path falls back to per-request render if it was never
+            # built — and try again next sweep.
+            logger.exception("worktree_monitor: rendered-payload rebuild failed")
 
     def get_all(self) -> list[WorktreeState]:
         """Return a snapshot of cached worktree state."""
@@ -1222,6 +1313,10 @@ class WorktreeMonitor:
             await self._refresh_source_control(
                 rows, force_capabilities=force_capabilities,
             )
+            # Pre-render the payload on the worker thread now that rows and
+            # source-control snapshots are settled, so /api/worktrees serves
+            # pre-encoded bytes without git or json.dumps (auto-yq27f).
+            await self.refresh_rendered_cache()
             return list(self._cache)
 
     async def refresh_one(
@@ -1281,6 +1376,7 @@ class WorktreeMonitor:
                     target = None
             if target is not None:
                 await self._refresh_one_source_control(target, rows)
+            await self.refresh_rendered_cache()
             return list(self._cache)
 
     async def discover_prs(self, rows: list[WorktreeState]) -> None:

@@ -78,7 +78,6 @@ from agents.workspace_manager import (
     merge_session_worktree_commit,
     prepare_session_mounts,
     sync_session_worktree_base,
-    worktree_target_branch_name,
 )
 from agents.design_db import DuplicateDesignTitleError
 if os.environ.get("DASHBOARD_MOCK"):
@@ -10494,11 +10493,13 @@ def _worktree_state_json(row: WorktreeState) -> dict:
         "session_live": row.session_live,
         "cherry_pick_eligible": row.cherry_pick_eligible,
         "cherry_pick_commit": row.cherry_pick_commit,
-        "target_branch": worktree_target_branch_name(
-            row.session_name,
-            row.repo_name,
-            row.branch,
-        ),
+        # PURE: read the label resolved on the sweep's worker thread and
+        # carried on the row (auto-yq27f). This serializer must never spawn
+        # git/subprocess/filesystem work — it runs on the event loop for
+        # every /api/worktrees poll, and a single blocking call here stalls
+        # SSE delivery for every connected viewer. Enforced by
+        # test_worktree_state_json_is_pure_no_git.
+        "target_branch": row.target_branch,
         "commits": [_worktree_commit_json(commit) for commit in row.commits],
         # The list payload ships only a 3-entry preview; the true count travels
         # separately so the UI can render "+N more" without the full array, and
@@ -10573,6 +10574,16 @@ async def api_worktrees(request):
     org = _org_filter_param(request)
     if os.environ.get("DASHBOARD_MOCK"):
         return JSONResponse(_filter_worktree_payload_by_org(dao_sessions.get_worktrees(), org))
+    # Fast path: the sweep already rendered + encoded this payload on its
+    # worker thread (auto-yq27f). Serve the pre-encoded bytes directly —
+    # zero git, zero json.dumps on the event loop, so SSE frames keep
+    # flowing while this returns. ``org`` selects a pre-partitioned slice.
+    rendered = worktree_monitor.get_rendered_json(org)
+    if rendered is not None:
+        return Response(rendered, media_type="application/json")
+    # Fallback (cold cache before the first sweep, or a monitor with no
+    # renderer registered — e.g. some tests): render per-request. Still
+    # pure git-wise, since the target-branch label lives on the row.
     payload = [
         _worktree_state_json(row)
         for row in worktree_monitor.get_all()
@@ -10584,8 +10595,11 @@ async def api_worktrees_orgs(request):
     """Org summary for the worktrees page: one entry per org with counts.
 
     Backs the org dropdown (the page always shows exactly one org at a
-    time), so it has to be cheap: aggregates the monitor's cached rows,
-    no git work.
+    time), so it has to be cheap: aggregates the monitor's cached rows
+    through the pure serializer — no git work. The target-branch label
+    the serializer used to resolve per row (and the ~0.5s git sweep that
+    caused) now lives on the row itself, resolved once per background
+    sweep (auto-yq27f), so this claim is now true rather than aspirational.
     """
     if os.environ.get("DASHBOARD_MOCK"):
         payload = dao_sessions.get_worktrees()
@@ -10642,6 +10656,11 @@ async def api_worktrees_refresh(request):
     # review bindings — discovery is identity-only, and a PR badge with
     # zero checks behind it reads green-by-absence.
     await worktree_monitor.refresh_bound_rows(scoped_rows)
+    # discover_prs / refresh_bound_rows mutated source-control snapshots
+    # after refresh() rendered — re-render so the shared pre-encoded cache
+    # the next poll serves reflects the freshly discovered PR state
+    # (auto-yq27f).
+    await worktree_monitor.refresh_rendered_cache()
     payload = [
         _worktree_state_json(row)
         for row in rows
@@ -17598,6 +17617,11 @@ async def _on_startup():
     # any initial-refresh cache write in ``start()`` can fire transitions
     # for already-armed rows.
     worktree_monitor.set_terminal_notifier(_terminal_crosstalk_notifier)
+    # Register the row→JSON renderer before the initial refresh so the very
+    # first sweep pre-encodes the /api/worktrees payload on its worker
+    # thread (auto-yq27f) — the request path then serves bytes, never git
+    # or json.dumps on the event loop.
+    worktree_monitor.set_row_renderer(_worktree_state_json)
     if os.environ.get("DASHBOARD_MOCK"):
         await worktree_monitor.start()
         # Mock mode: skip real database init and session monitor.
