@@ -299,21 +299,31 @@ def test_remove_raw_succeeds(graph_db_env, example_schema):
 # ── org / peers plumbing ─────────────────────────────
 
 
-def test_org_param_accepted(graph_db_env, example_schema):
-    """org / peers parameters are no-op today but must be accepted."""
+def test_org_param_routes_to_the_orgs_own_db(tmp_path, monkeypatch, example_schema):
+    """The org parameter ROUTES — it stopped being a no-op when per-org
+    resolution landed (23d9m): an explicit-org write lands in that org's
+    own DB in the orgs tree, and a read with the same org finds it there.
+    (The old test asserted the parameters were accepted-but-ignored under
+    a GRAPH_DB pin — the pin-collapse tautology this sweep retires.)"""
+    from tools.graph.db import GraphDB
+
+    orgs = tmp_path / "orgs"
+    orgs.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    GraphDB.close_all_pooled()
+    GraphDB.create_org_db("autonomy").close()
+
     sid = ops.add_setting(
         "autonomy.test.example", 1, "k", {"v": 1}, org="autonomy",
     )
     got = ops.get_setting(sid, org="autonomy", peers=["anchore"])
     assert got is not None
-    members = ops.read_set(
-        "autonomy.test.example", org="autonomy", peers=["anchore"],
-    )
+    members = ops.read_set("autonomy.test.example", org="autonomy", peers=[])
     assert len(members.members) == 1
-
-
-# ── deprecated filter ───────────────────────────────────────
-
+    assert (orgs / "autonomy.db").exists()
+    GraphDB.close_all_pooled()
 
 def test_read_set_skips_deprecated_rows(graph_db_env, example_schema):
     """A row with deprecated=1 must not surface from read_set, even if

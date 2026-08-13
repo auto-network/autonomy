@@ -46,8 +46,15 @@ from tools.graph.schemas.registry import (
 
 @pytest.fixture
 def graph_db_env(tmp_path, monkeypatch):
-    """Pin ``GRAPH_DB`` to a fresh per-test SQLite file."""
-    db_path = tmp_path / "graph.db"
+    """Hermetic stores whose resolutions AGREE (see test_surface.py's
+    fixture note): presence/heartbeat code writes at explicit
+    org='personal', so the pin points AT the orgs tree's personal.db —
+    explicit resolution, the pin, and caller-scope ops converge on one
+    hermetic file instead of the pin silently swallowing org writes."""
+    orgs = tmp_path / "orgs"
+    orgs.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
+    db_path = orgs / "personal.db"
     monkeypatch.setenv("GRAPH_DB", str(db_path))
     yield db_path
 

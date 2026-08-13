@@ -58,7 +58,10 @@ def orgs_root(tmp_path, monkeypatch):
     # Creation IS the founding ceremony (auto-nixfv): enroll a throwaway
     # personal identity and supply its password through the env source so
     # every `org create` below founds its ledger transparently.
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
+    # No GRAPH_DB pin: explicit-org settings resolution must route to the
+    # per-org tree — a pin silently swallows those writes (73bad14e) and,
+    # under the fail-loud resolver, conflicts. delenv guards ambient leaks.
+    monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.setenv("AUTONOMY_PERSONAL_PASSWORD", "cli-test-password")
     from tools.graph import settings_ops
     from tools.graph.schemas.personal_identity import PERSONAL_IDENTITY_SET_ID
@@ -101,10 +104,15 @@ def _run_cli(argv: list[str]) -> tuple[int, str, str]:
 # ── parser sanity ──────────────────────────────────────────
 
 
-def test_org_list_empty(orgs_root):
+def test_org_list_fresh_tree_shows_only_personal(orgs_root):
+    """A fresh orgs tree is never listably empty: caller-scope settings
+    resolution materializes personal.db on first touch, so the honest
+    baseline is exactly one row — personal — and no shared orgs."""
     rc, out, _ = _run_cli(["org", "list"])
     assert rc == 0
-    assert "no orgs" in out
+    lines = [l for l in out.splitlines() if l.strip() and not set(l) <= set("─ ")]
+    body = [l for l in lines if not l.startswith("SLUG")]
+    assert len(body) == 1 and body[0].startswith("personal"), out
 
 
 def test_org_show_missing_slug_errors(orgs_root):

@@ -332,13 +332,19 @@ def test_read_set_returns_org_identity_per_caller(
 ):
     """Acceptance §3: each org's ``autonomy.org#1`` Setting surfaces via
     ``read_set`` when that org is the caller."""
+    # Per-org routing resolves each slug from the orgs root; the old
+    # per-slug GRAPH_DB re-pin contradicts every other slug's explicit-org
+    # read under the fail-loud resolver (see test_migrate_workspaces_yaml).
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+
     apply_migration(build_plan(yaml_path, orgs_dir))
 
     from tools.graph import settings_ops
 
     def _with_caller(slug: str):
-        monkeypatch.setenv("GRAPH_DB", str(orgs_dir / f"{slug}.db"))
-        return settings_ops.read_set(ORG_SET_ID, org=slug)
+        # peers=[] pins the read to exactly the named org's DB.
+        return settings_ops.read_set(ORG_SET_ID, org=slug, peers=[])
 
     for slug in ("autonomy", "anchore", "personal"):
         result = _with_caller(slug)
