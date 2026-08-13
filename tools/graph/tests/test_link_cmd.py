@@ -156,7 +156,10 @@ def operator_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ar, "DB_PATH", tmp_path / "approvals.db")
     GraphDB.close_all_pooled()
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
+    # No GRAPH_DB pin: explicit-org settings resolution must route to the
+    # per-org tree — a pin silently swallows those writes (73bad14e) and,
+    # under the fail-loud resolver, conflicts. delenv guards ambient leaks.
+    monkeypatch.delenv("GRAPH_DB", raising=False)
     settings_ops.add_setting(
         NETWORK_BINDING_SET_ID, NETWORK_BINDING_REVISION, "registry.test",
         {

@@ -52,6 +52,7 @@ def multi_org_env(tmp_path, monkeypatch):
     monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
     monkeypatch.delenv("GRAPH_API", raising=False)
+    GraphDB.close_all_pooled()  # no stale pooled DBs from a prior env
     GraphDB.create_org_db("autonomy").close()
     GraphDB.create_org_db("anchore").close()
     yield root
@@ -558,7 +559,7 @@ def test_describe_org_follows_the_workspaces_real_org_not_the_caller(graph_db_en
     assert commit_policy_cmd._describe_org(None, None) == ops.CALLER_ORG
 
 
-def test_describe_org_falls_back_to_caller_org_for_unknown_workspace(graph_db_env):
+def test_describe_org_falls_back_to_caller_org_for_unknown_workspace(multi_org_env):
     """A workspace id that isn't registered yet (e.g. brand new) must not
     raise — describe still falls back to the caller org and correctly
     resolves to safe.default rather than erroring."""
@@ -566,17 +567,20 @@ def test_describe_org_falls_back_to_caller_org_for_unknown_workspace(graph_db_en
     assert commit_policy_cmd._describe_org("does-not-exist", None) == ops.CALLER_ORG
 
 
-def test_missing_workspace_still_resolves_safe_default(graph_db_env):
+def test_missing_workspace_still_resolves_safe_default(multi_org_env):
     """Regression guard: a workspace with no Setting row anywhere still
     correctly resolves to safe.default, not an error."""
     resolved = resolve_commit_policy(workspace_id="never-seeded", org="anchore")
     assert resolved.key == "built-in:safe.default"
 
 
-def test_workspace_primer_renders_resolved_commit_policy(graph_db_env):
+def test_workspace_primer_renders_resolved_commit_policy(multi_org_env):
+    # The workspace's policy lives in the workspace's org DB — a
+    # caller-scope seed would land in personal.db where the renderer's
+    # org-scoped resolve never looks.
     seed_workspace_policy(
         workspace_id="autonomy",
-        org=ops.CALLER_ORG,
+        org="autonomy",
         profile=AUTONOMY_PROFILE,
     )
     workspace = WorkspaceV1(
@@ -657,7 +661,7 @@ def test_commit_policy_block_issue_linkage_uses_real_capability_context(graph_db
     assert "issue_linkage is required" not in " ".join(block["errors"])
 
 
-def test_deploy_seed_only_autonomy_workspaces(graph_db_env):
+def test_deploy_seed_only_autonomy_workspaces(multi_org_env):
     class Workspace:
         def __init__(self, graph_project: str):
             self.graph_project = graph_project
@@ -667,9 +671,12 @@ def test_deploy_seed_only_autonomy_workspaces(graph_db_env):
         "enterprise": Workspace("anchore"),
     })
     assert results == {"autonomy": "inserted"}
-    resolved = resolve_commit_policy(workspace_id="autonomy", org=ops.CALLER_ORG)
+    # Each workspace's policy resolves in the workspace's OWN org — the
+    # old caller-scope reads only worked while a GRAPH_DB pin collapsed
+    # every org into one file (the tautology this sweep retires).
+    resolved = resolve_commit_policy(workspace_id="autonomy", org="autonomy")
     assert resolved.profile == AUTONOMY_PROFILE
-    assert resolve_commit_policy(workspace_id="enterprise", org=ops.CALLER_ORG).profile == "safe.default"
+    assert resolve_commit_policy(workspace_id="enterprise", org="anchore").profile == "safe.default"
 
 
 def test_enterprise_no_issue_profile_matches_enterprise_signed_pr_except_linkage():

@@ -295,15 +295,23 @@ def test_read_set_returns_workspaces_per_org(yaml_path, orgs_dir,
     is no cross-org union yet. Anchore's DB yields enterprise + enterprise-ng;
     autonomy's DB yields the autonomy workspace.
     """
+    # Per-org routing resolves each slug's DB from the orgs root; a
+    # per-slug GRAPH_DB re-pin would contradict every OTHER slug's
+    # explicit-org read under the fail-loud resolver. The env must name
+    # THIS test's orgs root BEFORE the migration writes, and for the
+    # reads after.
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+
     apply_migration(build_plan(yaml_path, orgs_dir))
 
     from tools.graph import settings_ops
 
-    # Route settings_ops._open(org) through our per-org root by
-    # pointing GRAPH_DB at the per-caller DB file.
     def _with_caller(slug: str):
-        monkeypatch.setenv("GRAPH_DB", str(orgs_dir / f"{slug}.db"))
-        return settings_ops.read_set("autonomy.workspace", org=slug)
+        # peers=[] pins the read to exactly the named org's DB — the
+        # test's purpose is per-org physical routing, and the default
+        # peer union would fold subscribed orgs' rows into the result.
+        return settings_ops.read_set("autonomy.workspace", org=slug, peers=[])
 
     anchore = _with_caller("anchore")
     anchore_keys = sorted(m.key for m in anchore.members)

@@ -33,7 +33,11 @@ def env(tmp_path, monkeypatch):
     orgs = tmp_path / "orgs"
     orgs.mkdir()
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
+    # No GRAPH_DB pin: explicit-org settings resolution must route to the
+    # per-org tree above — a pin would silently swallow those writes (the
+    # manufactured-evidence tautology, 73bad14e) and, under the fail-loud
+    # resolver, conflict. delenv guards against an ambient pin leaking in.
+    monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("AUTONOMY_PERSONAL_PASSWORD", raising=False)
     personal_root = KeyPair.generate()
     with settings_ops.identity_write_context():

@@ -140,6 +140,16 @@ def _configure_hermetic_stores():
     root = _Path(_tempfile.gettempdir()) / f"pytest-stores-{_os.getpid()}-{worker}"
     root.mkdir(parents=True, exist_ok=True)
     for store in STORE_MANIFEST:
+        # The main graph store is deliberately NOT pinned: a GRAPH_DB pin
+        # collapses explicit-org settings resolution (the manufactured-
+        # evidence tautology, and under the fail-loud resolver every app
+        # boot would conflict — the app's own bootstrap writes org rows).
+        # Explicit-org ops route to the per-org tree; caller-scope
+        # settings route to personal.db inside it; the few tests doing
+        # general graph ops provide their own GRAPH_DB and are named
+        # loudly by the refuse guard until they do.
+        if store.key == "graph":
+            continue
         if _os.environ.get(store.env, "").startswith(str(root)):
             continue
         dst = root / store.relative

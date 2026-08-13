@@ -40,8 +40,19 @@ from tools.graph.surface import (
 
 @pytest.fixture
 def graph_db_env(tmp_path, monkeypatch):
-    """Pin GRAPH_DB to a fresh tmp file for the test's duration."""
-    db_path = tmp_path / "graph.db"
+    """Hermetic stores whose resolutions AGREE.
+
+    The code under test writes presence/ping settings at caller scope AND
+    heartbeat rows at explicit org='personal'. A generic GRAPH_DB pin
+    contradicts the explicit org under the fail-loud resolver (and used to
+    silently swallow the write — 73bad14e's manufactured evidence). Pinning
+    GRAPH_DB *at the orgs tree's own personal.db* makes every resolution
+    agree on one hermetic file: explicit 'personal' resolves there, the pin
+    matches, caller-scope ops land in the same store."""
+    orgs = tmp_path / "orgs"
+    orgs.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
+    db_path = orgs / "personal.db"
     monkeypatch.setenv("GRAPH_DB", str(db_path))
     monkeypatch.delenv("GRAPH_API", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
