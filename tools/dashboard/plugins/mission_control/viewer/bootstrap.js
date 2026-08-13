@@ -218,6 +218,38 @@
     render();
   }
 
+  // ---- live updates at a real URL -----------------------------------------
+  // The framed path is handed events over its channel. At a real URL nothing
+  // fed applyEvent at all, so a screen showed whatever was true when it
+  // loaded and nothing after -- a question answered while the reader watched
+  // stayed unanswered on their screen until they reloaded.
+  //
+  // The dashboard already streams every topic to open tabs, and Mission
+  // Control already publishes conversation events onto it. This subscribes,
+  // keeps the frames for THIS mission, and hands them to the same handler the
+  // relay path uses, wrapped in the same shape the relay builds.
+  function subscribeLive() {
+    if (window.parent !== window) return;      // framed: the host feeds us
+    if (typeof EventSource !== "function") return;
+    if (!state.mission_id) return;
+    var source;
+    try {
+      source = new EventSource("/api/events");
+    } catch (_e) {
+      return;    // no stream is the status quo, not a failure worth showing
+    }
+    source.addEventListener("mission_control:conversation", function (e) {
+      var data;
+      try { data = JSON.parse(e.data); } catch (_err) { return; }
+      if (!data || data.mission_id !== state.mission_id) return;
+      // A pillar's question belongs on the overview too: the screen carries
+      // the whole mission's conversation, and applyEvent matches by entry id.
+      applyEvent({kind: "conversation", question: data.question});
+    });
+    // EventSource reconnects on its own. A stream that never opens leaves the
+    // page exactly as it is today, which is why nothing here reports an error.
+  }
+
   // ---- chrome, in a CLOSED shadow root ------------------------------------
   var host = document.createElement("div");
   host.setAttribute("data-mission-chrome", "");
@@ -739,6 +771,18 @@
   addEventListener("resize", measureBar, {passive: true});
 
   function render() {
+    // WHAT IS BEING TYPED SURVIVES. render() rebuilds the whole chrome, so
+    // without this a live event arriving mid-answer throws away what the
+    // reader had written -- which is worse than the stale screen the live
+    // updates exist to fix. activeElement is read from the shadow root, not
+    // the document: the root is closed, so document.activeElement is the
+    // host element, not the field inside it.
+    var typing = null;
+    var active = root.activeElement;
+    if (active && active.tagName === "TEXTAREA") {
+      typing = {value: active.value,
+                start: active.selectionStart, end: active.selectionEnd};
+    }
     chrome.textContent = "";
     chrome.appendChild(barRow());
     // Hidden while a panel or view is up. Choosing a pillar is a full-screen
@@ -752,6 +796,14 @@
     var e = entryNode(); if (e) chrome.appendChild(e);
     var a = anchorNode(); if (a) chrome.appendChild(a);
     if (ui.view === "feed") chrome.appendChild(feedView());
+    if (typing) {
+      var ta = root.querySelector("textarea");
+      if (ta) {
+        ta.value = typing.value;
+        ta.focus();
+        try { ta.setSelectionRange(typing.start, typing.end); } catch (_e) {}
+      }
+    }
     measureBar();
     syncStrip();
   }
@@ -850,6 +902,7 @@
     collectSections();
     render();
     announceHere();
+    subscribeLive();
     // Presence is a claim with a shelf life, so it is re-stated rather than
     // set once. Paused while the tab is hidden: nobody is reading a screen
     // they cannot see, and saying otherwise is the lie this is meant to end.

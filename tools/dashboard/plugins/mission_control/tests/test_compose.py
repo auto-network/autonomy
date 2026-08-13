@@ -349,3 +349,66 @@ def test_presence_rows_carry_the_session_name_a_link_needs():
         "presence rows must carry the kind; a person is not a session and "
         "must not be rendered as a link to one"
     )
+
+
+def test_live_updates_are_subscribed_only_at_a_real_url():
+    """A framed screen is fed events by its host over the channel; a screen at
+    a real URL had no source at all and showed page-load state forever.
+
+    Asserted on the built source because the defect is a MISSING CALL and a
+    MISSING GUARD — both invisible to any test that only renders the page.
+    """
+    from tools.dashboard.scripts import build_mission_viewer as builder
+
+    src = builder.bootstrap_source()
+
+    # Match the CALL, not the definition. "subscribeLive()" alone also
+    # matches "function subscribeLive()", so the first version of this
+    # assertion passed with the call deleted — it could not fail for the
+    # reason it exists.
+    calls = [ln for ln in src.splitlines()
+             if "subscribeLive()" in ln and "function" not in ln]
+    assert calls, "subscribeLive is defined but never called"
+
+    body = src[src.index("function subscribeLive"):]
+    body = body[: body.index("// ---- chrome")]
+    guard = body.index("window.parent !== window")
+    opened = body.index("new EventSource")
+    assert guard < opened, (
+        "EventSource must be constructed only at top level; a framed screen "
+        "is fed by its host and must not open a second source"
+    )
+    assert "mission_control:conversation" in body
+    assert "data.mission_id !== state.mission_id" in body, (
+        "events for another mission must be dropped"
+    )
+
+
+def test_a_live_render_preserves_what_is_being_typed():
+    """render() clears and rebuilds the whole chrome. Once events can trigger
+    it, an answer half-written when someone else posts would be destroyed —
+    worse than the stale screen live updates exist to fix.
+
+    root.activeElement, not document.activeElement: the chrome lives in a
+    CLOSED shadow root, so the document reports the host element instead of
+    the field inside it, and the value would never be captured.
+    """
+    from tools.dashboard.scripts import build_mission_viewer as builder
+
+    src = builder.bootstrap_source()
+    body = src[src.index("function render()"):]
+    body = body[: body.index("// ---- anchored controls")]
+    # Comments explain WHY document.activeElement is wrong here, so the
+    # assertion has to read code rather than prose.
+    code = "\n".join(
+        line for line in body.splitlines() if not line.strip().startswith("//")
+    )
+
+    assert "root.activeElement" in code
+    assert "document.activeElement" not in code, (
+        "a closed shadow root reports its host, not the focused field"
+    )
+    assert "setSelectionRange" in code, "the caret position is part of the text"
+    assert code.index("root.activeElement") < code.index('chrome.textContent = ""'), (
+        "what is typed must be captured BEFORE the chrome is torn down"
+    )
