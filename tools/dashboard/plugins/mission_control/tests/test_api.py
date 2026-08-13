@@ -2503,3 +2503,34 @@ def test_an_unidentified_reader_cannot_answer_for_the_operator():
                         json={"question": "q?", "answer": "a."})
     assert r.status_code == 403
     assert db.list_conversation(mission_id) == []
+
+
+def test_a_question_closed_without_an_answer_can_still_be_reopened():
+    """Reopening was gated on there being an answer, which was the same as
+    closed right up until closing became its own act. After that, a question
+    closed because it stopped mattering was the one kind of entry that could
+    never be reopened -- and it is the kind most likely to come back."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    visitor = _visitor(client)
+    with patch.object(mc_api, "_relay_question", new_callable=AsyncMock):
+        entry = _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "question", "question": "shelved for now"},
+        ))["question"]
+        _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "close", "entry_id": entry["entry_id"]},
+        ))
+        again = _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "reopen", "entry_id": entry["entry_id"],
+             "followup": "it matters again"},
+        ))
+
+    assert again is not None, "a question closed without an answer cannot come back"
+    assert again["question"]["closed_at"] is None
+    trail = [u["text"] for u in again["question"]["updates"]]
+    assert not any(t.startswith("Previous answer") for t in trail), (
+        "the responder was handed a previous answer that never existed"
+    )

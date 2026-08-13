@@ -1516,9 +1516,14 @@ def reopen_question(
     is deliberate: the record is meant to read as the current, integrated
     decision, not a story of how the discussion got there.
 
-    Returns None if the entry doesn't exist or isn't currently answered --
-    reopening an already-open entry is meaningless; the caller should just
-    rely on the still-open question (or post a plain update onto it).
+    Returns None if the entry doesn't exist or is already open -- reopening an
+    open entry is meaningless; the caller should rely on the still-open
+    question, or post a plain update onto it.
+
+    Gated on CLOSED, not on there being an answer. A question closed because
+    it stopped mattering has no answer to clear, and gating on one made it the
+    only kind of entry that could never be reopened -- the old model, in which
+    those two were the same thing, surviving inside the new one.
     """
     conn = _get_conn(db_path)
     try:
@@ -1526,13 +1531,17 @@ def reopen_question(
             "SELECT * FROM mission_conversation WHERE mission_id = ? AND entry_id = ?",
             (mission_id, entry_id),
         ).fetchone()
-        if not row or row["answer"] is None:
+        if not row or row["closed_at"] is None:
             return None
-        conn.execute(
-            "INSERT INTO mission_conversation_updates (update_id, entry_id, text, created_at)"
-            " VALUES (?, ?, ?, ?)",
-            (str(uuid.uuid4()), entry_id, f"Previous answer: {row['answer']}", time.time()),
-        )
+        # Only when there was one. An entry closed because it stopped
+        # mattering has no prior answer, and saying "Previous answer: None"
+        # hands the responder a fact that is not true.
+        if row["answer"] is not None:
+            conn.execute(
+                "INSERT INTO mission_conversation_updates (update_id, entry_id, text, created_at)"
+                " VALUES (?, ?, ?, ?)",
+                (str(uuid.uuid4()), entry_id, f"Previous answer: {row['answer']}", time.time()),
+            )
         conn.execute(
             "INSERT INTO mission_conversation_updates (update_id, entry_id, text, created_at)"
             " VALUES (?, ?, ?, ?)",
