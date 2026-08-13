@@ -422,13 +422,17 @@ class Harness:
             f" binding={context.get('binding')}"
             f" heads={len(context.get('heads') or [])}"
         )
+        # The SERVED join context above is the serving proof (relay-network
+        # ruling 2026-08-13: link_sessions is E1 browser identity-linking
+        # state, never a serving proxy — a headless ladder correctly shows
+        # zero). The store counts are printed under their true names.
         stats = self._fixture(
             "relay", "relay-stats", {"org_uuid": self._found["org_uuid"]}
         )
         self.announce(
-            "relay serving evidence:"
-            f" link_sessions live={stats.get('link_sessions_live')}"
-            f" ever={stats.get('link_sessions_ever')}"
+            "relay store state:"
+            f" browser_sessions live={stats.get('browser_sessions_live')}"
+            f" ever={stats.get('browser_sessions_ever')}"
             f" node_hints live={stats.get('node_hints_live')}"
         )
 

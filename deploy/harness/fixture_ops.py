@@ -515,12 +515,15 @@ def inspect_node(payload: dict) -> dict:
 
 
 def relay_stats(payload: dict) -> dict:
-    """Read-only serving evidence from the relay's own store (auto-qqlz5).
+    """Read-only relay-store state for the transcript (auto-qqlz5).
 
-    Counts live ``link_sessions`` and ``node_hints`` rows for one org so the
-    driver can PRINT the relay-side numbers instead of leaving "it passed"
-    as the whole record. Opens the registry database read-only and touches
-    no relay code — evidence capture must not be able to mutate the store.
+    Reports ``link_sessions`` counts under their TRUE name — browser
+    identity-linking sessions (E1 state written only by /v1/link/challenge
+    and assertion redemption; relay-network ruling 2026-08-13) — plus live
+    ``node_hints``. Neither is a serving proxy: a headless ladder correctly
+    shows zero for both, and the serving proof is the SERVED join context
+    the driver prints separately. Opens the registry database read-only so
+    evidence capture cannot mutate the store; no relay code is touched.
     """
     import sqlite3
 
@@ -552,8 +555,8 @@ def relay_stats(payload: dict) -> dict:
         conn.close()
     return {
         "org_uuid": org_uuid,
-        "link_sessions_live": sessions_live,
-        "link_sessions_ever": sessions_ever,
+        "browser_sessions_live": sessions_live,
+        "browser_sessions_ever": sessions_ever,
         "node_hints_live": hints_live,
     }
 
