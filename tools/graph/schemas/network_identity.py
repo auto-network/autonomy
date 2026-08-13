@@ -61,6 +61,17 @@ ORG_ROOT_ARMOR_PURPOSE = "autonomy/org-root-armor/v1"
 _SEALED_ROOT_KEY_HEX_LEN = 2 * (1 + 32 + 32 + 16)
 NETWORK_BINDING_SET_ID = "autonomy.network.binding"
 NETWORK_BINDING_REVISION = 1
+#: Which persona this node holds the seed for, per org. Written org=None
+#: (personal.db), keyed by the org's genesis id. See NetworkPersonaV1 for why
+#: the scope is the load-bearing part.
+NETWORK_PERSONA_SET_ID = "autonomy.network.persona"
+NETWORK_PERSONA_REVISION = 1
+#: Hex length of an org genesis event id. Mirrors idkit's persona derivation,
+#: which anchors on the genesis id string.
+GENESIS_ID_HEX_LEN = 64
+#: The ceremony that produced a persona. There is no third: a persona comes
+#: into existence either by founding an org or by claiming membership.
+PERSONA_SOURCES = ("found", "join")
 NETWORK_LINK_GRANT_SET_ID = "autonomy.network.link-grant"
 NETWORK_LINK_GRANT_REVISION = 3
 NETWORK_PUBLIC_LINK_BASE_URL = "https://relay.auto.network"
@@ -834,3 +845,122 @@ class NetworkServeCertV1(SettingSchema):
                 f"{cls.__name__}: cert does not chain to root_pub with "
                 f"{SERVE_CERT_SCOPE} scope: {e}"
             ) from e
+
+
+@keyed_per_entity
+class NetworkPersonaV1(SettingSchema):
+    """Which persona THIS NODE holds the seed for, in one organization.
+
+    Key: the org's genesis event id (64 lowercase hex) — the same value the
+    persona was derived under. Not a label like ``default``: org-key uses one
+    because "one org may hold more than one network identity", and that
+    multiplicity does not exist here. ``derive_persona`` is deterministic, so
+    one personal root plus one org yields exactly one persona; keying on the
+    derivation input makes the row self-describing and makes a re-found org
+    (new genesis, genuinely different persona) a second row rather than a
+    silent overwrite of the first.
+
+    Scope: written with ``org=None``, which resolves to ``personal.db`` — this
+    operator's own database, NOT the org's shared one. That is the whole point.
+    An org DB is shared by its members; this row answers "which persona is
+    MINE", a question with a different answer for every reader, and a shared
+    store has no "me". Two members writing it under ``org=<slug>`` would
+    collide on one (set_id, key, org) row and each would read the other's
+    identity — silent misattribution in the record whose purpose is correct
+    attribution.
+
+    The complementary fact — "persona P is a member of org O with role R" — is
+    shared, and already lives in the org ledger: signed, replicated, and
+    merge-defined by folding an event DAG. It is not duplicated here. What the
+    ledger cannot say is which of its members is the caller, because that
+    depends on who holds which seed. This row says only that, so it needs no
+    merge rule, no sync, and no replication: a second node with the same
+    personal root re-derives the same persona and writes the same row locally.
+
+    Public halves only. The persona private key is re-derivable from the
+    personal root seed whenever a signature is actually needed, so storing it
+    would convert a public index into a secret store for no gain.
+    """
+
+    set_id = NETWORK_PERSONA_SET_ID
+    schema_revision = NETWORK_PERSONA_REVISION
+
+    persona_pub: str = field(
+        required=True,
+        description=(
+            "The persona's Ed25519 PUBLIC key (64 lowercase hex = the key "
+            "id): HKDF-SHA256(personal_root_seed, salt=persona-v1, "
+            "info=genesis_id). Deterministic within an org and unlinkable "
+            "across orgs. This is the stable member id bound at claim time — "
+            "NOT the rotatable current signing key, which diverges from it at "
+            "the first rekey."
+        ),
+    )
+    genesis_id: str = field(
+        required=True,
+        description=(
+            "The org's genesis event id (64 lowercase hex) — the derivation "
+            "input this persona was produced under. Duplicated from the row "
+            "key on purpose: a payload read on its own must still state what "
+            "it is. Org identity anchors on the immutable genesis hash, never "
+            "the rotatable root key."
+        ),
+    )
+    org_slug: str = field(
+        required=True,
+        description=(
+            "The local slug of the org this persona belongs to, for display "
+            "and for finding the row from a slug the caller already holds. A "
+            "convenience label, never an authority: the genesis_id is the "
+            "identifier."
+        ),
+    )
+    derived_at: str = field(
+        required=True,
+        description="ISO-8601 UTC timestamp of the ceremony that derived it.",
+    )
+    source: str = field(
+        required=True,
+        description=(
+            "Which ceremony produced the persona: 'found' (this node founded "
+            "the org) or 'join' (this node claimed membership under an "
+            "invite). Known with certainty because the row is written at that "
+            "ceremony, which is the only moment the value exists without a "
+            "passphrase."
+        ),
+    )
+    invite_ref: str = field(
+        required=False,
+        description="The invite this persona claimed under; join only.",
+    )
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        super().validate(payload)
+        if not isinstance(payload, dict):
+            return
+        _require_hex(payload, "persona_pub", cls.__name__, length=NETWORK_PUB_HEX_LEN)
+        _require_hex(payload, "genesis_id", cls.__name__, length=GENESIS_ID_HEX_LEN)
+        _require_str(payload, "org_slug", cls.__name__, max_len=128)
+        _require_iso_ts(payload, "derived_at", cls.__name__)
+        source = _require_str(payload, "source", cls.__name__, max_len=16)
+        if source not in PERSONA_SOURCES:
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'source' must be one of "
+                f"{list(PERSONA_SOURCES)}, got {source!r}"
+            )
+        if source == "join" and not payload.get("invite_ref"):
+            raise SchemaValidationError(
+                f"{cls.__name__}: 'invite_ref' is required when source='join'"
+            )
+        # A private key here would be a category error, not a typo: the whole
+        # design rests on this row being public-only. Reject the shapes a
+        # careless caller would reach for rather than trusting review.
+        for banned in ("private_hex", "persona_priv", "seed", "personal_root_seed",
+                       "armored_private_key", "sealed"):
+            if banned in payload:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: {banned!r} must never be stored — this "
+                    "row is public-only; the private half is re-derived from "
+                    "the personal root seed when a signature is needed"
+                )

@@ -59,6 +59,10 @@ class JoinOutcome:
     org: str
     invite_ref: str
     persona_pub: Optional[str] = None
+    #: The org's genesis event id — the input this persona was derived under.
+    #: Carried on the outcome because persist_outcome records the persona and
+    #: the genesis IS its identifier; without it the record cannot be written.
+    genesis_id: Optional[str] = None
     granted_role: Optional[str] = None
     have: Optional[int] = None
     need: Optional[int] = None
@@ -217,18 +221,19 @@ def _outcome_from_submit(
     persona_pub: str,
     role: str,
     reply: dict,
+    genesis_id: Optional[str] = None,
 ) -> JoinOutcome:
     status = reply.get("status")
     if status == "admitted":
         return JoinOutcome(
             state=ADMITTED, org=invitation.org, invite_ref=invitation.invite_ref,
-            persona_pub=persona_pub, granted_role=role,
+            persona_pub=persona_pub, genesis_id=genesis_id, granted_role=role,
             detail=f"admitted to {invitation.org} as {role}",
         )
     if status == "pending":
         return JoinOutcome(
             state=PENDING, org=invitation.org, invite_ref=invitation.invite_ref,
-            persona_pub=persona_pub, granted_role=role,
+            persona_pub=persona_pub, genesis_id=genesis_id, granted_role=role,
             have=reply.get("have"), need=reply.get("need"),
             detail=f"awaiting approval ({reply.get('have')} of {reply.get('need')})",
         )
@@ -273,7 +278,9 @@ def _initial_claim(
     reply = transport.request(
         {"v": 1, "op": "submit", "event": event.to_json().decode("utf-8")}
     )
-    return _outcome_from_submit(invitation, persona.public_hex, role, reply)
+    return _outcome_from_submit(
+        invitation, persona.public_hex, role, reply, genesis_id=genesis_id
+    )
 
 
 def join_org(
@@ -388,7 +395,8 @@ def join_existing_identity(
     status = reply.get("status")
     if status == "admitted":
         return _outcome_from_submit(
-            invitation, persona.public_hex, role, reply
+            invitation, persona.public_hex, role, reply,
+            genesis_id=context["genesis_id"],
         )
     if status == "absent":
         return _initial_claim(invitation, transport, context, seed)
@@ -440,7 +448,7 @@ def _resume_pending(
     if have < need:
         return JoinOutcome(
             state=PENDING, org=invitation.org, invite_ref=invitation.invite_ref,
-            persona_pub=persona_pub, granted_role=role,
+            persona_pub=persona_pub, genesis_id=genesis_id, granted_role=role,
             have=have, need=need,
             detail=f"awaiting approval ({have} of {need})",
         )
@@ -484,7 +492,7 @@ def _resume_pending(
         "event": final.to_json().decode("utf-8"),
     })
     return _outcome_from_submit(
-        invitation, persona_pub, role, admitted
+        invitation, persona_pub, role, admitted, genesis_id=genesis_id
     )
 
 
@@ -501,6 +509,18 @@ def persist_outcome(outcome: JoinOutcome) -> None:
             need=outcome.need,
         )
     elif outcome.state == ADMITTED:
+        # Admission is the moment the persona becomes true, and it is also the
+        # moment the pending row carrying it is deleted below — so record it
+        # first. Until this ran, the node derived its persona three times and
+        # kept it nowhere, leaving "which member am I?" answerable only by
+        # unsealing the personal seed and re-deriving.
+        if outcome.persona_pub and outcome.genesis_id:
+            from tools.graph.org_ops import _record_persona_setting
+
+            _record_persona_setting(
+                outcome.org, outcome.genesis_id, outcome.persona_pub,
+                source="join", invite_ref=outcome.invite_ref,
+            )
         # Never clear merely because a status/finalize attempt ran. The org's
         # admitted verdict means the invitee-signed event actually appended.
         pending_joins.delete(outcome.invite_ref)
