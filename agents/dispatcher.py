@@ -9,8 +9,8 @@ dispatcher restarts, and responsive polling between agent runs.
 
 Dispatches all readiness:approved beads by priority, routing each to the
 container image configured in .beads/config.yaml (the rig default). Per-bead
-label routing comes from agents/projects.yaml — each project's
-``dispatch_labels`` list maps a bead label to that project's image plus its
+label routing comes from the ``autonomy.workspace#1`` settings — each
+workspace's ``dispatch_labels`` list maps a bead label to its image plus its
 graph scoping (graph_project + default_tags). The --queue flag optionally
 narrows to a specific label.
 

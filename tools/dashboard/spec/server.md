@@ -41,7 +41,7 @@ GET /api/source/{id}     → graph read {id} (full source, no cap by default)
 GET /api/context/{id}/{turn}?window=3
                          → graph context {id} {turn} --window 3
 
-GET /api/projects        → workspace registry (agents/projects.yaml)
+GET /api/projects        → workspace registry (from autonomy.workspace#1 settings)
 GET /api/stats           → graph stats
 ```
 

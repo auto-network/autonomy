@@ -53,6 +53,8 @@ graph set-nag --dispatch          # Enable dispatch completion nag (--off to dis
 3. `graph dispatch status` — check overall queue at any time
 4. `graph dispatch status <bead-id>` — inspect a completed run's results
 
+**Working with settings (`graph set`):** read the Setting Primitive signpost `graph://0d3f750f-f9c` and the rubric `graph://4d88c2ad-625` (crib `graph://8cd0ded4-7d9`) first. **You MUST read the rubric when deciding the org scope or publication state of a new setting** — the wrong org or state silently misfiles it or leaks it.
+
 ## Beads (`bd`)
 
 You are running in **read-only mode**. You cannot modify beads directly.
