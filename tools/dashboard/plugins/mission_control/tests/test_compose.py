@@ -412,3 +412,47 @@ def test_a_live_render_preserves_what_is_being_typed():
     assert code.index("root.activeElement") < code.index('chrome.textContent = ""'), (
         "what is typed must be captured BEFORE the chrome is torn down"
     )
+
+
+def test_anchor_counts_are_repainted_and_not_frozen_at_mount():
+    """mountAnchors only ADDS controls — it returns early on any element that
+    already carries one. So a control mounted before a question was asked kept
+    the count it was born with, while the top bar recounted on every render.
+    The anchor was frozen, not miscounted.
+
+    The closed shadow root is why this needs a kept reference: it cannot be
+    reached again from the holder element, so a control not recorded at mount
+    can never be updated.
+    """
+    from tools.dashboard.scripts import build_mission_viewer as builder
+
+    src = builder.bootstrap_source()
+    assert "anchorControls" in src, "mounted controls must be kept to be repainted"
+    calls = [ln for ln in src.splitlines()
+             if "repaintAnchors()" in ln and "function" not in ln]
+    assert calls, "repaintAnchors is defined but never called"
+
+    render = src[src.index("function render()"):]
+    render = render[: render.index("// ---- anchored controls")]
+    assert "repaintAnchors()" in render, (
+        "counts must be refreshed wherever the question list is re-read"
+    )
+
+
+def test_an_anchor_shows_unanswered_and_answered_separately():
+    """One total cannot tell 'three still waiting on me' from 'three already
+    settled', which is the whole reason to look at an anchor. Neither count is
+    drawn at zero: an anchor nobody has asked about stays a bare bubble.
+    """
+    from tools.dashboard.scripts import build_mission_viewer as builder
+
+    src = builder.bootstrap_source()
+    paint = src[src.index("function paintAnchor"):]
+    paint = paint[: paint.index("function repaintAnchors")]
+
+    assert "mc-count-open" in paint and "mc-count-done" in paint, (
+        "an anchor shows unanswered and answered as separate counts"
+    )
+    assert "if (open)" in paint and "if (done)" in paint, (
+        "a zero count is not drawn"
+    )
