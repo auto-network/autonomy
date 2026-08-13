@@ -21,7 +21,17 @@ def main() -> None:
     )
     args = parser.parse_args()
     app = create_app(args.db, base_url=args.base_url)
-    uvicorn.run(app, host=args.host, port=args.port)
+    # Link tokens are bearer credentials and are part of the public route.
+    # Uvicorn's HTTP access logger records the full path, while its WebSocket
+    # protocol records accepted paths through uvicorn.error at INFO.  Disable
+    # both rather than retaining a source-address-to-credential browsing log.
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        access_log=False,
+        log_level="warning",
+    )
 
 
 if __name__ == "__main__":
