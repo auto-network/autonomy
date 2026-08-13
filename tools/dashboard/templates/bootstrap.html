@@ -32,6 +32,10 @@
 <body>
 <main x-data="harnessBootstrap()" x-init="init()">
 
+  <template x-if="screen === 'checking'">
+    <p class="sub" style="margin-top:4rem">Checking this machine…</p>
+  </template>
+
   <!-- ── CHOOSE (design variant 0) ─────────────────────────────── -->
   <template x-if="screen === 'choose'">
     <div>
@@ -102,7 +106,7 @@
 <script>
 function harnessBootstrap() {
   return {
-    screen: 'choose',
+    screen: 'checking',
     harnesses: [],
     selected: null,
     error: '',
@@ -110,10 +114,20 @@ function harnessBootstrap() {
     _poll: null,
 
     async init() {
+      // Gate-rendered entry (served at "/"): a machine that already has a
+      // signed-in harness passes through without interaction — verify records
+      // the row, the reload lands on the session UI. An existing install must
+      // never be interrupted by a setup screen it doesn't need. A deliberate
+      // visit to /bootstrap always shows the walkthrough.
+      const auto = location.pathname === '/';
       await this.refresh();
-      // Idempotent entry: if a harness is already verified, the server would
-      // not have rendered this page — but if one flips to ready mid-probe,
-      // still let the operator through the choose screen.
+      if (auto) {
+        for (const h of this.harnesses.filter(h => h.state === 'ready')) {
+          const res = await this._verify(h.harness);
+          if (res && res.auth === 'ok') { window.location.replace('/'); return; }
+        }
+      }
+      this.screen = 'choose';
     },
 
     async refresh() {
