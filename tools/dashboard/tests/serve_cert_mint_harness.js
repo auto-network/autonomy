@@ -34,7 +34,7 @@ globalThis.fetch = async (url, opts) => {
 
 (async () => {
   await import(url.pathToFileURL(
-    path.join(__dirname, "..", "static", "js", "network-signon.js")).href);
+    path.join(__dirname, "..", "static", "js", "network-signon.mjs")).href);
   const session = globalThis.window.AutonomyNetworkSession;
   if (!session || typeof session.provisionServeCert !== "function") {
     console.error("network-signon.js did not expose provisionServeCert");

@@ -10,7 +10,7 @@ const moduleUrl = pathToFileURL(path.join(
   '..',
   'static',
   'js',
-  'network-signon.js',
+  'network-signon.mjs',
 )).href;
 
 function installIndexedDb() {

@@ -1,7 +1,7 @@
 """auto.network identity routes — C1/C2 ceremonies' server side.
 
 Read routes backing the C2 sign-on ceremony in
-``static/js/network-signon.js`` (spec §6.3):
+``static/js/network-signon.mjs`` (spec §6.3):
 
 * ``GET /api/network/org-key`` — the org root key as its passphrase-
   encrypted armor (``autonomy.network.org-key``). Same discipline as

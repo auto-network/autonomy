@@ -5,7 +5,7 @@ private key as an *armored, passphrase-encrypted* blob (spec §6.2,
 invariant I1: plaintext exists only in the operator's browser during
 ceremonies). This module is the canonical armor implementation — the C1
 create-org-identity ceremony produces it, the C2 sign-on ceremony's
-browser side (``static/js/network-signon.js``) mirrors the decrypt path
+browser side (``static/js/network-signon.mjs``) mirrors the decrypt path
 in WebCrypto, and tests use it to build fixtures. One format, two
 implementations, cross-checked by the L2.B sweep.
 
