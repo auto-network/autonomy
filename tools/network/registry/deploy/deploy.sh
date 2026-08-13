@@ -38,6 +38,20 @@ esac
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 APP_DIR=/opt/autonomy-registry
 
+# Stamp the exact source tree being copied. A dirty tree remains deployable for
+# incident work, but the public diagnostic says so rather than pretending the
+# commit alone identifies the bytes. This is build provenance only: protocol
+# compatibility is owned by auto-bstg2 and is never inferred from a SHA.
+SOURCE_SHA=$(git -C "$REPO_ROOT" rev-parse HEAD)
+if [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]; then
+    SOURCE_DIRTY=true
+else
+    SOURCE_DIRTY=false
+fi
+BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+BUILD_INFO=$(printf '{"commit":"%s","dirty":%s,"built_at":"%s"}' \
+    "$SOURCE_SHA" "$SOURCE_DIRTY" "$BUILT_AT")
+
 echo "==> syncing code and install primer to $TARGET:$APP_DIR"
 ssh "$TARGET" "mkdir -p $APP_DIR/tools/network $APP_DIR/deploy"
 rsync -az --delete --exclude '__pycache__' --exclude 'tests' \
@@ -48,6 +62,10 @@ rsync -az --delete --exclude '__pycache__' --exclude 'tests' \
 rsync -az --delete \
     "$REPO_ROOT/deploy/install" \
     "$TARGET:$APP_DIR/deploy/"
+
+echo "==> writing deployed provenance ($SOURCE_SHA, dirty=$SOURCE_DIRTY)"
+printf '%s\n' "$BUILD_INFO" | ssh "$TARGET" \
+    "umask 022; tee $APP_DIR/REVISION.json.tmp >/dev/null; mv $APP_DIR/REVISION.json.tmp $APP_DIR/REVISION.json"
 
 echo "==> venv + dependencies"
 ssh "$TARGET" bash -s <<EOF

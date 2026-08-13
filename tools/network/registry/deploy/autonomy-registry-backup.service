@@ -1,0 +1,29 @@
+[Unit]
+Description=Back up auto.network registry SQLite state off-host
+After=network-online.target autonomy-registry.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+LoadCredential=repository:/etc/autonomy-registry-backup/repository
+LoadCredential=restic-password:/etc/autonomy-registry-backup/restic-password
+LoadCredential=access-key-id:/etc/autonomy-registry-backup/access-key-id
+LoadCredential=secret-access-key:/etc/autonomy-registry-backup/secret-access-key
+ExecStart=/opt/autonomy-registry/tools/network/registry/deploy/backup-registry.sh
+StateDirectory=autonomy-registry-backup
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadOnlyPaths=/var/lib/private/autonomy-registry
+
+[Install]
+WantedBy=multi-user.target

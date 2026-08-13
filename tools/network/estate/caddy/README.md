@@ -20,18 +20,21 @@ naming/contract boundary, not three processes.
 `https://relay.auto.network` via the service unit's `--base-url`. Adding the
 apex vhost does not, and must not, touch that: a link minted after the apex
 lands still points at `relay.auto.network`. Do not add a base-url override in
-`auto.network.caddy` or in the systemd unit.
+`registry-ash-1.Caddyfile` or in the systemd unit.
 
 ## Files here
 
-- `auto.network.caddy` — the apex vhost fragment. The single reproducible
-  source of the front-door route. Installed by `../deploy-apex-vhost.sh`.
-- `registry-ash-1.Caddyfile.captured` — the **full** live Caddyfile as pulled
-  back from the host by `deploy-apex-vhost.sh`. It is captured, not authored:
-  the box's Caddyfile was previously host-only (uncaptured), so the VM was not
-  clean-room reproducible. This file is that capture. Treat it as evidence of
-  the live state, and reconcile the golden-snapshot build (auto-pqcsh) against
-  it — do not hand-edit it as if it were the source of truth for the whole box.
+- `registry-ash-1.Caddyfile` — the complete authored configuration for all
+  four current address blocks. This is the source of truth; clean hosts never
+  pull configuration back from an old host.
+- `../deploy-caddy.sh` — checksum, target-side validation, atomic install,
+  rollback copy, and reload. It never captures the live file into the repo.
+
+All four blocks deliberately have identical routing and no `encode` directive.
+The read-only host inventory on 2026-08-13 found the live file uncompressed;
+retaining that observed routing avoids bundling a compression change into the
+recovery artifact. `deploy-caddy.sh` prints any later live divergence before
+it replaces the file, then keeps the prior file for rollback.
 
 ## Ordering (do not invert)
 
@@ -40,10 +43,11 @@ Caddy mints the auto.network certificate over HTTP-01, which needs
 
 1. `../add-apex-a-record.sh` on **auto-ash-1** — adds the apex A record.
 2. Wait for propagation (checked across multiple resolvers).
-3. `../deploy-apex-vhost.sh` — installs this vhost; Caddy then obtains the cert.
+3. `../deploy-caddy.sh` — installs the complete configuration; Caddy then obtains the cert.
 4. `../verify-apex.sh` — proves DNS, cert, `/healthz`, and the `/install`
    content contract end to end, and that share links still use relay.
 
 Deploying the vhost before DNS resolves makes cert issuance fail against a name
-that does not yet point at the box; `deploy-apex-vhost.sh` refuses to run until
-the apex resolves from ≥2 public resolvers, which enforces this ordering.
+that does not yet point at the box. The DNS script and runbook preserve this
+ordering; the Caddy deploy itself also supports pre-configuring a replacement
+host before an intentional DNS cutover.

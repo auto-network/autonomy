@@ -21,6 +21,7 @@ WorkingDirectory=/opt/autonomy-registry
 # hostname. Tokens themselves are hostname-independent.
 ExecStart=/opt/autonomy-registry/venv/bin/python -m tools.network.registry \
     --db /var/lib/autonomy-registry/registry.db \
+    --version-file /opt/autonomy-registry/REVISION.json \
     --host 127.0.0.1 --port 8477 \
     --base-url https://relay.auto.network
 Restart=on-failure

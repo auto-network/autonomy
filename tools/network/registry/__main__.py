@@ -3,10 +3,44 @@
 from __future__ import annotations
 
 import argparse
+import json
+import re
+from pathlib import Path
 
 import uvicorn
 
 from .app import create_app
+
+
+_GIT_COMMIT_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+_UNKNOWN_BUILD = {"commit": "unknown", "dirty": None, "built_at": None}
+
+
+def _load_build_info(path: str | None) -> dict:
+    """Read the deploy-written provenance stamp without trusting its shape.
+
+    Provenance is diagnostic, never authority and never a compatibility gate.
+    A missing or malformed stamp is reported explicitly as ``unknown`` rather
+    than preventing the registry from serving existing links.
+    """
+    if path is None:
+        return dict(_UNKNOWN_BUILD)
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return dict(_UNKNOWN_BUILD)
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"commit", "dirty", "built_at"}
+        or not isinstance(value.get("commit"), str)
+        or _GIT_COMMIT_RE.fullmatch(value["commit"]) is None
+        or type(value.get("dirty")) is not bool
+        or not isinstance(value.get("built_at"), str)
+        or not value["built_at"]
+        or len(value["built_at"]) > 64
+    ):
+        return dict(_UNKNOWN_BUILD)
+    return value
 
 
 def main() -> None:
@@ -19,8 +53,16 @@ def main() -> None:
         default="https://relay.auto.network",
         help="public URL prefix for issued share links",
     )
+    parser.add_argument(
+        "--version-file",
+        help="deploy-written JSON provenance stamp (diagnostic only)",
+    )
     args = parser.parse_args()
-    app = create_app(args.db, base_url=args.base_url)
+    app = create_app(
+        args.db,
+        base_url=args.base_url,
+        build_info=_load_build_info(args.version_file),
+    )
     # Link tokens are bearer credentials and are part of the public route.
     # Uvicorn's HTTP access logger records the full path, while its WebSocket
     # protocol records accepted paths through uvicorn.error at INFO.  Disable
