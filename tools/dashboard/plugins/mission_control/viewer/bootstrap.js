@@ -32,6 +32,10 @@
   function show(next) {
     ui.panel = null; ui.entry = null; ui.anchor = null; ui.who = false;
     ui.view = null;
+    // Where this surface was opened FROM. Without it, closing a discussion
+    // could only mean "close everything" -- so reading one question and
+    // wanting the next one meant reopening the list by hand every time.
+    ui.from = null;
     if (next) Object.assign(ui, next);
     render();
   }
@@ -228,6 +232,20 @@
     if (data.event === "status") {
       if (p) { p.last_done = data.text; p.age = "just now"; }
       state.status_posts = state.status_posts || [];
+      // THE STREAM REPLAYS. Subscribing replays the cached state of every
+      // topic, and EventSource reconnects on its own after any blip, so the
+      // same status arrives again on every reconnect -- and once more at
+      // first connect, on top of the copy already inlined in the page. Three
+      // reconnects showed three identical entries.
+      //
+      // Applying an event has to be idempotent, which the conversation
+      // handler already is: it finds the entry by id and REPLACES it. This
+      // one appended, so it was the only handler that could duplicate.
+      // Identical text from the same pillar is the same report, not news.
+      var already = state.status_posts.some(function (x) {
+        return x.pillar_id === data.pillar_id && x.text === data.text;
+      });
+      if (already) { render(); return; }
       state.status_posts.unshift({
         post_id: "live-" + (data.at || Math.random()),
         pillar_id: data.pillar_id,
@@ -593,7 +611,12 @@
   }
 
   function questionRows() {
-    var sorted = questionsHere().slice().sort(function (a, b) { return (!!a.answer) - (!!b.answer); });
+    var shown = questionsHere().filter(function (q) {
+      if (qFilter === "open") return !q.answer;
+      if (qFilter === "done") return !!q.answer;
+      return true;
+    });
+    var sorted = shown.slice().sort(function (a, b) { return (!!a.answer) - (!!b.answer); });
     if (!sorted.length) {
       // Do not invite an action this reader cannot take.
       var canAsk = state.may_write !== false && !ui.noChannel;
@@ -604,7 +627,9 @@
         : "No questions yet."})];
     }
     return sorted.map(function (q) {
-      return el("button", {class: "mc-row", onclick: function () { show({entry: q.entry_id}); }}, [
+      return el("button", {class: "mc-row", onclick: function () {
+        show({entry: q.entry_id, from: {panel: "questions"}});
+      }}, [
         el("div", {class: "mc-row-top"}, [
           el("span", {class: q.answer ? "mc-chip mc-chip-done" : "mc-chip mc-chip-open",
                       text: q.answer ? "answered" : "open"}),
@@ -681,15 +706,38 @@
     return p ? p.name : "Mission";
   }
 
+  // Counts on the chips, because a filter you cannot see the size of makes
+  // you click it to find out whether it was worth clicking.
+  function filterChips() {
+    var all = questionsHere();
+    var open = all.filter(function (q) { return !q.answer; }).length;
+    var done = all.length - open;
+    return [
+      chip("all", "All", all.length),
+      chip("open", "Unanswered", open),
+      chip("done", "Answered", done),
+    ];
+  }
+
+  function chip(key, label, n) {
+    return el("button", {
+      class: qFilter === key ? "mc-chip mc-chip-on" : "mc-chip",
+      title: label,
+      text: n ? label + " " + n : label,
+      onclick: function () { qFilter = key; render(); },
+    });
+  }
+
   function panelNode() {
     if (!ui.panel) return null;
     var body = ui.panel === "pillars" ? pillarRows() : questionRows();
     var kids = [
       el("div", {class: "mc-phead"}, [
         el("span", {class: "mc-ptitle", text: ui.panel === "pillars" ? "Pillars" : "Questions"}),
+      ].concat(ui.panel === "questions" ? filterChips() : []).concat([
         el("span", {class: "mc-grow"}),
         el("button", {class: "mc-x", text: "\u00d7", onclick: function () { show(null); }}),
-      ]),
+      ])),
       el("div", {class: "mc-pbody"}, body),
     ];
     if (ui.panel === "questions") {
@@ -701,6 +749,19 @@
                          "goes to " + target, "Ask", ask));
     }
     return el("aside", {class: "mc-panel"}, kids);
+  }
+
+  // One step back, not out. Falls through to closing only when there is
+  // nowhere to return to -- a question opened directly, with no list behind
+  // it, has nothing above it to show.
+  function backLabel() {
+    if (ui.from && ui.from.panel === "questions") return "\u2039 Questions";
+    if (ui.from && ui.from.anchor) return "\u2039 Back";
+    return "\u2039 Back to " + ((currentPillar() || {}).name || "mission");
+  }
+
+  function goBack() {
+    show(ui.from || null);
   }
 
   function entryNode() {
@@ -725,8 +786,8 @@
     }
     return el("section", {class: "mc-view"}, [
       el("div", {class: "mc-phead"}, [
-        el("button", {class: "mc-back", text: "\u2039 Back to " + ((currentPillar() || {}).name || "mission"),
-                      onclick: function () { show(null); }}),
+        el("button", {class: "mc-back", text: backLabel(),
+                      onclick: goBack}),
         el("span", {class: "mc-grow"}),
         el("span", {class: q.answer ? "mc-chip" : "mc-chip mc-chip-open", text: q.answer ? "answered" : "open"}),
       ]),
@@ -742,7 +803,9 @@
     var body = [el("p", {class: "mc-label", text: "about"}), el("p", {class: "mc-sub mc-mb", text: ui.anchor})];
     if (!here.length) body.push(el("p", {class: "mc-empty", text: "Nothing discussed here yet."}));
     here.forEach(function (q) {
-      body.push(el("button", {class: "mc-row", onclick: function () { show({entry: q.entry_id}); }}, [
+      body.push(el("button", {class: "mc-row", onclick: function () {
+        show({entry: q.entry_id, from: {anchor: ui.anchor}});
+      }}, [
         el("span", {class: q.answer ? "mc-chip" : "mc-chip mc-chip-open", text: q.answer ? "answered" : "open"}),
         el("p", {class: "mc-qtext", text: q.question || ""}),
       ]));
@@ -855,6 +918,11 @@
   // root is CLOSED, so it cannot be reached again from the holder element --
   // if the reference is not kept here it is gone.
   var anchorControls = [];
+
+  //: Which questions the list shows. Kept OUTSIDE ui because ui is cleared
+  //: every time a surface opens; a filter that silently reset each time you
+  //: opened the list would be worse than not having one.
+  var qFilter = "all";
 
   var BUBBLE_SVG =
     '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
