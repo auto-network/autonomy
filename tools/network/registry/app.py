@@ -66,6 +66,54 @@ RECOVERY_POLICIES = frozenset({"none", "recovery-key"})
 
 _BOOTLOADER_DIR = Path(__file__).resolve().parent / "bootloader"
 
+# Agent-first install primer content (auto-2dt9b): canonical, repo-tracked
+# markdown under deploy/install/, served at /install with content
+# negotiation. Read per-request so a redeploy of content needs no restart.
+_INSTALL_DIR = Path(__file__).resolve().parents[3] / "deploy" / "install"
+
+_INSTALL_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+)
+
+
+def _install_html_wrapper(markdown: str) -> bytes:
+    """The browser face of /install: no CDN, no external fetches — a copy
+    CTA for handing the URL to a coding agent, above the primer verbatim."""
+    import html as _html
+
+    body = _html.escape(markdown)
+    page = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install Autonomy</title>
+<style>
+ body{{margin:0;background:#12100e;color:#e8e2d8;
+      font:16px/1.55 system-ui,-apple-system,sans-serif}}
+ main{{max-width:860px;margin:0 auto;padding:2.5rem 1.25rem 5rem}}
+ h1{{font-size:1.6rem;margin:0 0 .3rem}} .sub{{color:#a89d8c}}
+ .cta{{background:#1c1916;border:1px solid #3a332a;border-radius:10px;
+      padding:1rem 1.2rem;margin:1.4rem 0}}
+ .cta code{{display:block;background:#0d0c0a;border:1px solid #3a332a;
+      border-radius:6px;padding:.7rem .9rem;margin:.6rem 0;
+      font-size:.95rem;user-select:all}}
+ button{{background:#b5764a;color:#12100e;border:0;border-radius:6px;
+      padding:.45rem .9rem;font-weight:600;cursor:pointer}}
+ pre{{background:#0d0c0a;border:1px solid #3a332a;border-radius:8px;
+      padding:1rem 1.1rem;overflow-x:auto;font-size:.84rem;
+      line-height:1.5;white-space:pre-wrap}}
+</style></head><body><main>
+<h1>Install Autonomy</h1>
+<p class="sub">Sovereign, self-hosted, yours. The document below is written
+for your coding agent — hand it the URL and it takes care of the rest,
+with your consent at every step.</p>
+<div class="cta"><b>Tell your coding agent:</b>
+<code id="prompt">Please install Autonomy from https://auto.network/install</code>
+<button onclick="navigator.clipboard.writeText(document.getElementById('prompt').textContent)">Copy</button>
+</div>
+<pre>{body}</pre>
+</main></body></html>"""
+    return page.encode("utf-8")
+
 # Bootloader shell CSP. Two facts shape it:
 #
 # 1. The shell is a FIXED static byte string — no target/user data is ever
@@ -906,6 +954,66 @@ def create_app(
                 "Cache-Control": "no-store",
                 "X-Content-Type-Options": "nosniff",
             },
+        )
+
+    # -- agent-first install primer (auto-2dt9b) ------------------------------
+    #
+    # Content contract (packaging pillar): GET /install serves the
+    # repo-tracked primer — text/markdown to agents and curl, a
+    # self-contained HTML wrapper to browsers; GET /install/<doc> serves
+    # the fetchable sub-documents. The canonical bytes live in
+    # deploy/install/ in the checkout; this route is convenience
+    # distribution, never a control point. Deploying/operating the service
+    # is the relay-network pillar's half of the ruled boundary.
+
+    def _install_doc(rel: str) -> Path | None:
+        """Resolve a repo-tracked install document; fail closed on escape."""
+        root = _INSTALL_DIR.resolve()
+        try:
+            candidate = (root / rel).resolve()
+            candidate.relative_to(root)
+        except (ValueError, OSError):
+            return None
+        if candidate.suffix != ".md" or not candidate.is_file():
+            return None
+        return candidate
+
+    _install_headers = {
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+    }
+
+    @app.get("/install")
+    async def install_primer(request: Request):
+        doc = _install_doc("INSTALL.md")
+        if doc is None:
+            raise HTTPException(404, "install primer is not present in this deployment")
+        markdown = doc.read_text(encoding="utf-8")
+        if "text/html" in request.headers.get("accept", ""):
+            return Response(
+                content=_install_html_wrapper(markdown),
+                media_type="text/html",
+                headers={
+                    **_install_headers,
+                    "Content-Security-Policy": _INSTALL_CSP,
+                },
+            )
+        return Response(
+            content=markdown,
+            media_type="text/markdown; charset=utf-8",
+            headers=_install_headers,
+        )
+
+    @app.get("/install/{doc_path:path}")
+    async def install_document(doc_path: str):
+        doc = _install_doc(doc_path)
+        if doc is None:
+            raise HTTPException(404, "no such install document")
+        return Response(
+            content=doc.read_text(encoding="utf-8"),
+            media_type="text/markdown; charset=utf-8",
+            headers=_install_headers,
         )
 
     # -- §4.7 bootstrap-assertion redemption ------------------------------------
