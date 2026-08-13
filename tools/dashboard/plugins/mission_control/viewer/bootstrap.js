@@ -173,13 +173,13 @@
     if (op === "write" && kind === "question") {
       url = (body.pillar_id ? "/api/pillars/" + body.pillar_id
                             : "/api/missions/" + mid) + "/questions";
-      payload = {question: body.body, anchor: body.anchor || null};
+      payload = {question: body.question, anchor: body.anchor || null};
     } else if (op === "write" && kind === "answer") {
       url = ownerPath(body.entry_id) + "/questions/" + body.entry_id + "/answer";
-      payload = {answer: body.body};
+      payload = {answer: body.answer};
     } else if (op === "write" && kind === "reopen") {
       url = ownerPath(body.entry_id) + "/questions/" + body.entry_id + "/reopen";
-      payload = {followup: body.body};
+      payload = {followup: body.followup};
     } else if (op === "read" && kind === "here") {
       // Presence has no HTTP route yet; it is decoration, and announceHere
       // already treats an empty answer as "show nothing". Resolving quietly
@@ -764,6 +764,22 @@
     show(ui.from || null);
   }
 
+  // Timestamps cross the wire as epoch SECONDS (floats -- _app_json passes
+  // them through precisely because canonical_json refuses floats). Printed as
+  // they arrive, a question was stamped "1786651692.626123": the stored number
+  // reaching the screen with nothing between it and the reader.
+  function when(ts) {
+    var n = typeof ts === "number" ? ts : parseFloat(ts);
+    if (!isFinite(n)) return typeof ts === "string" ? ts : "";
+    var d = new Date(n * 1000);
+    var t = d.toLocaleTimeString([], {hour: "numeric", minute: "2-digit"});
+    // The date is noise on something from an hour ago and essential on
+    // anything older, so it appears only once it starts carrying information.
+    return d.toDateString() === new Date().toDateString()
+      ? t
+      : d.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + t;
+  }
+
   function entryNode() {
     if (!ui.entry) return null;
     var q = state.questions.filter(function (x) { return x.entry_id === ui.entry; })[0];
@@ -771,7 +787,7 @@
     var body = [el("p", {class: "mc-label", text: "Question"})];
     paras(q.question, "mc-qbig").forEach(function (n) { body.push(n); });
     body.push(el("p", {class: "mc-sub",
-                       text: (q.asked_by_label || "") + (q.created_at ? " \u00b7 " + q.created_at : "")}));
+                       text: (q.asked_by_label || "") + (q.created_at ? " \u00b7 " + when(q.created_at) : "")}));
     if (q.anchor) body.push(el("p", {class: "mc-sub", text: q.anchor}));
     if (!q.answer && (q.updates || []).length) {
       body.push(el("p", {class: "mc-label mc-mt", text: "While this is open"}));
@@ -823,16 +839,44 @@
 
   // Identity is NEVER supplied here. participant_id lives in the grant and is
   // attached by link_serving; there is no field in this request to claim one.
+  //
+  // FIELD NAMES ARE THE SERVER'S, NOT OURS. Over the relay the body is
+  // forwarded completely uninterpreted to handle_relay_write, which reads
+  // `question` and `followup` -- a generic `body` key meant every ask over a
+  // share link was refused, while the same call worked at a real URL because
+  // httpRequest happened to translate it. Both ends were tested; the seam
+  // between them was not. Keeping one vocabulary is what removes the seam.
   function ask(text, anchor) {
-    var body = {kind: "question", body: text};
+    var body = {kind: "question", question: text};
     var p = currentPillar();
     if (p) body.pillar_id = p.pillar_id;
     if (anchor) body.anchor = anchor;
-    return request("write", body).then(function () { show(null); });
+    // Where to return to, captured BEFORE show() clears it.
+    var from = ui.anchor ? {anchor: ui.anchor}
+                         : (ui.panel ? {panel: ui.panel} : ui.from);
+    return request("write", body).then(function (r) {
+      // LAND ON WHAT WAS JUST SENT. Closing the whole chrome on success threw
+      // the reader back to the screen with no sign their question existed --
+      // and the next thing they are waiting for, a progress update, renders
+      // inside this very view.
+      var q = r && r.question;
+      if (!q || !q.entry_id) { show(null); return; }
+      var i = state.questions.findIndex(function (x) { return x.entry_id === q.entry_id; });
+      if (i === -1) state.questions.push(q); else state.questions[i] = q;
+      show({entry: q.entry_id, from: from});
+    });
   }
   function reply(entryId, text, reopen) {
-    return request("write", {kind: reopen ? "reopen" : "answer", entry_id: entryId, body: text})
-      .then(function () { render(); });
+    var body = {kind: reopen ? "reopen" : "answer", entry_id: entryId};
+    body[reopen ? "followup" : "answer"] = text;
+    return request("write", body).then(function (r) {
+      var q = r && r.question;
+      if (q && q.entry_id) {
+        var i = state.questions.findIndex(function (x) { return x.entry_id === q.entry_id; });
+        if (i === -1) state.questions.push(q); else state.questions[i] = q;
+      }
+      render();
+    });
   }
 
   // The bar sticks to the top of the VIEWPORT once scrolled, but sits below

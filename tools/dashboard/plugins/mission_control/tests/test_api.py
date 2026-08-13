@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import yaml
@@ -2176,3 +2177,63 @@ def test_an_empty_rephrase_is_refused():
     )
     assert r.status_code == 400
     assert db.get_conversation_entry(entry["entry_id"])["question"] == "original"
+
+
+# ── the client/server seam ────────────────────────────────────────
+#
+# handle_relay_write's tests above call it with the SERVER's vocabulary,
+# and the viewer's own tests never leave the browser. Between the two sat
+# a client posting {"kind": "question", "body": ...} to a handler reading
+# `question`: every ask over a share link was refused, while the identical
+# call at a real URL worked, because the HTTP path happened to translate
+# the key on the way past. Both ends were covered and the seam was not.
+# These read the body the client actually builds and put it through the
+# handler that actually receives it.
+
+_BOOTSTRAP = (
+    Path(__file__).resolve().parents[1] / "viewer" / "bootstrap.js"
+).read_text()
+
+
+def test_the_viewer_speaks_the_relay_handlers_field_names():
+    """A write body is forwarded to handle_relay_write completely
+    uninterpreted, so the client has no translation layer to hide behind --
+    the names it writes are the names that must arrive."""
+    assert '{kind: "question", question: text}' in _BOOTSTRAP, (
+        "the viewer no longer sends the `question` field handle_relay_write reads"
+    )
+    assert 'body[reopen ? "followup" : "answer"] = text;' in _BOOTSTRAP, (
+        "the viewer no longer sends the `followup`/`answer` fields the server reads"
+    )
+    assert "body: text" not in _BOOTSTRAP, (
+        "a generic `body` key is exactly the mismatch this seam already shipped once"
+    )
+
+
+def test_the_body_the_viewer_builds_is_accepted_by_the_relay_handler():
+    """The client's literal shape, not a shape written for the server."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    visitor = _visitor(client)
+
+    # Exactly what ask() posts for an anchored question on a pillar-less view.
+    body = {"kind": "question", "question": "does the seam hold?", "anchor": "table:one"}
+
+    with patch.object(mc_api, "_relay_question", new_callable=AsyncMock):
+        result = _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id, body,
+        ))
+
+    assert result is not None, "the handler refused the body the client sends"
+    assert result["question"]["question"] == "does the seam hold?"
+    assert result["question"]["anchor"] == "table:one"
+
+
+def test_asking_lands_on_the_new_entry_rather_than_closing_everything():
+    """On success the viewer used to call show(null), tearing down the whole
+    chrome -- so a sent question vanished along with the surface that would
+    have shown it being worked on. The entry_id comes back in the response;
+    the view it opens is where progress updates render."""
+    assert "show({entry: q.entry_id, from: from})" in _BOOTSTRAP, (
+        "asking no longer lands on the entry it just created"
+    )
