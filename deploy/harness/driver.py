@@ -635,6 +635,21 @@ class Harness:
             "convergence assertions require the sync engine"
         )
 
+    def _source_commit(self) -> str:
+        root = Path(__file__).resolve().parents[2]
+        try:
+            sha = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=10, check=True,
+            ).stdout.strip()
+            dirty = subprocess.run(
+                ["git", "-C", str(root), "status", "--porcelain"],
+                capture_output=True, text=True, timeout=10, check=True,
+            ).stdout.strip()
+            return f"{sha} ({'dirty' if dirty else 'clean'} tree)"
+        except Exception:
+            return "unknown (no git metadata)"
+
     def _capture_logs(self) -> None:
         result = self._compose("logs", "--no-color", check=False)
         self.log_file.write_text(
@@ -679,6 +694,10 @@ class Harness:
                 "Docker is required for the real multi-node ladder; run this "
                 "command on a Linux Docker host or in the required CI job"
             )
+        # Evidence provenance: say what code this proof proves (the evidence
+        # manifest's instance.commit field). Best-effort — a tarball checkout
+        # without git still runs the ladder.
+        self.announce(f"harness source commit: {self._source_commit()}")
         failure: BaseException | None = None
         try:
             for index, phase in enumerate(PHASES, 1):
