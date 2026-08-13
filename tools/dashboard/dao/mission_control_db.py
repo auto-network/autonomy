@@ -271,6 +271,31 @@ def _get_conn(db_path: Path | str | None = None) -> sqlite3.Connection:
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE visitor_tokens ADD COLUMN avatar_attachment_id TEXT")
         conn.commit()
+    # CLOSED IS A FACT, NOT AN INFERENCE. It used to be read off the answer:
+    # an entry with text in `answer` was closed and one without was open. That
+    # conflates a thing arriving with a thing being finished, and it made
+    # answering your own question close it using your own words -- the asker
+    # and the reply were the same person and nothing could tell.
+    #
+    # Answering still closes in the same act, so a coordinator owes no extra
+    # step. What it buys is the two states inference could not express: a
+    # question its own asker has added to and left open, and one its asker
+    # closed without anybody needing to answer it.
+    #
+    # Backfill matters: every entry that already has an answer is closed, and
+    # reading `closed_at IS NULL` on those without this would silently reopen
+    # the entire history.
+    try:
+        conn.execute("SELECT closed_at, closed_by FROM mission_conversation LIMIT 0")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE mission_conversation ADD COLUMN closed_at REAL")
+        conn.execute("ALTER TABLE mission_conversation ADD COLUMN closed_by TEXT")
+        conn.execute(
+            "UPDATE mission_conversation"
+            "   SET closed_at = COALESCE(answered_at, created_at),"
+            "       closed_by = answered_by_session"
+            " WHERE answer IS NOT NULL")
+        conn.commit()
     return conn
 
 
@@ -1335,15 +1360,21 @@ def answer_question(
     mission row is mutable by design (a mission can change hands), so
     history must record the real answerer, not whatever the mission row
     says later.
+
+    Answering closes the entry in the same act. That is the normal path and
+    costs the coordinator no extra step; what is now possible, and was not,
+    is the entry being closed WITHOUT this -- see close_question.
     """
     answered_at = time.time()
     conn = _get_conn(db_path)
     try:
         cur = conn.execute(
             "UPDATE mission_conversation"
-            " SET answer = ?, answered_by_session = ?, answered_at = ?"
+            " SET answer = ?, answered_by_session = ?, answered_at = ?,"
+            "     closed_at = ?, closed_by = ?"
             " WHERE mission_id = ? AND entry_id = ?",
-            (answer, answered_by_session, answered_at, mission_id, entry_id),
+            (answer, answered_by_session, answered_at, answered_at,
+             answered_by_session, mission_id, entry_id),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -1510,11 +1541,102 @@ def reopen_question(
         conn.execute(
             "UPDATE mission_conversation"
             " SET answer = NULL, answered_by_session = NULL, answered_at = NULL,"
+            "     closed_at = NULL, closed_by = NULL,"
             "     relay_status = 'pending'"
             " WHERE mission_id = ? AND entry_id = ?",
             (mission_id, entry_id),
         )
         conn.commit()
+        row = conn.execute(
+            "SELECT * FROM mission_conversation WHERE mission_id = ? AND entry_id = ?",
+            (mission_id, entry_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def followup_question(
+    mission_id: str,
+    entry_id: str,
+    followup: str,
+    participant_label: str,
+    *,
+    db_path: Path | str | None = None,
+) -> dict | None:
+    """The ASKER adding to their own still-open question. Returns None if the
+    entry doesn't exist or is already closed.
+
+    This is the move that had nowhere to go. An asker with more to say about
+    their own unanswered question was offered the only composer that existed
+    -- the one that files an answer -- so saying more closed their question
+    using their own words, with themselves recorded as having answered it.
+
+    It is not a new entry and not a message in a thread: the record is one
+    question and one answer, so more from the asker amends what is being
+    asked. The follow-up is appended to `question` and stamped through the
+    same columns a rephrase uses, because that is what it is -- the asker
+    revising their own ask while it is still open. Relay goes back to pending
+    so the coordinator is told again; the question they were sent is no
+    longer the question on the record.
+    """
+    followup = (followup or "").strip()
+    if not followup:
+        return None
+    now = time.time()
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM mission_conversation WHERE mission_id = ? AND entry_id = ?",
+            (mission_id, entry_id),
+        ).fetchone()
+        if not row or row["closed_at"] is not None:
+            return None
+        conn.execute(
+            "UPDATE mission_conversation"
+            "   SET question = ?, question_edited_at = ?,"
+            "       question_edited_by_session = ?, relay_status = 'pending'"
+            " WHERE mission_id = ? AND entry_id = ?",
+            (f"{row['question']}\n\n{followup}", now, participant_label,
+             mission_id, entry_id),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM mission_conversation WHERE mission_id = ? AND entry_id = ?",
+            (mission_id, entry_id),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def close_question(
+    mission_id: str,
+    entry_id: str,
+    closed_by: str,
+    *,
+    db_path: Path | str | None = None,
+) -> dict | None:
+    """Close an entry without answering it. Returns None if it doesn't exist
+    or is already closed.
+
+    For the question that stopped needing an answer -- the asker worked it out,
+    or it was overtaken. Inventing an answer to record that would put words in
+    the record that nobody said, and leaving it open forever would keep asking
+    someone for something no longer wanted.
+    """
+    now = time.time()
+    conn = _get_conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE mission_conversation"
+            "   SET closed_at = ?, closed_by = ?"
+            " WHERE mission_id = ? AND entry_id = ? AND closed_at IS NULL",
+            (now, closed_by, mission_id, entry_id),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return None
         row = conn.execute(
             "SELECT * FROM mission_conversation WHERE mission_id = ? AND entry_id = ?",
             (mission_id, entry_id),

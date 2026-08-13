@@ -275,13 +275,22 @@ _SRCDOC_BASE = '<base href="about:srcdoc">\n'
 
 
 def compose_screen(mission_id: str, pillar_id: str | None = None, *,
-                   framed: bool = False, may_write: bool = True) -> bytes | None:
+                   framed: bool = False, may_write: bool = True,
+                   viewer: str | None = None) -> bytes | None:
     """One screen as a complete document, or None if there is nothing to serve.
 
     *framed* is True when this document will be handed to a sandboxed frame as
     srcdoc — the relay path. The author's content and the state block are
     identical either way; only the base differs, because the two surfaces
     genuinely differ in whether the document has a URL of its own.
+
+    *viewer* is the participant id this screen is being rendered FOR, so the
+    page can tell a question the reader asked from one asked of them. Without
+    it the chrome had no way to know whose question it was showing, and so
+    offered the same control for both: on your own unanswered question, the
+    one that files an answer. Never trusted for authorization — every write is
+    re-checked against the session cookie or the grant. It decides which
+    control to draw, nothing more.
 
     Order matters: the state block and the bootstrap precede the author's
     HTML so the runtime is mounted before their scripts run.
@@ -296,7 +305,7 @@ def compose_screen(mission_id: str, pillar_id: str | None = None, *,
         _HEAD
         + (_SRCDOC_BASE if framed else "")
         + _state_block(dict(mission_state(mission_id, pillar_id),
-                            may_write=may_write))
+                            may_write=may_write, me=viewer))
         + "<script>\n" + bootstrap_source() + "\n</script>\n"
         + current["html"]          # byte for byte, never parsed
     )

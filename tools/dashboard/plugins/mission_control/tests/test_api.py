@@ -2202,7 +2202,7 @@ def test_the_viewer_speaks_the_relay_handlers_field_names():
     assert '{kind: "question", question: text}' in _BOOTSTRAP, (
         "the viewer no longer sends the `question` field handle_relay_write reads"
     )
-    assert 'body[reopen ? "followup" : "answer"] = text;' in _BOOTSTRAP, (
+    assert 'body[kind === "answer" ? "answer" : "followup"] = text;' in _BOOTSTRAP, (
         "the viewer no longer sends the `followup`/`answer` fields the server reads"
     )
     assert "body: text" not in _BOOTSTRAP, (
@@ -2237,3 +2237,130 @@ def test_asking_lands_on_the_new_entry_rather_than_closing_everything():
     assert "show({entry: q.entry_id, from: from})" in _BOOTSTRAP, (
         "asking no longer lands on the entry it just created"
     )
+
+
+# ── open/closed as a fact, not an inference ───────────────────────
+#
+# Closed used to be read off the answer field. That cannot tell a question
+# you asked from one asked of you, so the app offered its only composer --
+# the one that files an answer -- on the operator's own open question, and
+# using it closed his question with his own words and recorded him as having
+# answered himself.
+
+
+def test_answering_still_closes_in_one_act():
+    """The normal path costs the coordinator no extra step."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    visitor = _visitor(client)
+    with patch.object(mc_api, "_relay_question", new_callable=AsyncMock):
+        entry = _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "question", "question": "why?"},
+        ))["question"]
+    r = client.post(
+        f"/api/missions/{mission_id}/questions/{entry['entry_id']}/answer",
+        json={"answer": "because"})
+    assert r.status_code == 200
+    q = r.json()["question"]
+    assert q["answer"] == "because"
+    assert q["closed_at"] is not None
+
+
+def test_the_asker_adding_to_their_own_question_does_not_close_it():
+    """The bug, in one assertion: more from the asker is more of the ask."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    visitor = _visitor(client)
+    with patch.object(mc_api, "_relay_question", new_callable=AsyncMock):
+        entry = _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "question", "question": "why?"},
+        ))["question"]
+        after = _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "followup", "entry_id": entry["entry_id"],
+             "followup": "and also when?"},
+        ))["question"]
+
+    assert after["closed_at"] is None, "the asker closed their own question"
+    assert after["answer"] is None, "the follow-up was recorded as an answer"
+    assert "why?" in after["question"] and "and also when?" in after["question"]
+    # The coordinator was sent a question that is no longer the one on record.
+    assert after["relay_status"] == "pending"
+
+
+def test_only_the_asker_may_add_to_or_close_a_question():
+    """A channel is bound to one identity. Without this check any guest could
+    amend or close anybody else's question on a mission they can merely see."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    asker = _visitor(client)
+    other = client.post(
+        "/api/visitor-tokens", json={"display_name": "Someone Else"},
+    ).json()["visitor"]
+    with patch.object(mc_api, "_relay_question", new_callable=AsyncMock):
+        entry = _run(mc_api.handle_relay_write(
+            asker["participant_id"], mission_id,
+            {"kind": "question", "question": "mine"},
+        ))["question"]
+        for body in (
+            {"kind": "followup", "entry_id": entry["entry_id"], "followup": "sneak"},
+            {"kind": "close", "entry_id": entry["entry_id"]},
+        ):
+            assert _run(mc_api.handle_relay_write(
+                other["participant_id"], mission_id, body)) is None
+
+    still = db.get_question(mission_id, entry["entry_id"])
+    assert still["question"] == "mine" and still["closed_at"] is None
+
+
+def test_a_question_can_be_closed_without_inventing_an_answer():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    visitor = _visitor(client)
+    with patch.object(mc_api, "_relay_question", new_callable=AsyncMock):
+        entry = _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "question", "question": "never mind"},
+        ))["question"]
+        closed = _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "close", "entry_id": entry["entry_id"]},
+        ))["question"]
+
+    assert closed["closed_at"] is not None
+    assert closed["answer"] is None, "closing fabricated an answer"
+
+
+def test_closing_does_not_ask_the_coordinator_again():
+    """Every other kind leaves someone holding a question that changed under
+    them. A closed entry wants nothing from anybody."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    visitor = _visitor(client)
+    with patch.object(mc_api, "_relay_question", new_callable=AsyncMock) as relay:
+        entry = _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "question", "question": "q"},
+        ))["question"]
+        relay.reset_mock()
+        _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "close", "entry_id": entry["entry_id"]},
+        ))
+        relay.assert_not_called()
+
+
+def test_the_screen_is_told_which_reader_it_is_for():
+    """Without this the chrome cannot tell your question from one asked of
+    you, which is the whole reason it offered the wrong control."""
+    from tools.dashboard.plugins.mission_control import compose
+
+    mission = db.create_mission("Viewer")
+    mission_id = mission["mission_id"]
+    db.push_site_revision(mission_id, "<html>x</html>", "first")
+    doc = compose.compose_screen(mission_id, viewer="guest:abc").decode()
+    assert '"me":"guest:abc"' in doc.replace(" ", "")
+    anon = compose.compose_screen(mission_id).decode()
+    assert '"me":null' in anon.replace(" ", "")

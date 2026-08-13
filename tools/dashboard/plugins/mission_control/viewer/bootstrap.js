@@ -180,6 +180,12 @@
     } else if (op === "write" && kind === "reopen") {
       url = ownerPath(body.entry_id) + "/questions/" + body.entry_id + "/reopen";
       payload = {followup: body.followup};
+    } else if (op === "write" && kind === "followup") {
+      url = ownerPath(body.entry_id) + "/questions/" + body.entry_id + "/followup";
+      payload = {followup: body.followup};
+    } else if (op === "write" && kind === "close") {
+      url = ownerPath(body.entry_id) + "/questions/" + body.entry_id + "/close";
+      payload = {};
     } else if (op === "read" && kind === "here") {
       // Presence has no HTTP route yet; it is decoration, and announceHere
       // already treats an empty answer as "show nothing". Resolving quietly
@@ -644,14 +650,14 @@
   }
 
   function rowChipText(q) {
-    if (q.answer) return "answered";
+    if (q.closed_at) return q.answer ? "answered" : "closed";
     if (q.relay_status === "failed") return "not delivered";
     if ((q.updates || []).length) return "working";
     return "open";
   }
 
   function rowChipClass(q) {
-    if (q.answer) return "mc-chip mc-chip-done";
+    if (q.closed_at) return "mc-chip mc-chip-done";
     if (q.relay_status === "failed") return "mc-chip mc-chip-bad";
     if ((q.updates || []).length) return "mc-chip mc-chip-working";
     return "mc-chip mc-chip-open";
@@ -898,13 +904,31 @@
         el("button", {class: "mc-back", text: backLabel(),
                       onclick: goBack}),
         el("span", {class: "mc-grow"}),
-        el("span", {class: q.answer ? "mc-chip" : "mc-chip mc-chip-open", text: q.answer ? "answered" : "open"}),
+        // Closing is YOUR act, and only on your own still-open question. The
+        // question that stopped needing an answer had nowhere to go but an
+        // invented one, which puts words in the record nobody said.
+        mine(q) && !q.closed_at
+          ? el("button", {class: "mc-close-q", text: "Close",
+                          title: "Close this without an answer",
+                          onclick: function () { closeEntry(q.entry_id); }})
+          : el("span", {}),
+        el("span", {class: q.closed_at ? "mc-chip" : "mc-chip mc-chip-open",
+                    text: q.closed_at ? (q.answer ? "answered" : "closed") : "open"}),
       ]),
       el("div", {class: "mc-pbody"}, body),
-      composer(q.answer ? "Reopen with a follow-up\u2026" : "Answer\u2026", "", q.answer ? "Reopen" : "Answer",
-               function (t) { reply(q.entry_id, t, !!q.answer); }),
+      composer(COMPOSE[replyKind(q)].hint, "", COMPOSE[replyKind(q)].label,
+               function (t) { reply(q.entry_id, t, replyKind(q)); }),
     ]);
   }
+
+  //: What each of the three is called where the reader can see it. "Add" and
+  //: not "Answer" on your own question is the whole point: the wrong word
+  //: there is what made answering yourself look like the thing to do.
+  var COMPOSE = {
+    answer:   {hint: "Answer\u2026",                   label: "Answer"},
+    followup: {hint: "Add to your question\u2026",     label: "Add"},
+    reopen:   {hint: "Reopen with a follow-up\u2026",  label: "Reopen"},
+  };
 
   function anchorNode() {
     if (!ui.anchor) return null;
@@ -959,9 +983,36 @@
       show({entry: q.entry_id, from: from});
     });
   }
-  function reply(entryId, text, reopen) {
-    var body = {kind: reopen ? "reopen" : "answer", entry_id: entryId};
-    body[reopen ? "followup" : "answer"] = text;
+  // WHOSE QUESTION IS IT. The composer used to choose by whether an answer
+  // existed yet, which cannot see the difference between a question you asked
+  // and one asked of you -- so on your own open question it offered the
+  // control that files an answer, and using it closed your own question with
+  // your own words, recording you as having answered yourself.
+  function mine(q) {
+    return !!state.me && q.asked_by_participant_id === state.me;
+  }
+
+  function replyKind(q) {
+    if (q.closed_at) return "reopen";     // finished with; say more and it reopens
+    return mine(q) ? "followup" : "answer";
+  }
+
+  function closeEntry(entryId) {
+    return request("write", {kind: "close", entry_id: entryId}).then(function (r) {
+      mergeEntry(r && r.question);
+      render();
+    });
+  }
+
+  function mergeEntry(q) {
+    if (!q || !q.entry_id) return;
+    var i = state.questions.findIndex(function (x) { return x.entry_id === q.entry_id; });
+    if (i === -1) state.questions.push(q); else state.questions[i] = q;
+  }
+
+  function reply(entryId, text, kind) {
+    var body = {kind: kind, entry_id: entryId};
+    body[kind === "answer" ? "answer" : "followup"] = text;
     return request("write", body).then(function (r) {
       var q = r && r.question;
       if (q && q.entry_id) {

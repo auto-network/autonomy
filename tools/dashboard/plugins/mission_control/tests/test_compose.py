@@ -85,12 +85,17 @@ def test_both_surfaces_produce_identical_bytes():
     # The resolver also tells the document whether this channel may write, so
     # compare against the same call it makes: a grant with a bound participant.
     grant = {"meta": {"participant_id": "guest:someone"}}
-    framed = compose.compose_screen(mission_id, framed=True, may_write=True)
+    # viewer, like may_write, is a property of the READER and legitimately
+    # differs between two people looking at the same screen. Pass the grant's
+    # own participant so both sides describe the same reader; what must not
+    # drift is everything else.
+    framed = compose.compose_screen(
+        mission_id, framed=True, may_write=True, viewer="guest:someone")
     via_resolver = link_serving._resolve_mission(mission_id, grant)["viewer"]
     assert via_resolver == framed
     assert b'<base href="about:srcdoc">' in framed
 
-    unframed = compose.compose_screen(mission_id)
+    unframed = compose.compose_screen(mission_id, viewer="guest:someone")
     # Scoped to the HEAD: the bootstrap's own comments mention the tag by
     # name, so "not anywhere in the document" would be checking the wrong
     # thing entirely.
@@ -106,7 +111,8 @@ def test_both_surfaces_produce_identical_bytes():
         {"kind": "pillar_site", "pillar_id": pillar["pillar_id"]},
     ))["document"]
     assert over_channel == compose.compose_screen(
-        mission_id, pillar["pillar_id"], framed=True
+        mission_id, pillar["pillar_id"], framed=True,
+        may_write=True, viewer="guest:1",
     ).decode("utf-8")
 
 

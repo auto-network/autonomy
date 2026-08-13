@@ -255,3 +255,9 @@
    underlined names turns a roster into a link farm. */
 .mc-who-link { color: #7dd3fc; text-decoration: none; cursor: pointer; }
 .mc-who-link:hover { text-decoration: underline; }
+
+/* Closing your own question, in the header beside its state. Quiet, because
+   it is rarely the thing you came to do -- and present, because the only
+   alternative was inventing an answer to record that it stopped mattering. */
+.mc-close-q { font-size: 11px; color: #64748b; border: 1px solid #334155;
+              border-radius: .3rem; padding: .1rem .45rem; background: transparent; }
