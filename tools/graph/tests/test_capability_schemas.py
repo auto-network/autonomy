@@ -1025,3 +1025,112 @@ def test_resolution_path_implementation_not_implementing_contract_version_fails(
         working_versions={issue_tracker["name"]: 1},
     )
     assert resolved is None
+
+
+# ── impl rev 2: host_install (protocol 149705db-a39) ─────────
+
+
+def _video_host_install() -> dict:
+    return {
+        "command": ["bash", "install/install.sh"],
+        "cwd": "agents/capabilities/video",
+        "fingerprint_files": ["agents/capabilities/video/install/ffmpeg.pin"],
+        "timeout_seconds": 600,
+        "success_marker": "bin/ffmpeg",
+    }
+
+
+def _autonomy_video_v1() -> dict:
+    payload = _autonomy_github_v1()
+    payload["name"] = "autonomy/video"
+    payload["delivery_mode"] = "mounted_tools"
+    payload["package_root"] = "agents/capabilities/video"
+    payload["skill_path"] = "agents/capabilities/video/SKILL.md"
+    payload["primer_path"] = "agents/capabilities/video/primer.md"
+    del payload["required_env"]
+    payload["host_install"] = _video_host_install()
+    return payload
+
+
+def test_impl_rev2_accepts_host_install():
+    validate_payload(capability_impl.SET_ID, 2, _autonomy_video_v1())
+
+
+def test_impl_rev2_validates_the_landed_video_manifest():
+    """The real manifest on master is the acceptance payload."""
+    import json
+    from pathlib import Path
+
+    manifest = json.loads(
+        Path("agents/capabilities/video/manifest.json").read_text()
+    )
+    validate_payload(capability_impl.SET_ID, 2, manifest)
+
+
+def test_impl_rev2_minimal_host_install_validates():
+    payload = _autonomy_video_v1()
+    payload["host_install"] = {
+        "command": ["npm", "install"],
+        "fingerprint_files": ["agents/capabilities/video/install/ffmpeg.pin"],
+    }
+    validate_payload(capability_impl.SET_ID, 2, payload)
+
+
+def test_impl_rev2_env_accepted():
+    payload = _autonomy_video_v1()
+    payload["host_install"]["env"] = {"PUPPETEER_SKIP_DOWNLOAD": "1"}
+    validate_payload(capability_impl.SET_ID, 2, payload)
+
+
+def test_impl_rev1_rows_still_validate_at_rev1():
+    """Existing stored rows (github/jira shape) are untouched by rev 2."""
+    validate_payload(capability_impl.SET_ID, 1, _autonomy_github_v1())
+
+
+def test_impl_rev1_still_rejects_host_install():
+    """The rev-1 contract is unchanged: host_install stays unknown there."""
+    with pytest.raises(SchemaValidationError, match="unknown field"):
+        validate_payload(capability_impl.SET_ID, 1, _autonomy_video_v1())
+
+
+def test_impl_rev2_upconverts_rev1_payload():
+    from tools.graph.schemas.registry import upconvert_chain
+
+    chain = upconvert_chain(capability_impl.SET_ID, 1, 2)
+    assert chain is not None and len(chain) == 1
+    upconverted = chain[0](_autonomy_github_v1())
+    validate_payload(capability_impl.SET_ID, 2, upconverted)
+
+
+@pytest.mark.parametrize(
+    "mutation, match",
+    [
+        (lambda hi: hi.pop("command"), "command"),
+        (lambda hi: hi.update(command=[]), "command"),
+        (lambda hi: hi.update(command="bash install.sh"), "command"),
+        (lambda hi: hi.update(command=["bash", 3]), "command"),
+        (lambda hi: hi.pop("fingerprint_files"), "fingerprint_files"),
+        (lambda hi: hi.update(fingerprint_files=[]), "fingerprint_files"),
+        (lambda hi: hi.update(fingerprint_files=["/etc/passwd"]), "fingerprint_files"),
+        (lambda hi: hi.update(fingerprint_files=["../escape"]), "fingerprint_files"),
+        (lambda hi: hi.update(cwd="/abs/path"), "cwd"),
+        (lambda hi: hi.update(cwd="../escape"), "cwd"),
+        (lambda hi: hi.update(env={"K": 1}), "env"),
+        (lambda hi: hi.update(env="X=1"), "env"),
+        (lambda hi: hi.update(timeout_seconds=0), "timeout_seconds"),
+        (lambda hi: hi.update(timeout_seconds=-5), "timeout_seconds"),
+        (lambda hi: hi.update(timeout_seconds="600"), "timeout_seconds"),
+        (lambda hi: hi.update(timeout_seconds=True), "timeout_seconds"),
+        (lambda hi: hi.update(success_marker=""), "success_marker"),
+        (lambda hi: hi.update(success_marker=7), "success_marker"),
+        (lambda hi: hi.update(surprise_field=1), "unknown"),
+        (lambda hi: None, "host_install"),  # replaced below with non-dict
+    ],
+)
+def test_impl_rev2_rejects_malformed_host_install(mutation, match):
+    payload = _autonomy_video_v1()
+    result = mutation(payload["host_install"])
+    if match == "host_install" and result is None:
+        payload["host_install"] = ["not", "a", "dict"]
+    with pytest.raises(SchemaValidationError, match=match):
+        validate_payload(capability_impl.SET_ID, 2, payload)

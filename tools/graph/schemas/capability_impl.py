@@ -519,3 +519,134 @@ class CapabilityImplV1(SettingSchema):
             raise SchemaValidationError(
                 f"{cls.__name__}: 'notes' must be a string"
             )
+
+
+# ── revision 2: host_install ─────────────────────────────────
+
+
+_HOST_INSTALL_FIELDS = {
+    "command",
+    "env",
+    "cwd",
+    "fingerprint_files",
+    "timeout_seconds",
+    "success_marker",
+}
+
+
+def _validate_host_install(hi: Any, cls_name: str) -> None:
+    """Validate the ``host_install`` sub-shape per the Capability
+    Host-Install Runner protocol (graph://149705db-a39): ``command`` and
+    ``fingerprint_files`` required; ``env``, ``cwd``, ``timeout_seconds``,
+    ``success_marker`` optional with runner-side defaults.
+    """
+    if not isinstance(hi, dict):
+        raise SchemaValidationError(
+            f"{cls_name}: 'host_install' must be an object, "
+            f"got {type(hi).__name__}"
+        )
+
+    extra = set(hi) - _HOST_INSTALL_FIELDS
+    if extra:
+        raise SchemaValidationError(
+            f"{cls_name}: 'host_install' unknown field(s): {sorted(extra)}"
+        )
+
+    command = hi.get("command")
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(c, str) and c for c in command)
+    ):
+        raise SchemaValidationError(
+            f"{cls_name}: 'host_install.command' is required and must be a "
+            f"non-empty list of non-empty strings (argv)"
+        )
+
+    fingerprint_files = hi.get("fingerprint_files")
+    if not isinstance(fingerprint_files, list) or not fingerprint_files:
+        raise SchemaValidationError(
+            f"{cls_name}: 'host_install.fingerprint_files' is required and "
+            f"must be a non-empty list of repo-local paths"
+        )
+    for i, entry in enumerate(fingerprint_files):
+        validate_repo_local_path(
+            entry,
+            field=f"host_install.fingerprint_files[{i}]",
+            cls_name=cls_name,
+        )
+
+    if "env" in hi:
+        env = hi["env"]
+        if not isinstance(env, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in env.items()
+        ):
+            raise SchemaValidationError(
+                f"{cls_name}: 'host_install.env' must be an object of "
+                f"string keys to string values"
+            )
+
+    if "cwd" in hi:
+        validate_repo_local_path(
+            hi["cwd"], field="host_install.cwd", cls_name=cls_name
+        )
+
+    if "timeout_seconds" in hi:
+        timeout = hi["timeout_seconds"]
+        if isinstance(timeout, bool) or not isinstance(timeout, int):
+            raise SchemaValidationError(
+                f"{cls_name}: 'host_install.timeout_seconds' must be an "
+                f"integer"
+            )
+        if timeout < 1:
+            raise SchemaValidationError(
+                f"{cls_name}: 'host_install.timeout_seconds' must be >= 1, "
+                f"got {timeout}"
+            )
+
+    if "success_marker" in hi:
+        marker = hi["success_marker"]
+        if not isinstance(marker, str) or not marker:
+            raise SchemaValidationError(
+                f"{cls_name}: 'host_install.success_marker' must be a "
+                f"non-empty string"
+            )
+
+
+class CapabilityImplV2(CapabilityImplV1):
+    """Revision 2 adds the optional ``host_install`` descriptor the
+    Capability Host-Install Runner protocol (graph://149705db-a39)
+    specifies on this Setting: how a host populates the capability's
+    dependency tree inside ``package_root``, once per fingerprint change.
+    Everything else is revision 1 unchanged; rows without ``host_install``
+    are valid at both revisions.
+    """
+
+    set_id = SET_ID
+    schema_revision = 2
+
+    host_install: dict = field(
+        required=False,
+        description=(
+            "Host-side install descriptor (protocol graph://149705db-a39): "
+            "command (argv, required), fingerprint_files (repo-local, "
+            "required), env, cwd, timeout_seconds, success_marker"
+        ),
+    )
+
+    @classmethod
+    def upconvert_from_prev(cls, payload: dict) -> dict:
+        # host_install is optional; a rev-1 row is a valid rev-2 row as-is.
+        return dict(payload)
+
+    @classmethod
+    def validate(cls, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            raise SchemaValidationError(
+                f"{cls.__name__}: payload must be a dict, "
+                f"got {type(payload).__name__}"
+            )
+        rest = {k: v for k, v in payload.items() if k != "host_install"}
+        CapabilityImplV1.validate.__func__(cls, rest)
+        if "host_install" in payload:
+            _validate_host_install(payload["host_install"], cls.__name__)
