@@ -337,3 +337,26 @@ def test_get_dispatch_wait_status_calls_dashboard_endpoint():
     assert "/api/dispatch/wait/auto-test" in captured["url"]
     assert captured["method"] == "GET"
     assert status == {"state": "waiting", "bead_id": "auto-test"}
+
+
+# ── auto-w1ktf: the container session token rides as an additive bearer ──
+
+
+def test_headers_add_bearer_additively_when_crosstalk_token_set(monkeypatch):
+    """The container ``CROSSTALK_TOKEN`` is sent as ``Authorization: Bearer``,
+    ADDITIVELY alongside ``X-Graph-Org``. Additive means no server behaviour
+    changes until the h4kzx flip — there is no window where a token-requiring
+    server refuses a caller that has not yet sent a bearer."""
+    monkeypatch.setenv("CROSSTALK_TOKEN", "sess-tok-123")
+    h = _make_client()._headers(org="anchore")
+    assert h["Authorization"] == "Bearer sess-tok-123"
+    assert h["X-Graph-Org"] == "anchore"  # unchanged — the bearer rides alongside
+
+
+def test_headers_omit_bearer_when_no_crosstalk_token(monkeypatch):
+    """A host caller has no ``CROSSTALK_TOKEN`` and sends no bearer — a local,
+    org-less caller server-side."""
+    monkeypatch.delenv("CROSSTALK_TOKEN", raising=False)
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    h = _make_client()._headers()
+    assert "Authorization" not in h
