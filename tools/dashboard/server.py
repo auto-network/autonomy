@@ -10125,6 +10125,20 @@ async def api_version(request):
 async def page_index(request):
     return RedirectResponse(url="/beads")
 
+async def page_network_join(request):
+    """The invite bridge's local-origin half (auto-1ihgz): display/consent
+    shell for an org:join invitation. One static template, rendered
+    client-side from the URL's query + fragment — the server reads neither,
+    and the page contains no input fields (the passphrase must never gain
+    an HTTP ingress, I1). Acceptance mechanics await auto-9rw91's ruling."""
+    return HTMLResponse(
+        _load_template("network-join.html"),
+        headers={"Cache-Control": "no-store",
+                 "Referrer-Policy": "no-referrer",
+                 "X-Content-Type-Options": "nosniff"},
+    )
+
+
 async def page_unlock(request):
     """The Unlock screen (mockup d49be06b 'Unlock' state) — the one page
     the human gate never covers. Skips itself when there is nothing to
@@ -17245,6 +17259,11 @@ routes = [
     # Personal identity + passkey enrollment (Get started onboarding)
     *identity_routes.ROUTES,
     *join_routes.ROUTES,
+
+    # Invite bridge, local half (auto-1ihgz): display/consent shell only.
+    # Acceptance mechanics are held for the ceremony-workflow ruling
+    # (auto-9rw91); this page has no inputs and no API calls by design.
+    Route("/network/join", page_network_join),
 
     # Human unlock gate: passkey assert + password fallback + session
     Route("/unlock", page_unlock),
