@@ -4,51 +4,84 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Accept an invitation — Autonomy</title>
-<!-- Invitation display (auto-1ihgz). Constraint: no input fields ever
-     on this page (I1); controls appear only when their function exists. -->
+<!-- Invitation flow (auto-1ihgz). Constraint: no password fields ever on
+     this page (I1); controls appear only when their function exists. -->
 <style>
   :root { --bg:#0f1117; --panel:#171a23; --line:#2a2f3d; --ink:#e5e7eb;
           --dim:#9ca3af; --accent:#6366f1; }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--ink);
          font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
-  main { max-width:600px; margin:0 auto; padding:3rem 1.25rem 4rem; }
-  h1 { font-size:1.45rem; margin:0 0 .4rem; }
-  .sub { color:var(--dim); margin-bottom:1.5rem; }
+  main { max-width:560px; margin:0 auto; padding:3.5rem 1.25rem 4rem; }
+  h1 { font-size:1.5rem; margin:0 0 .35rem; }
+  .sub { color:var(--dim); margin-bottom:1.8rem; }
   .card { background:var(--panel); border:1px solid var(--line);
-          border-radius:10px; padding:1.1rem 1.3rem; margin:1rem 0; }
-  .card h2 { font-size:1rem; margin:0 0 .5rem; color:#818cf8; }
+          border-radius:12px; padding:1.4rem 1.5rem; }
+  label { display:block; font-size:.9rem; color:var(--dim); margin-bottom:.45rem; }
+  input[type="url"] { width:100%; background:#0b0d12; color:var(--ink);
+          border:1px solid var(--line); border-radius:8px;
+          padding:.85rem 1rem; font:.95rem/1.4 ui-monospace,monospace; }
+  input[type="url"]:focus { outline:none; border-color:var(--accent); }
+  .hint { min-height:1.3rem; font-size:.85rem; color:#fca5a5; margin:.5rem 0 0; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px;
+           padding:.7rem 1.6rem; font-size:1rem; font-weight:600;
+           cursor:pointer; margin-top:1.1rem; }
+  .org-head { display:flex; align-items:center; gap:1rem; margin-bottom:1rem; }
+  .org-head img { width:56px; height:56px; border-radius:12px; }
+  #org-fallback { width:56px; height:56px; border-radius:12px;
+          display:flex; align-items:center; justify-content:center;
+          font-size:1.5rem; font-weight:700; background:#262b38; }
+  .org-head h2 { margin:0; font-size:1.25rem; }
+  .org-head p { margin:.15rem 0 0; color:var(--dim); font-size:.92rem; }
   .row { display:flex; justify-content:space-between; gap:1rem;
-         padding:.3rem 0; font-size:.92rem; }
+         padding:.3rem 0; font-size:.9rem; }
   .row .k { color:var(--dim); }
-  .row .v { font:.85rem ui-monospace,monospace; word-break:break-all; }
-  button { background:var(--accent); color:#fff; border:0; border-radius:6px;
-           padding:.55rem 1.1rem; font-weight:600; cursor:pointer; }
-  .dim { color:var(--dim); font-size:.88rem; }
+  .row .v { font:.82rem ui-monospace,monospace; word-break:break-all; }
   .hidden { display:none; }
 </style>
 </head>
 <body>
 <main>
-  <h1>Accept an invitation</h1>
-  <p class="sub" id="status-line">Reading your invitation…</p>
-
-  <div id="incomplete" class="card hidden">
-    <h2>This invitation link is incomplete</h2>
-    <p class="dim">Some apps cut off part of a link when forwarding —
-    everything after the <code>#</code> matters. Ask for a fresh link.</p>
-  </div>
-
-  <div id="invitation" class="hidden">
+  <!-- Step 1: paste — shown when the page opens without an invitation -->
+  <section id="step-paste" class="hidden">
+    <h1>Accept an invitation</h1>
+    <p class="sub">Paste the invitation link you received.</p>
     <div class="card">
-      <h2>Invitation</h2>
-      <div class="row"><span class="k">Organization</span>
+      <label for="invite-input">Invitation link</label>
+      <input type="url" id="invite-input" autocomplete="off" spellcheck="false"
+             placeholder="https://auto.network/l/…" data-testid="invite-input">
+      <p class="hint" id="paste-hint"></p>
+      <button id="next" data-testid="invite-next">Next</button>
+    </div>
+  </section>
+
+  <!-- Step 2: the organization — shown when the page opens with one -->
+  <section id="step-org" class="hidden">
+    <h1>You're invited</h1>
+    <p class="sub">Here's who is inviting you.</p>
+    <div class="card">
+      <div class="org-head">
+        <img id="org-icon" class="hidden" alt="">
+        <div id="org-fallback">?</div>
+        <div>
+          <h2 id="org-name">Organization</h2>
+          <p id="org-desc"></p>
+        </div>
+      </div>
+      <div class="row"><span class="k">Organization id</span>
         <span class="v" id="org-id"></span></div>
-      <div class="row"><span class="k">Invitation reference</span>
+      <div class="row"><span class="k">Invitation</span>
         <span class="v" id="invite-ref"></span></div>
     </div>
-  </div>
+  </section>
+
+  <section id="step-broken" class="hidden">
+    <h1>This link is incomplete</h1>
+    <p class="sub">Some apps cut off part of a link when forwarding —
+    everything after the <code>#</code> matters. Ask for a fresh link.</p>
+  </section>
 </main>
+<script src="/static/js/accept-invitation.js"></script>
 <script src="/static/js/network-join.js"></script>
 </body>
 </html>

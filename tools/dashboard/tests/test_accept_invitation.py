@@ -46,29 +46,31 @@ class TestStructuralAbsences:
                           "document.cookie"):
             assert forbidden not in ACCEPT_JS.lower(), forbidden
 
-    def test_no_password_input_in_the_chrome(self):
+    def test_no_input_of_any_kind_in_the_chrome(self):
         # The chrome may DISPLAY Gate-1 state (the 'Password' method
-        # label); it must never CREATE a password field. input.type in
-        # this file is set exactly once, to 'url', by the invite row.
+        # label); it creates no fields at all — the paste screen owns
+        # the flow's one input.
         assert 'type="password"' not in INDICATOR_JS.lower()
-        assert "input.type = 'password'" not in INDICATOR_JS
-        assert INDICATOR_JS.count("input.type = ") == 1
-        assert "input.type = 'url'" in INDICATOR_JS
+        assert "input.type" not in INDICATOR_JS
 
 
 class TestMount:
-    def test_indicator_delegates_to_the_parse_module(self):
-        assert "AutonomyAcceptInvitation" in INDICATOR_JS
-        assert "acceptPastedLink" in INDICATOR_JS
+    def test_panel_action_opens_the_full_page_flow(self):
+        # The chrome holds no paste UI (operator: a cramped dropdown box is
+        # not a workflow) — the action navigates to the paste SCREEN, which
+        # owns the input and everything after.
+        assert "location.assign('/network/join')" in INDICATOR_JS
+        assert "acceptPastedLink" not in INDICATOR_JS
+        assert "identity-panel-invite" not in INDICATOR_JS
 
-    def test_base_html_loads_parse_module_before_the_chrome(self):
-        accept = BASE_HTML.index("accept-invitation.js")
-        indicator = BASE_HTML.index("identity-indicator.js")
-        assert accept < indicator
-
-    def test_invite_state_dies_with_the_panel(self):
-        # No draft survives a close: both close paths reset the row.
-        assert INDICATOR_JS.count("inviteOpen = false") >= 2
+    def test_join_page_owns_the_parse_module(self):
+        template = (DASHBOARD / "templates" / "network-join.html").read_text(
+            encoding="utf-8"
+        )
+        accept = template.index("accept-invitation.js")
+        page = template.index("network-join.js")
+        assert accept < page
+        assert "accept-invitation.js" not in BASE_HTML
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")

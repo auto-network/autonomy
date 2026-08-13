@@ -118,44 +118,12 @@
   function closePanel() {
     if (!panelOpen) return;
     panelOpen = false;
-    inviteOpen = false;
     render();
   }
 
   function togglePanel() {
     panelOpen = !panelOpen;
-    if (!panelOpen) inviteOpen = false;
     render();
-  }
-
-  // ── Accept invitation (auto-a1xq3, operator-ruled paste ingress) ──
-  // Chrome only: parse/navigate logic lives in accept-invitation.js,
-  // which is structurally network- and storage-free. The pasted value is
-  // never sent, never persisted, and dies with the row (no draft state).
-  var inviteOpen = false;
-
-  function buildInviteRow() {
-    var row = el('div', 'identity-panel-invite');
-    var input = el('input', 'identity-panel-invite-input');
-    input.type = 'url';
-    input.placeholder = 'Paste your invitation link';
-    input.autocomplete = 'off';
-    input.setAttribute('data-testid', 'identity-invite-input');
-    var hint = el('div', 'identity-panel-invite-hint');
-    var go = el('button', 'identity-panel-action identity-panel-invite-go');
-    go.type = 'button';
-    go.textContent = 'Accept';
-    go.setAttribute('data-testid', 'identity-invite-go');
-    go.addEventListener('click', function () {
-      var api = root.AutonomyAcceptInvitation;
-      if (!api) { hint.textContent = 'Invitation handling failed to load.'; return; }
-      var result = api.acceptPastedLink(input.value);
-      if (result.kind === 'error') hint.textContent = result.reason;
-    });
-    row.appendChild(input);
-    row.appendChild(go);
-    row.appendChild(hint);
-    return row;
   }
 
   function triggerForState(state) {
@@ -282,13 +250,13 @@
       actions.appendChild(actionButton('lock', lockBusy ? 'Locking...' : 'Lock dashboard',
         'This session only', lockDashboard));
     }
+    // Accept invitation (auto-a1xq3): opens the full-page flow — the
+    // paste screen at /network/join owns the input and everything after.
     actions.appendChild(actionButton('accept-invite', 'Accept invitation',
       'Paste an invitation link', function () {
-        inviteOpen = !inviteOpen;
-        render();
+        root.location.assign('/network/join');
       }));
     if (actions.childNodes.length) panel.appendChild(actions);
-    if (inviteOpen) panel.appendChild(buildInviteRow());
     if (loadError) panel.appendChild(el('div', 'identity-panel-error', loadError));
     return panel;
   }

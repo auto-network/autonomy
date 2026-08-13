@@ -50,12 +50,16 @@ class TestRoute:
 class TestI1Constraints:
     """The properties the three-pillar convergence demands."""
 
-    def test_no_input_fields_at_all(self):
-        # Not just "no password field" — NO fields. A page with no inputs
-        # cannot become a password ingress by copy-editing.
+    def test_exactly_one_input_and_it_is_the_link_field(self):
+        # The paste step owns the flow's single input — a visible url
+        # field on its own screen. Nothing password-shaped can ever
+        # appear here.
         lowered = TEMPLATE.lower()
-        for forbidden in ("<input", "<form", "type=\"password\""):
-            assert forbidden not in lowered, forbidden
+        assert lowered.count("<input") == 1
+        assert 'type="url"' in lowered
+        body = lowered[lowered.index("<body"):]
+        for forbidden in ("<form", 'type="password"', "password"):
+            assert forbidden not in body, forbidden
 
     def test_no_network_calls_in_page_script(self):
         for forbidden in ("fetch(", "xmlhttprequest", "websocket",
@@ -83,11 +87,14 @@ class TestI1Constraints:
         assert 'query.get("t")' not in PAGE_JS
 
     def test_nothing_is_promised_that_does_not_work(self):
-        # Operator product rule: UI shows what works — engineering status
-        # never appears in the product. No accept control exists until the
-        # ceremony makes it real (auto-9rw91 adds control AND function
-        # together), and no internal narration leaks into user copy.
-        assert "<button" not in TEMPLATE.lower()
+        # Operator product rule: UI shows what works. The paste step's
+        # Next button is fully functional; the ORGANIZATION step carries
+        # no controls until the ceremony makes accepting real (auto-9rw91
+        # adds control and function together). No internal narration in
+        # user copy.
+        org_step = TEMPLATE[TEMPLATE.index('id="step-org"'):
+                            TEMPLATE.index('id="step-broken"')]
+        assert "<button" not in org_step.lower()
         for leaked in ("under review", "still being finished", "ceremony",
-                       "passphrase", "held"):
+                       "passphrase", "held", "pending ruling"):
             assert leaked not in TEMPLATE.lower(), leaked
