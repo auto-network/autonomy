@@ -392,11 +392,18 @@
     if (!p) return state.questions;
     return state.questions.filter(function (q) { return q.pillar_id === p.pillar_id; });
   }
+  // OPEN MEANS NOT CLOSED. Every count and filter here read it off the answer
+  // field, which was the same thing right up until closing became its own
+  // act. After that a question closed because it stopped mattering still
+  // counted as open, still sat under Unanswered, and still showed as waiting
+  // on somebody -- the old model surviving in every place that was not
+  // touched when it changed.
+  function isOpen(q) { return !q.closed_at; }
   function openCount() {
-    return questionsHere().filter(function (q) { return !q.answer; }).length;
+    return questionsHere().filter(isOpen).length;
   }
   function answeredCount() {
-    return questionsHere().filter(function (q) { return !!q.answer; }).length;
+    return questionsHere().filter(function (q) { return !isOpen(q); }).length;
   }
   function atAnchor(a) {
     return state.questions.filter(function (q) { return q.anchor === a; });
@@ -684,8 +691,8 @@
 
   function questionRows() {
     var shown = questionsHere().filter(function (q) {
-      if (qFilter === "open") return !q.answer;
-      if (qFilter === "done") return !!q.answer;
+      if (qFilter === "open") return isOpen(q);
+      if (qFilter === "done") return !isOpen(q);
       return true;
     });
     // NEWEST FIRST. The list used to lead with everything unanswered and,
@@ -800,7 +807,7 @@
 
   function filterToggle() {
     var all = questionsHere();
-    var open = all.filter(function (q) { return !q.answer; }).length;
+    var open = all.filter(isOpen).length;
     var counts = {all: all.length, open: open, done: all.length - open};
     var i = FILTERS.findIndex(function (f) { return f.key === qFilter; });
     if (i === -1) i = 0;
@@ -877,7 +884,7 @@
     body.push(el("p", {class: "mc-sub",
                        text: (q.asked_by_label || "") + (q.created_at ? " \u00b7 " + when(q.created_at) : "")}));
     if (q.anchor) body.push(el("p", {class: "mc-sub", text: q.anchor}));
-    if (!q.answer) {
+    if (isOpen(q)) {
       // DID IT REACH ANYONE. Whether the question was actually delivered has
       // always been recorded and never shown, so a question that failed to
       // reach its coordinator looked exactly like one being thought about:
@@ -980,7 +987,8 @@
       body.push(el("button", {class: "mc-row", onclick: function () {
         show({entry: q.entry_id, from: {anchor: ui.anchor}});
       }}, [
-        el("span", {class: q.answer ? "mc-chip" : "mc-chip mc-chip-open", text: q.answer ? "answered" : "open"}),
+        el("span", {class: isOpen(q) ? "mc-chip mc-chip-open" : "mc-chip",
+                    text: rowChipText(q)}),
         el("p", {class: "mc-qtext", text: q.question || ""}),
       ]));
     });
@@ -1182,7 +1190,7 @@
   function paintAnchor(control) {
     var here = atAnchor(control.ref);
     var open = 0, done = 0;
-    here.forEach(function (q) { q.answer ? done++ : open++; });
+    here.forEach(function (q) { isOpen(q) ? open++ : done++; });
     // A screen asking YOU is not a count of a conversation, it is a thing
     // waiting on you -- so it says so in a word, and stops the moment it is
     // answered. A number here would read as "two people are chatting".

@@ -388,3 +388,15 @@ def test_unanswered_screen_questions_stay_out_of_the_questions_count():
     assert "function unanswered(" in src
     assert "mc-foryou" in src
     assert '" for you"' in src
+
+
+def test_open_is_defined_once_and_means_not_closed():
+    """Every count and filter read open off the answer field, which was the
+    same thing until closing became its own act. After that a question closed
+    because it stopped mattering still counted as open, still sat under
+    Unanswered, and still showed as waiting on somebody."""
+    src = _viewer("bootstrap.js")
+    assert "function isOpen(q) { return !q.closed_at; }" in src
+    for gone in ('return !q.answer; }).length',
+                 'if (qFilter === "open") return !q.answer;'):
+        assert gone not in src, f"a count still infers open from the answer: {gone}"
