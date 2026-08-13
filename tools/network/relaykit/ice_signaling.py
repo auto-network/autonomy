@@ -19,7 +19,7 @@ import inspect
 import json
 import re
 import time
-from typing import Any, Iterable
+from typing import Any
 
 from tools.network.idkit import canonical_json
 
@@ -57,7 +57,6 @@ class IceOffer:
     attempt_id: str
     sdp: str
     candidates: tuple[dict[str, Any], ...]
-    wire_bytes: int
 
 
 @dataclass(frozen=True)
@@ -81,24 +80,39 @@ class IceAnswer:
 
 
 class IceCapacity:
-    """One event-loop-local process cap for live signaling attempts."""
+    """Event-loop-local global and per-token caps for signaling attempts."""
 
-    def __init__(self, limit: int):
+    def __init__(self, limit: int, *, per_token_limit: int):
         if type(limit) is not int or limit <= 0:
             raise ValueError("ICE capacity limit must be positive")
+        if (
+            type(per_token_limit) is not int
+            or per_token_limit <= 0
+            or per_token_limit > limit
+        ):
+            raise ValueError("ICE per-token capacity must be within the global limit")
         self.limit = limit
+        self.per_token_limit = per_token_limit
         self.active = 0
+        self._by_token: dict[str, int] = {}
 
-    def acquire(self) -> bool:
-        if self.active >= self.limit:
+    def acquire(self, token: str) -> bool:
+        token_active = self._by_token.get(token, 0)
+        if self.active >= self.limit or token_active >= self.per_token_limit:
             return False
         self.active += 1
+        self._by_token[token] = token_active + 1
         return True
 
-    def release(self) -> None:
-        if self.active <= 0:
+    def release(self, token: str) -> None:
+        token_active = self._by_token.get(token, 0)
+        if self.active <= 0 or token_active <= 0:
             raise RuntimeError("ICE capacity released without an acquisition")
         self.active -= 1
+        if token_active == 1:
+            del self._by_token[token]
+        else:
+            self._by_token[token] = token_active - 1
 
 
 def _wire_size(value: str) -> int:
@@ -128,7 +142,7 @@ def parse_message(raw: bytes | bytearray | memoryview) -> tuple[dict[str, Any], 
 
     try:
         value = json.loads(wire.decode("utf-8"), object_pairs_hook=object_pairs)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise IceSignalingError("signaling message is not valid JSON") from exc
     if not isinstance(value, dict):
         raise IceSignalingError("signaling message must be an object")
@@ -303,16 +317,7 @@ def validate_offer(
         attempt_id=attempt_id,
         sdp=assert_candidate_free_sdp(value["sdp"]),
         candidates=validate_candidates(value["candidates"], policy),
-        wire_bytes=wire_bytes,
     )
-
-
-def validate_outgoing_candidates(
-    values: Iterable[dict[str, Any]], policy: str
-) -> tuple[dict[str, Any], ...]:
-    """Materialize once, then apply the identical outbound privacy gate."""
-    materialized = list(values)
-    return validate_candidates(materialized, policy)
 
 
 def validate_ice_configuration(
@@ -389,6 +394,7 @@ class IceSignalingSession:
         self._monotonic = monotonic
         self._wall_clock = wall_clock
         self._deadline_seconds = float(deadline_seconds)
+        self._deadline_at = self._monotonic() + self._deadline_seconds
         self._state = "new"
         self._attempt_id: str | None = None
         self._started_at: float | None = None
@@ -396,16 +402,18 @@ class IceSignalingSession:
         self._configuration: IceConfiguration | None = None
         self._responder = None
         self._acquired = False
+        self._transferred = False
         self._closed = False
 
     def _remaining(self) -> float:
-        assert self._started_at is not None
-        remaining = self._deadline_seconds - (
-            self._monotonic() - self._started_at
-        )
+        remaining = self._deadline_at - self._monotonic()
         if remaining <= 0:
             raise IceSignalingError("ICE attempt deadline elapsed")
         return remaining
+
+    def receive_timeout(self) -> float:
+        """Bound the next encrypted request even when the peer stays silent."""
+        return self._remaining()
 
     def _account(self, wire: bytes) -> bytes:
         self._wire_bytes += len(wire)
@@ -419,11 +427,12 @@ class IceSignalingSession:
         value, wire_bytes = parse_message(raw)
         if self._state == "new":
             attempt_id = validate_begin(value, wire_bytes)
-            if not self._capacity.acquire():
+            if not self._capacity.acquire(self._token):
                 raise IceSignalingError("ICE responder capacity is exhausted")
             self._acquired = True
             self._attempt_id = attempt_id
             self._started_at = self._monotonic()
+            self._deadline_at = self._started_at + self._deadline_seconds
             self._wire_bytes = wire_bytes
             self._remaining()
             configuration = self._configuration_provider(token, self._policy)
@@ -437,8 +446,9 @@ class IceSignalingSession:
             response = _configuration_response(
                 attempt_id, self._policy, self._configuration
             )
-            self._state = "configured"
-            return self._account(response)
+            response = self._account(response)
+            self._state = "config_ready"
+            return response
 
         if self._state != "configured":
             raise IceSignalingError("ICE signaling attempt is already complete")
@@ -461,7 +471,7 @@ class IceSignalingSession:
         if not isinstance(answer, IceAnswer):
             raise IceSignalingError("ICE responder returned the wrong answer type")
         sdp = strip_candidate_lines(answer.sdp)
-        candidates = validate_outgoing_candidates(answer.candidates, self._policy)
+        candidates = validate_candidates(list(answer.candidates), self._policy)
         response = canonical_json({
             "v": ICE_SIGNAL_VERSION,
             "op": "ice.answer",
@@ -469,15 +479,43 @@ class IceSignalingSession:
             "sdp": sdp,
             "candidates": list(candidates),
         })
-        self._state = "answered"
-        return self._account(response)
+        response = self._account(response)
+        self._state = "answer_ready"
+        return response
+
+    def on_response_sent(self) -> bool:
+        """Confirm a complete encrypted response reached the transport.
+
+        The terminal answer transfers the exact responder object—not the
+        caller-chosen attempt id—to the direct-channel runtime.  Transfer is a
+        synchronous, event-loop-local ownership change so cancellation cannot
+        land between runtime adoption and the session recording it.  ``True``
+        tells ``serve_channel`` to close the short-lived signaling channel.
+        """
+        if self._state == "config_ready":
+            self._state = "configured"
+            return False
+        if self._state != "answer_ready" or self._responder is None:
+            raise IceSignalingError("signaling response confirmation is out of order")
+        transfer = getattr(self._responder, "transfer", None)
+        if transfer is None:
+            raise IceSignalingError("ICE responder cannot transfer ownership")
+        result = transfer()
+        if inspect.isawaitable(result) or result is not None:
+            raise IceSignalingError("ICE responder ownership transfer must be synchronous")
+        self._transferred = True
+        self._state = "transferred"
+        if self._acquired:
+            self._capacity.release(self._token)
+            self._acquired = False
+        return True
 
     async def aclose(self) -> None:
         if self._closed:
             return
         self._closed = True
         try:
-            if self._responder is not None:
+            if self._responder is not None and not self._transferred:
                 close = getattr(self._responder, "aclose", None)
                 if close is not None:
                     result = close()
@@ -485,5 +523,5 @@ class IceSignalingSession:
                         await result
         finally:
             if self._acquired:
-                self._capacity.release()
+                self._capacity.release(self._token)
                 self._acquired = False
