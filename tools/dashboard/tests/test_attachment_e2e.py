@@ -120,8 +120,13 @@ def stack(tmp_path, monkeypatch):
     now = int(time.time())
     session_cert = issue_cert(
         root, session_key.public_hex, scope=("tunnel:serve",), org=ORG_UUID,
-        subject=Subject("operator", "op-session-1"),
+        subject=Subject("persona", "ab" * 32),
         not_before=now - 300, not_after=now + 86_400,
+    )
+    viewer_cert = issue_cert(
+        root, session_key.public_hex, scope=("tunnel:serve",), org=ORG_UUID,
+        subject=Subject("operator", session_key.public_hex),
+        not_before=session_cert.not_before, not_after=session_cert.not_after,
     )
     port = free_port()
     registry = start_registry(port, tmp_path / "registry.db", tmp_path / "registry.log")
@@ -135,6 +140,7 @@ def stack(tmp_path, monkeypatch):
         connector = TunnelConnector(
             f"ws://127.0.0.1:{port}", ORG_UUID, session_key, session_cert,
             handler=link_serving.make_grant_handler(ORG),
+            channel_cert=viewer_cert,
             min_backoff=0.1, max_backoff=1.0,
         )
         yield {"port": port, "root": root, "root_pub": root.public_hex,
@@ -160,7 +166,9 @@ async def _fetch_manifest(port: int, token: str, root_pub: str) -> list:
         await channel.send_message(canonical_json({"op": "fetch", "v": 1}))
         served = await channel.recv_message()
     header, _, _ = served.partition(b"\n")
-    return json.loads(header)["content"]["attachments"]
+    parsed = json.loads(header)
+    assert "attachments" in parsed, parsed
+    return parsed["attachments"]
 
 
 def _make_fetch_window(port: int, token: str, root_pub: str, *, drop=None, requests=None):

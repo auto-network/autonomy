@@ -53,8 +53,8 @@ byte-exact soak through the full two-process stack.
 1. Viewer fetches the **envelope** over HTTPS first: org + `root_pub`.
    That root is the pin.
 2. `CLIENT_HELLO` carries the viewer's ephemeral X25519 key.
-3. `SERVER_HELLO` carries the dashboard's ephemeral key + a
-   `tunnel:serve` cert chain + an Ed25519 signature over
+3. `SERVER_HELLO` carries the dashboard's ephemeral key + an identity-neutral
+   direct-root `tunnel:serve` cert + an Ed25519 signature over
    `(org, token, client_eph, server_eph)`.
 4. The viewer verifies chain→pinned-root (scope `tunnel:serve`) then the
    signature. A relay substituting either ECDH key cannot re-sign; a relay
@@ -72,8 +72,11 @@ never does.
 
 ## Dashboard integration seam
 
-`TunnelConnector(relay_url, org, key, cert, handler)` — `handler(token,
-message) -> response` is where C4 plugs the target resolver. The connector
+`TunnelConnector(relay_url, org, key, registry_cert, handler,
+channel_cert=viewer_cert)` — `handler(token, message) -> response` is where C4
+plugs the target resolver. `registry_cert` may carry the org-scoped persona
+needed for admission; `viewer_cert` is identity-neutral and is the only one
+placed in `SERVER_HELLO`. The connector
 is deliberately a library + CLI (`python -m tools.network.relaykit.connector`)
 rather than a wired dashboard background task: launching it requires org
 key material that only exists after the C-track ceremonies (C2 session

@@ -158,7 +158,7 @@ def stack(tmp_path, monkeypatch):
     session_cert = issue_cert(
         root, session_key.public_hex,
         scope=("tunnel:serve",), org=ORG_UUID,
-        subject=Subject("operator", "op-session-1"),
+        subject=Subject("persona", "ab" * 32),
         not_before=now - 300, not_after=now + 86_400,
     )
 
@@ -300,8 +300,13 @@ def _provision_serve_cert(tmp_path, root, port):
     now = int(time.time())
     cert = issue_cert(
         root, delegate.public_hex, scope=("tunnel:serve",), org=ORG_UUID,
-        subject=Subject("operator", "op-serve"),
+        subject=Subject("persona", "ab" * 32),
         not_before=now - 300, not_after=now + 30 * 24 * 3600,
+    )
+    viewer_cert = issue_cert(
+        root, delegate.public_hex, scope=("tunnel:serve",), org=ORG_UUID,
+        subject=Subject("operator", delegate.public_hex),
+        not_before=cert.not_before, not_after=cert.not_after,
     )
     keydir = tmp_path / "network"
     keydir.mkdir(exist_ok=True)
@@ -310,7 +315,9 @@ def _provision_serve_cert(tmp_path, root, port):
     os.chmod(key_path, 0o600)
     settings_ops.add_setting(
         NETWORK_SERVE_CERT_SET_ID, NETWORK_SERVE_CERT_REVISION, "default",
-        {"cert": cert.to_json().decode("ascii"), "key_path": str(key_path),
+        {"cert": cert.to_json().decode("ascii"),
+         "viewer_cert": viewer_cert.to_json().decode("ascii"),
+         "key_path": str(key_path),
          "root_pub": root.public_hex, "not_after": cert.not_after},
         org=ORG,
     )

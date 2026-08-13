@@ -83,7 +83,9 @@ def stack(tmp_path_factory):
     # binding, and every idkit chain.
     sim = OrgSim(ORG)
     root = sim.root
-    node_key, relay_key = KeyPair.generate(), KeyPair.generate()
+    node_key, floor_key, relay_key = (
+        KeyPair.generate(), KeyPair.generate(), KeyPair.generate()
+    )
 
     # The authority ledger records who may do what; relay:serve on the
     # relay node is THE grant this bead is about.
@@ -107,6 +109,18 @@ def stack(tmp_path_factory):
         org=ORG, subject=Subject("agent", "target-node"),
         not_before=now - 300, not_after=now + 7 * 86_400,
     )
+    floor_cert = issue_cert(
+        root, floor_key.public_hex,
+        scope=("tunnel:serve",),
+        org=ORG, subject=Subject("persona", "ab" * 32),
+        not_before=node_cert.not_before, not_after=node_cert.not_after,
+    )
+    floor_channel_cert = issue_cert(
+        root, floor_key.public_hex,
+        scope=("tunnel:serve",),
+        org=ORG, subject=Subject("operator", floor_key.public_hex),
+        not_before=node_cert.not_before, not_after=node_cert.not_after,
+    )
 
     registry_port = free_port()
     registry = start_registry(registry_port, tmp / "registry.db", env,
@@ -115,6 +129,9 @@ def stack(tmp_path_factory):
 
     relay_port, listen_port = free_port(), free_port()
     node_kf, node_cf = _write_identity(tmp, "node", node_key, node_cert)
+    floor_kf, floor_cf = _write_identity(tmp, "node-floor", floor_key, floor_cert)
+    _floor_channel_kf, floor_channel_cf = _write_identity(
+        tmp, "node-floor-channel", floor_key, floor_channel_cert)
     relay_kf, relay_cf = _write_identity(tmp, "relay", relay_key, relay_cert)
 
     peer_relay = subprocess.Popen(
@@ -129,6 +146,9 @@ def stack(tmp_path_factory):
         [sys.executable, "-m", "tools.network.relaykit.node",
          "--org", ORG, "--root-pub", root.public_hex,
          "--key-file", str(node_kf), "--cert-file", str(node_cf),
+         "--floor-key-file", str(floor_kf),
+         "--floor-cert-file", str(floor_cf),
+         "--floor-channel-cert-file", str(floor_channel_cf),
          "--listen-port", str(listen_port),
          "--floor", f"ws://127.0.0.1:{registry_port}",
          "--peer-relay", f"ws://127.0.0.1:{relay_port}",

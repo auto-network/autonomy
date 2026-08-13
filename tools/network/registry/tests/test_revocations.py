@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from tools.network.idkit import KeyPair, Subject, issue_cert, issue_revocation
+from tools.network.registry.relay import Tunnel
 
 from .conftest import DAY, NOW, ORG, publish_link, signed
 
@@ -19,6 +20,47 @@ def post_revocation(client, record, revoked_cert, org=ORG):
 
 
 class TestRevocationAuthority:
+    def test_posted_revocation_closes_matching_standing_tunnel(
+        self, app, client, clock, root, bound_org,
+    ):
+        class Socket:
+            def __init__(self):
+                self.closed = None
+
+            async def close(self, code):
+                self.closed = code
+
+        serve_key = KeyPair.generate()
+        serve_cert = issue_cert(
+            root,
+            serve_key.public_hex,
+            scope=("tunnel:serve",),
+            org=ORG,
+            subject=Subject("persona", "ab" * 32),
+            not_before=clock.now - 10,
+            not_after=clock.now + DAY,
+        )
+        socket = Socket()
+        tunnel = Tunnel(
+            socket,
+            ORG,
+            persona_pub="ab" * 32,
+            signer_pub=serve_key.public_hex,
+        )
+        app.state.tunnel_hub.register(tunnel)
+        record = issue_revocation(
+            root,
+            serve_key.public_hex,
+            org=ORG,
+            revoked_at=clock.now,
+            expires_at=serve_cert.not_after,
+            revoked_cert=serve_cert,
+        )
+
+        assert post_revocation(client, record, serve_cert).status_code == 201
+        assert app.state.tunnel_hub.get(ORG) is None
+        assert socket.closed == 4403
+
     def test_root_signed_revocation_kills_chain(self, client, clock, root, bound_org,
                                                 session_key, session_cert):
         assert publish_link(client, clock, session_key, cert=session_cert).status_code == 201
@@ -155,5 +197,4 @@ class TestRetentionI7:
         store = app.state.store
         assert store.purge_expired_revocations(now=clock.now + DAY) == 0
         assert store.get_revocation(ORG, session_key.public_hex) is not None
-
 

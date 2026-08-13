@@ -30,7 +30,7 @@ def _serve_cert(root: KeyPair, serve_key: KeyPair, org: str = ORG):
         serve_key.public_hex,
         scope=("tunnel:serve",),
         org=org,
-        subject=Subject("operator", "serve"),
+        subject=Subject("persona", "ab" * 32),
         not_before=NOW - 100,
         not_after=NOW + 30 * DAY,
     )

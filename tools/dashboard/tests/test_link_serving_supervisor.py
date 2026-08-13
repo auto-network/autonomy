@@ -87,8 +87,13 @@ def _provision_serve_cert(tmp_path, *, ttl=30 * 24 * 3600) -> dict:
     now = int(time.time())
     cert = issue_cert(
         root, delegate.public_hex, scope=("tunnel:serve",), org=ORG_UUID,
-        subject=Subject("operator", "op-serve"),
+        subject=Subject("persona", "ab" * 32),
         not_before=now - 300, not_after=now + ttl,
+    )
+    viewer_cert = issue_cert(
+        root, delegate.public_hex, scope=("tunnel:serve",), org=ORG_UUID,
+        subject=Subject("operator", delegate.public_hex),
+        not_before=cert.not_before, not_after=cert.not_after,
     )
     keydir = tmp_path / "network"
     keydir.mkdir(exist_ok=True)
@@ -100,6 +105,7 @@ def _provision_serve_cert(tmp_path, *, ttl=30 * 24 * 3600) -> dict:
         NETWORK_SERVE_CERT_SET_ID, NETWORK_SERVE_CERT_REVISION, "default",
         {
             "cert": cert.to_json().decode("ascii"),
+            "viewer_cert": viewer_cert.to_json().decode("ascii"),
             "key_path": str(key_path),
             "root_pub": root.public_hex,
             "not_after": cert.not_after,
@@ -117,7 +123,8 @@ def _provision_serve_cert(tmp_path, *, ttl=30 * 24 * 3600) -> dict:
         },
         org=ORG,
     )
-    return {"root": root, "delegate": delegate, "cert": cert, "key_path": key_path}
+    return {"root": root, "delegate": delegate, "cert": cert,
+            "viewer_cert": viewer_cert, "key_path": key_path}
 
 
 def _put_grant(token="a" * 32, *, meta=None, issued_at=None):
@@ -143,6 +150,7 @@ def _replace_key_path(provisioned: dict, key_path: str) -> None:
         "default",
         {
             "cert": provisioned["cert"].to_json().decode("ascii"),
+            "viewer_cert": provisioned["viewer_cert"].to_json().decode("ascii"),
             "key_path": key_path,
             "root_pub": provisioned["root"].public_hex,
             "not_after": provisioned["cert"].not_after,
@@ -305,6 +313,91 @@ def test_watchdog_reconcile_relaunches_dead_proc(env):
     s.ensure_all()                 # what the watchdog thread runs
     assert len(spawn.calls) == 2   # relaunched
     assert s.running_orgs() == [ORG]
+
+
+def test_reprovisioned_credential_restarts_existing_connector(env):
+    from tools.network.idkit import KeyPair, Subject, issue_cert
+
+    provisioned = _provision_serve_cert(env)
+    _put_grant()
+    spawn = FakeSpawn()
+    s = sup.ServingSupervisor(spawn=spawn)
+    assert s.ensure(ORG)["reason"] == "launched"
+    original = spawn.procs[0]
+
+    replacement = KeyPair.generate()
+    now = int(time.time())
+    cert = issue_cert(
+        provisioned["root"],
+        replacement.public_hex,
+        scope=("tunnel:serve",),
+        org=ORG_UUID,
+        subject=Subject("persona", "ab" * 32),
+        not_before=now - 10,
+        not_after=now + 30 * 24 * 3600,
+    )
+    viewer_cert = issue_cert(
+        provisioned["root"], replacement.public_hex,
+        scope=("tunnel:serve",), org=ORG_UUID,
+        subject=Subject("operator", replacement.public_hex),
+        not_before=cert.not_before, not_after=cert.not_after,
+    )
+    provisioned["key_path"].write_text(replacement.private_hex)
+    settings_ops.upsert_by_key(
+        NETWORK_SERVE_CERT_SET_ID,
+        NETWORK_SERVE_CERT_REVISION,
+        "default",
+        {
+            "cert": cert.to_json().decode("ascii"),
+            "viewer_cert": viewer_cert.to_json().decode("ascii"),
+            "key_path": str(provisioned["key_path"]),
+            "root_pub": provisioned["root"].public_hex,
+            "not_after": cert.not_after,
+        },
+        org=ORG,
+    )
+
+    assert s.ensure(ORG)["reason"] == "launched"
+    assert original.alive() is False
+    assert len(spawn.calls) == 2
+
+
+def test_legacy_operator_serve_cert_requires_reprovision(
+    env, monkeypatch,
+):
+    from tools.network.idkit import KeyPair, Subject, issue_cert
+
+    root = KeyPair.generate()
+    child = KeyPair.generate()
+    now = int(time.time())
+    cert = issue_cert(
+        root,
+        child.public_hex,
+        scope=("tunnel:serve",),
+        org=ORG_UUID,
+        subject=Subject("operator", "legacy-browser"),
+        not_before=now - 10,
+        not_after=now + 3600,
+    )
+    key_path = env / "legacy.key"
+    key_path.write_text(child.private_hex)
+    row = {
+        "cert": cert.to_json().decode("ascii"),
+        "key_path": str(key_path),
+        "root_pub": root.public_hex,
+        "not_after": cert.not_after,
+    }
+    monkeypatch.setattr(
+        settings_ops,
+        "read_owned_set",
+        lambda *args, **kwargs: SimpleNamespace(
+            members=[SimpleNamespace(payload=row)]
+        ),
+    )
+
+    state = sup.serve_cert_state(ORG)
+    assert state["status"] == "identity-invalid"
+    assert "reprovision" in state["error"]
 
 
 def test_serve_cert_ok_reflects_status(env):

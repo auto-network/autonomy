@@ -28,10 +28,12 @@ shell and script together. There is no compatibility fallback.
 2. Try each announced `endpoints[]` entry, then fall back to the relay.
    Every transport must pass the same authenticated handshake.
 3. Open `WS /v1/links/{token}/channel`; send `CLIENT_HELLO`.
-4. Receive `SERVER_HELLO`; verify its `tunnel:serve` cert chain to the
-   pinned `root_pub` and the signature over `(org, token, client_eph,
-   server_eph)`. A relay substituting either ECDH key or the cert fails
-   here — **I5 on the client**.
+4. Receive `SERVER_HELLO`; verify its identity-neutral, direct-root
+   `tunnel:serve` cert to the pinned `root_pub` and the signature over
+   `(org, token, client_eph, server_eph)`. This certificate proves only that
+   the organization authorized the serving key; it contains no persona. A
+   relay substituting either ECDH key or the cert fails here — **I5 on the
+   client**.
 5. Derive keys and send `{v:1,op:"fetch"}`. The response is a JSON header
    line followed by a part-addressed body.
 6. Require `status:"ok"`, an allowed discriminated union, safe in-bounds

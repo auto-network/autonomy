@@ -130,17 +130,6 @@ var signRegistryRequestCore;
            now >= session.cert.not_before && now < session.cert.not_after;
   }
 
-  function _browserSubjectId() {
-    var KEY = 'autonomy.network.browser-id';
-    var id = null;
-    try { id = localStorage.getItem(KEY); } catch (e) { /* ignore */ }
-    if (!id) {
-      id = 'browser-' + bytesToHex(crypto.getRandomValues(new Uint8Array(4)));
-      try { localStorage.setItem(KEY, id); } catch (e) { /* ignore */ }
-    }
-    return id;
-  }
-
   async function _loadFromStore() {
     var rec = null;
     try {
@@ -329,6 +318,72 @@ var signRegistryRequestCore;
     return resp.json();
   }
 
+  async function _mintServeCredential(rootKey, orgUuid, personaPub) {
+    // One fresh exportable serving key, certified twice for two different
+    // disclosure contexts. The registry certificate names the org-scoped
+    // persona; the viewer certificate names only its already-public child key.
+    var delegate = await crypto.subtle.generateKey(
+      { name: 'Ed25519' }, true, ['sign', 'verify']);
+    var childPub = bytesToHex(new Uint8Array(
+      await crypto.subtle.exportKey('raw', delegate.publicKey)));
+    var pkcs8 = new Uint8Array(
+      await crypto.subtle.exportKey('pkcs8', delegate.privateKey));
+    var privateKeyHex = bytesToHex(pkcs8.slice(16, 48));
+    pkcs8.fill(0);
+
+    var now = _nowS();
+    var commonCert = {
+      v: 1,
+      child_pub: childPub,
+      scope: ['tunnel:serve'],
+      org: orgUuid,
+      not_before: now - NOT_BEFORE_SKEW_S,
+      not_after: now + MAX_TTL_S,
+    };
+    var registryPayload = Object.assign({}, commonCert, {
+      subject: { kind: 'persona', id: personaPub },
+    });
+    var viewerPayload = Object.assign({}, commonCert, {
+      subject: { kind: 'operator', id: childPub },
+    });
+    var registrySig = bytesToHex(new Uint8Array(await crypto.subtle.sign(
+      'Ed25519', rootKey,
+      _domainBytes(CERT_DOMAIN, canonicalJson(registryPayload)))));
+    var viewerSig = bytesToHex(new Uint8Array(await crypto.subtle.sign(
+      'Ed25519', rootKey,
+      _domainBytes(CERT_DOMAIN, canonicalJson(viewerPayload)))));
+    return {
+      childPub: childPub,
+      notAfter: commonCert.not_after,
+      body: {
+        cert: canonicalJson(Object.assign({}, registryPayload, { sig: registrySig })),
+        viewer_cert: canonicalJson(Object.assign({}, viewerPayload, { sig: viewerSig })),
+        private_key: privateKeyHex,
+      },
+    };
+  }
+
+  async function _postServeCredential(credential, orgSlug) {
+    var headers = orgSlug ? { 'X-Graph-Org': orgSlug } : {};
+    var body = Object.assign({ org: orgSlug || null }, credential.body);
+    try {
+      var resp = await _transport.fetch('/api/network/serve-cert', {
+        method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, headers),
+        body: JSON.stringify(body),
+      });
+      var result = await resp.json().catch(function () { return {}; });
+      if (!resp.ok || result.ok === false) {
+        throw new Error(result.error ||
+          ('serve-cert provisioning was refused (' + resp.status + ')'));
+      }
+      return { childPub: credential.childPub, notAfter: credential.notAfter };
+    } finally {
+      credential.body.private_key = null; // JS strings cannot be zeroed; drop it.
+      body.private_key = null;
+    }
+  }
+
   // Passphrase → decrypt root ONCE → mint session key + cert → drop root.
   async function signOn(passphrase, opts) {
     opts = opts || {};
@@ -356,6 +411,21 @@ var signRegistryRequestCore;
     var expectedRoot = bound ? binding.root_pub : (orgKey.root_pub || null);
     var orgId = bound ? binding.org_uuid : orgKey.root_pub;
     var registryUrl = bound ? binding.registry_url : null;
+    var serveCredentialRequired = false;
+    if (bound) {
+      try {
+        var serveState = await _fetchJson(
+          '/api/network/serve-cert' + orgQ, opts.org);
+        serveCredentialRequired = !!serveState.required;
+      } catch (e) {
+        // Unlocking local authority must never depend on registry-serving
+        // maintenance. A later unlock retries the cheap check.
+        if (window.console && console.warn) {
+          console.warn('could not check serving credential status:',
+                       (e && e.message) || e);
+        }
+      }
+    }
 
     // Resolve the persona subject BEFORE the org armor opens so the org
     // root plaintext window stays as tight as it was.
@@ -369,13 +439,13 @@ var signRegistryRequestCore;
       subjectResolution: personaSubject ? 'persona' : 'label',
       subjectFallbackReason: personaResolution.reason,
     };
-    var sessionKeys, certWire;
+    var sessionKeys, certWire, serveCredential = null, rootKey = null;
     try {
       if (expectedRoot && opened.rootPub !== expectedRoot) {
         throw new Error('the stored org key does not match its recorded ' +
           'root — refusing to sign in');
       }
-      var rootKey = await _importRootKey(opened.seed);
+      rootKey = await _importRootKey(opened.seed);
       // I1: the plaintext seed dies here, before any signing happens.
       opened.seed.fill(0);
       opened.seed = null;
@@ -409,12 +479,17 @@ var signRegistryRequestCore;
       var sigBytes = await crypto.subtle.sign(
         'Ed25519', rootKey,
         _domainBytes(CERT_DOMAIN, canonicalJson(certPayload)));
-      rootKey = null;   // I1: last root reference dropped
-      diagnostics.rootDropped = true;
 
       var certFull = Object.assign({}, certPayload, { sig: bytesToHex(sigBytes) });
       certWire = canonicalJson(certFull);
+      if (serveCredentialRequired && personaSubject) {
+        serveCredential = await _mintServeCredential(
+          rootKey, orgId, personaSubject.id);
+      }
+      rootKey = null;   // I1: last root reference dropped after all signatures
+      diagnostics.rootDropped = true;
     } finally {
+      rootKey = null;
       if (opened.seed) { opened.seed.fill(0); opened.seed = null; }
     }
 
@@ -428,6 +503,19 @@ var signRegistryRequestCore;
       orgSlug: opts.org || null,
       createdAt: _nowS(),
     });
+    if (serveCredential) {
+      try {
+        await _postServeCredential(serveCredential, opts.org || null);
+      } catch (e) {
+        // The sign-on succeeded. Serving repair is opportunistic and retries
+        // at the next root unlock; never turn broker maintenance into a local
+        // identity outage.
+        if (window.console && console.warn) {
+          console.warn('serve-cert provisioning failed after sign-on:',
+                       (e && e.message) || e);
+        }
+      }
+    }
     return {
       sessionPub: session.cert.child_pub,
       certWire: certWire,
@@ -436,11 +524,10 @@ var signRegistryRequestCore;
     };
   }
 
-  // Provision the org's tunnel SERVING delegate — a standalone step in a
-  // publish approve, fired only when the enrich precondition
-  // (serve_cert_required) says no usable serve-cert exists (the rare
-  // first-publish / post-expiry path; the common case already has one and
-  // skips this entirely).
+  // Explicit serving-credential provisioning seam used by focused tests and
+  // recovery tooling. Normal production repair is integrated into signOn():
+  // every organization-root unlock first performs the cheap status check and
+  // signs a replacement in that same root-key window when required.
   //
   // The delegate is ROOT-signed: a 30-day serving TTL cannot nest inside the
   // 24h session cert, so a session-key sub-delegate will not do. It signs the
@@ -448,6 +535,10 @@ var signRegistryRequestCore;
   // scope:['tunnel:serve'], org, subject, not_before, not_after} over
   // CERT_DOMAIN — with the org ROOT, decrypted from the armor with the same
   // approve password and zeroed the instant it is imported (I1).
+  //
+  // The signed subject is the current organization-scoped persona.  Serving
+  // has no legacy browser-label fallback: without the personal armor and the
+  // immutable ledger genesis there is no safe routing identity to mint.
   //
   // Its key is the ONE key this system exports: unlike the session key
   // (extractable:false, browser-only), the serving delegate's private half is
@@ -471,50 +562,28 @@ var signRegistryRequestCore;
       throw new Error('this org has no signing key to mint a serving delegate');
     }
 
+    var personaResolution = await _resolvePersonaSubject(
+      orgQ, orgSlug, passphrase);
+    if (!personaResolution.subject) {
+      throw new Error('serving persona could not be resolved: ' +
+        personaResolution.reason);
+    }
+    var personaPub = personaResolution.subject.id;
+    if (typeof personaPub !== 'string' ||
+        !/^[0-9a-f]{64}$/.test(personaPub)) {
+      throw new Error('serving persona is not a canonical public key');
+    }
+
     var opened = await _openOrgRoot(orgKey, passphrase);
-    var privateKeyHex = null;
     try {
       var rootKey = await _importRootKey(opened.seed);
       opened.seed.fill(0); opened.seed = null;   // I1: root seed gone at import
 
-      // The one exportable key: the server needs its private half to drive the
-      // unattended connector. extractable:true, unlike the session key.
-      var delegate = await crypto.subtle.generateKey(
-        { name: 'Ed25519' }, true, ['sign', 'verify']);
-      var childPub = bytesToHex(new Uint8Array(
-        await crypto.subtle.exportKey('raw', delegate.publicKey)));
-      var pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', delegate.privateKey));
-      privateKeyHex = bytesToHex(pkcs8.slice(16, 48));  // RFC 8410: 16B header + 32B seed
-      pkcs8.fill(0);
-
-      var now = _nowS();
-      var certPayload = {
-        v: 1,
-        child_pub: childPub,
-        scope: ['tunnel:serve'],
-        org: orgUuid,
-        subject: { kind: 'operator', id: _browserSubjectId() },
-        not_before: now - NOT_BEFORE_SKEW_S,
-        not_after: now + MAX_TTL_S,          // 30-day serving delegate
-      };
-      var sig = bytesToHex(new Uint8Array(await crypto.subtle.sign(
-        'Ed25519', rootKey, _domainBytes(CERT_DOMAIN, canonicalJson(certPayload)))));
+      var credential = await _mintServeCredential(rootKey, orgUuid, personaPub);
       rootKey = null;                        // I1: last root reference dropped
-      var certWire = canonicalJson(Object.assign({}, certPayload, { sig: sig }));
-
-      var resp = await fetch('/api/network/serve-cert', {
-        method: 'POST',
-        headers: Object.assign({ 'Content-Type': 'application/json' }, orgHeaders),
-        body: JSON.stringify({ org: orgSlug, cert: certWire, private_key: privateKeyHex }),
-      });
-      var body = await resp.json().catch(function () { return {}; });
-      if (!resp.ok || body.ok === false) {
-        throw new Error(body.error || ('serve-cert provisioning was refused (' + resp.status + ')'));
-      }
-      return { childPub: childPub, notAfter: certPayload.not_after };
+      return await _postServeCredential(credential, orgSlug);
     } finally {
       if (opened && opened.seed) { opened.seed.fill(0); opened.seed = null; }
-      privateKeyHex = null;   // drop the reference (a JS string cannot be zeroed)
     }
   }
 

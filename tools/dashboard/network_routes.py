@@ -41,8 +41,10 @@ Write routes backing the C1 create-org-identity ceremony in
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import os
+import re
 import time
 import urllib.parse
 from pathlib import Path
@@ -67,6 +69,52 @@ from tools.graph.schemas.network_identity import (  # noqa: F401
 )
 
 DEFAULT_REGISTRY_URL = "https://registry.auto.network"
+_PERSONA_PUB_RE = re.compile(r"^[0-9a-f]{64}\Z")
+
+
+def _serve_child_used_by_another_local_org(
+    child_pub: str, current_org
+) -> bool:
+    """Refuse cross-org child-key reuse using only this dashboard's stores.
+
+    This is the client-side A1 check. The registry deliberately keeps no
+    cross-org key index because such an index would itself be an identity
+    correlation mechanism. A pinned GRAPH_DB represents a single settings
+    scope and therefore has no other local org databases to compare.
+    """
+    if os.environ.get("GRAPH_DB"):
+        return False
+    current_slug = settings_ops._resolve_org_arg(current_org)
+    try:
+        from tools.graph import org_ops
+
+        scopes: list[str | None] = [None]
+        scopes.extend(ref.slug for ref in org_ops.list_orgs())
+    except Exception:
+        return True  # no enumeration is not proof of uniqueness
+    for scope in scopes:
+        if scope == current_slug:
+            continue
+        try:
+            members = settings_ops.read_owned_set(
+                NETWORK_SERVE_CERT_SET_ID, org=scope
+            ).members
+        except Exception:
+            # Fresh-per-org serving children are a privacy boundary. A local
+            # store we cannot inspect is not evidence that the child is new.
+            return True
+        for member in members:
+            if not isinstance(member.payload, dict):
+                continue
+            try:
+                from tools.network.idkit import DelegationCert
+
+                other = DelegationCert.from_json(member.payload.get("cert"))
+            except Exception:
+                continue
+            if other.child_pub == child_pub:
+                return True
+    return False
 
 
 def _registry_url() -> str:
@@ -1054,16 +1102,33 @@ def _write_serve_key(path: Path, private_key_hex: str) -> None:
     os.replace(tmp, path)
 
 
+async def get_serve_cert_status(request: Request) -> JSONResponse:
+    """Cheap pre-unlock check: does this org need a fresh serving credential?
+
+    No certificate bytes or identity are returned. The browser uses this only
+    to decide whether the organization root it is about to unlock should also
+    sign the two context-specific serving certificates.
+    """
+    org, refused = _scoped_org(request.query_params.get("org"))
+    if refused is not None:
+        return refused
+    from tools.dashboard.link_serving_supervisor import serve_cert_state
+
+    status = serve_cert_state(org).get("status", "missing")
+    return JSONResponse({"required": status != "ok", "status": status})
+
+
 async def post_serve_cert(request: Request) -> JSONResponse:
     """Provision the org's tunnel serving delegate (§5.1).
 
-    Body: ``{org?, cert, private_key}`` — a root-signed ``tunnel:serve``
-    delegation cert (canonical idkit wire) and the delegate's Ed25519 private
-    key hex, both minted in the operator's browser during a link-publish
-    approve, in the SAME single root unlock that signs the publish. This route
-    receives them, writes the key to its mode-0600 file, records the serve-cert
-    row (pointing at that file — never the key itself), and reconciles the
-    serving connector so the just-published link goes live.
+    Body: ``{org?, cert, viewer_cert, private_key}`` — two direct-root
+    ``tunnel:serve`` delegation certificates over one Ed25519 serving child,
+    minted in the operator's browser during ordinary organization sign-on when
+    the cheap status check says repair is required. The persona certificate is
+    for registry admission; the identity-neutral certificate is for viewer
+    handshakes. This route writes the shared key to its mode-0600 file, records
+    the serving row (pointing at that file — never the key itself), and
+    reconciles the serving connector.
 
     The delegate must chain to the org's OWN bound root (authoritative, from
     the binding — never a caller-supplied root) with ``tunnel:serve`` scope,
@@ -1079,10 +1144,12 @@ async def post_serve_cert(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"ok": False, "error": "body must be JSON"}, status_code=400)
     if not isinstance(body, dict) or not isinstance(body.get("cert"), str) \
+            or not isinstance(body.get("viewer_cert"), str) \
             or not isinstance(body.get("private_key"), str):
         return JSONResponse({"ok": False, "error": (
-            "body must carry 'cert' (delegation cert wire) and 'private_key' "
-            "(the delegate key hex)"
+            "body must carry 'cert' (registry admission cert), 'viewer_cert' "
+            "(identity-neutral viewer cert), and 'private_key' (their shared "
+            "delegate key hex)"
         )}, status_code=400)
 
     # Refuse a cross-org write BEFORE processing the (foreign) payload.
@@ -1114,12 +1181,40 @@ async def post_serve_cert(request: Request) -> JSONResponse:
     )
     try:
         cert = DelegationCert.from_json(body["cert"])
+        viewer_cert = DelegationCert.from_json(body["viewer_cert"])
     except Exception as e:
-        return JSONResponse({"ok": False, "error": f"cert does not parse: {e}"},
+        return JSONResponse({"ok": False, "error": f"serving cert does not parse: {e}"},
                             status_code=400)
-    if SERVE_CERT_SCOPE not in cert.scope:
+    if tuple(cert.scope) != (SERVE_CERT_SCOPE,):
         return JSONResponse({"ok": False, "error": (
-            f"cert scope must include {SERVE_CERT_SCOPE!r}"
+            f"cert scope must be exactly [{SERVE_CERT_SCOPE!r}]"
+        )}, status_code=400)
+    if cert.subject.kind != "persona" or not _PERSONA_PUB_RE.match(cert.subject.id):
+        return JSONResponse({"ok": False, "error": (
+            "cert subject must be the canonical organization-scoped persona"
+        )}, status_code=400)
+    if (
+        viewer_cert.subject.kind != "operator"
+        or viewer_cert.subject.id != viewer_cert.child_pub
+    ):
+        return JSONResponse({"ok": False, "error": (
+            "viewer cert must be identity-neutral: subject must be exactly "
+            "{kind: operator, id: child_pub}"
+        )}, status_code=400)
+    if (
+        viewer_cert.child_pub != cert.child_pub
+        or viewer_cert.org != cert.org
+        or tuple(viewer_cert.scope) != tuple(cert.scope)
+        or viewer_cert.not_before != cert.not_before
+        or viewer_cert.not_after != cert.not_after
+    ):
+        return JSONResponse({"ok": False, "error": (
+            "registry and viewer certs must name the same child key, "
+            "organization, scope, and validity window"
+        )}, status_code=400)
+    if viewer_cert.parent_cert is not None:
+        return JSONResponse({"ok": False, "error": (
+            "viewer serving delegates must be issued directly by the org root"
         )}, status_code=400)
     now = int(time.time())
     if cert.not_after <= now:
@@ -1137,22 +1232,65 @@ async def post_serve_cert(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": (
             f"private_key does not match the cert's delegate key: {e}"
         )}, status_code=400)
+    if _serve_child_used_by_another_local_org(cert.child_pub, org):
+        return JSONResponse({"ok": False, "error": (
+            "serving child keys are organization-scoped and cannot be reused "
+            "across local organizations"
+        )}, status_code=409)
     # Chain to the org's OWN root (not a caller-supplied one) with tunnel:serve.
-    mid = (cert.not_before + cert.not_after) // 2
     try:
-        verify_chain(cert, root_pub, org=org_uuid, now=mid,
-                     required_scope=SERVE_CERT_SCOPE)
+        for candidate in (cert, viewer_cert):
+            verified = verify_chain(
+                candidate,
+                root_pub,
+                org=org_uuid,
+                now=now,
+                required_scope=SERVE_CERT_SCOPE,
+            )
+            if verified.depth != 1:
+                raise IdkitError(
+                    "serving delegates must be issued directly by the org root"
+                )
     except IdkitError as e:
         return JSONResponse({"ok": False, "error": (
             f"cert does not chain to this org's root with {SERVE_CERT_SCOPE} scope: {e}"
         )}, status_code=400)
 
-    # Key filename is discriminated by the immutable org UUID (the settings
-    # 'org' is a caller sentinel, not a filesystem-safe name).
+    # Use a child-keyed filename so replacing a credential is transactional:
+    # a failed Settings write can remove only the new file and can never leave
+    # the previous row pointing at overwritten key material.
     # Persist only the portable basename in Settings. The current node's
     # manifest-rooted serving-key directory is resolved at every read, so a
     # restored volume does not retain the source node's absolute path.
-    key_file = f"serve-{org_uuid}.key"
+    previous_serve = _first_member(NETWORK_SERVE_CERT_SET_ID, org)
+    if previous_serve is not None:
+        try:
+            previous_cert = DelegationCert.from_json(
+                previous_serve.payload.get("cert")
+            )
+        except Exception:
+            previous_cert = None
+        if previous_cert is not None and previous_cert.child_pub == cert.child_pub:
+            # A network retry of the exact successful request is idempotent;
+            # reissuing a different certificate over the same child violates
+            # the fresh-key-per-provisioning privacy contract.
+            if (
+                previous_serve.payload.get("cert") == body["cert"]
+                and previous_serve.payload.get("viewer_cert") == body["viewer_cert"]
+            ):
+                from tools.dashboard.link_serving_supervisor import serve_cert_state
+
+                if serve_cert_state(org, now=now).get("status") == "ok":
+                    return JSONResponse({
+                        "ok": True,
+                        "child_pub": cert.child_pub,
+                        "not_after": cert.not_after,
+                    })
+            return JSONResponse({"ok": False, "error": (
+                "every serving credential provisioning must use a fresh "
+                "organization-scoped child key"
+            )}, status_code=409)
+    key_file = f"serve-{org_uuid}-{cert.child_pub}.key"
     key_path = resolve_store("serving_keys") / key_file
     try:
         _write_serve_key(key_path, body["private_key"])
@@ -1162,13 +1300,31 @@ async def post_serve_cert(request: Request) -> JSONResponse:
     try:
         settings_ops.upsert_by_key(
             NETWORK_SERVE_CERT_SET_ID, NETWORK_SERVE_CERT_REVISION, "default",
-            {"cert": body["cert"], "key_path": key_file,
+            {"cert": body["cert"], "viewer_cert": body["viewer_cert"],
+             "key_path": key_file,
              "root_pub": root_pub, "not_after": cert.not_after},
             org=org,
         )
     except Exception as e:
+        with contextlib.suppress(OSError):
+            key_path.unlink()
         return JSONResponse({"ok": False, "error": f"could not store the serve cert: {e}"},
                             status_code=500)
+
+    # The new row is durable. Remove a superseded managed key only when its
+    # locator is a bare filename inside the current serving-key store. An
+    # absolute locator may identify an operator-managed file outside this
+    # contract and is therefore never deleted here.
+    if previous_serve is not None:
+        old_file = previous_serve.payload.get("key_path")
+        if (
+            isinstance(old_file, str)
+            and old_file != key_file
+            and Path(old_file).name == old_file
+            and old_file not in {".", ".."}
+        ):
+            with contextlib.suppress(OSError):
+                (resolve_store("serving_keys") / old_file).unlink()
 
     # Reconcile serving now (a publish's grant may already be cached, or the
     # publish that triggered this will cache one and re-ensure). Best-effort:
@@ -1205,6 +1361,7 @@ ROUTES = [
     ),
     Route("/api/network/invite/email", post_invite_email, methods=["POST"]),
     Route("/api/network/register", post_register, methods=["POST"]),
+    Route("/api/network/serve-cert", get_serve_cert_status, methods=["GET"]),
     Route("/api/network/serve-cert", post_serve_cert, methods=["POST"]),
     Route("/api/network/revocations", post_revocation, methods=["POST"]),
 ]

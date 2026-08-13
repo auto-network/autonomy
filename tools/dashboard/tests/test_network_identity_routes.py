@@ -17,6 +17,7 @@ pin the server half against the REAL B1 registry (httpx.ASGITransport):
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -459,15 +460,41 @@ def _store_binding(root: KeyPair, *, org_uuid=ORG_UUID):
     )
 
 
-def _mint_serve(root: KeyPair, *, scope=("tunnel:serve",), org_uuid=ORG_UUID):
+def _mint_serve(
+    root: KeyPair,
+    *,
+    scope=("tunnel:serve",),
+    org_uuid=ORG_UUID,
+    subject=Subject("persona", "ab" * 32),
+    not_before=None,
+    not_after=None,
+):
     delegate = KeyPair.generate()
     now = int(time.time())
     cert = issue_cert(
         root, delegate.public_hex, scope=scope, org=org_uuid,
-        subject=Subject("operator", "op-serve"),
-        not_before=now - 300, not_after=now + 30 * 86400,
+        subject=subject,
+        not_before=now - 300 if not_before is None else not_before,
+        not_after=now + 30 * 86400 if not_after is None else not_after,
     )
     return delegate, cert
+
+
+def _serve_body(root: KeyPair, delegate: KeyPair, cert, *, org=ORG, **changes):
+    """Canonical two-cert provisioning body over one child and time window."""
+    viewer_cert = issue_cert(
+        root, delegate.public_hex, scope=tuple(cert.scope), org=cert.org,
+        subject=Subject("operator", delegate.public_hex),
+        not_before=cert.not_before, not_after=cert.not_after,
+    )
+    body = {
+        "org": org,
+        "cert": cert.to_json().decode("ascii"),
+        "viewer_cert": viewer_cert.to_json().decode("ascii"),
+        "private_key": delegate.private_hex,
+    }
+    body.update(changes)
+    return body
 
 
 def _serve_key_dir(monkeypatch, tmp_path):
@@ -481,17 +508,16 @@ def test_provision_serve_cert_happy_path(env, root, tmp_path, monkeypatch):
     _store_binding(root)
     delegate, cert = _mint_serve(root)
 
-    r = env.post("/api/network/serve-cert", json={
-        "org": ORG, "cert": cert.to_json().decode("ascii"),
-        "private_key": delegate.private_hex,
-    })
+    r = env.post("/api/network/serve-cert", json=_serve_body(root, delegate, cert))
     assert r.status_code == 200, r.text
     assert r.json()["child_pub"] == delegate.public_hex
 
     # Key file exists, mode 0600, holds exactly the delegate key — and the
     # settings row points at it, never carrying the key itself.
     import os
-    key_path = tmp_path / "serve-keys" / f"serve-{ORG_UUID}.key"
+    key_path = (
+        tmp_path / "serve-keys" / f"serve-{ORG_UUID}-{delegate.public_hex}.key"
+    )
     assert key_path.is_file()
     assert (os.stat(key_path).st_mode & 0o777) == 0o600
     assert key_path.read_text().strip() == delegate.private_hex
@@ -503,40 +529,250 @@ def test_provision_serve_cert_happy_path(env, root, tmp_path, monkeypatch):
     assert "private_key" not in row  # the secret is NOT in the settings store
 
 
+def test_serve_cert_status_is_a_cheap_required_or_ok_signal(
+    env, root, tmp_path, monkeypatch,
+):
+    _serve_key_dir(monkeypatch, tmp_path)
+    _store_binding(root)
+    missing = env.get(f"/api/network/serve-cert?org={ORG}")
+    assert missing.status_code == 200
+    assert missing.json() == {"required": True, "status": "missing"}
+
+    delegate, cert = _mint_serve(root)
+    stored = env.post(
+        "/api/network/serve-cert", json=_serve_body(root, delegate, cert))
+    assert stored.status_code == 200, stored.text
+    ready = env.get(f"/api/network/serve-cert?org={ORG}")
+    assert ready.json() == {"required": False, "status": "ok"}
+
+
+def test_failed_serve_cert_update_preserves_previous_row_and_key(
+    env, root, tmp_path, monkeypatch,
+):
+    key_dir = _serve_key_dir(monkeypatch, tmp_path)
+    _store_binding(root)
+    first_key, first_cert = _mint_serve(root)
+    first = env.post(
+        "/api/network/serve-cert",
+        json=_serve_body(root, first_key, first_cert),
+    )
+    assert first.status_code == 200, first.text
+    first_row = settings_ops.read_owned_set(
+        NETWORK_SERVE_CERT_SET_ID, org=ORG
+    ).members[0].payload
+    first_path = key_dir / first_row["key_path"]
+    assert first_path.read_text().strip() == first_key.private_hex
+
+    second_key, second_cert = _mint_serve(root)
+
+    def fail_upsert(*args, **kwargs):
+        raise RuntimeError("injected settings failure")
+
+    monkeypatch.setattr(settings_ops, "upsert_by_key", fail_upsert)
+    second = env.post(
+        "/api/network/serve-cert",
+        json=_serve_body(root, second_key, second_cert),
+    )
+    assert second.status_code == 500
+    current = settings_ops.read_owned_set(
+        NETWORK_SERVE_CERT_SET_ID, org=ORG
+    ).members[0].payload
+    assert current == first_row
+    assert first_path.read_text().strip() == first_key.private_hex
+    assert not (key_dir / f"serve-{ORG_UUID}-{second_key.public_hex}.key").exists()
+
+
+def test_exact_serve_cert_retry_is_idempotent(env, root, tmp_path, monkeypatch):
+    key_dir = _serve_key_dir(monkeypatch, tmp_path)
+    _store_binding(root)
+    delegate, cert = _mint_serve(root)
+    body = _serve_body(root, delegate, cert)
+    assert env.post("/api/network/serve-cert", json=body).status_code == 200
+    key_path = key_dir / f"serve-{ORG_UUID}-{delegate.public_hex}.key"
+    before = key_path.stat().st_mtime_ns
+
+    retried = env.post("/api/network/serve-cert", json=body)
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["child_pub"] == delegate.public_hex
+    assert key_path.stat().st_mtime_ns == before
+
+
+def test_same_child_cannot_be_recertified(env, root, tmp_path, monkeypatch):
+    _serve_key_dir(monkeypatch, tmp_path)
+    _store_binding(root)
+    delegate, cert = _mint_serve(root)
+    assert env.post(
+        "/api/network/serve-cert", json=_serve_body(root, delegate, cert)
+    ).status_code == 200
+    now = int(time.time())
+    replacement_cert = issue_cert(
+        root,
+        delegate.public_hex,
+        scope=("tunnel:serve",),
+        org=ORG_UUID,
+        subject=Subject("persona", "ab" * 32),
+        not_before=now - 10,
+        not_after=now + 10 * 86400,
+    )
+
+    refused = env.post(
+        "/api/network/serve-cert",
+        json=_serve_body(root, delegate, replacement_cert),
+    )
+    assert refused.status_code == 409
+    assert "fresh" in refused.json()["error"]
+
+
 def test_provision_rejects_key_not_matching_cert(env, root, tmp_path, monkeypatch):
     _serve_key_dir(monkeypatch, tmp_path)
     _store_binding(root)
     _delegate, cert = _mint_serve(root)
-    r = env.post("/api/network/serve-cert", json={
-        "org": ORG, "cert": cert.to_json().decode("ascii"),
-        "private_key": KeyPair.generate().private_hex,  # wrong key
-    })
+    body = _serve_body(root, _delegate, cert)
+    body["private_key"] = KeyPair.generate().private_hex
+    r = env.post("/api/network/serve-cert", json=body)
     assert r.status_code == 400
     assert "does not match" in r.json()["error"]
     assert not (tmp_path / "serve-keys").exists()  # nothing written on rejection
+
+
+def test_local_cross_org_child_key_reuse_is_refused(monkeypatch):
+    from tools.graph import org_ops
+
+    root = KeyPair.generate()
+    child, cert = _mint_serve(root)
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.setattr(
+        org_ops,
+        "list_orgs",
+        lambda: [SimpleNamespace(slug="org-a"), SimpleNamespace(slug="org-b")],
+    )
+    monkeypatch.setattr(
+        settings_ops,
+        "read_owned_set",
+        lambda set_id, org=None: SimpleNamespace(
+            members=(
+                [SimpleNamespace(payload={"cert": cert.to_json().decode("ascii")})]
+                if org == "org-b"
+                else []
+            )
+        ),
+    )
+
+    assert network_routes._serve_child_used_by_another_local_org(
+        child.public_hex, "org-a"
+    )
+
+
+def test_unreadable_local_org_store_fails_closed_for_child_reuse(monkeypatch):
+    from tools.graph import org_ops
+
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.setattr(
+        org_ops,
+        "list_orgs",
+        lambda: [SimpleNamespace(slug="org-a"), SimpleNamespace(slug="org-b")],
+    )
+
+    def unreadable(set_id, org=None):
+        if org == "org-b":
+            raise OSError("injected unreadable store")
+        return SimpleNamespace(members=[])
+
+    monkeypatch.setattr(settings_ops, "read_owned_set", unreadable)
+    assert network_routes._serve_child_used_by_another_local_org(
+        "ab" * 32, "org-a"
+    )
 
 
 def test_provision_rejects_scope_without_tunnel_serve(env, root, tmp_path, monkeypatch):
     _serve_key_dir(monkeypatch, tmp_path)
     _store_binding(root)
     delegate, cert = _mint_serve(root, scope=("link:publish",))
-    r = env.post("/api/network/serve-cert", json={
-        "org": ORG, "cert": cert.to_json().decode("ascii"),
-        "private_key": delegate.private_hex,
-    })
+    r = env.post("/api/network/serve-cert", json=_serve_body(root, delegate, cert))
     assert r.status_code == 400
     assert "tunnel:serve" in r.json()["error"]
+
+
+def test_provision_rejects_extra_serve_scope(env, root, tmp_path, monkeypatch):
+    _serve_key_dir(monkeypatch, tmp_path)
+    _store_binding(root)
+    delegate, cert = _mint_serve(root, scope=("link:publish", "tunnel:serve"))
+    r = env.post("/api/network/serve-cert", json=_serve_body(root, delegate, cert))
+    assert r.status_code == 400
+    assert "exactly" in r.json()["error"]
+
+
+@pytest.mark.parametrize("subject", [
+    Subject("operator", "ab" * 32),
+    Subject("persona", "AB" * 32),
+    Subject("persona", "browser-deadbeef"),
+])
+def test_provision_rejects_noncanonical_persona_subject(
+    env, root, tmp_path, monkeypatch, subject,
+):
+    _serve_key_dir(monkeypatch, tmp_path)
+    _store_binding(root)
+    delegate, cert = _mint_serve(root, subject=subject)
+    r = env.post("/api/network/serve-cert", json=_serve_body(root, delegate, cert))
+    assert r.status_code == 400
+    assert "organization-scoped persona" in r.json()["error"]
+
+
+def test_provision_rejects_not_yet_valid_cert(env, root, tmp_path, monkeypatch):
+    _serve_key_dir(monkeypatch, tmp_path)
+    _store_binding(root)
+    now = int(time.time())
+    delegate, cert = _mint_serve(
+        root, not_before=now + 3600, not_after=now + 7200)
+    r = env.post("/api/network/serve-cert", json=_serve_body(root, delegate, cert))
+    assert r.status_code == 400
+    assert "chain" in r.json()["error"]
+
+
+def test_provision_rejects_intermediate_issued_serve_cert(
+    env, root, tmp_path, monkeypatch,
+):
+    _serve_key_dir(monkeypatch, tmp_path)
+    _store_binding(root)
+    now = int(time.time())
+    intermediate = KeyPair.generate()
+    parent = issue_cert(
+        root,
+        intermediate.public_hex,
+        scope=("link:publish", "tunnel:serve"),
+        org=ORG_UUID,
+        subject=Subject("operator", "intermediate"),
+        not_before=now - 100,
+        not_after=now + 20 * 86400,
+    )
+    delegate = KeyPair.generate()
+    leaf = issue_cert(
+        intermediate,
+        delegate.public_hex,
+        scope=("tunnel:serve",),
+        org=ORG_UUID,
+        subject=Subject("persona", "ab" * 32),
+        not_before=now - 10,
+        not_after=now + 10 * 86400,
+        parent_cert=parent,
+    )
+
+    refused = env.post(
+        "/api/network/serve-cert", json=_serve_body(root, delegate, leaf))
+    assert refused.status_code == 400
+    assert "directly" in refused.json()["error"]
 
 
 def test_provision_rejects_cert_not_chaining_to_org_root(env, root, tmp_path, monkeypatch):
     _serve_key_dir(monkeypatch, tmp_path)
     _store_binding(root)
     # A cert signed by a DIFFERENT root — must not be accepted for this org.
-    delegate, cert = _mint_serve(KeyPair.generate())
-    r = env.post("/api/network/serve-cert", json={
-        "org": ORG, "cert": cert.to_json().decode("ascii"),
-        "private_key": delegate.private_hex,
-    })
+    foreign_root = KeyPair.generate()
+    delegate, cert = _mint_serve(foreign_root)
+    r = env.post(
+        "/api/network/serve-cert",
+        json=_serve_body(foreign_root, delegate, cert),
+    )
     assert r.status_code == 400
     assert "chain" in r.json()["error"]
 
@@ -544,10 +780,7 @@ def test_provision_rejects_cert_not_chaining_to_org_root(env, root, tmp_path, mo
 def test_provision_requires_a_binding_first(env, root, tmp_path, monkeypatch):
     _serve_key_dir(monkeypatch, tmp_path)
     delegate, cert = _mint_serve(root)  # no binding stored
-    r = env.post("/api/network/serve-cert", json={
-        "org": ORG, "cert": cert.to_json().decode("ascii"),
-        "private_key": delegate.private_hex,
-    })
+    r = env.post("/api/network/serve-cert", json=_serve_body(root, delegate, cert))
     assert r.status_code == 409
     assert "not registered" in r.json()["error"]
 
@@ -556,8 +789,8 @@ def test_provision_cross_org_refused(env, root, tmp_path, monkeypatch):
     _serve_key_dir(monkeypatch, tmp_path)
     _store_binding(root)
     delegate, cert = _mint_serve(root)
-    r = env.post("/api/network/serve-cert", json={
-        "org": "someone-else", "cert": cert.to_json().decode("ascii"),
-        "private_key": delegate.private_hex,
-    })
+    r = env.post(
+        "/api/network/serve-cert",
+        json=_serve_body(root, delegate, cert, org="someone-else"),
+    )
     assert r.status_code == 403

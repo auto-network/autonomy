@@ -67,7 +67,7 @@ def _serve_cert(root: KeyPair, serve_key: KeyPair, org: str):
     now = int(time.time())
     return issue_cert(
         root, serve_key.public_hex, scope=("tunnel:serve",), org=org,
-        subject=Subject("operator", "serve"),
+        subject=Subject("persona", "ab" * 32),
         not_before=now - 100, not_after=now + 30 * 86400,
     )
 

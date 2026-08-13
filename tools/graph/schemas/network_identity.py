@@ -15,11 +15,13 @@ program (spec ``graph://a17c8657-939`` §4.6, §6.2, §6.6; invariants I1, I9):
   dashboard serves a shared target only against a valid row here
   (invariant I9); rows carry the token, target, meta, and the issuing
   certificate's subject for attribution (invariant I6).
-* ``autonomy.network.serve-cert#1`` — the org's serving delegate: a
-  root-signed, short-lived ``tunnel:serve`` certificate plus a POINTER to
-  the on-disk (mode-0600) key file the unattended connector subprocess
-  signs with. The signing key is a filesystem credential, never
-  settings-store data, so I1's no-plaintext-key discipline holds.
+* ``autonomy.network.serve-cert#2`` — one org-scoped serving child key with
+  two direct-root, short-lived ``tunnel:serve`` certificates: a persona
+  certificate used only for registry admission and an identity-neutral
+  certificate used only in viewer handshakes. The row points to the
+  on-disk (mode-0600) key file the unattended connector signs with. The
+  signing key is a filesystem credential, never settings-store data, so
+  I1's no-plaintext-key discipline holds.
 
 Vocabulary is pinned to A1 (``tools/network/idkit``): subject kinds,
 token shape, and key-id hex length are duplicated here as constants so
@@ -76,7 +78,7 @@ NETWORK_LINK_GRANT_SET_ID = "autonomy.network.link-grant"
 NETWORK_LINK_GRANT_REVISION = 3
 NETWORK_PUBLIC_LINK_BASE_URL = "https://relay.auto.network"
 NETWORK_SERVE_CERT_SET_ID = "autonomy.network.serve-cert"
-NETWORK_SERVE_CERT_REVISION = 1
+NETWORK_SERVE_CERT_REVISION = 2
 SERVE_CERT_SCOPE = "tunnel:serve"
 
 
@@ -117,7 +119,8 @@ SYNOPSIS = {
         "root pub, recovery policy, TTL/renewal, endpoint hints), and the "
         "dashboard-side share-link grant cache (autonomy.network.link-grant "
         "— token, target, meta, issuing cert subject; the I9 serving check "
-        "reads this)."
+        "reads this), and one serving child certified separately for "
+        "registry admission and identity-neutral viewer authentication."
     ),
     "nouns": [
         "network identity", "org root key", "auto.network", "share link",
@@ -719,12 +722,13 @@ class NetworkLinkGrantV3(NetworkLinkGrantV2):
 
 
 @keyed_per_entity
-class NetworkServeCertV1(SettingSchema):
-    """The org's serving delegate for the auto.network tunnel (§5.1).
+class NetworkServeCertV2(SettingSchema):
+    """One serving key with two context-specific root-signed certificates.
 
-    Key: an operator-chosen label (e.g. ``default``). Payload: a root-signed
-    ``tunnel:serve`` delegation cert AND the delegate's PRIVATE key, both at
-    rest server-side.
+    ``cert`` is persona-bearing and used only for registry tunnel admission.
+    ``viewer_cert`` is identity-neutral and is the only certificate permitted
+    in viewer SERVER_HELLO bytes. Both certify the same fresh child key,
+    organization, exact ``tunnel:serve`` scope, and validity window.
 
     The delegate's private key is DELIBERATELY not stored here. This is an
     unattended managed subprocess: it signs SERVER_HELLO for every viewer
@@ -736,17 +740,15 @@ class NetworkServeCertV1(SettingSchema):
     rows store a portable basename resolved against the manifest-rooted
     serving-key directory; legacy absolute rows remain readable in place. The
     settings store thus still holds no plaintext key material of any kind; the
-    signing secret is a filesystem credential, protected by file permissions,
-    exactly like a TLS or SSH service key. It is also only a narrow delegate
+    signing secret is a filesystem credential protected by file permissions.
+    It is also only a narrow delegate
     (``tunnel:serve`` only), short-lived (30-day TTL, I7), and auto-expiring —
     never the sovereign root, which only the operator's browser ever holds and
     only to MINT this delegate.
 
-    The validator is a fail-closed crypto gate: the ``cert`` must be a genuine
-    root-signed ``tunnel:serve`` delegation whose chain verifies to the
-    declared root, or it does not enter the store. The key file itself is
-    verified to match ``cert.child_pub`` by the supervisor before it launches
-    the connector — the layer that actually holds the key.
+    There is no compatibility conversion from the former single-certificate
+    shape: a row missing ``viewer_cert`` is simply unusable and the next root
+    unlock provisions a fresh credential.
     """
 
     set_id = NETWORK_SERVE_CERT_SET_ID
@@ -757,7 +759,15 @@ class NetworkServeCertV1(SettingSchema):
         description=(
             "The root-signed tunnel:serve delegation certificate in canonical "
             "idkit wire JSON (tools/network/idkit DelegationCert.to_json). "
-            "Public by nature — it is sent in the clear in every SERVER_HELLO."
+            "Persona-bearing and used only for registry tunnel admission."
+        ),
+    )
+    viewer_cert: str = field(
+        required=True,
+        description=(
+            "The identity-neutral root-signed tunnel:serve certificate used "
+            "only in viewer SERVER_HELLO bytes. Its subject is exactly "
+            "{kind: operator, id: child_pub}."
         ),
     )
     key_path: str = field(
@@ -819,30 +829,81 @@ class NetworkServeCertV1(SettingSchema):
             ) from exc
         try:
             cert = DelegationCert.from_json(cert_wire)
+            viewer_cert = DelegationCert.from_json(
+                _require_str(payload, "viewer_cert", cls.__name__, max_len=16384)
+            )
         except Exception as e:
             raise SchemaValidationError(
-                f"{cls.__name__}: 'cert' does not parse as a delegation "
+                f"{cls.__name__}: serving certificate does not parse as a delegation "
                 f"certificate: {e}"
             ) from e
-        if SERVE_CERT_SCOPE not in cert.scope:
+
+        if tuple(cert.scope) != (SERVE_CERT_SCOPE,):
             raise SchemaValidationError(
-                f"{cls.__name__}: cert scope must include {SERVE_CERT_SCOPE!r}, "
+                f"{cls.__name__}: cert scope must be exactly {SERVE_CERT_SCOPE!r}, "
                 f"got {list(cert.scope)}"
+            )
+        if cert.parent_cert is not None:
+            raise SchemaValidationError(
+                f"{cls.__name__}: registry cert must be issued directly by the org root"
+            )
+        if (
+            cert.subject.kind != "persona"
+            or re.fullmatch(r"[0-9a-f]{64}", cert.subject.id) is None
+        ):
+            raise SchemaValidationError(
+                f"{cls.__name__}: cert subject must be a canonical "
+                "organization-scoped persona public key"
             )
         if cert.not_after != not_after:
             raise SchemaValidationError(
                 f"{cls.__name__}: 'not_after' ({not_after}) does not match the "
                 f"cert's not_after ({cert.not_after})"
             )
-        # The chain must verify to the declared root with tunnel:serve, at a
-        # time inside the validity window (mid-window avoids boundary edges).
+        if (
+            viewer_cert.child_pub != cert.child_pub
+            or viewer_cert.org != cert.org
+            or tuple(viewer_cert.scope) != tuple(cert.scope)
+            or viewer_cert.not_before != cert.not_before
+            or viewer_cert.not_after != cert.not_after
+        ):
+            raise SchemaValidationError(
+                f"{cls.__name__}: registry and viewer certificates must name "
+                "the same child key, organization, scope, and validity window"
+            )
+        if viewer_cert.parent_cert is not None:
+            raise SchemaValidationError(
+                f"{cls.__name__}: viewer cert must be issued directly by the org root"
+            )
+        if (
+            viewer_cert.subject.kind != "operator"
+            or viewer_cert.subject.id != viewer_cert.child_pub
+        ):
+            raise SchemaValidationError(
+                f"{cls.__name__}: viewer cert subject must be identity-neutral "
+                "{kind: operator, id: child_pub}"
+            )
+
+        # Settings validation has no injected clock, so verify both chains at
+        # a point inside their common validity window. The HTTP route and
+        # supervisor separately enforce current-time validity.
         mid = (cert.not_before + cert.not_after) // 2
         try:
-            verify_chain(cert, root_pub, org=cert.org, now=mid,
-                         required_scope=SERVE_CERT_SCOPE)
+            for candidate in (cert, viewer_cert):
+                verified = verify_chain(
+                    candidate,
+                    root_pub,
+                    org=cert.org,
+                    now=mid,
+                    required_scope=SERVE_CERT_SCOPE,
+                )
+                if verified.depth != 1:
+                    raise IdkitError(
+                        "serving delegates must be issued directly by the org root"
+                    )
         except IdkitError as e:
             raise SchemaValidationError(
-                f"{cls.__name__}: cert does not chain to root_pub with "
+                f"{cls.__name__}: serving cert does not chain to root_pub with "
                 f"{SERVE_CERT_SCOPE} scope: {e}"
             ) from e
 

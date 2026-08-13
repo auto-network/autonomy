@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 from collections import deque
 from typing import Callable, Coroutine, Dict, List, NamedTuple, Optional, Tuple
 
@@ -298,12 +299,26 @@ class Stream:
         return fallen_behind
 
 
+_PERSONA_PUB_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
 class Tunnel:
     """A live dashboard connection plus its open viewer channels."""
 
-    def __init__(self, ws: WebSocket, org: str):
+    def __init__(
+        self,
+        ws: WebSocket,
+        org: str,
+        *,
+        persona_pub: str | None = None,
+        signer_pub: str | None = None,
+    ):
         self.ws = ws
         self.org = org
+        # Connection-memory routing facts only. Neither value is written to
+        # link_sessions, node_hints, logs, metrics, or a history table.
+        self.persona_pub = persona_pub
+        self.signer_pub = signer_pub
         self.channels: Dict[bytes, _ViewerRelayChannel] = {}
         self.streams: Dict[str, Stream] = {}
         self._send_lock = asyncio.Lock()
@@ -447,8 +462,24 @@ class TunnelHub:
         if self._tunnels.get(tunnel.org) is tunnel:
             del self._tunnels[tunnel.org]
 
+    async def close_revoked(self, org: str, signer_pub: str) -> bool:
+        """Close the live tunnel authenticated by a newly revoked signer.
 
-def _verify_tunnel_hello(raw, org: str, store: RegistryStore, now: int) -> None:
+        Removing it from admission first prevents a viewer racing the socket
+        close from opening a new channel on an already-revoked tunnel.
+        """
+        tunnel = self._tunnels.get(org)
+        if tunnel is None or tunnel.signer_pub != signer_pub:
+            return False
+        self.unregister(tunnel)
+        await _close_quietly(tunnel.ws, CLOSE_UNAUTHENTICATED)
+        await tunnel.close_all_viewers(CLOSE_UNAUTHENTICATED)
+        return True
+
+
+def _verify_tunnel_hello(
+    raw, org: str, store: RegistryStore, now: int
+) -> tuple[str, str]:
     """The tunnel's I4 gate: hello signature + tunnel:serve chain to the
     org's bound root. Raises HelloError on any failure."""
     data = parse_tunnel_hello(raw)
@@ -468,7 +499,7 @@ def _verify_tunnel_hello(raw, org: str, store: RegistryStore, now: int) -> None:
         if cert.child_pub != data["signer"]:
             raise HelloError("cert does not delegate to the hello signer")
         store.purge_expired_revocations(now=now)
-        verify_chain(
+        verified = verify_chain(
             cert,
             binding.root_pub,
             org=org,
@@ -476,8 +507,20 @@ def _verify_tunnel_hello(raw, org: str, store: RegistryStore, now: int) -> None:
             revocations=store.revocation_set(org),
             required_scope="tunnel:serve",
         )
+        if tuple(verified.scope) != ("tunnel:serve",):
+            raise HelloError("serve cert scope must be exactly tunnel:serve")
+        if verified.depth != 1:
+            raise HelloError("serve cert must be issued directly by the org root")
+        if (
+            verified.subject_kind != "persona"
+            or _PERSONA_PUB_RE.fullmatch(verified.subject_id) is None
+        ):
+            raise HelloError(
+                "serve cert subject must be a canonical organization persona"
+            )
     except (ChainVerifyError, MalformedError) as exc:
         raise HelloError(f"{type(exc).__name__}: {exc}") from exc
+    return verified.subject_id, data["signer"]
 
 
 async def _close_quietly(ws: WebSocket, code: int) -> None:
@@ -614,14 +657,21 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
     except (WebSocketDisconnect, KeyError, RuntimeError):
         return
     try:
-        _verify_tunnel_hello(raw_hello, org, store, int(now_fn()))
+        persona_pub, signer_pub = _verify_tunnel_hello(
+            raw_hello, org, store, int(now_fn())
+        )
     except HelloError as exc:
         with contextlib.suppress(Exception):
             await websocket.send_json({"ok": False, "error": str(exc)})
         await _close_quietly(websocket, CLOSE_UNAUTHENTICATED)
         return
 
-    tunnel = Tunnel(websocket, org)
+    tunnel = Tunnel(
+        websocket,
+        org,
+        persona_pub=persona_pub,
+        signer_pub=signer_pub,
+    )
     replaced = hub.register(tunnel)
     if replaced is not None:
         await _close_quietly(replaced.ws, CLOSE_REPLACED)
