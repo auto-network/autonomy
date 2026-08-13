@@ -82,10 +82,12 @@ class TestI1Constraints:
         assert 'query.get("channel_token")' not in PAGE_JS
         assert 'query.get("t")' not in PAGE_JS
 
-    def test_accept_leads_to_honest_held_state(self):
-        # The held copy must exist and be honest: it names that the flow is
-        # unfinished and that nothing was sent or consumed.
-        assert 'id="held"' in TEMPLATE
-        assert "still being finished" in TEMPLATE
-        assert "was sent or consumed" in TEMPLATE
-        assert '$("held").classList.remove' in PAGE_JS
+    def test_nothing_is_promised_that_does_not_work(self):
+        # Operator product rule: UI shows what works — engineering status
+        # never appears in the product. No accept control exists until the
+        # ceremony makes it real (auto-9rw91 adds control AND function
+        # together), and no internal narration leaks into user copy.
+        assert "<button" not in TEMPLATE.lower()
+        for leaked in ("under review", "still being finished", "ceremony",
+                       "passphrase", "held"):
+            assert leaked not in TEMPLATE.lower(), leaked

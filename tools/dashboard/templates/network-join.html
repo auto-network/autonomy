@@ -4,12 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Accept an invitation — Autonomy</title>
-<!-- The local-origin half of the invite bridge (auto-1ihgz): DISPLAY and
-     CONSENT only. This page deliberately contains NO input fields — the
-     personal passphrase must never have an HTTP ingress (I1; see MC's
-     ingress audit and join_routes' own refusal). Acceptance mechanics are
-     held for the ceremony-workflow ruling (auto-9rw91); the accept action
-     renders an honest held state until then. -->
+<!-- Invitation display (auto-1ihgz). Constraint: no input fields ever
+     on this page (I1); controls appear only when their function exists. -->
 <style>
   :root { --bg:#0f1117; --panel:#171a23; --line:#2a2f3d; --ink:#e5e7eb;
           --dim:#9ca3af; --accent:#6366f1; }
@@ -39,9 +35,8 @@
 
   <div id="incomplete" class="card hidden">
     <h2>This invitation link is incomplete</h2>
-    <p class="dim">The part after <code>#</code> carries your invitation's
-    credentials and some apps strip it when forwarding. Ask for a fresh
-    link.</p>
+    <p class="dim">Some apps cut off part of a link when forwarding —
+    everything after the <code>#</code> matters. Ask for a fresh link.</p>
   </div>
 
   <div id="invitation" class="hidden">
@@ -51,18 +46,6 @@
         <span class="v" id="org-id"></span></div>
       <div class="row"><span class="k">Invitation reference</span>
         <span class="v" id="invite-ref"></span></div>
-      <p class="dim">Accepting derives a member identity for this
-      organization from your personal key — in this browser, where your
-      key lives. Your passphrase is never sent anywhere.</p>
-    </div>
-    <button id="accept">Accept this invitation</button>
-    <div id="held" class="card hidden">
-      <h2>Almost ready</h2>
-      <p class="dim">Accepting invitations from this page is the last piece
-      of this flow still being finished — the secure ceremony that keeps
-      your key in your browser is under review. Your invitation stays
-      valid: keep this link and try again after your next update. Nothing
-      about your invitation was sent or consumed by opening this page.</p>
     </div>
   </div>
 </main>
