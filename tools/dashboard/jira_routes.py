@@ -221,10 +221,11 @@ def _resolve_session(authorization: str | None) -> str:
     from tools.dashboard.dao import auth_db
 
     token_hash = hashlib.sha256(auth[7:].encode()).hexdigest()
-    session = auth_db.resolve_token(token_hash)
-    if session is None:
+    resolved = auth_db.resolve_token(token_hash)
+    if resolved is None:
         raise _JiraAuthError("invalid or revoked token", status=401)
-    return session
+    tmux_name, _org = resolved
+    return tmux_name
 
 
 def _authorized_workspace(authorization: str | None) -> tuple[str, dict]:
