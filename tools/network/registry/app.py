@@ -76,13 +76,13 @@ _INSTALL_CSP = (
 )
 
 # The org:join bridge page (auto-y7nap): a fixed static shell, rendered
-# entirely client-side, that performs NO ceremony — narrower than the
-# bootloader CSP (no artifact iframes, no blob:). connect-src admits only
-# the visitor's own LOCAL node for the best-effort liveness probe; the
-# ledger bearer lives in the URL fragment and is never sent anywhere.
+# entirely client-side, that performs NO ceremony and — per the operator's
+# ingress ruling (no auto-detection of any kind) — makes NO network calls:
+# default-src 'none' with no connect-src carve-out means the page
+# structurally cannot probe, forward, or exfiltrate. The ledger bearer
+# lives in the URL fragment and is never sent anywhere.
 _JOIN_CSP = (
     "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; "
-    "connect-src https://localhost:8080 http://localhost:8080; "
     "img-src 'none'; base-uri 'none'; form-action 'none'; "
     "frame-ancestors 'none'"
 )
