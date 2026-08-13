@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from tools.network.relaykit import connector as connector_module
 from tools.network.relaykit.connector import TunnelConnector
@@ -46,10 +47,11 @@ def _install_common_fakes(monkeypatch, connector: TunnelConnector, clock: _Clock
     connector._handshake = handshake
 
 
-def test_immediate_post_hello_failures_reach_the_backoff_cap(monkeypatch):
+def test_immediate_post_hello_failures_reach_the_backoff_cap(monkeypatch, caplog):
     connector = _connector()
     clock = _Clock()
     _install_common_fakes(monkeypatch, connector, clock)
+    caplog.set_level(logging.WARNING, logger=connector_module.__name__)
 
     async def serve(_ws):
         raise ConnectionError("post-hello flap")
@@ -66,12 +68,14 @@ def test_immediate_post_hello_failures_reach_the_backoff_cap(monkeypatch):
     asyncio.run(connector.run())
 
     assert clock.sleeps == [0.2, 0.4, 0.8, 0.8, 0.8]
+    assert "retry_delay=0.200s" in caplog.records[0].getMessage()
 
 
-def test_useful_service_resets_the_next_reconnect_to_minimum(monkeypatch):
+def test_useful_service_resets_the_next_reconnect_to_minimum(monkeypatch, caplog):
     connector = _connector()
     clock = _Clock()
     _install_common_fakes(monkeypatch, connector, clock)
+    caplog.set_level(logging.WARNING, logger=connector_module.__name__)
     attempts = 0
 
     async def serve(_ws):
@@ -93,6 +97,11 @@ def test_useful_service_resets_the_next_reconnect_to_minimum(monkeypatch):
     asyncio.run(connector.run())
 
     assert clock.sleeps == [0.2, 0.4, 0.8, 0.2]
+    # First failure is immediate, two are suppressed, then useful service
+    # clears the window and makes its own exit immediately visible.
+    assert len(caplog.records) == 2
+    assert "lived=0.800s" in caplog.records[-1].getMessage()
+    assert "retry_delay=0.200s" in caplog.records[-1].getMessage()
 
 
 def test_clean_serve_return_uses_the_same_stability_gate(monkeypatch):
@@ -135,7 +144,7 @@ def test_disconnect_logging_time_does_not_count_as_useful_service(monkeypatch):
         attempts += 1
         raise ConnectionError("immediate drop")
 
-    def slow_log(_exc, _served_at):
+    def slow_log(_exc, _served_for, _retry_delay):
         # A blocked log sink is not tunnel service and must not reset health.
         clock.now += connector._max_backoff
 
