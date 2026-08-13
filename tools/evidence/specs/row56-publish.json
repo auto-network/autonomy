@@ -1,0 +1,106 @@
+{
+  "row": 56,
+  "row_title": "Publish a note as a link: the operator approval ceremony end to end",
+  "base_url": "http://localhost:8091",
+  "kind": "step_gallery",
+  "session": "row56cap",
+  "instance": {
+    "kind": "real",
+    "base_url": "http://localhost:8091",
+    "commit": null
+  },
+  "provenance_session": "auto-0812-211435",
+  "steps": [
+    {
+      "slug": "unlock-gate",
+      "caption": "The dashboard's sign-in gate: automation arrives signed out, exactly like a person",
+      "actions": [
+        [
+          "open",
+          "{base}/",
+          "--ignore-https-errors"
+        ],
+        [
+          "wait",
+          "--load",
+          "networkidle"
+        ],
+        [
+          "wait",
+          "[data-testid=unlock-password]"
+        ]
+      ]
+    },
+    {
+      "slug": "unlocked",
+      "caption": "Password unlock (the zero-passkey fallback path) opens the dashboard; a first-run passkey offer, when shown, is declined",
+      "actions": [
+        [
+          "fill",
+          "[data-testid=unlock-password]",
+          "{env:CAPTURE_PASSWORD}"
+        ],
+        [
+          "click",
+          "[data-testid=unlock-primary]"
+        ],
+        [
+          "wait",
+          "--load",
+          "networkidle"
+        ],
+        [
+          "eval",
+          "(() => { const b = Array.from(document.querySelectorAll('button')).find(x => x.textContent.trim() === 'Not now'); if (b) { b.click(); } return true; })()"
+        ],
+        [
+          "wait",
+          "--load",
+          "networkidle"
+        ]
+      ]
+    },
+    {
+      "slug": "approval-sheet",
+      "caption": "An agent asked to publish a note as a share link; the approval sheet presents the trusted note title, the org identity, and the link duration",
+      "actions": [
+        [
+          "eval",
+          "window.openApprovalOverlay('{env:APPROVAL_ID}')"
+        ],
+        [
+          "wait",
+          "[data-testid=approval-confirm]"
+        ]
+      ]
+    },
+    {
+      "slug": "password-entered",
+      "caption": "The operator authorizes with the organization password; signing happens in the browser and the key never exists server-side",
+      "actions": [
+        [
+          "fill",
+          "[data-testid=approval-password]",
+          "{env:CAPTURE_PASSWORD}"
+        ]
+      ]
+    },
+    {
+      "slug": "published-toast",
+      "caption": "Approve & publish: the browser signs the request, the serving tunnel starts, and the link is minted",
+      "actions": [
+        [
+          "click",
+          "[data-testid=approval-confirm]"
+        ],
+        [
+          "wait",
+          "--text",
+          "Share link published",
+          "--timeout",
+          "40000"
+        ]
+      ]
+    }
+  ]
+}

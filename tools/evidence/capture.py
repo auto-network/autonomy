@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -57,7 +59,19 @@ def make_capture_id(row: int, out_root: Path) -> str:
 
 
 def substitute(fragment: str, spec: dict) -> str:
-    return fragment.replace("{base}", spec["base_url"])
+    """Expand ``{base}`` and ``{env:NAME}`` placeholders in an action fragment.
+
+    ``{env:NAME}`` lets an orchestrator hand the runner values that only
+    exist mid-ceremony (an approval id, a just-minted link URL) without
+    them being baked into the committed spec.
+    """
+    out = fragment.replace("{base}", spec["base_url"])
+    for name in re.findall(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}", out):
+        value = os.environ.get(name)
+        if value is None:
+            raise SystemExit(f"flow spec needs environment variable {name}, which is unset")
+        out = out.replace("{env:" + name + "}", value)
+    return out
 
 
 def write_gallery(capture_dir: Path, manifest: dict) -> None:
@@ -109,34 +123,48 @@ def main() -> int:
         action="store_true",
         help="leave the browser session open for post-mortem inspection",
     )
+    ap.add_argument(
+        "--continue-capture",
+        type=Path,
+        metavar="CAPTURE_DIR",
+        help="append this spec's steps to an existing capture (multi-phase "
+        "ceremonies whose later steps depend on values minted mid-flow)",
+    )
     args = ap.parse_args()
 
     spec = load_spec(args.spec)
     row = int(spec["row"])
-    capture_id = spec.get("capture_id") or make_capture_id(row, args.out)
-    capture_dir = args.out / f"row-{row:03d}" / capture_id
-    steps_dir = capture_dir / "steps"
-    steps_dir.mkdir(parents=True, exist_ok=True)
+    if args.continue_capture:
+        capture_dir = args.continue_capture
+        manifest = json.loads((capture_dir / "manifest.json").read_text())
+        capture_id = manifest["capture_id"]
+        steps_dir = capture_dir / "steps"
+        start_seq = len(manifest["steps"]) + 1
+    else:
+        capture_id = spec.get("capture_id") or make_capture_id(row, args.out)
+        capture_dir = args.out / f"row-{row:03d}" / capture_id
+        steps_dir = capture_dir / "steps"
+        steps_dir.mkdir(parents=True, exist_ok=True)
+        start_seq = 1
+        manifest = {
+            "manifest_version": MANIFEST_VERSION,
+            "row": row,
+            "row_title": spec["row_title"],
+            "capture_id": capture_id,
+            "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "kind": spec.get("kind", "step_gallery"),
+            "instance": spec.get(
+                "instance", {"kind": "real", "base_url": spec["base_url"], "commit": None}
+            ),
+            "driver": "agent-browser",
+            "steps": [],
+            "artifacts": [],
+            "provenance": {"session": spec.get("provenance_session")},
+        }
     session = spec.get("session", f"evidence-{capture_id}")
 
-    manifest: dict = {
-        "manifest_version": MANIFEST_VERSION,
-        "row": row,
-        "row_title": spec["row_title"],
-        "capture_id": capture_id,
-        "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "kind": spec.get("kind", "step_gallery"),
-        "instance": spec.get(
-            "instance", {"kind": "real", "base_url": spec["base_url"], "commit": None}
-        ),
-        "driver": "agent-browser",
-        "steps": [],
-        "artifacts": [],
-        "provenance": {"session": spec.get("provenance_session")},
-    }
-
     failed = False
-    for i, step in enumerate(spec["steps"], start=1):
+    for i, step in enumerate(spec["steps"], start=start_seq):
         slug = step.get("slug", f"step{i}")
         shot = steps_dir / f"{i:02d}-{slug}.png"
         status = "ok"
