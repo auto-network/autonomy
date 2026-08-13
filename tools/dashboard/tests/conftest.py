@@ -189,9 +189,33 @@ def _isolate_agent_browser_session():
         return
     worker = _os.environ.get("PYTEST_XDIST_WORKER", "master")
     _os.environ["AGENT_BROWSER_SESSION"] = f"pytest-{_os.getpid()}-{worker}"
+    # Test-session daemons must not outlive the run by the default hour:
+    # a day of suite runs accumulated 77 idle daemons (auto-s3him's
+    # measured leak), and each consecutive run degraded under the pile —
+    # the "late-file load" failures' substrate. Two minutes covers any
+    # legitimate between-command gap in a test.
+    _os.environ.setdefault("AGENT_BROWSER_IDLE_TIMEOUT_MS", "120000")
 
 
 _isolate_agent_browser_session()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Reap this worker's browser daemon at exit (auto-s3him).
+
+    The idle timeout above is the backstop for sessions test code names
+    itself; this closes the worker's own session deterministically so
+    back-to-back runs start clean instead of inheriting daemons.
+    """
+    name = _os.environ.get("AGENT_BROWSER_SESSION", "")
+    if not name.startswith("pytest-"):
+        return
+    import subprocess
+    try:
+        subprocess.run(["agent-browser", "close", "--session", name],
+                       capture_output=True, timeout=15)
+    except Exception:
+        pass  # reaping is best-effort; the idle timeout finishes the job
 
 
 # ── Repo-data write redirects ──────────────────────────────────────────
