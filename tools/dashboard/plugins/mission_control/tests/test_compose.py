@@ -456,3 +456,55 @@ def test_an_anchor_shows_unanswered_and_answered_separately():
     assert "if (open)" in paint and "if (done)" in paint, (
         "a zero count is not drawn"
     )
+
+
+def test_a_replayed_status_event_does_not_duplicate_the_entry():
+    """Subscribing replays the cached state of every topic, and EventSource
+    reconnects on its own, so the same status arrives again on every
+    reconnect — and once at first connect on top of the copy already inlined
+    in the page. Three reconnects showed three identical entries in the feed.
+
+    The conversation handler was never affected because it finds an entry by
+    id and REPLACES it. Only the activity handler appended.
+    """
+    from tools.dashboard.scripts import build_mission_viewer as builder
+
+    src = builder.bootstrap_source()
+    body = src[src.index("function applyActivity"):]
+    body = body[: body.index("// ---- live updates")]
+
+    assert "already" in body and "unshift" in body
+    assert body.index("already") < body.index("unshift"), (
+        "the duplicate check must run before the entry is added"
+    )
+    assert "x.text === data.text" in body, (
+        "identical text from the same pillar is the same report, not news"
+    )
+
+
+def test_opening_a_question_records_where_it_was_opened_from():
+    """Closing a discussion could only mean 'close everything', so reading one
+    question and wanting the next meant reopening the list by hand.
+    """
+    from tools.dashboard.scripts import build_mission_viewer as builder
+
+    src = builder.bootstrap_source()
+    assert 'from: {panel: "questions"}' in src, (
+        "a question opened from the list must remember the list"
+    )
+    assert "function goBack" in src and "show(ui.from || null)" in src, (
+        "back goes one step, falling through to close only when there is "
+        "nowhere to return to"
+    )
+
+
+def test_the_question_list_can_be_filtered():
+    from tools.dashboard.scripts import build_mission_viewer as builder
+
+    src = builder.bootstrap_source()
+    assert "var qFilter" in src
+    rows = src[src.index("function questionRows"):]
+    rows = rows[:800]
+    assert 'qFilter === "open"' in rows and 'qFilter === "done"' in rows, (
+        "the filter must actually be applied to the rows, not only rendered"
+    )
