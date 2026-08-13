@@ -19,6 +19,7 @@ grant):
 from __future__ import annotations
 
 import os
+import sys
 import time
 from types import SimpleNamespace
 
@@ -65,6 +66,26 @@ class FakeSpawn:
         p = FakeProc()
         self.procs.append(p)
         return p
+
+
+def test_default_spawn_captures_connector_warnings_in_shared_log(tmp_path):
+    """The real supervisor spawn path preserves connector WARNING output."""
+    log_path = tmp_path / "serve.log"
+    marker = "bounded connector failure marker"
+    proc = sup._default_spawn(
+        [
+            sys.executable,
+            "-c",
+            f"import logging; logging.warning({marker!r})",
+        ],
+        dict(os.environ),
+        log_path=str(log_path),
+    )
+    deadline = time.time() + 5
+    while proc.alive() and time.time() < deadline:
+        time.sleep(0.01)
+    assert proc.alive() is False
+    assert marker in log_path.read_text()
 
 
 @pytest.fixture

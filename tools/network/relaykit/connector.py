@@ -41,6 +41,7 @@ import inspect
 import json
 import logging
 import random
+import re
 import secrets
 import time
 
@@ -65,6 +66,28 @@ from .frames import (
 from .hello import HELLO_VERSION, build_tunnel_hello
 
 logger = logging.getLogger(__name__)
+
+_LIFECYCLE_LOG_WINDOW_S = 60.0
+_LOG_SECRET_RE = re.compile(
+    r"(?:https?|wss?)://\S+|"
+    r"\b(?:\d{1,3}\.){3}\d{1,3}\b|"
+    r"(?<![0-9a-fA-F:])(?:[0-9a-fA-F]{0,4}:){2,}"
+    r"[0-9a-fA-F]{0,4}(?:%[A-Za-z0-9_.-]+)?(?![0-9a-fA-F:])|"
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}\b|"
+    r"\b[0-9a-fA-F]{16,}\b|"
+    r"\b[A-Za-z0-9_-]{24,}\b"
+)
+_OP_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+
+
+def _safe_log_text(value) -> str:
+    if value is None:
+        return ""
+    return _LOG_SECRET_RE.sub("<redacted>", str(value))[:160]
+
+
+def _safe_operation(value) -> str:
+    return value if isinstance(value, str) and _OP_RE.fullmatch(value) else "<invalid>"
 
 
 class TunnelProtocolVersionError(ConnectionError):
@@ -345,6 +368,8 @@ class TunnelConnector:
         #: serve loop; the send hook is live only while a tunnel is up.
         self._pending: dict = {}
         self._ctrl_send = None
+        self._failure_log_window_started = None
+        self._failure_log_suppressed = 0
 
     def stop(self) -> None:
         self._stop.set()
@@ -353,10 +378,15 @@ class TunnelConnector:
         """Send one D19 control op over the live tunnel and await its
         correlated reply (register D19 §3). Raises ConnectionError when no
         tunnel is up or the reply does not arrive within *timeout*."""
+        correlation = secrets.token_hex(16)
+        safe_op = _safe_operation(op)
         send = self._ctrl_send
         if send is None:
+            logger.warning(
+                "tunnel control failed: id=%s op=%s kind=no-live-tunnel",
+                correlation, safe_op,
+            )
             raise ConnectionError("no live tunnel to carry a control frame")
-        correlation = secrets.token_hex(16)
         loop = asyncio.get_event_loop()
         future = loop.create_future()
         self._pending[correlation] = future
@@ -364,10 +394,26 @@ class TunnelConnector:
         try:
             await send(FRAME_CTRL, CTRL_CHANNEL_ID,
                        json.dumps(request).encode("utf-8"))
-            return await asyncio.wait_for(future, timeout)
+            reply = await asyncio.wait_for(future, timeout)
+            if not (isinstance(reply, dict) and reply.get("ok") is True):
+                logger.warning(
+                    "tunnel control failed: id=%s op=%s kind=rejected",
+                    correlation, safe_op,
+                )
+            return reply
         except asyncio.TimeoutError as exc:
+            logger.warning(
+                "tunnel control failed: id=%s op=%s kind=timeout",
+                correlation, safe_op,
+            )
             raise ConnectionError(
                 f"control op {op!r} timed out after {timeout}s") from exc
+        except Exception as exc:
+            logger.warning(
+                "tunnel control failed: id=%s op=%s kind=exception err=%s",
+                correlation, safe_op, type(exc).__name__,
+            )
+            raise
         finally:
             self._pending.pop(correlation, None)
 
@@ -418,35 +464,65 @@ class TunnelConnector:
             # sink is not useful tunnel service and must not reset health.
             served_for = (None if served_at is None
                           else time.monotonic() - served_at)
-            self._log_disconnect(disconnect_exc, served_at)
             # Authentication proves who answered, not that the connection was
             # useful. Reset only after it stayed up long enough to distinguish
             # ordinary churn from a post-hello flap. Reuse max_backoff as the
             # stability interval: no second timing knob or policy surface.
             if served_for is not None and served_for >= self._max_backoff:
                 backoff = self._min_backoff
+                self._reset_failure_log_suppression()
             if self._stop.is_set():
+                self._log_disconnect(disconnect_exc, served_for, None)
                 return
-            await asyncio.sleep(backoff * (1 + random.random() * 0.25))
+            retry_delay = backoff * (1 + random.random() * 0.25)
+            self._log_disconnect(disconnect_exc, served_for, retry_delay)
+            await asyncio.sleep(retry_delay)
             backoff = min(backoff * 2, self._max_backoff)
 
-    def _log_disconnect(self, exc: BaseException | None, served_at: float | None) -> None:
-        """One line per tunnel death: how long it lived, and why it ended.
+    def _reset_failure_log_suppression(self) -> None:
+        self._failure_log_window_started = None
+        self._failure_log_suppressed = 0
 
-        ``lived`` is None when the connection never got past the handshake —
-        which distinguishes "cannot connect at all" from "connects then drops",
-        the two failure modes that look identical in a bare reconnect count.
-        """
-        lived = None if served_at is None else time.monotonic() - served_at
+    def _log_disconnect(
+        self,
+        exc: BaseException | None,
+        lived: float | None,
+        retry_delay: float | None,
+    ) -> None:
+        """Emit one bounded lifecycle warning without logging wire content."""
         code = getattr(exc, "code", None)
-        reason = getattr(exc, "reason", None)
-        logger.warning(
-            "tunnel disconnected: lived=%s close_code=%s reason=%r err=%s: %s",
+        reason = _safe_log_text(getattr(exc, "reason", None))
+        detail = (
             "never-served" if lived is None else f"{lived:.3f}s",
-            code, reason,
+            code,
+            reason,
             type(exc).__name__ if exc is not None else "clean-exit",
-            exc if exc is not None else "",
+            _safe_log_text(exc),
+            "none" if retry_delay is None else f"{retry_delay:.3f}s",
         )
+        now = time.monotonic()
+        started = self._failure_log_window_started
+        if started is not None:
+            self._failure_log_suppressed += 1
+            if now - started < _LIFECYCLE_LOG_WINDOW_S:
+                return
+            logger.warning(
+                "tunnel disconnects suppressed=%d latest_lived=%s "
+                "latest_close_code=%s latest_reason=%r latest_err=%s:%s "
+                "latest_retry_delay=%s",
+                self._failure_log_suppressed,
+                *detail,
+            )
+            self._failure_log_window_started = now
+            self._failure_log_suppressed = 0
+            return
+
+        logger.warning(
+            "tunnel disconnected: lived=%s close_code=%s reason=%r "
+            "err=%s:%s retry_delay=%s",
+            *detail,
+        )
+        self._failure_log_window_started = now
 
     async def _handshake(self, ws) -> None:
         """Authenticate a fresh tunnel. The peer-relay park connector
