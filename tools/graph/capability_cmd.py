@@ -88,6 +88,49 @@ def cmd_skilltext(args: Any) -> None:
     print(f"Wrote {len(out)} bytes to {target}", file=sys.stderr)
 
 
+def cmd_host_install(args: Any) -> None:
+    """Run the host-install runner for one impl or every impl.
+
+    Walks ``agents/capabilities/*/manifest.json`` declaring ``host_install``
+    (or the single named ``impl``), fingerprints intent files, installs
+    under a per-impl lock when stale, and upserts
+    ``dashboard.capability.host_install_state#1`` rows. Exit status is
+    non-zero when any impl ended in ``failed`` / ``error`` so callers (and
+    CI) can gate on it; ``ready`` / ``skipped`` / ``unknown`` / ``locked``
+    all exit 0.
+    """
+    from . import capability_host_install as runner
+    from . import ops
+
+    impl = getattr(args, "impl", None)
+    org = getattr(args, "org", None) or ops.CALLER_ORG
+    results = runner.run(
+        impl,
+        client=get_client(),
+        org=org,
+        log_fn=lambda msg: print(msg, file=sys.stderr),
+    )
+
+    if impl is not None and not results:
+        print(
+            f"Error: no capability impl matching {impl!r} declares "
+            f"host_install. Run 'graph capability host-install' with no "
+            f"argument to list installable impls.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not results:
+        print("No capability impls declare host_install.", file=sys.stderr)
+        return
+
+    failed = [r for r in results if r.get("outcome") in ("failed", "error")]
+    for r in results:
+        print(f"{r['outcome']:>8}  {r['name']}")
+    if failed:
+        sys.exit(1)
+
+
 # ── parser wiring ────────────────────────────────────────────
 
 
@@ -130,3 +173,20 @@ def attach_capability_subparser(sub) -> None:
              " caller-org (env GRAPH_ORG or per-process default).",
     )
     p_skill.set_defaults(func=cmd_skilltext)
+
+    p_hi = cap_sub.add_parser(
+        "host-install",
+        help="Run the host-install runner for one impl (or every impl "
+             "declaring host_install)",
+    )
+    p_hi.add_argument(
+        "impl", nargs="?", default=None,
+        help="Implementation to install (e.g. autonomy/video or video). "
+             "Omit to walk every impl declaring host_install.",
+    )
+    p_hi.add_argument(
+        "--org", default=None,
+        help="Write state rows into this org's DB. Defaults to the "
+             "caller-org (env GRAPH_ORG or per-process default).",
+    )
+    p_hi.set_defaults(func=cmd_host_install)
