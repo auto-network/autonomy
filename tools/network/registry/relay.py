@@ -53,7 +53,12 @@ from tools.network.relaykit.frames import (
     VIEWER_KIND_FEED,
     tag_viewer_message,
 )
-from tools.network.relaykit.hello import HelloError, hello_signing_input, parse_tunnel_hello
+from tools.network.relaykit.hello import (
+    HELLO_VERSION,
+    HelloError,
+    hello_signing_input,
+    parse_tunnel_hello,
+)
 
 from .signing import MAX_CLOCK_SKEW
 from .store import LinkGrant, RegistryStore
@@ -61,6 +66,7 @@ from .store import LinkGrant, RegistryStore
 # WS close codes (4000-4999 = application-defined).
 CLOSE_UNAUTHENTICATED = 4403
 CLOSE_UNKNOWN_LINK = 4404  # unknown token or no serving tunnel
+CLOSE_PROTOCOL_MISMATCH = 4406
 CLOSE_REPLACED = 4409
 CLOSE_VIEWER_QUEUE_OVERFLOW = 4413
 CLOSE_TUNNEL_CHANNELS_EXCEEDED = 4429  # per-tunnel concurrent viewer cap hit
@@ -477,12 +483,25 @@ class TunnelHub:
         return True
 
 
+class _ProtocolVersionMismatch(HelloError):
+    def __init__(self, connector_version: int):
+        self.connector_version = connector_version
+        super().__init__(
+            "tunnel protocol version mismatch: "
+            f"connector={connector_version} registry={HELLO_VERSION}"
+        )
+
+
 def _verify_tunnel_hello(
     raw, org: str, store: RegistryStore, now: int
 ) -> tuple[str, str]:
     """The tunnel's I4 gate: hello signature + tunnel:serve chain to the
     org's bound root. Raises HelloError on any failure."""
-    data = parse_tunnel_hello(raw)
+    # Parse an integer version without accepting it yet.  We authenticate the
+    # signed hello first, then return a typed mismatch naming both strict
+    # versions.  A bit-flipped version therefore fails signature verification
+    # rather than eliciting a trusted-looking compatibility response.
+    data = parse_tunnel_hello(raw, allow_version_mismatch=True)
     if data["org"] != org:
         raise HelloError("hello org does not match tunnel path")
     if abs(now - data["ts"]) > MAX_CLOCK_SKEW:
@@ -493,8 +512,13 @@ def _verify_tunnel_hello(
         raise HelloError("no live binding for org")
 
     try:
-        verify_signature(data["signer"], data["sig"],
-                         hello_signing_input(org, data["signer"], data["ts"]))
+        verify_signature(
+            data["signer"],
+            data["sig"],
+            hello_signing_input(
+                org, data["signer"], data["ts"], version=data["v"]
+            ),
+        )
         cert = DelegationCert.from_json(data["cert"])
         if cert.child_pub != data["signer"]:
             raise HelloError("cert does not delegate to the hello signer")
@@ -520,6 +544,8 @@ def _verify_tunnel_hello(
             )
     except (ChainVerifyError, MalformedError) as exc:
         raise HelloError(f"{type(exc).__name__}: {exc}") from exc
+    if data["v"] != HELLO_VERSION:
+        raise _ProtocolVersionMismatch(data["v"])
     return verified.subject_id, data["signer"]
 
 
@@ -660,6 +686,18 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
         persona_pub, signer_pub = _verify_tunnel_hello(
             raw_hello, org, store, int(now_fn())
         )
+    except _ProtocolVersionMismatch as exc:
+        with contextlib.suppress(Exception):
+            await websocket.send_json({
+                "ok": False,
+                "error": {
+                    "code": "protocol_version_mismatch",
+                    "connector_version": exc.connector_version,
+                    "registry_version": HELLO_VERSION,
+                },
+            })
+        await _close_quietly(websocket, CLOSE_PROTOCOL_MISMATCH)
+        return
     except HelloError as exc:
         with contextlib.suppress(Exception):
             await websocket.send_json({"ok": False, "error": str(exc)})
@@ -675,7 +713,7 @@ async def tunnel_endpoint(websocket: WebSocket, org: str, hub: TunnelHub,
     replaced = hub.register(tunnel)
     if replaced is not None:
         await _close_quietly(replaced.ws, CLOSE_REPLACED)
-    await websocket.send_json({"ok": True})
+    await websocket.send_json({"ok": True, "v": HELLO_VERSION})
 
     try:
         while True:

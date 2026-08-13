@@ -15,7 +15,7 @@ First message on a fresh ``/t/{org}`` WebSocket, TEXT frame::
 The registry verifies the cert chain against the org binding's root key
 with required scope ``tunnel:serve`` (same I4 discipline as every other
 registry mutation — no permission tables), plus ±MAX_CLOCK_SKEW
-freshness on ``ts``. The registry answers ``{"ok": true}`` and the
+freshness on ``ts``. The registry answers ``{"ok": true, "v": 1}`` and the
 connection switches to binary mux frames (``frames.py``).
 """
 
@@ -35,9 +35,11 @@ class HelloError(Exception):
     """A tunnel hello that does not parse or verify."""
 
 
-def hello_signing_input(org: str, signer: str, ts: int) -> bytes:
+def hello_signing_input(
+    org: str, signer: str, ts: int, *, version: int = HELLO_VERSION
+) -> bytes:
     return TUNNEL_HELLO_DOMAIN + canonical_json(
-        {"v": HELLO_VERSION, "org": org, "signer": signer, "ts": ts}
+        {"v": version, "org": org, "signer": signer, "ts": ts}
     )
 
 
@@ -57,7 +59,7 @@ def build_tunnel_hello(key: KeyPair, cert: DelegationCert, *, org: str, ts: int)
     )
 
 
-def parse_tunnel_hello(raw) -> dict:
+def parse_tunnel_hello(raw, *, allow_version_mismatch: bool = False) -> dict:
     """Structural parse only — chain verification is the registry's job."""
     if isinstance(raw, (bytes, bytearray)):
         try:
@@ -70,7 +72,9 @@ def parse_tunnel_hello(raw) -> dict:
         raise HelloError("hello is not valid JSON") from exc
     if not isinstance(data, dict) or set(data) != HELLO_FIELDS:
         raise HelloError(f"hello must carry exactly {sorted(HELLO_FIELDS)}")
-    if data["v"] != HELLO_VERSION:
+    if type(data["v"]) is not int:
+        raise HelloError("hello v must be an integer")
+    if not allow_version_mismatch and data["v"] != HELLO_VERSION:
         raise HelloError(f"unsupported hello version: {data['v']!r}")
     if type(data["ts"]) is not int:
         raise HelloError("hello ts must be an integer unix timestamp")

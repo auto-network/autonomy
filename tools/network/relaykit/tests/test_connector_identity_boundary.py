@@ -10,6 +10,7 @@ from tools.network.idkit import DelegationCert, KeyPair, Subject, issue_cert
 from tools.network.relaykit.channel import build_client_hello
 from tools.network.relaykit.connector import TunnelConnector
 from tools.network.relaykit.frames import FRAME_DATA, VIEWER_KIND_RECORD, split_viewer_message
+from tools.network.relaykit.hello import HELLO_VERSION
 
 
 ORG = "11111111-1111-4111-8111-111111111111"
@@ -52,7 +53,7 @@ def test_actual_registry_and_viewer_hello_bytes_use_distinct_certificates():
             self.sent.append(value)
 
         async def recv(self):
-            return json.dumps({"ok": True})
+            return json.dumps({"ok": True, "v": HELLO_VERSION})
 
     async def exercise():
         registry_socket = FakeRegistrySocket()
