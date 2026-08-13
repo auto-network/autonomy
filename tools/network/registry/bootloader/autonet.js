@@ -1702,8 +1702,19 @@ const autonet = (() => {
       root_pub: context.rootPub,
       invite_ref: context.inviteRef,
     });
+    // BOTH credentials ride the fragment — never the query. The channel
+    // token is itself a bearer-class credential (possession opens the
+    // registry channel); although the registry saw it once in the /l/
+    // path, copying it into a query would create a second server-visible
+    // URL surface for no benefit. The fragment reaches the join page
+    // (auto-y7nap) without touching any server, independent of whatever
+    // access-log settings happen to be deployed.
+    const fragment = new URLSearchParams({
+      channel_token: (location.pathname || "").split("/").pop(),
+      t: context.token,
+    });
     const destination = "/network/join?" + query.toString() +
-      "#t=" + encodeURIComponent(context.token);
+      "#" + fragment.toString();
     location.assign(destination);
     return destination;
   }

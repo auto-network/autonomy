@@ -75,6 +75,18 @@ _INSTALL_CSP = (
     "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
 )
 
+# The org:join bridge page (auto-y7nap): a fixed static shell, rendered
+# entirely client-side, that performs NO ceremony — narrower than the
+# bootloader CSP (no artifact iframes, no blob:). connect-src admits only
+# the visitor's own LOCAL node for the best-effort liveness probe; the
+# ledger bearer lives in the URL fragment and is never sent anywhere.
+_JOIN_CSP = (
+    "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; "
+    "connect-src https://localhost:8080 http://localhost:8080; "
+    "img-src 'none'; base-uri 'none'; form-action 'none'; "
+    "frame-ancestors 'none'"
+)
+
 
 def _install_html_wrapper(markdown: str, host: str | None = None) -> bytes:
     """The browser face of /install: no CDN, no external fetches — a copy
@@ -936,6 +948,8 @@ def create_app(
 
     shell_bytes = (_BOOTLOADER_DIR / "bootloader.html").read_bytes()
     js_bytes = (_BOOTLOADER_DIR / "autonet.js").read_bytes()
+    join_shell_bytes = (_BOOTLOADER_DIR / "join.html").read_bytes()
+    join_js_bytes = (_BOOTLOADER_DIR / "join.js").read_bytes()
 
     @app.get("/l/{token}")
     async def bootloader_page(token: str):
@@ -955,6 +969,35 @@ def create_app(
                 "Referrer-Policy": "no-referrer",
                 "X-Content-Type-Options": "nosniff",
                 "Cache-Control": "no-store",
+            },
+        )
+
+    @app.get("/network/join")
+    async def join_bridge_page():
+        # ONE static byte sequence regardless of query — the server never
+        # reads the invitation context (org, channel token) and the ledger
+        # bearer never reaches it at all (fragment-only). Rendering,
+        # validation, and the local-node handoff are entirely client-side
+        # in join.js; this page performs no ceremony (auto-y7nap).
+        return Response(
+            content=join_shell_bytes,
+            media_type="text/html",
+            headers={
+                "Content-Security-Policy": _JOIN_CSP,
+                "Referrer-Policy": "no-referrer",
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @app.get("/l-assets/join.js")
+    async def join_bridge_js():
+        return Response(
+            content=join_js_bytes,
+            media_type="text/javascript",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
             },
         )
 

@@ -15,3 +15,16 @@ This path is about what happens after.
 
 Done when: admission landed, the user has seen the org's content respond
 to a search, and knows which workspaces they can open.
+
+## The blurb contract (for maintainers of this flow)
+
+The paste blurb a no-node visitor copies from the join page carries exactly
+two URLs, both assembled client-side from the page's own origin: the install
+primer (`<origin>/install`) and the visitor's rebuilt invite link
+(`<origin>/l/<channel token>#t=<bearer>`). The channel token reaches the
+page as the `channel_token` query parameter (registry-visible transport
+credential, same trust class as the `/l/` path it arrived on); the bearer
+never leaves the URL fragment and is never sent to any server by that page.
+The primer's join-first tracking (§6a) consumes the invite link exactly as
+rebuilt — one source for the blurb text (the join page), one consumer
+contract (this document).
