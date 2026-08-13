@@ -261,3 +261,16 @@
    alternative was inventing an answer to record that it stopped mattering. */
 .mc-close-q { font-size: 11px; color: #64748b; border: 1px solid #334155;
               border-radius: .3rem; padding: .1rem .45rem; background: transparent; }
+
+/* A screen asking YOU. Filled, and a word rather than a number: a count here
+   reads as "two people are chatting about this", which is the opposite of
+   something waiting on your decision. */
+.mc-anchor-btn.mc-anchor-asks { background: #fcd34d; border-color: #8a6a1c; }
+.mc-asks-label { font-size: 10px; font-weight: 600; color: #0b0d12;
+                 padding: 0 .15rem; letter-spacing: .01em; }
+.mc-label-asks { color: #fcd34d; }
+/* Kept out of the questions count on purpose -- that one is what the mission
+   owes you, this is what it is waiting on from you. */
+.mc-foryou { flex: none; border: 1px solid #8a6a1c; border-radius: 99px;
+             background: rgba(240,180,41,.1); color: #fcd34d;
+             font-size: 11px; padding: .1rem .5rem; white-space: nowrap; }

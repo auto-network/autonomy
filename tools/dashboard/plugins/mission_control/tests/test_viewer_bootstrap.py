@@ -357,3 +357,34 @@ def test_progress_steps_stack_with_only_the_newest_live():
     assert "i === steps.length - 1" in src, "every step renders the same"
     css = _viewer("chrome.css")
     assert "prefers-reduced-motion" in css, "the live step animates unconditionally"
+
+
+def test_an_anchor_can_ask_you_instead_of_only_being_asked_about():
+    """One extra attribute on the element the anchor is already on. The
+    question travels with it, so nothing parses the author's document to find
+    it and a question edited away simply stops existing."""
+    src = _viewer("bootstrap.js")
+    assert 'getAttribute("data-mc-ask")' in src
+    # A word, not a number: a count on something waiting for your decision
+    # reads as "two people are chatting about this".
+    assert 'text: "Answer"' in src
+    assert "mc-anchor-asks" in src
+
+
+def test_the_panel_is_headed_by_the_question_not_the_internal_id():
+    """It said "decision:dispatch-vs-local" and nothing else -- a name for the
+    code, shown to the person being asked to answer, with the question that
+    was written on the element left behind on the page."""
+    src = _viewer("bootstrap.js")
+    assert "function headingFor(" in src, "no way to name an anchor in the author's words"
+    assert 'text: "Your answer\\u2026"' in src or "Your answer" in src
+
+
+def test_unanswered_screen_questions_stay_out_of_the_questions_count():
+    """That count is what the mission owes the reader. This is the other
+    direction, and folding them together buries a decision somebody is blocked
+    on inside a number that mostly means conversations."""
+    src = _viewer("bootstrap.js")
+    assert "function unanswered(" in src
+    assert "mc-foryou" in src
+    assert '" for you"' in src
