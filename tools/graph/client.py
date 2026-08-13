@@ -141,11 +141,25 @@ class HttpClient:
         env. Matches how ``ops.*`` resolves the caller org on the host so
         the CLI reaches the same DB in both modes without callers having
         to pass ``--org`` explicitly.
+
+        A container session token (``CROSSTALK_TOKEN``) is sent additively as
+        ``Authorization: Bearer`` so the server can take a remote caller's org
+        from the authenticated token rather than the caller-controlled header
+        (auto-w1ktf, the client half of invariant 1). This is ADDITIVE: the
+        bearer rides ALONGSIDE ``X-Graph-Org`` and changes no server behavior
+        until the ``auto-h4kzx`` server flip derives org from the token and
+        ignores the header — so there is no window where a token-requiring
+        server refuses a caller that has not yet sent one. A host caller has no
+        ``CROSSTALK_TOKEN`` and simply omits the bearer (a local, org-less
+        caller server-side).
         """
         h = {}
         caller = org or os.environ.get("GRAPH_ORG")
         if caller:
             h["X-Graph-Org"] = caller
+        token = os.environ.get("CROSSTALK_TOKEN")
+        if token:
+            h["Authorization"] = f"Bearer {token}"
         return h
 
     def _request(
