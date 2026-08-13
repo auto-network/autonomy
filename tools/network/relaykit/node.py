@@ -49,6 +49,9 @@ class NodeServer:
         cert: DelegationCert,
         handler=echo_handler,
         *,
+        floor_key: KeyPair | None = None,
+        floor_cert: DelegationCert | None = None,
+        floor_channel_cert: DelegationCert | None = None,
         listen_host: str = "127.0.0.1",
         listen_port: Optional[int] = None,
         floor_url: Optional[str] = None,
@@ -60,10 +63,36 @@ class NodeServer:
         min_backoff: float = 0.2,
         max_backoff: float = 5.0,
     ):
+        # The base node certificate is emitted to direct/peer viewers. A
+        # persona-bearing certificate belongs only in registry admission and
+        # must never enter any viewer SERVER_HELLO, regardless of whether
+        # reachability announcement happens to be enabled for this instance.
+        if cert.subject.kind == "persona":
+            raise ValueError(
+                "persona-bearing registry credentials cannot be used as a "
+                "NodeServer viewer credential; use an identity-neutral node "
+                "certificate and a separate floor registry certificate"
+            )
         self._org = org
         self._root_pub = root_pub
         self._key = key
         self._cert = cert
+        self._floor_key = floor_key or key
+        self._floor_cert = floor_cert or cert
+        self._floor_channel_cert = floor_channel_cert or cert
+        if self._floor_cert.child_pub != self._floor_key.public_hex:
+            raise ValueError("floor cert does not match the floor serving key")
+        if self._floor_channel_cert.child_pub != self._floor_key.public_hex:
+            raise ValueError("floor channel cert does not match the floor serving key")
+        if (
+            registry_url is not None
+            and floor_url is not None
+            and self._floor_key.public_hex == key.public_hex
+        ):
+            raise ValueError(
+                "a reachability-announcing node must use a distinct floor "
+                "serving key so the registry cannot join persona to addresses"
+            )
         self._handler = handler
         self._direct = (
             DirectChannelServer(org, key, cert, handler,
@@ -73,7 +102,8 @@ class NodeServer:
         self._connectors = []
         if floor_url:
             self._connectors.append(TunnelConnector(
-                floor_url, org, key, cert, handler,
+                floor_url, org, self._floor_key, self._floor_cert, handler,
+                channel_cert=self._floor_channel_cert,
                 min_backoff=min_backoff, max_backoff=max_backoff,
             ))
         for relay_url in peer_relay_urls:
@@ -145,6 +175,18 @@ def main() -> None:
     parser.add_argument("--root-pub", required=True, help="org root public key, 64 hex")
     parser.add_argument("--key-file", required=True)
     parser.add_argument("--cert-file", required=True)
+    parser.add_argument(
+        "--floor-cert-file",
+        help="persona-bearing registry-admission cert for the floor tunnel",
+    )
+    parser.add_argument(
+        "--floor-key-file",
+        help="distinct serving key for the floor tunnel",
+    )
+    parser.add_argument(
+        "--floor-channel-cert-file",
+        help="identity-neutral viewer cert over the floor serving key",
+    )
     parser.add_argument("--mode", choices=["echo", "serve-file"], default="echo")
     parser.add_argument("--file", help="file to serve (serve-file mode)")
     parser.add_argument("--content-type", default="text/html")
@@ -168,6 +210,27 @@ def main() -> None:
         key = KeyPair.from_private_hex(fh.read().strip())
     with open(args.cert_file) as fh:
         cert = DelegationCert.from_json(fh.read().strip())
+    floor_key = key
+    floor_cert = cert
+    floor_channel_cert = cert
+    floor_args = (
+        args.floor_key_file,
+        args.floor_cert_file,
+        args.floor_channel_cert_file,
+    )
+    if any(floor_args) and not all(floor_args):
+        parser.error(
+            "--floor-key-file, --floor-cert-file, and "
+            "--floor-channel-cert-file must be supplied together"
+        )
+    if args.floor_key_file:
+        with open(args.floor_key_file) as fh:
+            floor_key = KeyPair.from_private_hex(fh.read().strip())
+    if args.floor_cert_file:
+        with open(args.floor_cert_file) as fh:
+            floor_cert = DelegationCert.from_json(fh.read().strip())
+        with open(args.floor_channel_cert_file) as fh:
+            floor_channel_cert = DelegationCert.from_json(fh.read().strip())
 
     if args.mode == "serve-file":
         if not args.file:
@@ -178,6 +241,8 @@ def main() -> None:
 
     node = NodeServer(
         args.org, args.root_pub, key, cert, handler,
+        floor_key=floor_key, floor_cert=floor_cert,
+        floor_channel_cert=floor_channel_cert,
         listen_host=args.listen_host, listen_port=args.listen_port,
         floor_url=args.floor, peer_relay_urls=tuple(args.peer_relay),
         registry_url=args.registry, announce_addrs=tuple(args.announce_addr),

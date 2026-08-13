@@ -224,26 +224,6 @@
       throw new Error('This request is missing its auto.network details. Close it and try again.');
     }
 
-    // Provision the serving delegate in this SAME approve if none is usable
-    // (rare — the common case already has one and skips this). It is
-    // root-signed, so it needs the password the operator just entered; the org
-    // uuid comes from the frozen registry request. Best-effort: a provisioning
-    // failure must NOT block the publish — the grant is still minted and the
-    // link exists; serving self-heals (watchdog) and the probe reports the real
-    // state. Nothing about serving surfaces in the dialog.
-    if (req.serveCertRequired && req.password && rr.payload && rr.payload.org) {
-      try {
-        await session.provisionServeCert(req.password, {
-          org: req.orgSlug, orgUuid: rr.payload.org,
-        });
-      } catch (e) {
-        if (window.console && console.warn) {
-          console.warn('serve-cert provisioning failed (publish still proceeds):',
-                       (e && e.message) || e);
-        }
-      }
-    }
-
     let retained = _matchingApprovalAuthority(req);
     if (!retained) {
       if (!req.password) throw new Error('Enter your organization password to continue.');
@@ -2501,10 +2481,6 @@
               password: '', showPassword: false,
               allowSessionApprovals: false,
               registrationRequired,
-              // Internal precondition (never shown): mint a serving delegate in
-              // this same approve if none is usable. Rare — the common case
-              // already has one and skips it.
-              serveCertRequired: !!r.serve_cert_required,
               previewOpen: false, targetPreview: r.target_preview || null,
               blockingError: r.target_error ||
                 (registrationRequired ? '' : r.binding_error) ||

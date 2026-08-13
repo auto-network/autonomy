@@ -304,6 +304,7 @@ class TunnelConnector:
         cert: DelegationCert,
         handler=echo_handler,
         *,
+        channel_cert: DelegationCert | None = None,
         min_backoff: float = 0.2,
         max_backoff: float = 5.0,
         publisher: "Publisher | None" = None,
@@ -312,6 +313,12 @@ class TunnelConnector:
         self._org = org
         self._key = key
         self._cert = cert
+        self._channel_cert = channel_cert or cert
+        if (
+            channel_cert is not None
+            and self._channel_cert.child_pub != key.public_hex
+        ):
+            raise ValueError("channel cert does not match the connector key")
         self._handler = handler
         #: Optional push seam (auto-albp6.8). None leaves the connector's
         #: behaviour byte-identical to before it existed.
@@ -515,7 +522,7 @@ class TunnelConnector:
         """One viewer channel: handshake, then request/response messages."""
         try:
             await serve_channel(
-                self._key, self._cert, org=self._org, token=token,
+                self._key, self._channel_cert, org=self._org, token=token,
                 recv=queue.get,
                 send=lambda data: send_frame(FRAME_DATA, channel_id, data),
                 handler=self._handler,
@@ -537,6 +544,11 @@ def main() -> None:
     parser.add_argument("--org", required=True)
     parser.add_argument("--key-file", required=True, help="file holding the private key hex")
     parser.add_argument("--cert-file", required=True, help="file holding the cert wire JSON")
+    parser.add_argument(
+        "--channel-cert-file",
+        help=("identity-neutral certificate for viewer SERVER_HELLO; defaults "
+              "to --cert-file for generic/test connectors"),
+    )
     parser.add_argument("--mode", choices=["echo", "serve-file"], default="echo")
     parser.add_argument("--file", help="file to serve (serve-file mode)")
     parser.add_argument("--content-type", default="text/html")
@@ -548,6 +560,10 @@ def main() -> None:
         key = KeyPair.from_private_hex(fh.read().strip())
     with open(args.cert_file) as fh:
         cert = DelegationCert.from_json(fh.read().strip())
+    channel_cert = cert
+    if args.channel_cert_file:
+        with open(args.channel_cert_file) as fh:
+            channel_cert = DelegationCert.from_json(fh.read().strip())
 
     if args.mode == "serve-file":
         if not args.file:
@@ -557,7 +573,7 @@ def main() -> None:
         handler = echo_handler
 
     connector = TunnelConnector(
-        args.relay, args.org, key, cert, handler,
+        args.relay, args.org, key, cert, handler, channel_cert=channel_cert,
         min_backoff=args.min_backoff, max_backoff=args.max_backoff,
     )
     asyncio.run(connector.run())

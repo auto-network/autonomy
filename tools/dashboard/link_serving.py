@@ -1121,6 +1121,10 @@ def main() -> None:
     parser.add_argument("--org", required=True, help="org UUID on the registry")
     parser.add_argument("--key-file", required=True, help="file holding the private key hex")
     parser.add_argument("--cert-file", required=True, help="file holding the cert wire JSON")
+    parser.add_argument(
+        "--channel-cert-file", required=True,
+        help="identity-neutral cert used only in viewer SERVER_HELLO",
+    )
     parser.add_argument("--graph-org", default=None,
                         help="dashboard org slug scoping the grant cache")
     parser.add_argument("--control-file", default=None,
@@ -1141,6 +1145,8 @@ def main() -> None:
         key = KeyPair.from_private_hex(fh.read().strip())
     with open(args.cert_file) as fh:
         cert = DelegationCert.from_json(fh.read().strip())
+    with open(args.channel_cert_file) as fh:
+        channel_cert = DelegationCert.from_json(fh.read().strip())
 
     from tools.network.relaykit.connector import Publisher
 
@@ -1152,7 +1158,7 @@ def main() -> None:
     # publishing into it.
     publisher = Publisher()
     connector = TunnelConnector(
-        args.relay, args.org, key, cert, handler,
+        args.relay, args.org, key, cert, handler, channel_cert=channel_cert,
         min_backoff=args.min_backoff, max_backoff=args.max_backoff,
         publisher=publisher,
     )

@@ -23,10 +23,11 @@ from three triggers:
   fully-revoked org is torn down, with no operator involvement.
 
 The signing key never leaves its mode-0600 file (see the ``serve-cert``
-schema): the supervisor reads the cert from the settings row, VERIFIES the
-on-disk key matches the cert's ``child_pub`` before launching (the layer that
-actually holds the key enforces the match the schema validator could not), and
-hands both to the connector as ``--key-file`` / ``--cert-file``.
+schema): the supervisor reads both context-specific certs from the settings
+row, VERIFIES the on-disk key matches their shared ``child_pub`` before
+launching, and hands them to the connector separately. ``--cert-file`` is
+registry admission; ``--channel-cert-file`` is the identity-neutral viewer
+handshake.
 
 The subprocess ``spawn`` is a seam so the reconciliation logic is testable
 without real processes; the default spawns ``python -m
@@ -39,6 +40,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -54,9 +56,13 @@ from tools.graph import settings_ops
 from tools.graph.schemas.network_identity import (
     NETWORK_LINK_GRANT_REVISION,
     NETWORK_LINK_GRANT_SET_ID,
+    NETWORK_SERVE_CERT_REVISION,
     NETWORK_SERVE_CERT_SET_ID,
     SERVE_CERT_SCOPE,
 )
+
+
+_PERSONA_PUB_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 # ── provisioning state (also the enrich precondition) ─────────
@@ -108,23 +114,80 @@ def serve_cert_state(org: str | None, *, now: float | None = None) -> dict:
       manifest root cannot be resolved;
     * ``key-missing`` — a row whose ``key_path`` file is gone.
 
-    This doubles as the publish-time precondition: the approve step mints a
-    fresh delegate iff the status is anything but ``ok``.
+This is the cheap pre-unlock check: every organization-root sign-on mints a
+fresh serving credential iff the status is anything but ``ok``.
     """
     now = time.time() if now is None else now
     try:
-        members = settings_ops.read_owned_set(NETWORK_SERVE_CERT_SET_ID, org=org).members
+        members = settings_ops.read_owned_set(
+            NETWORK_SERVE_CERT_SET_ID,
+            org=org,
+            target_revision=NETWORK_SERVE_CERT_REVISION,
+        ).members
     except Exception:
         return {"status": "missing"}
     rows = [m.payload for m in members if isinstance(m.payload, dict)]
     if not rows:
         return {"status": "missing"}
-    # v1 keeps one delegate per org; if several rows exist, the freshest
-    # (latest not_after) is the one to serve with.
+    # The keyed set keeps one credential per org. If corrupt storage contains
+    # several rows, select the freshest valid candidate deterministically.
     row = max(rows, key=lambda p: p.get("not_after") or 0)
     not_after = row.get("not_after")
     if not isinstance(not_after, int) or now >= not_after:
         return {"status": "expired", "row": row}
+    if not isinstance(row.get("viewer_cert"), str):
+        return {
+            "status": "identity-invalid",
+            "row": row,
+            "error": (
+                "serving credential lacks the required identity-neutral "
+                "viewer certificate; reprovision serving"
+            ),
+        }
+    try:
+        from tools.network.idkit import DelegationCert
+
+        cert = DelegationCert.from_json(row.get("cert"))
+        viewer_cert = DelegationCert.from_json(row.get("viewer_cert"))
+    except Exception as exc:
+        return {
+            "status": "identity-invalid",
+            "row": row,
+            "error": f"serve cert does not parse: {exc}",
+        }
+    if (
+        tuple(cert.scope) != (SERVE_CERT_SCOPE,)
+        or cert.parent_cert is not None
+        or cert.subject.kind != "persona"
+        or _PERSONA_PUB_RE.fullmatch(cert.subject.id) is None
+    ):
+        return {
+            "status": "identity-invalid",
+            "row": row,
+            "error": (
+                "serve cert must be a direct root-issued, persona-scoped "
+                "tunnel:serve delegate; reprovision serving"
+            ),
+        }
+    if (
+        tuple(viewer_cert.scope) != (SERVE_CERT_SCOPE,)
+        or viewer_cert.parent_cert is not None
+        or viewer_cert.subject.kind != "operator"
+        or viewer_cert.subject.id != viewer_cert.child_pub
+        or viewer_cert.child_pub != cert.child_pub
+        or viewer_cert.org != cert.org
+        or viewer_cert.not_before != cert.not_before
+        or viewer_cert.not_after != cert.not_after
+    ):
+        return {
+            "status": "identity-invalid",
+            "row": row,
+            "error": (
+                "viewer cert must be a direct root-issued, identity-neutral "
+                "certificate over the same serving child, org, and lifetime; "
+                "reprovision serving"
+            ),
+        }
     key_path, key_error = _resolve_key_path(row.get("key_path"))
     if key_error is not None:
         return {"status": "key-invalid", "row": row, "error": key_error}
@@ -134,6 +197,7 @@ def serve_cert_state(org: str | None, *, now: float | None = None) -> dict:
         "status": "ok",
         "row": row,
         "cert": row.get("cert"),
+        "viewer_cert": row.get("viewer_cert"),
         "key_path": key_path,
         "not_after": not_after,
     }
@@ -164,7 +228,8 @@ def _has_live_grant(org: str | None, now: float) -> bool:
 # ── key/cert materialization for the subprocess ───────────────
 
 
-def _verify_key_matches(cert_wire: str, key_path: str) -> tuple[bool, str]:
+def _verify_key_matches(cert_wire: str, viewer_cert_wire: str,
+                        key_path: str) -> tuple[bool, str]:
     """The on-disk key must be the one the cert delegates to, or we do not
     launch — the schema validator could not see the file, so the check lives
     here, at the layer that holds the key."""
@@ -176,17 +241,43 @@ def _verify_key_matches(cert_wire: str, key_path: str) -> tuple[bool, str]:
         return False, f"serve key file unreadable ({key_path}): {e}"
     try:
         cert = DelegationCert.from_json(cert_wire)
+        viewer_cert = DelegationCert.from_json(viewer_cert_wire)
     except Exception as e:
         return False, f"serve cert does not parse: {e}"
-    if SERVE_CERT_SCOPE not in cert.scope:
-        return False, f"serve cert lacks {SERVE_CERT_SCOPE} scope"
+    if tuple(cert.scope) != (SERVE_CERT_SCOPE,):
+        return False, f"serve cert scope is not exactly {SERVE_CERT_SCOPE}"
+    if cert.parent_cert is not None:
+        return False, "serve cert is not issued directly by the org root"
+    if (
+        cert.subject.kind != "persona"
+        or _PERSONA_PUB_RE.fullmatch(cert.subject.id) is None
+    ):
+        return False, "serve cert does not carry a canonical persona subject"
     if key.public_hex != cert.child_pub:
         return False, "serve key does not match the cert's child_pub"
+    if (
+        viewer_cert.child_pub != cert.child_pub
+        or tuple(viewer_cert.scope) != (SERVE_CERT_SCOPE,)
+        or viewer_cert.parent_cert is not None
+        or viewer_cert.org != cert.org
+        or viewer_cert.not_before != cert.not_before
+        or viewer_cert.not_after != cert.not_after
+        or viewer_cert.subject.kind != "operator"
+        or viewer_cert.subject.id != viewer_cert.child_pub
+    ):
+        return False, (
+            "viewer cert is not the identity-neutral direct-root certificate "
+            "for the same serving key, org, and lifetime"
+        )
     return True, "ok"
 
 
 def _cert_path_for(key_path: str) -> str:
     return os.path.splitext(key_path)[0] + ".cert"
+
+
+def _viewer_cert_path_for(key_path: str) -> str:
+    return os.path.splitext(key_path)[0] + ".viewer.cert"
 
 
 def _log_path_for(key_path: str) -> str:
@@ -274,7 +365,7 @@ def _materialize_cert(key_path: str, cert_wire: str) -> str:
 
 
 def _connector_command(binding: dict, org: str | None, key_path: str,
-                       cert_path: str) -> tuple[list, dict]:
+                       cert_path: str, viewer_cert_path: str) -> tuple[list, dict]:
     """The argv + env to launch the serving connector against *binding*."""
     argv = [
         sys.executable, "-m", "tools.dashboard.link_serving",
@@ -282,6 +373,7 @@ def _connector_command(binding: dict, org: str | None, key_path: str,
         "--org", binding["org_uuid"],
         "--key-file", key_path,
         "--cert-file", cert_path,
+        "--channel-cert-file", viewer_cert_path,
         "--control-file", _control_path_for(key_path),
     ]
     if org:
@@ -343,6 +435,7 @@ class ServingSupervisor:
         self._spawn = spawn or _default_spawn
         self._now = now or time.time
         self._procs: dict = {}       # org -> handle
+        self._credentials: dict = {} # org -> exact (both cert wires, key path) launched
         self._managed: set = set()   # orgs seen via ensure(), re-checked by the watchdog
         self._started_at: dict = {}  # org -> launch time; fresh-tunnel grace
         self._grace_s: float = 20.0  # one watchdog interval; a fresh tunnel is skipped once
@@ -375,7 +468,16 @@ class ServingSupervisor:
             self._managed.add(org)
             proc = self._procs.get(org)
             if proc is not None and proc.alive():
-                return {"running": True, "reason": "already-running"}
+                state = serve_cert_state(org, now=self._now())
+                if (
+                    state["status"] == "ok"
+                    and self._credentials.get(org)
+                    == (state["cert"], state["viewer_cert"], state["key_path"])
+                ):
+                    return {"running": True, "reason": "already-running"}
+                proc.stop()
+                self._procs.pop(org, None)
+                self._credentials.pop(org, None)
             self._procs.pop(org, None)
             state = serve_cert_state(org, now=self._now())
             if state["status"] != "ok":
@@ -400,35 +502,56 @@ class ServingSupervisor:
             if proc is not None:
                 proc.stop()
                 self._procs.pop(org, None)
+                self._credentials.pop(org, None)
             self._started_at.pop(org, None)
             reason = state["status"] if state["status"] != "ok" else "no-live-grants"
             return {"running": False, "reason": reason}
 
         if proc is not None and proc.alive():
-            return {"running": True, "reason": "already-running"}
+            if self._credentials.get(org) == (
+                state["cert"], state["viewer_cert"], state["key_path"]
+            ):
+                return {"running": True, "reason": "already-running"}
+            # Provisioning replaced this org's credential. Keeping the old
+            # process alive would leave it presenting the superseded cert
+            # forever, because ensure() otherwise treats any live PID as
+            # healthy. Stop and relaunch on the exact new credential.
+            proc.stop()
+            self._procs.pop(org, None)
+            self._credentials.pop(org, None)
         # A dead handle: drop it and relaunch below.
         self._procs.pop(org, None)
+        self._credentials.pop(org, None)
         return self._launch(org, state)
 
     def _launch(self, org: str | None, state: dict) -> dict:
         """Spawn the connector for *org* (``state`` must be an ``ok``
         serve-cert state) and record its launch time for the fresh-tunnel
         grace. Callers hold the lock."""
-        ok, detail = _verify_key_matches(state["cert"], state["key_path"])
+        ok, detail = _verify_key_matches(
+            state["cert"], state["viewer_cert"], state["key_path"])
         if not ok:
             return {"running": False, "reason": detail}
         binding, binding_error = _load_binding(org)
         if binding_error:
             return {"running": False, "reason": binding_error}
         cert_path = _materialize_cert(state["key_path"], state["cert"])
+        viewer_cert_path = _viewer_cert_path_for(state["key_path"])
+        viewer_tmp = viewer_cert_path + ".tmp"
+        with open(viewer_tmp, "w") as fh:
+            fh.write(state["viewer_cert"])
+        os.replace(viewer_tmp, viewer_cert_path)
         ctl_path = _control_path_for(state["key_path"])
         # A stale descriptor from a previous killed connector would mislead
         # control() until the new connector rewrites it; clear it up front.
         with contextlib.suppress(OSError):
             os.remove(ctl_path)
-        argv, env = _connector_command(binding, org, state["key_path"], cert_path)
+        argv, env = _connector_command(
+            binding, org, state["key_path"], cert_path, viewer_cert_path)
         self._procs[org] = self._spawn(
             argv, env, log_path=_log_path_for(state["key_path"]), ctl_path=ctl_path)
+        self._credentials[org] = (
+            state["cert"], state["viewer_cert"], state["key_path"])
         self._started_at[org] = self._now()
         return {"running": True, "reason": "launched"}
 
@@ -459,6 +582,7 @@ class ServingSupervisor:
                 except Exception:
                     pass
             self._procs.clear()
+            self._credentials.clear()
             self._managed.clear()
             self._started_at.clear()
         if watchdog is not None and watchdog is not threading.current_thread():

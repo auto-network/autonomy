@@ -139,16 +139,22 @@ def _mint_serve_cert(*, scope=("tunnel:serve",), org="2d4b90cb-0000-4000-8000-00
     now = int(time.time())
     cert = issue_cert(
         root, delegate.public_hex, scope=scope, org=org,
-        subject=Subject("operator", "op-serve"),
+        subject=Subject("persona", "ab" * 32),
         not_before=now - 300, not_after=now + ttl,
     )
-    return root, cert
+    viewer_cert = issue_cert(
+        root, delegate.public_hex, scope=scope, org=org,
+        subject=Subject("operator", delegate.public_hex),
+        not_before=cert.not_before, not_after=cert.not_after,
+    )
+    return root, cert, viewer_cert
 
 
 def serve_cert_payload() -> dict:
-    root, cert = _mint_serve_cert()
+    root, cert, viewer_cert = _mint_serve_cert()
     return {
         "cert": cert.to_json().decode("ascii"),
+        "viewer_cert": viewer_cert.to_json().decode("ascii"),
         "key_path": "/var/lib/dashboard/network/serve-2d4b90cb.key",
         "root_pub": root.public_hex,
         "not_after": cert.not_after,
@@ -164,24 +170,30 @@ ALL_SET_IDS = {
 
 
 def test_serve_cert_valid_payload_validates():
-    validate_payload(ni.NETWORK_SERVE_CERT_SET_ID, 1, serve_cert_payload())
+    validate_payload(
+        ni.NETWORK_SERVE_CERT_SET_ID, ni.NETWORK_SERVE_CERT_REVISION,
+        serve_cert_payload(),
+    )
 
 
 def test_serve_cert_rejects_scope_without_tunnel_serve():
-    root, cert = _mint_serve_cert(scope=("link:publish",))
+    root, cert, viewer_cert = _mint_serve_cert(scope=("link:publish",))
     payload = {
-        "cert": cert.to_json().decode("ascii"), "key_path": "/k",
+        "cert": cert.to_json().decode("ascii"),
+        "viewer_cert": viewer_cert.to_json().decode("ascii"), "key_path": "/k",
         "root_pub": root.public_hex, "not_after": cert.not_after,
     }
     with pytest.raises(SchemaValidationError, match="tunnel:serve"):
-        validate_payload(ni.NETWORK_SERVE_CERT_SET_ID, 1, payload)
+        validate_payload(
+            ni.NETWORK_SERVE_CERT_SET_ID, ni.NETWORK_SERVE_CERT_REVISION, payload)
 
 
 def test_serve_cert_rejects_not_after_mismatch():
     payload = serve_cert_payload()
     payload["not_after"] += 5   # no longer mirrors the cert
     with pytest.raises(SchemaValidationError, match="not_after"):
-        validate_payload(ni.NETWORK_SERVE_CERT_SET_ID, 1, payload)
+        validate_payload(
+            ni.NETWORK_SERVE_CERT_SET_ID, ni.NETWORK_SERVE_CERT_REVISION, payload)
 
 
 def test_serve_cert_rejects_wrong_root():
@@ -189,14 +201,16 @@ def test_serve_cert_rejects_wrong_root():
     payload = serve_cert_payload()
     payload["root_pub"] = KeyPair.generate().public_hex  # not the signer
     with pytest.raises(SchemaValidationError, match="chain to root_pub"):
-        validate_payload(ni.NETWORK_SERVE_CERT_SET_ID, 1, payload)
+        validate_payload(
+            ni.NETWORK_SERVE_CERT_SET_ID, ni.NETWORK_SERVE_CERT_REVISION, payload)
 
 
 def test_serve_cert_rejects_unparseable_cert():
     payload = serve_cert_payload()
     payload["cert"] = "{not a real cert}"
     with pytest.raises(SchemaValidationError, match="does not parse"):
-        validate_payload(ni.NETWORK_SERVE_CERT_SET_ID, 1, payload)
+        validate_payload(
+            ni.NETWORK_SERVE_CERT_SET_ID, ni.NETWORK_SERVE_CERT_REVISION, payload)
 
 
 # ── registration + happy-path validation ─────────────────────

@@ -40,7 +40,7 @@ import httpx
 import pytest
 import websockets
 
-from tools.network.idkit import KeyPair
+from tools.network.idkit import KeyPair, Subject, issue_cert
 from tools.network.registry.signing import sign_request
 from tools.network.relaykit.channel import HandshakeError
 from tools.network.relaykit.connector import TunnelConnector
@@ -115,13 +115,23 @@ def stack(tmp_path_factory, root, session_key, session_cert):
         cwd=str(REPO), env=env,
     )
 
-    key_file, cert_file = tmp / "session.hex", tmp / "session.cert"
+    now = int(time.time())
+    floor_cert = issue_cert(
+        root, session_key.public_hex, scope=("tunnel:serve",), org=ORG,
+        subject=Subject("persona", "ab" * 32),
+        not_before=now - 300, not_after=now + 7 * 86_400,
+    )
+    key_file = tmp / "session.hex"
+    cert_file = tmp / "floor.cert"
+    channel_cert_file = tmp / "channel.cert"
     key_file.write_text(session_key.private_hex)
-    cert_file.write_text(session_cert.to_json().decode("ascii"))
+    cert_file.write_text(floor_cert.to_json().decode("ascii"))
+    channel_cert_file.write_text(session_cert.to_json().decode("ascii"))
     connector = subprocess.Popen(
         [sys.executable, "-m", "tools.network.relaykit.connector",
          "--relay", f"ws://127.0.0.1:{tap_port}", "--org", ORG,
          "--key-file", str(key_file), "--cert-file", str(cert_file),
+         "--channel-cert-file", str(channel_cert_file),
          "--min-backoff", "0.1", "--max-backoff", "1.0"],
         cwd=str(REPO), env=env,
         stdout=open(tmp / "connector.log", "ab"), stderr=subprocess.STDOUT,

@@ -452,15 +452,6 @@ def _enrich_link_publish(row: dict) -> dict:
     if staged is None and binding_error and _is_registerable_on_first_publish(org):
         registration_required = True
         binding_error = None
-    # Internal precondition (NOT shown in the dialog): whether the approve step
-    # must ALSO mint a serve-cert in its single root unlock. True when no usable
-    # serve-cert is provisioned. The browser reads it to decide the dual-mint;
-    # the operator sees nothing about serving.
-    try:
-        from tools.dashboard.link_serving_supervisor import serve_cert_ok
-        serve_cert_required = not serve_cert_ok(org)
-    except Exception:
-        serve_cert_required = True  # fail toward minting; a spurious mint is safe
     recipient, recipient_error = _link_recipient(req)
     out = {
         "target_title": target["title"],
@@ -473,7 +464,6 @@ def _enrich_link_publish(row: dict) -> dict:
         "binding_error": binding_error,
         "binding_drift": drift,
         "registration_required": registration_required,
-        "serve_cert_required": serve_cert_required,
         **_approval_identities(org),
     }
     if target.get("preview"):
@@ -891,7 +881,8 @@ async def _execute_share_link_publish_tunnel(row: dict, decision: dict) -> dict:
         args["meta"] = wire_meta
     # First publish is chicken-and-egg: the serving tunnel only runs while a
     # link is live, but the very first link is created BY riding the tunnel.
-    # Start serving now (the approve step minted the serve-cert); the
+    # Start serving now (an earlier org-root sign-on provisioned the serving
+    # credential); the
     # supervisor's fresh-tunnel grace keeps the watchdog from reaping it before
     # this publish caches its grant.
     sup = get_supervisor()

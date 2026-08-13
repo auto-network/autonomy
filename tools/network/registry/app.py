@@ -902,6 +902,10 @@ def create_app(
             raise _bad_request(str(exc))
         store.add_revocation(org_uuid, record)
         store.purge_expired_revocations(now=t)
+        # Revocation is effective on the standing connection, not merely on
+        # its next reconnect. The hub keeps only connection-memory signer
+        # attribution; no persona/address history is created.
+        await hub.close_revoked(org_uuid, record.revoked_key_id)
         return {"revoked_key_id": record.revoked_key_id, "expires_at": record.expires_at}
 
     # -- §4.6 grant envelope (bootloader) -------------------------------------

@@ -332,11 +332,23 @@ def found_node(payload: dict) -> dict:
         delegate.public_hex,
         scope=("tunnel:serve",),
         org=org_uuid,
-        subject=Subject("operator", "harness-serving"),
+        # TEST AUTOMATION ONLY: exercise the production persona-bound serving
+        # contract with the real founder persona derived above. The serving
+        # child remains an independent key and never reuses persona material.
+        subject=Subject("persona", founder.public_hex),
         not_before=now - 30,
         not_after=now + 24 * 60 * 60,
     )
-    key_name = f"serve-{org_uuid}.key"
+    viewer_cert = issue_cert(
+        org_root,
+        delegate.public_hex,
+        scope=("tunnel:serve",),
+        org=org_uuid,
+        subject=Subject("operator", delegate.public_hex),
+        not_before=cert.not_before,
+        not_after=cert.not_after,
+    )
+    key_name = f"serve-{org_uuid}-{delegate.public_hex}.key"
     key_dir = resolve_store("serving_keys")
     key_path = key_dir / key_name
     _write_mode_0600(key_path, delegate.private_hex)
@@ -346,6 +358,7 @@ def found_node(payload: dict) -> dict:
         "default",
         {
             "cert": cert.to_json().decode("ascii"),
+            "viewer_cert": viewer_cert.to_json().decode("ascii"),
             "key_path": key_name,
             "root_pub": org_root.public_hex,
             "not_after": cert.not_after,

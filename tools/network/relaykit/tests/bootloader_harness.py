@@ -255,12 +255,22 @@ print('highlighted')
             raise RuntimeError("registry did not start")
 
         root, session = KeyPair.generate(), KeyPair.generate()
+        serve_key = KeyPair.generate()
         now = int(time.time())
         cert = issue_cert(
             root, session.public_hex,
             scope=("link:publish", "tunnel:serve"), org=ORG_UUID,
             subject=Subject("operator", "browser-harness"),
             not_before=now - 300, not_after=now + 7 * 86_400,
+        )
+        serve_cert = issue_cert(
+            root,
+            serve_key.public_hex,
+            scope=("tunnel:serve",),
+            org=ORG_UUID,
+            subject=Subject("persona", "ab" * 32),
+            not_before=now - 300,
+            not_after=now + 7 * 86_400,
         )
         with httpx.Client(base_url=f"http://127.0.0.1:{reg_port}") as client:
             registered = client.post("/v1/orgs", json=sign_request(
@@ -276,8 +286,8 @@ print('highlighted')
         cache_grant(settings_ops, schema, design_token, design, "design")
 
         key_file, cert_file = tmp / "key.hex", tmp / "cert.json"
-        key_file.write_text(session.private_hex)
-        cert_file.write_text(cert.to_json().decode("ascii"))
+        key_file.write_text(serve_key.private_hex)
+        cert_file.write_text(serve_cert.to_json().decode("ascii"))
         connector = subprocess.Popen(
             [sys.executable, "-m", "tools.dashboard.link_serving",
              "--relay", f"ws://127.0.0.1:{reg_port}", "--org", ORG_UUID,
