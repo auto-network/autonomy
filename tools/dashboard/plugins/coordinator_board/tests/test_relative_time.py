@@ -30,71 +30,35 @@ def _node_available() -> bool:
     return shutil.which("node") is not None
 
 
-_NODE_DRIVER = r"""
-// Stub the schema runtime — page.js falls back to ``state`` when
-// Schema.alpine isn't a function, which is enough to surface the
-// module-scope ``relativeTime`` since we re-export it.
-global.window = global.window || {};
-global.window.Schema = null;
-const mod = require(%(page_js)s);
-// page.js does not export relativeTime directly; reach it through eval
-// against the module file. Reimport via Function to keep the helper
-// reachable for tests without changing the plugin's public surface.
-const src = require('fs').readFileSync(%(page_js)s, 'utf-8');
-const fn = new Function(src + '\nreturn relativeTime;');
-const relativeTime = fn();
-
-const cases = %(cases)s;
-const results = cases.map(c => {
-  return { id: c.id, out: relativeTime(c.input) };
-});
-process.stdout.write(JSON.stringify(results));
-"""
-
-
-def _run_cases(cases: list[dict]) -> list[dict]:
-    src = _NODE_DRIVER % {
-        "page_js": json.dumps(str(PAGE_JS)),
-        "cases": json.dumps(cases),
-    }
-    proc = subprocess.run(
-        ["node", "-e", src],
-        capture_output=True, text=True, timeout=10,
-    )
-    if proc.returncode != 0:
-        raise AssertionError(
-            f"node driver failed:\nstdout={proc.stdout}\nstderr={proc.stderr}"
-        )
-    return json.loads(proc.stdout)
-
-
-def _iso_offset_minutes(minutes: float) -> str:
-    """Return an ISO timestamp ``minutes`` minutes before Date.now().
-
-    Computed inside the Node subprocess so we don't drift across
-    py↔node clock skew.
-    """
-    return f"__NOW_MINUS_MIN__:{minutes}"
-
-
 @pytest.mark.skipif(not _node_available(), reason="node not installed")
 class TestRelativeTime:
     """Stop-the-clock thresholds the operator pinned in bead auto-fwwfu."""
 
     def test_threshold_thresholds(self):
-        # Run a single Node call that resolves the ``__NOW_MINUS_MIN__``
-        # markers internally so wall-clock skew across the py↔node
+        # Run a single Node call that stamps every threshold timestamp
+        # from one ``Date.now()`` so wall-clock skew across the py↔node
         # boundary doesn't tip us across a threshold.
-        # Set window.Schema to a non-null stub so page.js skips the
-        # ``require('../../static/js/schemas.js')`` fallback that breaks
-        # under a Function-eval'd source string.
+        #
+        # ``relativeTime`` is a module-scope helper in page.js, not part
+        # of the plugin's CommonJS export surface, so we reach it by
+        # eval'ing the source and returning the binding. The catch: the
+        # source's module-scope ``require('../../static/js/…')`` fallbacks
+        # (schemas.js, surface-presence.js) have no containing file to
+        # resolve against inside a bare ``new Function`` eval, and blow up
+        # with MODULE_NOT_FOUND. Hand the eval a ``require`` anchored at
+        # page.js via ``module.createRequire`` — the same resolution the
+        # sibling ``require(page_js)`` drivers get for free — so those
+        # fallbacks resolve and the test exercises the threshold logic
+        # rather than the loader.
         driver = (
             "const fs = require('fs'); "
-            f"const src = fs.readFileSync({json.dumps(str(PAGE_JS))}, 'utf-8'); "
+            "const Module = require('module'); "
+            f"const PAGE_JS = {json.dumps(str(PAGE_JS))}; "
+            "const src = fs.readFileSync(PAGE_JS, 'utf-8'); "
             "global.window = global.window || {}; "
-            "global.window.Schema = { alpine: null, _setFetchOverride: () => {} }; "
-            "const fn = new Function(src + '\\nreturn relativeTime;'); "
-            "const relativeTime = fn(); "
+            "const req = Module.createRequire(PAGE_JS); "
+            "const fn = new Function('require', src + '\\nreturn relativeTime;'); "
+            "const relativeTime = fn(req); "
             "const now = Date.now(); "
             "function iso(secAgo) { return new Date(now - secAgo * 1000).toISOString(); } "
             "const out = { "
