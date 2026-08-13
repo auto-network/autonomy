@@ -46,11 +46,6 @@
     $("org-id").textContent = inputs.org;
     $("invite-ref").textContent = inputs.inviteRef.slice(0, 16) + "…";
     $("invitation").classList.remove("hidden");
-
-    $("accept").addEventListener("click", function () {
-      $("held").classList.remove("hidden");
-      $("accept").disabled = true;
-    });
   }
 
   if (document.readyState === "loading") {
