@@ -84,7 +84,10 @@ def test_compose_topology_is_manifest_rooted_and_has_no_host_data_mounts(tmp_pat
     text = compose_path.read_text()
     assert "AUTONOMY_HARNESS_INVITE_B" in text
     assert "claim_token" not in text
-    assert "harness-personal-password" in text  # path only, never the value
+    assert "test-automation-personal-password" in text  # path only, never value
+    assert "AUTONOMY_TEST_AUTOMATION" in text
+    assert "AUTONOMY_TEST_PERSONAL_PASSWORD_FILE" in text
+    assert "AUTONOMY_PERSONAL_PASSWORD_FILE" not in text
 
 
 @pytest.mark.parametrize(

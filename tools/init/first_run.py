@@ -232,8 +232,9 @@ def _run_join(report: InitReport, invitation, transport) -> None:
         if personal_identity_exists():
             if password is None:
                 raise JoinError(
-                    "a personal identity exists but no mounted/stdin password "
-                    "was available to resume the join"
+                    "a personal identity exists but no one-time stdin password "
+                    "was available to resume the join; complete this operation "
+                    "through an approved interactive identity ceremony"
                 )
             outcome = join_existing_identity(
                 invitation, transport, password=password

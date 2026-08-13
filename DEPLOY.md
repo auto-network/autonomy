@@ -72,25 +72,22 @@ user-carried invitation; the two settings are mutually exclusive. For an
 It keeps the registry's URL-path channel token distinct from the
 fragment-carried ledger claim token; version-1 one-token codes are refused.
 
-A headless join unlocks or creates the node's personal identity only from a
-mounted password file:
+A production installation does not accept a mounted personal-passphrase
+file. With no one-time stdin password, a fresh headless node validates and
+stages the invitation without minting an identity or membership claim; the
+personal identity ceremony remains an explicit interactive operation.
 
-```bash
-docker run \
-  -e AUTONOMY_INVITE="$INVITATION" \
-  -e AUTONOMY_PERSONAL_PASSWORD_FILE=/run/secrets/personal-password \
-  --mount type=bind,src=/secure/personal-password,dst=/run/secrets/personal-password,readonly \
-  --mount source=autonomy-data,destination=/app/data \
-  autonomy-dashboard:local
-```
+The multi-node harness has a separately named, doubly guarded mounted-file
+input for synthetic test identities. It is documented only in
+`deploy/harness/README.md` and is not mounted by the production dashboard.
 
 A bearer join that needs approval persists only public resume coordinates in
 `pending_joins.db`; restarting with the same invitation resumes and finalizes
 at the server-recorded claim position after approval. The bearer, password,
 root seed, and armor are never written to that store. An already-identified
-running node can accept the same invitation at `POST /api/identity/join` from
-loopback only, with body `{"invite":"..."}`. This endpoint never accepts a
-password in HTTP; the mounted `AUTONOMY_PERSONAL_PASSWORD_FILE` is required.
+running node does not accept the invitation through a server-side password
+handoff. The production dashboard exposes no mounted-passphrase join endpoint;
+interactive acceptance remains a browser-local identity ceremony.
 
 ### Verified published images
 

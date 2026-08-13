@@ -24,9 +24,15 @@ data directory or Docker socket is mounted. Every persistent store is
 explicitly rooted below `/app/data` and the real-data fallback guard is on.
 
 The generated Compose file contains only `${AUTONOMY_HARNESS_INVITE_B:-}`;
-the invitation value is supplied to the single `up node-b` subprocess. The
-personal password crosses stdin into a mode-0600 file in B's named volume.
-Neither credential is written to the Compose file or preserved logs.
+the invitation value is supplied to the single `up node-b` subprocess.
+
+**TEST AUTOMATION ONLY:** the harness's synthetic personal password crosses
+stdin into a mode-0600 file in B's isolated named volume. Its input is named
+`AUTONOMY_TEST_PERSONAL_PASSWORD_FILE` and is accepted only while both
+`AUTONOMY_TEST_AUTOMATION=1` and
+`AUTONOMY_REFUSE_REAL_DATA_FALLBACK=1` are set. Production installation and
+browser invitation flows do not support a mounted personal-passphrase file.
+Neither test credential is written to the Compose file or preserved logs.
 
 ## CI requirement
 

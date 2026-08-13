@@ -81,9 +81,9 @@ that persists. That's the honest pitch, and §5 is how you check the rest.
   (`docker --version`, `docker compose version`); a few GB of disk.
 - **Already installed?** Probe `https://localhost:8080` (accept a
   self-signed cert). A responding Autonomy dashboard means your job is
-  handoff, not installation — tell the user, and if they arrived with an
-  invitation, an already-identified node accepts it at
-  `POST /api/identity/join` from loopback (body `{"invite": "..."}`).
+  handoff, not installation — tell the user. Do not send an invitation or a
+  personal password to a loopback API: interactive invitation acceptance is
+  a browser-local identity ceremony, not a server-side password handoff.
 - Context you already have: the user's repositories, their git identity,
   whether teammates appear in commit history, whether an invitation link is
   in hand. Prefer inference over questions; aim to ask at most three
@@ -154,10 +154,11 @@ docker run \
 `AUTONOMY_FIRST_ORG` and `AUTONOMY_INVITE` are mutually exclusive. A join
 that needs approval parks safely and resumes on restart with the same
 invitation — approvals are asynchronous, so expect to continue setup while
-it's pending (§6a). The headless variant with
-`AUTONOMY_PERSONAL_PASSWORD_FILE` exists for server installs where the
-operator manages the secret file; it is not the default path and you do
-not generate that password.
+it's pending (§6a). There is no production mounted-personal-password variant.
+With no one-time stdin password, a headless start may validate and stage the
+invitation, but must not mint an identity or membership claim. The separately
+guarded file input used by the multi-node test harness is test automation only
+and is not an installation interface.
 
 **What will NOT happen, on either path:** no account creation, no license
 check, no telemetry, no CDN at runtime. The only external fetches are

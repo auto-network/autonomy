@@ -45,9 +45,10 @@ def test_env_names_exist_where_the_primer_says_they_do():
         assert env in COMPOSE, env
     # The invite path is docker-run based, exactly as DEPLOY.md documents
     # (compose does not pass AUTONOMY_INVITE through — auto-1orut tracks it).
-    for env in ("AUTONOMY_INVITE", "AUTONOMY_PERSONAL_PASSWORD_FILE"):
-        assert env in PRIMER, env
-        assert env in DEPLOY_MD, env
+    assert "AUTONOMY_INVITE" in PRIMER
+    assert "AUTONOMY_INVITE" in DEPLOY_MD
+    assert "AUTONOMY_PERSONAL_PASSWORD_FILE" not in PRIMER
+    assert "AUTONOMY_PERSONAL_PASSWORD_FILE" not in DEPLOY_MD
 
 
 def test_referenced_scripts_and_tools_exist():
@@ -73,6 +74,6 @@ def test_every_install_link_in_the_primer_resolves():
         assert (INSTALL_DIR / doc).is_file(), f"primer links missing doc: {doc}"
 
 
-def test_loopback_join_endpoint_matches_deploy_md():
-    assert "POST /api/identity/join" in PRIMER
-    assert "/api/identity/join" in DEPLOY_MD
+def test_production_docs_do_not_advertise_a_server_side_password_handoff():
+    assert "POST /api/identity/join" not in PRIMER
+    assert "/api/identity/join" not in DEPLOY_MD
