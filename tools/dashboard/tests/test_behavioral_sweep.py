@@ -3408,7 +3408,8 @@ class TestSessionsPageBehavior:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         """Run the sessions page check bundle once, cache for all test methods."""
         result = _navigate_and_check("/sessions", SESSIONS_PAGE_CHECKS, wait_ms=1500)
         request.cls._checks = result
@@ -3639,7 +3640,8 @@ class TestRecentSortAndSinceBehavior:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_eval_async(
             "/sessions",
             RECENT_SORT_SINCE_BEHAVIOR_CHECKS,
@@ -3678,7 +3680,8 @@ class TestDispatchPageBehavior:
     """Dispatch page behavioral sweep — section headings, bead cards, pause controls."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_check("/dispatch", DISPATCH_PAGE_CHECKS, wait_ms=1000)
         request.cls._checks = result
 
@@ -3737,7 +3740,8 @@ class TestBeadsPageBehavior:
     """Beads page behavioral sweep — view tabs, table rows, filters."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_check("/beads", BEADS_PAGE_CHECKS, wait_ms=1000)
         request.cls._checks = result
 
@@ -3793,7 +3797,8 @@ class TestActivitySurfaceBehavior:
     """Unified Activity surface sweep across both /timeline and /activity."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         request.cls._timeline = _navigate_and_eval_async("/timeline", ACTIVITY_PAGE_CHECKS, wait_ms=1200)
         request.cls._activity = _navigate_and_eval_async("/activity", ACTIVITY_PAGE_CHECKS, wait_ms=1200)
 
@@ -4243,7 +4248,8 @@ class TestActivityAttentionTabBehavior:
     """Activity surface — Attention tab over /api/journal (auto-ruhdw)."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         request.cls._timeline = _navigate_and_eval_async("/timeline", ACTIVITY_ATTENTION_CHECKS, wait_ms=1200)
         request.cls._activity = _navigate_and_eval_async("/activity", ACTIVITY_ATTENTION_CHECKS, wait_ms=1200)
 
@@ -4672,7 +4678,8 @@ class TestActivityNotificationsTabBehavior:
     """Activity surface — Notifications tab over SessionAsk substrate (auto-6gv89)."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         request.cls._timeline = _navigate_and_eval_async(
             "/timeline", ACTIVITY_NOTIFICATIONS_CHECKS, wait_ms=1200,
         )
@@ -4861,7 +4868,8 @@ class TestCollabPageBehavior:
     """Collab page behavioral sweep — tabs, notes, thought input."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_check("/collab", COLLAB_PAGE_CHECKS, wait_ms=1000)
         request.cls._checks = result
 
@@ -4930,7 +4938,8 @@ class TestSearchPageRanking:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         # ?q=worktree exercises the search path so the sticky strip is
         # visible and the auto-kvka6 ranking fixture rows surface (the
         # mock DAO substring-filters search_results by query).
@@ -5018,7 +5027,8 @@ class TestStreamsPageBehavior:
     """Streams page behavioral sweep — heading, stream entries, counts."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_check("/streams", STREAMS_PAGE_CHECKS, wait_ms=1000)
         request.cls._checks = result
 
@@ -5060,7 +5070,8 @@ class TestWorktreesPageBehavior:
     """Worktrees page behavioral sweep — stable mount and review overlays."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_eval_async("/worktrees", WORKTREES_PAGE_CHECKS, wait_ms=1200)
         request.cls._checks = result
 
@@ -5802,7 +5813,8 @@ class TestApprovalRequired:
     """L2.B for Gate 2's action-specific auto.network approval sheet."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         request.cls._checks = _navigate_and_eval_async(
             "/worktrees", LINK_PUBLISH_APPROVAL_CHECKS, wait_ms=1200)
 
@@ -5895,7 +5907,8 @@ class TestDashboardAccessApproval:
     """L2.B for root-signed, one-time dashboard-access approvals."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         request.cls._checks = _navigate_and_eval_async(
             "/worktrees", DASHBOARD_ACCESS_APPROVAL_CHECKS, wait_ms=1200)
 
@@ -6079,7 +6092,8 @@ class TestJiraCreateApprovalPreview:
     """Creation descriptions render as readable text, outside the fields JSON."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         request.cls._checks = _navigate_and_eval_async(
             "/worktrees", JIRA_CREATE_APPROVAL_CHECKS, wait_ms=1200)
 
@@ -6109,7 +6123,8 @@ class TestWorktreesRebaseStatusBehavior:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_eval_async(
             "/worktrees", WORKTREES_REBASE_STATUS_CHECKS, wait_ms=1500,
         )
@@ -6194,7 +6209,8 @@ class TestBeadDetailPageBehavior:
     """Bead detail page behavioral sweep — title, priority, status, description."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_check("/bead/auto-sweep-b1", BEAD_DETAIL_CHECKS, wait_ms=1000)
         request.cls._checks = result
 
@@ -6251,7 +6267,8 @@ class TestTracePageBehavior:
     """Trace page behavioral sweep — header, decision, scores."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_check(
             "/dispatch/trace/run-sweep-001", TRACE_PAGE_CHECKS, wait_ms=1000,
         )
@@ -6348,7 +6365,8 @@ class TestTraceOverlayBehavior:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         """Navigate to trace page, run check bundle, cache results."""
         result = _navigate_and_check(
             "/dispatch/trace/auto-sweep-b2-20260327-120000",
@@ -6439,7 +6457,8 @@ class TestHostSessionInputBehavior:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         """Navigate to host session viewer, run check bundle."""
         result = _navigate_and_check(
             "/session/autonomy/host-sweep-delta",
@@ -6544,7 +6563,8 @@ class TestSessionViewerTodoTiles:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_check(
             "/session/autonomy/auto-sweep-alpha",
             TODO_TILE_CHECKS,
@@ -6605,7 +6625,8 @@ class TestSessionViewerPreReadyLoadingChip:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         _navigate_and_check("/session/autonomy/auto-sweep-alpha", "", wait_ms=2000)
         result = _run_async_eval(
             """(async () => {
@@ -6759,7 +6780,8 @@ class TestSessionViewerWorktreeOverlay:
     """Session-viewer worktree review opens as an overlay without route churn."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         _navigate_and_check("/session/autonomy/auto-sweep-alpha", "", wait_ms=3000)
         result = _run_async_eval(
             f"""(async () => {{
@@ -7064,7 +7086,8 @@ class TestSessionTurnCorrectionOverlay:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         # Fresh navigation so prior class-scoped page state doesn't leak.
         result = _navigate_and_check(
             "/session/autonomy/auto-sweep-alpha",
@@ -7443,7 +7466,8 @@ class TestSessionTurnCorrectionLiveSync:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         # Navigate fresh to the session, then drive the production handler.
         subprocess.run(
             ["agent-browser", "eval", "navigateTo('/session/autonomy/auto-sweep-alpha')"],
@@ -7540,7 +7564,8 @@ class TestHostSessionTailContract:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def tail_response(self, browser, request):
+    @classmethod
+    def tail_response(cls, browser, request):
         """Fetch tail response for host session directly via HTTP.
 
         Depends on `browser` fixture to ensure sweep_server is running.
@@ -7693,7 +7718,8 @@ class TestExperimentToolbar:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         """Navigate to design page, wait for Alpine, run async check bundle."""
         result = _navigate_and_eval_async(
             f"/design/{SWEEP_EXPERIMENT_ID}",
@@ -7812,7 +7838,8 @@ class TestPlainNoteBehavior:
     """Plain note renders readable markdown content."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_check(
             f"/graph/{SWEEP_PLAIN_NOTE_ID[:12]}",
             PLAIN_NOTE_CHECKS,
@@ -7917,7 +7944,8 @@ class TestRichNoteDirectView:
     """Direct view of a rich-content note shows diagram in sandboxed iframe with toggle."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_check(
             f"/graph/{SWEEP_RICH_NOTE_ID[:12]}",
             RICH_NOTE_DIRECT_CHECKS,
@@ -8019,7 +8047,8 @@ class TestParentNoteEmbeds:
     """Parent note with ![[id]] embeds renders rich content in iframes inline."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_eval_async(
             f"/graph/{SWEEP_PARENT_NOTE_ID[:12]}",
             PARENT_EMBED_CHECKS,
@@ -8070,7 +8099,8 @@ class TestLegacyEmbedBackwardsCompat:
     """Old ![alt](graph://id) syntax still renders visible images."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_check(
             f"/graph/{SWEEP_LEGACY_NOTE_ID[:12]}",
             LEGACY_EMBED_CHECKS,
@@ -8110,7 +8140,8 @@ class TestGraphRewriteScopingSession:
     """Session viewer must NOT rewrite graph:// — it should render literally."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_check(
             "/session/autonomy/auto-sweep-alpha",
             GRAPH_REWRITE_SESSION_CHECKS,
@@ -8138,7 +8169,8 @@ class TestGraphRewriteScopingBead:
     """Bead detail page must NOT rewrite graph:// — it should render literally."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_check(
             "/bead/auto-sweep-b4",
             GRAPH_REWRITE_BEAD_CHECKS,
@@ -8196,7 +8228,8 @@ class TestRichContentNarrowViewport:
     """At narrow viewport (600px), wide diagrams must scroll horizontally, not clip."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         # Set narrow viewport
         subprocess.run(
             ["agent-browser", "set", "viewport", "600", "800"],
@@ -8281,7 +8314,8 @@ class TestSourceViewerRoleRendering:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_check(
             f"/graph/{SWEEP_CHAT_SOURCE_ID[:12]}",
             ROLE_RENDERING_CHECKS,
@@ -8367,7 +8401,8 @@ class TestSourceViewerHeaderMetadata:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         request.cls._a = _navigate_and_check(
             f"/graph/{SWEEP_HEADER_META_SINGLE_DAY_ID[:12]}",
             HEADER_META_CHECKS,
@@ -8517,7 +8552,8 @@ class TestGraphSourcePageLoad:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, sweep_server, request):
+    @classmethod
+    def checks(cls, browser, sweep_server, request):
         request.cls._sweep_url = sweep_server["url"]
         request.cls._render = _navigate_and_check(
             f"/graph/{SWEEP_LONG_SESSION_ID[:12]}",
@@ -8766,7 +8802,8 @@ class TestAgentActionsDropdown:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_eval_async(
             f"/graph/{SWEEP_AGENT_ACTIONS_AUTONOMY_NOTE_ID[:12]}",
             AGENT_ACTIONS_AUTONOMY_CHECKS,
@@ -8881,7 +8918,8 @@ class TestAgentActionsDropdownHiddenForEmptyOrg:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_eval_async(
             f"/graph/{SWEEP_AGENT_ACTIONS_EMPTY_NOTE_ID[:12]}",
             AGENT_ACTIONS_HIDDEN_CHECKS,
@@ -8904,7 +8942,8 @@ class TestAgentActionsDropdownLiveRefresh:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, sweep_server, request):
+    @classmethod
+    def checks(cls, browser, sweep_server, request):
         fixture_path = Path(sweep_server["fixture_path"])
         events_path = Path(sweep_server["events_path"])
         original_text = fixture_path.read_text()
@@ -9198,7 +9237,8 @@ class TestAskQuestionActionBehavior:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_eval_async(
             "/bead/auto-sweep-b1",
             ASK_QUESTION_MODAL_CHECKS,
@@ -9428,7 +9468,8 @@ class TestSearchPageBehavior:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_eval_async(
             "/search?q=dashboard",
             SEARCH_PAGE_MULTI_STATE_CHECKS,
@@ -9687,7 +9728,8 @@ class TestSearchChromePolish:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_eval_async(
             "/search?q=polish",
             SEARCH_CHROME_POLISH_CHECKS,
@@ -9883,7 +9925,8 @@ class TestSearchPillSemantics:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_eval_async(
             "/search?q=pillsweep",
             SEARCH_PILL_SEMANTICS_CHECKS,
@@ -10132,7 +10175,8 @@ class TestSearchSortChip:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         # ``navigateTo`` short-circuits identical paths, so bounce away
         # from the previous search-page class first to force a fresh
         # Alpine mount before we capture the next sort-driven refetch.
@@ -10339,7 +10383,8 @@ class TestSearchPillRefetch:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_eval_async(
             "/search?q=pillsweep",
             SEARCH_PILL_REFETCH_CHECKS,
@@ -10538,7 +10583,8 @@ class TestSearchDropdownPositioning:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_eval_async(
             "/search?q=pillsweep",
             SEARCH_DROPDOWN_POSITIONING_CHECKS,
@@ -10702,7 +10748,8 @@ class TestSearchFilterStripNarrowViewport:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         subprocess.run(
             ["agent-browser", "set", "viewport", "390", "844"],
             capture_output=True, timeout=5,
@@ -10942,7 +10989,8 @@ class TestCollabRecentTabBehavior:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         # Clear any localStorage left by earlier collab clicks before
         # navigating, so the default-active assertion sees a fresh state.
         subprocess.run(
@@ -11071,7 +11119,8 @@ class TestDispatchAgenticKindBadge:
     """L2.B backfill for the auto-5k2j4 kind-badge addition on /dispatch."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_check(
             "/dispatch", DISPATCH_KIND_BADGE_CHECKS, wait_ms=1000,
         )
@@ -11170,7 +11219,8 @@ class TestAgenticDispatchObservability:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         result = _navigate_and_check(
             "/dispatch", DISPATCH_AGENTIC_ROUTING_CHECKS, wait_ms=1000,
         )
@@ -12231,7 +12281,8 @@ class TestCoordinatorBoardSettingsWiring:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def _reset_class_state(self, sweep_server):
+    @classmethod
+    def _reset_class_state(cls, sweep_server):
         # By this point in the sweep the shared mock server + browser
         # pair can carry stale coordinator state across classes. Match
         # the later coordinator sweeps and restart both once before the
@@ -12647,7 +12698,8 @@ class TestSessionHarnessBadge:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, sweep_server, request):
+    @classmethod
+    def checks(cls, browser, sweep_server, request):
         # auto-pepqk — by this point in the sweep (~290 tests in) the
         # module-scoped agent-browser tab + uvicorn process have
         # accumulated enough SSE subscriber + Alpine + EventBus state
@@ -12991,7 +13043,8 @@ class TestCoordinatorBoardParityV2:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def _reset_class_state(self, sweep_server):
+    @classmethod
+    def _reset_class_state(cls, sweep_server):
         # auto-pepqk — soft reset (auto-wquxx ``_reset_sweep_state``)
         # is not enough by this point in the sweep: the mock server's
         # EventBus + the agent-browser Chromium tab have both degraded
@@ -13688,7 +13741,8 @@ class TestCoordinatorBoardRelativeTimeAndPendingCommits:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def _reset_class_state(self, sweep_server):
+    @classmethod
+    def _reset_class_state(cls, sweep_server):
         # Match the auto-pepqk pattern from earlier coord-board parity
         # classes — by this point in the sweep the agent-browser tab and
         # mock uvicorn process are degraded enough that a soft reset
@@ -14230,7 +14284,8 @@ class TestNetworkSignOn:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         _navigate_and_check("/sessions", "", wait_ms=600)
         request.cls._checks = _run_async_eval(_network_signon_js())
 
@@ -14667,7 +14722,8 @@ class TestNetworkIdentityCeremony:
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         _navigate_and_check("/sessions", "", wait_ms=600)
         request.cls._checks = _run_async_eval(_network_identity_js())
 
@@ -14913,7 +14969,8 @@ class TestOnboardingSurface:
     hands off to the dedicated create-org screen (auto-yn5yn)."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         _navigate_and_check("/sessions", "", wait_ms=600)
         request.cls._checks = _run_async_eval(_ONBOARDING_JS)
 
@@ -15129,7 +15186,8 @@ class TestCreateOrgScreen:
     onboarding 'Later' path that never blanks the app."""
 
     @pytest.fixture(scope="class", autouse=True)
-    def checks(self, browser, request):
+    @classmethod
+    def checks(cls, browser, request):
         _navigate_and_check("/sessions", "", wait_ms=600)
         request.cls._checks = _run_async_eval(_CREATE_ORG_JS)
 
