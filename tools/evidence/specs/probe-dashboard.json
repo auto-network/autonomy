@@ -1,0 +1,34 @@
+{
+  "row": 0,
+  "row_title": "Harness probe: dashboard home, mission list, mission site (read-only)",
+  "base_url": "https://localhost:8080",
+  "kind": "step_gallery",
+  "instance": {"kind": "real", "base_url": "https://localhost:8080", "commit": null},
+  "provenance_session": "auto-0812-211435",
+  "steps": [
+    {
+      "slug": "home",
+      "caption": "The dashboard home page as automation first sees it",
+      "actions": [
+        ["open", "{base}/", "--ignore-https-errors"],
+        ["wait", "--load", "networkidle"]
+      ]
+    },
+    {
+      "slug": "mission-site",
+      "caption": "The multi-user mission's site as served by Mission Control",
+      "actions": [
+        ["open", "{base}/missions/eec0efa1-fba7-42bf-8fd9-4790166b8f59"],
+        ["wait", "--load", "networkidle"]
+      ]
+    },
+    {
+      "slug": "pillar-screen",
+      "caption": "This pillar's own screen, revision 1, composed by the platform",
+      "actions": [
+        ["open", "{base}/missions/eec0efa1-fba7-42bf-8fd9-4790166b8f59/pillars/ece2b021-e60c-4d82-8ad8-cde3ebbf300d"],
+        ["wait", "--load", "networkidle"]
+      ]
+    }
+  ]
+}
