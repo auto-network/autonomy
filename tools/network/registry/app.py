@@ -76,11 +76,21 @@ _INSTALL_CSP = (
 )
 
 
-def _install_html_wrapper(markdown: str) -> bytes:
+def _install_html_wrapper(markdown: str, host: str | None = None) -> bytes:
     """The browser face of /install: no CDN, no external fetches — a copy
-    CTA for handing the URL to a coding agent, above the primer verbatim."""
-    import html as _html
+    CTA for handing the URL to a coding agent, above the primer verbatim.
 
+    The CTA names the host that actually served this page, so the copied
+    prompt works at every deployment stage — registry.auto.network today,
+    bare auto.network once its DNS lands (auto-9q7a5). A dead canonical URL
+    in a copy button is worse than an interim one that resolves.
+    """
+    import html as _html
+    import re as _re
+
+    served_host = host if host and _re.fullmatch(r"[A-Za-z0-9.\-]+(:\d+)?", host) \
+        else "auto.network"
+    cta = _html.escape(f"Please install Autonomy from https://{served_host}/install")
     body = _html.escape(markdown)
     page = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -107,7 +117,7 @@ def _install_html_wrapper(markdown: str) -> bytes:
 for your coding agent — hand it the URL and it takes care of the rest,
 with your consent at every step.</p>
 <div class="cta"><b>Tell your coding agent:</b>
-<code id="prompt">Please install Autonomy from https://auto.network/install</code>
+<code id="prompt">{cta}</code>
 <button onclick="navigator.clipboard.writeText(document.getElementById('prompt').textContent)">Copy</button>
 </div>
 <pre>{body}</pre>
@@ -992,7 +1002,9 @@ def create_app(
         markdown = doc.read_text(encoding="utf-8")
         if "text/html" in request.headers.get("accept", ""):
             return Response(
-                content=_install_html_wrapper(markdown),
+                content=_install_html_wrapper(
+                    markdown, host=request.headers.get("host"),
+                ),
                 media_type="text/html",
                 headers={
                     **_install_headers,
