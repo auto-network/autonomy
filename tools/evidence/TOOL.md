@@ -39,10 +39,44 @@ a failure capture is evidence too.
 - Each capture runs in its own named agent-browser session so it cannot
   disturb, or be disturbed by, other browser automation in the container.
 
-## Known constraint
+## Two-phase captures and mid-flow values
 
-The dashboard's app routes (`/`, `/beads`, …) sit behind the sign-in gate;
-unauthenticated automation sees the unlock screen. Mission Control site routes
-(`/missions/<id>`, pillar screens) are reachable without sign-in. Flows behind
-the gate need an authenticated driving path or an isolated test instance —
-tracked on the Test & Automation pillar (bead auto-vztz5).
+`{env:NAME}` in an action expands from the environment at run time — for
+values that only exist mid-ceremony (an approval id, a minted link URL).
+`--continue-capture <dir>` appends a spec's steps to an existing capture,
+for flows whose later steps depend on values produced by the earlier ones.
+`tools/evidence/row56_run.sh` is the reference orchestrator using both.
+
+## Publishing (the permanent store)
+
+Captured evidence lives as GRAPH ATTACHMENTS (mission controller ruling,
+2026-08-13): `python3 -m tools.evidence.publish <capture-dir>` creates one
+graph note carrying every step image as an attachment and writes the
+attachment ids and note id back into `manifest.json`. Run it OUTSIDE any
+isolated-instance environment so the note lands in the real org graph. The
+capture directory itself is staging, not the record.
+
+## Driving flows behind the sign-in gate
+
+The dashboard's app routes sit behind the sign-in gate; Mission Control site
+routes do not. The proven answer for gated flows is a fully isolated real
+instance with a throwaway identity and org, so automation types a test
+password that secures nothing:
+
+- real `tools.dashboard.server` + real `tools.network.registry` (TLS via a
+  self-signed RSA cert — Chromium rejects Ed25519 server certs; trust it by
+  pointing `SSL_CERT_FILE` at it so the dashboard and its spawned connector
+  verify normally);
+- every store env var from `tools/data_paths.py::STORE_MANIFEST` pointed at a
+  scratch root, plus `AUTONOMY_REFUSE_REAL_DATA_FALLBACK=1` so an unset store
+  raises instead of touching real data;
+- `AUTONOMY_NETWORK_REGISTRY_URL` pointed at the local registry;
+- identity + org provisioned headlessly (personal identity Setting with an
+  armored root, then `org_ops.create_org_with_identity`), a note created via
+  `tools.graph.ops.create_note`, and `static/tailwind.css` built or copied in
+  (it is a gitignored build artifact; a worktree serves a placeholder).
+
+The row-56 capture (register row 56, the share-link publish ceremony) runs
+end to end on this stack: gate → password unlock → approval sheet →
+in-browser signing → tunnel start → minted link → the note rendering over
+the encrypted channel in a cold browser.

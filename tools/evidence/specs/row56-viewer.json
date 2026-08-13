@@ -1,0 +1,36 @@
+{
+  "row": 56,
+  "row_title": "Publish a note as a link: the operator approval ceremony end to end",
+  "base_url": "http://localhost:8091",
+  "kind": "step_gallery",
+  "session": "row56cap",
+  "instance": {
+    "kind": "real",
+    "base_url": "http://localhost:8091",
+    "commit": null
+  },
+  "provenance_session": "auto-0812-211435",
+  "steps": [
+    {
+      "slug": "viewer",
+      "caption": "The minted link, opened cold in a browser: the note title arrives over the encrypted channel into the top bar, and the note body renders inside the sandboxed viewer frame",
+      "actions": [
+        [
+          "open",
+          "{env:LINK_URL}",
+          "--ignore-https-errors"
+        ],
+        [
+          "wait",
+          "--load",
+          "networkidle"
+        ],
+        [
+          "wait",
+          "--text",
+          "Capture pipeline first note"
+        ]
+      ]
+    }
+  ]
+}
