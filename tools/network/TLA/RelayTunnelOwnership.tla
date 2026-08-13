@@ -62,6 +62,7 @@ VARIABLES
     connector,              \* connector process state
     backoff,
     wait,
+    stable,                 \* served for one MaxBackoff interval
     viewer,
     assignment,             \* [VIEWERS -> TUNNELS \cup {NoTunnel}]
     restartsLeft,
@@ -69,7 +70,7 @@ VARIABLES
     healthyEvictionSeen,    \* ghost: register removed another live tunnel
     badAdmissionSeen        \* ghost: viewer bypassed a less-loaded tunnel
 
-vars == << pool, connector, backoff, wait, viewer, assignment,
+vars == << pool, connector, backoff, wait, stable, viewer, assignment,
            restartsLeft, disconnectsLeft,
            healthyEvictionSeen, badAdmissionSeen >>
 
@@ -112,6 +113,7 @@ Init ==
     /\ connector = [t \in TUNNELS |-> "dialing"]
     /\ backoff = [t \in TUNNELS |-> MinBackoff]
     /\ wait = [t \in TUNNELS |-> 0]
+    /\ stable = [t \in TUNNELS |-> FALSE]
     /\ viewer = [v \in VIEWERS |-> "new"]
     /\ assignment = [v \in VIEWERS |-> NoTunnel]
     /\ restartsLeft = RestartBudget
@@ -124,6 +126,8 @@ Init ==
 (***************************************************************************)
 
 \* A successful authenticated hello. Green behavior is a set insertion.
+\* Hello proves identity, not useful service, and therefore does NOT reset
+\* retry backoff. MarkStable records the separate health threshold.
 \* The calibration branch is the current dict assignment plus 4409 close:
 \* all previous members are removed and their connector loops sleep/retry.
 Register(t) ==
@@ -134,8 +138,9 @@ Register(t) ==
        IN IF PoolRegistration
           THEN /\ pool' = [pool EXCEPT ![o] = @ \cup {t}]
                /\ connector' = [connector EXCEPT ![t] = "connected"]
-               /\ backoff' = [backoff EXCEPT ![t] = MinBackoff]
+               /\ backoff' = backoff
                /\ wait' = [wait EXCEPT ![t] = 0]
+               /\ stable' = [stable EXCEPT ![t] = FALSE]
                /\ UNCHANGED << viewer, assignment,
                                healthyEvictionSeen >>
           ELSE /\ pool' = [pool EXCEPT ![o] = {t}]
@@ -144,13 +149,17 @@ Register(t) ==
                     ELSE IF q \in displaced THEN "sleeping"
                     ELSE connector[q]]
                /\ backoff' = [q \in TUNNELS |->
-                    IF q = t THEN MinBackoff
-                    ELSE IF q \in displaced THEN NextBackoff(backoff[q])
+                    IF q \in displaced
+                    THEN NextBackoff(
+                         IF stable[q] THEN MinBackoff ELSE backoff[q])
                     ELSE backoff[q]]
                /\ wait' = [q \in TUNNELS |->
                     IF q = t THEN 0
-                    ELSE IF q \in displaced THEN MinBackoff
+                    ELSE IF q \in displaced
+                    THEN IF stable[q] THEN MinBackoff ELSE backoff[q]
                     ELSE wait[q]]
+               /\ stable' = [q \in TUNNELS |->
+                    IF q = t \/ q \in displaced THEN FALSE ELSE stable[q]]
                /\ viewer' = [v \in VIEWERS |->
                     IF assignment[v] \in displaced THEN "new" ELSE viewer[v]]
                /\ assignment' = [v \in VIEWERS |->
@@ -160,6 +169,16 @@ Register(t) ==
                     (healthyEvictionSeen \/ displaced # {})
     /\ UNCHANGED << restartsLeft, disconnectsLeft, badAdmissionSeen >>
 
+\* Abstracts one authenticated MaxBackoff service interval. It is separate
+\* from Register so an immediate post-hello flap cannot masquerade as health.
+MarkStable(t) ==
+    /\ connector[t] = "connected"
+    /\ ~stable[t]
+    /\ stable' = [stable EXCEPT ![t] = TRUE]
+    /\ UNCHANGED << pool, connector, backoff, wait, viewer, assignment,
+                    restartsLeft, disconnectsLeft,
+                    healthyEvictionSeen, badAdmissionSeen >>
+
 \* Exact-instance unregister plus ordinary connector retry. Only viewers
 \* pinned to this tunnel are returned to admission; every other assignment
 \* is untouched.
@@ -167,11 +186,13 @@ Disconnect(t) ==
     /\ disconnectsLeft > 0
     /\ connector[t] = "connected"
     /\ t \in pool[TunnelOrg[t]]
-    /\ \E d \in DelayRange(backoff[t]) :
+    /\ LET base == IF stable[t] THEN MinBackoff ELSE backoff[t] IN
+       \E d \in DelayRange(base) :
          /\ pool' = [pool EXCEPT ![TunnelOrg[t]] = @ \ {t}]
          /\ connector' = [connector EXCEPT ![t] = "sleeping"]
          /\ wait' = [wait EXCEPT ![t] = d]
-         /\ backoff' = [backoff EXCEPT ![t] = NextBackoff(@)]
+         /\ backoff' = [backoff EXCEPT ![t] = NextBackoff(base)]
+         /\ stable' = [stable EXCEPT ![t] = FALSE]
          /\ viewer' = [v \in VIEWERS |->
               IF assignment[v] = t THEN "new" ELSE viewer[v]]
          /\ assignment' = [v \in VIEWERS |->
@@ -184,7 +205,7 @@ Tick ==
     /\ wait' = [t \in TUNNELS |->
          IF connector[t] = "sleeping" /\ wait[t] > 0
          THEN wait[t] - 1 ELSE wait[t]]
-    /\ UNCHANGED << pool, connector, backoff, viewer, assignment,
+    /\ UNCHANGED << pool, connector, backoff, stable, viewer, assignment,
                     restartsLeft, disconnectsLeft,
                     healthyEvictionSeen, badAdmissionSeen >>
 
@@ -192,7 +213,7 @@ Wake(t) ==
     /\ connector[t] = "sleeping"
     /\ wait[t] = 0
     /\ connector' = [connector EXCEPT ![t] = "dialing"]
-    /\ UNCHANGED << pool, backoff, wait, viewer, assignment,
+    /\ UNCHANGED << pool, backoff, wait, stable, viewer, assignment,
                     restartsLeft, disconnectsLeft,
                     healthyEvictionSeen, badAdmissionSeen >>
 
@@ -204,7 +225,8 @@ RelayRestart ==
        \E delays \in [TUNNELS -> 0..MaxDelay] :
          /\ \A t \in TUNNELS :
               IF t \in live
-              THEN delays[t] \in DelayRange(backoff[t])
+              THEN delays[t] \in DelayRange(
+                   IF stable[t] THEN MinBackoff ELSE backoff[t])
               ELSE delays[t] = 0
          /\ pool' = [o \in ORGS |-> {}]
          /\ connector' = [t \in TUNNELS |->
@@ -212,7 +234,11 @@ RelayRestart ==
          /\ wait' = [t \in TUNNELS |->
               IF t \in live THEN delays[t] ELSE wait[t]]
          /\ backoff' = [t \in TUNNELS |->
-              IF t \in live THEN NextBackoff(backoff[t]) ELSE backoff[t]]
+              IF t \in live
+              THEN NextBackoff(IF stable[t] THEN MinBackoff ELSE backoff[t])
+              ELSE backoff[t]]
+         /\ stable' = [t \in TUNNELS |->
+              IF t \in live THEN FALSE ELSE stable[t]]
          /\ viewer' = [v \in VIEWERS |-> "new"]
          /\ assignment' = [v \in VIEWERS |-> NoTunnel]
     /\ restartsLeft' = restartsLeft - 1
@@ -234,7 +260,7 @@ OpenViewer(v) ==
          /\ assignment' = [assignment EXCEPT ![v] = t]
          /\ badAdmissionSeen' =
               (badAdmissionSeen \/ ~LeastLoaded(t, ViewerOrg[v]))
-    /\ UNCHANGED << pool, connector, backoff, wait,
+    /\ UNCHANGED << pool, connector, backoff, wait, stable,
                     restartsLeft, disconnectsLeft, healthyEvictionSeen >>
 
 (***************************************************************************)
@@ -242,7 +268,7 @@ OpenViewer(v) ==
 (***************************************************************************)
 
 Next ==
-    \/ \E t \in TUNNELS : Register(t) \/ Disconnect(t) \/ Wake(t)
+    \/ \E t \in TUNNELS : Register(t) \/ MarkStable(t) \/ Disconnect(t) \/ Wake(t)
     \/ \E v \in VIEWERS : OpenViewer(v)
     \/ Tick
     \/ RelayRestart
@@ -255,6 +281,7 @@ FairSpec ==
     /\ Spec
     /\ \A t \in TUNNELS :
          /\ WF_vars(Register(t))
+         /\ WF_vars(MarkStable(t))
          /\ WF_vars(Wake(t))
     /\ \A v \in VIEWERS : WF_vars(OpenViewer(v))
     /\ WF_vars(Tick)
@@ -268,6 +295,7 @@ TypeOK ==
     /\ connector \in [TUNNELS -> ConnectorStates]
     /\ backoff \in [TUNNELS -> MinBackoff..MaxBackoff]
     /\ wait \in [TUNNELS -> 0..MaxDelay]
+    /\ stable \in [TUNNELS -> BOOLEAN]
     /\ viewer \in [VIEWERS -> ViewerStates]
     /\ assignment \in [VIEWERS -> TUNNELS \cup {NoTunnel}]
     /\ restartsLeft \in 0..RestartBudget

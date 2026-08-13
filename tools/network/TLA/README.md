@@ -5,6 +5,9 @@ tunnel for an org joins one cooperative pool. New viewers are assigned to a
 least-loaded member with capacity and remain pinned to it. A tunnel disconnect
 removes that exact member and reopens only its viewers.
 
+The connector retry model separates authenticated registration from useful
+service. A hello never resets backoff; one stable service interval does.
+
 The pool is logical, not process-local. `AnycastPoolGreen.cfg` places the
 viewer and the only usable tunnel on different relay nodes. This captures the
 required outcome behind `relay.auto.network`; it intentionally abstracts the
