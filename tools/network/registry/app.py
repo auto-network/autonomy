@@ -75,15 +75,21 @@ _INSTALL_CSP = (
     "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
 )
 
-# The org:join bridge page (auto-y7nap): a fixed static shell, rendered
-# entirely client-side, that performs NO ceremony and — per the operator's
-# ingress ruling (no auto-detection of any kind) — makes NO network calls:
-# default-src 'none' with no connect-src carve-out means the page
-# structurally cannot probe, forward, or exfiltrate. The ledger bearer
-# lives in the URL fragment and is never sent anywhere.
+# The org:join bridge page (auto-y7nap + r7kk4): a fixed static shell,
+# rendered client-side, that performs NO ceremony and exactly ONE network
+# interaction — the root-pinned E2E join channel to the org's own node
+# (same-origin websocket), over which the ORG self-describes (name,
+# byline, icon as a bounded data URI). No auto-detection of local nodes
+# (operator ruling): connect admits only this origin's channel endpoint.
+# The ledger bearer lives in the URL fragment and is never sent anywhere,
+# channel included. connect-src is 'self' ONLY: modern browsers admit a
+# same-origin wss upgrade under 'self', and scheme-wide wss:/ws: sources
+# would permit connections to ANY host (relay review) — with fail-silent
+# enrichment, a browser that disagrees simply shows the minimal display.
 _JOIN_CSP = (
     "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; "
-    "img-src 'none'; base-uri 'none'; form-action 'none'; "
+    "connect-src 'self'; "
+    "img-src data:; base-uri 'none'; form-action 'none'; "
     "frame-ancestors 'none'"
 )
 

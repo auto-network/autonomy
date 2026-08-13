@@ -1826,8 +1826,14 @@ const autonet = (() => {
 })();
 
 window.autonet = autonet;
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", () => autonet.boot());
-} else {
-  autonet.boot();
+// Auto-boot only on the share-link shell (/l/<token>): other pages (the
+// org:join bridge) load this file for its channel primitives and drive
+// them explicitly — booting the /l/ flow there would just render its
+// error state into a page that has no bootloader UI (auto-r7kk4).
+if (/^\/l\/[0-9a-f]{32}$/.test(location.pathname)) {
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => autonet.boot());
+  } else {
+    autonet.boot();
+  }
 }
