@@ -186,6 +186,10 @@
     } else if (op === "write" && kind === "close") {
       url = ownerPath(body.entry_id) + "/questions/" + body.entry_id + "/close";
       payload = {};
+    } else if (op === "write" && kind === "asked") {
+      url = (currentPillar() ? "/api/pillars/" + currentPillar().pillar_id
+                             : "/api/missions/" + mid) + "/asked";
+      payload = {anchor: body.anchor, question: body.question, answer: body.answer};
     } else if (op === "read" && kind === "here") {
       // The relay has always recorded this and the dashboard never did, so
       // in the app the list of who is here was empty on every mission,
@@ -498,6 +502,19 @@
                           onclick: function () { show(ui.panel === "questions" ? null : {panel: "questions"}); }},
                qKids);
     kids.push(q);
+    // WAITING ON YOU, kept apart from the questions count. That list is what
+    // the mission owes you; this is the other direction, and folding them
+    // together would bury a decision somebody is blocked on inside a number
+    // that mostly means "conversations". These exist only on the page until
+    // they are answered, so this is the one place they can be found without
+    // scrolling the whole screen looking for a marked paragraph.
+    var forYou = unanswered();
+    if (forYou.length) {
+      kids.push(el("button", {
+        class: "mc-foryou", title: forYou.length + " waiting on you",
+        onclick: function () { show({anchor: forYou[0].ref}); },
+      }, [el("span", {text: forYou.length + " for you"})]));
+    }
     if (ui.noChannel) {
       kids.push(el("span", {class: "mc-nobody", title:
         "This page cannot reach the mission. Navigation and questions are unavailable.",
@@ -935,8 +952,30 @@
   function anchorNode() {
     if (!ui.anchor) return null;
     var here = atAnchor(ui.anchor);
-    var body = [el("p", {class: "mc-label", text: "about"}), el("p", {class: "mc-sub mc-mb", text: ui.anchor})];
-    if (!here.length) body.push(el("p", {class: "mc-empty", text: "Nothing discussed here yet."}));
+    var screenAsk = asked(ui.anchor);
+    var answered = here.some(function (q) { return q.answer; });
+    var control = anchorControls.filter(function (x) { return x.ref === ui.anchor; })[0];
+    // Never headed by the anchor id again. It is a name for the code, and it
+    // was the only thing this panel said about what you were being asked --
+    // the question written on the element did not travel with you.
+    var body;
+    if (screenAsk && !answered) {
+      body = [
+        el("p", {class: "mc-label mc-label-asks", text: pillarName(
+          (currentPillar() || {}).pillar_id) + " asks"}),
+      ];
+      paras(screenAsk.asks, "mc-qbig").forEach(function (n) { body.push(n); });
+      if (screenAsk.about) body.push(el("p", {class: "mc-sub mc-mb", text: screenAsk.about}));
+    } else {
+      body = [el("p", {class: "mc-label", text: "about"}),
+              el("p", {class: "mc-qbig mc-mb",
+                       text: (control && control.about) || ui.anchor})];
+    }
+    // "Nothing discussed here yet" is false on a screen that is asking you
+    // something -- the question is right there above it.
+    if (!here.length && !(screenAsk && !answered)) {
+      body.push(el("p", {class: "mc-empty", text: "Nothing discussed here yet."}));
+    }
     here.forEach(function (q) {
       body.push(el("button", {class: "mc-row", onclick: function () {
         show({entry: q.entry_id, from: {anchor: ui.anchor}});
@@ -951,8 +990,11 @@
                       onclick: function () { show(null); }}),
       ]),
       el("div", {class: "mc-pbody"}, body),
-      composer("Ask about this\u2026", "tagged " + ui.anchor, "Ask",
-               function (t) { ask(t, ui.anchor); }),
+      screenAsk && !answered
+        ? composer("Your answer\u2026", screenAsk.about || "", "Answer",
+                   function (t) { answerAsked(ui.anchor, screenAsk.asks, t); })
+        : composer("Ask about this\u2026", "tagged " + ui.anchor, "Ask",
+                   function (t) { ask(t, ui.anchor); }),
     ]);
   }
 
@@ -1010,6 +1052,20 @@
     if (!q || !q.entry_id) return;
     var i = state.questions.findIndex(function (x) { return x.entry_id === q.entry_id; });
     if (i === -1) state.questions.push(q); else state.questions[i] = q;
+  }
+
+  // Answering a question the SCREEN asked. The question and the answer arrive
+  // together because until now there was nothing to answer -- the question
+  // lives on the element, and the platform never reads the author's document.
+  // The pair lands as one entry with the attributions the other way round.
+  function answerAsked(anchorRef, question, text) {
+    return request("write", {kind: "asked", anchor: anchorRef,
+                             question: question, answer: text})
+      .then(function (r) {
+        mergeEntry(r && r.question);
+        repaintAnchors();
+        show({anchor: anchorRef});
+      });
   }
 
   function reply(entryId, text, kind) {
@@ -1127,6 +1183,16 @@
     var here = atAnchor(control.ref);
     var open = 0, done = 0;
     here.forEach(function (q) { q.answer ? done++ : open++; });
+    // A screen asking YOU is not a count of a conversation, it is a thing
+    // waiting on you -- so it says so in a word, and stops the moment it is
+    // answered. A number here would read as "two people are chatting".
+    if (control.asks && !done) {
+      control.btn.innerHTML = "";
+      control.btn.classList.add("mc-anchor-asks");
+      control.btn.appendChild(el("span", {class: "mc-asks-label", text: "Answer"}));
+      return;
+    }
+    control.btn.classList.remove("mc-anchor-asks");
     control.btn.innerHTML = BUBBLE_SVG;
     if (open) {
       control.btn.appendChild(el("span", {
@@ -1150,20 +1216,63 @@
     anchorControls.forEach(paintAnchor);
   }
 
+  // What this element is about, in the author's own words: its own heading,
+  // or the nearest one above it. The panel headed itself with the raw anchor
+  // id -- "decision:dispatch-vs-local" -- which is a name for me, not for the
+  // person being asked to answer.
+  function headingFor(target) {
+    var own = target.querySelector("h1,h2,h3,h4,h5,h6");
+    if (own && own.textContent.trim()) return own.textContent.trim();
+    var node = target;
+    while (node && node !== document.body) {
+      var prev = node.previousElementSibling;
+      while (prev) {
+        if (/^H[1-6]$/.test(prev.tagName) && prev.textContent.trim()) {
+          return prev.textContent.trim();
+        }
+        prev = prev.previousElementSibling;
+      }
+      node = node.parentElement;
+    }
+    return "";
+  }
+
+  //: The screen's own questions, by anchor -- read from the DOM, never from
+  //: the server, because the server never parses the author's document.
+  function asked(ref) {
+    var c = anchorControls.filter(function (x) { return x.ref === ref; })[0];
+    return c && c.asks ? c : null;
+  }
+
+  //: Answered ones become ordinary entries; the rest exist only on the page.
+  function unanswered() {
+    return anchorControls.filter(function (c) {
+      return c.asks && !atAnchor(c.ref).some(function (q) { return q.answer; });
+    });
+  }
+
   function mountAnchors() {
     var n = 0;
     document.querySelectorAll("[data-mc-anchor]").forEach(function (target) {
       if (target.querySelector("[data-mc-control]")) return;   // idempotent
       var ref = target.getAttribute("data-mc-anchor");
+      // THE OTHER DIRECTION. An anchor alone is a place to ask about this.
+      // With data-mc-ask the screen is asking YOU, and the question is right
+      // there on the element -- nothing has to parse the author's document to
+      // find it, and a question edited away simply stops existing.
+      var asks = (target.getAttribute("data-mc-ask") || "").trim();
+      // The nearest heading, so a panel can name what it is about instead of
+      // showing the internal id, which means nothing to the person reading.
+      var about = headingFor(target);
       var holder = document.createElement("span");
       holder.setAttribute("data-mc-control", "");
       var r = holder.attachShadow({mode: "closed"});
       r.innerHTML = "<style>" + CSS + "</style>";
       var btn = el("button", {
-        class: "mc-anchor-btn", title: "Discuss",
+        class: "mc-anchor-btn", title: asks ? "Answer this" : "Discuss",
         onclick: function () { show({anchor: ref}); },
       });
-      var control = {ref: ref, btn: btn};
+      var control = {ref: ref, btn: btn, asks: asks, about: about};
       anchorControls.push(control);
       paintAnchor(control);
       r.appendChild(btn);

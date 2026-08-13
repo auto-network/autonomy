@@ -1524,6 +1524,122 @@ async def answer_pillar_question(request: Request) -> JSONResponse:
     )
 
 
+async def _relay_answer(*, mission_id: str, entry_id: str) -> None:
+    """Tell a coordinator that a question ITS OWN SCREEN asked has an answer.
+
+    The opposite direction from _relay_question, and the whole point of a
+    screen being able to ask: a pillar that puts a decision on its screen is
+    waiting on it, and nothing else would tell it the decision arrived.
+    """
+    from tools.dashboard.surface_actions import build_envelope
+    from tools.dashboard.tmux_send import tmux_send
+
+    entry = db.get_conversation_entry(entry_id)
+    if not entry:
+        return
+    pillar = db.get_pillar(entry["pillar_id"]) if entry.get("pillar_id") else None
+    mission = db.get_mission(mission_id) or {}
+    target = (pillar or mission).get("coordinator_session") or ""
+    if not target:
+        return
+    where = f" (re: {entry['anchor']})" if entry.get("anchor") else ""
+    try:
+        await tmux_send(target, build_envelope(
+            from_id=f"pillar:{pillar['pillar_id']}" if pillar else f"mission:{mission_id}",
+            kind="mission-answer",
+            extra={"mission": mission_id,
+                   "pillar": pillar["pillar_id"] if pillar else None,
+                   "entry_id": entry_id},
+            body=(
+                f"ANSWERED{where} — you asked this on your screen and "
+                f"{entry['answered_by_session'] or 'the operator'} answered it:\n\n"
+                f"Q: {entry['question']}\n\n"
+                f"A: {entry['answer']}\n\n"
+                f"No reply is expected. It is on the record as asked by you and "
+                f"answered by them. If the answer does not settle it, reopen it "
+                f"with a follow-up rather than asking the same thing again:\n"
+                f"POST /api/{'pillars/' + pillar['pillar_id'] if pillar else 'missions/' + mission_id}"
+                f"/questions/{entry_id}/reopen {{\"followup\": \"...\"}}"
+            ),
+        ))
+    except Exception:
+        logger.warning("answer relay failed for %s/%s", mission_id, entry_id)
+
+
+async def _answer_asked_impl(
+    request: Request, *, mission_id: str, pillar_id: str | None,
+    asker_id: str, asker_label: str,
+) -> JSONResponse:
+    """The operator answering a question a SCREEN asked, roles reversed.
+
+    A screen's question does not exist as a record until it is answered. It
+    lives in the author's own markup, and the platform never parses that --
+    so there is nothing to create at push time and nothing to clean up if the
+    question is edited away. What arrives here is the question and its answer
+    together, and the pair becomes one entry: asked by the screen, answered by
+    the reader. The same store and the same shape as every other entry, with
+    the two attributions the other way round.
+    """
+    body = await request.json()
+    question = body.get("question")
+    answer = body.get("answer")
+    if not isinstance(question, str) or not question.strip():
+        return JSONResponse({"error": "question is required"}, status_code=400)
+    if not isinstance(answer, str) or not answer.strip():
+        return JSONResponse({"error": "answer is required"}, status_code=400)
+    anchor = body.get("anchor")
+    if anchor is not None and not isinstance(anchor, str):
+        return JSONResponse({"error": "anchor must be a string"}, status_code=400)
+    identity = _operator_identity(request)
+    if not identity:
+        return JSONResponse({"error": "identity required"}, status_code=403)
+
+    entry = db.ask_question(
+        mission_id, question.strip(), asker_id, asker_label,
+        pillar_id=pillar_id, anchor=(anchor or "").strip() or None,
+    )
+    if entry is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    # Never relayed as a question: the coordinator wrote it, so sending it back
+    # would ask them to answer their own screen.
+    db.mark_question_relay_status(mission_id, entry["entry_id"], "sent")
+    entry = db.answer_question(
+        mission_id, entry["entry_id"], answer.strip(),
+        identity["participant_label"],
+    )
+    payload = _question_payload(entry)
+    await _publish_conversation_event(
+        "answered", mission_id, pillar_id, entry["entry_id"], question=payload,
+    )
+    return JSONResponse(
+        {"question": payload}, status_code=201,
+        background=BackgroundTask(
+            _relay_answer, mission_id=mission_id, entry_id=entry["entry_id"]),
+    )
+
+
+async def answer_asked_by_pillar(request: Request) -> JSONResponse:
+    pillar_id = request.path_params["pillar_id"]
+    pillar = db.get_pillar(pillar_id)
+    if not pillar:
+        return JSONResponse({"error": "pillar not found"}, status_code=404)
+    return await _answer_asked_impl(
+        request, mission_id=pillar["mission_id"], pillar_id=pillar_id,
+        asker_id=f"pillar:{pillar_id}", asker_label=pillar["name"],
+    )
+
+
+async def answer_asked_by_mission(request: Request) -> JSONResponse:
+    mission_id = request.path_params["mission_id"]
+    mission = db.get_mission(mission_id)
+    if not mission:
+        return JSONResponse({"error": "mission not found"}, status_code=404)
+    return await _answer_asked_impl(
+        request, mission_id=mission_id, pillar_id=None,
+        asker_id=f"mission:{mission_id}", asker_label=mission["name"],
+    )
+
+
 async def _here_impl(request: Request, *, surface_id: str) -> JSONResponse:
     """A reader on the dashboard saying "I am looking at this".
 
@@ -1793,6 +1909,8 @@ routes: list[Route] = [
         "/api/visitor-tokens/{participant_id}/avatar",
         set_visitor_avatar, methods=["POST"],
     ),
+    Route("/api/missions/{mission_id}/asked", answer_asked_by_mission, methods=["POST"]),
+    Route("/api/pillars/{pillar_id}/asked", answer_asked_by_pillar, methods=["POST"]),
     Route("/api/missions/{mission_id}/here", mission_here, methods=["POST"]),
     Route("/api/pillars/{pillar_id}/here", pillar_here, methods=["POST"]),
     Route("/api/missions/{mission_id}/questions", ask_question, methods=["POST"]),

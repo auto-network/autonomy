@@ -2431,3 +2431,75 @@ def test_the_operator_presence_id_matches_the_one_every_page_uses():
         "the dashboard's operator presence id changed; mission screens will "
         "now record the operator as a second, separate person"
     )
+
+
+# ── a screen asking YOU ───────────────────────────────────────────
+#
+# An anchor could only ever be asked ABOUT. When a screen needed something
+# decided there was nowhere to put it, so the operator typed his answer into
+# the only composer there was -- the one that asks -- and it was recorded as
+# HIS question, still waiting on the pillar. The roles were exactly inverted.
+
+
+def _op(monkeypatched=None):
+    return {"participant_id": mc_api.OPERATOR_PARTICIPANT_ID,
+            "participant_label": "Jeremy Spilman"}
+
+
+def test_a_screens_question_lands_asked_by_the_screen_and_answered_by_you():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    pillar = db.create_pillar(mission_id, "Infra", "sess-infra", "#4ade80")
+
+    with patch.object(mc_api, "_operator_identity", return_value=_op()), \
+         patch.object(mc_api, "_relay_answer", new_callable=AsyncMock):
+        r = client.post(
+            f"/api/pillars/{pillar['pillar_id']}/asked",
+            json={"anchor": "decision:dispatch", "question": "Dispatcher on or off?",
+                  "answer": "On -- the guidance changed."})
+
+    assert r.status_code == 201
+    q = r.json()["question"]
+    assert q["asked_by_label"] == "Infra", "the screen is not recorded as the asker"
+    assert q["asked_by_participant_id"] == f"pillar:{pillar['pillar_id']}"
+    assert q["answered_by_session"] == "Jeremy Spilman", "the operator is not the answerer"
+    assert q["answer"] == "On -- the guidance changed."
+    assert q["closed_at"] is not None
+    assert q["anchor"] == "decision:dispatch"
+
+
+def test_a_screens_question_is_never_relayed_back_as_a_question():
+    """The coordinator wrote it. Sending it to them would ask them to answer
+    their own screen."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    pillar = db.create_pillar(mission_id, "Infra", "sess-infra", "#4ade80")
+    with patch.object(mc_api, "_operator_identity", return_value=_op()), \
+         patch.object(mc_api, "_relay_question", new_callable=AsyncMock) as asked, \
+         patch.object(mc_api, "_relay_answer", new_callable=AsyncMock):
+        client.post(f"/api/pillars/{pillar['pillar_id']}/asked",
+                    json={"question": "q?", "answer": "a."})
+    asked.assert_not_called()
+    # A pillar-scoped entry: list_conversation is mission-level only.
+    entry = db.list_whole_mission_conversation(mission_id)[0]
+    assert entry["relay_status"] == "sent", "it looks undelivered forever"
+
+
+def test_answering_a_screens_question_needs_both_halves():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    with patch.object(mc_api, "_operator_identity", return_value=_op()):
+        assert client.post(f"/api/missions/{mission_id}/asked",
+                           json={"question": "q?"}).status_code == 400
+        assert client.post(f"/api/missions/{mission_id}/asked",
+                           json={"answer": "a."}).status_code == 400
+
+
+def test_an_unidentified_reader_cannot_answer_for_the_operator():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    with patch.object(mc_api, "_operator_identity", return_value=None):
+        r = client.post(f"/api/missions/{mission_id}/asked",
+                        json={"question": "q?", "answer": "a."})
+    assert r.status_code == 403
+    assert db.list_conversation(mission_id) == []
