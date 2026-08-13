@@ -171,8 +171,8 @@ class FakeDocker:
         if "fixture_ops relay-stats" in joined:
             return CommandResult(json.dumps({
                 "org_uuid": "11111111-1111-4111-8111-111111111111",
-                "link_sessions_live": 1,
-                "link_sessions_ever": 2,
+                "browser_sessions_live": 0,
+                "browser_sessions_ever": 0,
                 "node_hints_live": 1,
             }) + "\n")
         if "fixture_ops inspect" in joined:
@@ -250,7 +250,7 @@ def test_full_phase_machine_is_redrivable_secret_safe_and_tears_down(
         line.startswith("harness source commit: ") for line in announced
     )
     assert "join context served: status=ok granted_role=member" in evidence
-    assert "relay serving evidence: link_sessions live=1 ever=2" in evidence
+    assert "relay store state: browser_sessions live=0 ever=0" in evidence
     assert "node-b staged pending claim: state=pending have=0 need=2" in evidence
     assert "admission approvals: first=pending second=ready" in evidence
     assert any(
@@ -455,6 +455,6 @@ def test_relay_stats_fixture_counts_live_rows_read_only(tmp_path, monkeypatch):
 
     monkeypatch.setenv("AUTONOMY_HARNESS_REGISTRY_DB", str(db))
     stats = relay_stats({"org_uuid": "11111111-1111-4111-8111-111111111111"})
-    assert stats["link_sessions_live"] == 1
-    assert stats["link_sessions_ever"] == 2
+    assert stats["browser_sessions_live"] == 1
+    assert stats["browser_sessions_ever"] == 2
     assert stats["node_hints_live"] == 0
