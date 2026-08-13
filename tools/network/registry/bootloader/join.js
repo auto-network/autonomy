@@ -126,7 +126,11 @@
 
     probeLocalNode().then(function (alive) {
       if (!alive) return;
-      $("node-title").textContent = "Autonomy is running on this machine";
+      // Hint-grade copy only: the probe cannot PROVE availability
+      // (cross-origin opacity, untrusted local TLS, Private Network
+      // Access) — successful navigation is the proof (relay review).
+      $("node-title").textContent =
+        "This machine may be running Autonomy — the link below will tell you for sure";
       var main = document.querySelector("main");
       var node = $("node-panel");
       var agent = $("agent-panel");
