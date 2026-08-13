@@ -185,7 +185,8 @@ paste it to you, decline and say why. When they say they're in, continue.
 ### 6a. Invitation in hand? Join first.
 
 The moment identity exists, submit the invitation claim — before any other
-enrichment. Joining an established org grants its entire knowledge graph
+enrichment. The claim takes a v2 invitation CODE, not the URL: the literal
+URL-to-code conversion is in [/install/paths/invite.md](/install/paths/invite.md). Joining an established org grants its entire knowledge graph
 and its workspaces at once, which makes join-first the fastest route from
 empty node to working estate. The claim may wait on a human approver on
 the org side; that clock only runs after you submit, so submit early,
