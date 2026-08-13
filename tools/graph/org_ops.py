@@ -450,6 +450,61 @@ def create_org(
     )
 
 
+def create_org_shell(
+    slug: str,
+    *,
+    type_: str = "shared",
+    identity_payload: dict | None = None,
+    identity_state: str = "canonical",
+    root: Path | str | None = None,
+) -> OrgRef:
+    """Create the organization SHELL for the browser founding ceremony (I1).
+
+    The shell is the org DB + slug + optional identity/branding, with NO
+    password, NO server-side founding, and NO key seal: the org root is
+    generated and the four founding events are signed in the operator's browser,
+    then folded via ``POST /api/network/ledger/found`` with the sealed org-key
+    submitted separately. The no-passphrase counterpart to
+    :func:`create_org_with_identity` (which founds server-side under a password).
+
+    Idempotent on an UN-FOUNDED shell (the two-step failure window, auto-jdba4):
+    if the org already exists but its ledger has not been folded, the existing
+    shell is returned so the browser can retry the ceremony against it. A shell
+    whose ledger is already founded is a real conflict (:class:`OrgExistsError`).
+    A failed founding therefore never strands a half-org that cannot be
+    completed.
+    """
+    from tools.network.ledger.store import LedgerStore, org_ledger_db_path
+
+    _validate_slug(slug)
+    if type_ not in VALID_ORG_TYPES:
+        raise OrgError(f"invalid type {type_!r}; valid: {VALID_ORG_TYPES}")
+
+    path = _slug_db_path(slug, root)
+    if not path.exists():
+        return create_org(
+            slug, type_=type_, identity_payload=identity_payload,
+            identity_state=identity_state, root=root,
+        )
+
+    # Existing org: reusable as a retry target only if its ledger is UN-FOUNDED.
+    ledger_path = org_ledger_db_path(slug, root)
+    founded = False
+    if ledger_path.exists():
+        try:
+            with LedgerStore(ledger_path) as store:
+                founded = len(store) > 0
+        except Exception:
+            founded = True  # unreadable ledger -> treat as founded; refuse.
+    if founded:
+        raise OrgExistsError(f"org already exists and is founded: {slug}")
+
+    existing = get_org(slug, root=root)
+    if existing is None:
+        raise OrgError(f"org shell {slug!r} vanished during shell-create")
+    return existing
+
+
 @dataclass(frozen=True)
 class OrgCeremonyResult:
     """What the create-organization ceremony minted (auto-nixfv)."""
