@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import time
 import uuid
 from pathlib import Path
 
@@ -167,6 +168,13 @@ class FakeDocker:
                     {"key": "6" * 64, "sig": "7" * 128},
                 ]
             }) + "\n")
+        if "fixture_ops relay-stats" in joined:
+            return CommandResult(json.dumps({
+                "org_uuid": "11111111-1111-4111-8111-111111111111",
+                "link_sessions_live": 1,
+                "link_sessions_ever": 2,
+                "node_hints_live": 1,
+            }) + "\n")
         if "fixture_ops inspect" in joined:
             return CommandResult(json.dumps({
                 "org_root_pub": "a" * 64,
@@ -187,7 +195,12 @@ class FastHarness(Harness):
         return None
 
     def _wait_join_context(self):
-        return {"status": "ok"}
+        return {
+            "status": "ok",
+            "granted_role": "member",
+            "binding": "token",
+            "heads": ["c" * 64],
+        }
 
     def _post_json(self, url, payload, *, org):
         self._approval_count = getattr(self, "_approval_count", 0) + 1
@@ -228,6 +241,18 @@ def test_full_phase_machine_is_redrivable_secret_safe_and_tears_down(
         f"\n=== [{index}/6] {phase.title} ({phase.name}) ==="
         for index, phase in enumerate(driver.PHASES, 1)
     ]
+
+    # A PASS is self-evidencing (auto-qqlz5): the driver PRINTS the values
+    # it asserts, and container logs are captured on success too.
+    evidence = "\n".join(announced)
+    assert "join context served: status=ok granted_role=member" in evidence
+    assert "relay serving evidence: link_sessions live=1 ever=2" in evidence
+    assert "node-b staged pending claim: state=pending have=0 need=2" in evidence
+    assert "admission approvals: first=pending second=ready" in evidence
+    assert any(
+        "logs --no-color" in " ".join(call["argv"]) for call in fake.calls
+    ), "a passing run must capture compose logs"
+    assert harness.log_file.exists()
     all_argv = "\n".join(" ".join(call["argv"]) for call in fake.calls)
     assert password not in all_argv
     assert claim_token not in all_argv
@@ -409,3 +434,23 @@ def test_fixture_founds_real_crypto_ledger_and_registry_rows(tmp_path, monkeypat
     finally:
         registry.close()
         GraphDB.close_all_pooled()
+
+
+def test_relay_stats_fixture_counts_live_rows_read_only(tmp_path, monkeypatch):
+    """relay-stats reads the registry store read-only and reports the counts
+    the driver prints as serving evidence (auto-qqlz5)."""
+    from deploy.harness.fixture_ops import relay_stats
+    from tools.network.registry.store import RegistryStore
+
+    db = tmp_path / "registry.db"
+    store = RegistryStore(str(db))
+    now = int(time.time())
+    store.create_anonymous_session("live-session", now=now, expires_at=now + 600)
+    store.create_anonymous_session("dead-session", now=now - 900, expires_at=now - 300)
+    store.close()
+
+    monkeypatch.setenv("AUTONOMY_HARNESS_REGISTRY_DB", str(db))
+    stats = relay_stats({"org_uuid": "11111111-1111-4111-8111-111111111111"})
+    assert stats["link_sessions_live"] == 1
+    assert stats["link_sessions_ever"] == 2
+    assert stats["node_hints_live"] == 0

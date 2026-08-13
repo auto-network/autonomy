@@ -413,7 +413,24 @@ class Harness:
             f"{self.config.node_http(0)}/api/ping",
             description="node A after serving setup",
         )
-        self._wait_join_context()
+        context = self._wait_join_context()
+        # Print the asserted values, don't just assert them: a passing run
+        # must carry its own evidence in stdout (auto-qqlz5).
+        self.announce(
+            "join context served: status=ok"
+            f" granted_role={context.get('granted_role')}"
+            f" binding={context.get('binding')}"
+            f" heads={len(context.get('heads') or [])}"
+        )
+        stats = self._fixture(
+            "relay", "relay-stats", {"org_uuid": self._found["org_uuid"]}
+        )
+        self.announce(
+            "relay serving evidence:"
+            f" link_sessions live={stats.get('link_sessions_live')}"
+            f" ever={stats.get('link_sessions_ever')}"
+            f" node_hints live={stats.get('node_hints_live')}"
+        )
 
     def _wait_join_context(self) -> dict:
         from tools.init.join import ViewerJoinTransport
@@ -469,6 +486,12 @@ class Harness:
             and row.get("have") == 0
             and row.get("need") == 2,
         )
+        self.announce(
+            "node-b staged pending claim:"
+            f" state={self._pending.get('state')}"
+            f" have={self._pending.get('have')}"
+            f" need={self._pending.get('need')}"
+        )
         if self._pending["invite_ref"] != self._found["invite_ref"]:
             raise HarnessError("B staged a different invitation")
 
@@ -507,6 +530,11 @@ class Harness:
             raise HarnessError(f"first approval did not remain pending: {responses[0]}")
         if responses[1].get("status") != "ready":
             raise HarnessError(f"second approval did not make claim ready: {responses[1]}")
+        self.announce(
+            "admission approvals:"
+            f" first={responses[0].get('status')}"
+            f" second={responses[1].get('status')} (threshold of 2 met)"
+        )
         self._compose("restart", "node-b")
         self._wait_http(
             f"{self.config.node_http(1)}/api/ping",
@@ -658,10 +686,20 @@ class Harness:
                 getattr(self, phase.action)()
         except BaseException as exc:
             failure = exc
-            if self.compose_file.exists():
-                self._capture_logs()
             raise
         finally:
+            # Capture container logs pass OR fail (auto-qqlz5) — a passing
+            # run's evidence must not be thinner than a failure's. Must
+            # happen before teardown removes the containers; best-effort so
+            # a log hiccup cannot turn a pass into a failure.
+            if self.compose_file.exists():
+                try:
+                    self._capture_logs()
+                except Exception as log_exc:
+                    print(
+                        f"WARNING: compose log capture failed: {log_exc}",
+                        file=sys.stderr,
+                    )
             try:
                 self.teardown()
             except Exception:

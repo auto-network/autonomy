@@ -514,12 +514,57 @@ def inspect_node(payload: dict) -> dict:
     }
 
 
+def relay_stats(payload: dict) -> dict:
+    """Read-only serving evidence from the relay's own store (auto-qqlz5).
+
+    Counts live ``link_sessions`` and ``node_hints`` rows for one org so the
+    driver can PRINT the relay-side numbers instead of leaving "it passed"
+    as the whole record. Opens the registry database read-only and touches
+    no relay code — evidence capture must not be able to mutate the store.
+    """
+    import sqlite3
+
+    org_uuid = payload.get("org_uuid")
+    if not isinstance(org_uuid, str) or not org_uuid:
+        raise FixtureError("relay-stats payload must carry org_uuid")
+    db_path = os.environ.get(
+        "AUTONOMY_HARNESS_REGISTRY_DB", "/registry/registry.db"
+    )
+    now = int(time.time())
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        sessions_live = conn.execute(
+            "SELECT COUNT(*) FROM link_sessions"
+            " WHERE (org_uuid = ? OR org_uuid IS NULL) AND expires_at >= ?",
+            (org_uuid, now),
+        ).fetchone()[0]
+        sessions_ever = conn.execute(
+            "SELECT COUNT(*) FROM link_sessions"
+            " WHERE org_uuid = ? OR org_uuid IS NULL",
+            (org_uuid,),
+        ).fetchone()[0]
+        hints_live = conn.execute(
+            "SELECT COUNT(*) FROM node_hints"
+            " WHERE org_uuid = ? AND expires_at >= ?",
+            (org_uuid, now),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    return {
+        "org_uuid": org_uuid,
+        "link_sessions_live": sessions_live,
+        "link_sessions_ever": sessions_ever,
+        "node_hints_live": hints_live,
+    }
+
+
 COMMANDS = {
     "found": found_node,
     "seed-registry": seed_registry,
     "pending": pending_join,
     "approvals": approvals,
     "inspect": inspect_node,
+    "relay-stats": relay_stats,
 }
 
 
