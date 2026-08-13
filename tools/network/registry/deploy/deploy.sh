@@ -38,13 +38,16 @@ esac
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 APP_DIR=/opt/autonomy-registry
 
-echo "==> syncing code to $TARGET:$APP_DIR"
-ssh "$TARGET" "mkdir -p $APP_DIR/tools/network"
+echo "==> syncing code and install primer to $TARGET:$APP_DIR"
+ssh "$TARGET" "mkdir -p $APP_DIR/tools/network $APP_DIR/deploy"
 rsync -az --delete --exclude '__pycache__' --exclude 'tests' \
     "$REPO_ROOT/tools/network/idkit" \
     "$REPO_ROOT/tools/network/relaykit" \
     "$REPO_ROOT/tools/network/registry" \
     "$TARGET:$APP_DIR/tools/network/"
+rsync -az --delete \
+    "$REPO_ROOT/deploy/install" \
+    "$TARGET:$APP_DIR/deploy/"
 
 echo "==> venv + dependencies"
 ssh "$TARGET" bash -s <<EOF
