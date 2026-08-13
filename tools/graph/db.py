@@ -14,6 +14,7 @@ from typing import Any, Literal
 from tools.data_paths import (
     RealDataFallbackRefused,
     refuse_real_data_fallback_enabled,
+    resolve_data_root,
     resolve_orgs_root,
 )
 
@@ -156,6 +157,14 @@ def resolve_caller_db_path(
     slug = org or "personal"
     org_path = _org_db_path(slug, root)
     if org_path.exists():
+        return org_path
+    if resolve_data_root() is not None:
+        # An ambient-rooted deployment (AUTONOMY_DATA_ROOT, auto-fm4zz)
+        # never falls back to the repository-relative legacy DB — that
+        # would resolve OUTSIDE the declared volume, the exact split-brain
+        # the base root exists to prevent. The org's in-root path is the
+        # answer whether or not the file exists yet; initialization
+        # creates it there.
         return org_path
     if refuse_real_data_fallback_enabled():
         raise RealDataFallbackRefused(

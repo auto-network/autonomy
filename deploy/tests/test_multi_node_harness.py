@@ -67,6 +67,10 @@ def test_compose_topology_is_manifest_rooted_and_has_no_host_data_mounts(tmp_pat
         # open_org_db stay per-org, so the join channel and note serving
         # both refuse (auto-sb0g8).
         assert "GRAPH_DB" not in environment
+        # The ambient volume base ships instead (auto-fm4zz): a base
+        # DIRECTORY that composes with org routing and closes the unpinned
+        # graph store's guard gap in-volume.
+        assert environment["AUTONOMY_DATA_ROOT"] == "/app/data"
         for store in STORE_MANIFEST:
             if store.env and store.key != "graph":
                 assert environment[store.env] == f"/app/data/{store.relative}"

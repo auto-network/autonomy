@@ -105,6 +105,41 @@ STORE_MANIFEST: tuple = (
 STORES_BY_KEY = {store.key: store for store in STORE_MANIFEST}
 
 
+class AmbiguousDataRoot(RuntimeError):
+    """``AUTONOMY_DATA_ROOT`` was set to something that cannot be an
+    unambiguous base directory. Fail closed rather than guess."""
+
+
+DATA_ROOT_ENV = "AUTONOMY_DATA_ROOT"
+
+
+def resolve_data_root() -> Optional[Path]:
+    """The ambient BASE directory for the whole volume (auto-fm4zz).
+
+    A base DIRECTORY, never a whole-DB pin: it composes with each store's
+    ``relative`` (and with the org slug via ``base/orgs/<org>.db``), so it
+    has no org-discarding failure mode — the property that killed the
+    retired ``GRAPH_DB``-as-root idea (see resolve_caller_db_path's
+    conflict refusal, auto-23d9m). Precedence everywhere: the store's own
+    variable → this base → the explicit ``root`` argument → the
+    repository default under the refuse guard.
+
+    Relative values are refused fail-closed: an ambient root that changes
+    meaning with the working directory is an ambiguity, and the seam
+    ruling (23d9m/fm4zz) says ambiguity refuses rather than resolves.
+    """
+    value = os.environ.get(DATA_ROOT_ENV)
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        raise AmbiguousDataRoot(
+            f"{DATA_ROOT_ENV}={value!r} is not an absolute path; an ambient "
+            f"base that depends on the working directory is ambiguous"
+        )
+    return path
+
+
 def refuse_real_data_fallback_enabled() -> bool:
     """Return whether repository-local fallback paths must be refused."""
     value = os.environ.get(REFUSE_REAL_DATA_FALLBACK_ENV, "")
@@ -144,6 +179,13 @@ def resolve_store(key: str, *, root: Path | str | None = None) -> Path:
         env_value = os.environ.get(store.env)
         if env_value:
             return Path(env_value)
+    ambient = resolve_data_root()
+    if ambient is not None:
+        # The ambient base outranks the *root* argument for the same
+        # writer/reader-convergence reason the store variable outranks
+        # both: a reader that only knows the environment must agree with
+        # a writer that was handed a root.
+        return store.default(ambient)
     if root is not None:
         return store.default(root)
     if refuse_real_data_fallback_enabled():
@@ -176,6 +218,9 @@ def resolve_orgs_root(
     env = os.environ.get("AUTONOMY_ORGS_DIR")
     if env:
         return Path(env)
+    ambient = resolve_data_root()
+    if ambient is not None:
+        return ambient / "orgs"
     if root is not None:
         return Path(root)
     if refuse_real_data_fallback_enabled():
