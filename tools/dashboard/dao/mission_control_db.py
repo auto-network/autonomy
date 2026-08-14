@@ -285,6 +285,17 @@ def _get_conn(db_path: Path | str | None = None) -> sqlite3.Connection:
     # Backfill matters: every entry that already has an answer is closed, and
     # reading `closed_at IS NULL` on those without this would silently reopen
     # the entire history.
+    # WHAT IT IS ABOUT, IN THE AUTHOR'S WORDS. An anchor is a slug the screen's
+    # own author picked -- "decision:settings-invariant-bump" -- and it was the
+    # only context travelling with a question. A short answer to something the
+    # screen raised ("Do it") reached its coordinator as that slug and two
+    # words, and the reminder afterwards dropped even the slug. The page knows
+    # the heading the anchor sits under; it just had nowhere to put it.
+    try:
+        conn.execute("SELECT anchor_title FROM mission_conversation LIMIT 0")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE mission_conversation ADD COLUMN anchor_title TEXT")
+        conn.commit()
     try:
         conn.execute("SELECT closed_at, closed_by FROM mission_conversation LIMIT 0")
     except sqlite3.OperationalError:
@@ -1027,6 +1038,7 @@ def ask_question(
     *,
     pillar_id: str | None = None,
     anchor: str | None = None,
+    anchor_title: str | None = None,
     db_path: Path | str | None = None,
 ) -> dict | None:
     """Record a message -- no `kind` (question/proposal/comment): a message
@@ -1062,10 +1074,10 @@ def ask_question(
             "INSERT INTO mission_conversation"
             " (entry_id, mission_id, question, asked_by_participant_id,"
             "  asked_by_label, answer, answered_by_session, answered_at,"
-            "  relay_status, created_at, pillar_id, anchor)"
-            " VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 'pending', ?, ?, ?)",
+            "  relay_status, created_at, pillar_id, anchor, anchor_title)"
+            " VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 'pending', ?, ?, ?, ?)",
             (entry_id, mission_id, question, participant_id, participant_label,
-             created_at, pillar_id, anchor),
+             created_at, pillar_id, anchor, anchor_title),
         )
         conn.commit()
     finally:
@@ -1075,6 +1087,7 @@ def ask_question(
         "mission_id": mission_id,
         "pillar_id": pillar_id,
         "anchor": anchor,
+        "anchor_title": anchor_title,
         "question": question,
         "asked_by_participant_id": participant_id,
         "asked_by_label": participant_label,
@@ -1781,7 +1794,7 @@ def list_coordinators_with_open_questions(
             FROM mission_conversation mc
             LEFT JOIN pillars p ON mc.pillar_id = p.pillar_id
             LEFT JOIN missions m ON mc.pillar_id IS NULL AND mc.mission_id = m.mission_id
-            WHERE mc.answer IS NULL
+            WHERE mc.closed_at IS NULL AND mc.retired_at IS NULL
             ORDER BY mc.created_at ASC
             """,
         ).fetchall()

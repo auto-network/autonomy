@@ -974,7 +974,8 @@ def test_pillar_question_relays_to_both_pillar_and_mission_coordinator(mock_send
     envelopes = {call.args[0]: call.args[1] for call in mock_send.call_args_list}
     # Primary (pillar) is told a reply is expected; the mission is told
     # it's copied for tracking only.
-    assert "reply is expected" in envelopes["auto-pillar"]
+    # The primary is the one handed the routes to reply with.
+    assert "/answer" in envelopes["auto-pillar"]
     assert "Copied for tracking" in envelopes["auto-top"]
     assert "no reply expected from you" in envelopes["auto-top"]
     # Anchor surfaces in the relay body.
@@ -2534,3 +2535,83 @@ def test_a_question_closed_without_an_answer_can_still_be_reopened():
     assert not any(t.startswith("Previous answer") for t in trail), (
         "the responder was handed a previous answer that never existed"
     )
+
+
+# ── what a question carries with it ───────────────────────────────
+#
+# "Do it" reached a coordinator as two words and "(re:
+# decision:settings-invariant-bump)" -- a slug the screen's author keyed it
+# by. The reminder a minute later dropped even that, and told the reader to
+# go find the earlier message. The page knew the heading the anchor sat
+# under the whole time; it had nowhere to put it.
+
+
+def test_a_question_carries_what_it_is_about_in_words():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    visitor = _visitor(client)
+    with patch.object(mc_api, "_relay_question", new_callable=AsyncMock):
+        q = _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "question", "question": "Do it",
+             "anchor": "decision:settings-invariant-bump",
+             "anchor_title": "Bump the settings schema version"},
+        ))["question"]
+    assert q["anchor_title"] == "Bump the settings schema version"
+    assert q["anchor"] == "decision:settings-invariant-bump"
+
+
+def test_the_relay_leads_with_the_heading_not_the_slug():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    pillar = db.create_pillar(mission_id, "Infra", "auto-infra", "#4ade80")
+    entry = db.ask_question(
+        mission_id, "Do it", "guest:1", "Jeremy Spilman",
+        pillar_id=pillar["pillar_id"], anchor="decision:settings-invariant-bump",
+        anchor_title="Bump the settings schema version",
+    )
+    sent = {}
+
+    async def fake(target, body, **kw):
+        sent[target] = body
+        return True
+
+    with patch("tools.dashboard.tmux_send.tmux_send", new=fake):
+        _run(mc_api._relay_question(
+            mission_id=mission_id, entry_id=entry["entry_id"]))
+
+    envelope = sent["auto-infra"]
+    assert "Bump the settings schema version" in envelope
+    assert "decision:settings-invariant-bump" not in envelope, (
+        "the slug is still what the reader is shown"
+    )
+    # The protocol lives in the skill; what varies belongs in the message.
+    assert "checking the acquisition log" not in envelope
+    assert "If the guest pushes back later" not in envelope
+    assert "/answer" in envelope, "no way to reply was carried"
+
+
+def test_a_closed_or_retired_question_stops_nagging():
+    """The reminder query asked whether an answer existed, which stopped being
+    the same as open the moment closing became its own act -- and it never
+    excluded retired entries at all. Both would nag a coordinator forever
+    about something nobody is waiting on."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    visitor = _visitor(client)
+    with patch.object(mc_api, "_relay_question", new_callable=AsyncMock):
+        closed = _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "question", "question": "never mind"},
+        ))["question"]
+        _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "close", "entry_id": closed["entry_id"]},
+        ))
+    retired = db.ask_question(mission_id, "gone", "guest:1", "J")
+    db.retire_question(retired["entry_id"], "the subject was replaced")
+
+    open_by_session = db.list_coordinators_with_open_questions()
+    still = [e["entry_id"] for entries in open_by_session.values() for e in entries]
+    assert closed["entry_id"] not in still, "a closed question still nags"
+    assert retired["entry_id"] not in still, "a retired question still nags"

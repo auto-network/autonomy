@@ -958,6 +958,9 @@ def _question_payload(entry: dict) -> dict:
         "mission_id": entry["mission_id"],
         "pillar_id": entry.get("pillar_id"),
         "anchor": entry.get("anchor"),
+        # The heading the anchor sits under, in the screen author's own words.
+        # The slug is a name for the code; this is the one a reader recognises.
+        "anchor_title": entry.get("anchor_title"),
         "question": entry["question"],
         "asked_by_participant_id": entry["asked_by_participant_id"],
         "asked_by_label": entry["asked_by_label"],
@@ -1029,7 +1032,11 @@ async def _relay_question(*, mission_id: str, entry_id: str) -> None:
         )
         return
 
-    anchor_note = f" (re: {entry['anchor']})" if entry.get("anchor") else ""
+    # The heading the screen's author wrote, not the slug they keyed it by.
+    # "(re: decision:settings-invariant-bump)" was the entire context on a
+    # message whose body was "Do it".
+    about = entry.get("anchor_title") or entry.get("anchor") or ""
+    anchor_note = f" (re: {about})" if about else ""
     # Non-empty only after a reopen (see reopen_question) -- a first-round
     # relay always fires before any update could exist. Its presence is
     # what distinguishes "new question" framing from "this was reopened."
@@ -1052,25 +1059,18 @@ async def _relay_question(*, mission_id: str, entry_id: str) -> None:
             "pillar": pillar["pillar_id"] if pillar else None,
             "entry_id": entry_id,
         },
+        # WHAT VARIES, NOT THE PROTOCOL. This carried 215 words of unchanging
+        # instruction around a two-word message, every time, to a reader who
+        # read the same text in the skill when it was created. The rules for
+        # answering live there; what belongs here is who asked, about what,
+        # what they said, and where to reply.
         body=(
-            f"New message on \"{primary_label}\"{anchor_note} from {entry['asked_by_label']}:\n\n"
+            f"{entry['asked_by_label']} on \"{primary_label}\"{anchor_note}:\n\n"
             f"{entry['question']}"
             f"{context_block}\n\n"
-            f"A reply is expected -- but only once it's actually correct, not "
-            f"provisionally. If this will take a while, post interim progress "
-            f"visibility any number of times first -- one short, present-tense "
-            f"line each (e.g. \"checking the acquisition log\"). Updates are "
-            f"ephemeral and disappear once you answer, so don't put anything in "
-            f"one that the answer itself needs:\n"
-            f"POST {reply_route}/update {{\"text\": \"still working...\"}}\n"
-            f"Then file exactly one concise closing answer that stands alone -- "
-            f"state the current conclusion and its rationale, not the steps you "
-            f"took to get there or references to earlier back-and-forth:\n"
-            f"POST {reply_route}/answer {{\"answer\": \"...\"}}\n"
-            f"If the guest pushes back later, they may reopen this with a "
-            f"follow-up -- you'll get a fresh relay like this one with the "
-            f"prior context folded in, and should file a new answer that "
-            f"replaces this one entirely."
+            f"Answer only when it is right; post progress meanwhile.\n"
+            f"  progress  POST {reply_route}/update {{\"text\": \"...\"}}\n"
+            f"  answer    POST {reply_route}/answer {{\"answer\": \"...\"}}"
         ),
     )
 
@@ -1144,6 +1144,9 @@ async def handle_relay_write(participant_id: str, mission_id: str, body: dict) -
         if anchor is not None and not isinstance(anchor, str):
             return None
         anchor = (anchor or "").strip() or None
+        anchor_title = body.get("anchor_title")
+        anchor_title = (anchor_title or "").strip() or None if isinstance(
+            anchor_title, str) else None
         pillar_id = body.get("pillar_id")
         if pillar_id is not None:
             if not isinstance(pillar_id, str):
@@ -1160,7 +1163,7 @@ async def handle_relay_write(participant_id: str, mission_id: str, body: dict) -
                 return None
         entry = db.ask_question(
             mission_id, question, participant_id, participant_label,
-            pillar_id=pillar_id, anchor=anchor,
+            pillar_id=pillar_id, anchor=anchor, anchor_title=anchor_title,
         )
         event = "asked"
     elif kind == "reopen":
@@ -1365,6 +1368,7 @@ async def _ask_question_impl(
     if not isinstance(question, str) or not question.strip():
         return JSONResponse({"error": "question is required"}, status_code=400)
     anchor = (body.get("anchor") or "").strip() or None
+    anchor_title = (body.get("anchor_title") or "").strip() or None
 
     visitor = _resolve_visitor_identity(request)
     if not visitor:
@@ -1375,7 +1379,7 @@ async def _ask_question_impl(
 
     entry = db.ask_question(
         mission_id, question, visitor["participant_id"], visitor["participant_label"],
-        pillar_id=pillar_id, anchor=anchor,
+        pillar_id=pillar_id, anchor=anchor, anchor_title=anchor_title,
     )
     if entry is None:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -1597,6 +1601,7 @@ async def _answer_asked_impl(
     entry = db.ask_question(
         mission_id, question.strip(), asker_id, asker_label,
         pillar_id=pillar_id, anchor=(anchor or "").strip() or None,
+        anchor_title=(body.get("anchor_title") or "").strip() or None,
     )
     if entry is None:
         return JSONResponse({"error": "not found"}, status_code=404)

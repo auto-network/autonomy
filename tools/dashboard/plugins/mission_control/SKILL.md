@@ -535,7 +535,8 @@ Your whole contract is two lines:
 
 1. **Push a complete, self-contained HTML document** for the screen (§2 for a
    mission, §8 for a pillar).
-2. **Optionally** mark discussable elements `data-mc-anchor="<short-id>"`.
+2. **Optionally** mark discussable elements `data-mc-anchor="<short-id>"`, and
+   add `data-mc-ask="<question>"` to any of them where you need an answer.
 
 That is all of it. Ordinary HTML, CSS, `<script>`, in-page `#anchor` links —
 all work natively, on the dashboard and over the relay alike. Your document is
@@ -552,7 +553,8 @@ You do not build any of this, and you should not duplicate it:
   and a **full-screen discussion view** for one question — with ask, answer,
   and reopen.
 - An **icon control inside every `[data-mc-anchor]` element**, showing the
-  number of questions on that artifact and colouring it while any is open.
+  number of questions on that artifact and colouring it while any is open —
+  or, where you added `data-mc-ask`, an **Answer** control instead.
 
 Two consequences worth stating plainly:
 
@@ -580,6 +582,53 @@ an extra inline child — a table cell, a figure, a paragraph, a card:
 The control mounts **inside** that element, never as a sibling — a sibling
 would break your own adjacent-sibling (`+`) CSS rules. The value is free text
 that means something to you; it is what the question gets tagged with.
+
+### Asking the reader something
+
+An anchor on its own is a place to be asked about. Add `data-mc-ask` and the
+same element becomes a question **you are asking the reader**:
+
+```html
+<div class="card" data-mc-anchor="decision:partitioning"
+     data-mc-ask="Partition by acquisition run, or by ecosystem?">
+  <h3>How the dataset is partitioned</h3>
+  <p>Either works for the loader; they differ under re-ingest.</p>
+</div>
+```
+
+Use it for a decision you cannot make yourself (§11's "a standing decision you
+now think is wrong", and anything across a boundary you do not own). Do not use
+it for rhetorical questions in your prose — every one of these is a real
+request for someone's attention.
+
+Three things follow, and you do not build any of them:
+
+- The control reads **Answer** rather than a question count, and stops the
+  moment it is answered.
+- It is **not** in the mission's open-question list until answered. That list
+  is what the mission owes the reader; this is the other direction. It is
+  counted separately, as *"N for you"*, so it is still findable.
+- Answered, it becomes an ordinary entry with the attributions the other way
+  round — asked by your screen, answered by them — in the same record, with
+  the same reopen path. You are told the answer over CrossTalk. You are
+  deliberately **not** told the question: you wrote it.
+
+A question exists only on the page until it is answered, so **editing it away
+is how you withdraw it.** Nothing to retire, nothing to clean up. Change the
+text and you have asked a different question; the answered ones are untouched,
+because those are records.
+
+### Name your anchors in words
+
+Whatever heading your anchored element sits under travels with every question
+asked there, and is what the reader, your CrossTalk relay and your reminders
+all say the question is about. The anchor value itself is never shown to a
+person.
+
+So `data-mc-anchor="decision:partitioning"` under a heading of "How the dataset
+is partitioned" reads well everywhere. The same anchor under no heading at all
+falls back to the raw slug, and a short reply — "Do it" — then reaches you as
+two words and an identifier.
 
 **Restructure freely; move the conversations with you.** Anchors are
 placement hints, not a contract with the past. A question asked last week is
