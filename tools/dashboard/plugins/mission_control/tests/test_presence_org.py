@@ -25,6 +25,10 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[4]
 
+#: One temp root shared by writer and reader: they must address the SAME
+#: database for the test to mean anything, and it must not be a real one.
+_DATA_ROOT = Path(tempfile.mkdtemp(prefix="mc-presence-org-"))
+
 WRITE = """
 import sys; sys.path.insert(0, {repo!r})
 from tools.dashboard.plugins.mission_control import compose
@@ -45,7 +49,17 @@ print(json.dumps([p["participant_id"] for p in here]))
 
 
 def _run(code: str, env_extra: dict) -> str:
+    # A CHILD THAT NAMES ITS ORG MUST NOT ALSO CARRY A DATABASE PIN. The
+    # harness sets GRAPH_DB for store isolation, subprocesses inherited it,
+    # and the child then asked for an org by name -- a combination the
+    # platform refuses rather than silently discarding one of the two.
+    #
+    # Redirect the whole data root instead of unsetting the pin. Unsetting it
+    # resolves the org to the real data/orgs/autonomy.db, so a test about
+    # where presence lands would start writing presence into production.
     env = {**os.environ, **env_extra}
+    env.pop("GRAPH_DB", None)
+    env.setdefault("AUTONOMY_DATA_ROOT", str(_DATA_ROOT))
     r = subprocess.run([sys.executable, "-c", code.format(repo=str(REPO))],
                        capture_output=True, text=True, timeout=90, env=env)
     assert r.returncode == 0, r.stderr[-1500:]
