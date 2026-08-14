@@ -37,6 +37,12 @@ from tools.network.idkit import DelegationCert, KeyPair, canonical_json
 REQUEST_DOMAIN = b"autonomy.network.registry.request.v1\n"
 ENVELOPE_VERSION = 1
 
+#: Domain for the OLD recovery key's co-signature authorizing its own
+#: replacement or removal as the org's recovery factor (the succession
+#: co-sig). Distinct from REQUEST_DOMAIN so a request envelope signature
+#: can never be substituted for a succession authorization and vice versa.
+RECOVERY_SUCCESSION_DOMAIN = b"autonomy.network.registry.recovery-succession.v1\n"
+
 #: Maximum tolerated |server now - envelope ts|, seconds.
 MAX_CLOCK_SKEW = 300
 
@@ -52,6 +58,56 @@ def request_signing_input(method: str, path: str, ts: int, signer: str, payload:
             "signer": signer,
             "payload": payload,
         }
+    )
+
+
+def recovery_succession_input(
+    org_uuid: str,
+    old_recovery_pub: str,
+    new_policy: str,
+    new_recovery_pub: Optional[str],
+    policy_epoch: int,
+) -> bytes:
+    """The exact bytes the OLD recovery key co-signs to authorize replacing or
+    removing itself as the org's recovery factor.
+
+    Bound to ``policy_epoch`` — the epoch the update TRANSITIONS INTO (current
+    + 1) — so an old-recovery co-signature is single-use for exactly one
+    succession and cannot be replayed against a later one. ``org_uuid`` and
+    ``old_recovery_pub`` pin it to this org and this outgoing key;
+    ``new_policy`` / ``new_recovery_pub`` pin the successor it authorizes (or
+    ``None`` on removal), so the co-signer approves a specific transition, not a
+    blank cheque.
+    """
+    return RECOVERY_SUCCESSION_DOMAIN + canonical_json(
+        {
+            "org_uuid": org_uuid,
+            "old_recovery_pub": old_recovery_pub,
+            "new_policy": new_policy,
+            "new_recovery_pub": new_recovery_pub,
+            "policy_epoch": policy_epoch,
+        }
+    )
+
+
+def sign_recovery_succession(
+    recovery_key: KeyPair,
+    org_uuid: str,
+    new_policy: str,
+    new_recovery_pub: Optional[str],
+    policy_epoch: int,
+) -> str:
+    """Client-side counterpart: the outgoing recovery key co-signs its own
+    succession/removal. The signer's own public key is the ``old_recovery_pub``
+    the server checks against, so it is derived here rather than passed."""
+    return recovery_key.sign_hex(
+        recovery_succession_input(
+            org_uuid,
+            recovery_key.public_hex,
+            new_policy,
+            new_recovery_pub,
+            policy_epoch,
+        )
     )
 
 
