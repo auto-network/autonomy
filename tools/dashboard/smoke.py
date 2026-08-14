@@ -19,13 +19,23 @@ import subprocess
 import sys
 import time
 
+# ``requests`` is only needed for the dashboard tiers (tier1/tier2). The
+# per-bead functional check (--functional-only) is pure subprocess plumbing and
+# must run in bare containers that never installed requests, so the import is
+# lazy: it fails loudly only when a tier that needs it actually runs.
 try:
     import requests
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 except ImportError:
-    print("ERROR: requests not installed. Run: pip install requests", file=sys.stderr)
-    sys.exit(1)
+    requests = None
+
+
+def _require_requests():
+    if requests is None:
+        print("ERROR: requests not installed. Run: pip install requests",
+              file=sys.stderr)
+        sys.exit(1)
 
 
 def _check(name: str, fn) -> dict:
@@ -42,6 +52,7 @@ def _check(name: str, fn) -> dict:
 
 def run_tier1(base_url: str) -> dict:
     """Run Tier 1 API sanity checks (pure HTTP, no browser)."""
+    _require_requests()
     session = requests.Session()
     session.verify = False
     # The human-gate (HumanGateMiddleware) locks /pages/* behind an unlock
@@ -283,6 +294,7 @@ def run_tier1(base_url: str) -> dict:
 
 def run_tier2(base_url: str) -> dict:
     """Run Tier 2 browser sweep using agent-browser."""
+    _require_requests()
     if not shutil.which("agent-browser"):
         # Skip-as-pass is the tautology the test-value standard names: the
         # dispatcher's shell never had agent-browser on PATH, so this tier
@@ -686,6 +698,71 @@ def run_tier2(base_url: str) -> dict:
     return {"pass": passed, "skipped": False, "pages": page_results}
 
 
+def run_functional_check(output_dir: str) -> dict:
+    """Execute a run's per-bead functional-proof script (golden-rule gate,
+    auto-hwrho).
+
+    Convention, riding the existing per-run plumbing end to end: a dispatched
+    run that wants pipeline-driven functional proof writes an executable
+    ``functional_check.sh`` into its own output dir (next to decision.json).
+    The contract is deliberately tiny:
+
+      - exit 0  == the change was exercised on a real user path (PROVEN)
+      - stdout  IS the evidence transcript
+
+    This runs it (timeout 120s), tees stdout to ``functional_check.log`` in the
+    same dir, and returns a block describing the outcome:
+
+        {"present": True, "pass": bool, "log": "<path>"}
+
+    An absent script returns ``{"present": False}`` and the caller behaves
+    exactly as before — the gate still demands functional proof from a
+    ``functional_artifacts`` entry elsewhere. The run declares by writing the
+    script; there is no config and no bead-side flag.
+    """
+    from pathlib import Path
+
+    out = Path(output_dir)
+    script = out / "functional_check.sh"
+    if not script.exists():
+        return {"present": False}
+
+    log_path = out / "functional_check.log"
+    # Prefer executing the script directly (honours its shebang) when it is
+    # executable; otherwise drive it through bash. Either way stdout is the
+    # transcript and the exit code is the verdict.
+    cmd = [str(script)] if os.access(script, os.X_OK) else ["bash", str(script)]
+    print(f"=== Functional check: {script} ===", file=sys.stderr)
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, cwd=str(out), timeout=120,
+        )
+        transcript = proc.stdout or ""
+        log_path.write_text(transcript)
+        # Echo the transcript + any stderr so it is visible in the run log too.
+        if transcript:
+            print(transcript, end="", file=sys.stderr)
+        if proc.stderr:
+            print(proc.stderr, end="", file=sys.stderr)
+        passed = proc.returncode == 0
+        print(
+            f"  Functional check: {'PASS' if passed else 'FAIL'} "
+            f"(exit {proc.returncode}) — log: {log_path}",
+            file=sys.stderr,
+        )
+        return {"present": True, "pass": passed, "log": str(log_path)}
+    except subprocess.TimeoutExpired as e:
+        partial = e.stdout or ""
+        if isinstance(partial, bytes):
+            partial = partial.decode(errors="replace")
+        log_path.write_text(
+            partial + "\n[functional_check.sh timed out after 120s]\n"
+        )
+        print("  Functional check: FAIL (timed out after 120s)", file=sys.stderr)
+        return {"present": True, "pass": False, "log": str(log_path),
+                "detail": "timed out after 120s"}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Dashboard smoke test")
     parser.add_argument(
@@ -696,11 +773,40 @@ def main():
         "--tier", default="all", choices=["all", "tier1", "tier2"],
         help="Which tier(s) to run (default: all)",
     )
+    parser.add_argument(
+        "--output-dir", default=None,
+        help="Run output dir; execute functional_check.sh here if present and "
+             "attach a 'functional' block to the result JSON.",
+    )
+    parser.add_argument(
+        "--functional-only", action="store_true",
+        help="Skip the dashboard tiers and run only the per-bead functional "
+             "check (for non-dashboard runtime changes). Requires --output-dir.",
+    )
     args = parser.parse_args()
+
+    if args.functional_only and not args.output_dir:
+        print("ERROR: --functional-only requires --output-dir", file=sys.stderr)
+        sys.exit(2)
 
     start_ms = time.time() * 1000
     tier1_result = None
     tier2_result = None
+    functional_result = None
+
+    # --functional-only: skip the dashboard tiers entirely and run just the
+    # per-bead functional check. This is the non-dashboard runtime-change path
+    # the dispatcher drives before the pre-merge gate.
+    if args.functional_only:
+        functional_result = run_functional_check(args.output_dir)
+        fn = functional_result or {}
+        # Absent script -> nothing to prove here (pass); present -> its verdict.
+        overall_pass = (not fn.get("present")) or bool(fn.get("pass"))
+        duration_ms = int(time.time() * 1000 - start_ms)
+        result = {"pass": overall_pass, "duration_ms": duration_ms,
+                  "functional": functional_result}
+        print(json.dumps(result))
+        sys.exit(0 if overall_pass else 1)
 
     # Tier 1
     if args.tier in ("all", "tier1"):
@@ -727,6 +833,14 @@ def main():
         t2 = tier2_result["pass"] if tier2_result else False
         overall_pass = t1 and t2
 
+    # Per-bead functional check rides the same result JSON when an output dir
+    # is given (dashboard runs pass --output-dir too). A present-and-failed
+    # functional check drags the overall verdict down; an absent one is inert.
+    if args.output_dir:
+        functional_result = run_functional_check(args.output_dir)
+        if functional_result.get("present") and not functional_result.get("pass"):
+            overall_pass = False
+
     duration_ms = int(time.time() * 1000 - start_ms)
 
     result: dict = {"pass": overall_pass, "duration_ms": duration_ms}
@@ -734,6 +848,8 @@ def main():
         result["tier1"] = tier1_result
     if tier2_result is not None:
         result["tier2"] = tier2_result
+    if functional_result is not None:
+        result["functional"] = functional_result
 
     print(json.dumps(result))
     sys.exit(0 if overall_pass else 1)

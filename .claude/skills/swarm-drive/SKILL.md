@@ -62,6 +62,29 @@ python3 -m pytest <touched suites> -q
 # then ATTACK: adversarially probe the invariants; happy-path-only reproduction = FAIL
 ```
 
+### Runtime-critical beads: suite-green is not proof
+
+The rerun-the-suite recipe above proves the mocked/unit layer. For a bead
+labeled `runtime-critical` (session/launch, credential/auth, mount wiring,
+dispatch, merge automation, background pollers) that is exactly the layer the
+bug hides behind — so a green suite is **not** proof, and the golden-rule gate
+will refuse the close/merge without a **functional artifact**: a REAL run's
+screenshot, log tail, or transcript of the change on the actual user path.
+
+Require the validator (or builder) to record the proof as a marker line the
+gate recognizes — in the close reason or a bead note, and as a
+`functional_artifacts` entry in decision.json:
+
+```
+functional-proof: <ref>          # graph attachment id | /workspace/output path | run log
+```
+
+The ref must be a concrete token (`[A-Za-z0-9/][A-Za-z0-9/_.:-]{5,}`); a
+literal `functional-proof: <ref>` placeholder does NOT satisfy the gate. If no
+functional artifact exists, the bead is BLOCKED, not proved — do not record it
+as merged. See the Definition-of-Done block in `tool_guidelines.md` for the
+verbatim refusal text and the `functional_check.sh` pipeline path.
+
 ## Memory & concurrency
 
 - `free -g` before each launch; hold a floor (back off when available < ~8GB). Dashboard/graph workspaces are LIGHT; never launch Anchore/enterprise workspaces for this — they're RAM hogs.
