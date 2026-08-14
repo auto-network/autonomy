@@ -8156,6 +8156,17 @@ GRAPH_REWRITE_BEAD_CHECKS = """
 
 
 class TestGraphRewriteScopingSession:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): this class asserts
+        # against state that accumulated SSE events / the server's event
+        # buffer perturb, and ANY predecessor class leaves those behind.
+        # Only the hard reset clears that set (soft reset measured
+        # insufficient); same cure the late ceremony classes use.
+        _hard_reset_sweep(sweep_server)
+
     """Session viewer must NOT rewrite graph:// — it should render literally."""
 
     @pytest.fixture(scope="class", autouse=True)
@@ -8185,6 +8196,17 @@ class TestGraphRewriteScopingSession:
 
 
 class TestGraphRewriteScopingBead:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): this class asserts
+        # against state that accumulated SSE events / the server's event
+        # buffer perturb, and ANY predecessor class leaves those behind.
+        # Only the hard reset clears that set (soft reset measured
+        # insufficient); same cure the late ceremony classes use.
+        _hard_reset_sweep(sweep_server)
+
     """Bead detail page must NOT rewrite graph:// — it should render literally."""
 
     @pytest.fixture(scope="class", autouse=True)
@@ -8244,6 +8266,17 @@ NARROW_VIEWPORT_CHECKS = """
 
 
 class TestRichContentNarrowViewport:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): this class asserts
+        # against state that accumulated SSE events / the server's event
+        # buffer perturb, and ANY predecessor class leaves those behind.
+        # Only the hard reset clears that set (soft reset measured
+        # insufficient); same cure the late ceremony classes use.
+        _hard_reset_sweep(sweep_server)
+
     """At narrow viewport (600px), wide diagrams must scroll horizontally, not clip."""
 
     @pytest.fixture(scope="class", autouse=True)
@@ -8319,6 +8352,17 @@ ROLE_RENDERING_CHECKS = """
 
 
 class TestSourceViewerRoleRendering:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): this class asserts
+        # against state that accumulated SSE events / the server's event
+        # buffer perturb, and ANY predecessor class leaves those behind.
+        # Only the hard reset clears that set (soft reset measured
+        # insufficient); same cure the late ceremony classes use.
+        _hard_reset_sweep(sweep_server)
+
     """Chat-layout entries render USER vs ASSISTANT per ``role`` (auto-pluod).
 
     Regression guard: pre-fix the template discriminated on a missing
@@ -8406,6 +8450,17 @@ HEADER_META_CHECKS = r"""
 
 
 class TestSourceViewerHeaderMetadata:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): this class asserts
+        # against state that accumulated SSE events / the server's event
+        # buffer perturb, and ANY predecessor class leaves those behind.
+        # Only the hard reset clears that set (soft reset measured
+        # insufficient); same cure the late ceremony classes use.
+        _hard_reset_sweep(sweep_server)
+
     """Header metadata strip renders per the visibility matrix (auto-ptptn).
 
     Four fixtures cover the state matrix from the bead spec:
@@ -8553,6 +8608,17 @@ LONG_SESSION_HEADER_CHECKS = """
 
 
 class TestGraphSourcePageLoad:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): this class asserts
+        # against state that accumulated SSE events / the server's event
+        # buffer perturb, and ANY predecessor class leaves those behind.
+        # Only the hard reset clears that set (soft reset measured
+        # insufficient); same cure the late ceremony classes use.
+        _hard_reset_sweep(sweep_server)
+
     """Long-session page-load returns the full transcript and renders
     header metadata from the authoritative ``source.metadata`` fields
     rather than recomputing from the entries list (auto-urf1s).
@@ -8814,6 +8880,17 @@ AGENT_ACTIONS_HIDDEN_CHECKS = """(async () => {
 
 
 class TestAgentActionsDropdown:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): this class asserts
+        # against state that accumulated SSE events / the server's event
+        # buffer perturb, and ANY predecessor class leaves those behind.
+        # Only the hard reset clears that set (soft reset measured
+        # insufficient); same cure the late ceremony classes use.
+        _hard_reset_sweep(sweep_server)
+
     """Verify the agentic-actions dropdown mounts on a page where its
     asset's org has applicable members, opens with action items, and
     renders Send-To using the shared partials/session-card.html — not
@@ -8931,6 +9008,17 @@ class TestAgentActionsDropdown:
 
 
 class TestAgentActionsDropdownHiddenForEmptyOrg:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): this class asserts
+        # against state that accumulated SSE events / the server's event
+        # buffer perturb, and ANY predecessor class leaves those behind.
+        # Only the hard reset clears that set (soft reset measured
+        # insufficient); same cure the late ceremony classes use.
+        _hard_reset_sweep(sweep_server)
+
     """The button must stay hidden on a note whose org has no seeded
     actions — the universal Send-To is also gated by canonical promotion
     into the asset's own org, so a freshly-bootstrapped org renders nothing.
@@ -8956,6 +9044,17 @@ class TestAgentActionsDropdownHiddenForEmptyOrg:
 
 
 class TestAgentActionsDropdownLiveRefresh:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): this class asserts
+        # against state that accumulated SSE events / the server's event
+        # buffer perturb, and ANY predecessor class leaves those behind.
+        # Only the hard reset clears that set (soft reset measured
+        # insufficient); same cure the late ceremony classes use.
+        _hard_reset_sweep(sweep_server)
+
     """Adding a Setting member via the test API must update the dropdown
     without a manual page reload (Round 1b live-update via setting.changed).
     """
@@ -9238,6 +9337,17 @@ ASK_QUESTION_MODAL_CHECKS = """(async () => {
 
 
 class TestAskQuestionActionBehavior:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): this class asserts
+        # against state that accumulated SSE events / the server's event
+        # buffer perturb, and ANY predecessor class leaves those behind.
+        # Only the hard reset clears that set (soft reset measured
+        # insufficient); same cure the late ceremony classes use.
+        _hard_reset_sweep(sweep_server)
+
     """Operator-input modal flow for ``bead.ask-question`` (auto-0tkwj).
 
     Drives the modal through its full state matrix on /bead/auto-sweep-b1
@@ -9479,6 +9589,17 @@ SEARCH_PAGE_MULTI_STATE_CHECKS = """(async () => {
 
 
 class TestSearchPageBehavior:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): this class asserts
+        # against state that accumulated SSE events / the server's event
+        # buffer perturb, and ANY predecessor class leaves those behind.
+        # Only the hard reset clears that set (soft reset measured
+        # insufficient); same cure the late ceremony classes use.
+        _hard_reset_sweep(sweep_server)
+
     """L2.B backfill for /search (auto-bcxdr + chrome).
 
     Exercises three URL states in a single browser session: the populated
@@ -9739,6 +9860,17 @@ SEARCH_CHROME_POLISH_CHECKS = """(async () => {
 
 
 class TestSearchChromePolish:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): this class asserts
+        # against state that accumulated SSE events / the server's event
+        # buffer perturb, and ANY predecessor class leaves those behind.
+        # Only the hard reset clears that set (soft reset measured
+        # insufficient); same cure the late ceremony classes use.
+        _hard_reset_sweep(sweep_server)
+
     """Verifies auto-gsu99's production chrome on the live /search page.
 
     Companion to test_search_chrome_polish.py — that file asserts the
@@ -9930,6 +10062,17 @@ SEARCH_PILL_SEMANTICS_CHECKS = """(async () => {
 
 
 class TestSearchPillSemantics:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): this class asserts
+        # against state that accumulated SSE events / the server's event
+        # buffer perturb, and ANY predecessor class leaves those behind.
+        # Only the hard reset clears that set (soft reset measured
+        # insufficient); same cure the late ceremony classes use.
+        _hard_reset_sweep(sweep_server)
+
     """Round 7k: pill semantics — Sessions, Dispatch, NULL invisibility,
     legacy 'Agent runs' chip removed.
 
@@ -10185,6 +10328,17 @@ SEARCH_SORT_CHIP_CHECKS = """(async () => {
 
 
 class TestSearchSortChip:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): this class asserts
+        # against state that accumulated SSE events / the server's event
+        # buffer perturb, and ANY predecessor class leaves those behind.
+        # Only the hard reset clears that set (soft reset measured
+        # insufficient); same cure the late ceremony classes use.
+        _hard_reset_sweep(sweep_server)
+
     """Round 7k: sort chip toggles Relevance ⇄ Recent.
 
     URL is the source of truth — ``?order=recent`` is round-tripped on
@@ -10388,6 +10542,17 @@ SEARCH_PILL_REFETCH_CHECKS = """(async () => {
 
 
 class TestSearchPillRefetch:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): this class asserts
+        # against state that accumulated SSE events / the server's event
+        # buffer perturb, and ANY predecessor class leaves those behind.
+        # Only the hard reset clears that set (soft reset measured
+        # insufficient); same cure the late ceremony classes use.
+        _hard_reset_sweep(sweep_server)
+
     """Round 7l: pill click triggers a /api/search re-fetch with the
     type filter pushed to the URL — no longer a client-only filter
     over ``this.results``.
@@ -10757,6 +10922,17 @@ SEARCH_FILTER_STRIP_NARROW_CHECKS = """(async () => {
 
 
 class TestSearchFilterStripNarrowViewport:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): this class asserts
+        # against state that accumulated SSE events / the server's event
+        # buffer perturb, and ANY predecessor class leaves those behind.
+        # Only the hard reset clears that set (soft reset measured
+        # insufficient); same cure the late ceremony classes use.
+        _hard_reset_sweep(sweep_server)
+
     """At iPhone width, Org / State / Sort / Ranker share one row.
 
     Pre-Round-7m the labels + values + padding overflowed and Sort
