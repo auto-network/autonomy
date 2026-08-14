@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import os
 import re
 import time
@@ -70,6 +71,31 @@ from tools.graph.schemas.network_identity import (  # noqa: F401
 
 DEFAULT_REGISTRY_URL = "https://registry.auto.network"
 _PERSONA_PUB_RE = re.compile(r"^[0-9a-f]{64}\Z")
+
+# -- invite resolve (auto-yw5gz) ------------------------------------------------
+# The dashboard-origin half of the paste-into-your-own-dashboard flow: the page
+# hands its own dashboard {relay_host, channel_token} (TRANSPORT credentials
+# only — registry-visible by design), the dashboard opens the root-pinned E2E
+# join channel to the org and returns the org-served invite context + identity.
+# The ledger bearer (#t=) is NEVER part of this — it stays in the browser.
+_CHANNEL_TOKEN_RE = re.compile(r"^[0-9a-f]{32}\Z")
+_ORG_UUID_RE = re.compile(r"^[0-9a-f-]{32,36}\Z")
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}\Z")
+# The org-identity guards MATCH the relay bridge's (join.js safeColor/safeIcon):
+# a bare hex color and a bounded data:image/*;base64 URI — never arbitrary CSS,
+# never a remote URL. Re-validated here serve-side even though the org already
+# bounds them, and re-validated again client-side (defence at every hop).
+_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}\Z")
+_ICON_RE = re.compile(
+    r"^data:image/(png|jpeg|gif|webp|svg\+xml);base64,[A-Za-z0-9+/=]+\Z"
+)
+_ICON_MAX_LEN = 300000
+# The whole request vocabulary — transport credentials, plus the already-public
+# org/root_pub/invite_ref a /network/join handoff carries in its own query. A
+# 't'/'bearer' or any other key is refused, not ignored, so the bearer can
+# never ride in even by accident.
+_RESOLVE_KEYS = frozenset({"relay_host", "channel_token", "org", "root_pub",
+                           "invite_ref"})
 
 
 def _serve_child_used_by_another_local_org(
@@ -1339,6 +1365,196 @@ async def post_serve_cert(request: Request) -> JSONResponse:
                          "not_after": cert.not_after})
 
 
+def _relay_bases(relay_host: str):
+    """Split a pasted relay origin into its ``(https base, wss base)``.
+
+    Accepts a full origin (``https://relay.host``) or a bare host; a bare
+    host defaults to https/wss. Returns ``(http_base, ws_base, None)`` or
+    ``(None, None, JSONResponse)`` on a malformed value.
+    """
+    raw = relay_host.strip()
+    parsed = urllib.parse.urlsplit(raw if "//" in raw else "https://" + raw)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None, None, JSONResponse(
+            {"ok": False, "error": "relay_host must be an http(s) origin"},
+            status_code=400,
+        )
+    http_base = f"{parsed.scheme}://{parsed.netloc}"
+    ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+    return http_base, f"{ws_scheme}://{parsed.netloc}", None
+
+
+def _relay_client(base_url: str) -> httpx.AsyncClient:
+    """Factory seam for the link-envelope GET (tests swap it for an
+    in-process registry app)."""
+    return httpx.AsyncClient(base_url=base_url, timeout=10.0)
+
+
+async def _fetch_link_envelope(http_base: str, token: str) -> dict | None:
+    """The link's PUBLIC transport envelope from its own relay host —
+    ``{org, root_pub, invite_ref, …}`` (§5.3). This is the same public
+    source the relay bridge pins from; nothing secret rides here. Returns
+    None on any transport/shape failure (the org step degrades to paste)."""
+    try:
+        async with _relay_client(http_base) as client:
+            resp = await client.get(f"/v1/links/{token}/envelope")
+    except httpx.HTTPError:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        body = resp.json()
+    except Exception:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+async def _read_org_context(ws_base: str, token: str, *, root_pub: str,
+                            org: str) -> dict | None:
+    """Open the root-pinned E2E join channel and read the org's own invite
+    context (the ``op: context`` reply). Reuses relaykit's viewer client —
+    the Python twin of the browser handshake, so ``root_pub`` is the I5 pin
+    established BEFORE any channel byte and the bearer never participates.
+    Returns the reply dict, or None if the org is unreachable / an older
+    node that does not serve it (the caller then renders the minimal form)."""
+    from tools.network.relaykit.viewer import ViewerChannel
+
+    try:
+        channel = await ViewerChannel.connect(
+            ws_base, token, root_pub=root_pub, org=org
+        )
+    except Exception:
+        return None
+    try:
+        await channel.send_message(json.dumps({"v": 1, "op": "context"}).encode())
+        raw = await channel.recv_message()
+    except Exception:
+        return None
+    finally:
+        with contextlib.suppress(Exception):
+            await channel.close()
+    try:
+        reply = json.loads(raw.split(b"\n", 1)[0])
+    except Exception:
+        return None
+    if not isinstance(reply, dict) or reply.get("status") != "ok":
+        return None
+    return reply
+
+
+def _safe_identity(reply: dict) -> dict:
+    """The r7kk4 identity fields, re-validated with the bridge's guards.
+
+    Only a non-empty name, a bare hex color, a bounded description byline,
+    and a bounded ``data:image/*;base64`` icon survive. A remote-URL icon or
+    arbitrary-CSS color is dropped (never emitted), matching join.js."""
+    out: dict = {}
+    name = reply.get("org_name")
+    if isinstance(name, str) and name:
+        out["org_name"] = name[:120]
+    color = reply.get("org_color")
+    if isinstance(color, str) and _HEX_COLOR_RE.match(color):
+        out["org_color"] = color
+    desc = reply.get("org_description")
+    if isinstance(desc, str) and desc:
+        out["org_description"] = desc[:300]
+    icon = reply.get("org_icon")
+    if isinstance(icon, str) and len(icon) <= _ICON_MAX_LEN and _ICON_RE.match(icon):
+        out["org_icon"] = icon
+    return out
+
+
+async def post_invite_resolve(request: Request) -> JSONResponse:
+    """Resolve a pasted invite link on THIS dashboard's own origin (auto-yw5gz).
+
+    Body: ``{relay_host, channel_token}`` — transport credentials only — and,
+    for a ``/network/join`` handoff link, its already-public
+    ``{org, root_pub, invite_ref}``. The ledger bearer (#t=) is NEVER accepted:
+    an unexpected key (``t``, ``bearer``, anything) is a hard 400, so the
+    secret can never ride in even by mistake.
+
+    Returns ``{ok: true, org, invite_ref?, org_name?, org_color?,
+    org_description?, org_icon?}``. When the relay is unreachable or the org
+    node is older, the identity fields are simply absent and the caller renders
+    the minimal verified-org step — never an error page.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "body must be JSON"},
+                            status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "error": "body must be a JSON object"},
+                            status_code=400)
+    unknown = set(body) - _RESOLVE_KEYS
+    if unknown:
+        return JSONResponse({"ok": False, "error": (
+            f"unexpected keys {sorted(unknown)}: invite resolve carries only "
+            "transport credentials (relay_host, channel_token) and, for a "
+            "handoff link, its public org/root_pub/invite_ref — never the "
+            "bearer, which must stay in the browser"
+        )}, status_code=400)
+
+    relay_host = body.get("relay_host")
+    channel_token = body.get("channel_token")
+    if not isinstance(relay_host, str) or not relay_host:
+        return JSONResponse({"ok": False, "error": "relay_host is required"},
+                            status_code=400)
+    if not isinstance(channel_token, str) or not _CHANNEL_TOKEN_RE.match(channel_token):
+        return JSONResponse({"ok": False, "error": (
+            "channel_token must be 32 hex chars"
+        )}, status_code=400)
+    http_base, ws_base, refused = _relay_bases(relay_host)
+    if refused is not None:
+        return refused
+
+    # Root pin source per link kind (respec after dry-run 8dbf730d): a handoff
+    # link already carries org/root_pub/invite_ref in its query; a bare /l/
+    # paste has only transport creds, so pin from the link host's PUBLIC
+    # registry envelope. Either way the pin exists before any channel byte.
+    org = body.get("org")
+    root_pub = body.get("root_pub")
+    invite_ref = body.get("invite_ref")
+    if org is not None or root_pub is not None or invite_ref is not None:
+        if not (isinstance(org, str) and _ORG_UUID_RE.match(org)
+                and isinstance(root_pub, str) and _HEX64_RE.match(root_pub)
+                and isinstance(invite_ref, str) and _HEX64_RE.match(invite_ref)):
+            return JSONResponse({"ok": False, "error": (
+                "org, root_pub and invite_ref must all be supplied together "
+                "and well-formed"
+            )}, status_code=400)
+    else:
+        envelope = await _fetch_link_envelope(http_base, channel_token)
+        if envelope is None:
+            # Relay unreachable / unknown link: no public context to pin or
+            # dial. Report the honest miss; the page keeps its paste step.
+            return JSONResponse({"ok": False, "reason": "unreachable"})
+        org = envelope.get("org")
+        root_pub = envelope.get("root_pub")
+        invite_ref = envelope.get("invite_ref")
+        if not (isinstance(org, str) and _ORG_UUID_RE.match(org)
+                and isinstance(root_pub, str) and _HEX64_RE.match(root_pub)):
+            return JSONResponse({"ok": False, "reason": "unreachable"})
+
+    # The minimal verified-org step stands on the pinned PUBLIC context alone
+    # (id + invite ref), so an older org node that cannot serve identity still
+    # renders — never an error page.
+    out: dict = {"ok": True, "org": org}
+    if isinstance(invite_ref, str) and invite_ref:
+        out["invite_ref"] = invite_ref
+
+    identity = await _read_org_context(ws_base, channel_token,
+                                       root_pub=root_pub, org=org)
+    if identity is not None:
+        out.update(_safe_identity(identity))
+        env_ref = identity.get("invite_ref")
+        # The org's own reply is authoritative over the public envelope for
+        # the invite ref it is serving.
+        if isinstance(env_ref, str) and env_ref:
+            out["invite_ref"] = env_ref
+    return JSONResponse(out)
+
+
 ROUTES = [
     Route("/api/network/org-key", get_org_key, methods=["GET"]),
     Route("/api/network/org-key", put_org_key, methods=["POST"]),
@@ -1361,6 +1577,7 @@ ROUTES = [
     ),
     Route("/api/network/invite/email", post_invite_email, methods=["POST"]),
     Route("/api/network/register", post_register, methods=["POST"]),
+    Route("/api/network/invite/resolve", post_invite_resolve, methods=["POST"]),
     Route("/api/network/serve-cert", get_serve_cert_status, methods=["GET"]),
     Route("/api/network/serve-cert", post_serve_cert, methods=["POST"]),
     Route("/api/network/revocations", post_revocation, methods=["POST"]),

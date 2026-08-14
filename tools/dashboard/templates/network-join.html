@@ -55,17 +55,22 @@
     </div>
   </section>
 
-  <!-- Step 2: the organization — shown when the page opens with one -->
+  <!-- Step 2: the organization. Reached by resolving a pasted /l/ link on
+       THIS dashboard's own origin, or opened with a handoff link's context in
+       the URL. The verified header (name/icon/byline/brand accent) lights up
+       from the org's own reply over the E2E tunnel; the minimal id + invite
+       ref stand on their own when the org is unreachable. No Accept control —
+       the acceptance ceremony arrives with auto-9rw91. -->
   <section id="step-org" class="hidden">
     <h1>You're invited</h1>
     <p class="sub">Here's who is inviting you.</p>
-    <div class="card">
+    <div class="card" id="org-header">
       <div class="org-head">
         <img id="org-icon" class="hidden" alt="">
         <div id="org-fallback">?</div>
         <div>
           <h2 id="org-name">Organization</h2>
-          <p id="org-desc"></p>
+          <p id="org-byline"></p>
         </div>
       </div>
       <div class="row"><span class="k">Organization id</span>
