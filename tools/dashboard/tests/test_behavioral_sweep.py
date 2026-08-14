@@ -5735,6 +5735,9 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
         // Register-before-freeze is actionable when enrichment reports no
         // blocker.  Registration must never suppress an independent target
         // resolution failure: approving an unresolved target would be blind.
+        // (Dismissal fully clears the request since 3430f38f — "keep them
+        // dismissed" — so re-open a fresh row before mutating it.)
+        data._approvalKinds.link_publish.open(data, row('inline-reg')); await tick();
         data.approvalRequest.registrationRequired = true;
         data.approvalRequest.blockingError = '';
         await tick();
@@ -5764,37 +5767,51 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
         data.dismissApproval();
         await tick();
 
-        // Every dismissal path is local only: no decline/decision POST.
-        var dismissBefore = posted.length;
+        // Every dismissal path RESOLVES the server row as a decline
+        // (3430f38f: else the pending request re-surfaces on reload):
+        // exactly one {approved:false} decision post, never an approval
+        // or signature. Declining executes nothing.
+        var declineOnly = function(from) {
+            var s2 = posted.slice(from);
+            return s2.length === 1 &&
+                   s2[0].url.indexOf('/decision') !== -1 &&
+                   !!s2[0].body && s2[0].body.approved === false;
+        };
+        var mark = posted.length;
         data._approvalKinds.link_publish.open(data, row('cancel')); await tick();
         q('approval-cancel').click(); await tick();
-        r.cancel_local = !q('approval-sheet') && posted.length === dismissBefore;
+        r.cancel_declines = !q('approval-sheet') && declineOnly(mark);
+        mark = posted.length;
         data._approvalKinds.link_publish.open(data, row('close')); await tick();
         q('approval-close').click(); await tick();
-        r.close_local = !q('approval-sheet') && posted.length === dismissBefore;
+        r.close_declines = !q('approval-sheet') && declineOnly(mark);
+        mark = posted.length;
         data._approvalKinds.link_publish.open(data, row('outside')); await tick();
         q('approval-required-layer').click(); await tick();
-        r.outside_local = !q('approval-sheet') && posted.length === dismissBefore;
+        r.outside_declines = !q('approval-sheet') && declineOnly(mark);
+        mark = posted.length;
         data._approvalKinds.link_publish.open(data, row('escape')); await tick();
         window.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'})); await tick();
-        r.escape_local = !q('approval-sheet') && posted.length === dismissBefore;
+        r.escape_declines = !q('approval-sheet') && declineOnly(mark);
 
         // A newly-created org without authority has a clean follow-up seam.
         data._approvalKinds.link_publish.open(data, row('no-key')); await tick();
+        var attemptMark = posted.length;
         input('approval-password', 'missing key');
         await data.approveRequest(); await tick();
         r.no_key_error = textOf(q('approval-error'));
         r.no_key_stays_open = !!q('approval-sheet');
-        r.no_key_posts = posted.length - dismissBefore;
+        r.no_key_posts = posted.length - attemptMark;
         data.dismissApproval(); await tick();
 
         // Wrong password stays in the sheet and never posts a decision.
         data._approvalKinds.link_publish.open(data, row('wrong')); await tick();
+        attemptMark = posted.length;
         input('approval-password', 'wrong password');
         await data.approveRequest(); await tick();
         r.wrong_password_error = textOf(q('approval-error'));
         r.wrong_password_stays_open = !!q('approval-sheet');
-        r.wrong_password_posts = posted.length - dismissBefore;
+        r.wrong_password_posts = posted.length - attemptMark;
         data.dismissApproval(); await tick();
 
         // Unchecked: one explicit action, no password in POST, authority cleared.
@@ -5819,8 +5836,11 @@ LINK_PUBLISH_APPROVAL_CHECKS = """(async () => {
         var callsBeforeNext = signOnCalls.length;
         data._approvalKinds.link_publish.open(data, row('next')); await tick();
         r.next_sheet_still_present = !!q('approval-confirm');
-        r.next_option_checked = q('approval-session-option').checked;
-        r.next_password_disabled = q('approval-password').disabled;
+        // Retained authority renders the no-password variant (controls
+        // absent entirely), not the old checked-and-disabled password row.
+        r.next_password_controls_hidden =
+            !q('approval-session-option') && !q('approval-password');
+        r.next_approve_enabled = !q('approval-confirm').disabled;
         await data.approveRequest(); await tick();
         r.next_skipped_password = signOnCalls.length === callsBeforeNext;
         r.retained_after_next = authority;
@@ -5895,12 +5915,14 @@ class TestApprovalRequired:
         assert c["preview_option_preserved"] is True
         assert c["preview_duration_preserved"] is True
 
-    def test_all_cancel_paths_are_local_only(self):
+    def test_all_cancel_paths_decline_and_execute_nothing(self):
+        """Dismissal resolves the row as a decline (one {approved:false}
+        post, never an approval) — else it re-surfaces on reload."""
         c = self._checks
-        assert c["cancel_local"] is True
-        assert c["close_local"] is True
-        assert c["outside_local"] is True
-        assert c["escape_local"] is True
+        assert c["cancel_declines"] is True
+        assert c["close_declines"] is True
+        assert c["outside_declines"] is True
+        assert c["escape_declines"] is True
 
     def test_wrong_password_is_recoverable_without_post(self):
         c = self._checks
@@ -5927,8 +5949,8 @@ class TestApprovalRequired:
         c = self._checks
         assert c["retained_after_first"] is True
         assert c["next_sheet_still_present"] is True
-        assert c["next_option_checked"] is True
-        assert c["next_password_disabled"] is True
+        assert c["next_password_controls_hidden"] is True
+        assert c["next_approve_enabled"] is True
         assert c["next_skipped_password"] is True
         assert c["retained_after_next"] is True
         assert c["lock_store_clear"] is True
