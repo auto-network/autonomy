@@ -803,7 +803,14 @@ def _db_path(org: str | None) -> str | None:
     whether dashboard startup happened to materialize ``personal.db`` yet.
     """
     env_db = os.environ.get("GRAPH_DB")
-    if env_db:
+    if env_db and org is None:
+        # The pin only applies to the org-less (personal) resolution — its
+        # sole legitimate callers (test suite, ``graph --db``, multi-node
+        # harness) all pass ``org=None`` (23d9m docstring). An EXPLICIT org
+        # must never be silently misrouted into the pinned store: fall
+        # through to ``resolve_caller_db_path``, which resolves to the org's
+        # own DB or raises ``OrgResolutionConflict`` under a contradicting
+        # pin, rather than honouring the pin blind.
         return env_db
     if org is None:
         personal_path = _org_db_path("personal")
