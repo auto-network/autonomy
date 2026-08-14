@@ -67,6 +67,7 @@ from . import org_primer  # noqa: F401 — autonomy.org.primer#1
 from . import workspace_primer  # noqa: F401 — autonomy.workspace.primer#1
 from . import org_capability_primer  # noqa: F401 — autonomy.org.capability.primer#1
 from . import claude_credentials  # noqa: F401 — dashboard.claude.credentials#1
+from . import codex_credentials  # noqa: F401 — dashboard.codex.credentials#1
 from . import claude_setup_tokens  # noqa: F401 — dashboard.claude.setup_tokens#1
 from . import feature_flags  # noqa: F401 — dashboard.feature_flags#1
 from . import bootstrap_allowlist  # noqa: F401 — autonomy.org.bootstrap-allowlist#1
