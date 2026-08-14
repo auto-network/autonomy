@@ -209,7 +209,8 @@ def _question_state(entry: dict) -> dict:
     }
 
 
-def mission_state(mission_id: str, pillar_id: str | None = None) -> dict:
+def mission_state(mission_id: str, pillar_id: str | None = None, *,
+                  include_sessions: bool = False) -> dict:
     """The whole state block for one screen.
 
     Everything in one object because the whole artifact already arrives in
@@ -218,9 +219,24 @@ def mission_state(mission_id: str, pillar_id: str | None = None) -> dict:
     """
     now = time.time()
     mission = db.get_mission(mission_id) or {}
-    pillars = [_pillar_state(p, now) for p in db.list_pillars(mission_id)]
+    pillar_rows = db.list_pillars(mission_id)
+    pillars = [_pillar_state(p, now) for p in pillar_rows]
+    # WHERE A FILE GOES, ON THE DASHBOARD ONLY. Sending an attachment means
+    # addressing the coordinator's own session, and the session name is
+    # already ordinary furniture on the dashboard -- every session is listed
+    # by name there. Over a share link it is not: a guest has no use for it,
+    # cannot reach the upload endpoint anyway, and should not be handed the
+    # internal name of a machine session to go with the screen they were
+    # invited to read.
+    if include_sessions:
+        by_id = {p["pillar_id"]: p for p in pillar_rows}
+        for entry in pillars:
+            entry["coordinator_session"] = (
+                by_id.get(entry["pillar_id"], {}).get("coordinator_session") or "")
     return {
         "mission_id": mission_id,
+        "coordinator_session": (
+            mission.get("coordinator_session") or "" if include_sessions else ""),
         # The overview screen is not "Mission" -- it has a name, and the bar
         # is where a reader confirms which mission they are looking at.
         "mission": mission.get("name") or "",
@@ -304,7 +320,8 @@ def compose_screen(mission_id: str, pillar_id: str | None = None, *,
     document = (
         _HEAD
         + (_SRCDOC_BASE if framed else "")
-        + _state_block(dict(mission_state(mission_id, pillar_id),
+        + _state_block(dict(mission_state(mission_id, pillar_id,
+                                          include_sessions=not framed),
                             may_write=may_write, me=viewer))
         + "<script>\n" + bootstrap_source() + "\n</script>\n"
         + current["html"]          # byte for byte, never parsed

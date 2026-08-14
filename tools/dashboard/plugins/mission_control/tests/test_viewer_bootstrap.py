@@ -438,3 +438,27 @@ def test_the_for_you_count_opens_all_of_them_not_the_first():
     assert 'show(ui.panel === "foryou" ? null : {panel: "foryou"})' in src
     # And a way back out of one of them to the rest.
     assert '"\\u2039 For you"' in src or "For you" in src
+
+
+def test_a_file_is_shown_before_it_is_sent_and_uploads_while_you_type():
+    """The preview is read from the picked file itself, so it needs no server
+    and looks the same however the page was opened. The upload runs in the
+    background and the send waits on it, so a large picture delays the picture
+    and never the message."""
+    src = _viewer("bootstrap.js")
+    assert "readAsDataURL" in src, "the preview waits on a round trip"
+    assert '"/api/upload"' in src
+    assert 'status.textContent = "Still attaching' in src, (
+        "a message can be sent referring to a file that is not there yet"
+    )
+    # Paths above the message: how a session receives an attachment everywhere
+    # else on this dashboard.
+    assert 'join("\\n") + "\\n\\n" + text' in src
+
+
+def test_attaching_is_absent_where_there_is_nowhere_to_send_a_file():
+    """Over a shared link there is no session to deliver to. A control that is
+    offered and then refuses is worse than one that is not offered."""
+    src = _viewer("bootstrap.js")
+    assert "function uploadTarget(" in src
+    assert "target ? [clip, status, send] : [status, send]" in src

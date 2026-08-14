@@ -287,3 +287,19 @@
                  border-radius: .35rem; padding: .45rem .6rem; margin: .4rem 0 0 .9rem; }
 .mc-post-q { font-size: .85rem; color: #cbd5e1; margin: 0; }
 .mc-post-a { font-size: .82rem; color: #7c8899; margin: .2rem 0 0; }
+
+/* Attachments. The preview is drawn from the picked file itself, so it looks
+   the same however the page was opened; only sending needs a session. */
+.mc-strip { display: flex; flex-wrap: wrap; gap: .35rem; margin: 0 0 .45rem; }
+.mc-thumb { position: relative; width: 3rem; height: 3rem; border-radius: .35rem;
+            border: 1px solid #334155; background: #131722 center/cover no-repeat;
+            display: flex; align-items: center; justify-content: center; flex: none; }
+.mc-thumb-busy { opacity: .55; }
+.mc-thumb-ext { font-size: 9px; color: #64748b; letter-spacing: .04em; }
+.mc-thumb-x { position: absolute; top: -.35rem; right: -.35rem; width: 1.05rem;
+              height: 1.05rem; border-radius: 99px; background: #0f1218;
+              border: 1px solid #334155; color: #94a3b8; font-size: 11px;
+              line-height: 1; display: flex; align-items: center; justify-content: center; }
+.mc-clip { flex: none; font-size: 1rem; opacity: .75; padding: 0 .15rem 0 0; }
+.mc-file { display: none; }
+.mc-foot-drop { outline: 1px dashed #475569; outline-offset: -3px; }
