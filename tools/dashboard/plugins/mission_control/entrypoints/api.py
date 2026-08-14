@@ -1023,6 +1023,14 @@ def _question_payload(entry: dict) -> dict:
         # whether text happens to be sitting in `answer`.
         "closed_at": entry.get("closed_at"),
         "closed_by": entry.get("closed_by"),
+        # WHO LAST CHANGED THE WORDING, AND WHEN. A pillar keeps its record
+        # clear by adjusting the text -- including the operator's -- so a
+        # reader finding wording that does not match what someone remembers
+        # saying has to be able to see that it was edited, and by whom. It was
+        # recorded from the start and never sent to anybody, which is the same
+        # as not recording it.
+        "question_edited_at": entry.get("question_edited_at"),
+        "question_edited_by_session": entry.get("question_edited_by_session"),
         "created_at": entry["created_at"],
         "retired_at": entry.get("retired_at"),
         "retired_note": entry.get("retired_note"),
@@ -1548,7 +1556,16 @@ async def _rephrase_impl(
     question = body.get("question")
     if not isinstance(question, str) or not question.strip():
         return JSONResponse({"error": "question is required"}, status_code=400)
-    entry = db.rephrase_question(mission_id, entry_id, question, by_session)
+    # WHOEVER ACTUALLY MADE THE EDIT. This recorded the coordinator_session
+    # field on the row, which is a guess about who is acting and is empty
+    # whenever nobody has been named there. An authenticated caller says who
+    # it is, and that is the only trustworthy answer to "who changed my
+    # words".
+    editor = _resolve_visitor_identity(request) or {}
+    entry = db.rephrase_question(
+        mission_id, entry_id, question,
+        editor.get("participant_label") or by_session,
+    )
     if entry is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     payload = _question_payload(entry)
