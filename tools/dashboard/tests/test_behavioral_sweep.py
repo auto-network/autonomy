@@ -2119,6 +2119,25 @@ def sweep_server(tmp_path_factory):
     # rows; the server's startup flush is partial under mock, so
     # materialize every registered schema into the hermetic stores the
     # way real startup does (test_startup_schema_flush precedent).
+    # Plugin schemas register at import — real startup imports plugin
+    # entrypoints before its flush, so mirror that ordering here or the
+    # coordinator/plugin sets stay absent from the synopsis.
+    import importlib as _importlib
+    _plug_root = Path(__file__).parents[1] / "plugins"
+    for _pdir in sorted(_plug_root.iterdir()):
+        if (_pdir / "entrypoints" / "schemas.py").exists():
+            _importlib.import_module(
+                f"tools.dashboard.plugins.{_pdir.name}.entrypoints.schemas")
+    # Core graph-side schema modules also register at import (e.g.
+    # dashboard.harness.usage lives in claude_credentials); import the
+    # whole schemas package so the registry matches real startup's.
+    import tools.graph.schemas as _gschemas
+    for _minfo in __import__("pkgutil").iter_modules(_gschemas.__path__):
+        _importlib.import_module(f"tools.graph.schemas.{_minfo.name}")
+    # A few dashboard-side schema classes live outside both trees
+    # (dashboard.harness.usage among them) — import the modules real
+    # server startup pulls in.
+    _importlib.import_module("tools.dashboard.harness_usage_settings")
     from tools.graph.schemas.registry import flush_schema_meta_all_orgs
     flush_schema_meta_all_orgs()
     _GraphDB.close_all_pooled()
