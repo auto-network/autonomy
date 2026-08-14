@@ -19,10 +19,23 @@
   clean.
 
 ## Pitfalls
-- The two HOST-EXECUTED acceptance clauses cannot be satisfied from a container:
-  (1) a real poller cycle on the host quoting the measured-basis line, and
-  (2) correcting the '10d' claim in the l1h3f record via comment. Both need the
-  named host executor seat. The greppable line for the host to quote is:
+- Only ONE of the two HOST-EXECUTED sub-clauses actually needs the host seat.
+  The '10d' correction was assumed container-impossible on the first pass but
+  is not: `graph` reaches the graph.db from a dispatched container, so the
+  correcting comment on the l1h3f record (note `9ac61611-cc6`, whose last line
+  read "refresh when <3d of ~10d TTL left → rotates ~weekly") was posted from
+  here — comment `3a66d441-b9a`. It restates the measured 60-minute id_token
+  TTL, the measured-state decision basis, and the canary. Lesson: check whether
+  a "HOST-EXECUTED" clause is host-executed because of the *tool* (graph works
+  from a container) or because of the *data/side-effect* (a real refresh hits
+  OpenAI with the host's real tokens) before assuming the whole clause is out
+  of reach.
+- What genuinely CANNOT be done from a container is the real poller cycle: it
+  reads the host `personal.db` credential rows and POSTs the stored
+  refresh_token to `auth.openai.com`, rotating the host's live tokens. Running
+  it here would either read an empty/copy set or disrupt the host's chain, so
+  it is left for the named host executor seat. The greppable line for the host
+  to quote is:
   `codex credentials refresh: account=<key> who=<email> decision=<refresh|skip> basis=<...> last_refresh_age_ms=<...> failure_age_ms=<...> last_error=<...>`
 - `refresh_token_reused` used to be classified as `revoked`. It is now
   `superseded` — a distinct kind. If any other code counted on the old
