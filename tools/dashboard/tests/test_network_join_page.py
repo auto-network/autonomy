@@ -61,10 +61,24 @@ class TestI1Constraints:
         for forbidden in ("<form", 'type="password"', "password"):
             assert forbidden not in body, forbidden
 
-    def test_no_network_calls_in_page_script(self):
-        for forbidden in ("fetch(", "xmlhttprequest", "websocket",
-                          "navigator.sendbeacon", "/api/"):
-            assert forbidden not in PAGE_JS.lower(), forbidden
+    def test_page_network_is_exactly_the_one_ruled_resolve_call(self):
+        # DELIBERATE CHANGE (2026-08-14): the operator ruled the
+        # paste-into-own-dashboard design — the page resolves invitations on
+        # its OWN origin (auto-yw5gz). The former no-network pin therefore
+        # narrows, consciously, to: exactly one fetch, to exactly the resolve
+        # endpoint, whose body carries transport credentials only. The bearer
+        # still never leaves the browser.
+        lowered = PAGE_JS.lower()
+        assert lowered.count("fetch(") == 1
+        assert 'fetch("/api/network/invite/resolve"' in PAGE_JS
+        assert lowered.count("/api/") == 1
+        for forbidden in ("xmlhttprequest", "websocket",
+                          "navigator.sendbeacon"):
+            assert forbidden not in lowered, forbidden
+        # The resolve body is built from transport credentials alone; the
+        # bearer has no path into it.
+        assert ("var body = { relay_host: relayHost, "
+                "channel_token: channelToken };") in PAGE_JS
 
     def test_no_ceremony_code(self):
         # TO THE IMPLEMENTER OF ACCEPTANCE MECHANICS (auto-9rw91): when the
