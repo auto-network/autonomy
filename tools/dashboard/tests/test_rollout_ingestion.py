@@ -1490,17 +1490,26 @@ def _claude_line(text: str, role: str = "assistant",
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "KNOWN BUG, reproduced: a created <uuid>.jsonl supersedes the linked "
-        "transcript on sight. _classify_codex_rollout returns 'main' for any "
-        "name not starting with 'rollout-' WITHOUT reading or stat'ing the "
-        "file, so the characterize state that enforces N2 is never entered "
-        "for Claude. Cost: auto-0730-021228 froze at 01:25 on 2026-08-14 for "
-        "ten hours. A parentUuid-on-first-line gate was TRIED and REVERTED: "
-        "real Claude transcripts open with 'mode'/'permission-mode' records "
-        "and carry no parentUuid, so it broke two legitimate rollover tests "
-        "(test_cross_boundary, test_sse_delivery). The invariant that does "
-        "hold is liveness, not content shape: an incumbent that is STILL "
-        "BEING APPENDED TO has not rolled over and must not be superseded."
+        "KNOWN BUG, reproduced. A created <uuid>.jsonl supersedes the linked "
+        "transcript on sight: _classify_codex_rollout returns 'main' for any "
+        "name not starting with 'rollout-' without reading or stat'ing the "
+        "file, so the characterize state that enforces N2 is never entered for "
+        "Claude. Cost: auto-0730-021228 froze at 01:25 on 2026-08-14 for ten "
+        "hours. Needs create_event=True to fail at all.\n\n"
+        "TWO FIXES TRIED AND REVERTED, both measured:\n"
+        "1. parentUuid-non-null gate — wrong question. The stillborn stubs DO "
+        "carry parentUuids (4 each); they just point at their own entries. "
+        "Broke test_cross_boundary + test_sse_delivery.\n"
+        "2. parentUuid-chain gate (do the candidate's early refs resolve INTO "
+        "the linked file?) — right question, verified 13/13 on this host's real "
+        "corpus: 2 genuine rollovers hit, 10 stillborn stubs and 1 unrelated "
+        "session miss. But it regressed rollover TIMING: a real successor is "
+        "created EMPTY and written a moment later, and observe_rollout has no "
+        "per-modify hook for an unlinked file — it is re-called only from scan/"
+        "registry paths. So adoption slipped from immediate to scan-delayed.\n\n"
+        "The chain test is the right discriminator. It needs the candidate "
+        "re-evaluated on the file's OWN modify watch (arm a watch and re-check, "
+        "as _classify_and_step already does for 'unknown'), not only at create."
     ),
 )
 @pytest.mark.asyncio
@@ -1556,4 +1565,56 @@ async def test_contentful_stillborn_sibling_does_not_steal_the_live_transcript(e
     assert row["jsonl_path"] == str(live), (
         "a sibling transcript must not take the link from an incumbent that "
         "is still being written, however much content the sibling carries"
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_rollover_is_still_adopted(env):
+    """POSITIVE half of the pair. MUST run beside the reject case.
+
+    The reject test alone cannot tell "fixed" from "disabled": a change that
+    blocks ALL adoption satisfies it perfectly. That is not hypothetical --
+    a parentUuid-presence gate did exactly that, went green here, and broke
+    test_cross_boundary and test_sse_delivery, which live in other files and
+    were not in the subset being run.
+
+    A real rollover references the predecessor from its early entries
+    (measured: 1 hit inside the first 50 on every real rollover pair on this
+    host). It must still take the link.
+    """
+    name = "auto-rollover-ok"
+    sdir = env.tmp_path / name / "sessions" / "-workspace-repo"
+    env.make_session(name, sdir)
+
+    anchor = "11111111-2222-3333-4444-555555555555"
+    live = sdir / "aaaaaaaa-0000-0000-0000-000000000000.jsonl"
+    live.write_text("\n".join(
+        [json.dumps({"type": "mode", "timestamp": "2026-08-14T05:00:00.000Z"})]
+        + [_claude_line(f"predecessor line {i}") for i in range(20)]
+        + [json.dumps({"type": "assistant", "uuid": anchor,
+                       "timestamp": "2026-08-14T05:10:00.000Z",
+                       "message": {"role": "assistant",
+                                   "content": [{"type": "text", "text": "last turn"}]}})]
+    ) + "\n")
+
+    mon = env.make_monitor()
+    mon.observe_rollout(name, live, source="reconciliation")
+    await _settle(mon)
+    assert _db_row(env.db_path, name)["jsonl_path"] == str(live)
+
+    # A genuine rollover: its first entry continues the predecessor's chain.
+    successor = sdir / "bbbbbbbb-0000-0000-0000-000000000000.jsonl"
+    successor.write_text(json.dumps({
+        "type": "user", "parentUuid": anchor,
+        "sessionId": "bbbbbbbb-0000-0000-0000-000000000000",
+        "timestamp": "2026-08-14T05:11:00.000Z",
+        "message": {"role": "user", "content": [{"type": "text",
+                                                 "text": "after compaction"}]},
+    }) + "\n")
+    mon.observe_rollout(name, successor, source="watch_scan", create_event=True)
+    await _settle(mon)
+
+    assert _db_row(env.db_path, name)["jsonl_path"] == str(successor), (
+        "a successor that continues the linked conversation MUST be adopted; "
+        "rejecting it breaks every real rollover"
     )

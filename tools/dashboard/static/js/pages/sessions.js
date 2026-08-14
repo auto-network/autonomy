@@ -979,7 +979,18 @@
         for (var id in allSessions) {
           var s = allSessions[id];
           if (!s.isLive && !s._resuming) continue;
-          var lastEntry = s.entries.length > 0 ? s.entries[s.entries.length - 1] : null;
+          // Newest DISPLAYABLE entry, not merely the newest. Trailing
+          // internal markers (codex_task_complete) and tool_use/tool_result
+          // rows carry no operator-visible text; taking them verbatim blanked
+          // the preview the moment a turn completed, and because lastEntry was
+          // truthy the `|| s.lastMessage` fallback below never fired.
+          var lastEntry = null;
+          for (var _i = s.entries.length - 1; _i >= 0; _i--) {
+            var _e = s.entries[_i];
+            if (!_e || _e.internal) continue;
+            if (!(_e.content || '').trim()) continue;
+            lastEntry = _e; break;
+          }
           var sizeVal = s.sizeMB ? parseFloat(s.sizeMB) : 0;
           var hasData = s.entries.length > 0 || (s.sizeMB && sizeVal > 0) || s.entryCount > 0 || s.lastActivity > 0;
           var role = _deriveRole(s);

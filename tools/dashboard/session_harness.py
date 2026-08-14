@@ -2485,18 +2485,17 @@ _CODEX_PREAMBLE_PREFIXES = (
     "<user_instructions",
     "<skills_instructions",
 )
-# The session-start banner is machine-authored too but opens with the tmux
-# name, so it needs a pattern rather than a prefix.
-_CODEX_SESSION_BANNER_RE = re.compile(
-    r"^Session \S+ started in workspace .+ at \d{4}-\d{2}-\d{2}T",
-)
+# NOT suppressed: the session-start banner ("Session <tmux> started in
+# workspace <name> at <ts>"). It is machine-authored, but it is one short
+# line, it is what the terminal shows too, and on a brand-new session it is
+# the ONLY entry before the agent's greeting. Filtering it left a fresh
+# session with no user entry at all, so the viewer fell through to its
+# "Send a message to begin" empty state and rendered nothing -- which is
+# exactly the blank-viewer symptom this series set out to fix.
 
 
 def _is_codex_preamble(text: str) -> bool:
-    stripped = text.lstrip()
-    if stripped.startswith(_CODEX_PREAMBLE_PREFIXES):
-        return True
-    return bool(_CODEX_SESSION_BANNER_RE.match(stripped))
+    return text.lstrip().startswith(_CODEX_PREAMBLE_PREFIXES)
 
 
 def _codex_response_item_chat_entry(
