@@ -3595,25 +3595,31 @@ class TestSessionsPageBehavior:
 
     # b1281669 (design d2250266): ended cards moved their time range to the
     # .sc-when line ("started → ended · duration") and DROPPED the 'ended'
-    # footer column; live cards keep the Idle column.
+    # footer column. 95a438c6 then replaced the per-type adaptive footer
+    # (tmux hidden on dispatch/librarian) with the design's FIXED 5-column
+    # grid — every dead card renders the same columns, blank cells included,
+    # so the per-type tests now guard that uniformity rather than the old
+    # hide-rules.
+
+    _FIXED_GRID = ["turns", "ctx", "disk", "tmux"]
 
     def test_recent_interactive_footer_labels(self):
-        """Dead interactive: footer = ['turns', 'ctx', 'tmux'] (ended moved to when-line)."""
+        """Dead interactive: the fixed grid (ended lives on the when-line)."""
         f = self._footer_for("interactive")
-        assert self._core_labels(f["labels"]) == ["turns", "ctx", "tmux"], \
+        assert self._core_labels(f["labels"]) == self._FIXED_GRID, \
             f"interactive footer labels mismatch: {f['labels']}"
 
     def test_recent_dispatch_footer_labels(self):
-        """Dead dispatch: footer = ['turns', 'ctx'] (tmux hidden, ended on when-line)."""
+        """Dead dispatch: same fixed grid — no per-type column hiding."""
         f = self._footer_for("dispatch")
-        assert self._core_labels(f["labels"]) == ["turns", "ctx"], \
-            f"dispatch footer labels mismatch (tmux must be absent): {f['labels']}"
+        assert self._core_labels(f["labels"]) == self._FIXED_GRID, \
+            f"dispatch footer labels mismatch: {f['labels']}"
 
     def test_recent_librarian_footer_labels(self):
-        """Dead librarian: footer = ['turns', 'ctx'] (tmux hidden, ended on when-line)."""
+        """Dead librarian: same fixed grid — no per-type column hiding."""
         f = self._footer_for("librarian")
-        assert self._core_labels(f["labels"]) == ["turns", "ctx"], \
-            f"librarian footer labels mismatch (tmux must be absent): {f['labels']}"
+        assert self._core_labels(f["labels"]) == self._FIXED_GRID, \
+            f"librarian footer labels mismatch: {f['labels']}"
 
     def test_recent_ended_value_is_absolute_datetime(self):
         """Ended cards carry their time range on the when-line:
@@ -3628,11 +3634,15 @@ class TestSessionsPageBehavior:
                 f"when-line missing/empty on {f['type']!r} row: {f.get('when')!r}"
 
     def test_recent_dispatch_librarian_have_no_tmux_column(self):
-        """For dispatch + librarian, the synthetic tmux value must not leak into the footer."""
+        """For dispatch + librarian, the synthetic tmux value must not leak
+        into the footer.
+
+        The fixed grid (95a438c6) renders the tmux COLUMN on every dead
+        card, so the guard is on the cell's VALUE: these types have no
+        tmux session and their cell must stay blank.
+        """
         for stype in ("dispatch", "librarian"):
             f = self._footer_for(stype)
-            assert "tmux" not in f["labels"], \
-                f"{stype} footer must not render a tmux column; got labels={f['labels']}"
             joined = " ".join(f["values"])
             assert "agent-auto-" not in joined and "librarian-auto-" not in joined, \
                 f"synthetic tmux value leaked into {stype} footer: {f['values']}"
