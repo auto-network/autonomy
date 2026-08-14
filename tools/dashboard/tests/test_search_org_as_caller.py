@@ -84,6 +84,36 @@ def test_org_chip_does_not_send_only_org_query_param():
     )
 
 
+def test_result_links_preserve_pinned_caller_org(test_app):
+    """Opening a result must carry the pinned caller into the source page.
+
+    SPA navigation cannot carry the X-Graph-Org header used by /api/search,
+    so the result URL preserves it as ``?org=`` for sourcePage to restore on
+    its own API requests.
+    """
+    src = _read_search_js()
+    assert "sourceHref(r, turnNumber)" in src
+    assert "params.set('org', this.selectedOrg)" in src
+
+    with TestClient(test_app) as client:
+        html = client.get("/pages/search").text
+
+    assert ':href="sourceHref(r)"' in html
+    assert '@click.prevent="navigateTo(sourceHref(r))"' in html
+    assert ':href="sourceHref(r, ex.turn_number)"' in html
+    assert '@click.prevent.stop="navigateTo(sourceHref(r, ex.turn_number))"' in html
+
+
+def test_source_page_restores_pinned_caller_header(test_app):
+    """The source viewer consumes the result link's org handoff."""
+    with TestClient(test_app) as client:
+        src = client.get("/static/js/pages/source.js").text
+
+    assert "this.callerOrg = params.get('org') || ''" in src
+    assert "{ 'X-Graph-Org': this.callerOrg }" in src
+    assert "fetch(url, this._scopedFetchOptions())" in src
+
+
 # ── 2. Server contract: X-Graph-Org reaches ops.search as caller ──────
 
 

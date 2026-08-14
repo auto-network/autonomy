@@ -57,6 +57,7 @@
       isContext: false,
       targetTurn: 0,
       contextWindow: 5,
+      callerOrg: '',
 
       // Rich-content note state
       isRichContent: false,
@@ -312,12 +313,31 @@
         }
       },
 
+      _scopedFetchOptions() {
+        if (!this.callerOrg) return {};
+        return { headers: { 'X-Graph-Org': this.callerOrg } };
+      },
+
+      _scopedPageUrl(extraParams) {
+        const params = new URLSearchParams(extraParams || {});
+        if (this.callerOrg) params.set('org', this.callerOrg);
+        const query = params.toString();
+        return `/graph/${this.id}` + (query ? `?${query}` : '');
+      },
+
       async showMoreContext() {
         this.contextWindow += 5;
-        const url = `/graph/${this.id}?turn=${this.targetTurn}&window=${this.contextWindow}`;
+        const contextParams = {
+          turn: String(this.targetTurn),
+          window: String(this.contextWindow),
+        };
+        const url = this._scopedPageUrl(contextParams);
         history.replaceState({}, '', url);
         try {
-          const res = await fetch(`/api/graph/${this.id}?turn=${this.targetTurn}&window=${this.contextWindow}`);
+          const res = await fetch(
+            `/api/graph/${this.id}?turn=${this.targetTurn}&window=${this.contextWindow}`,
+            this._scopedFetchOptions(),
+          );
           const data = await res.json();
           if (data && !data.error && Array.isArray(data.entries)) {
             this.allEntries = data.entries.map((e, i) => ({
@@ -378,6 +398,7 @@
         }
 
         const params = new URLSearchParams(window.location.search);
+        this.callerOrg = params.get('org') || '';
         const turn = params.get('turn');
         if (turn) {
           this.isContext = true;
@@ -390,7 +411,7 @@
           const url = this.isContext
             ? `/api/graph/${this.id}?turn=${this.targetTurn}&window=${this.contextWindow}`
             : `/api/graph/${this.id}`;
-          const res = await fetch(url);
+          const res = await fetch(url, this._scopedFetchOptions());
           const data = await res.json();
 
           if (data && data.error) {
@@ -403,7 +424,11 @@
           // Use replaceState (not navigateTo/pushState) so the intermediate
           // /graph/{comment_id} URL doesn't remain in history — avoids back-button loop.
           if (data.type === 'comment') {
-            history.replaceState({}, '', data.redirect);
+            const redirect = new URL(data.redirect, window.location.origin);
+            if (this.callerOrg) redirect.searchParams.set('org', this.callerOrg);
+            history.replaceState(
+              {}, '', redirect.pathname + redirect.search + redirect.hash,
+            );
             route();
             return;
           }
@@ -455,7 +480,10 @@
           // Fetch attachments for notes
           if (this.isNote) {
             try {
-              const attRes = await fetch(`/api/source/${this.id}/attachments`);
+              const attRes = await fetch(
+                `/api/source/${this.id}/attachments`,
+                this._scopedFetchOptions(),
+              );
               const attData = await attRes.json();
               this.attachments = attData.attachments || [];
               this.unrefAttachments = this.attachments.filter(
@@ -472,7 +500,10 @@
           if (this.isNote && this.noteMeta && this.noteMeta.rich_content) {
             this.isRichContent = true;
             try {
-              const resolveRes = await fetch('/api/resolve/' + encodeURIComponent(this.id));
+              const resolveRes = await fetch(
+                '/api/resolve/' + encodeURIComponent(this.id),
+                this._scopedFetchOptions(),
+              );
               if (resolveRes.ok) {
                 this._richResolveData = await resolveRes.json();
                 this._richResolveData._directView = true;

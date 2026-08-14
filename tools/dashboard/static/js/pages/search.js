@@ -408,6 +408,22 @@
         window.history.replaceState({}, '', url.toString());
       },
 
+      // Keep the pinned caller org attached when a result opens. Search
+      // sends the org as X-Graph-Org, but SPA navigation itself carries no
+      // request headers; the source page reads this query param and restores
+      // the same header for its /api/graph request. Without this handoff, a
+      // raw result from a non-default org renders in search and then 404s as
+      // soon as it is opened.
+      sourceHref(r, turnNumber) {
+        var sourceId = (r && (r.source_id || r.id)) || '';
+        var path = '/graph/' + sourceId.slice(0, 12);
+        var params = new URLSearchParams();
+        if (turnNumber != null) params.set('turn', String(turnNumber));
+        if (this.selectedOrg) params.set('org', this.selectedOrg);
+        var query = params.toString();
+        return path + (query ? '?' + query : '');
+      },
+
       _refetch() {
         this.loaded = false;
         // Org chip = caller_org. Sent as ``X-Graph-Org`` header — NOT as

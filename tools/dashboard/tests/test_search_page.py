@@ -177,7 +177,8 @@ def test_search_page_multi_hit_renders_excerpt_list(test_app):
     # Verify the template renders the per-turn anchor pattern.
     with TestClient(test_app) as client:
         page = client.get("/pages/search").text
-    assert "/graph/' + (r.source_id || r.id).slice(0, 12) + '?turn=' + ex.turn_number" in page
+    assert ':href="sourceHref(r, ex.turn_number)"' in page
+    assert '@click.prevent.stop="navigateTo(sourceHref(r, ex.turn_number))"' in page
 
 
 # ── 4. Accent rail bound to source_type, not result_type ──────────────
