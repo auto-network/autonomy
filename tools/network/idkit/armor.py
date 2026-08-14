@@ -144,15 +144,11 @@ def _b64_field(container: dict, key: str, *, length: int, what: str) -> bytes:
     return raw
 
 
-def parse_armor(armor: str) -> dict:
-    """Parse the armor text into its inner dict without decrypting.
-
-    STRICT: the decoded body must carry EXACTLY the canonical fields —
-    ``{v, kdf{name, hash, iterations, salt}, cipher{name, iv}, root_pub,
-    ct}`` — with valid formats and lengths. Unknown fields are rejected
-    outright: the armor is the ONLY thing the org-key store persists, so
-    a tolerated extra field would be a smuggling channel for plaintext
-    key material riding inside an otherwise-valid armor (I1).
+def _armor_body(armor: str) -> dict:
+    """Shared decode: BEGIN/END unwrap, canonical base64, duplicate-key-refusing
+    JSON parse. Returns the raw dict; VERSION-SPECIFIC field-closure is the
+    caller's job (``parse_armor`` for v1, ``parse_armor_v2`` for v2), so the
+    one anti-malleability boundary is not duplicated across format versions.
     """
     if not isinstance(armor, str):
         raise ArmorError("armor must be a string")
@@ -178,6 +174,24 @@ def parse_armor(armor: str) -> dict:
         raise ArmorError(f"armor body does not decode: {exc}") from exc
     if not isinstance(data, dict):
         raise ArmorError("armor body must be a JSON object")
+    return data
+
+
+def parse_armor(armor: str) -> dict:
+    """Parse the armor text into its inner dict without decrypting.
+
+    STRICT: the decoded body must carry EXACTLY the canonical fields —
+    ``{v, kdf{name, hash, iterations, salt}, cipher{name, iv}, root_pub,
+    ct}`` — with valid formats and lengths. Unknown fields are rejected
+    outright: the armor is the ONLY thing the org-key store persists, so
+    a tolerated extra field would be a smuggling channel for plaintext
+    key material riding inside an otherwise-valid armor (I1).
+
+    LEGACY v1. v1 never shipped; this reader exists ONLY as a migration source
+    (see :func:`migrate_v1_to_v2`) and is DELETED from the shipped product once
+    the one-shot migration has run. Nothing writes v1 going forward.
+    """
+    data = _armor_body(armor)
     if set(data) != {"v", "kdf", "cipher", "root_pub", "ct"}:
         raise ArmorError(
             "armor body must carry exactly {v, kdf, cipher, root_pub, ct} — "
@@ -268,3 +282,255 @@ def decrypt_root_key(armor: str, passphrase: str) -> KeyPair:
     if key.public_hex != data["root_pub"]:
         raise MalformedError("armor root_pub does not match the enclosed private key")
     return key
+
+
+# ── Armor v2: versioned multi-wrap envelope (master KEK under a factor list) ──
+#
+# v2 INVERTS the wrap. The 32-byte seed is sealed under a fresh random 256-bit
+# MASTER KEK, and the master KEK is wrapped by a LIST of factors. Unit 1 ships
+# the ``password`` factor (parity with v1's single passphrase wrap); the
+# recovery-code and passkey factors are added at their own slots in later units
+# without another format change.
+#
+# This is the deliberate I1 re-expression the operator ruled on: the strict
+# field-closure that v1 enforced with flat set-equality is preserved
+# RECURSIVELY and gated by version — the top level, ``kek_seal``, and every
+# ``factors[i]`` are each closed to an exact key set, and the factor ``type`` is
+# a closed registry — so no tolerated field can ride inside at any level. AEAD
+# associated data binds the version, ``root_pub``, and (for a factor wrap) the
+# factor type, so material minted for one slot/version can't verify in another.
+#
+# FORWARD-COMPATIBLE BY CONSTRUCTION: version dispatch plus a migration registry
+# make a future v3 a routine (parser, decryptor, (2,3)-migration) addition, not
+# another constitutional event. V2 is the ONLY format ever WRITTEN going
+# forward; v1 survives only as a read-once migration source (:func:`parse_armor`
+# / :func:`decrypt_root_key`) and is deleted from the shipped product after the
+# one-shot migration runs — v1 never shipped, so no persistent V1 path is kept.
+
+ARMOR_VERSION_2 = 2
+_MASTER_KEK_LEN = 32
+#: AES-256-GCM ciphertext of a 32-byte payload (seed, or master KEK): 32 + tag.
+_WRAP_LEN = _MASTER_KEK_LEN + 16
+_V2_SEAL_AAD = b"autonomy.idkit.armor.v2.kek-seal\n"
+_V2_FACTOR_AAD = b"autonomy.idkit.armor.v2.factor\n"
+#: Closed registry of factor types (unit 1). recovery/passkey join here later.
+_KNOWN_FACTOR_TYPES = frozenset({"password"})
+
+
+def _v2_seal_aad(root_pub: str) -> bytes:
+    return _V2_SEAL_AAD + root_pub.encode("ascii")
+
+
+def _v2_factor_aad(root_pub: str, factor_type: str) -> bytes:
+    return (
+        _V2_FACTOR_AAD + root_pub.encode("ascii") + b"\n" + factor_type.encode("ascii")
+    )
+
+
+def encrypt_root_key_v2(
+    key: KeyPair,
+    passphrase: str,
+    *,
+    iterations: int = DEFAULT_ITERATIONS,
+) -> str:
+    """Armor *key* in the v2 envelope under a single ``password`` factor.
+
+    Fresh random master KEK; the seed is sealed under it, and the master KEK is
+    wrapped under ``KDF(passphrase)``. Returns the BEGIN/END-wrapped text. This
+    is the only writer going forward (v1 is never written)."""
+    if not (_MIN_ITERATIONS <= iterations <= _MAX_ITERATIONS):
+        raise ArmorError(
+            f"iterations must be in [{_MIN_ITERATIONS}, {_MAX_ITERATIONS}]"
+        )
+    root_pub = key.public_hex
+    seed = bytes.fromhex(key.private_hex)
+    master_kek = os.urandom(_MASTER_KEK_LEN)
+    seal_iv = os.urandom(_IV_LEN)
+    seal_ct = AESGCM(master_kek).encrypt(seal_iv, seed, _v2_seal_aad(root_pub))
+    salt = os.urandom(_SALT_LEN)
+    pw_key = _derive_key(passphrase, salt, iterations)
+    wrap_iv = os.urandom(_IV_LEN)
+    wrap = AESGCM(pw_key).encrypt(
+        wrap_iv, master_kek, _v2_factor_aad(root_pub, "password")
+    )
+    body = canonical_json(
+        {
+            "v": ARMOR_VERSION_2,
+            "root_pub": root_pub,
+            "kek_seal": {
+                "cipher": "AES-256-GCM",
+                "iv": base64.b64encode(seal_iv).decode("ascii"),
+                "ct": base64.b64encode(seal_ct).decode("ascii"),
+            },
+            "factors": [
+                {
+                    "type": "password",
+                    "kdf": {
+                        "name": "PBKDF2",
+                        "hash": "SHA-256",
+                        "iterations": iterations,
+                        "salt": base64.b64encode(salt).decode("ascii"),
+                    },
+                    "cipher": "AES-256-GCM",
+                    "iv": base64.b64encode(wrap_iv).decode("ascii"),
+                    "wrap": base64.b64encode(wrap).decode("ascii"),
+                }
+            ],
+        }
+    )
+    b64 = base64.b64encode(body).decode("ascii")
+    return "\n".join([ARMOR_BEGIN, *textwrap.wrap(b64, 64), ARMOR_END])
+
+
+def _parse_password_factor(f: dict, index: int) -> None:
+    if set(f) != {"type", "kdf", "cipher", "iv", "wrap"}:
+        raise ArmorError(
+            f"v2 password factor[{index}] must carry exactly "
+            "{type, kdf, cipher, iv, wrap}"
+        )
+    kdf = f["kdf"]
+    if (
+        not isinstance(kdf, dict)
+        or set(kdf) != {"name", "hash", "iterations", "salt"}
+        or kdf["name"] != "PBKDF2"
+        or kdf["hash"] != "SHA-256"
+        or type(kdf["iterations"]) is not int
+        or not (_MIN_ITERATIONS <= kdf["iterations"] <= _MAX_ITERATIONS)
+    ):
+        raise ArmorError(
+            "v2 password factor kdf must be exactly {name: PBKDF2, hash: "
+            "SHA-256, iterations, salt} with sane iterations"
+        )
+    if f["cipher"] != "AES-256-GCM":
+        raise ArmorError("v2 password factor cipher must be AES-256-GCM")
+    _b64_field(kdf, "salt", length=_SALT_LEN, what="factor.kdf.salt")
+    _b64_field(f, "iv", length=_IV_LEN, what="factor.iv")
+    _b64_field(f, "wrap", length=_WRAP_LEN, what="factor.wrap")
+
+
+def parse_armor_v2(armor: str) -> dict:
+    """Strict, RECURSIVELY closed parse of the v2 envelope (I1 preserved).
+
+    Exact key sets at every level; a closed factor-``type`` registry; no
+    duplicate factor types; valid formats and lengths. Any extra key, unknown
+    factor type, or bad length is refused — the same no-smuggling guarantee as
+    v1, re-expressed for a richer shape."""
+    data = _armor_body(armor)
+    if set(data) != {"v", "root_pub", "kek_seal", "factors"}:
+        raise ArmorError(
+            "v2 armor body must carry exactly {v, root_pub, kek_seal, factors} — "
+            f"got {sorted(data)}; unknown fields are refused (I1)"
+        )
+    if data["v"] != ARMOR_VERSION_2:
+        raise ArmorError(f"parse_armor_v2 got version {data['v']!r}, expected 2")
+    if not isinstance(data["root_pub"], str) or not _ROOT_PUB_RE.match(data["root_pub"]):
+        raise ArmorError("v2 armor root_pub must be 64 lowercase hex chars")
+    seal = data["kek_seal"]
+    if (
+        not isinstance(seal, dict)
+        or set(seal) != {"cipher", "iv", "ct"}
+        or seal["cipher"] != "AES-256-GCM"
+    ):
+        raise ArmorError("v2 kek_seal must be exactly {cipher: AES-256-GCM, iv, ct}")
+    _b64_field(seal, "iv", length=_IV_LEN, what="kek_seal.iv")
+    _b64_field(seal, "ct", length=_WRAP_LEN, what="kek_seal.ct")
+    factors = data["factors"]
+    if not isinstance(factors, list) or not factors:
+        raise ArmorError("v2 factors must be a non-empty list")
+    seen = set()
+    for i, f in enumerate(factors):
+        if not isinstance(f, dict) or "type" not in f:
+            raise ArmorError(f"v2 factor[{i}] must be an object with a type")
+        ftype = f["type"]
+        if ftype not in _KNOWN_FACTOR_TYPES:
+            raise ArmorError(
+                f"v2 factor[{i}] has unknown type {ftype!r}; the registry is "
+                f"closed to {sorted(_KNOWN_FACTOR_TYPES)}"
+            )
+        if ftype in seen:
+            raise ArmorError(f"v2 has a duplicate factor type {ftype!r}")
+        seen.add(ftype)
+        if ftype == "password":
+            _parse_password_factor(f, i)
+    return data
+
+
+def decrypt_root_key_v2(armor: str, passphrase: str) -> KeyPair:
+    """Open a v2 armor with *passphrase*: unwrap the master KEK from the
+    password factor, then unseal the seed under the master KEK."""
+    data = parse_armor_v2(armor)
+    root_pub = data["root_pub"]
+    pw = next((f for f in data["factors"] if f["type"] == "password"), None)
+    if pw is None:
+        raise ArmorError("v2 armor has no password factor to open with a passphrase")
+    try:
+        salt = base64.b64decode(pw["kdf"]["salt"], validate=True)
+        wrap_iv = base64.b64decode(pw["iv"], validate=True)
+        wrap = base64.b64decode(pw["wrap"], validate=True)
+        seal_iv = base64.b64decode(data["kek_seal"]["iv"], validate=True)
+        seal_ct = base64.b64decode(data["kek_seal"]["ct"], validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ArmorError(f"v2 armor fields do not base64-decode: {exc}") from exc
+    pw_key = _derive_key(passphrase, salt, pw["kdf"]["iterations"])
+    try:
+        master_kek = AESGCM(pw_key).decrypt(
+            wrap_iv, wrap, _v2_factor_aad(root_pub, "password")
+        )
+    except InvalidTag as exc:
+        raise ArmorPassphraseError("v2 armor does not open with that passphrase") from exc
+    try:
+        seed = AESGCM(master_kek).decrypt(seal_iv, seal_ct, _v2_seal_aad(root_pub))
+    except InvalidTag as exc:
+        raise MalformedError("v2 master KEK does not open the seed seal") from exc
+    if len(seed) != _SEED_LEN:
+        raise MalformedError("v2 armor plaintext is not a 32-byte Ed25519 seed")
+    key = KeyPair.from_private_hex(seed.hex())
+    if key.public_hex != root_pub:
+        raise MalformedError("v2 armor root_pub does not match the enclosed private key")
+    return key
+
+
+# Version dispatch tables — a future v3 slots in here (parser, decryptor, and a
+# (2, 3) migration) with no change to callers. This is the forward-compatibility
+# the operator required: new formats are routine, never constitutional.
+_ARMOR_DECRYPTORS = {
+    ARMOR_VERSION: decrypt_root_key,      # LEGACY v1 — removed post-migration
+    ARMOR_VERSION_2: decrypt_root_key_v2,
+}
+
+
+def armor_version(armor: str) -> int:
+    """The declared version of *armor* (1 or 2), else :class:`ArmorError`."""
+    data = _armor_body(armor)
+    v = data.get("v")
+    if v not in _ARMOR_DECRYPTORS:
+        raise ArmorError(f"unsupported armor version: {v!r}")
+    return v
+
+
+def decrypt_root_key_any(armor: str, passphrase: str) -> KeyPair:
+    """Open a v1 OR v2 armor. The v1 branch exists ONLY to read a pre-migration
+    blob and is deleted from the shipped product once migration has run."""
+    return _ARMOR_DECRYPTORS[armor_version(armor)](armor, passphrase)
+
+
+def migrate_v1_to_v2(
+    v1_armor: str,
+    passphrase: str,
+    *,
+    iterations: int = DEFAULT_ITERATIONS,
+) -> str:
+    """One-shot: open a v1 armor and re-emit it as v2. THROWAWAY — this function
+    and the v1 reader are deleted from the shipped product after the migration
+    runs (v1 never shipped, so no persistent V1 path is kept).
+
+    Produces the v2 text ONLY. The caller MUST replace-and-destroy the v1 blob
+    ATOMICALLY with the v2 write — no window that leaves a readable v1 master-KEK
+    copy, and no v1 copy left in any backup/sync path it can reach. A leftover v1
+    blob is a master-KEK sealed under the weaker single-PBKDF2 wrap that an
+    attacker can brute-force offline with their own reader, so the destroy is
+    load-bearing, not hygiene."""
+    if armor_version(v1_armor) != ARMOR_VERSION:
+        raise ArmorError("migrate_v1_to_v2 expects a v1 armor")
+    key = decrypt_root_key(v1_armor, passphrase)
+    return encrypt_root_key_v2(key, passphrase, iterations=iterations)
