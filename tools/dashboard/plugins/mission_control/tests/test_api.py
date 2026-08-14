@@ -2615,3 +2615,39 @@ def test_a_closed_or_retired_question_stops_nagging():
     still = [e["entry_id"] for entries in open_by_session.values() for e in entries]
     assert closed["entry_id"] not in still, "a closed question still nags"
     assert retired["entry_id"] not in still, "a retired question still nags"
+
+
+def test_you_are_never_nagged_about_a_question_your_own_screen_asked():
+    """Every open entry used to be one a guest asked and a coordinator owed,
+    so mapping an entry to its coordinator was the same as mapping it to
+    whoever owed the answer. A screen asking the operator something breaks
+    that -- the asker IS the coordinator. Unanswered it cannot bite (no row
+    exists until it is answered), but reopening your own answered ask puts one
+    back in scope, and you would be chased for a decision only the operator
+    can make."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    pillar = db.create_pillar(mission_id, "Infra", "auto-infra", "#4ade80")
+
+    with patch.object(mc_api, "_operator_identity", return_value={
+            "participant_id": mc_api.OPERATOR_PARTICIPANT_ID,
+            "participant_label": "Jeremy Spilman"}), \
+         patch.object(mc_api, "_relay_answer", new_callable=AsyncMock):
+        entry = client.post(
+            f"/api/pillars/{pillar['pillar_id']}/asked",
+            json={"question": "Run or ecosystem?", "answer": "Run."},
+        ).json()["question"]
+
+    # Answered, so closed, so out of scope either way.
+    assert entry["entry_id"] not in _open_entry_ids()
+    # The coordinator pushes back on the operator's answer.
+    db.reopen_question(mission_id, entry["entry_id"], "that breaks re-ingest", "Infra")
+    assert entry["entry_id"] not in _open_entry_ids(), (
+        "the coordinator is being chased for an answer only the operator can give"
+    )
+
+
+def _open_entry_ids():
+    return [e["entry_id"]
+            for entries in db.list_coordinators_with_open_questions().values()
+            for e in entries]

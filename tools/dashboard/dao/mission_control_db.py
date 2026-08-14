@@ -1795,6 +1795,17 @@ def list_coordinators_with_open_questions(
             LEFT JOIN pillars p ON mc.pillar_id = p.pillar_id
             LEFT JOIN missions m ON mc.pillar_id IS NULL AND mc.mission_id = m.mission_id
             WHERE mc.closed_at IS NULL AND mc.retired_at IS NULL
+              -- NEVER NAG SOMEONE ABOUT THEIR OWN QUESTION. Every open entry
+              -- used to be one a guest asked and a coordinator owed, so
+              -- mapping an entry to its coordinator was the same as mapping it
+              -- to whoever owed the answer. A screen that asks the operator
+              -- something breaks that: the asker IS the coordinator. It cannot
+              -- bite while such a question is unanswered (there is no row
+              -- until then), but reopening your own answered ask puts one back
+              -- in scope, and you would be chased for a decision only the
+              -- operator can make.
+              AND mc.asked_by_participant_id IS NOT COALESCE(
+                    'pillar:' || mc.pillar_id, 'mission:' || mc.mission_id)
             ORDER BY mc.created_at ASC
             """,
         ).fetchall()
