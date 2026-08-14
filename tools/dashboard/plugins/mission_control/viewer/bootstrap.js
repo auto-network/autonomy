@@ -544,7 +544,12 @@
     if (forYou.length) {
       kids.push(el("button", {
         class: "mc-foryou", title: forYou.length + " waiting on you",
-        onclick: function () { show({anchor: forYou[0].ref}); },
+        // A LIST, NOT THE FIRST ONE. This opened forYou[0] -- so the bar
+        // counted six and the tap showed one, with the other five reachable
+        // only by scrolling the page hunting for Answer controls. The count
+        // exists to make them findable; jumping to one of them is the single
+        // thing it must not do.
+        onclick: function () { show(ui.panel === "foryou" ? null : {panel: "foryou"}); },
       }, [el("span", {text: forYou.length + " for you"})]));
     }
     if (ui.noChannel) {
@@ -848,12 +853,37 @@
     })];
   }
 
+  //: Everything on this screen waiting on the reader, in the order it appears
+  //: on the page -- which is the order the author put it in, and the only
+  //: order that means anything to someone about to read the screen itself.
+  function forYouRows() {
+    var waiting = unanswered();
+    if (!waiting.length) {
+      return [el("p", {class: "mc-empty", text: "Nothing is waiting on you here."})];
+    }
+    return waiting.map(function (c) {
+      return el("button", {class: "mc-row", onclick: function () {
+        show({anchor: c.ref, from: {panel: "foryou"}});
+      }}, [
+        el("div", {class: "mc-row-top"}, [
+          el("span", {class: "mc-chip mc-chip-open", text: "answer"}),
+          el("span", {class: "mc-sub", text: c.about || ""}),
+        ]),
+        el("p", {class: "mc-qtext", text: c.asks}),
+      ]);
+    });
+  }
+
+  var PANEL_TITLE = {pillars: "Pillars", questions: "Questions", foryou: "For you"};
+
   function panelNode() {
     if (!ui.panel) return null;
-    var body = ui.panel === "pillars" ? pillarRows() : questionRows();
+    var body = ui.panel === "pillars" ? pillarRows()
+             : ui.panel === "foryou" ? forYouRows()
+             : questionRows();
     var kids = [
       el("div", {class: "mc-phead"}, [
-        el("span", {class: "mc-ptitle", text: ui.panel === "pillars" ? "Pillars" : "Questions"}),
+        el("span", {class: "mc-ptitle", text: PANEL_TITLE[ui.panel] || "Questions"}),
       ].concat(ui.panel === "questions" ? filterToggle() : []).concat([
         el("span", {class: "mc-grow"}),
         el("button", {class: "mc-x", text: "\u00d7", onclick: function () { show(null); }}),
@@ -876,6 +906,7 @@
   // it, has nothing above it to show.
   function backLabel() {
     if (ui.from && ui.from.panel === "questions") return "\u2039 Questions";
+    if (ui.from && ui.from.panel === "foryou") return "\u2039 For you";
     // Opened from the feed, so back is the feed -- not "back to the mission",
     // which would throw away the place in the list you had scrolled to.
     if (ui.from && (ui.from.view === "feed" || ui.from.post)) {

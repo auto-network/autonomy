@@ -423,3 +423,18 @@ def test_a_reply_goes_to_the_pillar_that_wrote_the_post():
     assert "function ask(text, anchor, pillarId, about)" in src
     assert "pillarId ? {pillar_id: pillarId} : currentPillar()" in src
     assert "ask(t, ref, post.pillar_id, firstLine(post.text))" in src
+
+
+def test_the_for_you_count_opens_all_of_them_not_the_first():
+    """The bar counted six and the tap showed one, with the other five
+    reachable only by scrolling the page hunting for Answer controls. The
+    count exists to make them findable; opening one of them is the single
+    thing it must not do."""
+    src = _viewer("bootstrap.js")
+    assert "function forYouRows(" in src, "there is no list of what is waiting"
+    assert 'show({anchor: forYou[0].ref})' not in src, (
+        "the count still jumps to the first item"
+    )
+    assert 'show(ui.panel === "foryou" ? null : {panel: "foryou"})' in src
+    # And a way back out of one of them to the rest.
+    assert '"\\u2039 For you"' in src or "For you" in src
