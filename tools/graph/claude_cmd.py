@@ -113,17 +113,43 @@ def _setup_token_expires_at(setup_row: Any | None) -> str | None:
     return (dt + CLAUDE_SETUP_TOKEN_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _credentials_org() -> str:
+    """Return the substrate org that owns every row this module touches.
+
+    All three sets here — ``dashboard.claude.credentials``,
+    ``dashboard.claude.setup_tokens`` and ``dashboard.harness.usage`` — are
+    operator-local: their correct value depends on *this* machine, they are
+    secrets or host telemetry, and they sync only across the operator's own
+    fleet. Their home is ``personal`` (org-scope rubric graph://4d88c2ad-625,
+    worked-examples table).
+
+    This is the rubric's ergonomic law: *read a setting through a resolver
+    pinned to its home, never through the process's ambient ``GRAPH_ORG``.*
+    Pinning here is what makes this module agree with every other consumer —
+    ``credential_import.CREDENTIALS_ORG``, both refresh pollers'
+    ``_credentials_org()``, ``harness_usage_settings.HARNESS_USAGE_ORG`` and
+    the session launcher — all of which already hard-code ``personal``.
+
+    It previously passed ``ops.CALLER_ORG``, which follows ``GRAPH_ORG``.
+    Agent shells set ``GRAPH_ORG=autonomy``, so ``graph claude list`` read a
+    different database than the running system wrote, and reported a
+    two-month-stale row carrying ``invalid_grant`` for an account that was
+    refreshing normally — a health surface that failed toward false alarm.
+    """
+    return "personal"
+
+
 def _read_credentials_rows() -> list[Any]:
     """Return the list of ``ResolvedSetting`` rows for installed credentials."""
     members = ops.read_set(
-        CLAUDE_CREDENTIALS_SET_ID, org=ops.CALLER_ORG,
+        CLAUDE_CREDENTIALS_SET_ID, org=_credentials_org(),
     )
     return list(members.members)
 
 
 def _read_setup_token_rows() -> list[Any]:
     members = ops.read_set(
-        CLAUDE_SETUP_TOKENS_SET_ID, org=ops.CALLER_ORG,
+        CLAUDE_SETUP_TOKENS_SET_ID, org=_credentials_org(),
     )
     return list(members.members)
 
@@ -182,7 +208,7 @@ def _write_credentials_row(*, org_uuid: str, payload: dict[str, Any]) -> str:
         CLAUDE_CREDENTIALS_REVISION,
         org_uuid,
         payload,
-        org=ops.CALLER_ORG,
+        org=_credentials_org(),
     )
 
 
@@ -198,7 +224,7 @@ def _write_setup_token_row(*, org_uuid: str, raw_key: str) -> str:
         CLAUDE_SETUP_TOKENS_REVISION,
         org_uuid,
         {"raw_key": raw_key},
-        org=ops.CALLER_ORG,
+        org=_credentials_org(),
     )
 
 
@@ -438,7 +464,7 @@ def _read_harness_usage_rows() -> list[Any]:
     """
     try:
         members = ops.read_set(
-            "dashboard.harness.usage", org=ops.CALLER_ORG,
+            "dashboard.harness.usage", org=_credentials_org(),
         )
     except Exception:  # noqa: BLE001 — set may not exist yet on a fresh DB
         return []
@@ -537,7 +563,7 @@ def cmd_claude_remove(args: argparse.Namespace) -> None:
             return
     logger.info("claude remove: deleting alias=%r org=%s", alias, org_uuid)
     try:
-        ops.remove_setting(cred.id, org=ops.CALLER_ORG)
+        ops.remove_setting(cred.id, org=_credentials_org())
     except Exception as e:  # noqa: BLE001 — surface to operator
         logger.error("claude remove: credentials row delete failed alias=%r org=%s: %s",
                      alias, org_uuid, e)
@@ -546,7 +572,7 @@ def cmd_claude_remove(args: argparse.Namespace) -> None:
     setup = _setup_token_by_org_uuid(org_uuid)
     if setup is not None:
         try:
-            ops.remove_setting(setup.id, org=ops.CALLER_ORG)
+            ops.remove_setting(setup.id, org=_credentials_org())
         except Exception as e:  # noqa: BLE001
             logger.error("claude remove: setup_token row delete failed alias=%r org=%s: %s",
                          alias, org_uuid, e)
