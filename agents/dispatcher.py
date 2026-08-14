@@ -461,6 +461,35 @@ def release_bead(bead_id: str, status: str, reason: str) -> bool:
     """
     try:
         if status == "DONE":
+            # Golden-rule gate, host-side closer (auto-w41na): this bd
+            # runs on the HOST, where the cap-bin shim never rides — the
+            # highest-volume closer in the system was the one ungated
+            # caller (found live by packaging: a re-run that declined to
+            # fabricate host evidence still got its bead closed here).
+            # Same rule inline: runtime-critical + no proof ref = no
+            # close; downgrade to BLOCKED semantics instead.
+            labels = []
+            try:
+                show = run_bd(["show", bead_id, "--json"]) or "[]"
+                row = json.loads(show)
+                labels = (row[0] if isinstance(row, list) else row).get(
+                    "labels") or []
+            except Exception:
+                pass
+            proof_re = r"functional-proof: *[A-Za-z0-9/][A-Za-z0-9/_.:-]{5,}"
+            if ("runtime-critical" in labels
+                    and not re.search(proof_re, reason or "", re.I)
+                    and not re.search(
+                        proof_re, run_bd(["show", bead_id]) or "", re.I)):
+                _retry_bd(["update", bead_id, "-s", "open"])
+                run_bd(["update", bead_id, "--append-notes",
+                        "golden-rule gate (host closer): refusing DONE close "
+                        "— runtime-critical bead has no functional-proof "
+                        "reference. Provide real-run evidence "
+                        "(functional-proof: <ref>) or remove the label with "
+                        "a recorded justification."])
+                print(f"  Golden-rule gate: host close REFUSED for {bead_id}")
+                return True
             _retry_bd(["close", bead_id, "--reason", reason])
         elif status == "BLOCKED":
             _retry_bd(["update", bead_id, "-s", "open"])
