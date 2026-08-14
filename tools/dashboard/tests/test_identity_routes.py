@@ -61,15 +61,17 @@ def env(tmp_path, monkeypatch):
     from tools.graph.db import GraphDB
 
     GraphDB.close_all_pooled()
-    # Agreement pin (test_feature_flags.py's recipe): the routes write at
-    # org=None while the tests read back at explicit CALLER_ORG (= ORG),
-    # so the pin points AT the orgs tree's own db for ORG — explicit-org
-    # resolution and the pin converge on one hermetic file instead of the
-    # pin contradicting the org (OrgResolutionConflict).
+    # Honest personal-store routing (auto-01d2y, crypto-adjudicated):
+    # the routes write at org=None -> personal.db, and the tests read
+    # back at explicit org="personal" — same store by production's own
+    # routing, no pin needed. GRAPH_ORG stays set to a DIFFERENT org so
+    # the tests also prove personal routing is immune to ambient org.
     orgs_dir = tmp_path / "orgs"
     orgs_dir.mkdir()
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
-    monkeypatch.setenv("GRAPH_DB", str(orgs_dir / f"{ORG}.db"))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    GraphDB.create_org_db(
+        "personal", type_="personal", path=orgs_dir / "personal.db").close()
     monkeypatch.setenv("GRAPH_ORG", ORG)
     # post_personal mints the bootstrap unlock session — keep its HMAC
     # secret out of the repo's data/ during tests.
@@ -302,7 +304,7 @@ def test_status_org_identity_does_not_satisfy_personal(env, root):
         {"armored_private_key": encrypt_root_key(org_root, PASSWORD,
                                                  iterations=10_000),
          "root_pub": org_root.public_hex},
-        org=settings_ops.CALLER_ORG)
+        org="personal")
     body = env.get("/api/identity/status").json()
     assert body["personal_identity"] is None
     assert body["onboarding_needed"] is True
@@ -350,7 +352,7 @@ def test_personal_is_distinct_from_org_key(env, root):
     key row — the two roots live in different set_ids."""
     _store_identity(env, root)
     org_rows = settings_ops.read_set("autonomy.network.org-key",
-                                     org=settings_ops.CALLER_ORG).members
+                                     org="personal").members
     assert org_rows == []
     personal_rows = settings_ops.read_set(PERSONAL_IDENTITY_SET_ID,
                                           org=None).members
@@ -363,7 +365,7 @@ def test_personal_seed_never_touches_disk(env, root, tmp_path):
     import os
 
     _store_identity(env, root)
-    db_bytes = open(os.environ["GRAPH_DB"], "rb").read()
+    db_bytes = open(os.environ["AUTONOMY_ORGS_DIR"] + "/personal.db", "rb").read()
     seed_hex = root.private_hex
     assert seed_hex.encode() not in db_bytes
     assert bytes.fromhex(seed_hex) not in db_bytes
@@ -445,7 +447,7 @@ def test_register_happy_path_stores_credential(env, root):
     body = r.json()
     assert body["rp_id"] == "localhost"
     rows = settings_ops.read_set(PASSKEY_SET_ID,
-                                 org=settings_ops.CALLER_ORG).members
+                                 org="personal").members
     assert len(rows) == 1
     stored = rows[0].payload
     assert stored["credential_id"] == body["credential_id"]
@@ -564,7 +566,7 @@ def test_register_refuses_completion_from_different_host(env, root):
     assert "must complete on the host" in r.json()["error"]
     # Nothing was stored...
     rows = settings_ops.read_set(PASSKEY_SET_ID,
-                                 org=settings_ops.CALLER_ORG).members
+                                 org="personal").members
     assert rows == []
     # ...and the burned ceremony cannot be replayed on the right host.
     retry = env.post("/api/identity/passkey/register",

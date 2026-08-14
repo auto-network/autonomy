@@ -42,15 +42,15 @@ def route_client(tmp_path, monkeypatch):
     from tools.graph.db import GraphDB
 
     GraphDB.close_all_pooled()
-    # Agreement pin (test_feature_flags.py's recipe): the routes write at
-    # org=None while the test reads back at explicit CALLER_ORG (= ORG),
-    # so the pin points AT the orgs tree's own db for ORG — explicit-org
-    # resolution and the pin converge on one hermetic file instead of the
-    # pin contradicting the org (OrgResolutionConflict).
+    # Honest personal-store routing (auto-01d2y): routes write at
+    # org=None -> personal.db, reads assert at explicit org="personal";
+    # GRAPH_ORG stays a different org to prove ambient-org immunity.
     orgs_dir = tmp_path / "orgs"
     orgs_dir.mkdir()
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
-    monkeypatch.setenv("GRAPH_DB", str(orgs_dir / f"{ORG}.db"))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    GraphDB.create_org_db(
+        "personal", type_="personal", path=orgs_dir / "personal.db").close()
     monkeypatch.setenv("GRAPH_ORG", ORG)
     monkeypatch.setenv(
         "DASHBOARD_SESSION_SECRET_FILE",
@@ -175,7 +175,7 @@ def test_virtual_authenticator_registers_unlocks_and_signals_clone(
 
         rows = settings_ops.read_set(
             PASSKEY_SET_ID,
-            org=settings_ops.CALLER_ORG,
+            org="personal",
         ).members
         assert len(rows) == 1
         assert rows[0].payload["credential_id"] == credential["rawId"]
@@ -207,7 +207,7 @@ def test_virtual_authenticator_registers_unlocks_and_signals_clone(
 
         advanced = settings_ops.read_set(
             PASSKEY_SET_ID,
-            org=settings_ops.CALLER_ORG,
+            org="personal",
         ).members[0]
         assert advanced.payload["sign_count"] == 1
 
