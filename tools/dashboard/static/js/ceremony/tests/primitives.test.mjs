@@ -9,6 +9,9 @@ const {
   bytesToHex,
   canonicalJson,
   decryptArmor,
+  decryptArmorV2,
+  migrateArmorV1ToV2,
+  parseArmorV2,
   domainBytes,
   hexToBytes,
   importEd25519RootSigningKey,
@@ -51,6 +54,45 @@ function tamperCiphertext(armor) {
 await assert.rejects(
   decryptArmor(tamperCiphertext(fixture.armor), fixture.passphrase),
   /wrong passphrase/,
+);
+
+// ── Armor v2: cross-open the Python-minted v2, migrate v1->v2, strict parse ──
+const openedV2 = await decryptArmorV2(fixture.armor_v2, fixture.passphrase);
+assert.equal(bytesToHex(openedV2.seed), fixture.seed_hex, 'JS opens Python-minted v2');
+assert.equal(openedV2.rootPub, fixture.root_pub);
+openedV2.seed.fill(0);
+
+await assert.rejects(
+  decryptArmorV2(fixture.armor_v2, 'wrong-passphrase'),
+  /wrong passphrase/,
+  'v2 wrong passphrase must fail closed',
+);
+
+// Migrate the Python-minted v1 to v2 in JS, then open it -> exact seed.
+const migratedV2 = await migrateArmorV1ToV2(fixture.armor, fixture.passphrase, 10000);
+const openedMig = await decryptArmorV2(migratedV2, fixture.passphrase);
+assert.equal(bytesToHex(openedMig.seed), fixture.seed_hex, 'JS v1->v2 migrate recovers seed');
+openedMig.seed.fill(0);
+
+function editV2Body(edit) {
+  const lines = fixture.armor_v2.split('\n').filter((line) => line.length > 0);
+  const data = JSON.parse(
+    Buffer.from(lines.slice(1, -1).join(''), 'base64').toString('utf8'),
+  );
+  edit(data);
+  const body = Buffer.from(JSON.stringify(data)).toString('base64');
+  return [lines[0], ...body.match(/.{1,64}/g), lines[lines.length - 1]].join('\n');
+}
+
+// I1 preserved: an injected extra field is refused at parse.
+assert.throws(
+  () => parseArmorV2(editV2Body((d) => { d.smuggled = 'AAAA'; })),
+  'v2 injected extra field must be refused',
+);
+// Total factor dispatch (F4): an unknown factor type is refused, never passed.
+assert.throws(
+  () => parseArmorV2(editV2Body((d) => { d.factors[0].type = 'backdoor'; })),
+  'v2 unknown factor type must be refused',
 );
 
 for (const vector of fixture.canonical_vectors) {
