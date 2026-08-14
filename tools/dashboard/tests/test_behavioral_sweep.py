@@ -2094,6 +2094,33 @@ def sweep_server(tmp_path_factory):
         if not (_orgs / f"{_slug}.db").exists():
             _GraphDB.create_org_db(
                 _slug, type_=_type, path=_orgs / f"{_slug}.db").close()
+    # The dropdown resolves dashboard.agent-actions via the real settings
+    # API against the org DBs (Schema proxy with X-Graph-Org) — the mock
+    # settings shadow never enters that path, so the members must exist
+    # as real rows or the button hides (visible = members.length > 0).
+    # Mirror SWEEP_AGENT_ACTIONS verbatim, deprecated legacy row included
+    # (the count assertion guards the production deprecated filter).
+    import json as _json, time as _time, uuid as _uuid
+    _adb = _GraphDB(_orgs / "autonomy.db")
+    _now = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
+    for _m in SWEEP_AGENT_ACTIONS:
+        _adb.conn.execute(
+            "INSERT OR IGNORE INTO settings (id, set_id, schema_revision,"
+            " key, payload, publication_state, supersedes, excludes,"
+            " deprecated, created_at, updated_at)"
+            " VALUES (?, 'dashboard.agent-actions', 2, ?, ?, 'canonical',"
+            " NULL, NULL, ?, ?, ?)",
+            (str(_uuid.uuid4()), _m["key"], _json.dumps(_m["payload"]),
+             int(_m.get("deprecated", 0)), _now, _now),
+        )
+    _adb.conn.commit()
+    _adb.close()
+    # Schema.of() first fetches the schema synopsis from autonomy.schema
+    # rows; the server's startup flush is partial under mock, so
+    # materialize every registered schema into the hermetic stores the
+    # way real startup does (test_startup_schema_flush precedent).
+    from tools.graph.schemas.registry import flush_schema_meta_all_orgs
+    flush_schema_meta_all_orgs()
     _GraphDB.close_all_pooled()
     state = start_mock_server(
         _build_fixture(), tmpdir, port=worker_test_port(8094),
