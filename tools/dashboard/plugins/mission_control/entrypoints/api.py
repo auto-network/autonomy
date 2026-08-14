@@ -1177,7 +1177,10 @@ async def _relay_question(*, mission_id: str, entry_id: str) -> None:
                else f"Not delivered to {primary_label} — nobody has been told")
     try:
         update = await asyncio.to_thread(
-            db.add_conversation_update, entry_id, receipt)
+            lambda: db.add_conversation_message(
+                entry_id, receipt, kind="echo",
+                author_participant_id="platform",
+                author_label="Mission Control"))
         entry_now = await asyncio.to_thread(db.get_question, mission_id, entry_id)
         await _publish_conversation_event(
             "update", mission_id, entry.get("pillar_id"), entry_id,
@@ -1947,7 +1950,12 @@ async def _add_update_impl(
     existing = db.get_question(lookup_mission_id, entry_id)
     if not existing:
         return JSONResponse({"error": "question not found"}, status_code=404)
-    update = db.add_conversation_update(entry_id, text)
+    who = _resolve_visitor_identity(request) or {}
+    update = db.add_conversation_message(
+        entry_id, text, kind="status",
+        author_participant_id=who.get("participant_id"),
+        author_label=who.get("participant_label"),
+    )
     update_payload = _update_payload(update)
     # EVERY CONVERSATION EVENT CARRIES ITS ENTRY. This one carried only the
     # update, and a reader with the screen open drops any conversation event

@@ -300,7 +300,9 @@
               height: 1.05rem; border-radius: 99px; background: #0f1218;
               border: 1px solid #334155; color: #94a3b8; font-size: 11px;
               line-height: 1; display: flex; align-items: center; justify-content: center; }
-.mc-clip { flex: none; font-size: 1rem; opacity: .75; padding: 0 .15rem 0 0; }
+.mc-clip { flex: none; font-size: 1.15rem; line-height: 1; color: #94a3b8;
+           width: 1.5rem; height: 1.5rem; border: 1px solid #334155;
+           border-radius: .35rem; padding: 0; }
 .mc-file { display: none; }
 .mc-foot-drop { outline: 1px dashed #475569; outline-offset: -3px; }
 
