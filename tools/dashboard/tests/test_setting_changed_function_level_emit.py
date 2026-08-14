@@ -25,11 +25,29 @@ TEST_REVISION = 1
 
 @pytest.fixture
 def graph_db_env(tmp_path, monkeypatch):
-    db_path = tmp_path / "graph.db"
-    monkeypatch.setenv("GRAPH_DB", str(db_path))
+    """Hermetic orgs tree, no GRAPH_DB pin.
+
+    The CLI-path test writes with an explicit ``org="autonomy"``; a
+    whole-DB pin contradicts that org's own DB path and the strict
+    resolver refuses. The remaining tests write scopeless
+    (``CALLER_ORG`` → personal). Pre-create both org DBs.
+    """
+    from tools.graph.db import GraphDB
+
+    GraphDB.close_all_pooled()
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_API", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
-    yield db_path
+    GraphDB.create_org_db(
+        "autonomy", type_="shared", path=orgs_dir / "autonomy.db").close()
+    GraphDB.create_org_db(
+        "personal", type_="personal", path=orgs_dir / "personal.db").close()
+    GraphDB.close_all_pooled()
+    yield orgs_dir
+    GraphDB.close_all_pooled()
 
 
 @pytest.fixture(autouse=True)

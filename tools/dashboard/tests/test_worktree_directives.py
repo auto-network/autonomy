@@ -62,11 +62,25 @@ def _isolate_action_registry():
 
 @pytest.fixture
 def graph_db_env(tmp_path, monkeypatch):
-    db_path = tmp_path / "graph.db"
-    monkeypatch.setenv("GRAPH_DB", str(db_path))
+    from tools.graph.db import GraphDB
+
+    GraphDB.close_all_pooled()
+    # Orgs-tree hermeticity, no GRAPH_DB pin: the failure path writes the
+    # rebase status at the directive row's explicit org ('autonomy'), which
+    # a pin silently swallows (73bad14e) and the fail-loud resolver refuses.
+    # Caller-scope directive writes resolve to personal.db in the same tree.
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_API", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
-    yield db_path
+    GraphDB.create_org_db("autonomy", type_="shared",
+                          path=orgs_dir / "autonomy.db").close()
+    GraphDB.create_org_db("personal", type_="personal",
+                          path=orgs_dir / "personal.db").close()
+    yield orgs_dir
+    GraphDB.close_all_pooled()
 
 
 def test_rebase_directive_set_id_composes_under_worktree_namespace():

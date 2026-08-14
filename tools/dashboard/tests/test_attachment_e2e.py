@@ -110,7 +110,14 @@ def stack(tmp_path, monkeypatch):
     from tools.graph.db import GraphDB
 
     GraphDB.close_all_pooled()
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
+    # Orgs-tree hermeticity, no GRAPH_DB pin: the code under test
+    # resolves explicit orgs, which a pin silently swallows (73bad14e)
+    # and the fail-loud resolver refuses. delenv guards ambient leaks.
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    GraphDB.create_org_db(ORG).close()
     monkeypatch.delenv("GRAPH_ORG", raising=False)
     monkeypatch.setattr(design_db, "DB_PATH", tmp_path / "designs.db")
     monkeypatch.setattr(design_db, "_initialized", False)

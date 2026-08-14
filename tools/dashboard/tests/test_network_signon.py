@@ -66,7 +66,15 @@ def env(tmp_path, monkeypatch, registry_app):
     from tools.graph.db import GraphDB
 
     GraphDB.close_all_pooled()
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
+    # Orgs-tree hermeticity, no GRAPH_DB pin: the code under test
+    # resolves explicit orgs, which a pin silently swallows and the
+    # fail-loud resolver refuses. delenv guards ambient leaks.
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    GraphDB.close_all_pooled()
+    GraphDB.create_org_db(ORG, type_="shared", path=orgs_dir / f"{ORG}.db").close()
     monkeypatch.setenv("GRAPH_ORG", ORG)  # this dashboard IS this org — own-org caller
     monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
 

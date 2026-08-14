@@ -24,13 +24,30 @@ from tools.graph.surface import (
 
 @pytest.fixture
 def graph_db_env(tmp_path, monkeypatch):
-    """Pin GRAPH_DB to a fresh per-test sqlite file."""
-    db_path = tmp_path / "graph.db"
+    """Agreement pin: GRAPH_DB points at the orgs tree's own personal.db.
+
+    The activity writer and readers address ``org="personal"``
+    explicitly; the strict resolver refuses a pin that contradicts that
+    org's own DB path. This path is genuinely single-org, so pin AT
+    ``<orgs>/personal.db`` with ``AUTONOMY_ORGS_DIR`` set — the pin and
+    org resolution agree, and ``settings_ops._open(None)`` reads the
+    same file.
+    """
+    from tools.graph.db import GraphDB
+
+    GraphDB.close_all_pooled()
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir(exist_ok=True)
+    db_path = orgs_dir / "personal.db"
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
     monkeypatch.setenv("GRAPH_DB", str(db_path))
     monkeypatch.delenv("GRAPH_API", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
     monkeypatch.delenv("GRAPH_SCOPE", raising=False)
+    GraphDB.create_org_db("personal", type_="personal", path=db_path).close()
+    GraphDB.close_all_pooled()
     yield db_path
+    GraphDB.close_all_pooled()
 
 
 def _iso(dt: datetime) -> str:

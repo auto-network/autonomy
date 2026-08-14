@@ -147,7 +147,14 @@ def stack(tmp_path, monkeypatch):
     from tools.graph.db import GraphDB
 
     GraphDB.close_all_pooled()
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
+    # Orgs-tree hermeticity, no GRAPH_DB pin: the code under test
+    # resolves explicit orgs, which a pin silently swallows (73bad14e)
+    # and the fail-loud resolver refuses. delenv guards ambient leaks.
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    GraphDB.create_org_db(ORG).close()
     monkeypatch.delenv("GRAPH_ORG", raising=False)
     monkeypatch.setattr(design_db, "DB_PATH", tmp_path / "designs.db")
     monkeypatch.setattr(design_db, "_initialized", False)
@@ -335,10 +342,11 @@ def test_supervisor_brings_serving_live_end_to_end(stack, tmp_path, monkeypatch)
     """The whole point: given a provisioned serve-cert, the supervisor spawns
     the REAL connector subprocess and the freshly published link goes live —
     proven by the publisher's own probe, headers-only."""
-    # The spawned connector is a SEPARATE process: it inherits GRAPH_DB (its
-    # grant cache) from the env, but the designs DB is a module attr the stack
-    # fixture only monkeypatched in-process — so point the subprocess at the
-    # same tmp designs DB via the env var design_db reads.
+    # The spawned connector is a SEPARATE process: it inherits the orgs tree
+    # (AUTONOMY_ORGS_DIR — its grant cache) from the env, but the designs DB
+    # is a module attr the stack fixture only monkeypatched in-process — so
+    # point the subprocess at the same tmp designs DB via the env var
+    # design_db reads.
     monkeypatch.setenv("EXPERIMENTS_DB", str(design_db.DB_PATH))
     binder_rev = design_db.create_design(
         title="OSS Insights binder",

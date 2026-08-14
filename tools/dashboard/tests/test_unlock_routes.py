@@ -107,7 +107,15 @@ def env(tmp_path, monkeypatch):
     from tools.graph.db import GraphDB
 
     GraphDB.close_all_pooled()
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
+    # Agreement pin (test_feature_flags.py's recipe): the routes write at
+    # org=None while the tests read/write at explicit org=ORG, so the pin
+    # points AT the orgs tree's own db for ORG — explicit-org resolution
+    # and the pin converge on one hermetic file instead of the pin
+    # contradicting the org (OrgResolutionConflict).
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.setenv("GRAPH_DB", str(orgs_dir / f"{ORG}.db"))
     monkeypatch.setenv("GRAPH_ORG", ORG)
     monkeypatch.setenv("DASHBOARD_SESSION_SECRET_FILE",
                        str(tmp_path / "session.secret"))
@@ -507,7 +515,7 @@ class TestGateFailsClosedOnReadError:
 
     def test_fresh_missing_store_reads_empty_and_stays_open(
             self, env, tmp_path):
-        personal_db = tmp_path / "graph.db"
+        personal_db = tmp_path / "orgs" / f"{ORG}.db"   # the env fixture's pin
         assert not personal_db.exists()
 
         assert unlock_routes.human_auth_enrolled() is False
@@ -536,7 +544,7 @@ class TestGateFailsClosedOnReadError:
         from tools.graph import db as graph_db
 
         _store_identity(env, root)
-        personal_db = tmp_path / "graph.db"
+        personal_db = tmp_path / "orgs" / f"{ORG}.db"   # the env fixture's pin
         with sqlite3.connect(personal_db) as conn:
             conn.execute("PRAGMA user_version = 0")
 
@@ -566,7 +574,7 @@ class TestGateFailsClosedOnReadError:
         from tools.graph import db as graph_db
         from tools.graph.db import GraphDB
 
-        personal_db = tmp_path / "graph.db"
+        personal_db = tmp_path / "orgs" / f"{ORG}.db"   # the env fixture's pin
         GraphDB(personal_db).close()
         with sqlite3.connect(personal_db) as conn:
             conn.execute("PRAGMA user_version = 0")
@@ -617,7 +625,7 @@ def test_server_startup_warm_open_prepares_first_gate_read(
     from tools.graph import db as graph_db
     from tools.graph.db import GraphDB
 
-    personal_db = tmp_path / "graph.db"
+    personal_db = tmp_path / "orgs" / f"{ORG}.db"   # the env fixture's pin
     assert not personal_db.exists()
 
     server._warm_personal_settings_store()
@@ -903,11 +911,15 @@ def test_auth_reads_ignore_canonical_identity_and_passkey_from_peer_org(
 
     GraphDB.close_all_pooled()
     orgs_dir = tmp_path / "orgs"
+    # Point the env at the orgs tree BEFORE creating the DBs:
+    # AUTONOMY_ORGS_DIR outranks create_org_db's root= argument
+    # (resolve_orgs_root precedence), so creating first would land the
+    # rows in the ambient hermetic tree where later resolution never looks.
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
     GraphDB.create_org_db("personal", type_="personal", root=orgs_dir).close()
     GraphDB.create_org_db(ORG, root=orgs_dir).close()
     GraphDB.create_org_db("hostile", root=orgs_dir).close()
-    monkeypatch.delenv("GRAPH_DB", raising=False)
-    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
     monkeypatch.setenv("GRAPH_ORG", ORG)
     monkeypatch.setenv("DASHBOARD_SESSION_SECRET_FILE",
                        str(tmp_path / "session.secret"))

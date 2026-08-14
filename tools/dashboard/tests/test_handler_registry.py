@@ -58,11 +58,29 @@ TEST_REVISION = 1
 
 @pytest.fixture
 def graph_db_env(tmp_path, monkeypatch):
-    db_path = tmp_path / "graph.db"
-    monkeypatch.setenv("GRAPH_DB", str(db_path))
+    """Hermetic orgs tree, no GRAPH_DB pin.
+
+    The dispatch path resolves rows for explicit orgs ("autonomy",
+    "personal") as well as the scopeless default; a whole-DB pin
+    contradicts those orgs' own DB paths and the strict resolver
+    refuses. Pre-create every org DB the tests touch.
+    """
+    from tools.graph.db import GraphDB
+
+    GraphDB.close_all_pooled()
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_API", raising=False)
     monkeypatch.delenv("GRAPH_ORG", raising=False)
-    yield db_path
+    GraphDB.create_org_db(
+        "autonomy", type_="shared", path=orgs_dir / "autonomy.db").close()
+    GraphDB.create_org_db(
+        "personal", type_="personal", path=orgs_dir / "personal.db").close()
+    GraphDB.close_all_pooled()
+    yield orgs_dir
+    GraphDB.close_all_pooled()
 
 
 @pytest.fixture(autouse=True)
@@ -258,7 +276,10 @@ async def test_loop_invokes_scopeless_handler_for_any_org(
 
     register_action(TEST_SET_ID, h, name="scopeless", org=None)
 
-    ops.add_setting(TEST_SET_ID, TEST_REVISION, "any-org", {"origin": "test"}, org=ops.CALLER_ORG)
+    # Dispatch re-resolves the row scoped to the event's own org, so the
+    # row must exist in each org DB whose event we dispatch.
+    ops.add_setting(TEST_SET_ID, TEST_REVISION, "any-org", {"origin": "test"}, org="autonomy")
+    ops.add_setting(TEST_SET_ID, TEST_REVISION, "any-org", {"origin": "test"}, org="personal")
     await _dispatch_event(_event(key="any-org", org="autonomy"), services)
     await _dispatch_event(_event(key="any-org", org="personal"), services)
 
@@ -387,7 +408,9 @@ async def test_two_plugins_registering_same_set_id_both_fire(
     finally:
         _loading_plugin_org.reset(token)
 
-    ops.add_setting(TEST_SET_ID, TEST_REVISION, "k1", {"x": 1}, org=ops.CALLER_ORG)
+    # The event carries org="autonomy"; dispatch resolves the row from
+    # that org's own DB, so write it there.
+    ops.add_setting(TEST_SET_ID, TEST_REVISION, "k1", {"x": 1}, org="autonomy")
     await _dispatch_event(_event(key="k1", org="autonomy"), services)
 
     assert invocations == ["a", "b"]

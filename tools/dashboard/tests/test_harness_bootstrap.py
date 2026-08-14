@@ -108,10 +108,22 @@ def test_probe_present_but_version_fails_is_not_installed(monkeypatch):
 
 @pytest.fixture
 def graph_db(tmp_path, monkeypatch):
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
-    monkeypatch.delenv("GRAPH_API", raising=False)
     from tools.graph.db import GraphDB
+
     GraphDB.close_all_pooled()
+    # Orgs-tree hermeticity, no GRAPH_DB pin: bootstrap rows live at explicit
+    # org='personal', which a pin silently swallows (73bad14e) and the
+    # fail-loud resolver refuses. delenv guards ambient leaks. The endpoint
+    # test's app boot (test_app) may have materialized personal.db already
+    # in the same tmp orgs dir, hence the exists() guards.
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    monkeypatch.delenv("GRAPH_API", raising=False)
+    personal = orgs_dir / "personal.db"
+    if not personal.exists():
+        GraphDB.create_org_db("personal", type_="personal", path=personal).close()
     yield
     GraphDB.close_all_pooled()
 
