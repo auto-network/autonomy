@@ -667,8 +667,8 @@
   <template x-if="loaded && results.length > 0">
     <div class="sp-results" data-testid="sp-results">
       <template x-for="r in filteredResults" :key="r.source_id || r.id">
-        <a :href="'/graph/' + (r.source_id || r.id).slice(0, 12)"
-           @click.prevent="navigateTo('/graph/' + (r.source_id || r.id).slice(0, 12))"
+        <a :href="sourceHref(r)"
+           @click.prevent="navigateTo(sourceHref(r))"
            class="sp-source-card"
            :data-source-type="r.source_type || ''"
            :data-session-type="rowSessionType(r) || ''"
@@ -725,8 +725,8 @@
               <template x-for="(ex, i) in cardExcerpts(r)" :key="i">
                 <template x-if="ex.turn_number != null">
                   <a class="sp-excerpt"
-                     :href="'/graph/' + (r.source_id || r.id).slice(0, 12) + '?turn=' + ex.turn_number"
-                     @click.prevent.stop="navigateTo('/graph/' + (r.source_id || r.id).slice(0, 12) + '?turn=' + ex.turn_number)">
+                     :href="sourceHref(r, ex.turn_number)"
+                     @click.prevent.stop="navigateTo(sourceHref(r, ex.turn_number))">
                     <span class="sp-turn-badge" x-text="'t' + ex.turn_number"></span>
                     <span class="sp-excerpt-text" x-html="highlightTerms(ex.content || '', query)"></span>
                   </a>
