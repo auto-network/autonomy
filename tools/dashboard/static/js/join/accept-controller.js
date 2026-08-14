@@ -42,6 +42,11 @@ export class JoinSession {
     this.brand = null;
     this.claimKey = null;
     this.personaPub = null;
+    // The invitee's own per-org KEM key material, captured from the ceremony
+    // seam. NEVER transmitted -- the page persists it locally only once the
+    // claim is admitted, so the new member can read org-sealed data (finding b).
+    this.kemPrivateKey = null;
+    this.kemCredential = null;
   }
 
   ready() {
@@ -114,6 +119,8 @@ export class JoinSession {
     });
     this.claimKey = minted.claimKey;
     this.personaPub = minted.personaPub;
+    this.kemPrivateKey = minted.kemPrivateKey || null;
+    this.kemCredential = minted.kemCredential || null;
     let reply;
     try {
       reply = await submitClaim({ context: this.context, event: minted.event });

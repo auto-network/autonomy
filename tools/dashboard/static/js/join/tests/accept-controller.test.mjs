@@ -63,6 +63,8 @@ const stubCeremony = async ({ context, inputs, passphrase }) => {
     event: { parents: HEADS, kind: 'member.claim', payload: { invite_ref: inputs.inviteRef } },
     personaPub: PERSONA,
     claimKey: CLAIMKEY,
+    kemPrivateKey: { secret: 'per-org-kem-private' },
+    kemCredential: { pub: 'per-org-kem-public' },
   };
 };
 
@@ -147,6 +149,14 @@ const stubCeremony = async ({ context, inputs, passphrase }) => {
   });
   assert.equal(terminal.state, 'admitted');
   assert.equal(progress.length >= 1, true); // saw at least one pending tick
+  // finding b: the invitee's own KEM private key is captured for the page to
+  // persist locally on admission, but is NEVER put on the wire.
+  assert.deepEqual(s.kemPrivateKey, { secret: 'per-org-kem-private' });
+  assert.equal(
+    JSON.stringify(ch.sent).includes('per-org-kem-private'),
+    false,
+    'kemPrivateKey must never be transmitted over the channel',
+  );
   // the submitted event's parents matched the context heads (claim.js enforces)
   const submit = ch.sent.find((m) => m.op === 'submit');
   assert.deepEqual(JSON.parse(submit.event).parents, HEADS);
