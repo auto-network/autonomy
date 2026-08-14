@@ -2472,6 +2472,33 @@ def _codex_reads_response_item_chat(ctx: dict | None) -> bool:
     return ver is not None and ver >= _CODEX_RESPONSE_ITEM_CHAT_FROM
 
 
+# Machine-authored text that Codex files under the *user* role. The
+# event_msg shape never carried any of it, so it never reached the viewer
+# before 0.147 — reading response_items is what surfaced it, and it is
+# spam: the workspace primer alone is tens of thousands of characters and
+# lands as the FIRST message of every session. Suppressed only on the
+# gated path, so nothing that renders correctly today is affected.
+_CODEX_PREAMBLE_PREFIXES = (
+    "# AGENTS.md instructions",   # the workspace primer
+    "<environment_context",       # cwd/shell/date block
+    "<codex_internal_context",    # Codex re-injecting its own goal
+    "<user_instructions",
+    "<skills_instructions",
+)
+# The session-start banner is machine-authored too but opens with the tmux
+# name, so it needs a pattern rather than a prefix.
+_CODEX_SESSION_BANNER_RE = re.compile(
+    r"^Session \S+ started in workspace .+ at \d{4}-\d{2}-\d{2}T",
+)
+
+
+def _is_codex_preamble(text: str) -> bool:
+    stripped = text.lstrip()
+    if stripped.startswith(_CODEX_PREAMBLE_PREFIXES):
+        return True
+    return bool(_CODEX_SESSION_BANNER_RE.match(stripped))
+
+
 def _codex_response_item_chat_entry(
     payload: dict, timestamp: str,
 ) -> dict | None:
@@ -2500,12 +2527,17 @@ def _codex_response_item_chat_entry(
 
     if role == "assistant":
         return {
-            "type": "assistant",
+            # "assistant_text", NOT "assistant" — the viewer keys on type,
+            # and this is the string every pre-0.147 session emits.
+            "type": "assistant_text",
             "role": "assistant",
             "content": text,
             "timestamp": timestamp,
             **_codex_event_message_identity(payload, "assistant", text),
         }
+
+    if _is_codex_preamble(text):
+        return None
 
     identity = _codex_event_message_identity(payload, "user", text)
     ct = _classify_crosstalk(text)
