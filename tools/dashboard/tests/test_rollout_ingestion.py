@@ -1462,3 +1462,98 @@ async def test_lifecycle_columns_byte_identical_through_ingestion(env):
     await mon.reconciliation_tick()
     await _settle(mon)
     assert lifecycle_bytes() == baseline
+
+
+def _claude_queue_line(session_id: str, ts: str, text: str = "ok") -> str:
+    """The first line the real stubs carried — a queued user message.
+
+    Both 01:25 files opened with this, 12,478 bytes and 8 lines each. They
+    were never empty, which is why N2 has nothing to say about them.
+    """
+    return json.dumps({
+        "type": "queue-operation", "operation": "add",
+        "sessionId": session_id, "timestamp": ts, "content": text,
+    })
+
+
+def _claude_line(text: str, role: str = "assistant",
+                 ts: str = "2026-08-14T05:00:00.000Z") -> str:
+    """One Claude-transcript line. Claude uses no session_meta header and
+    names its files <uuid>.jsonl, with no timestamp or ordering in the name."""
+    return json.dumps({
+        "timestamp": ts,
+        "type": role,
+        "message": {"role": role, "content": [{"type": "text", "text": text}]},
+    })
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "KNOWN BUG, reproduced: a created <uuid>.jsonl supersedes the linked "
+        "transcript on sight. _classify_codex_rollout returns 'main' for any "
+        "name not starting with 'rollout-' WITHOUT reading or stat'ing the "
+        "file, so the characterize state that enforces N2 is never entered "
+        "for Claude. Cost: auto-0730-021228 froze at 01:25 on 2026-08-14 for "
+        "ten hours. A parentUuid-on-first-line gate was TRIED and REVERTED: "
+        "real Claude transcripts open with 'mode'/'permission-mode' records "
+        "and carry no parentUuid, so it broke two legitimate rollover tests "
+        "(test_cross_boundary, test_sse_delivery). The invariant that does "
+        "hold is liveness, not content shape: an incumbent that is STILL "
+        "BEING APPENDED TO has not rolled over and must not be superseded."
+    ),
+)
+@pytest.mark.asyncio
+async def test_contentful_stillborn_sibling_does_not_steal_the_live_transcript(env):
+    """The 2026-08-14 auto-0730-021228 incident, with its real filenames.
+
+    Two short-lived `claude` processes started at 01:25:26 and 01:25:31,
+    each wrote its own <uuid>.jsonl carrying a queued message and a couple
+    of 'Not logged in - Please run /login' turns, then died. The monitor
+    linked to each in turn and abandoned a 13.7 MB transcript that was
+    still being appended to. It stayed on the second corpse for ten hours
+    while the session went on working; the operator's viewer froze at 01:25.
+
+    N2 does not cover this: those files were NOT empty. They were 12,478
+    bytes with a fresh sessionId, which is exactly what a legitimate
+    rollover successor looks like. Nothing distinguishes 'this session
+    rolled over' from 'a different, doomed process wrote in the same
+    directory' -- so the newest contentful file wins, and the incumbent's
+    own liveness is never consulted.
+    """
+    name = "auto-0730-021228"
+    sdir = env.tmp_path / name / "sessions" / "-workspace-repo"
+    env.make_session(name, sdir)
+
+    live = sdir / "a7826859-a4a5-4ce3-b2fc-0617dfddb960.jsonl"
+    live.write_text("\n".join(
+        _claude_line(f"live content line {i}") for i in range(50)) + "\n")
+
+    mon = env.make_monitor()
+    mon.observe_rollout(name, live, source="reconciliation")
+    await _settle(mon)
+    assert _db_row(env.db_path, name)["jsonl_path"] == str(live)
+
+    for stub_uuid, ts in (
+        ("201026a4-3634-4a53-a8be-2d62d1aa5ce9", "2026-08-14T05:25:26.562Z"),
+        ("017bced4-5d89-4686-b8eb-28d26533e776", "2026-08-14T05:25:31.461Z"),
+    ):
+        stub = sdir / f"{stub_uuid}.jsonl"
+        stub.write_text(
+            _claude_queue_line(stub_uuid, ts) + "\n"
+            + _claude_line("Not logged in - Please run /login", ts=ts) + "\n"
+        )
+        # Born under inotify IN_CREATE, as they were in production: this
+        # is what makes a file a supersede candidate (observe_rollout:2203).
+        mon.observe_rollout(name, stub, source="watch_scan", create_event=True)
+        await _settle(mon)
+        # ...and the incumbent keeps growing, as it really did.
+        with live.open("a") as fh:
+            fh.write(_claude_line("live line after the stub appeared") + "\n")
+        await _settle(mon)
+
+    row = _db_row(env.db_path, name)
+    assert row["jsonl_path"] == str(live), (
+        "a sibling transcript must not take the link from an incumbent that "
+        "is still being written, however much content the sibling carries"
+    )
