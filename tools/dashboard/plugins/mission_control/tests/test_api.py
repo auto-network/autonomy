@@ -1501,9 +1501,11 @@ def test_reopen_question_publishes_conversation_event():
                 topic, data, seq = queue.get_nowait()
                 if topic == mc_api.MISSION_CONVERSATION_TOPIC and seq != 0:
                     events.append(data)
-            assert len(events) == 1
-            assert events[0]["event"] == "reopened"
-            assert events[0]["question"]["answer"] is None
+            # Delivery publishes its own receipt, so identify the event
+            # under test rather than counting everything on the topic.
+            reopened = [e for e in events if e["event"] == "reopened"]
+            assert len(reopened) == 1
+            assert reopened[0]["question"]["answer"] is None
         finally:
             mc_api.event_bus.unsubscribe(queue)
 
@@ -1525,9 +1527,10 @@ def test_pillar_question_event_carries_pillar_id():
             topic, data, seq = queue.get_nowait()
             if topic == mc_api.MISSION_CONVERSATION_TOPIC and seq != 0:
                 events.append(data)
-        assert len(events) == 1
-        assert events[0]["pillar_id"] == pillar["pillar_id"]
-        assert events[0]["mission_id"] == mission_id
+        asked_events = [e for e in events if e["event"] == "asked"]
+        assert len(asked_events) == 1
+        assert asked_events[0]["pillar_id"] == pillar["pillar_id"]
+        assert asked_events[0]["mission_id"] == mission_id
     finally:
         mc_api.event_bus.unsubscribe(queue)
 
@@ -2651,3 +2654,50 @@ def _open_entry_ids():
     return [e["entry_id"]
             for entries in db.list_coordinators_with_open_questions().values()
             for e in entries]
+
+
+def test_delivery_leaves_a_receipt_in_the_conversation():
+    """Whether a message reached anyone was a field on the entry that only the
+    asker's screen read: the sender saw a state, the person it was sent to saw
+    nothing. The receipt sits in the same column as everything else that
+    happened, in the order it happened."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    pillar = db.create_pillar(mission_id, "Infra", "auto-infra", "#4ade80")
+    visitor = _visitor(client)
+
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock) as send:
+        send.return_value = True
+        _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "question", "question": "did this arrive?",
+             "pillar_id": pillar["pillar_id"]},
+        ))
+        await_all = [e for e in db.list_whole_mission_conversation(mission_id)]
+
+    entry = await_all[0]
+    trail = [u["text"] for u in db.list_conversation_updates(entry["entry_id"])]
+    assert any(t.startswith("Delivered to") for t in trail), (
+        f"no receipt in the conversation: {trail}"
+    )
+
+
+def test_a_failed_delivery_says_so_in_the_conversation():
+    client = _client()
+    mission_id = _mission_with_site(client)
+    pillar = db.create_pillar(mission_id, "Infra", "auto-infra", "#4ade80")
+    visitor = _visitor(client)
+
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock) as send:
+        send.side_effect = RuntimeError("no such session")
+        _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "question", "question": "does this arrive?",
+             "pillar_id": pillar["pillar_id"]},
+        ))
+
+    entry = db.list_whole_mission_conversation(mission_id)[0]
+    trail = [u["text"] for u in db.list_conversation_updates(entry["entry_id"])]
+    assert any("Not delivered" in t for t in trail), (
+        f"a failed delivery is silent in the conversation: {trail}"
+    )
