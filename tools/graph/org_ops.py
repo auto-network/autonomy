@@ -552,6 +552,7 @@ def create_org_with_identity(
     identity_payload: dict | None = None,
     root: Path | str | None = None,
     now: int | None = None,
+    recovery_pub: str | None = None,
 ) -> OrgCeremonyResult:
     """Create an organization as one atomic founding ceremony (auto-nixfv).
 
@@ -599,6 +600,11 @@ def create_org_with_identity(
                 org_root=org_root,
                 personal_root_seed=personal_seed,
                 now=now_ms,
+                # The recovery-code ceremony's PUBLIC half only (derived from the
+                # cold code in the operator's own context) -- declaring it at
+                # genesis relocates no secret; recovery_pub == root_pub is
+                # rejected by _v_genesis (make_event validates it).
+                recovery_pub=recovery_pub,
             )
         finally:
             store.close()

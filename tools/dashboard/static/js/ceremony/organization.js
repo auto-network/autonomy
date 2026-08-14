@@ -199,6 +199,16 @@ function validateRegistrationPayload(payload, rootPubHex) {
   }
   if (payload.recovery_policy === 'recovery-key') {
     assertRootPub(payload.recovery_pub, 'recovery_pub');
+    // The recovery factor must be a DISTINCT key -- naming the root as its own
+    // recovery key is no second factor at all (a stolen root signs both), the
+    // exact self-defeat rejected at genesis (_v_genesis). Close it on this
+    // write path too.
+    if (payload.recovery_pub === payload.root_pub) {
+      throw new Error(
+        'recovery_pub must differ from root_pub — a recovery factor the root '
+        + 'controls is no second factor',
+      );
+    }
   } else if (payload.recovery_pub !== undefined) {
     throw new Error(
       'recovery_pub is only valid with recovery-key policy',

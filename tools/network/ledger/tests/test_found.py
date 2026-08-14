@@ -9,9 +9,14 @@ import pytest
 from tools.network.idkit import KeyPair, derive_persona
 from tools.network.idkit.sealing import open as seal_open
 from tools.network.idkit.sealing import seal
-from tools.network.ledger import make_event, HLC
+from tools.network.ledger import (
+    make_event, HLC, fold, sign_rotate_continuity, sign_rotate_recovery,
+)
+from tools.network.ledger.errors import SchemaError
 from tools.network.ledger.found import FoundedLedger, found_org_ledger
-from tools.network.ledger.fold import R_INVITE_ALREADY_CLAIMED, R_INVITE_EXPIRED
+from tools.network.ledger.fold import (
+    R_INVITE_ALREADY_CLAIMED, R_INVITE_EXPIRED, R_RECOVERY_CONTINUITY_MISSING,
+)
 from tools.network.ledger.store import LedgerStore
 
 ORG_ID = "018f6b2a-7c4d-7e11-8a3b-9d5c1e2f4a6b"  # uuid7-style orgs.id
@@ -295,3 +300,83 @@ class TestResumeFounding:
             resume_org_founding(
                 store, org_id=ORG_ID, org_root=root, personal_root_seed=os.urandom(32)
             )
+
+
+def _rotate(store, org_root, new_root, *, genesis_id, recovery=None, ts):
+    payload = {
+        "type": "key.rotate",
+        "old_pub": org_root.public_hex,
+        "new_pub": new_root.public_hex,
+        "continuity": sign_rotate_continuity(new_root, org_root.public_hex),
+    }
+    if recovery is not None:
+        payload["recovery_continuity"] = sign_rotate_recovery(
+            recovery, genesis_id, org_root.public_hex, new_root.public_hex
+        )
+    ev = make_event(org_root, payload, list(store.ledger.heads()), HLC(ts, 0))
+    store.append(ev)
+    return ev.event_id
+
+
+def test_founding_with_recovery_declares_genesis_and_gates_rotation():
+    # Enrolling a recovery factor at founding declares it constitutionally at
+    # genesis, and the fold then requires the recovery co-signature to rotate --
+    # a dual-signed rotation admits, a root-only one is refused.
+    store = LedgerStore()
+    org_root = KeyPair.generate()
+    recovery = KeyPair.generate()
+    result = found_org_ledger(
+        store, org_id=ORG_ID, org_root=org_root,
+        personal_root_seed=os.urandom(32), now=T0,
+        recovery_pub=recovery.public_hex,
+    )
+    assert store.get(result.genesis_id).payload["recovery"] == {
+        "policy": "recovery-key", "recovery_pub": recovery.public_hex,
+    }
+    dual = _rotate(store, org_root, KeyPair.generate(),
+                   genesis_id=result.genesis_id, recovery=recovery, ts=T0 + 1000)
+    assert fold(store.ledger).valid[dual] is True
+
+
+def test_founding_with_recovery_refuses_root_only_rotation():
+    # Under the founding-declared recovery-key policy a rotation missing the
+    # recovery co-signature is refused -- a stolen root alone cannot rotate.
+    store = LedgerStore()
+    org_root = KeyPair.generate()
+    recovery = KeyPair.generate()
+    result = found_org_ledger(
+        store, org_id=ORG_ID, org_root=org_root,
+        personal_root_seed=os.urandom(32), now=T0,
+        recovery_pub=recovery.public_hex,
+    )
+    root_only = _rotate(store, org_root, KeyPair.generate(),
+                        genesis_id=result.genesis_id, ts=T0 + 1000)
+    assert fold(store.ledger).reasons[root_only] == R_RECOVERY_CONTINUITY_MISSING
+
+
+def test_founding_without_recovery_is_policy_none():
+    store = LedgerStore()
+    org_root = KeyPair.generate()
+    result = found_org_ledger(
+        store, org_id=ORG_ID, org_root=org_root,
+        personal_root_seed=os.urandom(32), now=T0,
+    )
+    # No recovery field declared -> policy 'none' -> a plain rotation admits.
+    assert "recovery" not in store.get(result.genesis_id).payload
+    new_root = KeyPair.generate()
+    plain = _rotate(store, org_root, new_root, genesis_id=result.genesis_id,
+                    ts=T0 + 1000)
+    assert fold(store.ledger).valid[plain] is True
+
+
+def test_founding_rejects_recovery_pub_equals_root_pub():
+    # The recovery factor must be a key the root does not control; naming the
+    # root as its own recovery factor is the self-defeat rejected at genesis.
+    store = LedgerStore()
+    org_root = KeyPair.generate()
+    with pytest.raises(SchemaError):
+        found_org_ledger(
+            store, org_id=ORG_ID, org_root=org_root,
+            personal_root_seed=os.urandom(32), now=T0,
+            recovery_pub=org_root.public_hex,
+        )

@@ -46,6 +46,22 @@ try {
       recovery.pubHex,
       recoverySeedHex,
     );
+    // Gap check (auto-fvatz part 3): a D21 registration naming the root as its
+    // OWN recovery factor must be rejected -- the sibling of the genesis
+    // self-defeat. A pure assertion, no stdout, so the vector output is intact.
+    let selfDefeatRejected = false;
+    try {
+      await buildRegistrationEnvelope(signingKey, pair.pubHex, {
+        root_pub: pair.pubHex,
+        recovery_policy: 'recovery-key',
+        recovery_pub: pair.pubHex,
+      }, 1800000000);
+    } catch (err) {
+      selfDefeatRejected = /differ from root_pub/.test(err.message);
+    }
+    if (!selfDefeatRejected) {
+      throw new Error('recovery_pub == root_pub must be rejected in registration');
+    }
     process.stdout.write(JSON.stringify({
       passphrase,
       seedHex,

@@ -271,3 +271,44 @@ class TestPolicyUpdate:
     def test_policy_update_unknown_org_404(self, client, clock, root):
         self._policy(client, clock, root, 1, "none",
                      org="44444444-4444-4444-8444-444444444444", expect=404)
+
+
+class TestRecoveryFactorDistinctFromRoot:
+    """The recovery factor must be a key the root does not control -- enforced
+    on the AUTHORITATIVE server on every write path. A stolen root signing both
+    its rotation and its "recovery" co-signature is the self-defeat this rejects;
+    the browser mirror is only a UX nicety, so these curl the endpoints directly.
+    """
+
+    def test_register_rejects_recovery_pub_equal_root(self, client, clock, root):
+        response = register(client, clock, root, policy="recovery-key",
+                            recovery_pub=root.public_hex)
+        assert response.status_code == 400, response.json()
+        assert "differ from root_pub" in response.json()["detail"]
+
+    def test_rebind_rejects_recovery_pub_equal_new_root(self, client, clock, recovery, bound_org):
+        new_root = KeyPair.generate()
+        response = signed(
+            client, "POST", f"/v1/orgs/{ORG}/rebind", recovery,
+            {"new_root_pub": new_root.public_hex, "recovery_policy": "recovery-key",
+             "recovery_pub": new_root.public_hex}, clock,
+        )
+        assert response.status_code == 400, response.json()
+
+    def test_rebind_onto_recovery_key_kept_as_recovery_rejected(self, client, clock, recovery, bound_org):
+        # Rebinding the root ONTO the recovery key while carrying the policy
+        # forward would make the new root its own recovery factor -- refused,
+        # even though _parse_recovery_policy is not re-run on that path.
+        response = signed(
+            client, "POST", f"/v1/orgs/{ORG}/rebind", recovery,
+            {"new_root_pub": recovery.public_hex}, clock,
+        )
+        assert response.status_code == 400, response.json()
+
+    def test_policy_rejects_recovery_pub_equal_bound_root(self, client, clock, root, bound_org):
+        response = signed(
+            client, "POST", f"/v1/orgs/{ORG}/policy", root,
+            {"recovery_policy": "recovery-key", "recovery_pub": root.public_hex,
+             "policy_epoch": 1}, clock,
+        )
+        assert response.status_code == 400, response.json()
