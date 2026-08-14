@@ -11,7 +11,7 @@ import asyncio
 
 import tools.network.registry.relay as relay
 from tools.network.registry.relay import (
-    CLOSE_TUNNEL_CHANNELS_EXCEEDED,
+    CLOSE_UNKNOWN_LINK,
     CLOSE_VIEWER_QUEUE_OVERFLOW,
     VIEWER_QUEUE_MAX_BYTES,
     Tunnel,
@@ -141,9 +141,9 @@ class _AcceptCloseSocket:
 
 
 def test_viewer_channel_cap_rejects_when_tunnel_full(monkeypatch):
-    # A tunnel already at the per-tunnel cap refuses a further viewer with a
-    # dedicated close code and does not add a channel — one bearer-link holder
-    # cannot open unbounded attachment-streaming channels on the org tunnel.
+    # A tunnel already at the per-tunnel cap refuses a further viewer with the
+    # same anonymous code as every other admission failure. One bearer-link
+    # holder cannot open unbounded channels or learn the internal reason.
     monkeypatch.setattr(relay, "MAX_VIEWER_CHANNELS_PER_TUNNEL", 2)
     tunnel = Tunnel(_TunnelSocket(), "test-org")
     tunnel.channels = {b"a" * 16: object(), b"b" * 16: object()}  # at cap
@@ -161,7 +161,7 @@ def test_viewer_channel_cap_rejects_when_tunnel_full(monkeypatch):
     asyncio.run(viewer_endpoint(ws, "0" * 32, _Hub(), None, lambda: 0))
 
     assert ws.accepted
-    assert ws.close_codes == [CLOSE_TUNNEL_CHANNELS_EXCEEDED]
+    assert ws.close_codes == [CLOSE_UNKNOWN_LINK]
     assert len(tunnel.channels) == 2  # the rejected viewer was not admitted
 
 
@@ -187,5 +187,6 @@ def test_viewer_channel_cap_admits_below_capacity(monkeypatch):
 
     ws = _AdmitSocket()
     asyncio.run(viewer_endpoint(ws, "0" * 32, _Hub(), None, lambda: 0))
-    # Not rejected with the cap code (it either opened and closed normally).
-    assert CLOSE_TUNNEL_CHANNELS_EXCEEDED not in ws.close_codes
+    # It reached FRAME_OPEN rather than being refused by the cap. The fake
+    # tunnel then fails that send and uses the same uniform public close.
+    assert len(tunnel.channels) == 0
