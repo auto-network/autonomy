@@ -1586,6 +1586,23 @@ def test_materialize_codex_auth_json_missing_row_returns_none(tmp_path, monkeypa
     assert session_launcher._materialize_codex_auth_json(run_dir) is None
 
 
+def test_materialize_codex_auth_json_missing_row_warns_with_remedy(
+    tmp_path, monkeypatch, caplog,
+):
+    """A None return must WARN with the remedy — a missed migration is an
+    operator-visible error, not a silent sign-in prompt at launch."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    monkeypatch.setattr(session_launcher, "_codex_credential_rows", lambda: [])
+    with caplog.at_level("INFO", logger=session_launcher.logger.name):
+        assert session_launcher._materialize_codex_auth_json(run_dir) is None
+    warns = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warns) == 1
+    msg = warns[0].getMessage()
+    assert "no usable Codex credential row" in msg
+    assert "graph credentials import" in msg
+
+
 def test_pick_codex_credential_row_prefers_freshest(monkeypatch):
     older = _codex_row("a", _fresh_codex_payload(expires_at_ms=1000))
     newer = _codex_row("b", _fresh_codex_payload(expires_at_ms=9000))

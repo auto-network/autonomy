@@ -111,6 +111,24 @@ def _now_iso() -> str:
     )
 
 
+def _parse_iso_ms(value: Any) -> int | None:
+    """Parse an ISO-8601 stamp (``...Z`` or offset) into epoch ms, or ``None``.
+
+    Used to age the fleet's standing failures for the per-tick log. Anything
+    unparseable collapses to ``None`` so the log line degrades to
+    "age unknown" rather than raising inside a poller tick.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
 def _credentials_org() -> str:
     # Host-local, per-instance credentials live in personal.db, read with
     # peers=[] (never shared across orgs). Pinned to personal so the refresh
@@ -394,6 +412,16 @@ def refresh_all_credentials() -> dict[str, int]:
         return counters
     rows = list(getattr(members, "members", []) or [])
     if not rows:
+        # A Codex-enabled fleet whose credential surface is empty is NOT
+        # healthy — every session falls back to an interactive sign-in with
+        # no mounted auth. WARN (not INFO) so it stands out against the
+        # steady tick, and name the remedy inline: a missed import must read
+        # as an operator-actionable error, not a silent zero-row tick.
+        logger.warning(
+            "codex credentials refresh: Codex is enabled but the credentials "
+            "surface holds ZERO rows — sessions will get sign-in prompts with "
+            "no mounted auth. Remedy: run `graph credentials import`.",
+        )
         return counters
     now_ms = _now_ms()
     now_iso = _now_iso()
@@ -413,7 +441,46 @@ def refresh_all_credentials() -> dict[str, int]:
             counters["skipped"] += 1
         else:
             counters[result.kind] = counters.get(result.kind, 0) + 1
+    _log_tick_decision(rows=rows, counters=counters, now_ms=now_ms)
     return counters
+
+
+def _log_tick_decision(
+    *, rows: list[Any], counters: dict[str, int], now_ms: int,
+) -> None:
+    """Log the decision basis for one tick, not just the raw counters.
+
+    States rows found, how many refreshed, and the age of the oldest
+    standing failure (a row still carrying ``last_refresh_error``) so an
+    operator tailing ``data/dashboard.log`` can read fleet health at a
+    glance instead of guessing what four bare integers meant.
+    """
+    failing_ages_ms: list[int] = []
+    failing = 0
+    for row in rows:
+        payload = _row_payload(row)
+        if not payload.get("last_refresh_error"):
+            continue
+        failing += 1
+        last_ok_ms = _parse_iso_ms(payload.get("last_refresh_at"))
+        if last_ok_ms is not None:
+            failing_ages_ms.append(now_ms - last_ok_ms)
+    if not failing:
+        failure_desc = "no standing failures"
+    elif failing_ages_ms:
+        oldest_h = max(failing_ages_ms) / 3_600_000
+        failure_desc = (
+            f"{failing} standing failure(s), oldest {oldest_h:.1f}h since "
+            "last success"
+        )
+    else:
+        failure_desc = f"{failing} standing failure(s), age unknown"
+    logger.info(
+        "codex credentials refresh tick: %d row(s) found, %d refreshed, "
+        "%d revoked, %d transient, %d skipped; %s",
+        len(rows), counters["ok"], counters["revoked"],
+        counters["transient"], counters["skipped"], failure_desc,
+    )
 
 
 # ── Background poller ────────────────────────────────────────
@@ -445,8 +512,10 @@ async def codex_credentials_refresh_poller() -> None:
     )
     while True:
         try:
-            counters = await asyncio.to_thread(refresh_all_credentials)
-            logger.info("codex credentials refresh tick: %s", counters)
+            # refresh_all_credentials logs the per-tick decision basis
+            # itself (rows found / refreshed / failure age), or WARNs on a
+            # zero-row surface — no bare-counter echo here.
+            await asyncio.to_thread(refresh_all_credentials)
         except asyncio.CancelledError:
             raise
         except Exception:
