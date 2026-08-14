@@ -2078,6 +2078,23 @@ def _build_fixture() -> dict:
 def sweep_server(tmp_path_factory):
     """Boot a DASHBOARD_MOCK uvicorn server on a test port, tear down after module."""
     tmpdir = tmp_path_factory.mktemp("sweep")
+    # The hermetic orgs tree starts empty, and the server's schema routes
+    # resolve Settings from the org DBs: without them the startup schema
+    # flush has no store, /api/graph/settings/... answers 500 under
+    # AUTONOMY_REFUSE_REAL_DATA_FALLBACK, and every schema-bound viewer
+    # component silently fails (observed as session tiles never
+    # rendering). Pre-create the two DBs the server touches so the flush
+    # materializes hermetically — previously these tests only passed by
+    # falling back to the repo's real graph store.
+    import os as _os
+    from tools.graph.db import GraphDB as _GraphDB
+    _orgs = Path(_os.environ["AUTONOMY_ORGS_DIR"])
+    _orgs.mkdir(parents=True, exist_ok=True)
+    for _slug, _type in (("personal", "personal"), ("autonomy", "shared")):
+        if not (_orgs / f"{_slug}.db").exists():
+            _GraphDB.create_org_db(
+                _slug, type_=_type, path=_orgs / f"{_slug}.db").close()
+    _GraphDB.close_all_pooled()
     state = start_mock_server(
         _build_fixture(), tmpdir, port=worker_test_port(8094),
     )
