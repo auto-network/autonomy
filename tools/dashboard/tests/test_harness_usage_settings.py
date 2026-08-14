@@ -14,10 +14,25 @@ from tools.dashboard.session_harness import CLAUDE_HARNESS, CODEX_HARNESS
 
 @pytest.fixture
 def graph_db_env(tmp_path, monkeypatch):
-    db_path = tmp_path / "graph.db"
-    monkeypatch.setenv("GRAPH_DB", str(db_path))
+    from tools.graph.db import GraphDB
+
+    GraphDB.close_all_pooled()
+    # Orgs-tree hermeticity, no GRAPH_DB pin: the collector reads credentials
+    # at explicit org='personal' and the server boot touches 'autonomy', both
+    # of which a pin silently swallows (73bad14e) and the fail-loud resolver
+    # refuses. Caller-scope writes (org=CALLER_ORG with no GRAPH_ORG) resolve
+    # to the same personal.db, so the yielded path stays count-able directly.
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
     monkeypatch.delenv("GRAPH_API", raising=False)
+    monkeypatch.delenv("GRAPH_ORG", raising=False)
+    db_path = orgs_dir / "personal.db"
+    if not db_path.exists():
+        GraphDB.create_org_db("personal", type_="personal", path=db_path).close()
     yield db_path
+    GraphDB.close_all_pooled()
 
 
 @pytest.fixture(autouse=True)

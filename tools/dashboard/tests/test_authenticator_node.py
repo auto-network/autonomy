@@ -42,7 +42,15 @@ def route_client(tmp_path, monkeypatch):
     from tools.graph.db import GraphDB
 
     GraphDB.close_all_pooled()
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
+    # Agreement pin (test_feature_flags.py's recipe): the routes write at
+    # org=None while the test reads back at explicit CALLER_ORG (= ORG),
+    # so the pin points AT the orgs tree's own db for ORG — explicit-org
+    # resolution and the pin converge on one hermetic file instead of the
+    # pin contradicting the org (OrgResolutionConflict).
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.setenv("GRAPH_DB", str(orgs_dir / f"{ORG}.db"))
     monkeypatch.setenv("GRAPH_ORG", ORG)
     monkeypatch.setenv(
         "DASHBOARD_SESSION_SECRET_FILE",

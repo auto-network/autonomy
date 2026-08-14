@@ -21,10 +21,17 @@ def client(tmp_path, monkeypatch):
     from tools.dashboard import server
 
     GraphDB.close_all_pooled()
+    # Orgs-tree hermeticity, no GRAPH_DB pin: the ceremony writes to the
+    # created org's OWN db, which a pin would contradict and the
+    # fail-loud resolver refuses. delenv guards ambient leaks.
     orgs = tmp_path / "orgs"
     orgs.mkdir()
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    GraphDB.close_all_pooled()
+    GraphDB.create_org_db(
+        "personal", type_="personal", path=orgs / "personal.db"
+    ).close()
     root = KeyPair.generate()
     with settings_ops.identity_write_context():
         settings_ops.upsert_by_key(
