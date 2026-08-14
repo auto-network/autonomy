@@ -153,6 +153,7 @@ def resume_env(tmp_path):
         "host_source_id": "src-host-session",
         "missing_source_id": "src-missing-jsonl",
         "non_session_source_id": "src-not-a-session",
+        "sources_by_id": {source["id"]: source for source in sources},
         "tmp_path": tmp_path,
     }
 
@@ -314,6 +315,38 @@ def test_client(mock_fixture, resume_env, monkeypatch):
     # Reload server
     from tools.dashboard import server
     importlib.reload(server)
+
+    # Owner location is a cross-org metadata scan in production.  This suite
+    # uses one deliberately standalone graph DB, so expose its fixture rows as
+    # belonging to a synthetic org while leaving content resolution on the
+    # real explicit-org code path below.
+    source_types = {
+        resume_env["container_source_id"]: "session",
+        resume_env["host_source_id"]: "session",
+        resume_env["missing_source_id"]: "session",
+        resume_env["non_session_source_id"]: "conversation",
+    }
+
+    def fake_locate_source_org(source_id, *, org=None):
+        source_type = source_types.get(source_id)
+        if source_type is None:
+            return None
+        return {"org": "fixture-org", "id": source_id, "type": source_type}
+
+    monkeypatch.setattr(server.graph_ops, "locate_source_org", fake_locate_source_org)
+
+    def fake_resolve_source_strict(source_id, *, org=None, peers=None):
+        source = resume_env["sources_by_id"].get(source_id)
+        if source is None:
+            return None
+        row = dict(source)
+        row["metadata"] = json.dumps(row.get("metadata", {}))
+        row["org"] = org or "fixture-org"
+        return row
+
+    monkeypatch.setattr(
+        server.graph_ops, "resolve_source_strict", fake_resolve_source_strict,
+    )
 
     # Launches run on the lifecycle worker now: capture enqueued jobs and
     # let tests drain them synchronously via client.run_lifecycle_jobs().

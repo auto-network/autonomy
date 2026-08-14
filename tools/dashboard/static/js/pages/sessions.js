@@ -657,16 +657,9 @@
         store.startedAt = Date.now() / 1000;
 
         try {
-          // Recent sessions are merged across every org, while the resume
-          // endpoint resolves graph sources in the caller-org scope. Carry
-          // the row's owning org so an Anchore session can be resumed from
-          // an Autonomy dashboard shell (and vice versa).
-          var resumeHeaders = {'Content-Type': 'application/json'};
-          var resumeOrg = s.org && s.org.slug;
-          if (resumeOrg) resumeHeaders['X-Graph-Org'] = resumeOrg;
           var res = await fetch('/api/session/resume', {
             method: 'POST',
-            headers: resumeHeaders,
+            headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({source_id: s.id}),
           });
           if (!res.ok) {

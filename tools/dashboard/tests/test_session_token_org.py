@@ -102,8 +102,18 @@ def test_valid_container_token_returns_session_and_org(server_mod, monkeypatch):
     assert identity == ("auto-x", "personal")
 
 
+@pytest.mark.parametrize("scheme", ["Bearer", "bearer", "BEARER"])
+def test_bearer_scheme_is_case_insensitive(server_mod, monkeypatch, scheme):
+    monkeypatch.setattr(server_mod.auth_db, "resolve_token",
+                        lambda _h: ("auto-x", "personal"))
+    identity, err = server_mod.authenticate_session_request(
+        _req(f"{scheme} whatever"))
+    assert err is None
+    assert identity == ("auto-x", "personal")
+
+
 def test_missing_bearer_is_401(server_mod):
-    for header in (None, "", "Basic abc"):
+    for header in (None, "", "Bearer", "Bearer   ", "Basic abc"):
         identity, err = server_mod.authenticate_session_request(_req(header))
         assert identity is None
         assert err.status_code == 401

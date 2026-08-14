@@ -81,6 +81,127 @@ class TestResumeWithSourceId:
         assert data["label"] == "Container session alpha"
 
 
+class TestResumeAuthorization:
+    """Owner location and operator-vs-org-session authorization."""
+
+    def test_dashboard_cookie_resumes_owner_org_despite_wrong_ambient_org(
+        self, test_client, resume_env, monkeypatch,
+    ):
+        from tools.dashboard import server
+
+        monkeypatch.setattr(
+            server.unlock_routes,
+            "_verified_session_payload",
+            lambda token: ({
+                "v": 1,
+                "sid": "browser-operator",
+                "method": "password",
+                "iat": 1,
+                "exp": 2,
+            } if token == "valid-cookie" else None),
+        )
+        monkeypatch.setattr(
+            server.unlock_routes.identity_sessions,
+            "check_active",
+            lambda **_kwargs: True,
+        )
+
+        response = test_client.post(
+            "/api/session/resume",
+            json={"source_id": resume_env["container_source_id"]},
+            headers={
+                "Cookie": (
+                    f"{server.unlock_routes.SESSION_COOKIE}=valid-cookie"
+                ),
+                "X-Graph-Org": "wrong-ambient-org",
+            },
+        )
+
+        assert response.status_code == 202, response.text
+
+    def test_org_session_token_can_resume_a_source_in_its_org(
+        self, test_client, resume_env, monkeypatch,
+    ):
+        from tools.dashboard import server
+
+        monkeypatch.setattr(
+            server.auth_db,
+            "resolve_token",
+            lambda _token_hash: ("agent-fixture", "fixture-org"),
+        )
+        response = test_client.post(
+            "/api/session/resume",
+            json={"source_id": resume_env["container_source_id"]},
+            headers={
+                "Authorization": "Bearer valid-agent-token",
+                "X-Graph-Org": "spoofed-org",
+            },
+        )
+        assert response.status_code == 202, response.text
+
+    def test_cross_org_session_token_is_opaque_and_does_not_resolve_content(
+        self, test_client, resume_env, monkeypatch, caplog,
+    ):
+        from tools.dashboard import server
+
+        monkeypatch.setattr(
+            server.auth_db,
+            "resolve_token",
+            lambda _token_hash: ("agent-foreign", "foreign-org"),
+        )
+        content_reads = []
+        original_resolve = server.graph_ops.resolve_source_strict
+
+        def capture_resolve(*args, **kwargs):
+            content_reads.append((args, kwargs))
+            return original_resolve(*args, **kwargs)
+
+        monkeypatch.setattr(
+            server.graph_ops, "resolve_source_strict", capture_resolve,
+        )
+
+        with caplog.at_level("WARNING"):
+            response = test_client.post(
+                "/api/session/resume",
+                json={"source_id": resume_env["container_source_id"]},
+                headers={
+                    "Authorization": "Bearer foreign-agent-token",
+                    "X-Graph-Org": "fixture-org",
+                },
+            )
+
+        assert response.status_code == 404
+        assert "not found" in response.json()["error"].lower()
+        assert content_reads == []
+        assert "api_authz_refused action=session.resume" in caplog.text
+
+    def test_resume_resolves_content_only_in_server_located_owner_org(
+        self, test_client, resume_env, monkeypatch,
+    ):
+        from tools.dashboard import server
+
+        calls = []
+        original_resolve = server.graph_ops.resolve_source_strict
+
+        def capture_resolve(*args, **kwargs):
+            calls.append((args, kwargs))
+            return original_resolve(*args, **kwargs)
+
+        monkeypatch.setattr(
+            server.graph_ops, "resolve_source_strict", capture_resolve,
+        )
+        response = test_client.post(
+            "/api/session/resume",
+            json={"source_id": resume_env["container_source_id"]},
+            headers={"X-Graph-Org": "wrong-ambient-org"},
+        )
+
+        assert response.status_code == 202, response.text
+        assert len(calls) == 1
+        assert calls[0][0] == (resume_env["container_source_id"],)
+        assert calls[0][1] == {"org": "fixture-org", "peers": []}
+
+
 class TestResumeWithDirectParams:
     """POST /api/session/resume with session_uuid + file_path."""
 

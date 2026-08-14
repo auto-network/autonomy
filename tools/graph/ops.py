@@ -128,10 +128,10 @@ class CrossOrgWriteError(RuntimeError):
 
 import contextvars as _ctxvars
 
-# Per-request caller-org context. The dashboard's ``caller_org_middleware``
-# sets this from the ``X-Graph-Org`` header on every inbound request, so
-# every ``ops.*`` call inside any handler sees the right org automatically
-# — no manual ``org=`` threading at each endpoint. See
+# Per-request caller-org context. The dashboard's API identity middleware
+# binds this from authenticated token scope or an allowed ``X-Graph-Org``
+# selector, so every ``ops.*`` call inside a handler sees the trusted effective
+# org automatically — no manual ``org=`` threading at each endpoint. See
 # graph://bcce359d-a1d § Cross-org request routing.
 _caller_org_var: "_ctxvars.ContextVar[str | None]" = _ctxvars.ContextVar(
     "graph_caller_org", default=None,
@@ -158,9 +158,10 @@ def _resolve_org(org: str | None) -> str | None:
     Priority:
       1. Explicit ``org=`` kwarg (wins; used by code that knows exactly
          which org it wants — ``ops`` internal helpers, host CLI tests).
-      2. Per-request contextvar — set by ``caller_org_middleware`` on the
-         dashboard from ``X-Graph-Org``. Handlers don't need to thread
-         ``org=`` through; the ops layer picks it up automatically.
+      2. Per-request contextvar — set by the dashboard API identity middleware
+         from authenticated token scope or an allowed ``X-Graph-Org``
+         selector. Handlers don't need to thread ``org=`` through; the ops
+         layer picks it up automatically.
       3. ``GRAPH_ORG`` env — host CLI (no middleware in play).
       4. ``None`` — scopeless default (callers iterate every per-org DB
          in :func:`_iter_org_dbs`, except when ``GRAPH_DB`` pinning is

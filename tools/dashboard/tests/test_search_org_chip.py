@@ -10,7 +10,7 @@ Three contracts:
    the result set to a single org.
 3. The result-row enrichment attaches an ``is_peer`` boolean by
    comparing the row's resolved org slug against the caller-org bound
-   by :class:`_CallerOrgMiddleware`. Same-org rows get ``is_peer=False``;
+   by :class:`ApiIdentityMiddleware`. Same-org rows get ``is_peer=False``;
    cross-org rows get ``is_peer=True``. This is what the UI reads to
    paint the "peer" pill on cards.
 """
@@ -65,7 +65,7 @@ def test_search_with_only_org_pin(test_app):
 def test_search_results_carry_is_peer_flag(test_app):
     """Rows whose resolved org slug differs from the caller-org get
     ``is_peer=True``; same-org rows get ``is_peer=False``. Caller-org is
-    bound by ``_CallerOrgMiddleware`` from the ``X-Graph-Org`` header."""
+    bound by ``ApiIdentityMiddleware`` from the ``X-Graph-Org`` header."""
     from tools.dashboard import server
 
     rows = [

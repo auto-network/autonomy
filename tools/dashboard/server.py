@@ -124,6 +124,7 @@ from tools.dashboard import mcp_relay_routes
 from tools.dashboard import jira_routes
 from tools.dashboard import identity_routes
 from tools.dashboard import unlock_routes
+from tools.dashboard import api_auth
 from tools.dashboard import network_routes
 if os.environ.get("DASHBOARD_MOCK"):
     from tools.dashboard.dao import mock as dao_beads
@@ -2537,7 +2538,7 @@ def _enrich_search_results(results: list) -> None:
     """Attach resolved ``org``, ``is_peer``, and 24hr ``date`` to each row in-place.
 
     ``is_peer`` is True when the row's resolved org slug differs from the
-    caller-org bound by ``_CallerOrgMiddleware`` — used by the search UI to
+    caller-org bound by ``ApiIdentityMiddleware`` — used by the search UI to
     paint a "peer" pill on cross-org rows. A scopeless caller (no contextvar /
     no env) treats every row as own-org since "peer" only makes sense relative
     to a known caller seat.
@@ -3166,10 +3167,11 @@ def authenticate_session_request(
     trust ``org is None`` to mean "genuine local caller."
     """
     auth = request.headers.get("authorization", "")
-    if not auth.startswith("Bearer "):
+    parts = auth.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1]:
         return None, JSONResponse(
             {"error": "missing or invalid Authorization header"}, status_code=401)
-    raw_token = auth[7:]
+    raw_token = parts[1]
     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
     resolved = auth_db.resolve_token(token_hash)
     if resolved is None:
@@ -8484,7 +8486,42 @@ async def api_session_resume(request):
     # ── Resolve from graph source metadata if source_id provided ──
     if source_id:
         try:
-            src = graph_ops.resolve_source_strict(source_id)
+            located = graph_ops.locate_source_org(source_id)
+        except Exception:
+            return JSONResponse({"error": "Failed to query graph.db"}, status_code=500)
+
+        if located is None:
+            return JSONResponse({"error": f"Source '{source_id}' not found"}, status_code=404)
+
+        owner_org = located["org"]
+        principal = api_auth.principal_from_request(request)
+        if principal.org_bound and principal.org != owner_org:
+            logger.warning(
+                "api_authz_refused action=session.resume caller=%s "
+                "caller_org=%s owner_org=%s",
+                principal.subject,
+                principal.org,
+                owner_org,
+            )
+            # Remote callers must not learn that a source exists in another
+            # org.  The audit is explicit; the network response stays opaque.
+            return JSONResponse({"error": f"Source '{source_id}' not found"}, status_code=404)
+
+        if located.get("type") != "session":
+            return JSONResponse(
+                {"error": f"Source '{source_id}' is type '{located.get('type')}', not a session"},
+                status_code=400,
+            )
+
+        try:
+            # Location is a server-side fact.  Resolve content only after the
+            # caller is authorized, in the located owner org, never through
+            # the ambient X-Graph-Org selection.
+            src = graph_ops.resolve_source_strict(
+                located.get("id") or source_id,
+                org=owner_org,
+                peers=[],
+            )
         except Exception:
             return JSONResponse({"error": "Failed to query graph.db"}, status_code=500)
 
@@ -18083,38 +18120,6 @@ class _CSPMiddleware(BaseHTTPMiddleware):
         return response
 
 
-class _CallerOrgMiddleware:
-    """Bind ``X-Graph-Org`` to the ops-layer contextvar for every request.
-
-    Every ``graph_ops.X()`` call made while a handler is on the stack
-    picks up the caller org automatically — handlers don't need to read
-    the header or thread ``org=`` through each call. This is the single
-    per-request boundary for caller-org routing; forgetting it in a new
-    endpoint is structurally impossible because middleware runs first.
-
-    See graph://bcce359d-a1d § Cross-org request routing.
-    """
-
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-        from tools.graph import ops as _graph_ops
-        header_org: str | None = None
-        for name, value in scope.get("headers", []):
-            if name == b"x-graph-org":
-                header_org = value.decode("latin-1") or None
-                break
-        token = _graph_ops.set_caller_org(header_org)
-        try:
-            await self.app(scope, receive, send)
-        finally:
-            _graph_ops.reset_caller_org(token)
-
-
 async def _protected_setting_handler(request, exc):
     """A generic-settings mutation tried to write a protected identity
     set without the identity-route capability — refuse with 403 across
@@ -18147,10 +18152,17 @@ app = Starlette(
         # through uncompressed. Non-HTTP scopes -- websockets -- never reach
         # the responder at all.
         Middleware(GZipMiddleware, minimum_size=1024),
-        # Outer: bind X-Graph-Org to the ops-layer contextvar for every
-        # request. Every ``graph_ops.X()`` made while a handler is on the
-        # stack picks up the caller org automatically.
-        Middleware(_CallerOrgMiddleware),
+        # Establish one API principal and one trusted graph scope. Dashboard
+        # cookies and positively local host tokens have global authority;
+        # org-stamped session tokens are forced to their own org regardless of
+        # X-Graph-Org. Compatibility traffic is classified but remains open
+        # while route policies are migrated.
+        Middleware(
+            api_auth.ApiIdentityMiddleware,
+            authenticate_bearer=authenticate_session_request,
+            verify_cookie=unlock_routes.verify_session_token,
+            cookie_name=unlock_routes.SESSION_COOKIE,
+        ),
         Middleware(_CSPMiddleware),
         # Innermost: the human unlock gate (fail-open-then-enforce).
         # Covers page loads, fragments, and browser websockets; the
