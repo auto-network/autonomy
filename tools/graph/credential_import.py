@@ -30,19 +30,24 @@ Scope (locked by the bead's boundary decisions):
   reads; see ``agents/session_launcher._credentials_org``). The write is
   an idempotent upsert keyed by the Anthropic org UUID: re-running
   refreshes, never duplicates.
-* **Codex has no substrate Setting today.** The launcher mounts
-  ``~/.codex/auth.json`` read-only straight off the host home, so a
-  validated file *is already in place* for inner sessions — there is
-  nothing to copy and nothing to write. We discover + validate + report
-  ``in-place`` / ``needs-sign-in`` and make zero writes. When a
-  codex-analog credential Setting is built, ``_import_codex`` extends to
-  write it; the report already carries the validated bundle.
+* **Codex now has a substrate Setting too** (bead auto-kzws9, STEP 1 of
+  the Codex credential end-state). ``dashboard.codex.credentials`` mirrors
+  the Claude surface, keyed by the ChatGPT ``account_id``. A validated
+  ChatGPT-mode bundle is copied into it with the same idempotent
+  ``upsert_by_key`` + freshness rule Claude uses. This is TRANSITIONAL:
+  the launcher and the read-only host mount are UNTOUCHED here — the
+  cutover, the refresh poller, and mount retirement are the successor
+  bead's whole job, so the credential is written to the substrate *and*
+  still consumed in place via the mount until the successor lands.
+  API-key-mode Codex credentials are not stored on this surface — they
+  carry no ``account_id`` and no OAuth tokens — so they stay ``in-place``
+  with no write.
 
-The only substrate write this module performs is the Claude
-``upsert_by_key`` — nothing is written outside the Settings store.
+The only substrate writes this module performs are the Claude and Codex
+``upsert_by_key`` calls — nothing is written outside the Settings store.
 
-Spec: bead auto-5bq85. Storage of record: ``graph://73c4e9ef-bbc``.
-Auth runbook: ``graph://ffa116fb-f85``.
+Spec: bead auto-5bq85 (Claude), bead auto-kzws9 (Codex step 1). Storage of
+record: ``graph://73c4e9ef-bbc``. Auth runbook: ``graph://ffa116fb-f85``.
 """
 
 from __future__ import annotations
@@ -63,6 +68,10 @@ from .claude_oauth import CLAUDE_USER_AGENT, CONSUMER_SCOPES
 from .schemas.claude_credentials import (
     CLAUDE_CREDENTIALS_REVISION,
     CLAUDE_CREDENTIALS_SET_ID,
+)
+from .schemas.codex_credentials import (
+    CODEX_CREDENTIALS_REVISION,
+    CODEX_CREDENTIALS_SET_ID,
 )
 
 
@@ -488,10 +497,19 @@ class CodexDiscovery:
     account_id: str | None
     email: str | None
     id_token_exp_ms: int | None
-    has_access_token: bool
-    has_refresh_token: bool
+    access_token: str | None
+    refresh_token: str | None
+    id_token: str | None
     has_api_key: bool
     source_path: str
+
+    @property
+    def has_access_token(self) -> bool:
+        return bool(self.access_token)
+
+    @property
+    def has_refresh_token(self) -> bool:
+        return bool(self.refresh_token)
 
 
 def _decode_jwt_claims(token: str) -> dict[str, Any]:
@@ -541,13 +559,16 @@ def discover_codex(home: str) -> CodexDiscovery | None:
     exp = claims.get("exp")
     exp_ms = int(exp) * 1000 if isinstance(exp, int) else None
     email = claims.get("email")
+    access_token = tokens.get("access_token") if isinstance(tokens, dict) else None
+    refresh_token = tokens.get("refresh_token") if isinstance(tokens, dict) else None
     return CodexDiscovery(
         auth_mode=raw.get("auth_mode") if isinstance(raw.get("auth_mode"), str) else None,
         account_id=tokens.get("account_id") if isinstance(tokens, dict) else None,
         email=email if isinstance(email, str) and email else None,
         id_token_exp_ms=exp_ms,
-        has_access_token=bool(isinstance(tokens, dict) and tokens.get("access_token")),
-        has_refresh_token=bool(isinstance(tokens, dict) and tokens.get("refresh_token")),
+        access_token=access_token if isinstance(access_token, str) and access_token else None,
+        refresh_token=refresh_token if isinstance(refresh_token, str) and refresh_token else None,
+        id_token=id_token if isinstance(id_token, str) and id_token else None,
         has_api_key=bool(isinstance(api_key, str) and api_key),
         source_path=path,
     )
@@ -594,15 +615,109 @@ def validate_codex(disc: CodexDiscovery, *, now_ms: int) -> tuple[bool, str]:
     return True, f"valid session for {who}"
 
 
-def import_codex(home: str, *, now_ms: int | None = None) -> HarnessResult:
-    """Discover + validate the local Codex credential; report status.
+def _codex_row_is_writable(disc: CodexDiscovery) -> bool:
+    """True when a discovered Codex credential is a keyable OAuth bundle.
 
-    Codex credentials have no substrate Setting today: the launcher
-    mounts ``~/.codex/auth.json`` read-only straight off the host home, so
-    a validated file is *already in place* for inner sessions. This path
-    therefore makes **zero writes** — it discovers, validates, and reports
-    ``in_place`` / ``needs_sign_in``. It extends to a real write the day a
-    codex-analog credential Setting exists.
+    The substrate surface is keyed by ``account_id`` and stores the OAuth
+    token triple, so a row is only writable when the ChatGPT-mode bundle
+    carries all of them plus the id_token's derived expiry. API-key-mode
+    credentials (no ``account_id``, no OAuth tokens) have nothing to store
+    on this surface and stay ``in_place`` with no write.
+    """
+    return bool(
+        disc.account_id
+        and disc.access_token
+        and disc.refresh_token
+        and disc.id_token
+        and disc.id_token_exp_ms is not None
+    )
+
+
+def build_codex_payload(disc: CodexDiscovery) -> dict[str, Any]:
+    """Assemble the ``dashboard.codex.credentials`` payload for a row.
+
+    Written clean — carrying no ``last_refresh_*`` metadata — for the same
+    reason the Claude path writes clean: a stale ``last_refresh_error``
+    preserved onto a freshly-imported bundle would make the successor
+    refresh poller treat the row as revoked. The poller stamps freshness
+    on its own ticks. ``auth_mode`` falls back to ``"chatgpt"`` because a
+    keyable OAuth bundle is by definition a ChatGPT-mode login even if the
+    file omitted the field.
+    """
+    return {
+        "email": disc.email,
+        "auth_mode": disc.auth_mode or "chatgpt",
+        "access_token": disc.access_token,
+        "refresh_token": disc.refresh_token,
+        "id_token": disc.id_token,
+        "expires_at_ms": disc.id_token_exp_ms,
+    }
+
+
+def _read_existing_codex_row(
+    account_id: str,
+    *,
+    read_set: Callable[..., Any] | None = None,
+) -> dict[str, Any] | None:
+    """Return the existing Codex credentials payload for ``account_id``.
+
+    Reads from ``personal`` with ``peers=[]`` — exactly how the launcher
+    and the successor poller will read — so the freshness comparison sees
+    the same row the consumers do.
+    """
+    reader = read_set or ops.read_set
+    try:
+        members = reader(
+            CODEX_CREDENTIALS_SET_ID, org=CREDENTIALS_ORG, peers=[],
+        )
+    except Exception:  # noqa: BLE001 — set may not exist yet on a fresh DB
+        return None
+    for member in getattr(members, "members", []) or []:
+        if member.key == account_id:
+            return member.payload if isinstance(member.payload, dict) else {}
+    return None
+
+
+def _write_codex_row(
+    account_id: str,
+    payload: dict[str, Any],
+    *,
+    upsert: Callable[..., Any] | None = None,
+) -> None:
+    writer = upsert or ops.upsert_by_key
+    writer(
+        CODEX_CREDENTIALS_SET_ID,
+        CODEX_CREDENTIALS_REVISION,
+        account_id,
+        payload,
+        org=CREDENTIALS_ORG,
+    )
+
+
+def import_codex(
+    home: str,
+    *,
+    now_ms: int | None = None,
+    dry_run: bool = False,
+    read_set: Callable[..., Any] | None = None,
+    upsert: Callable[..., Any] | None = None,
+) -> HarnessResult:
+    """Discover → validate → import the local Codex credential.
+
+    STEP 1 of the Codex credential end-state (bead auto-kzws9): a validated
+    ChatGPT-mode bundle is copied into ``dashboard.codex.credentials``,
+    keyed by the ChatGPT ``account_id``, with the same idempotent
+    ``upsert_by_key`` + freshness rule the Claude path uses. On re-import we
+    only overwrite when the on-disk id_token is *newer* than what the
+    substrate holds (``expires_at_ms`` comparison), so a second run is a
+    no-op (``unchanged``) and never regresses a bundle a future poller has
+    rotated ahead of the on-disk copy.
+
+    TRANSITIONAL: the launcher and the read-only host mount are untouched —
+    the credential is written to the substrate *and* still consumed in
+    place via the mount until the successor bead cuts the launcher over.
+    API-key-mode credentials are not stored here (no ``account_id``, no
+    OAuth tokens); they validate and stay ``in_place`` with no write.
     """
     now = now_ms if now_ms is not None else int(time.time() * 1000)
     try:
@@ -618,9 +733,41 @@ def import_codex(home: str, *, now_ms: int | None = None) -> HarnessResult:
     account = disc.email or disc.account_id
     if not ok:
         return HarnessResult("codex", STATUS_NEEDS_SIGN_IN, detail, account)
+
+    # API-key mode (and any non-keyable bundle) has no account-keyed row to
+    # write — it is validated and consumed in place from the host mount.
+    if not _codex_row_is_writable(disc):
+        return HarnessResult(
+            "codex", STATUS_IN_PLACE,
+            f"{detail}; consumed in place from ~/.codex/auth.json",
+            account,
+        )
+
+    existing = _read_existing_codex_row(disc.account_id, read_set=read_set)
+    if existing is not None:
+        existing_exp = existing.get("expires_at_ms")
+        if isinstance(existing_exp, int) and existing_exp >= disc.id_token_exp_ms:
+            return HarnessResult(
+                "codex", STATUS_UNCHANGED,
+                f"already current for {account} (account {disc.account_id})",
+                account,
+            )
+    payload = build_codex_payload(disc)
+    if dry_run:
+        verb = "would refresh" if existing is not None else "would import"
+        return HarnessResult(
+            "codex", STATUS_WOULD_IMPORT,
+            f"{verb} {account} (account {disc.account_id})",
+            account,
+        )
+    _write_codex_row(disc.account_id, payload, upsert=upsert)
+    verb = "refreshed" if existing is not None else "imported"
+    logger.info(
+        "credential import: codex %s account=%s", verb, disc.account_id,
+    )
     return HarnessResult(
-        "codex", STATUS_IN_PLACE,
-        f"{detail}; consumed in place from ~/.codex/auth.json",
+        "codex", STATUS_IMPORTED,
+        f"{verb} {account} (account {disc.account_id})",
         account,
     )
 
@@ -639,7 +786,7 @@ def run_import(
     report.add(import_claude(
         home, alias_override=alias_override, dry_run=dry_run,
     ))
-    report.add(import_codex(home))
+    report.add(import_codex(home, dry_run=dry_run))
     return report
 
 

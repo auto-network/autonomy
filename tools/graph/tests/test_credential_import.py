@@ -35,6 +35,9 @@ from tools.graph.schemas.claude_credentials import (
     CLAUDE_CREDENTIALS_REVISION,
     CLAUDE_CREDENTIALS_SET_ID,
 )
+from tools.graph.schemas.codex_credentials import (
+    CODEX_CREDENTIALS_SET_ID,
+)
 
 
 # ── fixtures ─────────────────────────────────────────────────
@@ -132,6 +135,13 @@ def _run_cli(argv):
 def _read_rows():
     members = ops.read_set(
         CLAUDE_CREDENTIALS_SET_ID, org=ci.CREDENTIALS_ORG, peers=[],
+    )
+    return {m.key: m.payload for m in members.members}
+
+
+def _read_codex_rows():
+    members = ops.read_set(
+        CODEX_CREDENTIALS_SET_ID, org=ci.CREDENTIALS_ORG, peers=[],
     )
     return {m.key: m.payload for m in members.members}
 
@@ -299,22 +309,59 @@ def test_fresh_reauth_clears_stale_error_and_keeps_alias(graph_db_env, tmp_path)
 # ── codex ────────────────────────────────────────────────────
 
 
-def test_codex_valid_reports_in_place(tmp_path):
+def test_codex_valid_imports_working_copy(graph_db_env, tmp_path):
+    # STEP 1 (auto-kzws9): a validated ChatGPT-mode bundle is copied into
+    # the substrate credential Setting, keyed by account_id.
     home = tmp_path / "home"
-    _write_codex_file(home, email="dev@example.com")
+    src = _write_codex_file(
+        home, email="dev@example.com", account_id="acct-9",
+        access="ct-live", refresh="cr-live",
+    )
+    before = src.read_bytes()
+
     result = ci.import_codex(str(home))
-    assert result.status == ci.STATUS_IN_PLACE
-    assert "dev@example.com" in result.detail
+
+    assert result.status == ci.STATUS_IMPORTED
+    rows = _read_codex_rows()
+    assert "acct-9" in rows
+    payload = rows["acct-9"]
+    assert payload["access_token"] == "ct-live"
+    assert payload["refresh_token"] == "cr-live"
+    assert payload["email"] == "dev@example.com"
+    assert payload["auth_mode"] == "chatgpt"
+    assert payload["id_token"]  # the JWT is stored
+    assert isinstance(payload["expires_at_ms"], int)
+    # bead: the user's original file is byte-identical afterwards
+    assert src.read_bytes() == before
 
 
-def test_codex_expired_id_token_with_refresh_stays_in_place(tmp_path):
+def test_codex_second_run_is_unchanged(graph_db_env, tmp_path):
+    home = tmp_path / "home"
+    _write_codex_file(home, account_id="acct-9")
+    first = ci.import_codex(str(home))
+    assert first.status == ci.STATUS_IMPORTED
+    second = ci.import_codex(str(home))
+    assert second.status == ci.STATUS_UNCHANGED
+    assert len(_read_codex_rows()) == 1  # never duplicates
+
+
+def test_codex_dry_run_writes_nothing(graph_db_env, tmp_path):
+    home = tmp_path / "home"
+    _write_codex_file(home, account_id="acct-9")
+    result = ci.import_codex(str(home), dry_run=True)
+    assert result.status == ci.STATUS_WOULD_IMPORT
+    assert _read_codex_rows() == {}
+
+
+def test_codex_expired_id_token_with_refresh_still_imports(graph_db_env, tmp_path):
     # Codex self-refreshes on launch, so an expired id_token on an account
-    # that still has a refresh_token authenticates fine.
+    # that still has a refresh_token authenticates fine — and is still worth
+    # importing (the successor poller will rotate it on the substrate row).
     home = tmp_path / "home"
-    _write_codex_file(home, exp_epoch=int(time.time()) - 10)
+    _write_codex_file(home, exp_epoch=int(time.time()) - 10, account_id="acct-9")
     result = ci.import_codex(str(home))
-    assert result.status == ci.STATUS_IN_PLACE
-    assert "refresh" in result.detail.lower()
+    assert result.status == ci.STATUS_IMPORTED
+    assert _read_codex_rows()["acct-9"]["refresh_token"] == "cr-1"
 
 
 def test_codex_expired_no_refresh_reports_needs_sign_in(tmp_path):
@@ -377,14 +424,20 @@ def test_no_interactive_secret_prompt_in_module():
     assert "getpass" not in called
 
 
-def test_codex_path_makes_no_substrate_write(graph_db_env, tmp_path, monkeypatch):
-    """Codex import writes nothing — it validates a file consumed in place."""
+def test_codex_api_key_path_makes_no_substrate_write(graph_db_env, tmp_path, monkeypatch):
+    """API-key-mode Codex has no account-keyed row — it stays in place."""
     def _boom(*a, **k):
-        raise AssertionError("import_codex must not write to the substrate")
+        raise AssertionError(
+            "API-key-mode codex import must not write to the substrate"
+        )
 
     monkeypatch.setattr(ops, "upsert_by_key", _boom)
     home = tmp_path / "home"
-    _write_codex_file(home)
+    path = home / ".codex" / "auth.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "auth_mode": "apikey", "OPENAI_API_KEY": "sk-proj-xyz", "tokens": {},
+    }))
     result = ci.import_codex(str(home))
     assert result.status == ci.STATUS_IN_PLACE
 
@@ -439,4 +492,4 @@ def test_cli_import_reports_both_harnesses(graph_db_env, tmp_path, monkeypatch):
     assert "claude" in out
     assert "codex" in out
     assert ci.STATUS_NEEDS_SIGN_IN in out  # claude not authed
-    assert ci.STATUS_IN_PLACE in out       # codex in place
+    assert ci.STATUS_IMPORTED in out       # codex bundle imported to substrate
