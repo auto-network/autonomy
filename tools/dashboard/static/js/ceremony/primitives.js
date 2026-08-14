@@ -512,6 +512,39 @@ async function migrateArmorV1ToV2(
   }
 }
 
+function armorVersion(armorText) {
+  if (typeof armorText !== 'string') throw new Error('armor must be text');
+  const lines = armorText
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (
+    lines.length < 3
+    || lines[0] !== ARMOR_BEGIN
+    || lines[lines.length - 1] !== ARMOR_END
+  ) {
+    throw new Error('this is not an auto.network root key armor');
+  }
+  let data;
+  try {
+    data = JSON.parse(new TextDecoder().decode(b64ToBytes(lines.slice(1, -1).join(''))));
+  } catch {
+    throw new Error('armor body does not decode');
+  }
+  if (data.v !== 1 && data.v !== 2) {
+    throw new Error(`unsupported armor version: ${data.v}`);
+  }
+  return data.v;
+}
+
+// Open a v1 OR v2 armor. The v1 branch exists only to read a pre-migration blob
+// and is deleted from the shipped product once migration has run.
+async function decryptArmorAny(armorText, passphrase) {
+  return armorVersion(armorText) === 2
+    ? decryptArmorV2(armorText, passphrase)
+    : decryptArmor(armorText, passphrase);
+}
+
 export {
   canonicalJson,
   hexToBytes,
@@ -520,6 +553,8 @@ export {
   domainBytes,
   decryptArmor,
   decryptArmorV2,
+  decryptArmorAny,
+  armorVersion,
   encryptArmorV2,
   migrateArmorV1ToV2,
   parseArmorV2,

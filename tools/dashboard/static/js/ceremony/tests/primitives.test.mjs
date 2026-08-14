@@ -10,6 +10,8 @@ const {
   canonicalJson,
   decryptArmor,
   decryptArmorV2,
+  decryptArmorAny,
+  armorVersion,
   migrateArmorV1ToV2,
   parseArmorV2,
   domainBytes,
@@ -73,6 +75,16 @@ const migratedV2 = await migrateArmorV1ToV2(fixture.armor, fixture.passphrase, 1
 const openedMig = await decryptArmorV2(migratedV2, fixture.passphrase);
 assert.equal(bytesToHex(openedMig.seed), fixture.seed_hex, 'JS v1->v2 migrate recovers seed');
 openedMig.seed.fill(0);
+
+// Version-agnostic open + version peek across v1 and v2.
+assert.equal(armorVersion(fixture.armor), 1);
+assert.equal(armorVersion(fixture.armor_v2), 2);
+const anyV1 = await decryptArmorAny(fixture.armor, fixture.passphrase);
+assert.equal(bytesToHex(anyV1.seed), fixture.seed_hex, 'decryptArmorAny opens v1');
+anyV1.seed.fill(0);
+const anyV2 = await decryptArmorAny(fixture.armor_v2, fixture.passphrase);
+assert.equal(bytesToHex(anyV2.seed), fixture.seed_hex, 'decryptArmorAny opens v2');
+anyV2.seed.fill(0);
 
 function editV2Body(edit) {
   const lines = fixture.armor_v2.split('\n').filter((line) => line.length > 0);
