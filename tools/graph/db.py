@@ -44,7 +44,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # expensive full re-init, or (without a bump) never landed at all.
 # (A future enhancement can auto-derive this from the schema; for now the whole
 # point is to prove the perf win with the smallest possible change.)
-_SCHEMA_USER_VERSION = 3
+# v4 (auto-uq1mi): re-run migrations fleet-wide so the one-live-base settings
+# invariant (idx_settings_one_base + the auto-55jwx self-heal in
+# _migrate_settings) reaches every org DB on next open, not just newly-created
+# DBs plus a hand-installed list. The heal deprecates duplicate bases before the
+# index is built, so re-init on a DB carrying legacy duplicates converges
+# instead of failing — retiring the manual-install dependency for universal
+# enforcement.
+_SCHEMA_USER_VERSION = 4
 DEFAULT_DB = REPO_ROOT / "data" / "graph.db"
 DEFAULT_ORGS_DIR = REPO_ROOT / "data" / "orgs"
 
