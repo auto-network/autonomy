@@ -1352,7 +1352,18 @@
   addEventListener("scroll", measureBar, {passive: true});
   addEventListener("resize", measureBar, {passive: true});
 
+  //: A render counter on the host element. The chrome is in a CLOSED shadow
+  //: root, deliberately -- coordinator scripts share this realm, so anything
+  //: reachable from outside is reachable by them. That also means nothing
+  //: outside can see the chrome redraw, so "a live event actually repainted
+  //: this page" was untestable in a real browser and went unproven. A counter
+  //: is not a capability: it carries no state, exposes no port, and moving it
+  //: tells an observer only that a redraw happened -- which is exactly the
+  //: fact worth being able to check.
+  var renders = 0;
+
   function render() {
+    host.setAttribute("data-mc-render", String(++renders));
     // WHAT IS BEING TYPED SURVIVES. render() rebuilds the whole chrome, so
     // without this a live event arriving mid-answer throws away what the
     // reader had written -- which is worse than the stale screen the live
