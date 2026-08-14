@@ -208,32 +208,41 @@ async function importDerivedPersonaKey(derivedSeed) {
 }
 
 async function derivePersona(personalRootSeed, genesisId) {
+  // The local copy of the personal root seed must be zeroed on EVERY exit --
+  // it is the whole personal identity, and importKey copies it into the
+  // WebCrypto key, so our copy is dead weight the instant the derivation runs.
+  // A single outer try/finally covers the length guard, the genesisId guard,
+  // and the derive path alike (mirrors founding.js's seed handling).
   const seed = new Uint8Array(personalRootSeed);
-  if (seed.length !== 32) {
-    throw new Error('personalRootSeed must be exactly 32 raw bytes');
-  }
-  requireLowerHex(genesisId, 64, 'genesisId');
-  const material = await webCrypto.subtle.importKey(
-    'raw',
-    seed,
-    'HKDF',
-    false,
-    ['deriveBits'],
-  );
-  const derivedSeed = new Uint8Array(await webCrypto.subtle.deriveBits(
-    {
-      name: 'HKDF',
-      hash: 'SHA-256',
-      salt: textEncoder.encode(PERSONA_SALT),
-      info: textEncoder.encode(genesisId),
-    },
-    material,
-    256,
-  ));
   try {
-    return await importDerivedPersonaKey(derivedSeed);
+    if (seed.length !== 32) {
+      throw new Error('personalRootSeed must be exactly 32 raw bytes');
+    }
+    requireLowerHex(genesisId, 64, 'genesisId');
+    const material = await webCrypto.subtle.importKey(
+      'raw',
+      seed,
+      'HKDF',
+      false,
+      ['deriveBits'],
+    );
+    const derivedSeed = new Uint8Array(await webCrypto.subtle.deriveBits(
+      {
+        name: 'HKDF',
+        hash: 'SHA-256',
+        salt: textEncoder.encode(PERSONA_SALT),
+        info: textEncoder.encode(genesisId),
+      },
+      material,
+      256,
+    ));
+    try {
+      return await importDerivedPersonaKey(derivedSeed);
+    } finally {
+      derivedSeed.fill(0);
+    }
   } finally {
-    derivedSeed.fill(0);
+    seed.fill(0);
   }
 }
 

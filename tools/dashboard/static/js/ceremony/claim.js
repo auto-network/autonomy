@@ -203,12 +203,15 @@ async function mintMemberClaim({
   const createdHlc = position === null ? requestedCredentialHlc : eventHlc;
   const seed = new Uint8Array(personalRootSeed);
   const encapsulationSeed = new Uint8Array(kemSeed);
-  if (seed.length !== 32) {
-    throw new Error('personalRootSeed must be exactly 32 raw bytes');
-  }
-  if (encapsulationSeed.length !== 32) {
+  if (seed.length !== 32 || encapsulationSeed.length !== 32) {
+    // Zero BOTH copies on either malformed-length exit -- neither the root
+    // seed nor the kem seed may survive a rejected mint.
+    const message = seed.length !== 32
+      ? 'personalRootSeed must be exactly 32 raw bytes'
+      : 'kemSeed must be exactly 32 raw bytes';
     seed.fill(0);
-    throw new Error('kemSeed must be exactly 32 raw bytes');
+    encapsulationSeed.fill(0);
+    throw new Error(message);
   }
 
   let persona;

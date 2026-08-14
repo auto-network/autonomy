@@ -258,25 +258,32 @@ async function decryptArmor(armorText, passphrase) {
  * generic key importer.
  */
 async function importEd25519RootSigningKey(ed25519SigningSeed) {
+  // Both the raw seed copy and the pkcs8 it is spliced into carry root key
+  // material and must be zeroed on every exit -- the outer finally covers the
+  // length guard too, so no path leaves the seed on the heap.
   const seed = new Uint8Array(ed25519SigningSeed);
-  if (seed.length !== 32) {
-    throw new Error('Ed25519 root signing seed must be exactly 32 bytes');
-  }
-  const pkcs8 = new Uint8Array(
-    PKCS8_ED25519_PREFIX.length + seed.length,
-  );
-  pkcs8.set(PKCS8_ED25519_PREFIX, 0);
-  pkcs8.set(seed, PKCS8_ED25519_PREFIX.length);
   try {
-    return await webCrypto.subtle.importKey(
-      'pkcs8',
-      pkcs8,
-      { name: 'Ed25519' },
-      false,
-      ['sign'],
+    if (seed.length !== 32) {
+      throw new Error('Ed25519 root signing seed must be exactly 32 bytes');
+    }
+    const pkcs8 = new Uint8Array(
+      PKCS8_ED25519_PREFIX.length + seed.length,
     );
+    pkcs8.set(PKCS8_ED25519_PREFIX, 0);
+    pkcs8.set(seed, PKCS8_ED25519_PREFIX.length);
+    try {
+      return await webCrypto.subtle.importKey(
+        'pkcs8',
+        pkcs8,
+        { name: 'Ed25519' },
+        false,
+        ['sign'],
+      );
+    } finally {
+      pkcs8.fill(0);
+    }
   } finally {
-    pkcs8.fill(0);
+    seed.fill(0);
   }
 }
 
