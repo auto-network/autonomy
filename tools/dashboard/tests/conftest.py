@@ -195,6 +195,18 @@ _set_default_event_bus_state_path()
 # calls inherit os.environ, so both layers cover every helper
 # (l2b_harness, per-file ab()/ab_raw() wrappers, BrowserHelper).
 def _isolate_agent_browser_session():
+    # agent-browser installs under nvm's node bin, which non-login shells
+    # do not have on PATH — a run launched outside a login shell then
+    # errors EVERY browser class at fixture time with FileNotFoundError
+    # (measured: 79 of 83 errors in one host run). Wire it up here so
+    # the suite works the same from any shell.
+    import shutil as _shutil, glob as _glob
+    if _shutil.which("agent-browser") is None:
+        for _cand in sorted(_glob.glob(
+                _os.path.expanduser("~/.nvm/versions/node/*/bin"))):
+            if (_os.path.exists(_os.path.join(_cand, "agent-browser"))):
+                _os.environ["PATH"] = _cand + _os.pathsep + _os.environ["PATH"]
+                break
     if _os.environ.get("AGENT_BROWSER_SESSION"):
         return
     worker = _os.environ.get("PYTEST_XDIST_WORKER", "master")
