@@ -4264,6 +4264,15 @@ ACTIVITY_ATTENTION_CHECKS = """(async () => {
 
 
 class TestActivityAttentionTabBehavior:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): green alone, red
+        # after predecessors — accumulated SSE/server-buffer state; only
+        # the hard reset clears it.
+        _hard_reset_sweep(sweep_server)
+
     """Activity surface — Attention tab over /api/journal (auto-ruhdw)."""
 
     @pytest.fixture(scope="class", autouse=True)
@@ -7730,6 +7739,15 @@ def _navigate_and_eval_async(path: str, js_expr: str, wait_ms: int = 800) -> dic
 
 
 class TestExperimentToolbar:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): green alone, red
+        # after predecessors — accumulated SSE/server-buffer state; only
+        # the hard reset clears it.
+        _hard_reset_sweep(sweep_server)
+
     """Experiment toolbar behavioral sweep — 4-state state machine via Alpine.nextTick().
 
     One async batched eval cycles through all 4 states (DISCONNECTED, LIVE_UI,
