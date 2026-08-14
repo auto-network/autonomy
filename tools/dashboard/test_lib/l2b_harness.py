@@ -160,24 +160,54 @@ def open_browser(url: str, *, wait_load: bool = True) -> None:
     Tests reuse this single session across the module so we only pay the
     page-load cost once. ``wait_load=False`` skips the network-idle wait
     when callers know the page is intentionally lazy.
+
+    A ``subprocess.TimeoutExpired`` from either call is deliberately NOT
+    swallowed: a reopen that cannot finish inside the timeout means the
+    daemon behind the session is degraded, and the caller must decide
+    between failing and rotating to a fresh daemon
+    (``rotate_browser_session``).
     """
     subprocess.run(
         ["agent-browser", "open", url],
-        capture_output=True, timeout=10,
+        capture_output=True, timeout=30,
     )
     if wait_load:
         subprocess.run(
             ["agent-browser", "wait", "--load", "networkidle"],
-            capture_output=True, timeout=10,
+            capture_output=True, timeout=30,
         )
 
 
 def close_browser() -> None:
     """Close the shared ``agent-browser`` session (best-effort)."""
-    subprocess.run(
-        ["agent-browser", "close"],
-        capture_output=True, timeout=5,
-    )
+    try:
+        subprocess.run(
+            ["agent-browser", "close"],
+            capture_output=True, timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        pass  # a hung close is exactly the degraded-daemon case; the
+        # caller rotates away and the idle timeout reaps the daemon
+
+
+def rotate_browser_session() -> str:
+    """Swap this process onto a fresh ``agent-browser`` session name and
+    return it.
+
+    Every session name owns its own daemon process, and there is no CLI
+    verb that restarts a daemon in place — closing a SESSION leaves the
+    (possibly degraded) daemon running. When a reopen hangs past its
+    subprocess timeout (auto-s3him's late-sweep failure mode), renaming
+    the session is the one in-band way to get a genuinely fresh daemon +
+    Chromium. The old session is closed best-effort first; if that hangs
+    too, the suite's ``AGENT_BROWSER_IDLE_TIMEOUT_MS`` backstop reaps it.
+    """
+    close_browser()
+    name = os.environ.get("AGENT_BROWSER_SESSION", "pytest-l2b")
+    base, sep, n = name.rpartition("~r")
+    nxt = f"{base}~r{int(n) + 1}" if sep and n.isdigit() else f"{name}~r1"
+    os.environ["AGENT_BROWSER_SESSION"] = nxt
+    return nxt
 
 
 # ── Eval helpers ────────────────────────────────────────────────────────
