@@ -1,0 +1,114 @@
+#!/bin/bash
+# Golden-rule close gate (auto-w41na). Shadows the real bd binary via a
+# PATH-earlier install (cap-bin) and intercepts `close`: a bead labeled
+# runtime-critical cannot be closed without a functional-proof reference
+# — evidence of the change exercised on a REAL user path (a run's
+# screenshot, tail, or transcript), not a test suite's green.
+#
+# Everything except a gated close delegates to the real binary verbatim.
+# There is deliberately NO override flag: the rule this gate enforces is
+# "unskippable", and the one time it must bend (a bead mislabeled
+# runtime-critical), the honest path is removing the label with a
+# recorded justification, which stays in the bead's audit trail.
+#
+# The proof reference is accepted from either:
+#   - the close reason:      -r "... functional-proof: <ref> ..."
+#   - a prior bead note containing a line `functional-proof: <ref>`
+# where <ref> is a graph attachment id, a /workspace/output path, or a
+# run-log path. The gate checks presence and non-emptiness of the ref,
+# not its content — reviewers and the dispatcher gate judge substance.
+
+set -u
+
+_real_bd() {
+    # The first `bd` on PATH that is not this script.
+    local self cand
+    self="$(readlink -f "${BASH_SOURCE[0]}")"
+    while IFS= read -r cand; do
+        [ "$(readlink -f "$cand")" != "$self" ] && { printf '%s' "$cand"; return; }
+    done < <(type -ap bd)
+    printf '/usr/local/bin/bd'
+}
+
+REAL_BD="$(_real_bd)"
+
+if [ "${1:-}" != "close" ]; then
+    exec "$REAL_BD" "$@"
+fi
+
+shift  # drop `close`
+
+ids=()
+reason=""
+passthru=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -r|--reason)
+            reason="${2:-}"; passthru+=("$1" "${2:-}"); shift 2 ;;
+        --reason=*)
+            reason="${1#--reason=}"; passthru+=("$1"); shift ;;
+        -*)
+            passthru+=("$1"); shift ;;
+        *)
+            ids+=("$1"); passthru+=("$1"); shift ;;
+    esac
+done
+
+# No-id close refusal (packaging's field finding): the real bd defaults
+# a bare `close` to the LAST-TOUCHED bead, which silently closed the
+# wrong bead mid-proof when a variable came up empty. Closing is the one
+# operation where implicitness is a hazard — require the id.
+if [ "${#ids[@]}" -eq 0 ]; then
+    echo "bd-close gate: REFUSING close with no explicit issue id" >&2
+    echo "  The real bd would close the last-touched bead, which has" >&2
+    echo "  already misfired in the field. Name the bead you mean." >&2
+    exit 2
+fi
+
+blocked=0
+for id in "${ids[@]:-}"; do
+    [ -z "$id" ] && continue
+    labels="$("$REAL_BD" show "$id" --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)
+    row = rows[0] if isinstance(rows, list) else rows
+    print(" ".join(row.get("labels") or []))
+except Exception:
+    print("")
+')"
+    case " $labels " in
+        *" runtime-critical "*) ;;
+        *) continue ;;
+    esac
+    # Gated: look for a proof reference in the reason, then in notes.
+    # A real ref is a concrete token (attachment id, path, url) — six or
+    # more ref-safe chars and no angle brackets, so documentation that
+    # QUOTES the syntax (`functional-proof: <ref>`) never satisfies the
+    # gate. Learned from this gate's own first red run, which it failed:
+    # its bead's description quoted the contract and the close sailed
+    # through.
+    proof_re='functional-proof: *[A-Za-z0-9/][A-Za-z0-9/_.:-]{5,}'
+    if printf '%s' "$reason" | grep -qiE "$proof_re"; then
+        continue
+    fi
+    if "$REAL_BD" show "$id" 2>/dev/null | grep -qiE "$proof_re"; then
+        continue
+    fi
+    echo "bd-close gate: REFUSING to close $id" >&2
+    echo "  This bead is labeled runtime-critical: closing it requires" >&2
+    echo "  evidence the change ran on a real user path — a screenshot," >&2
+    echo "  tail, or transcript from an actual run, referenced as:" >&2
+    echo "      functional-proof: <graph attachment id | output path>" >&2
+    echo "  in the close reason (-r) or a bead note. A green test suite" >&2
+    echo "  is not functional proof for a runtime change." >&2
+    echo "  If the label itself is wrong, remove it with a recorded" >&2
+    echo "  justification: bd update $id --remove-label runtime-critical" >&2
+    blocked=1
+done
+
+if [ "$blocked" -eq 1 ]; then
+    exit 2
+fi
+
+exec "$REAL_BD" close "${passthru[@]}"

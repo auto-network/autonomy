@@ -461,6 +461,47 @@ def release_bead(bead_id: str, status: str, reason: str) -> bool:
     """
     try:
         if status == "DONE":
+            # Golden-rule gate, host-side closer (auto-w41na): this bd
+            # runs on the HOST, where the cap-bin shim never rides — the
+            # highest-volume closer in the system was the one ungated
+            # caller (found live by packaging: a re-run that declined to
+            # fabricate host evidence still got its bead closed here).
+            # Same rule inline: runtime-critical + no proof ref = no
+            # close; downgrade to BLOCKED semantics instead.
+            labels = []
+            try:
+                show = run_bd(["show", bead_id, "--json"]) or "[]"
+                row = json.loads(show)
+                labels = (row[0] if isinstance(row, list) else row).get(
+                    "labels") or []
+            except Exception:
+                pass
+            proof_re = r"functional-proof: *[A-Za-z0-9/][A-Za-z0-9/_.:-]{5,}"
+            if ("runtime-critical" in labels
+                    and not re.search(proof_re, reason or "", re.I)
+                    and not re.search(
+                        proof_re, run_bd(["show", bead_id]) or "", re.I)):
+                _retry_bd(["update", bead_id, "-s", "open"])
+                # Refusal is the one moment the gate KNOWS host evidence
+                # is outstanding — flip the readiness axis too, or the
+                # reopened bead stays dispatch-eligible and the pipeline
+                # re-dispatches work it structurally cannot finish
+                # (packaging's observed loop). approved -> host-verify,
+                # replacing not stacking; the coordinator flips it back
+                # explicitly if build work remains.
+                run_bd(["update", bead_id,
+                        "--remove-label", "readiness:approved",
+                        "--add-label", "readiness:host-verify"])
+                run_bd(["update", bead_id, "--append-notes",
+                        "golden-rule gate (host closer): refusing DONE close "
+                        "— runtime-critical bead has no functional-proof "
+                        "reference. Provide real-run evidence "
+                        "(functional-proof: <ref>) or remove the label with "
+                        "a recorded justification. Readiness moved to "
+                        "host-verify: not dispatch-eligible until the "
+                        "evidence lands or a coordinator flips it back."])
+                print(f"  Golden-rule gate: host close REFUSED for {bead_id}")
+                return True
             _retry_bd(["close", bead_id, "--reason", reason])
         elif status == "BLOCKED":
             _retry_bd(["update", bead_id, "-s", "open"])
@@ -768,6 +809,28 @@ def check_working_tree_clean() -> tuple[bool, str]:
     modified/untracked files so the error message is actionable.
     """
     return working_tree_clean_and_summary(REPO_ROOT, untracked="normal", timeout=10)
+
+
+def functional_proof_missing(dispatch_result) -> bool:
+    """True when a runtime-critical bead's decision.json carries no
+    concrete functional artifact (golden-rule gate, auto-w41na).
+
+    Concrete means a functional_artifacts entry whose path is a real
+    token — non-empty, no angle-bracket placeholders. Shape only: the
+    gate never stats paths, so content-addressed attachment ids and
+    host-side paths both qualify; the record judges substance.
+    """
+    if "runtime-critical" not in (dispatch_result.labels or []):
+        return False
+    artifacts = (dispatch_result.decision or {}).get(
+        "functional_artifacts") or []
+    concrete = [
+        a for a in artifacts
+        if isinstance(a, dict) and str(a.get("path", "")).strip()
+        and "<" not in str(a.get("path", ""))
+    ]
+    return not concrete
+
 
 
 def merge_branch(branch: str, bead_id: str, reason: str) -> tuple[bool, str]:
@@ -1089,6 +1152,30 @@ def process_decision(dispatch_result: DispatchResult) -> str:
             print(f"  Created discovered bead: {out}")
 
     # Auto-merge to master on DONE if agent committed
+    # ── Golden-rule pre-merge gate (auto-w41na) ──────────────────────
+    # A runtime-critical bead merges only with functional proof: evidence
+    # the change ran on a REAL user path, listed in decision.json as
+    #   functional_artifacts: [{"path": ..., "kind": ..., "note": ...}]
+    # A green test suite is not functional proof for a runtime change.
+    # Mirrors the bd-close shim (tools/beads/bd); same label, same rule,
+    # enforced here for the dispatched path the shim never sees.
+    if status == "DONE" and functional_proof_missing(dispatch_result):
+        if True:
+            status = "BLOCKED"
+            reason = (
+                "golden-rule gate: runtime-critical bead has no "
+                "functional artifact in decision.json — a real run's "
+                "screenshot/tail/transcript is required before merge"
+            )
+            run_bd(["update", bead_id, "--append-notes",
+                    "golden-rule gate BLOCKED merge: decision.json has no "
+                    "concrete functional_artifacts entry. Provide evidence "
+                    "of the change exercised on a real user path "
+                    "(screenshot, log tail, transcript) and re-dispatch, "
+                    "or remove the runtime-critical label with a recorded "
+                    "justification."])
+            print(f"  Golden-rule gate: BLOCKED {bead_id} (no functional artifact)")
+
     if status == "DONE" and dispatch_result.commit_hash and dispatch_result.branch:
         merge_ok, merge_err = merge_branch(
             dispatch_result.branch, bead_id, reason

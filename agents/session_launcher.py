@@ -131,8 +131,6 @@ def _capability_command_surface(
                     cap.implementation, cmd, shims_to_emit[cmd])
                 continue
             shims_to_emit[cmd] = f"{tt.target}/{cmd}"
-    if not shims_to_emit:
-        return {}, {}
     shim_dir = run_dir / "cap-bin"
     shim_dir.mkdir(parents=True, exist_ok=True)
     for cmd, exec_target in shims_to_emit.items():
@@ -142,6 +140,18 @@ def _capability_command_surface(
         )
         # 0755 — executable for everyone so the agent user can invoke it.
         shim_path.chmod(0o755)
+    # The golden-rule close gate (auto-w41na) rides every session's cap-bin,
+    # not just capability opt-ins: the gate script's CONTENT is copied in
+    # (never an exec-wrapper — a wrapper's $0 would differ from cap-bin/bd
+    # and the shim's self-location would loop), so `bd` fleet-wide refuses
+    # to close runtime-critical work without a functional-proof reference.
+    gate_src = Path(__file__).resolve().parents[1] / "tools" / "beads" / "bd"
+    if gate_src.is_file():
+        gate_path = shim_dir / "bd"
+        gate_path.write_text(gate_src.read_text(encoding="utf-8"))
+        gate_path.chmod(0o755)
+    elif not shims_to_emit:
+        return {}, {}
     return (
         {str(shim_dir): f"{CAPABILITY_BIN_DIR}:ro"},
         {"AUTONOMY_CAPABILITY_BIN": CAPABILITY_BIN_DIR},
