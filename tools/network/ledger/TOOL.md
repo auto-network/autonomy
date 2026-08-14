@@ -29,7 +29,7 @@ schema-rejected and cannot exist in the DAG):
 | `role.grant` / `role.revoke` | `persona, role` | role membership facts |
 | `invite` | `invite_pub \| token_hash, granted_role, expiry, sponsor` | scoped join offer |
 | `member.claim` | `invite_ref, persona_pub, profile, approvals[], token?` | membership fact |
-| `member.rekey` | `persona, old_pub, new_pub, approvals[]` | persona key rotation |
+| `member.rekey` | `persona, old_pub, new_pub, continuity, approvals[]` | persona key rotation (new key signs continuity over its own domain, persona-bound — not replayable to/from key.rotate) |
 | `key.rotate` | `old_pub, new_pub, continuity` | org root rotation (lineage) |
 | `checkpoint` | `state_hash, signers[]` | fast-cold-join stub (no fold effect) |
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from tools.network.idkit import KeyPair
-from tools.network.ledger import fold, sign_rotate_continuity
+from tools.network.ledger import fold, sign_rotate_continuity, sign_rekey_continuity
 from tools.network.ledger.fold import (
     R_BAD_CONTINUITY,
     R_NOT_ROOT,
@@ -110,6 +110,23 @@ class TestRekey:
             assert member.roles == ("member",)
             assert state.holds(new_key.public_hex, "link:publish")
             assert not state.holds(persona.public_hex, "link:publish")
+
+    def test_rekey_continuity_is_new_key_and_domain_bound(self):
+        # The NEW key must sign the rekey binding over member.rekey's OWN
+        # domain (persona-bound). So neither a wrong signer NOR a valid
+        # key.rotate proof (right new key, wrong domain) is accepted — no
+        # persona strands on an uncontrolled key, and no cross-event-type
+        # continuity replay is reachable (x97iz).
+        sim, persona = self.build_member()
+        new_key, other = KeyPair.generate(), KeyPair.generate()
+        wrong_signer = sign_rekey_continuity(other, persona.public_hex, persona.public_hex)
+        bad_a = sim.rekey(persona, persona, persona, new_key, continuity=wrong_signer)
+        rotate_style = sign_rotate_continuity(new_key, persona.public_hex)
+        bad_b = sim.rekey(persona, persona, persona, new_key, continuity=rotate_style)
+        state = fold(sim.ledger)
+        assert state.reasons[bad_a] == R_BAD_CONTINUITY
+        assert state.reasons[bad_b] == R_BAD_CONTINUITY
+        assert state.members[persona.public_hex].current_key == persona.public_hex
 
     def test_root_may_rekey_a_member(self):
         sim, persona = self.build_member()

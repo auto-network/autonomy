@@ -37,6 +37,7 @@ from .scopes import validate_scope, validate_scope_list
 EVENT_DOMAIN = b"autonomy.ledger.event.v1\n"
 APPROVAL_DOMAIN = b"autonomy.ledger.approval.v1\n"
 ROTATE_DOMAIN = b"autonomy.ledger.rotate-continuity.v1\n"
+REKEY_CONTINUITY_DOMAIN = b"autonomy.ledger.member-rekey-continuity.v1\n"
 #: Frozen, byte-identical to storagekit.credentials.CREDENTIAL_DOMAIN —
 #: the fold verifies an embedded kem_credential with idkit only, and a
 #: cross-package fidelity test keeps the two constants from drifting.
@@ -355,10 +356,22 @@ def _v_member_claim(p: dict) -> None:
 
 
 def _v_member_rekey(p: dict) -> None:
-    _require_fields(p, "member.rekey", frozenset({"persona", "old_pub", "new_pub", "approvals"}))
+    _require_fields(
+        p, "member.rekey",
+        frozenset({"persona", "old_pub", "new_pub", "continuity", "approvals"}),
+    )
     _require_key(p["persona"], "member.rekey.persona")
     _require_key(p["old_pub"], "member.rekey.old_pub")
     _require_key(p["new_pub"], "member.rekey.new_pub")
+    # The new key signs the rekey binding, proving it possessed new_pub at
+    # rekey time — so a rekey cannot name a successor its author never held
+    # (x97iz). Malformed hex is an L8 schema rejection, not a raised idkit
+    # error, so a peer feeding a junk continuity is rejected, not a crash.
+    _require_str(p["continuity"], "member.rekey.continuity", max_len=SIGNATURE_HEX_LEN)
+    try:
+        _decode_hex(p["continuity"], SIGNATURE_HEX_LEN, "member.rekey.continuity")
+    except _IdkitMalformed as exc:
+        raise SchemaError(str(exc)) from None
     _require_approvals(p["approvals"], "member.rekey.approvals")
 
 
@@ -610,3 +623,20 @@ def sign_rotate_continuity(new_key: KeyPair, old_pub: str) -> str:
     proving possession — a rotation cannot point at a key its author does
     not control."""
     return new_key.sign_hex(rotate_continuity_input(old_pub, new_key.public_hex))
+
+
+def rekey_continuity_input(persona: str, old_pub: str, new_pub: str) -> bytes:
+    """member.rekey's continuity binding — a DISTINCT domain from key.rotate,
+    and persona-bound, so a proof valid for one can never be replayed as the
+    other even for an identical key pair (x97iz cross-event-type defence)."""
+    return REKEY_CONTINUITY_DOMAIN + canonical_json(
+        {"persona": persona, "old_pub": old_pub, "new_pub": new_pub}
+    )
+
+
+def sign_rekey_continuity(new_key: KeyPair, persona: str, old_pub: str) -> str:
+    """The NEW persona key signs the rekey binding, proving it controls the
+    key the persona is rotating onto."""
+    return new_key.sign_hex(
+        rekey_continuity_input(persona, old_pub, new_key.public_hex)
+    )

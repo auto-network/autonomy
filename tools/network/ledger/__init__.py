@@ -27,8 +27,10 @@ from .events import (
     approval_signing_input,
     make_event,
     rotate_continuity_input,
+    rekey_continuity_input,
     sign_approval,
     sign_rotate_continuity,
+    sign_rekey_continuity,
     validate_payload,
 )
 from .fold import (
@@ -135,7 +137,9 @@ __all__ = [
     "approval_signing_input",
     "sign_approval",
     "rotate_continuity_input",
+    "rekey_continuity_input",
     "sign_rotate_continuity",
+    "sign_rekey_continuity",
     # fold
     "fold",
     "FoldState",

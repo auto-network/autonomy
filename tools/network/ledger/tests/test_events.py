@@ -56,6 +56,21 @@ class TestL8SchemaBoundary:
         with pytest.raises(SchemaError):
             validate_payload({"type": kind, "anything": 1})
 
+    def test_member_rekey_malformed_continuity_is_schema_error(self):
+        # A junk continuity is an L8 SchemaError, never an uncaught idkit
+        # MalformedError that a sync/ingest path (catching SchemaError to reject
+        # bad peer input) would miss and crash on.
+        payload = {
+            "type": "member.rekey",
+            "persona": KeyPair.generate().public_hex,
+            "old_pub": KeyPair.generate().public_hex,
+            "new_pub": KeyPair.generate().public_hex,
+            "continuity": "not-a-valid-signature",
+            "approvals": [],
+        }
+        with pytest.raises(SchemaError):
+            validate_payload(payload)
+
     def test_payload_type_must_be_string(self):
         with pytest.raises(SchemaError):
             validate_payload({"type": 7})
