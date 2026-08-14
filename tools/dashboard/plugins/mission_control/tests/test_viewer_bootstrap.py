@@ -349,14 +349,17 @@ def test_an_undelivered_question_does_not_look_like_a_considered_one():
     assert '"working"' in src, "a question being actively worked on is not distinguishable"
 
 
-def test_progress_steps_stack_with_only_the_newest_live():
-    """Being superseded is what finishing looks like -- no step marks itself
-    done. Only the newest animates."""
+def test_only_the_newest_round_is_live_and_only_while_work_is_owed():
+    """Being superseded is what finishing looks like -- no round marks itself
+    done. The live mark belongs to the newest progress on a conversation
+    nobody has answered yet: a round that is someone talking is not work in
+    flight, and neither is anything on a conversation already replied to."""
     src = _viewer("bootstrap.js")
     assert "mc-step-live" in src
-    assert "i === steps.length - 1" in src, "every step renders the same"
+    assert 'i === rounds.length - 1' in src, "every round renders the same"
+    assert '&& kind === "status"' in src, "a message is being shown as work in flight"
     css = _viewer("chrome.css")
-    assert "prefers-reduced-motion" in css, "the live step animates unconditionally"
+    assert "prefers-reduced-motion" in css, "the live round animates unconditionally"
 
 
 def test_an_anchor_can_ask_you_instead_of_only_being_asked_about():
@@ -478,3 +481,20 @@ def test_a_screen_can_ask_again_after_its_question_was_answered():
     for stale in ('return c.asks && !atAnchor(c.ref).some(function (q) { return q.answer; });',
                   'if (control.asks && !done) {'):
         assert stale not in src, f"an anchor-keyed judgement survives: {stale}"
+
+
+def test_a_conversation_reads_as_one_ordered_column():
+    """It showed a question, a bare delivery line, a separate block of
+    progress and an answer -- four sections that happened to concern the same
+    exchange. What a reader could not get from that was the SEQUENCE: asked,
+    delivered, worked on, replied, worked on again. That is the whole of what
+    an open conversation tells you, and it was the one thing not on screen."""
+    src = _viewer("bootstrap.js")
+    assert "var rounds = q.updates || [];" in src
+    assert "ROUND_MARK" in src, "every round renders identically"
+    # Each round says who, because a conversation read back without speakers
+    # is a list of sentences.
+    assert "u.author_label ? u.author_label" in src
+    # The old separate blocks are gone.
+    assert '"While this is open"' not in src
+    assert 'text: "Delivered"' not in src

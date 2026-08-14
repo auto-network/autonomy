@@ -1048,6 +1048,11 @@
       : d.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + t;
   }
 
+  //: What each kind of round looks like in the margin. A receipt is the
+  //: platform speaking, progress is someone working, a message is someone
+  //: talking -- three different things that all belong in one column.
+  var ROUND_MARK = {message: "\u201C", status: "\u25CF", echo: "\u2713"};
+
   function entryNode() {
     if (!ui.entry) return null;
     var q = state.questions.filter(function (x) { return x.entry_id === ui.entry; })[0];
@@ -1061,39 +1066,39 @@
     if (q.anchor_title || q.anchor) {
       body.push(el("p", {class: "mc-sub", text: q.anchor_title || q.anchor}));
     }
-    if (isOpen(q)) {
-      // DID IT REACH ANYONE. Whether the question was actually delivered has
-      // always been recorded and never shown, so a question that failed to
-      // reach its coordinator looked exactly like one being thought about:
-      // both were nothing at all on the screen, for as long as you cared to
-      // wait.
-      var relay = q.relay_status;
-      if (relay === "failed") {
-        body.push(el("p", {class: "mc-relay mc-relay-bad",
-                           text: "Not delivered — nobody has been told about this yet."}));
-      } else if (relay === "sent") {
-        body.push(el("p", {class: "mc-relay", text: "Delivered"}));
-      } else {
-        body.push(el("p", {class: "mc-relay", text: "Sending…"}));
-      }
-      var steps = q.updates || [];
-      if (steps.length) {
-        body.push(el("p", {class: "mc-label mc-mt", text: "While this is open"}));
-        steps.forEach(function (u, i) {
-          // Newest is the live one; everything above it became a tick when the
-          // next arrived. Nothing marks itself finished -- being superseded is
-          // what finishing looks like.
-          var last = i === steps.length - 1;
-          body.push(el("div", {class: last ? "mc-step mc-step-live" : "mc-step"}, [
-            el("span", {class: "mc-step-ic", text: last ? "●" : "✓"}),
-            el("div", {}, [
-              el("div", {class: "mc-step-tx", text: u.text || ""}),
-              el("div", {class: "mc-step-at",
-                         text: when(u.created_at) + (last ? " · now" : "")}),
-            ]),
-          ]));
-        });
-      }
+    // THE ROUNDS, IN ORDER. This showed a question, then a bare delivery
+    // line, then a separate block of progress, then an answer -- four
+    // sections that happened to be about the same exchange. What a reader
+    // could not get from it was the SEQUENCE: asked, delivered, worked on,
+    // replied, worked on again. That is the whole of what an open
+    // conversation tells you, and it was the one thing not on the screen.
+    var rounds = q.updates || [];
+    if (rounds.length) {
+      body.push(el("p", {class: "mc-label mc-mt", text: "Since then"}));
+      rounds.forEach(function (u, i) {
+        var kind = u.kind || "status";
+        var live = isOpen(q) && !q.answer && i === rounds.length - 1
+                   && kind === "status";
+        body.push(el("div", {class: live ? "mc-step mc-step-live" : "mc-step"}, [
+          el("span", {class: "mc-step-ic mc-ic-" + kind, text: ROUND_MARK[kind] || "•"}),
+          el("div", {}, [
+            el("div", {class: kind === "message" ? "mc-step-tx mc-round-said"
+                                                 : "mc-step-tx",
+                       text: u.text || ""}),
+            el("div", {class: "mc-step-at",
+                       text: (u.author_label ? u.author_label + " · " : "")
+                             + when(u.created_at) + (live ? " · now" : "")}),
+          ]),
+        ]));
+      });
+    }
+    if (isOpen(q) && !rounds.length && q.relay_status !== "sent") {
+      // Nothing has happened yet, so say only the one thing that is true.
+      body.push(el("p", {class: q.relay_status === "failed"
+                                ? "mc-relay mc-relay-bad" : "mc-relay",
+                         text: q.relay_status === "failed"
+                               ? "Not delivered — nobody has been told about this yet."
+                               : "Sending…"}));
     }
     if (q.answer) {
       body.push(el("p", {class: "mc-label mc-mt", text: "Answer"}));
