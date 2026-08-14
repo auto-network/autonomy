@@ -934,6 +934,11 @@ def _update_payload(update: dict) -> dict:
         "entry_id": update["entry_id"],
         "text": update["text"],
         "created_at": update["created_at"],
+        # What sort of round this was, and who it was. A conversation read
+        # back without these is a list of sentences with no speakers.
+        "kind": update.get("kind") or "status",
+        "author_participant_id": update.get("author_participant_id"),
+        "author_label": update.get("author_label"),
     }
 
 
@@ -944,15 +949,14 @@ def _question_payload(entry: dict) -> dict:
     # what guests see. The answer itself is the only thing meant to
     # persist. See reopen_question's docstring for the same call on the
     # write side.
-    # Keyed on closed, not on answered. The two used to be the same thing;
-    # they no longer are, and it is being FINISHED WITH that ends the working
-    # trail -- an entry closed without an answer keeps no more of a diary than
-    # one closed with it.
-    updates = (
-        []
-        if entry.get("closed_at") is not None
-        else [_update_payload(u) for u in db.list_conversation_updates(entry["entry_id"])]
-    )
+    # EVERY ROUND, ALWAYS. A conversation is not a question and an answer with
+    # the middle thrown away: the first reply is very often a question of its
+    # own, and what was said in between is how anyone reads the ending. The
+    # clean pair is what the pillar WRITES when it resolves -- the output, not
+    # the storage.
+    updates = [
+        _update_payload(u) for u in db.list_conversation_updates(entry["entry_id"])
+    ]
     return {
         "entry_id": entry["entry_id"],
         "mission_id": entry["mission_id"],

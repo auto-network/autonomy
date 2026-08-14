@@ -296,6 +296,29 @@ def _get_conn(db_path: Path | str | None = None) -> sqlite3.Connection:
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE mission_conversation ADD COLUMN anchor_title TEXT")
         conn.commit()
+    # A CONVERSATION, NOT A PAIR. A reply is not presumed to be the answer:
+    # the first one is very often a question of its own or a partial, and
+    # treating it as final ends an exchange that had barely started. So an
+    # entry carries every round, each with who said it and what kind of thing
+    # it was -- something said, volatile progress, or an automatic receipt --
+    # and they are never dropped.
+    #
+    # Existing rows are progress written by the coordinator, which is what
+    # they were: kind 'status', author unknown rather than invented.
+    try:
+        conn.execute(
+            "SELECT author_participant_id, author_label, kind"
+            " FROM mission_conversation_updates LIMIT 0")
+    except sqlite3.OperationalError:
+        conn.execute(
+            "ALTER TABLE mission_conversation_updates"
+            " ADD COLUMN author_participant_id TEXT")
+        conn.execute(
+            "ALTER TABLE mission_conversation_updates ADD COLUMN author_label TEXT")
+        conn.execute(
+            "ALTER TABLE mission_conversation_updates"
+            " ADD COLUMN kind TEXT NOT NULL DEFAULT 'status'")
+        conn.commit()
     try:
         conn.execute("SELECT closed_at, closed_by FROM mission_conversation LIMIT 0")
     except sqlite3.OperationalError:
@@ -1468,6 +1491,57 @@ def retire_question(
     finally:
         conn.close()
     return cur.rowcount > 0
+
+
+def add_conversation_message(
+    entry_id: str,
+    text: str,
+    *,
+    kind: str = "message",
+    author_participant_id: str | None = None,
+    author_label: str | None = None,
+    db_path: Path | str | None = None,
+) -> dict | None:
+    """Append one round to a conversation. Returns the stored row.
+
+    *kind* is what sort of round this is:
+
+    ``message``  somebody said something and it is part of the exchange
+    ``status``   volatile progress, posted while working
+    ``echo``     an automatic receipt, written by the platform
+
+    All three are kept and all three are shown, in the order they happened.
+    The sequence is the thing a reader cannot reconstruct afterwards -- asked,
+    delivered, working, replied -- and it is lost the moment any of them is
+    treated as ephemeral.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    row_id = str(uuid.uuid4())
+    created_at = time.time()
+    conn = _get_conn(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO mission_conversation_updates"
+            " (update_id, entry_id, text, created_at, kind,"
+            "  author_participant_id, author_label)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (row_id, entry_id, text, created_at, kind,
+             author_participant_id, author_label),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "update_id": row_id,
+        "entry_id": entry_id,
+        "text": text,
+        "created_at": created_at,
+        "kind": kind,
+        "author_participant_id": author_participant_id,
+        "author_label": author_label,
+    }
 
 
 def add_conversation_update(

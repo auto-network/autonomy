@@ -1154,10 +1154,11 @@ def test_add_pillar_question_update_missing_pillar():
     assert resp.status_code == 404
 
 
-def test_question_payload_hides_updates_once_answered():
-    """Updates are working-in-progress noise, not part of the record --
-    once an entry is answered, GET .../questions must stop returning its
-    update trail. See _question_payload's docstring."""
+def test_a_conversation_keeps_every_round_after_it_is_answered():
+    """A conversation is not a question and an answer with the middle thrown
+    away. The first reply is very often a question of its own, and what was
+    said in between is how anyone reads the ending. The clean pair is what a
+    pillar WRITES when it resolves -- the output, not the storage."""
     client = _client()
     mission_id = client.post(
         "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
@@ -1180,7 +1181,12 @@ def test_question_payload_hides_updates_once_answered():
         json={"answer": "final"},
     )
     answered = client.get(f"/api/missions/{mission_id}/questions").json()["questions"][0]
-    assert answered["updates"] == []
+    trail = [u["text"] for u in answered["updates"]]
+    # Delivery, then working, in the order it happened -- the sequence is the
+    # thing a reader cannot reconstruct afterwards.
+    assert any(t.startswith("Delivered to") for t in trail), trail
+    assert "still working" in trail, trail
+    assert trail.index("still working") > 0, "the receipt did not precede the work"
     assert answered["answer"] == "final"
 
 
@@ -1347,10 +1353,10 @@ def test_reopen_pillar_question_missing_pillar():
     assert resp.status_code == 404
 
 
-def test_reopen_then_reanswer_leaves_only_the_new_answer_visible():
-    """The end-to-end point of reopening: after a full reopen -> re-answer
-    cycle, the record shows one question and one (new) answer -- no trace
-    of the old answer or the follow-up that prompted it."""
+def test_reopen_then_reanswer_carries_one_answer_and_the_whole_exchange():
+    """One question and one current answer, with every round that produced it
+    still there. The answer is what stands now; the rounds are how a reader
+    works out why it stands."""
     client = _client()
     mission_id = client.post(
         "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
@@ -1376,7 +1382,10 @@ def test_reopen_then_reanswer_leaves_only_the_new_answer_visible():
 
     final = client.get(f"/api/missions/{mission_id}/questions").json()["questions"][0]
     assert final["answer"] == "integrated final answer"
-    assert final["updates"] == []
+    trail = [u["text"] for u in final["updates"]]
+    assert any("Previous answer" in t for t in trail), (
+        f"the exchange that produced this answer is gone: {trail}"
+    )
 
 
 # ── Live-update events (auto-ljkpn) ────────────────────────────────
