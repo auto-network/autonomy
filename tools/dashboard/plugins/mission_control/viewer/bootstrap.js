@@ -173,7 +173,8 @@
     if (op === "write" && kind === "question") {
       url = (body.pillar_id ? "/api/pillars/" + body.pillar_id
                             : "/api/missions/" + mid) + "/questions";
-      payload = {question: body.question, anchor: body.anchor || null};
+      payload = {question: body.question, anchor: body.anchor || null,
+                 anchor_title: body.anchor_title || null};
     } else if (op === "write" && kind === "answer") {
       url = ownerPath(body.entry_id) + "/questions/" + body.entry_id + "/answer";
       payload = {answer: body.answer};
@@ -189,7 +190,8 @@
     } else if (op === "write" && kind === "asked") {
       url = (currentPillar() ? "/api/pillars/" + currentPillar().pillar_id
                              : "/api/missions/" + mid) + "/asked";
-      payload = {anchor: body.anchor, question: body.question, answer: body.answer};
+      payload = {anchor: body.anchor, anchor_title: body.anchor_title,
+                 question: body.question, answer: body.answer};
     } else if (op === "read" && kind === "here") {
       // The relay has always recorded this and the dashboard never did, so
       // in the app the list of who is here was empty on every mission,
@@ -911,7 +913,11 @@
     paras(q.question, "mc-qbig").forEach(function (n) { body.push(n); });
     body.push(el("p", {class: "mc-sub",
                        text: (q.asked_by_label || "") + (q.created_at ? " \u00b7 " + when(q.created_at) : "")}));
-    if (q.anchor) body.push(el("p", {class: "mc-sub", text: q.anchor}));
+    // The slug is a name for the code. Show what the screen's author called
+    // it; keep the slug only when there is nothing better.
+    if (q.anchor_title || q.anchor) {
+      body.push(el("p", {class: "mc-sub", text: q.anchor_title || q.anchor}));
+    }
     if (isOpen(q)) {
       // DID IT REACH ANYONE. Whether the question was actually delivered has
       // always been recorded and never shown, so a question that failed to
@@ -1015,7 +1021,7 @@
       el("div", {class: "mc-pbody"}, body),
       composer("Reply to " + (post.pillar_name || "this") + "\u2026",
                "goes to " + (post.pillar_name || "the pillar"), "Send",
-               function (t) { ask(t, ref, post.pillar_id); }),
+               function (t) { ask(t, ref, post.pillar_id, firstLine(post.text)); }),
     ]);
   }
 
@@ -1037,9 +1043,10 @@
       paras(screenAsk.asks, "mc-qbig").forEach(function (n) { body.push(n); });
       if (screenAsk.about) body.push(el("p", {class: "mc-sub mc-mb", text: screenAsk.about}));
     } else {
+      var namedBy = (control && control.about)
+        || (here[0] && here[0].anchor_title) || ui.anchor;
       body = [el("p", {class: "mc-label", text: "about"}),
-              el("p", {class: "mc-qbig mc-mb",
-                       text: (control && control.about) || ui.anchor})];
+              el("p", {class: "mc-qbig mc-mb", text: namedBy})];
     }
     // "Nothing discussed here yet" is false on a screen that is asking you
     // something -- the question is right there above it.
@@ -1078,8 +1085,16 @@
   // share link was refused, while the same call worked at a real URL because
   // httpRequest happened to translate it. Both ends were tested; the seam
   // between them was not. Keeping one vocabulary is what removes the seam.
-  function ask(text, anchor, pillarId) {
+  function ask(text, anchor, pillarId, about) {
     var body = {kind: "question", question: text};
+    // THE HEADING TRAVELS WITH IT. The page knows what an anchor sits under;
+    // until it sent that, the only context reaching a coordinator was the
+    // slug the screen's author picked, and the reminder afterwards dropped
+    // even the slug. A short answer to something the screen raised arrived as
+    // two words and an identifier.
+    var ctl = anchorControls.filter(function (x) { return x.ref === anchor; })[0];
+    var title = about || (ctl && ctl.about) || "";
+    if (title) body.anchor_title = title;
     // THE POST'S PILLAR, NOT THE SCREEN'S. A reply to something in the feed
     // goes to whoever wrote it, which is usually not the screen being read --
     // defaulting to the current one would deliver it to the wrong coordinator
@@ -1134,7 +1149,9 @@
   // lives on the element, and the platform never reads the author's document.
   // The pair lands as one entry with the attributions the other way round.
   function answerAsked(anchorRef, question, text) {
+    var ctl = anchorControls.filter(function (x) { return x.ref === anchorRef; })[0];
     return request("write", {kind: "asked", anchor: anchorRef,
+                             anchor_title: (ctl && ctl.about) || "",
                              question: question, answer: text})
       .then(function (r) {
         mergeEntry(r && r.question);

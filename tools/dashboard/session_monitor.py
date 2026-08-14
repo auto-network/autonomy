@@ -416,13 +416,23 @@ def _build_mission_control_nag_message(entries: list[dict]) -> str:
     for entry in entries[:5]:
         question = entry["question"]
         preview = question if len(question) <= 120 else question[:117] + "..."
-        lines.append(f"- {preview}")
+        # WHAT IT IS ABOUT, THEN WHAT WAS SAID. A short answer to something a
+        # screen raised reads as "- Do it" on its own, which is not a
+        # reminder of anything.
+        about = entry.get("anchor_title") or entry.get("anchor")
+        head = f"- [{about}] {preview}" if about else f"- {preview}"
+        lines.append(head)
+        # SELF-SUFFICIENT. This used to say "see the reply route in the
+        # original relay message", which fails exactly when a reminder
+        # matters most: a long-running session whose scrollback is gone.
+        scope = (f"pillars/{entry['pillar_id']}" if entry.get("pillar_id")
+                 else f"missions/{entry['mission_id']}")
+        lines.append(
+            f"  POST /api/{scope}/questions/{entry['entry_id']}/answer"
+            ' {"answer": "..."}'
+        )
     if n > 5:
         lines.append(f"...and {n - 5} more.")
-    lines.append(
-        "Only file an answer once it's actually correct -- see the "
-        "reply route in the original relay message for each question."
-    )
     return "\n".join(lines)
 
 
