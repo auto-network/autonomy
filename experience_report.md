@@ -41,3 +41,20 @@
   the host executor's real-tick evidence reveals the actual lifetime, these
   should be retuned. Suggested: fold into the same follow-up as auto-wl20m
   (zero-row warning), P3.
+
+## Merge-retry resolution (second pass)
+- This bead landed a merge conflict against auto-wl20m (merged first), which
+  independently added a per-tick decision-basis summary to the SAME file. Both
+  branches added `_parse_iso_ms` (kept one copy) and both extended the counters
+  dict. Integration points:
+  - auto-wl20m's `_log_tick_decision` (tick-level summary) and this bead's
+    per-row `decision=/basis=` line COEXIST — one is a fleet summary, the other
+    is per-row. Kept both.
+  - Added the `superseded` count to `_log_tick_decision`'s summary line and to
+    the zero-row/read-set counter-equality assertions (auto-wl20m predated the
+    superseded kind, so its `counters == {...}` dicts omitted it → would fail).
+  - auto-wl20m's tick-log tests were written against the OLD expires_at skip
+    logic; under the measured `last_refresh_at` basis both fixtures had to be
+    rewritten (never_refreshed vs no_refresh_token / revoked) so they still
+    assert "1 refreshed" / "1 standing failure" honestly and never hit the
+    network. 38 tests pass.
