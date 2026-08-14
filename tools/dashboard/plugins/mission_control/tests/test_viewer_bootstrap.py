@@ -423,9 +423,9 @@ def test_a_reply_goes_to_the_pillar_that_wrote_the_post():
     one would deliver to the wrong coordinator and look correct from both
     ends."""
     src = _viewer("bootstrap.js")
-    assert "function ask(text, anchor, pillarId, about)" in src
+    assert "function ask(text, anchor, pillarId, about, excerpt)" in src
     assert "pillarId ? {pillar_id: pillarId} : currentPillar()" in src
-    assert "ask(t, ref, post.pillar_id, firstLine(post.text))" in src
+    assert "ask(t, ref, post.pillar_id, firstLine(post.text)," in src
 
 
 def test_the_for_you_count_opens_all_of_them_not_the_first():

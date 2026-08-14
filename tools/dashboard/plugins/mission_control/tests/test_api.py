@@ -2826,3 +2826,38 @@ def test_an_edited_question_says_it_was_edited_and_by_whom():
     # mission. An authenticated caller is attributed to itself instead --
     # see test_a_coordinator_session_is_a_participant_on_its_own_surface.
     assert edited["question_edited_by_session"] == "auto-coordinator"
+
+
+def test_a_question_carries_the_text_it_replies_to():
+    """A heading names the thing being replied to and does not say what it
+    said. "(re: Now)" reached a coordinator with no indication of WHICH status
+    report was being answered. Sending the slug was the first version of this
+    fault and sending the heading was the second."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    pillar = db.create_pillar(mission_id, "Crypto", "auto-crypto", "#818cf8")
+    visitor = _visitor(client)
+    said = "Mapped out the secrets vault and found the storage lockbox unbuilt."
+
+    with patch.object(mc_api, "_relay_question", new_callable=AsyncMock):
+        q = _run(mc_api.handle_relay_write(
+            visitor["participant_id"], mission_id,
+            {"kind": "question", "question": "Which lockbox?",
+             "pillar_id": pillar["pillar_id"],
+             "anchor": "scoping-vault", "anchor_title": "Now",
+             "anchor_excerpt": said},
+        ))["question"]
+    assert q["anchor_excerpt"] == said
+
+    sent = {}
+
+    async def fake(target, body, **kw):
+        sent[target] = body
+        return True
+
+    with patch("tools.dashboard.tmux_send.tmux_send", new=fake):
+        _run(mc_api._relay_question(mission_id=mission_id, entry_id=q["entry_id"]))
+
+    envelope = sent["auto-crypto"]
+    assert "In reply to:" in envelope, "the coordinator cannot tell what is being answered"
+    assert said in envelope

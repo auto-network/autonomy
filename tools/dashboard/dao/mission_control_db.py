@@ -296,6 +296,15 @@ def _get_conn(db_path: Path | str | None = None) -> sqlite3.Connection:
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE mission_conversation ADD COLUMN anchor_title TEXT")
         conn.commit()
+    # WHAT PRECIPITATED THE QUESTION. A heading names the thing being replied
+    # to; it does not say what it said. "(re: Now)" reaches a coordinator with
+    # no indication of WHICH status report is being answered, which is the
+    # same fault as sending the anchor slug and one level less abstract.
+    try:
+        conn.execute("SELECT anchor_excerpt FROM mission_conversation LIMIT 0")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE mission_conversation ADD COLUMN anchor_excerpt TEXT")
+        conn.commit()
     # A CONVERSATION, NOT A PAIR. A reply is not presumed to be the answer:
     # the first one is very often a question of its own or a partial, and
     # treating it as final ends an exchange that had barely started. So an
@@ -1062,6 +1071,7 @@ def ask_question(
     pillar_id: str | None = None,
     anchor: str | None = None,
     anchor_title: str | None = None,
+    anchor_excerpt: str | None = None,
     db_path: Path | str | None = None,
 ) -> dict | None:
     """Record a message -- no `kind` (question/proposal/comment): a message
@@ -1097,10 +1107,11 @@ def ask_question(
             "INSERT INTO mission_conversation"
             " (entry_id, mission_id, question, asked_by_participant_id,"
             "  asked_by_label, answer, answered_by_session, answered_at,"
-            "  relay_status, created_at, pillar_id, anchor, anchor_title)"
-            " VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 'pending', ?, ?, ?, ?)",
+            "  relay_status, created_at, pillar_id, anchor, anchor_title,"
+            "  anchor_excerpt)"
+            " VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, 'pending', ?, ?, ?, ?, ?)",
             (entry_id, mission_id, question, participant_id, participant_label,
-             created_at, pillar_id, anchor, anchor_title),
+             created_at, pillar_id, anchor, anchor_title, anchor_excerpt),
         )
         conn.commit()
     finally:
@@ -1111,6 +1122,7 @@ def ask_question(
         "pillar_id": pillar_id,
         "anchor": anchor,
         "anchor_title": anchor_title,
+        "anchor_excerpt": anchor_excerpt,
         "question": question,
         "asked_by_participant_id": participant_id,
         "asked_by_label": participant_label,

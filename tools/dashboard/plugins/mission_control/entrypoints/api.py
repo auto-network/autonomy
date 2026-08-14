@@ -1011,6 +1011,9 @@ def _question_payload(entry: dict) -> dict:
         # The heading the anchor sits under, in the screen author's own words.
         # The slug is a name for the code; this is the one a reader recognises.
         "anchor_title": entry.get("anchor_title"),
+        # The text the question was asked ABOUT -- the status report, the
+        # decision, whatever the screen said that prompted it.
+        "anchor_excerpt": entry.get("anchor_excerpt"),
         "question": entry["question"],
         "asked_by_participant_id": entry["asked_by_participant_id"],
         "asked_by_label": entry["asked_by_label"],
@@ -1109,6 +1112,15 @@ async def _relay_question(*, mission_id: str, entry_id: str) -> None:
             f"the earlier rounds (\"as I mentioned\", \"following up on\") -- "
             f"the guest only ever sees this one final answer, never the history."
         )
+    # WHAT THEY ARE REPLYING TO, VERBATIM. "(re: Now)" told a coordinator which
+    # heading was involved and nothing about which status report was being
+    # answered. Sending the slug was the first version of this fault; sending
+    # the heading was the second. The text is the answer to it -- a reply is
+    # unreadable without the thing it replies to.
+    about_block = (
+        f"\n\nIn reply to:\n> {entry['anchor_excerpt']}"
+        if entry.get("anchor_excerpt") else ""
+    )
     primary_envelope = build_envelope(
         from_id=primary_from_id,
         kind="mission-question",
@@ -1123,7 +1135,8 @@ async def _relay_question(*, mission_id: str, entry_id: str) -> None:
         # answering live there; what belongs here is who asked, about what,
         # what they said, and where to reply.
         body=(
-            f"{entry['asked_by_label']} on \"{primary_label}\"{anchor_note}:\n\n"
+            f"{entry['asked_by_label']} on \"{primary_label}\"{anchor_note}:"
+            f"{about_block}\n\n"
             f"{entry['question']}"
             f"{context_block}\n\n"
             f"Answer only when it is right; post progress meanwhile.\n"
@@ -1153,7 +1166,8 @@ async def _relay_question(*, mission_id: str, entry_id: str) -> None:
             },
             body=(
                 f"Copied for tracking -- no reply expected from you. New message on "
-                f"\"{primary_label}\"{anchor_note} from {entry['asked_by_label']}:\n\n"
+                f"\"{primary_label}\"{anchor_note} from {entry['asked_by_label']}:"
+                f"{about_block}\n\n"
                 f"{entry['question']}"
                 f"{context_block}\n\n"
                 f"\"{primary_label}\"'s own session ({primary_session}) is expected to reply."
@@ -1228,6 +1242,9 @@ async def handle_relay_write(participant_id: str, mission_id: str, body: dict) -
         anchor_title = body.get("anchor_title")
         anchor_title = (anchor_title or "").strip() or None if isinstance(
             anchor_title, str) else None
+        anchor_excerpt = body.get("anchor_excerpt")
+        anchor_excerpt = (anchor_excerpt or "").strip() or None if isinstance(
+            anchor_excerpt, str) else None
         pillar_id = body.get("pillar_id")
         if pillar_id is not None:
             if not isinstance(pillar_id, str):
@@ -1245,6 +1262,7 @@ async def handle_relay_write(participant_id: str, mission_id: str, body: dict) -
         entry = db.ask_question(
             mission_id, question, participant_id, participant_label,
             pillar_id=pillar_id, anchor=anchor, anchor_title=anchor_title,
+            anchor_excerpt=anchor_excerpt,
         )
         event = "asked"
     elif kind == "reopen":
@@ -1450,6 +1468,7 @@ async def _ask_question_impl(
         return JSONResponse({"error": "question is required"}, status_code=400)
     anchor = (body.get("anchor") or "").strip() or None
     anchor_title = (body.get("anchor_title") or "").strip() or None
+    anchor_excerpt = (body.get("anchor_excerpt") or "").strip() or None
 
     visitor = _resolve_visitor_identity(request)
     if not visitor:
@@ -1461,6 +1480,7 @@ async def _ask_question_impl(
     entry = db.ask_question(
         mission_id, question, visitor["participant_id"], visitor["participant_label"],
         pillar_id=pillar_id, anchor=anchor, anchor_title=anchor_title,
+        anchor_excerpt=anchor_excerpt,
     )
     if entry is None:
         return JSONResponse({"error": "not found"}, status_code=404)

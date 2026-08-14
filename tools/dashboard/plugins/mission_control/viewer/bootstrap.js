@@ -174,7 +174,8 @@
       url = (body.pillar_id ? "/api/pillars/" + body.pillar_id
                             : "/api/missions/" + mid) + "/questions";
       payload = {question: body.question, anchor: body.anchor || null,
-                 anchor_title: body.anchor_title || null};
+                 anchor_title: body.anchor_title || null,
+                 anchor_excerpt: body.anchor_excerpt || null};
     } else if (op === "write" && kind === "answer") {
       url = ownerPath(body.entry_id) + "/questions/" + body.entry_id + "/answer";
       payload = {answer: body.answer};
@@ -773,6 +774,23 @@
     return (p && p.coordinator_session) || state.coordinator_session || "";
   }
 
+  //: ATTACHMENTS SURVIVE A REDRAW. render() rebuilds the whole chrome, and it
+  //: runs on every live event and on the presence heartbeat -- so a strip of
+  //: thumbnails held inside the composer was destroyed seconds after being
+  //: drawn, by something the reader did nothing to cause. Typing was already
+  //: carried across a redraw for exactly this reason; picking a file is the
+  //: same act and was not. Keyed by surface so switching screens does not
+  //: carry someone's files somewhere they did not attach them.
+  var pendingFiles = Object.create(null);
+
+  function pendingKey() {
+    return (ui.entry ? "e:" + ui.entry
+            : ui.anchor ? "a:" + ui.anchor
+            : ui.post ? "p:" + ui.post.post_id
+            : ui.panel ? "panel:" + ui.panel
+            : "screen") + "|" + (state.screen || "");
+  }
+
   function composer(placeholder, note, label, onSend) {
     var ta = el("textarea", {class: "mc-ta", rows: "2", placeholder: placeholder});
     // ---- attachments ------------------------------------------------------
@@ -780,7 +798,9 @@
     // in the background while the message is still being written. The send
     // waits on them, so a large picture delays the picture and never the
     // message.
-    var picked = [];
+    var slot = pendingKey();
+    if (!pendingFiles[slot]) pendingFiles[slot] = [];
+    var picked = pendingFiles[slot];
     var strip = el("div", {class: "mc-strip"});
     var target = uploadTarget();
 
@@ -835,6 +855,8 @@
           });
       });
     }
+
+    drawStrip();
 
     ta.addEventListener("paste", function (e) {
       var files = [];
@@ -891,8 +913,8 @@
           : text;
         status.textContent = "Sending\u2026";
         Promise.resolve(onSend(body)).then(function () {
-          ta.value = ""; picked = []; drawStrip(); grow();
-          status.textContent = note;
+          ta.value = ""; picked.length = 0; delete pendingFiles[slot];
+          drawStrip(); grow(); status.textContent = note;
         }, function (err) {
           // Never silent. A refused write used to reject a promise nobody
           // was listening to, so the tap did nothing and said nothing.
@@ -1070,6 +1092,13 @@
     if (q.anchor_title || q.anchor) {
       body.push(el("p", {class: "mc-sub", text: q.anchor_title || q.anchor}));
     }
+    // AND WHAT IT SAID. A question read back without the thing it replies to
+    // is half a conversation -- the reader has to go and find the screen, and
+    // the screen may have been rewritten since.
+    if (q.anchor_excerpt) {
+      body.push(el("p", {class: "mc-label mc-mt", text: "In reply to"}));
+      body.push(el("blockquote", {class: "mc-quote", text: q.anchor_excerpt}));
+    }
     // THE ROUNDS, IN ORDER. This showed a question, then a bare delivery
     // line, then a separate block of progress, then an answer -- four
     // sections that happened to be about the same exchange. What a reader
@@ -1172,7 +1201,8 @@
       el("div", {class: "mc-pbody"}, body),
       composer("Reply to " + (post.pillar_name || "this") + "\u2026",
                "goes to " + (post.pillar_name || "the pillar"), "Send",
-               function (t) { ask(t, ref, post.pillar_id, firstLine(post.text)); }),
+               function (t) { ask(t, ref, post.pillar_id, firstLine(post.text),
+                                  post.text); }),
     ]);
   }
 
@@ -1197,7 +1227,13 @@
       var namedBy = (control && control.about)
         || (here[0] && here[0].anchor_title) || ui.anchor;
       body = [el("p", {class: "mc-label", text: "about"}),
-              el("p", {class: "mc-qbig mc-mb", text: namedBy})];
+              el("p", {class: "mc-qbig", text: namedBy})];
+      // The thing being replied to, on the screen where the reply is written.
+      // Without it this panel names a heading and shows the conversation,
+      // while the paragraph that prompted it sits behind the panel.
+      var said = (control && control.excerpt)
+        || (here[0] && here[0].anchor_excerpt) || "";
+      if (said) body.push(el("blockquote", {class: "mc-quote mc-mb", text: said}));
     }
     // "Nothing discussed here yet" is false on a screen that is asking you
     // something -- the question is right there above it.
@@ -1236,7 +1272,7 @@
   // share link was refused, while the same call worked at a real URL because
   // httpRequest happened to translate it. Both ends were tested; the seam
   // between them was not. Keeping one vocabulary is what removes the seam.
-  function ask(text, anchor, pillarId, about) {
+  function ask(text, anchor, pillarId, about, excerpt) {
     var body = {kind: "question", question: text};
     // THE HEADING TRAVELS WITH IT. The page knows what an anchor sits under;
     // until it sent that, the only context reaching a coordinator was the
@@ -1246,6 +1282,8 @@
     var ctl = anchorControls.filter(function (x) { return x.ref === anchor; })[0];
     var title = about || (ctl && ctl.about) || "";
     if (title) body.anchor_title = title;
+    var said = (ctl && ctl.excerpt) || excerpt || "";
+    if (said) body.anchor_excerpt = said;
     // THE POST'S PILLAR, NOT THE SCREEN'S. A reply to something in the feed
     // goes to whoever wrote it, which is usually not the screen being read --
     // defaulting to the current one would deliver it to the wrong coordinator
@@ -1475,6 +1513,15 @@
   // or the nearest one above it. The panel headed itself with the raw anchor
   // id -- "decision:dispatch-vs-local" -- which is a name for me, not for the
   // person being asked to answer.
+  //: What an anchored element says, without the chrome mounted inside it and
+  //: capped so a whole screen cannot ride along on one question.
+  function textOf(target) {
+    var clone = target.cloneNode(true);
+    clone.querySelectorAll("[data-mc-control]").forEach(function (n) { n.remove(); });
+    var text = (clone.textContent || "").replace(/\s+/g, " ").trim();
+    return text.length > 600 ? text.slice(0, 597) + "\u2026" : text;
+  }
+
   function headingFor(target) {
     var own = target.querySelector("h1,h2,h3,h4,h5,h6");
     if (own && own.textContent.trim()) return own.textContent.trim();
@@ -1532,6 +1579,12 @@
       // The nearest heading, so a panel can name what it is about instead of
       // showing the internal id, which means nothing to the person reading.
       var about = headingFor(target);
+      // AND WHAT IT SAYS. A heading names the thing; the reader is replying
+      // to its CONTENT. Answering a status report or a decision on a screen
+      // meant looking at a panel headed "Now" with no sight of the paragraph
+      // that prompted it -- and the question, once asked, carried no trace of
+      // what it was about either.
+      var excerpt = textOf(target);
       var holder = document.createElement("span");
       holder.setAttribute("data-mc-control", "");
       var r = holder.attachShadow({mode: "closed"});
@@ -1540,7 +1593,8 @@
         class: "mc-anchor-btn", title: asks ? "Answer this" : "Discuss",
         onclick: function () { show({anchor: ref}); },
       });
-      var control = {ref: ref, btn: btn, asks: asks, about: about};
+      var control = {ref: ref, btn: btn, asks: asks, about: about,
+                     excerpt: excerpt};
       anchorControls.push(control);
       paintAnchor(control);
       r.appendChild(btn);
