@@ -728,7 +728,7 @@
       // /api/session/resume, the same call the session-list Resume button
       // makes. _resumeMeta is fetched from /api/session/{name} on load and
       // carries the identity + resumability needed to fire it.
-      _resumeMeta: null,        // {resumable, sourceId, sessionUuid, filePath}
+      _resumeMeta: null,        // {resumable, sourceId, sessionUuid, filePath, orgSlug}
       resumeStarting: false,    // boot transition in flight (drives row-1 chip)
       resumeStartErr: '',       // transient error surfaced under the button
       _resumeStartTimer: null,  // polls lifecycle derivation until ready
@@ -937,11 +937,16 @@
         var body = m.sourceId
           ? { source_id: m.sourceId }
           : { session_uuid: m.sessionUuid, file_path: m.filePath };
+        // The session viewer is global, but graph-source resolution is
+        // caller-org scoped. Use the session's owning org rather than the
+        // dashboard shell's default org for cross-org resumes.
+        var resumeHeaders = { 'Content-Type': 'application/json' };
+        if (m.orgSlug) resumeHeaders['X-Graph-Org'] = m.orgSlug;
 
         try {
           var res = await fetch('/api/session/resume', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: resumeHeaders,
             body: JSON.stringify(body),
           });
           if (!res.ok) {
@@ -994,7 +999,8 @@
           // Button is now gated off (isLive true); resumeStarting drives the
           // row-1 boot chip until the harness reports ready.
           this._resumeMeta = { resumable: false, sourceId: m.sourceId,
-            sessionUuid: m.sessionUuid, filePath: m.filePath };
+            sessionUuid: m.sessionUuid, filePath: m.filePath,
+            orgSlug: m.orgSlug };
 
           window.ensureSessionMessages();
           this._setupWatchers();
@@ -1173,6 +1179,7 @@
                 sourceId: data.graph_source_id || '',
                 sessionUuid: data.session_uuid || '',
                 filePath: data.file_path || '',
+                orgSlug: (data.org && data.org.slug) || '',
               };
             })
             .catch(function() {});
