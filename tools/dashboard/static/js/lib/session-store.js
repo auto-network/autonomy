@@ -111,7 +111,12 @@ document.addEventListener('alpine:init', function() {
         if (s.last_activity) store.lastActivity = s.last_activity;
         if (s.entry_count) store.entryCount = s.entry_count;
         if (s.context_tokens) store.contextTokens = s.context_tokens;
-        if (s.last_message !== undefined) store.lastMessage = s.last_message;
+        // An EMPTY last_message never replaces a real one. A completed Codex
+        // turn ends with codex_task_complete (internal, content null), so a
+        // blanket `!== undefined` blanked the card preview every time a turn
+        // finished. Matches the truthiness guards on last_activity /
+        // entry_count / context_tokens directly above.
+        if (s.last_message) store.lastMessage = s.last_message;
         if (s.topics) store.topics = s.topics;
         if (Array.isArray(s.todos)) store.todos = s.todos;
         if (s.nag_enabled !== undefined) store.nagEnabled = !!s.nag_enabled;
@@ -974,7 +979,12 @@ window.ensureSessionMessages = function() {
       store.isLive = s.is_live;
       store.startedAt = s.started_at || 0;
       if (s.last_activity) store.lastActivity = s.last_activity;
-      if (s.last_message !== undefined) store.lastMessage = s.last_message;
+      // An EMPTY last_message never replaces a real one. A completed Codex
+        // turn ends with codex_task_complete (internal, content null), so a
+        // blanket `!== undefined` blanked the card preview every time a turn
+        // finished. Matches the truthiness guards on last_activity /
+        // entry_count / context_tokens directly above.
+        if (s.last_message) store.lastMessage = s.last_message;
       if (s.activity_state !== undefined) store.activityState = s.activity_state;
       if (s.org) store.org = s.org;
       store.resolved = !!s.resolved;
