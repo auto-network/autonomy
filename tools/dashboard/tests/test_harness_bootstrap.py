@@ -168,8 +168,15 @@ def test_first_launch_gates_to_bootstrap(test_client, monkeypatch):
 
 
 def test_verified_harness_does_not_block(test_client, monkeypatch):
-    """A verified harness → GET / falls through to the session UI."""
+    """A verified harness → GET / falls through past the bootstrap layer.
+
+    The empty-state Welcome gate (bead auto-inpkd) sits one layer below the
+    harness gate; neutralise it here so this test isolates the Layer-0
+    fall-through rather than the onboarding shell it would otherwise reach.
+    """
+    from tools.dashboard import server
     monkeypatch.setattr(hb, "has_verified_harness", lambda: True)
+    monkeypatch.setattr(server, "_welcome_gate_open", lambda: False)
     r = test_client.get("/", follow_redirects=False)
     assert r.status_code in (302, 307)
     assert r.headers["location"] == "/beads"
