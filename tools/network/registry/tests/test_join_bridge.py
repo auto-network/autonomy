@@ -151,6 +151,36 @@ class TestOrgSelfDescription:
         for bad in ("remote", "local", "script", "junk"):
             assert out[bad] is None, bad
 
+    def test_color_guard_accepts_only_bare_hex(self):
+        # org_color themes the header border and nothing else; anything but
+        # a six-digit hex literal is discarded (no CSS injection surface).
+        import json as _json
+        import shutil as _shutil
+        import subprocess as _subprocess
+
+        if _shutil.which("node") is None:
+            import pytest as _pytest
+            _pytest.skip("node not on PATH")
+        module = str(BOOTLOADER_DIR / "join.js")
+        script = (
+            f"const api = require({_json.dumps(module)});"
+            "const cases = {"
+            "  good: api.safeColor('#5b3aa6'),"
+            "  short: api.safeColor('#fff'),"
+            "  css: api.safeColor('red; background:url(//evil)'),"
+            "  func: api.safeColor('rgb(1,2,3)'),"
+            "  junk: api.safeColor(42),"
+            "};"
+            "process.stdout.write(JSON.stringify(cases));"
+        )
+        result = _subprocess.run(["node", "-e", script],
+                                 capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        out = _json.loads(result.stdout)
+        assert out["good"] == "#5b3aa6"
+        for bad in ("short", "css", "func", "junk"):
+            assert out[bad] is None, bad
+
     def test_autonet_boots_only_on_share_links(self):
         # The bridge loads autonet.js for its channel primitives; the /l/
         # flow must not auto-boot there (it would render its error state
