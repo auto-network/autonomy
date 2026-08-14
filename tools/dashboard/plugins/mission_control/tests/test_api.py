@@ -406,6 +406,14 @@ def _mission_with_site(client) -> str:
 def _visitor(client) -> dict:
     return client.post("/api/visitor-tokens", json={"display_name": "Alex"}).json()["visitor"]
 
+def _close(client, scope: str, entry_id: str) -> None:
+    """Reopen means un-closing a CLOSED entry. Answering no longer closes
+    anything -- a reply is not presumed to be the end of the exchange -- so a
+    flow that wants a reopenable entry has to close it first."""
+    client.post(f"/api/{scope}/questions/{entry_id}/close")
+
+
+
 
 @patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock)
 def test_ask_question_via_as_query_param(mock_send):
@@ -1208,6 +1216,7 @@ def test_reopen_question_mission_level():
             f"/api/missions/{mission_id}/questions/{asked['entry_id']}/answer",
             json={"answer": "first answer"},
         )
+        _close(client, f"missions/{mission_id}", asked["entry_id"])
         resp = client.post(
             f"/api/missions/{mission_id}/questions/{asked['entry_id']}/reopen?as={visitor['token']}",
             json={"followup": "not quite -- what about X?"},
@@ -1237,6 +1246,7 @@ def test_reopen_question_relays_again_with_prior_context(mock_send):
     )
     mock_send.reset_mock()
 
+    _close(client, f"missions/{mission_id}", asked["entry_id"])
     client.post(
         f"/api/missions/{mission_id}/questions/{asked['entry_id']}/reopen?as={visitor['token']}",
         json={"followup": "not quite -- what about X?"},
@@ -1265,6 +1275,7 @@ def test_reopen_question_requires_followup_text():
             f"/api/missions/{mission_id}/questions/{asked['entry_id']}/answer",
             json={"answer": "first answer"},
         )
+        _close(client, f"missions/{mission_id}", asked["entry_id"])
         resp = client.post(
             f"/api/missions/{mission_id}/questions/{asked['entry_id']}/reopen?as={visitor['token']}",
             json={},
@@ -1287,6 +1298,7 @@ def test_reopen_question_requires_visitor_identity():
             f"/api/missions/{mission_id}/questions/{asked['entry_id']}/answer",
             json={"answer": "first answer"},
         )
+        _close(client, f"missions/{mission_id}", asked["entry_id"])
         resp = client.post(
             f"/api/missions/{mission_id}/questions/{asked['entry_id']}/reopen",
             json={"followup": "not quite"},
@@ -1294,7 +1306,7 @@ def test_reopen_question_requires_visitor_identity():
     assert resp.status_code == 401
 
 
-def test_reopen_question_not_yet_answered_returns_404():
+def test_reopening_a_live_conversation_is_refused():
     client = _client()
     mission_id = client.post(
         "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
@@ -1305,6 +1317,8 @@ def test_reopen_question_not_yet_answered_returns_404():
             f"/api/missions/{mission_id}/questions?as={visitor['token']}",
             json={"question": "hi"},
         ).json()["question"]
+        # Nothing to reopen: it never closed. More to say goes in the
+        # conversation, which is what an open conversation is for.
         resp = client.post(
             f"/api/missions/{mission_id}/questions/{asked['entry_id']}/reopen?as={visitor['token']}",
             json={"followup": "still waiting"},
@@ -1336,6 +1350,7 @@ def test_reopen_pillar_question():
             f"/api/pillars/{pillar['pillar_id']}/questions/{asked['entry_id']}/answer",
             json={"answer": "first answer"},
         )
+        _close(client, f"pillars/{pillar['pillar_id']}", asked["entry_id"])
         resp = client.post(
             f"/api/pillars/{pillar['pillar_id']}/questions/{asked['entry_id']}/reopen?as={visitor['token']}",
             json={"followup": "still unclear"},
@@ -1371,6 +1386,7 @@ def test_reopen_then_reanswer_carries_one_answer_and_the_whole_exchange():
             f"/api/missions/{mission_id}/questions/{asked['entry_id']}/answer",
             json={"answer": "first answer"},
         )
+        _close(client, f"missions/{mission_id}", asked["entry_id"])
         client.post(
             f"/api/missions/{mission_id}/questions/{asked['entry_id']}/reopen?as={visitor['token']}",
             json={"followup": "not quite -- what about X?"},
@@ -1501,6 +1517,7 @@ def test_reopen_question_publishes_conversation_event():
 
         queue = mc_api.event_bus.subscribe()
         try:
+            _close(client, f"missions/{mission_id}", asked["entry_id"])
             client.post(
                 f"/api/missions/{mission_id}/questions/{asked['entry_id']}/reopen?as={visitor['token']}",
                 json={"followup": "not quite"},
@@ -1587,6 +1604,7 @@ def test_handle_relay_write_reopens_a_question():
         f"/api/missions/{mission_id}/questions/{asked['entry_id']}/answer",
         json={"answer": "done"},
     )
+    _close(client, f"missions/{mission_id}", asked["entry_id"])
 
     with patch.object(mc_api, "_relay_question", new_callable=AsyncMock):
         result = _run(mc_api.handle_relay_write(
@@ -2261,8 +2279,11 @@ def test_asking_lands_on_the_new_entry_rather_than_closing_everything():
 # answered himself.
 
 
-def test_answering_still_closes_in_one_act():
-    """The normal path costs the coordinator no extra step."""
+def test_answering_does_not_end_the_conversation():
+    """A reply is not presumed to be the end of it. The person who asked may
+    have more to say, and very often the first thing back is a question of
+    their own. A screen's question stops being asked when the screen stops
+    asking it; a person's, when they close it."""
     client = _client()
     mission_id = _mission_with_site(client)
     visitor = _visitor(client)
@@ -2277,7 +2298,7 @@ def test_answering_still_closes_in_one_act():
     assert r.status_code == 200
     q = r.json()["question"]
     assert q["answer"] == "because"
-    assert q["closed_at"] is not None
+    assert q["closed_at"] is None, "answering ended the conversation"
 
 
 def test_the_asker_adding_to_their_own_question_does_not_close_it():
@@ -2477,7 +2498,8 @@ def test_a_screens_question_lands_asked_by_the_screen_and_answered_by_you():
     assert q["asked_by_participant_id"] == f"pillar:{pillar['pillar_id']}"
     assert q["answered_by_session"] == "Jeremy Spilman", "the operator is not the answerer"
     assert q["answer"] == "On -- the guidance changed."
-    assert q["closed_at"] is not None
+    # A screen's question is cleared by the screen, not by being answered.
+    assert q["closed_at"] is None
     assert q["anchor"] == "decision:dispatch"
 
 

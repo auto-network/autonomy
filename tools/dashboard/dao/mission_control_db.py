@@ -1397,20 +1397,23 @@ def answer_question(
     history must record the real answerer, not whatever the mission row
     says later.
 
-    Answering closes the entry in the same act. That is the normal path and
-    costs the coordinator no extra step; what is now possible, and was not,
-    is the entry being closed WITHOUT this -- see close_question.
+    ANSWERING DOES NOT CLOSE ANYTHING. A reply is not presumed to be the end
+    of the exchange: the person who asked may have more to say, and very often
+    the first thing back is a question of its own. What is stored here is the
+    current answer, which a later round can replace.
+
+    A question asked by a screen stops being asked when the screen stops
+    asking it -- the pillar removes it and pushes. One asked by a person ends
+    when they close it (see close_question). Neither of those is this.
     """
     answered_at = time.time()
     conn = _get_conn(db_path)
     try:
         cur = conn.execute(
             "UPDATE mission_conversation"
-            " SET answer = ?, answered_by_session = ?, answered_at = ?,"
-            "     closed_at = ?, closed_by = ?"
+            " SET answer = ?, answered_by_session = ?, answered_at = ?"
             " WHERE mission_id = ? AND entry_id = ?",
-            (answer, answered_by_session, answered_at, answered_at,
-             answered_by_session, mission_id, entry_id),
+            (answer, answered_by_session, answered_at, mission_id, entry_id),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -1869,6 +1872,14 @@ def list_coordinators_with_open_questions(
             LEFT JOIN pillars p ON mc.pillar_id = p.pillar_id
             LEFT JOIN missions m ON mc.pillar_id IS NULL AND mc.mission_id = m.mission_id
             WHERE mc.closed_at IS NULL AND mc.retired_at IS NULL
+              -- STILL OWED, not merely still open. A conversation stays open
+              -- after it is answered, because a reply is not presumed to be
+              -- the end of it. The reminder asks whether YOU still owe a
+              -- reply, which is a different question from whether the
+              -- exchange is finished -- conflating the two is what would
+              -- nag a coordinator forever about a conversation they have
+              -- already spoken in.
+              AND mc.answer IS NULL
               -- NEVER NAG SOMEONE ABOUT THEIR OWN QUESTION. Every open entry
               -- used to be one a guest asked and a coordinator owed, so
               -- mapping an entry to its coordinator was the same as mapping it
