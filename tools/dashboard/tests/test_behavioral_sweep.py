@@ -41,6 +41,7 @@ from tools.dashboard.test_lib.l2b_harness import (
     _run_async_eval,
     close_browser,
     open_browser,
+    rotate_browser_session,
     start_mock_server,
     stop_mock_server,
 )
@@ -2194,7 +2195,15 @@ def _hard_reset_sweep(sweep_server: dict) -> None:
     sweep_server.clear()
     sweep_server.update(new_state)
 
-    open_browser(sweep_server["url"] + "/sessions")
+    try:
+        open_browser(sweep_server["url"] + "/sessions")
+    except subprocess.TimeoutExpired:
+        # The daemon itself is too degraded to serve a reopen inside the
+        # timeout — restarting the SESSION cannot help, only a fresh
+        # daemon can (auto-s3him). Rotate and reopen once; a second
+        # timeout on a brand-new daemon is a real failure worth seeing.
+        rotate_browser_session()
+        open_browser(sweep_server["url"] + "/sessions")
 
     # Match the module-scoped browser fixture: seed the dispatch +
     # nav SSE topics so the new page's ``_sseCache`` has the same
@@ -14313,7 +14322,8 @@ class TestNetworkSignOn:
         (
             ("async function _loadFromStore()", "async function _installSession("),
             ("async function _installSession(record)", "// ── ceremonies"),
-            ("async function signOn(passphrase, opts)", "// Provision the org's"),
+            ("async function signOn(passphrase, opts)",
+             "async function provisionServeCert(passphrase, opts)"),
             ("async function signRegistryRequest(method, path, payload)",
              "// Expiry watchdog:"),
         ),
@@ -14325,7 +14335,16 @@ class TestNetworkSignOn:
             Path(__file__).parents[1]
             / "static" / "js" / "network-signon.mjs"
         ).read_text()
-        body = source.split(function_start, 1)[1].split(function_end, 1)[0]
+        # A missing marker must fail LOUD: str.split on an absent
+        # separator silently returns the whole remainder, which once
+        # swept every function after signOn into signOn's slice and
+        # blamed it for a bare fetch() in a different function.
+        assert function_start in source, (
+            f"slice start marker no longer in module: {function_start!r}")
+        after = source.split(function_start, 1)[1]
+        assert function_end in after, (
+            f"slice end marker no longer in module: {function_end!r}")
+        body = after.split(function_end, 1)[0]
         forbidden = re.compile(
             r"\b(?:indexedDB|localStorage)\b|_idbOp|"
             r"_browserSubjectId\s*\(|(?<![\w.])fetch\s*\("
