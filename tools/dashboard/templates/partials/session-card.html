@@ -368,7 +368,10 @@
       <template x-if="showTmuxColumn(s) || !s.is_live">
         <div class="sc-footer-item">
           <span class="sc-footer-label">tmux</span>
-          <span class="sc-footer-value" x-text="s.tmux_session || '—'"></span>
+          <!-- dispatch/librarian tmux names are synthetic internals
+               (agent-auto-*, librarian-auto-*): the fixed grid keeps the
+               column, the cell stays blank for them. -->
+          <span class="sc-footer-value" x-text="(s.session_type === 'dispatch' || s.session_type === 'librarian') ? '—' : (s.tmux_session || '—')"></span>
         </div>
       </template>
       <template x-if="s.org">
