@@ -52,6 +52,7 @@ from .events import (
     KEM_CREDENTIAL_DOMAIN,
     approval_signing_input,
     rotate_continuity_input,
+    rekey_continuity_input,
 )
 from .ledger import Ledger
 from .scopes import UNIVERSE, attenuates, covered_subset, set_covers
@@ -778,6 +779,18 @@ class _Folder:
         taken.update(rec[2] for rec in members.values())
         if p["new_pub"] in taken:
             return R_PERSONA_EXISTS
+        # The new key must prove it controls the rotation — like key.rotate,
+        # but over member.rekey's OWN domain and bound to the persona — so a
+        # rekey can never strand the persona on a key nobody holds, and a
+        # key.rotate proof can never be replayed here (or vice versa) (x97iz).
+        try:
+            verify_signature(
+                p["new_pub"],
+                p["continuity"],
+                rekey_continuity_input(p["persona"], p["old_pub"], p["new_pub"]),
+            )
+        except IdkitError:
+            return R_BAD_CONTINUITY
         self.rekeys[event.event_id] = _Rekey(
             id=event.event_id,
             persona=p["persona"],

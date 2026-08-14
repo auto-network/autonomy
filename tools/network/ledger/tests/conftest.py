@@ -22,6 +22,7 @@ from tools.network.ledger import (
     make_event,
     sign_approval,
     sign_rotate_continuity,
+    sign_rekey_continuity,
 )
 
 ORG = "33333333-3333-4333-8333-333333333333"
@@ -155,12 +156,16 @@ class Sim:
         payload["approvals"] = sorted(approvals, key=lambda e: e["key"])
         return self.emit(signer, payload, parents=parents, ts=ts)
 
-    def rekey(self, signer, persona, old, new, approvers=(), parents=None):
+    def rekey(self, signer, persona, old, new, approvers=(),
+              continuity=None, parents=None):
         payload = {
             "type": "member.rekey",
             "persona": key(persona),
             "old_pub": key(old),
             "new_pub": key(new),
+            "continuity": continuity
+            if continuity is not None
+            else sign_rekey_continuity(new, key(persona), key(old)),
             "approvals": [],
         }
         approvals = [sign_approval(a, "member.rekey", payload) for a in approvers]
