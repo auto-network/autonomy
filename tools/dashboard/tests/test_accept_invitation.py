@@ -22,6 +22,12 @@ ACCEPT_JS = (DASHBOARD / "static" / "js" / "accept-invitation.js").read_text(
 INDICATOR_JS = (
     DASHBOARD / "static" / "js" / "identity-indicator.js"
 ).read_text(encoding="utf-8")
+JOIN_JS = (DASHBOARD / "static" / "js" / "network-join.js").read_text(
+    encoding="utf-8"
+)
+JOIN_HTML = (DASHBOARD / "templates" / "network-join.html").read_text(
+    encoding="utf-8"
+)
 BASE_HTML = (DASHBOARD / "templates" / "base.html").read_text(encoding="utf-8")
 
 TOKEN = "7f" * 16
@@ -52,6 +58,40 @@ class TestStructuralAbsences:
         # the flow's one input.
         assert 'type="password"' not in INDICATOR_JS.lower()
         assert "input.type" not in INDICATOR_JS
+
+
+class TestBearerNeverEgresses:
+    """auto-yw5gz: the page holds the bearer and resolves on its own origin
+    with transport credentials only. These grep-level checks pin that the
+    bearer is never placed in the one request the page makes."""
+
+    def test_resolve_body_is_transport_credentials_only(self):
+        # The single fetch body carries relay_host + channel_token (and, for a
+        # handoff, the public org/root_pub/invite_ref). It must never carry the
+        # bearer under any name.
+        i = JOIN_JS.index("JSON.stringify(body)")
+        # The request body object is assembled just above the fetch.
+        assembly = JOIN_JS[JOIN_JS.index("var body = {"):i]
+        for forbidden in ("bearer", "heldBearer", "parsed.bearer", '"t"', "'t'"):
+            assert forbidden not in assembly, forbidden
+
+    def test_the_bearer_is_held_never_stored(self):
+        # Held in a closure for the ceremony; never persisted anywhere audited.
+        assert "heldBearer" in JOIN_JS
+        for forbidden in ("localstorage", "sessionstorage", "indexeddb",
+                          "document.cookie"):
+            assert forbidden not in JOIN_JS.lower(), forbidden
+
+    def test_the_one_endpoint_is_the_local_resolve(self):
+        # Same-origin path; no relay/registry origin is ever fetched by the page.
+        assert "/api/network/invite/resolve" in JOIN_JS
+        assert "auto.network" not in JOIN_JS  # never a cross-origin fetch
+
+    def test_org_step_stays_button_free(self):
+        # No Accept until the ceremony lands (auto-9rw91).
+        org = JOIN_HTML[JOIN_HTML.index('id="step-org"'):
+                        JOIN_HTML.index('id="step-broken"')]
+        assert "<button" not in org.lower()
 
 
 class TestMount:
@@ -85,12 +125,23 @@ class TestParseBehavior:
         assert result.returncode == 0, result.stderr
         return json.loads(result.stdout)
 
-    def test_share_link_routes_to_the_pasted_url_verbatim(self):
+    def test_share_link_parses_to_transport_credentials_for_local_resolve(self):
+        # auto-yw5gz: a /l/ share link no longer navigates to the relay
+        # bridge. It parses to the transport credentials (relay origin +
+        # channel token) plus the bearer, which the caller HOLDS — the
+        # dashboard resolves the link on its own origin. No destination: the
+        # navigation-to-relay is gone.
         out = self._run(
             "process.stdout.write(JSON.stringify("
             f"api.parseInvitationLink({json.dumps(SHARE)})))"
         )
-        assert out == {"kind": "bridge", "destination": SHARE}
+        assert out == {
+            "kind": "bridge",
+            "relayHost": "https://auto.network",
+            "channelToken": TOKEN,
+            "bearer": "bearer secret",
+        }
+        assert "destination" not in out  # the relay bounce is gone
 
     def test_handoff_routes_locally_with_query_and_fragment_preserved(self):
         out = self._run(
@@ -123,10 +174,33 @@ class TestParseBehavior:
             assert expected in out["r"]["reason"], pasted
             assert out["calls"] == [], f"navigated on invalid paste: {pasted}"
 
-    def test_navigation_fires_only_on_success(self):
+    def test_handoff_navigates_but_a_share_link_resolves_in_place(self):
+        # A handoff link navigates (fragment survives the hop). A share link
+        # never navigates — it is handed to the resolve handler with its
+        # transport credentials, so the bearer stays in the browser.
         out = self._run(
-            "const calls=[];"
-            f"api.acceptPastedLink({json.dumps(SHARE)},(d)=>calls.push(d));"
-            "process.stdout.write(JSON.stringify(calls))"
+            "const nav=[],res=[];"
+            f"api.acceptPastedLink({json.dumps(HANDOFF)},"
+            "{navigate:(d)=>nav.push(d),resolve:(r)=>res.push(r)});"
+            f"api.acceptPastedLink({json.dumps(SHARE)},"
+            "{navigate:(d)=>nav.push(d),resolve:(r)=>res.push(r)});"
+            "process.stdout.write(JSON.stringify({nav, res}))"
         )
-        assert out == [SHARE]
+        assert len(out["nav"]) == 1
+        assert out["nav"][0].startswith("/network/join?org=")
+        assert out["res"] == [{
+            "kind": "bridge",
+            "relayHost": "https://auto.network",
+            "channelToken": TOKEN,
+            "bearer": "bearer secret",
+        }]
+
+    def test_a_share_link_without_a_resolve_handler_stays_put(self):
+        # Default dispatch has no resolve handler, so a share link parses but
+        # is NOT acted on — the bearer never escapes by accident.
+        out = self._run(
+            "const nav=[];"
+            f"const r=api.acceptPastedLink({json.dumps(SHARE)},(d)=>nav.push(d));"
+            "process.stdout.write(JSON.stringify({kind:r.kind, nav}))"
+        )
+        assert out == {"kind": "bridge", "nav": []}
