@@ -1532,3 +1532,135 @@ def test_beads_credential_key_is_masked(
     specs = _mount_specs(captured_run[0])
     assert f"{session_launcher.REPO_ROOT / '.beads'}:/data/.beads" in specs
     assert "/dev/null:/data/.beads/.beads-credential-key:ro" in specs
+
+
+# ── Codex credential cutover (bead auto-l1h3f) ───────────────────────
+
+def _codex_row(key, payload):
+    from types import SimpleNamespace
+    return SimpleNamespace(key=key, payload=payload)
+
+
+def _fresh_codex_payload(**over):
+    p = {
+        "email": "codexuser@example.com",
+        "auth_mode": "chatgpt",
+        "access_token": "at-1",
+        "refresh_token": "rt-1",
+        "id_token": "id-1",
+        "expires_at_ms": 4102444800000,
+        "last_refresh_at": "2026-08-14T00:00:00Z",
+    }
+    p.update(over)
+    return p
+
+
+def test_materialize_codex_auth_json_reconstructs_file(tmp_path, monkeypatch):
+    """The substrate row is rebuilt into the on-disk auth.json shape Codex expects."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    monkeypatch.setattr(
+        session_launcher, "_codex_credential_rows",
+        lambda: [_codex_row("acct-UUID", _fresh_codex_payload())],
+    )
+    out = session_launcher._materialize_codex_auth_json(run_dir)
+    assert out is not None
+    doc = json.loads(Path(out).read_text())
+    assert doc["auth_mode"] == "chatgpt"
+    assert doc["OPENAI_API_KEY"] is None
+    # account_id is the row KEY, not a payload field
+    assert doc["tokens"]["account_id"] == "acct-UUID"
+    assert doc["tokens"]["access_token"] == "at-1"
+    assert doc["tokens"]["refresh_token"] == "rt-1"
+    assert doc["tokens"]["id_token"] == "id-1"
+    assert doc["last_refresh"] == "2026-08-14T00:00:00Z"
+    # 0600 like the host file
+    assert (Path(out).stat().st_mode & 0o777) == 0o600
+
+
+def test_materialize_codex_auth_json_missing_row_returns_none(tmp_path, monkeypatch):
+    """No usable substrate row → no file → Codex simply unavailable (truthful)."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    monkeypatch.setattr(session_launcher, "_codex_credential_rows", lambda: [])
+    assert session_launcher._materialize_codex_auth_json(run_dir) is None
+
+
+def test_pick_codex_credential_row_prefers_freshest(monkeypatch):
+    older = _codex_row("a", _fresh_codex_payload(expires_at_ms=1000))
+    newer = _codex_row("b", _fresh_codex_payload(expires_at_ms=9000))
+    incomplete = _codex_row("c", {"auth_mode": "chatgpt"})  # no tokens
+    assert session_launcher._pick_codex_credential_row(
+        [older, newer, incomplete]) is newer
+    assert session_launcher._pick_codex_credential_row([incomplete]) is None
+
+
+def test_optional_tool_mounts_uses_substrate_not_host_auth_json(
+    tmp_path, monkeypatch,
+):
+    """The credential mount is the materialized substrate file, never ~/.codex/auth.json."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    monkeypatch.setattr(
+        session_launcher, "_codex_credential_rows",
+        lambda: [_codex_row("acct-UUID", _fresh_codex_payload())],
+    )
+    mounts = session_launcher._resolve_optional_tool_mounts(run_dir=run_dir)
+    # Exactly one mount targets the container auth.json path...
+    auth_hosts = [
+        hp for hp, spec in mounts.items()
+        if spec.split(":")[0] == "/home/agent/.codex/auth.json"
+    ]
+    assert len(auth_hosts) == 1
+    # ...and it is the run_dir copy, NOT the operator's host file.
+    host_auth = str(Path.home() / ".codex" / "auth.json")
+    assert auth_hosts[0] != host_auth
+    assert auth_hosts[0].startswith(str(run_dir))
+
+
+def test_optional_tool_mounts_no_row_mounts_no_auth(tmp_path, monkeypatch):
+    """A missing substrate row leaves no auth.json mount at all."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    monkeypatch.setattr(session_launcher, "_codex_credential_rows", lambda: [])
+    mounts = session_launcher._resolve_optional_tool_mounts(run_dir=run_dir)
+    assert not any(
+        spec.split(":")[0] == "/home/agent/.codex/auth.json"
+        for spec in mounts.values()
+    )
+
+
+def test_launcher_source_has_no_host_codex_auth_json_read():
+    """Grep-level acceptance: no launcher code path reads the host ~/.codex/auth.json.
+
+    The retired construct was ``host_codex_home / "auth.json"`` — the only
+    code that ever pointed a mount at the operator's on-disk credential.
+    Prose references to the path in docstrings are fine; the *code* read is
+    what must be gone, and its container-target string
+    (``/home/agent/.codex/auth.json``) is the materialized-from-substrate
+    mount, not a host read.
+    """
+    import inspect
+    src = inspect.getsource(session_launcher)
+    assert 'host_codex_home / "auth.json"' not in src
+    assert "host_codex_home / 'auth.json'" not in src
+
+
+def test_codex_auth_copy_cleanup_is_scheduled(
+    tmp_path, fake_crosstalk, captured_run, platform_snapshot, monkeypatch,
+):
+    """The materialized Codex auth.json (live tokens) is cleaned up post-exit."""
+    monkeypatch.setattr(
+        session_launcher, "_codex_credential_rows",
+        lambda: [_codex_row("acct-UUID", _fresh_codex_payload())],
+    )
+    scheduled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        session_launcher, "_schedule_creds_cleanup",
+        lambda cid, path: scheduled.append((cid, path)),
+    )
+    _run(output_dir=str(tmp_path / "run"), harness="codex")
+    # exactly one cleanup, for the run_dir codex-auth.json copy
+    assert len(scheduled) == 1
+    assert scheduled[0][1].endswith("codex-auth.json")
+    assert str(tmp_path / "run") in scheduled[0][1]

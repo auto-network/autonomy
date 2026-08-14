@@ -801,6 +801,116 @@ def _generate_codex_config(base_config: Path, git_root: str, run_dir: Path) -> P
         return None
 
 
+def _codex_credentials_org() -> str:
+    """Return the substrate org for Codex credential rows: ``personal``.
+
+    Host-local, per-instance secrets — never shared cross-org. Mirror of
+    :func:`_credentials_org`, ``codex_credentials_refresh._credentials_org``,
+    and ``credential_import.CREDENTIALS_ORG`` so the launcher, the refresh
+    poller, and the importer all converge on the same ``personal.db`` rows.
+    """
+    return "personal"
+
+
+def _codex_credential_rows() -> list[Any]:
+    """Return ``dashboard.codex.credentials`` rows from substrate.
+
+    Best-effort: any failure (DB unavailable, set never created) collapses
+    to ``[]`` so a Codex launch degrades to "no auth mounted" rather than
+    crashing the launch path.
+    """
+    from tools.graph import ops as _ops
+    from tools.graph.schemas.codex_credentials import (
+        CODEX_CREDENTIALS_SET_ID,
+    )
+
+    try:
+        members = _ops.read_set(
+            CODEX_CREDENTIALS_SET_ID, org=_codex_credentials_org(), peers=[],
+        )
+    except Exception:
+        logger.exception("session_launcher: read_set(codex.credentials) failed")
+        return []
+    return list(getattr(members, "members", []) or [])
+
+
+def _pick_codex_credential_row(rows: list[Any]) -> Any | None:
+    """Pick the single active Codex credential row from ``rows`` or ``None``.
+
+    Codex authenticates one account at a time (not load-balanced), but the
+    surface is account-keyed and may in future hold several rows. Keep only
+    rows carrying the full OAuth triple and pick the one with the greatest
+    ``expires_at_ms`` (the freshest / most-alive), tie-broken by key so the
+    choice is deterministic.
+    """
+    def _exp(row: Any) -> int:
+        payload = getattr(row, "payload", None)
+        v = payload.get("expires_at_ms") if isinstance(payload, dict) else None
+        return v if isinstance(v, int) and not isinstance(v, bool) else -1
+
+    usable: list[Any] = []
+    for row in rows:
+        payload = getattr(row, "payload", None)
+        if not isinstance(payload, dict):
+            continue
+        if not all(
+            isinstance(payload.get(k), str) and payload.get(k)
+            for k in ("access_token", "refresh_token", "id_token")
+        ):
+            continue
+        usable.append(row)
+    if not usable:
+        return None
+    return max(usable, key=lambda r: (_exp(r), getattr(r, "key", "") or ""))
+
+
+def _materialize_codex_auth_json(run_dir: Path) -> Path | None:
+    """Reconstruct ``~/.codex/auth.json`` from the substrate row into ``run_dir``.
+
+    The single credential path (bead auto-l1h3f): Codex sessions no longer
+    read the operator's host ``~/.codex/auth.json``. Instead we rebuild the
+    on-disk auth.json shape Codex expects from the account-keyed
+    ``dashboard.codex.credentials`` row (the account_id is the row key, not
+    a payload field) and mount that per-session copy read-only. The refresh
+    poller keeps the substrate row ahead of expiry, so the materialized copy
+    is fresh at launch.
+
+    Returns the host path to the written file, or ``None`` when no usable
+    row exists — a missing row means Codex is simply unavailable to the
+    session, which is the truthful state.
+    """
+    row = _pick_codex_credential_row(_codex_credential_rows())
+    if row is None:
+        return None
+    payload = row.payload
+    now_iso = (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    auth_doc = {
+        "auth_mode": payload.get("auth_mode") or "chatgpt",
+        "OPENAI_API_KEY": None,
+        "tokens": {
+            "id_token": payload["id_token"],
+            "access_token": payload["access_token"],
+            "refresh_token": payload["refresh_token"],
+            "account_id": row.key,
+        },
+        # Informational only for Codex; carry the poller's stamp when present.
+        "last_refresh": payload.get("last_refresh_at") or now_iso,
+    }
+    out = Path(run_dir) / "codex-auth.json"
+    try:
+        out.write_text(json.dumps(auth_doc, indent=2))
+        out.chmod(0o600)
+    except OSError:
+        logger.exception("session_launcher: could not write codex auth.json")
+        return None
+    return out
+
+
 def _resolve_optional_tool_mounts(
     worktree_host: Path | None = None,
     run_dir: Path | None = None,
@@ -808,9 +918,11 @@ def _resolve_optional_tool_mounts(
     """Return optional host mounts that make Codex usable inside containers.
 
     Claude is already handled via dedicated credential resolution plus the
-    mounted sessions directory. Codex keeps its login/config under ~/.codex,
-    so mount only the durable control files and skill/rule directories rather
-    than the whole mutable state tree.
+    mounted sessions directory. Codex's *credentials* are now resolved the
+    same way — from the ``dashboard.codex.credentials`` substrate row, NOT
+    the host ``~/.codex/auth.json`` (retired in bead auto-l1h3f). Its
+    config/skills/rules are ordinary host content (not credentials) and are
+    still mounted from ``~/.codex`` read-only.
 
     When ``worktree_host`` and ``run_dir`` are supplied, mount a generated
     per-session ``config.toml`` that pre-trusts the worktree's git-root instead
@@ -833,8 +945,10 @@ def _resolve_optional_tool_mounts(
             if generated is not None:
                 config_source = generated
 
+    # Non-credential host content only. The credential (auth.json) is
+    # materialized from substrate below — this table deliberately omits it
+    # so no launcher code path reads the host ~/.codex/auth.json.
     codex_mounts = {
-        host_codex_home / "auth.json": "/home/agent/.codex/auth.json:ro",
         config_source: "/home/agent/.codex/config.toml:ro",
         host_codex_home / "skills": "/home/agent/.codex/skills:ro",
         host_codex_home / "rules": "/home/agent/.codex/rules:ro",
@@ -842,6 +956,15 @@ def _resolve_optional_tool_mounts(
     for host_path, container_spec in codex_mounts.items():
         if host_path.exists():
             mounts[str(host_path)] = container_spec
+
+    # Codex credentials: materialize a per-session auth.json from the
+    # substrate row and mount it read-only. Missing row → no auth mount →
+    # Codex unavailable (the truthful state). This is the ONLY credential
+    # path; the host ~/.codex/auth.json mount is retired.
+    if run_dir is not None:
+        codex_auth = _materialize_codex_auth_json(run_dir)
+        if codex_auth is not None:
+            mounts[str(codex_auth)] = "/home/agent/.codex/auth.json:ro"
 
     agents_home = Path.home() / ".agents"
     if agents_home.exists():
@@ -1297,10 +1420,17 @@ def launch_session(
         if working_dir == container_path or working_dir.startswith(f"{container_path}/"):
             working_mounts.append((len(container_path), Path(host_path)))
     worktree_host = max(working_mounts, default=(0, None), key=lambda item: item[0])[1]
+    codex_auth_copy: str | None = None
     for host_path, container_spec in _resolve_optional_tool_mounts(
         worktree_host=worktree_host, run_dir=run_dir
     ).items():
         cmd.extend(["-v", f"{host_path}:{container_spec}"])
+        # The per-session Codex auth.json is materialized from the substrate
+        # row and carries live OAuth tokens; schedule its deletion after the
+        # container exits (like the Claude creds copy) so no plaintext token
+        # accumulates in run_dir once the session is gone.
+        if container_spec.split(":")[0] == "/home/agent/.codex/auth.json":
+            codex_auth_copy = host_path
 
     if global_claude_md is not None:
         cmd.extend(["-v", f"{global_claude_md}:/home/agent/.claude/CLAUDE.md:ro"])
@@ -1461,6 +1591,8 @@ def launch_session(
         creds_copy = creds.get("creds_copy") if creds else None
         if creds_copy:
             _schedule_creds_cleanup(container_id, creds_copy)
+        if codex_auth_copy:
+            _schedule_creds_cleanup(container_id, codex_auth_copy)
 
         return container_id
 
