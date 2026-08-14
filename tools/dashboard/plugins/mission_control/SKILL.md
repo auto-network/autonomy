@@ -945,6 +945,70 @@ mission's own signpost note, so the mission keeps a record of what was cut and
 why. A judgement that lives only in a conversation is lost to the next pillar
 that would have made the same mistake.
 
+### The mission check-in
+
+The operator's Activity screen has an Attention tab: a timeline of where their
+attention went, which agents write. The mission check-in is the controller's
+entry on it. It answers one question — **what happened on this mission?** —
+for someone who was not watching.
+
+Write one when a body of work has landed. Not per commit, not per pillar
+report; a stretch of the mission with a shape to it.
+
+```bash
+graph journal write "Mission name check-in — N commits, largest advance in <area>" \
+    --normal /tmp/normal.md --expanded /tmp/expanded.md \
+    --start <ISO> --end <ISO> --type mixed
+```
+
+Use `--start`/`--end` for the period being reported. A `--since` lookback
+timestamps the entry at the start of the window, which files a check-in behind
+shorter entries covering less time.
+
+The three bodies are one report at three depths: the headline stands alone in a
+list of a day, `normal` is what happened, `expanded` is the full check-in.
+
+**The shape of the expanded body.** Five sections, in this order, and no others:
+
+```
+N commits landed. Largest advance in <area> — <one line on why>.
+
+## Live UI Changes
+- What the operator can now see and use that they could not before.
+
+## New Platform Functionality
+- **Named capability.** What it is, in a sentence that survives without
+  the bead that produced it.
+
+## Plans Changed
+- **What changed, and what moved because of it.** A directive, a scope cut,
+  a decision held. Name the pillars it moved and what each one did.
+
+## Blockers Encountered
+- **What is blocked and why.** Evidence, not a feeling. Who it belongs to
+  if it is not yours.
+
+## New Beads Written
+N today, grouped by the work they belong to — the shape of what was written,
+not a list of titles.
+```
+
+**Writing it.** Technical manual voice: complete declarative sentences,
+mechanisms named precisely, no narrative arc and no closing line drawing a
+moral. Everything else follows from one rule — **say what happened, not the
+process that produced it.** A directive is worth a line under Plans Changed
+because of what it moved; the audit it triggered is not.
+
+Three things that do not go in it, at any depth:
+
+- **No disclaimers.** Not what the tracker failed to record, not how the
+  numbers were derived, not what you could not verify. Fix those or raise
+  them; a check-in is not where they live.
+- **No process.** Reviews, calibration, who asked whom. The reader wants the
+  product, not the machine that made it.
+- **No hedging on the count.** Report what landed. If a number is wrong,
+  find the right one before writing.
+
 ### Raising the whole mission, when the whole mission is stuck
 
 Everything above happens inside a mission: the operator opens it and works
