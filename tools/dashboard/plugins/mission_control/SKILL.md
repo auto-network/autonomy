@@ -601,6 +601,64 @@ now think is wrong", and anything across a boundary you do not own). Do not use
 it for rhetorical questions in your prose — every one of these is a real
 request for someone's attention.
 
+#### The form of an ask
+
+The text of `data-mc-ask` is not a label for a topic. It is the whole of what
+the reader is shown: it heads the screen where they type their answer, and it
+is the first line of the message that reaches you. Nothing else travels with
+it. Whatever it does not say, they do not have.
+
+Every one of these is a hard rule. An ask that breaks any of them is wrong and
+should be rewritten before the screen is pushed:
+
+1. **It is a question, and it ends in a question mark.** "Member-rekey policy"
+   is a subject heading. "Should a member's keys be re-minted on rekey, or
+   carried over?" is an ask.
+2. **It names the options.** A fork with its branches stated can be answered in
+   one word; a fork with only its name can only be answered with "what are you
+   asking me?".
+3. **No identifiers.** No bead ids, no file or function names, no internal
+   codenames, no route names. If it is a token you could grep for, it does not
+   belong in the question. The anchor is where those live, and the anchor is
+   never shown to a person.
+4. **It is answerable without opening anything else.** The reader is on a
+   phone, looking at a list of things waiting on them. If answering requires
+   finding a ticket first, it will not be answered.
+5. **Say what turns on it, in one clause.** What the choice costs either way,
+   or what it unblocks. A decision with no stated consequence reads as trivia
+   and gets deferred.
+6. **One decision per ask.** Two questions in one box get one answer, and you
+   will not know which.
+
+**The test, before you push it:** could someone who has not read your screen
+answer it from the sentence alone? If they would have to ask you what you meant,
+it is not an ask yet.
+
+**Why this is strict:** these do not queue with the mission's other questions.
+They are pulled out into their own count, in front of the one person whose
+attention the mission cannot replace, precisely so a real decision is not lost
+among conversations. That separation is worth exactly as much as the weakest
+item in the pile. Seven half-formed asks are worse than none, because they
+teach the reader that the pile is not worth opening.
+
+Good:
+
+> Should witness keys be re-minted on every rekey, or carried over? Carrying
+> them over is simpler now and costs a migration if we ever rotate the root.
+
+> Do we buy a real iOS device for testing, or keep relying on the simulator?
+> The simulator has not reproduced the two most recent Safari-only faults.
+
+Wrong, and why:
+
+| Written | Why it fails |
+|---|---|
+| "Member-rekey policy (x97iz)" | Not a question (1), no options (2), carries a bead id (3). |
+| "B7: the update mechanism (unblocks 6aamc)" | A codename and an id (3); nothing states what is being decided (1, 2). |
+| "Demo resources" | A subject, not a question. Unanswerable without asking you what you mean (4). |
+| "Confirm cleanup: close auto-509" | An instruction to yourself with an id in it (3); if you can close it, this is not an ask at all (§11). |
+| "Should we defer witness-key persistence, and also decide the rekey policy?" | Two decisions, one box (6). |
+
 Three things follow, and you do not build any of them:
 
 - The control reads **Answer** rather than a question count, and stops the
