@@ -75,10 +75,37 @@ class TestI1Constraints:
         for forbidden in ("xmlhttprequest", "websocket",
                           "navigator.sendbeacon"):
             assert forbidden not in lowered, forbidden
-        # The resolve body is built from transport credentials alone; the
-        # bearer has no path into it.
+        # The SENT body shape is an allowlist, not just the declaration
+        # (adversarial review 2026-08-14: pinning the declaration alone let a
+        # later `body.t = heldBearer` mutation ship green). Every write to the
+        # body object, anywhere in the script, must stay inside the allowed
+        # public-field set.
+        import re
+
         assert ("var body = { relay_host: relayHost, "
                 "channel_token: channelToken };") in PAGE_JS
+        mutations = set(re.findall(r"body\.(\w+)\s*=", PAGE_JS))
+        assert mutations <= {"org", "root_pub", "invite_ref"}, mutations
+        assert not re.search(r"body\s*\[", PAGE_JS)  # no dynamic-key writes
+
+    def test_the_bearer_never_reaches_any_request(self):
+        # heldBearer exists to be HELD for the future accept ceremony. It may
+        # be assigned from parsed link input; it may never flow toward the
+        # network: not into the resolve body, not into fetch, not serialized.
+        import re
+
+        uses = [m.start() for m in re.finditer(r"heldBearer", PAGE_JS)]
+        assert uses, "the held bearer disappeared — reassess this guard"
+        for idx in uses:
+            line_start = PAGE_JS.rfind("\n", 0, idx) + 1
+            line = PAGE_JS[line_start:PAGE_JS.index("\n", idx)]
+            ok = re.match(r"\s*(var\s+)?heldBearer\s*=", line)
+            assert ok, f"heldBearer used outside plain assignment: {line.strip()}"
+        resolve_fn = PAGE_JS[PAGE_JS.index("function resolveOnOrigin"):
+                             PAGE_JS.index("function showPasteStep")]
+        assert "heldBearer" not in resolve_fn
+        assert "bearer" not in resolve_fn.lower().replace(
+            "// the bearer is deliberately absent.", "")
 
     def test_no_ceremony_code(self):
         # TO THE IMPLEMENTER OF ACCEPTANCE MECHANICS (auto-9rw91): when the

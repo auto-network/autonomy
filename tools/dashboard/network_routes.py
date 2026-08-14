@@ -1510,8 +1510,11 @@ async def post_invite_resolve(request: Request) -> JSONResponse:
 
     # Root pin source per link kind (respec after dry-run 8dbf730d): a handoff
     # link already carries org/root_pub/invite_ref in its query; a bare /l/
-    # paste has only transport creds, so pin from the link host's PUBLIC
-    # registry envelope. Either way the pin exists before any channel byte.
+    # paste has only transport creds, so pin from the PASTED LINK'S OWN host's
+    # public envelope. That host is chosen by whoever minted the link — the
+    # pin's trust root is the act of pasting, exactly the relay-bridge model,
+    # NOT an independent registry cross-check. Either way the pin exists
+    # before any channel byte.
     org = body.get("org")
     root_pub = body.get("root_pub")
     invite_ref = body.get("invite_ref")
