@@ -253,7 +253,7 @@ describe('session viewer resume catch-up (auto-16g9t wake protocol)', () => {
 });
 
 describe('session viewer cross-org resume', () => {
-  it('scopes source lookup to the session owning org', async () => {
+  it('sends only the stable source id and leaves owner lookup to the server', async () => {
     const h = makeHarness();
     const { viewer } = primeViewer(h);
     viewer._setupWatchers = function() {};
@@ -263,19 +263,15 @@ describe('session viewer cross-org resume', () => {
       sourceId: 'f919a3fe-39a9-4eb1-b9e7-3154a4dac34c',
       sessionUuid: '76b3e374-e2b9-4304-bbce-878580d68351',
       filePath: '/host/enterprise-ng/session.jsonl',
-      orgSlug: 'anchore',
     };
 
     await viewer.resumeFromViewer();
 
     const call = h.requestCalls.find((entry) => entry.url === '/api/session/resume');
     assert.ok(call, 'resume request was not sent');
-    assert.equal(call.options.headers['X-Graph-Org'], 'anchore');
     assert.equal(call.options.headers['Content-Type'], 'application/json');
     assert.deepEqual(JSON.parse(call.options.body), {
       source_id: 'f919a3fe-39a9-4eb1-b9e7-3154a4dac34c',
     });
-    assert.equal(viewer._resumeMeta.orgSlug, 'anchore',
-      'org ownership must survive the transition to non-resumable state');
   });
 });

@@ -18,7 +18,7 @@ The /search Alpine page itself runs in the browser — these tests exercise:
   1. The static template+JS contract (search.js sends X-Graph-Org, not
      ?only_org=, when an org is pinned).
   2. The /api/search endpoint's existing X-Graph-Org → caller plumbing
-     (already shipped via _CallerOrgMiddleware) survives the new chip.
+     (now established by ApiIdentityMiddleware) survives the new chip.
   3. The endpoint accepts ``?states=`` and forwards it to ops.search.
 """
 
@@ -42,7 +42,7 @@ def _read_search_js() -> str:
 def test_org_chip_sends_x_graph_org_header():
     """The fetch() in _refetch() must build a headers object that includes
     ``X-Graph-Org`` when an org is pinned. The header name is the contract
-    with _CallerOrgMiddleware on the server."""
+    with ApiIdentityMiddleware on the server."""
     src = _read_search_js()
     # The header is set conditionally on selectedOrg.
     assert "'X-Graph-Org'" in src, "search.js no longer sets X-Graph-Org"

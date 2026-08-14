@@ -784,7 +784,7 @@ def test_gate_ignores_attacker_caller_org(env, root, monkeypatch):
         return real()
 
     monkeypatch.setattr(unlock_routes, "_personal_member", spy)
-    # Simulate _CallerOrgMiddleware having bound an attacker-chosen org.
+    # Simulate request middleware having bound an attacker-chosen org.
     token = ops.set_caller_org("attacker-bogus-org")
     try:
         result = unlock_routes.human_auth_enrolled()
