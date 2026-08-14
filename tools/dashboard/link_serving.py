@@ -381,6 +381,46 @@ def _resolve_org_brand(org: str | None) -> dict | None:
         return None
 
 
+def _org_brand_for_invite(org: str | None) -> dict | None:
+    """The org's OWN identity for the invite/join context (auto-r7kk4), served
+    by the org over the E2E join channel — never registry-served, so the
+    registry never learns org identity.
+
+    Returns ``{org_name, org_color, org_description?, org_icon?}`` for a viewer's
+    verified-org header. org_description (the byline) and org_icon are optional.
+
+    org_icon is ALWAYS a bounded ``data:image/*;base64`` URI or ABSENT — NEVER a
+    remote URL. A remote favicon fetched on the invite-view page would leak each
+    visitor's IP/UA to the favicon host (a tracking vector on the exact page
+    where we promise a registry-blind posture) and would fail the invite page's
+    ``img-src data:`` CSP. So :func:`_resolve_org_brand`'s remote ``favicon_url``
+    branch is deliberately dropped here (degrade to name/initial).
+    """
+    brand = _resolve_org_brand(org)
+    if not brand or not isinstance(brand.get("name"), str):
+        return None
+    fields: dict = {"org_name": brand["name"], "org_color": brand["color"]}
+    try:
+        from tools.dashboard.org_identity import resolve_org_identity
+
+        byline = (resolve_org_identity(org) or {}).get("byline")
+        if isinstance(byline, str) and byline:
+            fields["org_description"] = byline
+    except Exception:
+        pass
+    icon = brand.get("favicon")
+    # ONLY the bounded {mime, bytes} form becomes an icon; a remote favicon_url
+    # is intentionally never emitted here (registry-blind + data:-only CSP).
+    if (
+        isinstance(icon, dict)
+        and isinstance(icon.get("bytes"), bytes)
+        and isinstance(icon.get("mime"), str)
+    ):
+        b64 = base64.b64encode(icon["bytes"]).decode("ascii")
+        fields["org_icon"] = f"data:{icon['mime']};base64,{b64}"
+    return fields
+
+
 def _resolve_note(target_uuid: str, org: str | None):
     """Build an owning-scope note payload with only current image parts."""
     from tools.graph import ops as graph_ops
@@ -721,6 +761,13 @@ def _serve_join(grant: dict, org: str | None, request: dict) -> bytes:
     try:
         if op == "context":
             result = service.context(org, invite_ref)
+            # r7kk4: enrich with the org's OWN identity (name/description/icon/
+            # color) so the invitee's verified-org header is delivered by the
+            # org over this E2E channel, never registry-served. Icon is a
+            # bounded data: URI or absent — never a remote URL.
+            brand = _org_brand_for_invite(org)
+            if brand:
+                result = {**result, **brand}
         elif op == "submit":
             wire = request.get("event")
             if not isinstance(wire, str) or not wire:
