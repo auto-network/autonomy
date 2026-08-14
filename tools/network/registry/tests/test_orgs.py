@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from tools.network.idkit import KeyPair, Subject, issue_cert
+from tools.network.registry.signing import sign_recovery_succession
 
 from .conftest import DAY, HOUR, NOW, ORG, ORG_NONE, SESSION_SCOPE, register, signed
 
@@ -189,15 +190,20 @@ class TestRebindI3:
 # -- recovery-policy update (sovereign, root-signed) --------------------------
 
 class TestPolicyUpdate:
-    """The root, in possession of its key, freely sets/changes/removes its
-    recovery policy — proof of key control IS the authority (sovereign
-    model). Monotonic policy_epoch blocks replay/downgrade."""
+    """The root freely ADDS recovery to a 'none' org — proof of key control IS
+    the authority for that sovereign transition. Changing or REMOVING an
+    existing recovery key is NOT sovereign (see TestRecoverySuccessionGate):
+    it requires the outgoing recovery key's co-signature. Monotonic
+    policy_epoch blocks replay/downgrade throughout."""
 
     def _policy(self, client, clock, key, epoch, policy,
-                recovery_pub=None, org=ORG, expect=None, cert=None):
+                recovery_pub=None, org=ORG, expect=None, cert=None,
+                succession_sig=None):
         payload = {"recovery_policy": policy, "policy_epoch": epoch}
         if recovery_pub is not None:
             payload["recovery_pub"] = recovery_pub
+        if succession_sig is not None:
+            payload["recovery_succession_sig"] = succession_sig
         return signed(client, "POST", f"/v1/orgs/{org}/policy", key, payload,
                       clock, cert=cert, expect=expect)
 
@@ -213,10 +219,15 @@ class TestPolicyUpdate:
                       {"new_root_pub": KeyPair.generate().public_hex}, clock
                       ).status_code == 200
 
-    def test_root_removes_recovery(self, client, clock, root, recovery):
+    def test_root_removes_recovery_with_outgoing_cosignature(self, client, clock, root, recovery):
+        # Removal is a subset-authorized transition, not sovereign: it takes
+        # the OUTGOING recovery key's co-signature (the root alone must not be
+        # able to strip recovery). With it, removal lands.
         register(client, clock, root, policy="recovery-key",
                  recovery_pub=recovery.public_hex)                        # epoch 0
-        assert self._policy(client, clock, root, 1, "none").status_code == 200
+        cosig = sign_recovery_succession(recovery, ORG, "none", None, 1)
+        assert self._policy(client, clock, root, 1, "none",
+                            succession_sig=cosig).status_code == 200
         # After removal, the recovery-key rebind path is structurally gone.
         assert signed(client, "POST", f"/v1/orgs/{ORG}/rebind", recovery,
                       {"new_root_pub": KeyPair.generate().public_hex}, clock
@@ -271,6 +282,106 @@ class TestPolicyUpdate:
     def test_policy_update_unknown_org_404(self, client, clock, root):
         self._policy(client, clock, root, 1, "none",
                      org="44444444-4444-4444-8444-444444444444", expect=404)
+
+
+class TestRecoverySuccessionGate:
+    """Changing or removing an EXISTING recovery key is subset-authorized, not
+    sovereign: a stolen root alone must not be able to swap the recovery factor
+    and then sign a rebind, hijacking the org's registry-bound root (the
+    relay-visible pin new joiners trust). Such a transition takes the OUTGOING
+    recovery key's co-signature, domain-separated and bound to the exact
+    epoch/successor. ADD (none -> recovery-key) stays sovereign. Until the
+    announced-windowed-vetoable path exists, a co-signature-less succession is
+    REFUSED, not deferred.
+    """
+
+    def _policy(self, client, clock, key, epoch, policy,
+                recovery_pub=None, succession_sig=None, expect=None):
+        payload = {"recovery_policy": policy, "policy_epoch": epoch}
+        if recovery_pub is not None:
+            payload["recovery_pub"] = recovery_pub
+        if succession_sig is not None:
+            payload["recovery_succession_sig"] = succession_sig
+        return signed(client, "POST", f"/v1/orgs/{ORG}/policy", key, payload,
+                      clock, expect=expect)
+
+    def _rebind(self, client, clock, key):
+        return signed(client, "POST", f"/v1/orgs/{ORG}/rebind", key,
+                      {"new_root_pub": KeyPair.generate().public_hex}, clock)
+
+    def test_succession_without_cosignature_refused(self, client, clock, root, recovery, bound_org):
+        # Stolen-root scenario: the root tries to install a new recovery key
+        # (the accomplice it would then rebind through) with a bare root sig.
+        new_recovery = KeyPair.generate()
+        self._policy(client, clock, root, 1, "recovery-key",
+                     new_recovery.public_hex, expect=403)
+        # The swap did NOT take: the ORIGINAL recovery key still owns rebind,
+        # the accomplice does not.
+        assert self._rebind(client, clock, new_recovery).status_code == 403
+        assert self._rebind(client, clock, recovery).status_code == 200
+
+    def test_succession_with_outgoing_cosignature_lands(self, client, clock, root, recovery, bound_org):
+        new_recovery = KeyPair.generate()
+        cosig = sign_recovery_succession(
+            recovery, ORG, "recovery-key", new_recovery.public_hex, 1)
+        r = self._policy(client, clock, root, 1, "recovery-key",
+                         new_recovery.public_hex, succession_sig=cosig)
+        assert r.status_code == 200, r.json()
+        assert r.json()["recovery_pub"] == new_recovery.public_hex
+        # Authority moved: the NEW key rebinds, the OLD key no longer can.
+        assert self._rebind(client, clock, recovery).status_code == 403
+        assert self._rebind(client, clock, new_recovery).status_code == 200
+
+    def test_removal_without_cosignature_refused(self, client, clock, root, recovery, bound_org):
+        self._policy(client, clock, root, 1, "none", expect=403)
+        # Recovery still stands: the rebind path was not silently stripped.
+        assert self._rebind(client, clock, recovery).status_code == 200
+
+    def test_cosignature_by_wrong_key_refused(self, client, clock, root, recovery, bound_org):
+        # A co-signature by the ROOT (the self-defeat the whole gate exists to
+        # block) or any other key is not the outgoing recovery key's.
+        new_recovery = KeyPair.generate()
+        for wrong in (root, KeyPair.generate()):
+            cosig = sign_recovery_succession(
+                wrong, ORG, "recovery-key", new_recovery.public_hex, 1)
+            self._policy(client, clock, root, 1, "recovery-key",
+                         new_recovery.public_hex, succession_sig=cosig, expect=403)
+
+    def test_cosignature_bound_to_wrong_epoch_refused(self, client, clock, root, recovery, bound_org):
+        # Epoch-binding: a co-signature the outgoing key made for a DIFFERENT
+        # epoch cannot authorize the transition into epoch 1 -- so a co-sig
+        # captured/pre-minted for one succession can't be replayed at another.
+        new_recovery = KeyPair.generate()
+        cosig_for_epoch_2 = sign_recovery_succession(
+            recovery, ORG, "recovery-key", new_recovery.public_hex, 2)
+        self._policy(client, clock, root, 1, "recovery-key",
+                     new_recovery.public_hex, succession_sig=cosig_for_epoch_2,
+                     expect=403)
+
+    def test_cosignature_for_different_successor_refused(self, client, clock, root, recovery, bound_org):
+        # The co-signature names the successor it authorizes; it cannot be
+        # lifted onto a substitution to a DIFFERENT key.
+        approved = KeyPair.generate()
+        substituted = KeyPair.generate()
+        cosig = sign_recovery_succession(
+            recovery, ORG, "recovery-key", approved.public_hex, 1)
+        self._policy(client, clock, root, 1, "recovery-key",
+                     substituted.public_hex, succession_sig=cosig, expect=403)
+
+    def test_add_rejects_stray_succession_sig(self, client, clock, root, recovery):
+        # ADD (none -> recovery-key) is sovereign; a succession co-signature
+        # authorizes nothing here and is rejected rather than accepted-and-
+        # ignored (no unverifiable bytes ride along).
+        register(client, clock, root, policy="none")                     # epoch 0
+        stray = sign_recovery_succession(recovery, ORG, "recovery-key",
+                                         recovery.public_hex, 1)
+        self._policy(client, clock, root, 1, "recovery-key",
+                     recovery.public_hex, succession_sig=stray, expect=400)
+
+    def test_add_stays_sovereign_no_cosignature(self, client, clock, root, recovery):
+        register(client, clock, root, policy="none")                     # epoch 0
+        r = self._policy(client, clock, root, 1, "recovery-key", recovery.public_hex)
+        assert r.status_code == 200, r.json()
 
 
 class TestRecoveryFactorDistinctFromRoot:

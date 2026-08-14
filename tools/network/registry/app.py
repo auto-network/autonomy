@@ -55,7 +55,12 @@ from .abuse import RelayAbuseLimiter
 from .assertion import IDENTIFY_SCOPE, MAX_ASSERTION_TTL, parse_assertion
 from .listings import parse_attestation_record, parse_listing_claim
 from .relay import TunnelHub, _resolve_live_link, tunnel_endpoint, viewer_endpoint
-from .signing import ENVELOPE_VERSION, MAX_CLOCK_SKEW, request_signing_input
+from .signing import (
+    ENVELOPE_VERSION,
+    MAX_CLOCK_SKEW,
+    recovery_succession_input,
+    request_signing_input,
+)
 from .store import LinkGrant, OrgBinding, RegistryStore
 from .witness import MAX_WITNESS_HEADS, sign_attestation
 
@@ -743,7 +748,10 @@ def create_app(
         payload = envelope["payload"]
         _require_fields(
             payload,
-            allowed=frozenset({"recovery_policy", "recovery_pub", "policy_epoch"}),
+            allowed=frozenset(
+                {"recovery_policy", "recovery_pub", "policy_epoch",
+                 "recovery_succession_sig"}
+            ),
             required=frozenset({"recovery_policy", "policy_epoch"}),
             what="policy payload",
         )
@@ -768,6 +776,55 @@ def create_app(
                 f"stale policy_epoch: expected {binding.policy_epoch + 1}, got {epoch} "
                 "— re-read the binding and retry; an old policy envelope cannot replay"
             ))
+
+        # Succession/removal gate: a policy update is sovereign ONLY when it is
+        # not changing or removing an EXISTING recovery key. A stolen root
+        # alone must not be able to swap the recovery factor — otherwise it
+        # sets itself (or an accomplice) as recovery, then that key signs a
+        # rebind, hijacking the org's registry-bound root: the relay-visible
+        # pin new joiners trust (existing members derive recovery from the
+        # immutable ledger genesis and are unaffected). So:
+        #   ADD (none -> recovery-key):        SOVEREIGN, root-signed alone.
+        #   SUCCESSION (recovery-key -> other): requires the OLD recovery key's
+        #                                       co-signature over this exact,
+        #                                       epoch-bound transition.
+        #   REMOVAL (recovery-key -> none):     same — removing recovery is a
+        #                                       subset-authorized transition too.
+        # The announced-windowed-vetoable path (the lattice's alternative to a
+        # complete authorization) is unbuilt; until that substrate exists a
+        # succession/removal without the co-signature is REFUSED, not deferred.
+        changes_existing_recovery = binding.recovery_policy == "recovery-key" and (
+            new_policy != "recovery-key" or new_recovery_pub != binding.recovery_pub
+        )
+        succession_sig = payload.get("recovery_succession_sig")
+        if changes_existing_recovery:
+            if not isinstance(succession_sig, str):
+                raise _forbidden(
+                    "changing or removing an existing recovery key requires the "
+                    "old recovery key's co-signature (recovery_succession_sig); a "
+                    "root signature alone cannot succeed or remove the recovery factor"
+                )
+            succession_input = recovery_succession_input(
+                org_uuid, binding.recovery_pub, new_policy, new_recovery_pub, epoch,
+            )
+            try:
+                verify_signature(binding.recovery_pub, succession_sig, succession_input)
+            except MalformedError as exc:
+                raise _bad_request(f"recovery_succession_sig: {exc}")
+            except IdkitError:
+                raise _forbidden(
+                    "recovery_succession_sig does not verify against the current "
+                    "recovery key over this transition"
+                )
+        elif succession_sig is not None:
+            # ADD or no-op: no existing recovery key is being changed, so a
+            # succession co-signature authorizes nothing. Reject it rather than
+            # accept-and-ignore — no unverifiable bytes ride along (mirrors the
+            # ledger refusing a recovery-continuity co-sig under policy "none").
+            raise _bad_request(
+                "recovery_succession_sig is only valid when changing or removing "
+                "an existing recovery key"
+            )
 
         ok = store.update_recovery_policy(
             org_uuid, new_policy, new_recovery_pub,
