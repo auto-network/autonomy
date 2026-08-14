@@ -1172,7 +1172,7 @@
     if (!ui.anchor) return null;
     var here = atAnchor(ui.anchor);
     var screenAsk = asked(ui.anchor);
-    var answered = here.some(function (q) { return q.answer; });
+    var answered = askAnswered(screenAsk);
     var control = anchorControls.filter(function (x) { return x.ref === ui.anchor; })[0];
     // Never headed by the anchor id again. It is a name for the code, and it
     // was the only thing this panel said about what you were being asked --
@@ -1422,7 +1422,7 @@
     // A screen asking YOU is not a count of a conversation, it is a thing
     // waiting on you -- so it says so in a word, and stops the moment it is
     // answered. A number here would read as "two people are chatting".
-    if (control.asks && !done) {
+    if (control.asks && !askAnswered(control)) {
       control.btn.innerHTML = "";
       control.btn.classList.add("mc-anchor-asks");
       control.btn.appendChild(el("span", {class: "mc-asks-label", text: "Answer"}));
@@ -1473,6 +1473,19 @@
     return "";
   }
 
+  // AN ASK IS ANSWERED WHEN THIS QUESTION HAS BEEN ANSWERED, not when the
+  // element it sits on has ever been. Keyed on the anchor, an answered ask
+  // silenced its own element for good: the reader answering with a question
+  // of their own -- the most ordinary outcome there is -- left the screen with
+  // no way to ask again, and rewriting the attribute changed nothing. The
+  // question lives in the attribute, so changing it asks a different one.
+  function askAnswered(control) {
+    if (!control || !control.asks) return false;
+    return atAnchor(control.ref).some(function (q) {
+      return q.answer && q.question === control.asks;
+    });
+  }
+
   //: The screen's own questions, by anchor -- read from the DOM, never from
   //: the server, because the server never parses the author's document.
   function asked(ref) {
@@ -1483,7 +1496,7 @@
   //: Answered ones become ordinary entries; the rest exist only on the page.
   function unanswered() {
     return anchorControls.filter(function (c) {
-      return c.asks && !atAnchor(c.ref).some(function (q) { return q.answer; });
+      return c.asks && !askAnswered(c);
     });
   }
 

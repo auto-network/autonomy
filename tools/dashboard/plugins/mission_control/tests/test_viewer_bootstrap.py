@@ -462,3 +462,19 @@ def test_attaching_is_absent_where_there_is_nowhere_to_send_a_file():
     src = _viewer("bootstrap.js")
     assert "function uploadTarget(" in src
     assert "target ? [clip, status, send] : [status, send]" in src
+
+
+def test_a_screen_can_ask_again_after_its_question_was_answered():
+    """Keyed on the anchor, an answered ask silenced its own element for good.
+    The reader answering with a question of their own -- the most ordinary
+    outcome there is -- left the screen with no way to ask again, and
+    rewriting the attribute changed nothing. The question lives in the
+    attribute, so changing it asks a different one."""
+    src = _viewer("bootstrap.js")
+    assert "function askAnswered(control)" in src
+    assert "q.answer && q.question === control.asks" in src, (
+        "an ask is still judged by whether its element was ever answered"
+    )
+    for stale in ('return c.asks && !atAnchor(c.ref).some(function (q) { return q.answer; });',
+                  'if (control.asks && !done) {'):
+        assert stale not in src, f"an anchor-keyed judgement survives: {stale}"
