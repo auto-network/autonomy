@@ -1862,9 +1862,16 @@ async def _add_update_impl(
         return JSONResponse({"error": "question not found"}, status_code=404)
     update = db.add_conversation_update(entry_id, text)
     update_payload = _update_payload(update)
+    # EVERY CONVERSATION EVENT CARRIES ITS ENTRY. This one carried only the
+    # update, and a reader with the screen open drops any conversation event
+    # without a question on it -- so progress was published, discarded, and
+    # appeared only on the next load. The delta stays in the envelope for
+    # anything that wants it; the entry is what makes an open screen repaint.
+    entry = db.get_question(lookup_mission_id, entry_id)
     await _publish_conversation_event(
         "update", lookup_mission_id, existing.get("pillar_id"), entry_id,
         update=update_payload,
+        question=_question_payload(entry) if entry else None,
     )
     return JSONResponse({"update": update_payload}, status_code=201)
 
