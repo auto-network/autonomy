@@ -2794,3 +2794,35 @@ def test_a_visitor_token_still_wins_over_a_bearer():
 
 
 VISITOR_COOKIE_NAME = mc_api.VISITOR_COOKIE
+
+
+def test_an_edited_question_says_it_was_edited_and_by_whom():
+    """A pillar keeps its record clear by adjusting the text, including the
+    operator's. A reader finding wording that does not match what someone
+    remembers saying has to be able to see that it was edited. It was recorded
+    from the start and never sent to anybody, which is the same as not
+    recording it."""
+    client = _client()
+    mission_id = client.post(
+        "/api/missions", json={"name": "A", "coordinator_session": "auto-coordinator"},
+    ).json()["mission"]["mission_id"]
+    client.post(f"/api/missions/{mission_id}/site", json={"html": "<html>v1</html>"})
+    visitor = _visitor(client)
+    with patch("tools.dashboard.tmux_send.tmux_send", new_callable=AsyncMock):
+        asked = client.post(
+            f"/api/missions/{mission_id}/questions?as={visitor['token']}",
+            json={"question": "rambling original, mid-thought"},
+        ).json()["question"]
+    assert asked["question_edited_at"] is None
+    assert asked["question_edited_by_session"] is None
+
+    edited = client.post(
+        f"/api/missions/{mission_id}/questions/{asked['entry_id']}/rephrase",
+        json={"question": "the question that was actually answered"},
+    ).json()["question"]
+    assert edited["question"] == "the question that was actually answered"
+    assert edited["question_edited_at"] is not None
+    # No caller identity here, so it falls back to the session named on the
+    # mission. An authenticated caller is attributed to itself instead --
+    # see test_a_coordinator_session_is_a_participant_on_its_own_surface.
+    assert edited["question_edited_by_session"] == "auto-coordinator"
