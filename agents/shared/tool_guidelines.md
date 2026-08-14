@@ -160,6 +160,67 @@ When you complete your work, write a decision file to `/workspace/output/decisio
 - `code` — tests fail, won't compile, logic errors
 - `other` — anything else
 
+## Definition of Done — runtime-critical work
+
+If the bead carries the `runtime-critical` label — code exercised only when
+the real system runs and stubbed by the mock/unit layers (session/container
+startup + launch routing, credential/auth resolve+store+refresh, session
+launcher + mount wiring, dispatch execution, merge automation, background
+pollers/jobs) — a green test suite is **not** enough to be DONE.
+
+- **`confidence: 5` requires a functional artifact.** A functional artifact is
+  a REAL run's evidence — a screenshot, a log tail, a transcript — of the
+  change exercised on the actual user path. A passing pytest+grep is not that:
+  it proves the mocked layer, which is the layer the bug hides behind. Without
+  a functional artifact your ceiling is `confidence: 2`.
+- **No artifact => BLOCKED, not DONE.** This is enforced, not advisory. Three
+  gates refuse an unproven close/merge (the `bd close` shim, the dispatcher's
+  pre-merge check, and the dispatcher's own host-side closer). If you cannot
+  produce the artifact, write a `BLOCKED` decision saying so — do not claim
+  DONE and let a gate reopen the bead under you.
+
+Record the proof as a marker line the gates recognize, in the close reason
+(`-r`) or a bead note, AND as a `functional_artifacts` entry in decision.json:
+
+```
+functional-proof: <ref>
+```
+
+where `<ref>` is a graph attachment id, a `/workspace/output` path, or a run
+log. Two rules the proven gate enforces — learned by it failing each one on a
+real run first:
+
+1. **The ref must be a concrete token** — six or more ref-safe characters
+   matching `[A-Za-z0-9/][A-Za-z0-9/_.:-]{5,}`. `functional-proof: abcdef`,
+   `functional-proof: /workspace/output/run/functional_check.log`, and
+   `functional-proof: edf85f2c-5bf` all satisfy it.
+2. **Literal angle-bracket examples do NOT satisfy the gate.** Quoting the
+   syntax — `functional-proof: <ref>`, `functional-proof: <graph attachment
+   id | output path>` — is documentation, not proof, and is rejected. This
+   exclusion caught a real false-positive: the gate's own first red run sailed
+   through because the bead description quoted the contract.
+
+The exact refusal you will see if you try to close without proof (verbatim
+from the fleet-proof transcript, graph attachment `edf85f2c-5bf`):
+
+```
+bd-close gate: REFUSING to close <id>
+  This bead is labeled runtime-critical: closing it requires
+  evidence the change ran on a real user path — a screenshot,
+  tail, or transcript from an actual run, referenced as:
+      functional-proof: <graph attachment id | output path>
+  in the close reason (-r) or a bead note. A green test suite
+  is not functional proof for a runtime change.
+```
+
+**The pipeline-driven way to produce a functional artifact:** write an
+executable `functional_check.sh` into your run's output dir (next to
+decision.json). Contract: `exit 0` = proven; stdout IS the evidence
+transcript. The dispatcher runs it (via `smoke.py`, 120s timeout), tees stdout
+to `functional_check.log`, and the pre-merge gate accepts that log as your
+functional artifact when it passed. No config, no bead-side flag — the run
+declares by writing the script.
+
 ## Optional: write a journal entry
 
 If this arc revealed something an operator should follow — a substrate gap,

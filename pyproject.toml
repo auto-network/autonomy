@@ -4,5 +4,5 @@ pythonpath = ["."]
 # outside the default sweep for months and silently accumulated drift
 # (typegen artifacts, schema synopses, launcher call-capture assumptions,
 # primer template changes) that ambushed whichever session ran them next.
-testpaths = ["tools/dashboard/tests", "tools/graph/tests", "agents/tests", "tools/network/idkit/tests", "tools/network/registry/tests", "tools/network/relaykit/tests", "tools/network/swarmkit/tests", "tools/init/tests", "tools/connectors/tests"]
+testpaths = ["tools/dashboard/tests", "tools/graph/tests", "agents/tests", "tools/network/idkit/tests", "tools/network/registry/tests", "tools/network/relaykit/tests", "tools/network/swarmkit/tests", "tools/init/tests", "tools/connectors/tests", "tests/gates"]
 addopts = "-n 8 --dist loadfile"

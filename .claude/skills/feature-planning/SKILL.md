@@ -46,6 +46,38 @@ Not every requirement needs this. Write full scenarios for the **architecturally
 11. **Scope & test plan.** In/out. How each requirement is checked — and distinguish **verification** (the response measure is met) from **validation** (the real need is solved in the real environment); the acceptance gates are validations (NASA SE Handbook's distinction). Tie tests to the scenarios.
 12. **Write it up** — the decision-note (graph) + the bead.
 
+## Operationalizing verification vs validation: the runtime-critical label
+
+Step 11's verification/validation split is not just vocabulary — it decides
+whether a bead can be *verified* by a green test suite or must be *validated*
+against a real run before it closes. The controller's boundary ruling
+(auto-w41na) makes the split a test you can apply:
+
+> **runtime-critical = code exercised only when the real system runs and
+> stubbed by mock/unit layers** — session/container startup + launch routing,
+> credential/auth resolution+storage+refresh, session launcher + mount wiring,
+> dispatch execution, merge automation, background pollers/jobs.
+
+**The label test.** Ask of the change: *is the code path exercised only when
+the real system runs, and stubbed by the mock/unit layers the tests use?* If
+yes, a passing suite verifies the stub, not the behavior — the bug lives in the
+layer the test replaced. That bead is `runtime-critical`, and its acceptance
+gate is a **validation**: a REAL run's evidence (screenshot, log tail,
+transcript), recorded as `functional-proof: <ref>`. If no — the tests exercise
+the same code the user hits — verification suffices and the label does not
+apply. "Which layer does the test actually run?" is the whole test; when
+unsure, treat wide-blast-radius runtime code as runtime-critical.
+
+**The polish-time application rule.** Apply the label when polishing the bead
+(the [bead polishing](graph://f6c6c43e-24a) gate), not at idea time — by then
+the concrete design (step 10) shows which layer the change lives in, so the
+test above has an answer. Refine the boundary list from evidence: a class of
+change that keeps shipping mock-verified bugs is a candidate to add. The label
+is what arms the three golden-rule gates (bd-close shim, dispatcher pre-merge,
+host-side closer); mislabel low and the gate never fires, mislabel high and
+honest work is blocked until it removes the label with a recorded
+justification. See the Definition-of-Done block in `tool_guidelines.md`.
+
 ## The artifact: a decision-note in the graph (MADR)
 
 Knowledge goes in the graph, not a repo file — git is for code. Use the MADR 4 shape (adr.github.io/madr; origin: Nygard, "Documenting Architecture Decisions", 2011): **Context & problem statement · Decision drivers** (the scenarios, with numbers) **· Considered options · Decision outcome** (+ consequences + confirmation) **· Pros and cons of the options · More information.** Graph versioning gives you the ADR "supersede, don't edit" property for free; provenance links note → bead → session → commit. The bead links the note; [bead polishing](graph://f6c6c43e-24a) is the final gate on the work item.

@@ -829,7 +829,73 @@ def functional_proof_missing(dispatch_result) -> bool:
         if isinstance(a, dict) and str(a.get("path", "")).strip()
         and "<" not in str(a.get("path", ""))
     ]
-    return not concrete
+    if concrete:
+        return False
+    # Pipeline-driven proof (auto-hwrho): a passing functional_check.log,
+    # produced by the run's own functional_check.sh via smoke.py and recorded
+    # in <output_dir>/smoke_result.json's functional block, also satisfies the
+    # gate. Same standard — a REAL run's transcript — reached by convention
+    # instead of a hand-written decision.json entry.
+    return not functional_check_proven(dispatch_result)
+
+
+def functional_check_proven(dispatch_result) -> bool:
+    """True when the run's per-bead functional check ran and passed.
+
+    Reads <output_dir>/smoke_result.json (written by smoke.py --functional-only
+    / --output-dir) and accepts it as functional proof only when the functional
+    block reports present + pass and the referenced functional_check.log exists
+    on disk. Shape only — the log's substance is judged by the record.
+    """
+    out = getattr(dispatch_result, "output_dir", "")
+    if not out:
+        return False
+    try:
+        smoke = json.loads((Path(out) / "smoke_result.json").read_text())
+    except Exception:
+        return False
+    fn = smoke.get("functional") or {}
+    log = fn.get("log")
+    return bool(fn.get("present") and fn.get("pass")
+                and log and Path(log).exists())
+
+
+def run_functional_check(dispatch_result) -> dict | None:
+    """Execute the run's per-bead functional_check.sh via smoke.py, before the
+    pre-merge gate (golden-rule gate feeder, auto-hwrho).
+
+    Convention-based: a dispatched run declares pipeline-driven functional
+    proof by writing an executable functional_check.sh into its output dir.
+    This drives smoke.py --output-dir <dir> --functional-only (which skips the
+    dashboard tiers, runs the script, tees stdout to functional_check.log, and
+    emits a functional block) and persists smoke_result.json — the same file
+    the post-merge dashboard smoke writes — so functional_proof_missing() can
+    accept the log. No-op (returns None) when there is no output dir, no
+    smoke.py, or no functional_check.sh.
+    """
+    out = getattr(dispatch_result, "output_dir", "")
+    smoke_script = REPO_ROOT / "tools/dashboard/smoke.py"
+    if not out or not smoke_script.exists():
+        return None
+    if not (Path(out) / "functional_check.sh").exists():
+        return None
+    try:
+        raw = subprocess.run(
+            [sys.executable, str(smoke_script),
+             "--output-dir", out, "--functional-only"],
+            capture_output=True, text=True, cwd=str(REPO_ROOT), timeout=140,
+        )
+        smoke = json.loads(raw.stdout) if raw.stdout.strip() else {
+            "pass": False, "functional": {"present": True, "pass": False,
+                                          "detail": "no smoke output"}}
+        (Path(out) / "smoke_result.json").write_text(json.dumps(smoke))
+        fn = smoke.get("functional") or {}
+        print(f"  Functional check: present={fn.get('present')} "
+              f"pass={fn.get('pass')} (log: {fn.get('log')})")
+        return smoke
+    except Exception as fc_err:
+        print(f"  WARN: functional check error: {fc_err}", file=sys.stderr)
+        return None
 
 
 
@@ -1151,11 +1217,19 @@ def process_decision(dispatch_result: DispatchResult) -> str:
         if out:
             print(f"  Created discovered bead: {out}")
 
+    # Per-bead functional check (auto-hwrho): if the run wrote a
+    # functional_check.sh into its output dir, execute it now — before the
+    # pre-merge gate — so a passing functional_check.log counts as the
+    # functional artifact the gate demands. No-op when absent.
+    if status == "DONE":
+        run_functional_check(dispatch_result)
+
     # Auto-merge to master on DONE if agent committed
     # ── Golden-rule pre-merge gate (auto-w41na) ──────────────────────
     # A runtime-critical bead merges only with functional proof: evidence
     # the change ran on a REAL user path, listed in decision.json as
     #   functional_artifacts: [{"path": ..., "kind": ..., "note": ...}]
+    # or produced by the run's own functional_check.sh (auto-hwrho).
     # A green test suite is not functional proof for a runtime change.
     # Mirrors the bd-close shim (tools/beads/bd); same label, same rule,
     # enforced here for the dispatched path the shim never sees.
@@ -1196,10 +1270,16 @@ def process_decision(dispatch_result: DispatchResult) -> str:
             smoke_script = REPO_ROOT / "tools/dashboard/smoke.py"
             if "dashboard" in dispatch_result.labels and smoke_script.exists():
                 try:
+                    # Pass --output-dir so the dashboard smoke also runs any
+                    # per-bead functional_check.sh and rides the functional
+                    # block on the same smoke_result.json (auto-hwrho).
+                    smoke_cmd = [sys.executable, str(smoke_script)]
+                    if dispatch_result.output_dir:
+                        smoke_cmd += ["--output-dir", dispatch_result.output_dir]
                     smoke_raw = subprocess.run(
-                        [sys.executable, str(smoke_script)],
+                        smoke_cmd,
                         capture_output=True, text=True,
-                        cwd=str(REPO_ROOT), timeout=60,
+                        cwd=str(REPO_ROOT), timeout=180,
                     )
                     smoke = (
                         json.loads(smoke_raw.stdout)
