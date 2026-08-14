@@ -842,6 +842,30 @@ window.flushPendingSessionAttachments = function(store, provenance) {
 var _messagesRegistered = false;
 window.ensureSessionMessages = function() {
   if (_messagesRegistered) return;
+
+  // THESE HANDLERS NEED THE STORE, SO THEY WAIT FOR IT. This file is a plain
+  // script and Alpine is deferred, so anything registering before Alpine has
+  // run reaches getSessionStore -> Alpine.store('sessions') with Alpine
+  // undefined. Registering also REPLAYS the cached event for the topic
+  // immediately, so an early registration runs a handler at once, against a
+  // store that does not exist yet.
+  //
+  // Nothing crashed, because every dispatch path catches per handler and
+  // warns -- which is precisely why it survived: a caught error prints like
+  // an uncaught one and the page still works, so it read as fatal to one
+  // reader and as noise to everyone else. What actually happened is that the
+  // handler aborted partway through the registry list and whatever it had not
+  // applied yet was simply not applied.
+  //
+  // Waiting costs nothing and loses nothing: registration replays the cached
+  // event whenever it happens, so deferring registration defers the replay
+  // with it, rather than dropping it.
+  if (typeof Alpine === 'undefined') {
+    document.addEventListener('alpine:init', function() {
+      window.ensureSessionMessages();
+    }, {once: true});
+    return;
+  }
   _messagesRegistered = true;
 
   window.registerHandler('session:messages', function(data) {
