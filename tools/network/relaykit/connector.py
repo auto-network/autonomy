@@ -328,6 +328,12 @@ class Publisher:
         #: finally so a publish between tunnels fails closed rather than
         #: emitting into a dead socket.
         self._send_frame = None
+        # token -> exact responder object -> async raw-viewer send.  Relay
+        # viewers are fanned out by the registry after one tunnel frame;
+        # direct DataChannels have no registry hop, so each direct listener
+        # receives the same already-sealed feed bytes here.  The stream key is
+        # still absent: this object moves opaque bytes only.
+        self._direct: dict[str, dict[object, object]] = {}
 
     # -- connector side ------------------------------------------------
 
@@ -347,20 +353,37 @@ class Publisher:
         else:
             self._attached.pop(token, None)
 
+    def attach_direct(self, token: str, owner: object, send) -> None:
+        """Attach one exact live DataChannel to *token*'s feed."""
+        if not callable(send):
+            raise TypeError("direct publisher send must be callable")
+        listeners = self._direct.setdefault(token, {})
+        if owner in listeners:
+            raise RuntimeError("direct publisher listener is already attached")
+        listeners[owner] = send
+
+    def detach_direct(self, token: str, owner: object) -> None:
+        """Detach only *owner*; delayed teardown cannot remove a successor."""
+        listeners = self._direct.get(token)
+        if listeners is None:
+            return
+        listeners.pop(owner, None)
+        if not listeners:
+            self._direct.pop(token, None)
+
     # -- application side ----------------------------------------------
 
     def has_listeners(self, token: str) -> bool:
         """Whether any channel is open against *token* right now. The
         publish side checks this before doing any work at all."""
-        return token in self._attached
+        return token in self._attached or token in self._direct
 
     async def publish(self, token: str, sealed: bytes) -> bool:
         """Emit one already-sealed frame for *token*, once. False means
         it was not sent -- no tunnel, or nobody is listening -- and is
         not an error: the live stream is best-effort by design and a
         viewer recovers a gap through history on its own channel."""
-        send_frame = self._send_frame
-        if send_frame is None or not self.has_listeners(token):
+        if not self.has_listeners(token):
             return False
         try:
             token_bytes = bytes.fromhex(token)
@@ -368,11 +391,32 @@ class Publisher:
             return False
         if len(token_bytes) != CHANNEL_ID_LEN:
             return False
-        try:
-            await send_frame(FRAME_DATA, token_bytes, sealed)
-        except Exception:
-            return False  # a dropped frame is recoverable through history
-        return True
+        sent = False
+        send_frame = self._send_frame
+        if send_frame is not None and token in self._attached:
+            try:
+                await send_frame(FRAME_DATA, token_bytes, sealed)
+                sent = True
+            except Exception:
+                pass  # a dropped frame is recoverable through history
+
+        # Snapshot: a send failure may concurrently close and detach the exact
+        # responder.  Never iterate the mutable owner map across an await.
+        direct = tuple(self._direct.get(token, {}).values())
+        if direct:
+            from .frames import VIEWER_KIND_FEED, tag_viewer_message
+            # The sealed feed frame is opaque here, so it cannot be split
+            # without changing its application protocol.  Relay transport can
+            # carry larger frames; direct DataChannels cannot.  Skip only the
+            # oversized direct delivery and leave relay delivery intact rather
+            # than tearing down every direct viewer on one large event.
+            if len(sealed) <= 60 * 1024 + 26:
+                tagged = tag_viewer_message(VIEWER_KIND_FEED, sealed)
+                results = await asyncio.gather(
+                    *(send(tagged) for send in direct), return_exceptions=True
+                )
+                sent = sent or any(not isinstance(result, BaseException) for result in results)
+        return sent
 
 
 class TunnelConnector:

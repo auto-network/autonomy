@@ -25,7 +25,7 @@ from typing import Any
 
 from tools.network.idkit import DelegationCert, KeyPair
 
-from .channel import MAX_RECORD_CHUNK_SIZE
+from .channel import MAX_RECORD_CHUNK_SIZE, SEND_CHUNK_SIZE
 from .connector import serve_channel
 from .ice_signaling import (
     IceAnswer,
@@ -50,6 +50,11 @@ DATA_CHANNEL_QUEUE_RECORDS = 32
 # 8-byte sequence, 1-byte encrypted flags, and a 16-byte GCM tag surround
 # the largest record chunk the current protocol accepts.
 MAX_DATA_CHANNEL_MESSAGE_BYTES = MAX_RECORD_CHUNK_SIZE + 25
+# Everything this responder sends is target-format v1: a 60 KiB encrypted
+# record plus its 25-byte sequence/flags/tag overhead and the outer viewer-kind
+# byte.  The larger receive ceiling is temporary deployed-client tolerance and
+# must never leak into a newly emitted DataChannel message.
+MAX_DATA_CHANNEL_OUTBOUND_BYTES = SEND_CHUNK_SIZE + 26
 
 
 class AiortcRuntimeError(RuntimeError):
@@ -121,7 +126,8 @@ class PeerRuntime:
 
     Signaling attempts have a separate, shorter-lived cap.  This owner reserves
     a peer slot before an answer is built, so ownership transfer after the full
-    answer send cannot fail and create an unowned live connection.
+    answer send cannot fail for capacity. It may still refuse an object already
+    closing, which is not an unowned live connection.
     """
 
     def __init__(self, limit: int, *, per_token_limit: int):
@@ -338,6 +344,7 @@ class AiortcResponder:
         org: str,
         application_handler,
         authorization_check=None,
+        publisher=None,
         modules: _Modules,
         application_timeout: float = APPLICATION_HANDSHAKE_TIMEOUT_SECONDS,
     ):
@@ -350,11 +357,15 @@ class AiortcResponder:
         self._org = org
         self._handler = application_handler
         self._authorization_check = authorization_check
+        self._publisher = publisher
+        self._direct_publisher_attached = False
         self._modules = modules
         self._application_timeout = application_timeout
         self._peer = peer
         self._channel = None
         self._channel_task: asyncio.Task | None = None
+        self._feed_task: asyncio.Task | None = None
+        self._close_tasks: set[asyncio.Task] = set()
         self._established = asyncio.Event()
         self._transferred = False
         self._closed = False
@@ -428,7 +439,7 @@ class AiortcResponder:
 
     def _on_datachannel(self, channel) -> None:
         if self._closed or self._channel is not None or channel.label != DATA_CHANNEL_LABEL:
-            asyncio.create_task(self.aclose())
+            self._spawn_close()
             return
         self._channel = channel
         self._channel_task = asyncio.create_task(self._serve_datachannel(channel))
@@ -439,9 +450,23 @@ class AiortcResponder:
             try:
                 _assert_relay_selected(self._peer, self._modules)
             except Exception:
-                asyncio.create_task(self.aclose())
+                self._spawn_close()
         elif state in ("failed", "closed"):
-            asyncio.create_task(self.aclose())
+            self._spawn_close()
+
+    def _spawn_close(self) -> None:
+        """Retain event-driven close tasks until their teardown completes."""
+        if self._closed:
+            return
+        task = asyncio.create_task(self.aclose())
+        self._close_tasks.add(task)
+
+        def done(completed: asyncio.Task) -> None:
+            self._close_tasks.discard(completed)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(done)
 
     async def _serve_datachannel(self, channel) -> None:
         queue: asyncio.Queue[bytes | None] = asyncio.Queue(
@@ -450,13 +475,14 @@ class AiortcResponder:
         low = asyncio.Event()
         low.set()
         failed = False
+        send_lock = asyncio.Lock()
         channel.bufferedAmountLowThreshold = DATA_CHANNEL_LOW_WATER_BYTES
 
         def fail_channel() -> None:
             nonlocal failed
             if not failed:
                 failed = True
-                asyncio.create_task(self.aclose())
+                self._spawn_close()
 
         @channel.on("message")
         def on_message(message):
@@ -485,16 +511,19 @@ class AiortcResponder:
         async def recv():
             return await queue.get()
 
-        async def send(payload: bytes):
-            if channel.readyState != "open":
-                raise ConnectionError("WebRTC DataChannel is not open")
-            if channel.bufferedAmount > DATA_CHANNEL_HIGH_WATER_BYTES:
-                low.clear()
-                if channel.bufferedAmount > DATA_CHANNEL_LOW_WATER_BYTES:
-                    await asyncio.wait_for(
-                        low.wait(), timeout=DATA_CHANNEL_DRAIN_TIMEOUT_SECONDS
-                    )
-            channel.send(payload)
+        async def send_wire(payload: bytes):
+            if not isinstance(payload, bytes) or len(payload) > MAX_DATA_CHANNEL_OUTBOUND_BYTES:
+                raise ConnectionError("WebRTC DataChannel message exceeds its bound")
+            async with send_lock:
+                if channel.readyState != "open":
+                    raise ConnectionError("WebRTC DataChannel is not open")
+                if channel.bufferedAmount > DATA_CHANNEL_HIGH_WATER_BYTES:
+                    low.clear()
+                    if channel.bufferedAmount > DATA_CHANNEL_LOW_WATER_BYTES:
+                        await asyncio.wait_for(
+                            low.wait(), timeout=DATA_CHANNEL_DRAIN_TIMEOUT_SECONDS
+                        )
+                channel.send(payload)
 
         async def application_handler(token: str, message: bytes):
             # Reaching this wrapper proves the fresh root-pinned application
@@ -507,6 +536,38 @@ class AiortcResponder:
                     allowed = await allowed
                 if allowed is not True:
                     raise PermissionError("the local link grant is no longer valid")
+            if self._publisher is not None and not self._direct_publisher_attached:
+                # Register only after the fresh application handshake and
+                # grant re-check. Publisher sends the same already-sealed feed
+                # bytes as the relay stream, tagged outside the pairwise record
+                # layer; no second application protocol or stream key exists.
+                feed_queue: asyncio.Queue[bytes] = asyncio.Queue(
+                    maxsize=DATA_CHANNEL_QUEUE_RECORDS
+                )
+
+                async def enqueue_feed(payload: bytes):
+                    if self._closed:
+                        raise ConnectionError("WebRTC DataChannel is closed")
+                    try:
+                        feed_queue.put_nowait(payload)
+                    except asyncio.QueueFull as exc:
+                        self._spawn_close()
+                        raise ConnectionError(
+                            "WebRTC DataChannel feed queue is full"
+                        ) from exc
+
+                async def write_feeds():
+                    try:
+                        while True:
+                            await send_wire(await feed_queue.get())
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        await self.aclose()
+
+                self._feed_task = asyncio.create_task(write_feeds())
+                self._publisher.attach_direct(self.token, self, enqueue_feed)
+                self._direct_publisher_attached = True
             self._established.set()
             result = self._handler(token, message)
             if inspect.isawaitable(result):
@@ -520,7 +581,7 @@ class AiortcResponder:
                 org=self._org,
                 token=self.token,
                 recv=recv,
-                send=send,
+                send=send_wire,
                 handler=application_handler,
             )
         finally:
@@ -530,9 +591,12 @@ class AiortcResponder:
         if self._closed:
             return
         self._closed = True
+        if self._publisher is not None and self._direct_publisher_attached:
+            self._publisher.detach_direct(self.token, self)
+            self._direct_publisher_attached = False
         current = asyncio.current_task()
         cancelled = []
-        for task in (self._watchdog, self._channel_task):
+        for task in (self._watchdog, self._channel_task, self._feed_task):
             if task is not None and task is not current and not task.done():
                 task.cancel()
                 cancelled.append(task)
@@ -559,6 +623,7 @@ class AiortcResponderFactory:
         org: str,
         application_handler,
         authorization_check=None,
+        publisher=None,
         modules: _Modules | None = None,
     ):
         self.token = token
@@ -568,6 +633,7 @@ class AiortcResponderFactory:
         self.org = org
         self.application_handler = application_handler
         self.authorization_check = authorization_check
+        self.publisher = publisher
         self.modules = modules or load_aiortc_modules()
         # xw5ow: persona belongs only in the registry-admission certificate.
         # A viewer SERVER_HELLO may carry only the direct-root neutral twin.
@@ -604,6 +670,7 @@ class AiortcResponderFactory:
                 org=self.org,
                 application_handler=self.application_handler,
                 authorization_check=self.authorization_check,
+                publisher=self.publisher,
                 modules=self.modules,
             )
         except BaseException:

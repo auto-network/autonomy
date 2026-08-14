@@ -19,6 +19,7 @@ import pytest
 
 from tools.network.relaykit.connector import Publisher
 from tools.network.relaykit.frames import CHANNEL_ID_LEN, FRAME_DATA
+from tools.network.relaykit.frames import VIEWER_KIND_FEED, split_viewer_message
 
 TOKEN = "ab" * 16  # 32 hex chars == 16 raw bytes == CHANNEL_ID_LEN
 
@@ -145,6 +146,57 @@ def test_detaching_an_unknown_token_is_harmless():
     assert publisher.has_listeners("never-attached") is False
 
 
+def test_direct_listener_gets_the_same_opaque_sealed_feed_and_detaches_by_identity():
+    async def run():
+        publisher = Publisher()
+        first, second = object(), object()
+        first_frames, second_frames = [], []
+
+        async def send_first(payload):
+            first_frames.append(payload)
+
+        async def send_second(payload):
+            second_frames.append(payload)
+
+        publisher.attach_direct(TOKEN, first, send_first)
+        publisher.attach_direct(TOKEN, second, send_second)
+        assert await publisher.publish(TOKEN, b"sealed") is True
+        assert split_viewer_message(first_frames[0]) == (VIEWER_KIND_FEED, b"sealed")
+        assert split_viewer_message(second_frames[0]) == (VIEWER_KIND_FEED, b"sealed")
+
+        publisher.detach_direct(TOKEN, first)
+        assert publisher.has_listeners(TOKEN) is True
+        assert await publisher.publish(TOKEN, b"later") is True
+        assert len(first_frames) == 1
+        assert split_viewer_message(second_frames[-1]) == (VIEWER_KIND_FEED, b"later")
+
+        # A delayed duplicate cleanup for the old object cannot remove the
+        # surviving direct listener.
+        publisher.detach_direct(TOKEN, first)
+        assert publisher.has_listeners(TOKEN) is True
+        publisher.detach_direct(TOKEN, second)
+        assert publisher.has_listeners(TOKEN) is False
+
+    asyncio.run(run())
+
+
+def test_one_publish_reaches_the_relay_once_and_each_direct_listener_once():
+    async def run():
+        publisher, sender = Publisher(), _Sender()
+        direct_frames = []
+        publisher.bind(sender)
+        publisher.attached(TOKEN)
+        publisher.attach_direct(TOKEN, object(), lambda payload: _append(direct_frames, payload))
+        assert await publisher.publish(TOKEN, b"sealed") is True
+        assert sender.frames == [(FRAME_DATA, bytes.fromhex(TOKEN), b"sealed")]
+        assert len(direct_frames) == 1
+
+    async def _append(target, payload):
+        target.append(payload)
+
+    asyncio.run(run())
+
+
 def test_the_stream_key_never_reaches_the_publisher():
     """Publisher moves opaque bytes only -- it has no key parameter, no
     key attribute, and no way to seal anything. The application side
@@ -153,3 +205,20 @@ def test_the_stream_key_never_reaches_the_publisher():
     assert not any("key" in name.lower() for name in vars(publisher))
     import inspect
     assert "key" not in inspect.signature(Publisher.publish).parameters
+
+
+def test_oversized_direct_feed_is_skipped_without_tearing_down_listener():
+    async def run():
+        publisher = Publisher()
+        frames = []
+        owner = object()
+
+        async def send(payload):
+            frames.append(payload)
+
+        publisher.attach_direct(TOKEN, owner, send)
+        assert await publisher.publish(TOKEN, b"x" * (60 * 1024 + 27)) is False
+        assert frames == []
+        assert publisher.has_listeners(TOKEN) is True
+
+    asyncio.run(run())

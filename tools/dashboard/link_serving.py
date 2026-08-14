@@ -1084,6 +1084,7 @@ def make_ice_grant_handler(
     channel_cert,
     peer_runtime,
     signaling_capacity,
+    publisher=None,
     modules=None,
     now=None,
 ):
@@ -1098,6 +1099,13 @@ def make_ice_grant_handler(
     """
     from tools.network.relaykit.aiortc_responder import AiortcResponderFactory
     from tools.network.relaykit.ice_handler import IceRoutingHandler
+
+    # The production grant path always carries live questions/presence through
+    # Publisher.  Allowing None here creates a direct request/response path
+    # that silently loses the live feed; isolated responder tests may still
+    # omit it by constructing AiortcResponder directly.
+    if publisher is None:
+        raise ValueError("ICE grant handler requires a Publisher")
 
     clock = now or time.time
     application_handler = make_grant_handler(org, now=clock)
@@ -1122,6 +1130,7 @@ def make_ice_grant_handler(
             org=org,
             application_handler=application_handler,
             authorization_check=valid_grant,
+            publisher=publisher,
             modules=modules,
         )
 

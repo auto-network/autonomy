@@ -13,6 +13,7 @@ from tools.network.relaykit.ice_signaling import (
     STUN_URL,
     TURN_URLS,
 )
+from tools.network.relaykit.connector import Publisher
 
 
 TOKEN = "a" * 32
@@ -70,6 +71,7 @@ async def test_ice_policy_is_derived_only_from_the_verified_local_grant(
         channel_cert=cert,
         peer_runtime=object(),
         signaling_capacity=IceCapacity(4, per_token_limit=2),
+        publisher=Publisher(),
         modules=object(),
         now=lambda: 1000,
     )
@@ -92,6 +94,7 @@ async def test_revoked_grant_cannot_obtain_ice_configuration(monkeypatch):
         channel_cert=object(),
         peer_runtime=object(),
         signaling_capacity=IceCapacity(4, per_token_limit=2),
+        publisher=Publisher(),
         modules=object(),
         now=lambda: 1000,
     )
@@ -102,3 +105,17 @@ async def test_revoked_grant_cannot_obtain_ice_configuration(monkeypatch):
             json.dumps({"v": 1, "op": "ice.begin", "attempt_id": ATTEMPT}).encode(),
         )
     await channel.aclose()
+
+
+def test_ice_grant_handler_requires_publisher():
+    key, cert = viewer_credentials()
+    with pytest.raises(ValueError, match="requires a Publisher"):
+        link_serving.make_ice_grant_handler(
+            "test-org",
+            configuration_provider=lambda token, policy: configuration(),
+            key=key,
+            channel_cert=cert,
+            peer_runtime=object(),
+            signaling_capacity=IceCapacity(4, per_token_limit=2),
+            modules=object(),
+        )
