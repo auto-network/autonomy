@@ -945,6 +945,49 @@ mission's own signpost note, so the mission keeps a record of what was cut and
 why. A judgement that lives only in a conversation is lost to the next pillar
 that would have made the same mistake.
 
+### Raising the whole mission, when the whole mission is stuck
+
+Everything above happens inside a mission: the operator opens it and works
+through what is waiting there. That is the right shape for the detail — a
+pillar's `data-mc-ask` is a specific decision, in context, on the screen where
+the work is.
+
+It is the wrong shape for "this mission cannot proceed". Waiting to be visited
+is not how you say that.
+
+**The controller — and only the controller — writes one row saying where the
+mission stands.** It lands in the operator's Activity → Notifications, where
+they see it without opening any mission. It is the mission's push channel.
+
+```bash
+graph set add dashboard.activity.ask#2 --key "$AUTONOMY_SESSION" --from - <<'JSON'
+{
+  "session_id": "auto-0729-212913",
+  "compact": "Multi-User Autonomy is blocked on one decision: relay-hosted join pages.",
+  "normal": "Three pillars are waiting on whether the relay may host the join page...",
+  "expanded": "...the longer version, for when they want the whole picture.",
+  "created_at": "2026-08-14T01:00:00Z",
+  "revision_seq": 4
+}
+JSON
+```
+
+One row per session by construction — writing again replaces it. So this is
+not a feed and nothing accumulates: it is the single current answer to "what
+does this mission need from you?", rewritten whenever that changes, and
+removed when the answer is nothing.
+
+The three bodies are one thought at three depths, and `compact` has to stand
+alone — it is what a reader sees in a list of every session wanting something.
+Bump `revision_seq` on every rewrite; a refresh request from the operator
+clears only when it advances, which is how they ask you to re-prove an ask is
+still live.
+
+**A pillar never writes one of these.** Your mission-level status belongs to
+the controller, who is the only participant holding the whole picture (that is
+this section's whole argument). Raise it to them and let them decide whether
+the mission is blocked or only you are.
+
 ---
 
 ## How this document is maintained
