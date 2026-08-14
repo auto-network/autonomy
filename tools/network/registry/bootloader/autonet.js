@@ -42,6 +42,23 @@ const autonet = (() => {
   // follows is NOT bounded here: a large artifact may legitimately take time.
   const CONNECT_TIMEOUT_MS = 10000;
   const VIEWER_READY_TIMEOUT_MS = 10000;
+  const ICE_GATHER_TIMEOUT_MS = 2000;
+  const ICE_ATTEMPT_TIMEOUT_MS = 8000;
+  const ICE_MAX_CANDIDATES = 32;
+  const ICE_MAX_CANDIDATE_BYTES = 2 * 1024;
+  const ICE_MAX_SDP_BYTES = 64 * 1024;
+  const DATA_CHANNEL_LABEL = "autonomy-v1";
+  const DATA_CHANNEL_QUEUE_RECORDS = 32;
+  const DATA_CHANNEL_LOW_WATER_BYTES = 256 * 1024;
+  const DATA_CHANNEL_HIGH_WATER_BYTES = 512 * 1024;
+  const DATA_CHANNEL_DRAIN_TIMEOUT_MS = 5000;
+  const DATA_CHANNEL_MAX_WIRE_BYTES = SEND_CHUNK_SIZE + 25;
+  const STUN_URL = "stun:turn.auto.network:3478";
+  const TURN_URLS = [
+    "turn:turn.auto.network:3478?transport=udp",
+    "turn:turn.auto.network:3478?transport=tcp",
+    "turns:turn.auto.network:443?transport=tcp",
+  ];
   const STREAM_FINAL = 0x01;
   const MSG_END = 0x02;
   const KNOWN_RECORD_FLAGS = STREAM_FINAL | MSG_END;
@@ -278,7 +295,10 @@ const autonet = (() => {
           { name: "AES-GCM", iv: concatBytes(this.sendDir, seq),
             additionalData: concatBytes(this.transcript, this.sendDir, seq) },
           this.sendKey, plaintext));
-        this.ws.send(concatBytes(seq, ciphertext));
+        // WebSocket.send is synchronous and returns undefined.  The
+        // DataChannel adapter returns a Promise while its bounded send buffer
+        // drains.  Awaiting either keeps one record layer for both transports.
+        await Promise.resolve(this.ws.send(concatBytes(seq, ciphertext)));
         if (final) return;
       }
     }
@@ -431,6 +451,471 @@ const autonet = (() => {
         "disconnected", "websocket closed (" + event.code + ")"
       ));
     });
+  }
+
+  // ---- bounded browser WebRTC transport ----------------------------------
+
+  function exactFields(value, fields) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const actual = Object.keys(value).sort();
+    const expected = [...fields].sort();
+    return actual.length === expected.length &&
+      actual.every((field, index) => field === expected[index]);
+  }
+
+  function utf8Length(value) {
+    return te.encode(value).length;
+  }
+
+  function isMdnsName(value) {
+    return typeof value === "string" && value.length <= 253 &&
+      /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+local\.?$/i.test(value);
+  }
+
+  function parseIpv4(value) {
+    if (!/^(?:\d{1,3}\.){3}\d{1,3}$/.test(value)) return null;
+    const parts = value.split(".").map(Number);
+    return parts.every((part) => part >= 0 && part <= 255) ? parts : null;
+  }
+
+  function isGlobalIpv4(value) {
+    const p = parseIpv4(value);
+    if (!p) return false;
+    if (p[0] === 0 || p[0] === 10 || p[0] === 127 || p[0] >= 224) return false;
+    if (p[0] === 100 && p[1] >= 64 && p[1] <= 127) return false;
+    if (p[0] === 169 && p[1] === 254) return false;
+    if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return false;
+    if (p[0] === 192 && p[1] === 0 && (p[2] === 0 || p[2] === 2)) return false;
+    if (p[0] === 192 && p[1] === 88 && p[2] === 99) return false;
+    if (p[0] === 192 && p[1] === 168) return false;
+    if (p[0] === 198 && (p[1] === 18 || p[1] === 19 || p[1] === 51 && p[2] === 100)) return false;
+    if (p[0] === 203 && p[1] === 0 && p[2] === 113) return false;
+    return true;
+  }
+
+  function isGlobalIpv6(value) {
+    if (typeof value !== "string" || !value.includes(":")) return false;
+    const lower = value.toLowerCase();
+    if (lower.startsWith("::ffff:")) return isGlobalIpv4(lower.slice(7));
+    if (lower.startsWith("::") || lower.startsWith("ff") ||
+        lower.startsWith("fe8") || lower.startsWith("fe9") ||
+        lower.startsWith("fea") || lower.startsWith("feb") ||
+        lower.startsWith("fec") || lower.startsWith("fed") ||
+        lower.startsWith("fee") || lower.startsWith("fef") ||
+        lower.startsWith("fc") || lower.startsWith("fd") ||
+        lower.startsWith("2001:db8:") || lower.startsWith("2001:0:") ||
+        lower.startsWith("2001:2:") || lower.startsWith("2001:10:") ||
+        lower.startsWith("2001:20:") || lower.startsWith("2002:")) return false;
+    if (!/^[0-9a-f:]+$/.test(lower)) return false;
+    const first = parseInt(lower.split(":", 1)[0], 16);
+    return first >= 0x2000 && first <= 0x3fff;
+  }
+
+  function isGlobalIp(value) {
+    return isGlobalIpv4(value) || isGlobalIpv6(value);
+  }
+
+  function candidateTokens(value) {
+    if (!exactFields(value, ["candidate", "sdpMid", "sdpMLineIndex", "usernameFragment"]) ||
+        typeof value.candidate !== "string" || !value.candidate ||
+        utf8Length(value.candidate) > ICE_MAX_CANDIDATE_BYTES) {
+      throw new Error("malformed ICE candidate");
+    }
+    const tokens = value.candidate.trim().split(/\s+/);
+    if (tokens.length < 8 || !tokens[0].startsWith("candidate:") ||
+        tokens[6] !== "typ" || !["host", "srflx", "relay"].includes(tokens[7])) {
+      throw new Error("malformed ICE candidate");
+    }
+    if ((tokens.length - 8) % 2) throw new Error("malformed ICE candidate extensions");
+    const extensions = new Map();
+    for (let index = 8; index < tokens.length; index += 2) {
+      const name = tokens[index].toLowerCase();
+      if (extensions.has(name)) throw new Error("duplicate ICE candidate extension");
+      extensions.set(name, index + 1);
+    }
+    if (extensions.has("raddr") !== extensions.has("rport")) {
+      throw new Error("incomplete ICE related address");
+    }
+    return { tokens, type: tokens[7], address: tokens[4], extensions };
+  }
+
+  /** Privacy-filter one trickled candidate; null means deliberately omitted. */
+  function filterIceCandidate(value, policy) {
+    if (policy !== "direct_allowed" && policy !== "relay_only") {
+      throw new Error("unknown ICE policy");
+    }
+    const { tokens, type, address, extensions } = candidateTokens(value);
+    if (policy === "relay_only" && type !== "relay") return null;
+    if (type === "host") {
+      if (policy === "relay_only" || !isMdnsName(address) || extensions.has("raddr")) {
+        return null;
+      }
+    } else if (!isGlobalIp(address)) {
+      // A CGNAT/double-NAT srflx address is unusable to the peer, but must
+      // not abort the whole offer: a relay candidate may still work.
+      if (type === "srflx") return null;
+      throw new Error("ICE candidate address is not globally routable");
+    }
+
+    const relatedIndex = extensions.get("raddr");
+    if (relatedIndex !== undefined) {
+      const related = tokens[relatedIndex];
+      if (type === "relay" || !isGlobalIp(related)) {
+        tokens[relatedIndex] = related.includes(":") ? "::" : "0.0.0.0";
+        tokens[extensions.get("rport")] = "9";
+      }
+    }
+    return {
+      candidate: tokens.join(" "),
+      sdpMid: value.sdpMid,
+      sdpMLineIndex: value.sdpMLineIndex,
+      usernameFragment: value.usernameFragment,
+    };
+  }
+
+  function sdpLines(sdp) {
+    if (typeof sdp !== "string" || utf8Length(sdp) > ICE_MAX_SDP_BYTES) {
+      throw new Error("SDP is malformed or exceeds its byte limit");
+    }
+    return { lines: sdp.split(/\r?\n/), newline: sdp.includes("\r\n") ? "\r\n" : "\n" };
+  }
+
+  /** Remove every candidate and neutralize every standard SDP address slot. */
+  function sanitizeIceSdp(sdp) {
+    const { lines, newline } = sdpLines(sdp);
+    const clean = [];
+    for (let line of lines) {
+      const stripped = line.trim();
+      if (/^a=(?:candidate:|end-of-candidates$)/i.test(stripped)) continue;
+      let match = /^c=IN IP(4|6) \S+$/i.exec(stripped);
+      if (match) {
+        line = `c=IN IP${match[1]} ${match[1] === "4" ? "0.0.0.0" : "::"}`;
+      } else {
+        match = /^o=(\S+ \S+ \S+ IN IP)(4|6) \S+$/i.exec(stripped);
+        if (match) line = `o=${match[1]}${match[2]} ${match[2] === "4" ? "0.0.0.0" : "::"}`;
+        match = /^a=rtcp:(\d+) IN IP(4|6) \S+$/i.exec(stripped);
+        if (match) line = `a=rtcp:${match[1]} IN IP${match[2]} ${match[2] === "4" ? "0.0.0.0" : "::"}`;
+      }
+      clean.push(line);
+    }
+    const result = clean.join(newline);
+    assertAddressFreeIceSdp(result);
+    return result;
+  }
+
+  /** Refuse candidate smuggling and non-placeholder SDP address positions. */
+  function assertAddressFreeIceSdp(sdp) {
+    const { lines } = sdpLines(sdp);
+    let addressPositions = 0;
+    for (const line of lines) {
+      const stripped = line.trim();
+      if (/^a=(?:candidate:|end-of-candidates$)/i.test(stripped)) {
+        throw new Error("SDP contains a smuggled ICE candidate");
+      }
+      const fields = stripped.split(/\s+/);
+      if (/^c=IN IP[46] /i.test(stripped) || /^o=/i.test(stripped) ||
+          /^a=rtcp:\d+ IN IP[46] /i.test(stripped)) {
+        const address = fields[fields.length - 1];
+        if (address !== "0.0.0.0" && address !== "::") {
+          throw new Error("SDP contains a non-placeholder address");
+        }
+        addressPositions += 1;
+      }
+    }
+    if (!addressPositions) throw new Error("SDP contains no checked address position");
+    return sdp;
+  }
+
+  function parseJsonMessage(bytes, what) {
+    try {
+      return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    } catch (_error) {
+      throw new Error(what + " is not valid JSON");
+    }
+  }
+
+  function validateIceConfig(value, attemptId, nowSeconds) {
+    if (!exactFields(value, ["v", "op", "attempt_id", "policy", "ice_servers", "expires_at"]) ||
+        value.v !== 1 || value.op !== "ice.config" || value.attempt_id !== attemptId ||
+        !["direct_allowed", "relay_only"].includes(value.policy) ||
+        !Number.isInteger(value.expires_at) || value.expires_at <= nowSeconds ||
+        !Array.isArray(value.ice_servers) || value.ice_servers.length !== 2) {
+      throw new Error("malformed ice.config");
+    }
+    const [stun, turn] = value.ice_servers;
+    if (!exactFields(stun, ["urls"]) || !Array.isArray(stun.urls) ||
+        stun.urls.length !== 1 || stun.urls[0] !== STUN_URL ||
+        !exactFields(turn, ["urls", "username", "credential", "credentialType"]) ||
+        !Array.isArray(turn.urls) || turn.urls.length !== TURN_URLS.length ||
+        !turn.urls.every((url, index) => url === TURN_URLS[index]) ||
+        turn.credentialType !== "password" || typeof turn.username !== "string" ||
+        !turn.username || utf8Length(turn.username) > 512 ||
+        typeof turn.credential !== "string" || !turn.credential ||
+        utf8Length(turn.credential) > 512) {
+      throw new Error("malformed ICE server configuration");
+    }
+    return value;
+  }
+
+  function validateIceAnswer(value, attemptId, policy) {
+    if (!exactFields(value, ["v", "op", "attempt_id", "sdp", "candidates"]) ||
+        value.v !== 1 || value.op !== "ice.answer" || value.attempt_id !== attemptId ||
+        !Array.isArray(value.candidates) || value.candidates.length > ICE_MAX_CANDIDATES) {
+      throw new Error("malformed ice.answer");
+    }
+    assertAddressFreeIceSdp(value.sdp);
+    const candidates = value.candidates.map((candidate) => {
+      const filtered = filterIceCandidate(candidate, policy);
+      if (!filtered) throw new Error("answer candidate violates ICE policy");
+      return filtered;
+    });
+    return { sdp: value.sdp, candidates };
+  }
+
+  function dataChannelTransport(channel, onClose) {
+    if (!channel || channel.label !== DATA_CHANNEL_LABEL) {
+      throw new Error("unexpected DataChannel label");
+    }
+    channel.binaryType = "arraybuffer";
+    channel.bufferedAmountLowThreshold = DATA_CHANNEL_LOW_WATER_BYTES;
+    const queue = [];
+    const waiters = [];
+    const feedQueue = [];
+    const feedWaiters = [];
+    let closed = null;
+
+    const fail = (error) => {
+      if (closed) return;
+      closed = error;
+      while (waiters.length) waiters.shift().reject(error);
+      while (feedWaiters.length) feedWaiters.shift().reject(error);
+      try { channel.close(); } catch (_error) { /* already closed */ }
+      if (typeof onClose === "function") {
+        try { onClose(); } catch (_error) { /* peer teardown is best effort */ }
+      }
+    };
+    channel.addEventListener("message", (event) => {
+      if (!(event.data instanceof ArrayBuffer)) return fail(new Error("DataChannel message is not binary"));
+      const tagged = new Uint8Array(event.data);
+      if (!tagged.length || tagged.length > DATA_CHANNEL_MAX_WIRE_BYTES + 1 ||
+          (tagged[0] !== VIEWER_KIND_RECORD && tagged[0] !== VIEWER_KIND_FEED)) {
+        return fail(new Error("DataChannel carried an invalid application record"));
+      }
+      const payload = tagged.slice(1);
+      const targetQueue = tagged[0] === VIEWER_KIND_FEED ? feedQueue : queue;
+      const targetWaiters = tagged[0] === VIEWER_KIND_FEED ? feedWaiters : waiters;
+      if (targetWaiters.length) targetWaiters.shift().resolve(payload);
+      else if (targetQueue.length < DATA_CHANNEL_QUEUE_RECORDS) targetQueue.push(payload);
+      else fail(new Error("DataChannel receive queue is full"));
+    });
+    channel.addEventListener("close", () => fail(typedError("disconnected", "DataChannel closed")));
+    channel.addEventListener("error", () => fail(typedError("disconnected", "DataChannel failed")));
+
+    const waitForDrain = () => new Promise((resolve, reject) => {
+      let timer;
+      const done = (error) => {
+        clearTimeout(timer);
+        channel.removeEventListener("bufferedamountlow", low);
+        channel.removeEventListener("close", gone);
+        error ? reject(error) : resolve();
+      };
+      const low = () => done(null);
+      const gone = () => done(typedError("disconnected", "DataChannel closed while draining"));
+      channel.addEventListener("bufferedamountlow", low, { once: true });
+      channel.addEventListener("close", gone, { once: true });
+      timer = setTimeout(() => done(new Error("DataChannel send buffer did not drain")),
+        DATA_CHANNEL_DRAIN_TIMEOUT_MS);
+    });
+
+    return {
+      async send(payload) {
+        if (!(payload instanceof Uint8Array) || payload.length > DATA_CHANNEL_MAX_WIRE_BYTES) {
+          throw new Error("DataChannel record exceeds the v1 wire limit");
+        }
+        if (closed || channel.readyState !== "open") {
+          throw closed || typedError("disconnected", "DataChannel is not open");
+        }
+        if (channel.bufferedAmount > DATA_CHANNEL_HIGH_WATER_BYTES) await waitForDrain();
+        channel.send(payload);
+      },
+      recvBinary() {
+        if (queue.length) return Promise.resolve(queue.shift());
+        if (closed) return Promise.reject(closed);
+        return new Promise((resolve, reject) => waiters.push({ resolve, reject }));
+      },
+      recvFeed() {
+        if (feedQueue.length) return Promise.resolve(feedQueue.shift());
+        if (closed) return Promise.reject(closed);
+        return new Promise((resolve, reject) => feedWaiters.push({ resolve, reject }));
+      },
+      close() { fail(typedError("disconnected", "DataChannel closed")); },
+    };
+  }
+
+  function waitForDataChannelOpen(channel) {
+    if (channel.readyState === "open") return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const done = (error) => {
+        channel.removeEventListener("open", opened);
+        channel.removeEventListener("close", closed);
+        channel.removeEventListener("error", failed);
+        error ? reject(error) : resolve();
+      };
+      const opened = () => done(null);
+      const closed = () => done(new Error("DataChannel closed before opening"));
+      const failed = () => done(new Error("DataChannel failed before opening"));
+      channel.addEventListener("open", opened, { once: true });
+      channel.addEventListener("close", closed, { once: true });
+      channel.addEventListener("error", failed, { once: true });
+    });
+  }
+
+  async function gatherIceOffer(peer, policy) {
+    const candidates = [];
+    let gatheringError = null;
+    let complete;
+    const finished = new Promise((resolve) => { complete = resolve; });
+    const onCandidate = (event) => {
+      if (!event.candidate) return complete();
+      try {
+        const raw = typeof event.candidate.toJSON === "function"
+          ? event.candidate.toJSON() : event.candidate;
+        const filtered = filterIceCandidate(raw, policy);
+        if (filtered) {
+          if (candidates.length >= ICE_MAX_CANDIDATES) throw new Error("too many ICE candidates");
+          candidates.push(filtered);
+        }
+      } catch (error) {
+        gatheringError = error;
+        complete();
+      }
+    };
+    peer.addEventListener("icecandidate", onCandidate);
+    try {
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      if (peer.iceGatheringState !== "complete") {
+        await withTimeout(finished, ICE_GATHER_TIMEOUT_MS, "ICE gathering");
+      }
+      if (gatheringError) throw gatheringError;
+      return { sdp: sanitizeIceSdp(peer.localDescription.sdp), candidates };
+    } finally {
+      peer.removeEventListener("icecandidate", onCandidate);
+    }
+  }
+
+  async function assertRelaySelected(peer) {
+    if (typeof peer.getStats !== "function") {
+      throw new Error("relay-only path cannot verify the selected ICE pair");
+    }
+    const stats = await peer.getStats();
+    const rows = new Map();
+    stats.forEach((value, key) => rows.set(key, value));
+    let pair = [...rows.values()].find((row) => row.type === "candidate-pair" &&
+      (row.selected === true || row.nominated === true) && row.state === "succeeded");
+    if (!pair) {
+      const transport = [...rows.values()].find((row) => row.type === "transport" &&
+        typeof row.selectedCandidatePairId === "string");
+      pair = transport && rows.get(transport.selectedCandidatePairId);
+      if (!pair || pair.type !== "candidate-pair" || pair.state !== "succeeded") pair = null;
+    }
+    const local = pair && rows.get(pair.localCandidateId);
+    if (!local || local.candidateType !== "relay") {
+      throw new Error("relay-only path selected a direct candidate");
+    }
+  }
+
+  /**
+   * Attempt one parallel upgrade after the relay has already delivered the
+   * artifact request.  The caller supplies ONE shared authentication function
+   * created by the D22 link-opening layer; this transport adapter neither
+   * reads the registry's root_pub nor replays identity lineage itself.
+   */
+  async function attemptWebRtcUpgrade({
+    openSignaling,
+    authenticateTransport,
+    proveApplication,
+    RTCPeerConnectionImpl = globalThis.RTCPeerConnection,
+    attemptId = bytesToHex(crypto.getRandomValues(new Uint8Array(16))),
+    nowSeconds = () => Math.floor(Date.now() / 1000),
+  }) {
+    if (typeof openSignaling !== "function" || typeof authenticateTransport !== "function" ||
+        typeof proveApplication !== "function" || typeof RTCPeerConnectionImpl !== "function" ||
+        !/^[0-9a-f]{32}$/.test(attemptId)) {
+      throw new Error("WebRTC upgrade dependencies are incomplete");
+    }
+    const deadline = Date.now() + ICE_ATTEMPT_TIMEOUT_MS;
+    const bounded = (promise, label) => withTimeout(
+      Promise.resolve(promise), Math.max(1, deadline - Date.now()), label,
+    );
+    let signalingTransport = null;
+    let signalingChannel = null;
+    let peer = null;
+    let directTransport = null;
+    let directChannel = null;
+    let complete = false;
+    try {
+      signalingTransport = await bounded(openSignaling(), "ICE signaling connect");
+      signalingChannel = await bounded(
+        authenticateTransport(signalingTransport), "ICE signaling authentication",
+      );
+      await bounded(signalingChannel.sendMessage(te.encode(canonicalJson({
+        v: 1, op: "ice.begin", attempt_id: attemptId,
+      }))), "ICE begin");
+      const config = validateIceConfig(
+        parseJsonMessage(await bounded(signalingChannel.recvMessage(), "ICE config"), "ice.config"),
+        attemptId,
+        nowSeconds(),
+      );
+      peer = new RTCPeerConnectionImpl({
+        iceServers: config.ice_servers,
+        iceCandidatePoolSize: 0,
+        iceTransportPolicy: config.policy === "relay_only" ? "relay" : "all",
+      });
+      const dataChannel = peer.createDataChannel(DATA_CHANNEL_LABEL, { ordered: true });
+      peer.addEventListener("datachannel", () => { try { peer.close(); } catch (_error) {} });
+      const offer = await bounded(gatherIceOffer(peer, config.policy), "ICE gathering");
+      await bounded(signalingChannel.sendMessage(te.encode(canonicalJson({
+        v: 1,
+        op: "ice.offer",
+        attempt_id: attemptId,
+        sdp: offer.sdp,
+        candidates: offer.candidates,
+      }))), "ICE offer");
+      const answer = validateIceAnswer(
+        parseJsonMessage(await bounded(signalingChannel.recvMessage(), "ICE answer"), "ice.answer"),
+        attemptId,
+        config.policy,
+      );
+      await bounded(peer.setRemoteDescription({ type: "answer", sdp: answer.sdp }), "ICE answer apply");
+      for (const candidate of answer.candidates) {
+        await bounded(peer.addIceCandidate(candidate), "remote ICE candidate");
+      }
+      await bounded(peer.addIceCandidate(null), "remote ICE completion");
+      await bounded(waitForDataChannelOpen(dataChannel), "DataChannel open");
+      if (config.policy === "relay_only") await bounded(assertRelaySelected(peer), "relay path proof");
+      directTransport = dataChannelTransport(dataChannel, () => peer.close());
+      directChannel = await bounded(
+        authenticateTransport(directTransport), "DataChannel application authentication",
+      );
+      await bounded(proveApplication(directChannel), "DataChannel application exchange");
+      complete = true;
+      return {
+        channel: directChannel,
+        transport: directTransport,
+        policy: config.policy,
+        expiresAt: config.expires_at,
+        peer,
+      };
+    } finally {
+      if (signalingChannel && typeof signalingChannel.close === "function") signalingChannel.close();
+      else if (signalingTransport && typeof signalingTransport.close === "function") signalingTransport.close();
+      if (!complete) {
+        if (directChannel && typeof directChannel.close === "function") directChannel.close();
+        else if (directTransport) directTransport.close();
+        if (peer) peer.close();
+      }
+    }
   }
 
   /* §5.4 direct-connect seam: try each announced endpoint before falling
@@ -1815,6 +2300,8 @@ const autonet = (() => {
   return {
     state, boot, canonicalJson, verifyChain, attemptEndpoints,
     attemptDirectEndpoint, performHandshake, openSocket, fetchArtifact,
+    attemptWebRtcUpgrade, dataChannelTransport,
+    filterIceCandidate, sanitizeIceSdp, assertAddressFreeIceSdp,
     validateArtifact, renderArtifact, ChannelBroker,
     assembleJoinContext, deliverJoinContext,
     withTimeout, SecureChannel,

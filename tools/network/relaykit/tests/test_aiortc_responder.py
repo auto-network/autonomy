@@ -33,6 +33,8 @@ from tools.network.relaykit.ice_signaling import (
     assert_candidate_free_sdp,
     strip_candidate_lines,
 )
+from tools.network.relaykit.connector import Publisher
+from tools.network.relaykit.frames import VIEWER_KIND_FEED, split_viewer_message
 
 from .conftest import ORG, TOKEN
 
@@ -456,6 +458,58 @@ async def test_fresh_application_handshake_rechecks_the_local_grant(
             await responder._serve_datachannel(Channel())
         assert not responder.established
         assert application_calls == []
+    assert runtime.active == 0
+
+
+@pytest.mark.asyncio
+async def test_established_direct_peer_attaches_the_existing_live_feed_until_close(
+    monkeypatch, session_key, session_cert
+):
+    modules = load_aiortc_modules()
+    runtime = PeerRuntime(2, per_token_limit=1)
+    publisher = Publisher()
+    responder = AiortcResponder(
+        token=TOKEN,
+        policy="direct_allowed",
+        owner=runtime,
+        reservation=runtime.reserve(TOKEN),
+        peer=modules.RTCPeerConnection(
+            _aiortc_configuration(configuration(), modules)
+        ),
+        key=session_key,
+        cert=session_cert,
+        org=ORG,
+        application_handler=lambda _token, _message: b"ok",
+        authorization_check=lambda _token: True,
+        publisher=publisher,
+        modules=modules,
+    )
+    sent = []
+
+    async def exercise_handler(_key, _cert, **kwargs):
+        assert not publisher.has_listeners(TOKEN)
+        assert await kwargs["handler"](TOKEN, b"real-application-request") == b"ok"
+        assert publisher.has_listeners(TOKEN)
+        assert await publisher.publish(TOKEN, b"sealed-feed") is True
+        await asyncio.sleep(0)  # bounded direct writer drains independently
+
+    monkeypatch.setattr(aiortc_responder, "serve_channel", exercise_handler)
+
+    class Channel:
+        bufferedAmountLowThreshold = 0
+        readyState = "open"
+        bufferedAmount = 0
+
+        def on(self, _name):
+            return lambda callback: callback
+
+        def send(self, payload):
+            sent.append(payload)
+
+    await responder._serve_datachannel(Channel())
+    assert len(sent) == 1
+    assert split_viewer_message(sent[0]) == (VIEWER_KIND_FEED, b"sealed-feed")
+    assert not publisher.has_listeners(TOKEN)
     assert runtime.active == 0
 
 
