@@ -431,7 +431,7 @@ var signRegistryRequestCore;
       } catch (e) {
         // Unlocking local authority must never depend on registry-serving
         // maintenance. A later unlock retries the cheap check.
-        if (window.console && console.warn) {
+        if (typeof console !== 'undefined' && console.warn) {
           console.warn('could not check serving credential status:',
                        (e && e.message) || e);
         }
@@ -521,7 +521,7 @@ var signRegistryRequestCore;
         // The sign-on succeeded. Serving repair is opportunistic and retries
         // at the next root unlock; never turn broker maintenance into a local
         // identity outage.
-        if (window.console && console.warn) {
+        if (typeof console !== 'undefined' && console.warn) {
           console.warn('serve-cert provisioning failed after sign-on:',
                        (e && e.message) || e);
         }
