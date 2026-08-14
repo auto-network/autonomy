@@ -4893,6 +4893,15 @@ class TestActivityNotificationsTabBehavior:
 
 
 class TestCollabPageBehavior:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): green alone, red
+        # after predecessors — accumulated SSE/server-buffer state; only
+        # the hard reset clears it.
+        _hard_reset_sweep(sweep_server)
+
     """Collab page behavioral sweep — tabs, notes, thought input."""
 
     @pytest.fixture(scope="class", autouse=True)
@@ -6142,6 +6151,15 @@ class TestJiraCreateApprovalPreview:
 
 
 class TestWorktreesRebaseStatusBehavior:
+
+    @pytest.fixture(scope="class", autouse=True)
+    @classmethod
+    def _fresh_stack(cls, sweep_server):
+        # Order-fragility cure (auto-s3him, measured): green alone, red
+        # after predecessors — accumulated SSE/server-buffer state; only
+        # the hard reset clears it.
+        _hard_reset_sweep(sweep_server)
+
     """Worktrees page agent-→dashboard rebase status channel (auto-r1dc4).
 
     Drives ``WorktreeRebaseStatusV1`` transitions through the page's
