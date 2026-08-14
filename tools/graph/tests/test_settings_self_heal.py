@@ -142,3 +142,42 @@ def test_clean_db_open_is_a_noop(tmp_path):
     finally:
         db.close()
         GraphDB.close_all_pooled()
+
+
+def test_prior_version_stamp_with_duplicates_heals_on_open(tmp_path):
+    """The version bump (auto-uq1mi) re-runs heal-then-index fleet-wide:
+    a DB stamped at the PRIOR schema version — the fleet's real state
+    before the bump, where the index commit never bumped the stamp — with
+    live same-state duplicates opens, converges to one live base, gains
+    the index, and re-stamps current."""
+    from tools.graph.db import _SCHEMA_USER_VERSION
+
+    prior = _SCHEMA_USER_VERSION - 1
+    db = GraphDB.create_org_db(f"bump-{uuid.uuid4().hex[:8]}", root=tmp_path)
+    db.conn.execute("DROP INDEX idx_settings_one_base")
+    ids = {}
+    for marker, created_at in _CHRONO:
+        ids[marker] = _insert_base(
+            db.conn, state="raw", created_at=created_at, marker=marker)
+    db.conn.execute(f"PRAGMA user_version = {prior}")
+    db.conn.commit()
+    path = pathlib.Path(db.conn.execute("PRAGMA database_list").fetchone()[2])
+    db.close()
+    GraphDB.close_all_pooled()
+
+    db = GraphDB(path)
+    try:
+        rows = db.conn.execute(
+            "SELECT id, deprecated FROM settings WHERE set_id = ? AND key = ?",
+            (SET_ID, KEY)).fetchall()
+        live = [r["id"] for r in rows if not r["deprecated"]]
+        assert live == [ids["C"]], "newest wins; losers deprecated"
+        assert len(rows) == 3, "history retained"
+        assert db.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index'"
+            " AND name='idx_settings_one_base'").fetchone() is not None
+        stamped = db.conn.execute("PRAGMA user_version").fetchone()[0]
+        assert stamped == _SCHEMA_USER_VERSION, "re-stamped current"
+    finally:
+        db.close()
+        GraphDB.close_all_pooled()
