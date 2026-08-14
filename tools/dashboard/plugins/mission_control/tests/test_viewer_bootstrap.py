@@ -400,3 +400,26 @@ def test_open_is_defined_once_and_means_not_closed():
     for gone in ('return !q.answer; }).length',
                  'if (qFilter === "open") return !q.answer;'):
         assert gone not in src, f"a count still infers open from the answer: {gone}"
+
+
+def test_a_status_post_can_be_replied_to_where_it_is_read():
+    """The feed could be read and nothing else. Replying to any of it meant
+    working out which pillar wrote it and going there yourself, which is most
+    of why a feed stops being read."""
+    src = _viewer("bootstrap.js")
+    assert "function postNode(" in src, "a status post has no reply surface"
+    assert 'return "status:" + post.post_id;' in src, (
+        "a reply has nothing tying it to the post it answers"
+    )
+    # What came back reads under what it was about, not somewhere else.
+    assert "mc-post-reply" in src
+
+
+def test_a_reply_goes_to_the_pillar_that_wrote_the_post():
+    """Not the pillar whose screen is being read. Defaulting to the current
+    one would deliver to the wrong coordinator and look correct from both
+    ends."""
+    src = _viewer("bootstrap.js")
+    assert "function ask(text, anchor, pillarId)" in src
+    assert "pillarId ? {pillar_id: pillarId} : currentPillar()" in src
+    assert "ask(t, ref, post.pillar_id)" in src

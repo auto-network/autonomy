@@ -31,7 +31,7 @@
   // rather than opening a panel underneath the view that covers it.
   function show(next) {
     ui.panel = null; ui.entry = null; ui.anchor = null; ui.who = false;
-    ui.view = null;
+    ui.view = null; ui.post = null;
     // Where this surface was opened FROM. Without it, closing a discussion
     // could only mean "close everything" -- so reading one question and
     // wanting the next one meant reopening the list by hand every time.
@@ -438,12 +438,31 @@
   // and no collapsing: the value is reading them in order, and any grouping
   // hides exactly the interleaving that shows what a week actually looked
   // like.
+  //: A reply belongs to the thing it is about. The anchor is free text the
+  //: author of a screen normally chooses; a status post has no screen, so the
+  //: feed names its own.
+  function postAnchor(post) { return "status:" + post.post_id; }
+
   function feedView() {
     var posts = state.status_posts || [];
     var body = posts.length
       ? posts.map(function (post) {
           var dot = el("span", {class: "mc-swatch"});
           dot.style.background = post.color || "#475569";
+          // WHAT WAS SAID BACK, UNDER WHAT IT WAS SAID ABOUT. The feed could
+          // be read and nothing else -- replying to any of it meant working
+          // out which pillar it came from and going there yourself, which is
+          // most of the reason a feed gets ignored.
+          var replies = atAnchor(postAnchor(post)).map(function (q) {
+            return el("button", {class: "mc-post-reply", onclick: function () {
+              show({entry: q.entry_id, from: {view: "feed"}});
+            }}, [
+              el("p", {class: "mc-post-q", text: q.question || ""}),
+              q.answer
+                ? el("p", {class: "mc-post-a", text: firstLine(q.answer)})
+                : el("span", {class: "mc-chip mc-chip-open", text: rowChipText(q)}),
+            ]);
+          });
           return el("article", {class: "mc-post"}, [
             el("div", {class: "mc-post-head"}, [
               dot,
@@ -451,7 +470,11 @@
               el("span", {class: "mc-age", text: post.ago || ""}),
             ]),
             el("p", {class: "mc-post-text", text: post.text || ""}),
-          ]);
+            el("div", {class: "mc-post-foot"}, [
+              el("button", {class: "mc-post-act", text: "Reply",
+                            onclick: function () { show({post: post}); }}),
+            ]),
+          ].concat(replies));
         })
       : [el("p", {class: "mc-empty",
                   text: "No pillar has reported anything yet."})];
@@ -851,6 +874,11 @@
   // it, has nothing above it to show.
   function backLabel() {
     if (ui.from && ui.from.panel === "questions") return "\u2039 Questions";
+    // Opened from the feed, so back is the feed -- not "back to the mission",
+    // which would throw away the place in the list you had scrolled to.
+    if (ui.from && (ui.from.view === "feed" || ui.from.post)) {
+      return "\u2039 What is happening";
+    }
     if (ui.from && ui.from.anchor) return "\u2039 Back";
     return "\u2039 Back to " + ((currentPillar() || {}).name || "mission");
   }
@@ -956,6 +984,41 @@
     reopen:   {hint: "Reopen with a follow-up\u2026",  label: "Reopen"},
   };
 
+  function postNode() {
+    if (!ui.post) return null;
+    var post = ui.post;
+    var ref = postAnchor(post);
+    var dot = el("span", {class: "mc-swatch"});
+    dot.style.background = post.color || "#475569";
+    var body = [
+      el("div", {class: "mc-post-head"}, [
+        dot,
+        el("span", {class: "mc-post-who", text: post.pillar_name || ""}),
+        el("span", {class: "mc-age", text: post.ago || ""}),
+      ]),
+      el("p", {class: "mc-qbig mc-mb", text: post.text || ""}),
+    ];
+    atAnchor(ref).forEach(function (q) {
+      body.push(el("button", {class: "mc-row", onclick: function () {
+        show({entry: q.entry_id, from: {post: post}});
+      }}, [
+        el("span", {class: isOpen(q) ? "mc-chip mc-chip-open" : "mc-chip",
+                    text: rowChipText(q)}),
+        el("p", {class: "mc-qtext", text: q.question || ""}),
+      ]));
+    });
+    return el("section", {class: "mc-view"}, [
+      el("div", {class: "mc-phead"}, [
+        el("button", {class: "mc-back", text: "\u2039 What is happening",
+                      onclick: function () { show({view: "feed"}); }}),
+      ]),
+      el("div", {class: "mc-pbody"}, body),
+      composer("Reply to " + (post.pillar_name || "this") + "\u2026",
+               "goes to " + (post.pillar_name || "the pillar"), "Send",
+               function (t) { ask(t, ref, post.pillar_id); }),
+    ]);
+  }
+
   function anchorNode() {
     if (!ui.anchor) return null;
     var here = atAnchor(ui.anchor);
@@ -1015,9 +1078,13 @@
   // share link was refused, while the same call worked at a real URL because
   // httpRequest happened to translate it. Both ends were tested; the seam
   // between them was not. Keeping one vocabulary is what removes the seam.
-  function ask(text, anchor) {
+  function ask(text, anchor, pillarId) {
     var body = {kind: "question", question: text};
-    var p = currentPillar();
+    // THE POST'S PILLAR, NOT THE SCREEN'S. A reply to something in the feed
+    // goes to whoever wrote it, which is usually not the screen being read --
+    // defaulting to the current one would deliver it to the wrong coordinator
+    // and look, from both ends, like it had been sent correctly.
+    var p = pillarId ? {pillar_id: pillarId} : currentPillar();
     if (p) body.pillar_id = p.pillar_id;
     if (anchor) body.anchor = anchor;
     // Where to return to, captured BEFORE show() clears it.
@@ -1143,13 +1210,14 @@
     // Hidden while a panel or view is up. Choosing a pillar is a full-screen
     // act; leaving the current pillar's own section names showing behind the
     // chooser makes it unclear which screen you are even looking at.
-    var covered = ui.panel || ui.entry || ui.anchor || ui.view;
+    var covered = ui.panel || ui.entry || ui.anchor || ui.view || ui.post;
     var strip = covered ? null : stripNode();
     if (strip) chrome.appendChild(strip);
     if (ui.who) chrome.appendChild(whoList());
     var p = panelNode(); if (p) chrome.appendChild(p);
     var e = entryNode(); if (e) chrome.appendChild(e);
     var a = anchorNode(); if (a) chrome.appendChild(a);
+    var sp = postNode(); if (sp) chrome.appendChild(sp);
     if (ui.view === "feed") chrome.appendChild(feedView());
     repaintAnchors();
     if (typing) {
