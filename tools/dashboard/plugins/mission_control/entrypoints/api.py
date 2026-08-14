@@ -1110,6 +1110,26 @@ async def _relay_question(*, mission_id: str, entry_id: str) -> None:
             )
 
     db.mark_question_relay_status(mission_id, entry_id, "sent" if sent_ok else "failed")
+    # A RECEIPT, IN THE CONVERSATION, FOR BOTH SIDES. Whether a message
+    # reached anyone was a field on the entry that only the asker's screen
+    # read, so the person who sent it saw a state and the person it was sent
+    # to saw nothing. Written as an ordinary progress line, it sits in the
+    # same column as everything else that happened, in the order it happened.
+    receipt = (f"Delivered to {primary_label}" if sent_ok
+               else f"Not delivered to {primary_label} — nobody has been told")
+    try:
+        update = await asyncio.to_thread(
+            db.add_conversation_update, entry_id, receipt)
+        entry_now = await asyncio.to_thread(db.get_question, mission_id, entry_id)
+        await _publish_conversation_event(
+            "update", mission_id, entry.get("pillar_id"), entry_id,
+            update=_update_payload(update),
+            question=_question_payload(entry_now) if entry_now else None,
+        )
+    except Exception:
+        logger.warning(
+            "delivery receipt not recorded for %s/%s", mission_id, entry_id,
+        )
 
 
 async def handle_relay_write(participant_id: str, mission_id: str, body: dict) -> dict | None:
