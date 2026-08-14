@@ -167,6 +167,7 @@ from tools.dashboard import session_orientation_settings as _session_orientation
 from tools.dashboard import voice_transcription_settings as _voice_transcription_settings  # noqa: E402
 from tools.dashboard import worktree_directives as _worktree_directives  # noqa: E402, F401
 from tools.dashboard import claude_credentials_refresh as _claude_credentials_refresh  # noqa: E402
+from tools.dashboard import codex_credentials_refresh as _codex_credentials_refresh  # noqa: E402
 from tools.graph import settings_ops  # noqa: E402
 
 # Activity tab notifications substrate (bead auto-5u8zb) — imported
@@ -17439,6 +17440,7 @@ _mock_event_watcher_task: asyncio.Task | None = None
 _harness_usage_poller_task: asyncio.Task | None = None
 _serving_bootstrap_task: asyncio.Task | None = None
 _claude_credentials_refresh_task: asyncio.Task | None = None
+_codex_credentials_refresh_task: asyncio.Task | None = None
 _event_loop_watchdog_task: asyncio.Task | None = None
 _recent_sessions_refresher_task: asyncio.Task | None = None
 _settings_mediator_started: bool = False
@@ -17585,7 +17587,8 @@ def _warm_personal_settings_store() -> None:
 
 async def _on_startup():
     global _dispatch_watcher_task, _mock_event_watcher_task, _harness_usage_poller_task
-    global _claude_credentials_refresh_task, _event_loop_watchdog_task
+    global _claude_credentials_refresh_task, _codex_credentials_refresh_task
+    global _event_loop_watchdog_task
     global _recent_sessions_refresher_task, _serving_bootstrap_task
     # Re-arm the emit hook on every lifespan startup. Module import
     # already wires it (so ASGITransport-based tests that skip lifespan
@@ -17750,6 +17753,10 @@ async def _on_startup():
         _claude_credentials_refresh_task = asyncio.create_task(
             _claude_credentials_refresh.credentials_refresh_poller()
         )
+    if _codex_credentials_refresh.should_run_codex_credentials_refresh_poller():
+        _codex_credentials_refresh_task = asyncio.create_task(
+            _codex_credentials_refresh.codex_credentials_refresh_poller()
+        )
     if os.environ.get("DASHBOARD_MOCK_EVENTS"):
         from tools.dashboard.dao.mock import mock_event_watcher
         _mock_event_watcher_task = asyncio.create_task(mock_event_watcher())
@@ -17806,6 +17813,7 @@ async def _on_startup():
 async def _on_shutdown():
     global _dispatch_watcher_task, _mock_event_watcher_task
     global _harness_usage_poller_task, _claude_credentials_refresh_task
+    global _codex_credentials_refresh_task
     global _settings_mediator_started, _serving_bootstrap_task
     # Clear the emit hook so a subsequent process / test reload doesn't
     # leak a stale binding into a swapped module-level event_bus.
@@ -17849,6 +17857,7 @@ async def _on_shutdown():
             _mock_event_watcher_task,
             _harness_usage_poller_task,
             _claude_credentials_refresh_task,
+            _codex_credentials_refresh_task,
             _event_loop_watchdog_task,
             _recent_sessions_refresher_task,
         )
@@ -17862,6 +17871,7 @@ async def _on_shutdown():
     _mock_event_watcher_task = None
     _harness_usage_poller_task = None
     _claude_credentials_refresh_task = None
+    _codex_credentials_refresh_task = None
     try:
         await session_monitor.stop()
     except Exception:
