@@ -1148,7 +1148,7 @@ def cmd_read(args):
         print(f"Multiple sources match '{args.source}':")
         for s in result:
             org_tag = f" [{s['org']}]" if s.get('org') else ""
-            print(f"  {s['id'][:12]}  {s['type']:10s}  {s.get('title', '?')[:60]}{org_tag}")
+            print(f"  {s['id'][:12]}  {s['type']:10s}  {(s.get('title') or '?')[:60]}{org_tag}")
         print(f"\nUse the source ID to read a specific one, or --first to read the top match.")
         return
     source = result
@@ -1400,7 +1400,7 @@ def _cmd_read_body(args, source, db, version_req, _json):
                 return
             org_tag = f" [{source['org']}]" if source.get('org') else ""
             print(f"Source: {source['id'][:12]}  {source['type']}{org_tag}  (version {version_req})")
-            print(f"Title:  {source.get('title', '?')}")
+            print(f"Title:  {(source.get('title') or '?')}")
             print(f"Date:   {ver['created_at'][:10]}")
             print(f"{'─' * 72}")
             content = ver['content']
@@ -1609,7 +1609,7 @@ def cmd_sources(args):
         org = s.get('org') or ""
         org_tag = f" [{org}]" if org else ""
         date = (s.get("created_at") or "")[:10]
-        print(f"  {s['id'][:12]}  {s['type']:10s}  {date}  {s.get('title', '?')[:55]}{org_tag}")
+        print(f"  {s['id'][:12]}  {s['type']:10s}  {date}  {(s.get('title') or '?')[:55]}{org_tag}")
         if args.verbose:
             fp = s.get("file_path")
             print(f"                {fp if fp else '(no file)'}")
@@ -1738,7 +1738,7 @@ def cmd_context(args):
                 if (e.get("turn_number") or 0) >= lo
             ]
             org_tag = f" [{source['org']}]" if source.get('org') else ""
-            print(f"Source: {source.get('title', '?')[:60]}{org_tag}")
+            print(f"Source: {(source.get('title') or '?')[:60]}{org_tag}")
             print(f"Showing last {tail_n} turns ({lo}–{max_turn})")
             print(f"{'─' * 72}")
             for e in relevant:
@@ -1776,7 +1776,7 @@ def cmd_context(args):
         relevant = [e for e in entries if abs((e.get("turn_number") or 0) - target_turn) <= window]
 
         org_tag = f" [{source['org']}]" if source.get('org') else ""
-        print(f"Source: {source.get('title', '?')[:60]}{org_tag}")
+        print(f"Source: {(source.get('title') or '?')[:60]}{org_tag}")
         print(f"Showing turns {target_turn - window}–{target_turn + window}")
         print(f"{'─' * 72}")
 
