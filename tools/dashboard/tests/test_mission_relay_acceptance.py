@@ -131,7 +131,12 @@ def stack(tmp_path_factory):
     from tools.network.idkit import Subject, issue_cert
 
     tmp = tmp_path_factory.mktemp("mission-relay")
-    graph_db = tmp / "graph.db"
+    # Orgs-tree, no GRAPH_DB pin: the stack's grant/mission writes go at
+    # explicit org=GRAPH_ORG, which a pin contradicts under the fail-loud
+    # resolver (73bad14e). In-process writes and the connector subprocess
+    # share the tree, so both resolve the same per-org store.
+    orgs_dir = tmp / "orgs"
+    orgs_dir.mkdir()
     mission_db = tmp / "mission_control.db"
     registry_db = tmp / "registry.db"
     registry_port = free_port()
@@ -139,10 +144,11 @@ def stack(tmp_path_factory):
     env = {
         **os.environ,
         "PYTHONPATH": str(REPO),
-        "GRAPH_DB": str(graph_db),
+        "AUTONOMY_ORGS_DIR": str(orgs_dir),
         "GRAPH_ORG": GRAPH_ORG,
         "MISSION_CONTROL_DB": str(mission_db),
     }
+    env.pop("GRAPH_DB", None)
 
     # -- the org's own key material (the C2/C5 ceremony's output) --------
     root = KeyPair.generate()
@@ -187,8 +193,11 @@ def stack(tmp_path_factory):
     # process must point at the same stores, not the ambient ones, or the
     # grant lands in the operator's real DB and the connector (correctly)
     # refuses a token it cannot find.
-    prior_env = {k: os.environ.get(k) for k in ("GRAPH_DB", "GRAPH_ORG", "MISSION_CONTROL_DB")}
-    os.environ["GRAPH_DB"] = str(graph_db)
+    prior_env = {k: os.environ.get(k) for k in
+                 ("GRAPH_DB", "GRAPH_ORG", "MISSION_CONTROL_DB",
+                  "AUTONOMY_ORGS_DIR")}
+    os.environ.pop("GRAPH_DB", None)
+    os.environ["AUTONOMY_ORGS_DIR"] = str(orgs_dir)
     os.environ["GRAPH_ORG"] = GRAPH_ORG
     os.environ["MISSION_CONTROL_DB"] = str(mission_db)
 
@@ -197,6 +206,7 @@ def stack(tmp_path_factory):
     from tools.graph.db import GraphDB
 
     GraphDB.close_all_pooled()
+    GraphDB.create_org_db(GRAPH_ORG).close()
     from tools.graph.schemas.network_identity import (
         NETWORK_LINK_GRANT_REVISION, NETWORK_LINK_GRANT_SET_ID,
     )
@@ -248,9 +258,29 @@ def stack(tmp_path_factory):
     )
 
     # -- connector subprocess: the REAL grant-gated serving handler -------
-    key_file, cert_file = tmp / "session.hex", tmp / "session.cert"
+    key_file = tmp / "session.hex"
     key_file.write_text(session_key.private_hex)
-    cert_file.write_text(session_cert.to_json().decode("ascii"))
+    # The relay's hello check requires the SERVING cert scope to be
+    # exactly tunnel:serve, and the connector's REQUIRED channel cert
+    # (E1) must mirror it with the identity-neutral subject
+    # {operator, child_pub} — both are dedicated serve-side certs,
+    # distinct from the broad session cert above.
+    serve_cert = issue_cert(
+        root, session_key.public_hex,
+        scope=("tunnel:serve",),
+        org=ORG_UUID, subject=Subject("operator", "op-1"),
+        not_before=now - 300, not_after=now + 7 * 86_400,
+    )
+    cert_file = tmp / "session.cert"
+    cert_file.write_text(serve_cert.to_json().decode("ascii"))
+    channel_cert = issue_cert(
+        root, session_key.public_hex,
+        scope=("tunnel:serve",),
+        org=ORG_UUID, subject=Subject("operator", session_key.public_hex),
+        not_before=now - 300, not_after=now + 7 * 86_400,
+    )
+    channel_cert_file = tmp / "session.channel.cert"
+    channel_cert_file.write_text(channel_cert.to_json().decode("ascii"))
     # The connector's publish loop needs an event source. Without an
     # explicit --dashboard-url it falls back to _default_dashboard_url(),
     # which in a dev container resolves to the OPERATOR'S REAL DASHBOARD
@@ -261,6 +291,7 @@ def stack(tmp_path_factory):
         [sys.executable, "-m", "tools.dashboard.link_serving",
          "--relay", f"ws://127.0.0.1:{registry_port}", "--org", ORG_UUID,
          "--key-file", str(key_file), "--cert-file", str(cert_file),
+         "--channel-cert-file", str(channel_cert_file),
          "--graph-org", GRAPH_ORG,
          "--dashboard-url", f"http://127.0.0.1:{events.port}",
          "--min-backoff", "0.1", "--max-backoff", "1.0"],

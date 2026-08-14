@@ -20,8 +20,14 @@ from tools.dashboard import feature_flags as ff
 
 @pytest.fixture
 def graph_db_env(tmp_path, monkeypatch):
-    """Pin GRAPH_DB to a fresh tmp file for per-test isolation."""
-    db_path = tmp_path / "graph.db"
+    """Hermetic stores whose resolutions AGREE (test_surface.py's recipe):
+    flag reads resolve at explicit org='personal', so the pin points AT
+    the orgs tree's personal.db — explicit, pin, and caller scope all
+    converge on one hermetic file."""
+    orgs = tmp_path / "orgs"
+    orgs.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
+    db_path = orgs / "personal.db"
     monkeypatch.setenv("GRAPH_DB", str(db_path))
     monkeypatch.delenv("GRAPH_API", raising=False)
     ff.invalidate_cache(all_orgs=True)
@@ -39,7 +45,12 @@ def _seed_flag(name: str, *, enabled: bool, owner: str = "test", description: st
     )
     # Production receives this through server._settings_emit_hook. These
     # focused helper tests do not require importing the full ASGI server.
-    ff.invalidate_cache(org=settings_ops._resolve_org_arg(settings_ops.CALLER_ORG))
+    # Invalidate under the org identity READS cache with: a caller-scope
+    # write resolves to org=None, but the personal store's snapshot is
+    # keyed 'personal' — invalidate(None) pops a different key and the
+    # stale empty snapshot keeps answering (measured; the None<->personal
+    # cache-key split is flagged to the resolution owners).
+    ff.invalidate_cache(org=ff._FLAGS_ORG)
 
 
 # ── is_enabled ───────────────────────────────────────────────

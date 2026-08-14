@@ -60,7 +60,16 @@ def env(tmp_path, monkeypatch, registry_app):
     from tools.graph.db import GraphDB
 
     GraphDB.close_all_pooled()
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
+    # Orgs-tree hermeticity, no GRAPH_DB pin: the code under test
+    # resolves explicit orgs, which a pin silently swallows (73bad14e)
+    # and the fail-loud resolver refuses. delenv guards ambient leaks.
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    from tools.graph.db import GraphDB
+    GraphDB.close_all_pooled()
+    GraphDB.create_org_db(ORG).close()
     monkeypatch.setenv("GRAPH_ORG", ORG)  # this dashboard IS this org — own-org caller
     monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
     monkeypatch.setenv("AUTONOMY_NETWORK_REGISTRY_URL", REGISTRY_URL)
@@ -176,8 +185,12 @@ def test_i1_grep_pin_seed_never_touches_disk(env, root, tmp_path):
     _store_key(env, root)
     from tools.graph.db import GraphDB
     GraphDB.close_all_pooled()   # flush WAL into the main file
+    # The org-key row lives in the org's OWN DB in the orgs tree (the
+    # pinned single-file store is gone) — the never-on-disk property is
+    # asserted against the store that actually holds the row.
     blob = b"".join(
-        p.read_bytes() for p in tmp_path.glob("graph.db*") if p.is_file()
+        p.read_bytes()
+        for p in (tmp_path / "orgs").glob(f"{ORG}.db*") if p.is_file()
     )
     assert blob, "settings DB was never written"
     assert root.private_hex.encode() not in blob
@@ -420,7 +433,16 @@ def test_smuggle_via_generic_settings_api_refused(test_app, tmp_path, monkeypatc
     from starlette.testclient import TestClient as _TC
 
     GraphDB.close_all_pooled()
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
+    # Orgs-tree hermeticity, no GRAPH_DB pin: the code under test
+    # resolves explicit orgs, which a pin silently swallows (73bad14e)
+    # and the fail-loud resolver refuses. delenv guards ambient leaks.
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    from tools.graph.db import GraphDB
+    GraphDB.close_all_pooled()
+    GraphDB.create_org_db(ORG).close()
     monkeypatch.setenv("GRAPH_ORG", ORG)  # this dashboard IS this org — own-org caller
     monkeypatch.delenv("DASHBOARD_MOCK", raising=False)
 
@@ -436,8 +458,12 @@ def test_smuggle_via_generic_settings_api_refused(test_app, tmp_path, monkeypatc
     assert "I1" in json.dumps(r.json())
 
     GraphDB.close_all_pooled()
+    # The org-key row lives in the org's OWN DB in the orgs tree (the
+    # pinned single-file store is gone) — the never-on-disk property is
+    # asserted against the store that actually holds the row.
     blob = b"".join(
-        p.read_bytes() for p in tmp_path.glob("graph.db*") if p.is_file()
+        p.read_bytes()
+        for p in (tmp_path / "orgs").glob(f"{ORG}.db*") if p.is_file()
     )
     assert root.private_hex.encode() not in blob
     assert bytes.fromhex(root.private_hex) not in blob

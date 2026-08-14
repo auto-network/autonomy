@@ -17,8 +17,18 @@ from tools.graph.schemas.registry import SCHEMAS, UPCONVERTERS, SchemaValidation
 
 @pytest.fixture
 def graph_db_env(tmp_path, monkeypatch):
-    db_path = tmp_path / "graph.db"
-    monkeypatch.setenv("GRAPH_DB", str(db_path))
+    # Orgs-tree, NO pin: the server's request paths write at 'autonomy'
+    # (the caller org) AND 'personal' (boot/identity scope) — no single
+    # pin can agree with both, so any pin conflicts under the fail-loud
+    # resolver. Both org DBs exist in the per-test tree.
+    from tools.graph.db import GraphDB
+    orgs = tmp_path / "orgs"
+    orgs.mkdir()
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    GraphDB.close_all_pooled()
+    GraphDB.create_org_db("autonomy").close()
+    db_path = orgs / "autonomy.db"
     monkeypatch.delenv("GRAPH_API", raising=False)
     yield db_path
 
