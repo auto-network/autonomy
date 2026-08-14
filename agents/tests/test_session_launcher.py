@@ -788,7 +788,9 @@ def test_tool_target_without_expose_commands_skips_shim_dir(
     tmp_path, fake_creds, fake_crosstalk, captured_run,
 ):
     """A capability with a tool_target but no expose_commands still mounts
-    the bundle but does not synthesize a shim directory."""
+    the bundle and synthesizes no CAPABILITY shims — the shim directory now
+    always exists carrying exactly the bd close gate (deliberate change,
+    auto-w41na: the gate rides every session)."""
     cap = MaterializedCapability(
         contract="issue_tracker",
         contract_version=1,
@@ -810,11 +812,11 @@ def test_tool_target_without_expose_commands_skips_shim_dir(
     envs = _envs(cmd)
     # tool_target source still mounts at /opt/jira-tools.
     assert any(m.endswith("agents/capabilities/jira/tools:/opt/jira-tools:ro") for m in mounts)
-    # No shim directory mount or env when nothing to expose.
-    assert not any(":/etc/autonomy/cap-bin:" in m for m in mounts)
-    assert not any(e.startswith("AUTONOMY_CAPABILITY_BIN=") for e in envs)
-    # And no cap-bin scaffold gets dropped on disk.
-    assert not (run_dir / "cap-bin").exists()
+    # The shim dir exists for the gate alone: no capability commands leak in.
+    assert any(":/etc/autonomy/cap-bin:" in m for m in mounts)
+    assert any(e.startswith("AUTONOMY_CAPABILITY_BIN=") for e in envs)
+    shim_dir = run_dir / "cap-bin"
+    assert sorted(p.name for p in shim_dir.iterdir()) == ["bd"]
 
 
 # ── env_bindings source resolver ────────────────────────────────────────
@@ -1681,3 +1683,27 @@ def test_codex_auth_copy_cleanup_is_scheduled(
     assert len(scheduled) == 1
     assert scheduled[0][1].endswith("codex-auth.json")
     assert str(tmp_path / "run") in scheduled[0][1]
+
+
+def test_every_session_gets_the_bd_close_gate(
+    tmp_path, fake_creds, fake_crosstalk, captured_run,
+):
+    """The golden-rule close gate (auto-w41na) rides EVERY session's cap-bin
+    — no capability opt-in required — as a byte-identical copy of
+    tools/beads/bd (a copy, never an exec-wrapper: a wrapper would defeat
+    the shim's resolved-path self-location and loop)."""
+    import stat as _stat
+
+    run_dir = tmp_path / "run"
+    _run(output_dir=str(run_dir), capabilities=())
+    gate = run_dir / "cap-bin" / "bd"
+    assert gate.is_file(), "bd gate missing from cap-bin"
+    assert gate.stat().st_mode & _stat.S_IXUSR
+    repo_shim = (
+        Path(__file__).resolve().parents[2] / "tools" / "beads" / "bd"
+    )
+    assert gate.read_text() == repo_shim.read_text(encoding="utf-8")
+    # And the surface is mounted + exposed even with zero capabilities.
+    cmd = captured_run[0]
+    mounts = _mounts(cmd)
+    assert f"{run_dir / 'cap-bin'}:/etc/autonomy/cap-bin:ro" in mounts
