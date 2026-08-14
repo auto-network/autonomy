@@ -829,6 +829,49 @@ async def get_visitor_by_participant_id(request: Request) -> JSONResponse:
     return JSONResponse({"visitor": visitor})
 
 
+def _resolve_session_identity(request: Request) -> dict | None:
+    """The coordinator session behind an authenticated bearer token, as a
+    participant, or None.
+
+    A pillar screen can ask the operator a question, so a coordinator is an
+    ASKER on its own surface -- and could not act as one, because identity
+    resolution knew only a browser operator and a link guest. An agent calling
+    over HTTP was neither, so every identity-gated route refused it.
+
+    Nothing new is minted for this. Container sessions already carry their
+    CrossTalk token as an additive bearer, and the dashboard already resolves
+    that token to a session for its own restricted routes. The only thing
+    missing was the last hop: a session coordinates a pillar or a mission, and
+    THAT is the participant it acts as -- the same
+    ``pillar:<id>`` / ``mission:<id>`` identity its screen's questions are
+    already attributed to. A session that coordinates nothing here is nobody
+    here, and is refused.
+    """
+    from tools.dashboard.server import authenticate_session_request
+
+    if not request.headers.get("authorization", "").startswith("Bearer "):
+        return None
+    identity, err = authenticate_session_request(request)
+    if err is not None or not identity:
+        return None
+    session, _org = identity
+    if not session:
+        return None
+    pillar = db.get_pillar_by_coordinator(session)
+    if pillar:
+        return {
+            "participant_id": f"pillar:{pillar['pillar_id']}",
+            "participant_label": pillar["name"],
+        }
+    mission = db.get_mission_by_coordinator(session)
+    if mission:
+        return {
+            "participant_id": f"mission:{mission['mission_id']}",
+            "participant_label": mission["name"],
+        }
+    return None
+
+
 def _resolve_visitor_identity(request: Request) -> dict | None:
     """Cookie first (the TOKEN, never bare participant_id -- an
     impersonation hole otherwise: participant_id is deliberately
@@ -838,7 +881,10 @@ def _resolve_visitor_identity(request: Request) -> dict | None:
     has been set."""
     token = request.cookies.get(VISITOR_COOKIE) or request.query_params.get("as")
     if not token:
-        return _operator_identity(request)
+        # A coordinator acting on its own surface, before falling back to the
+        # operator: an agent presents a bearer and never a cookie, so the two
+        # cannot be confused for each other.
+        return _resolve_session_identity(request) or _operator_identity(request)
     return db.resolve_visitor(token)
 
 

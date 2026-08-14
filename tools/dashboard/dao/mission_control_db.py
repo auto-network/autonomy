@@ -1122,6 +1122,49 @@ def ask_question(
     }
 
 
+def get_pillar_by_coordinator(
+    coordinator_session: str, *, db_path: Path | str | None = None,
+) -> dict | None:
+    """The pillar a session coordinates, or None.
+
+    coordinator_session is plain data and mutable by design -- a pillar can
+    change hands -- so this is a live lookup, never cached. Newest first, so a
+    session that has been handed two pillars acts as the one it most recently
+    took over rather than one it has left behind.
+    """
+    if not coordinator_session:
+        return None
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM pillars WHERE coordinator_session = ?"
+            " ORDER BY created_at DESC LIMIT 1",
+            (coordinator_session,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
+def get_mission_by_coordinator(
+    coordinator_session: str, *, db_path: Path | str | None = None,
+) -> dict | None:
+    """The mission a session coordinates, or None. Same contract as
+    get_pillar_by_coordinator."""
+    if not coordinator_session:
+        return None
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute(
+            "SELECT * FROM missions WHERE coordinator_session = ?"
+            " ORDER BY created_at DESC LIMIT 1",
+            (coordinator_session,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else None
+
+
 def get_question(
     mission_id: str, entry_id: str, *, db_path: Path | str | None = None,
 ) -> dict | None:
