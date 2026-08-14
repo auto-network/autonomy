@@ -14,6 +14,7 @@ from .app import create_app
 
 _GIT_COMMIT_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _UNKNOWN_BUILD = {"commit": "unknown", "dirty": None, "built_at": None}
+FORWARDED_ALLOW_IPS = "127.0.0.1,::1"
 
 
 def _load_build_info(path: str | None) -> dict:
@@ -73,6 +74,11 @@ def main() -> None:
         port=args.port,
         access_log=False,
         log_level="warning",
+        # Caddy is the only public listener. Trust forwarded client
+        # addresses exclusively from its loopback hop; a direct/non-loopback
+        # caller cannot choose the abuse limiter's source key.
+        proxy_headers=True,
+        forwarded_allow_ips=FORWARDED_ALLOW_IPS,
     )
 
 

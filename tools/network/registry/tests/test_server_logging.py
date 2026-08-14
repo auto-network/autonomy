@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
+
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from tools.network.registry import __main__ as registry_main
 
@@ -59,6 +62,9 @@ def test_entrypoint_disables_http_and_websocket_route_logging(monkeypatch):
                 # WebSocket paths are emitted by uvicorn.error at INFO even
                 # when the HTTP access logger is disabled.
                 "log_level": "warning",
+                # Only Caddy's loopback hop supplies authoritative client IPs.
+                "proxy_headers": True,
+                "forwarded_allow_ips": registry_main.FORWARDED_ALLOW_IPS,
             },
         )
     ]
@@ -93,3 +99,34 @@ def test_entrypoint_disables_http_and_websocket_route_logging(monkeypatch):
             logger.handlers = handlers
             logger.propagate = propagate
             logger.disabled = disabled
+
+
+def test_only_loopback_proxy_can_supply_the_limiter_source_address():
+    async def probe(peer: str, forwarded: str) -> tuple[str, int]:
+        seen: list[tuple[str, int]] = []
+
+        async def app(scope, receive, send):
+            seen.append(scope["client"])
+
+        middleware = ProxyHeadersMiddleware(
+            app, trusted_hosts=registry_main.FORWARDED_ALLOW_IPS
+        )
+        scope = {
+            "type": "http",
+            "scheme": "http",
+            "client": (peer, 12345),
+            "headers": [(b"x-forwarded-for", forwarded.encode("ascii"))],
+        }
+        await middleware(scope, None, None)
+        return seen[0]
+
+    # A direct remote caller cannot choose its source key.
+    assert asyncio.run(probe("203.0.113.5", "10.0.0.1")) == (
+        "203.0.113.5",
+        12345,
+    )
+    # Caddy's loopback hop is trusted. In a multi-value header Uvicorn walks
+    # from the trusted right edge, so a client-added left value is not used.
+    assert asyncio.run(
+        probe("127.0.0.1", "10.0.0.1, 198.51.100.9")
+    ) == ("198.51.100.9", 0)

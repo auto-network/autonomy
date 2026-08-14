@@ -51,6 +51,7 @@ from tools.network.idkit import (
 )
 from tools.network.idkit.keys import PUBLIC_KEY_HEX_LEN, _decode_hex
 
+from .abuse import RelayAbuseLimiter
 from .assertion import IDENTIFY_SCOPE, MAX_ASSERTION_TTL, parse_assertion
 from .listings import parse_attestation_record, parse_listing_claim
 from .relay import TunnelHub, _resolve_live_link, tunnel_endpoint, viewer_endpoint
@@ -92,6 +93,11 @@ _JOIN_CSP = (
     "img-src data:; base-uri 'none'; form-action 'none'; "
     "frame-ancestors 'none'"
 )
+
+
+def _peer_host(request: Request) -> str:
+    """Return Uvicorn's trusted peer address, with no unmetered fallback."""
+    return request.client.host if request.client is not None else "unknown"
 
 
 def _install_html_wrapper(markdown: str, host: str | None = None) -> bytes:
@@ -506,6 +512,7 @@ def create_app(
     witness_key: Optional[KeyPair] = None,
     secure_cookies: bool = True,
     build_info: Optional[dict] = None,
+    abuse_limiter: Optional[RelayAbuseLimiter] = None,
 ) -> FastAPI:
     """Build the registry app.
 
@@ -526,6 +533,8 @@ def create_app(
     store = RegistryStore(db_path)
     now_fn = now_fn or (lambda: int(time.time()))
     hub = TunnelHub()
+    if abuse_limiter is None:
+        abuse_limiter = RelayAbuseLimiter()
     witness_key = witness_key or KeyPair.generate()
     challenge_hub = ChallengeHub()
     build_info = dict(build_info or {
@@ -536,6 +545,7 @@ def create_app(
     app.state.tunnel_hub = hub
     app.state.witness_key = witness_key
     app.state.challenge_hub = challenge_hub
+    app.state.abuse_limiter = abuse_limiter
 
     def now() -> int:
         return int(now_fn())
@@ -915,6 +925,9 @@ def create_app(
         # Anti-enumeration (§5.3): unknown, expired, revoked, and
         # dead-binding tokens are all the SAME 404 — a prober learns
         # nothing about which failure they hit.
+        admission = abuse_limiter.begin(_peer_host(request))
+        if admission is None:
+            raise HTTPException(status_code=404, detail="unknown link")
         t = now()
         link = store.get_link(token)
         if (
@@ -925,6 +938,8 @@ def create_app(
             raise HTTPException(status_code=404, detail="unknown link")
         binding = store.get_org(link.org_uuid)
         if binding is None or binding.expires_at < t:
+            raise HTTPException(status_code=404, detail="unknown link")
+        if abuse_limiter.resolve(admission, token, link.org_uuid) is None:
             raise HTTPException(status_code=404, detail="unknown link")
 
         # I12: identity attaches to a VIEW only when the grant requires it.
@@ -962,14 +977,23 @@ def create_app(
     join_js_bytes = (_BOOTLOADER_DIR / "join.js").read_bytes()
 
     @app.get("/l/{token}")
-    async def bootloader_page(token: str):
+    async def bootloader_page(token: str, request: Request):
         # ONE static byte sequence for every token — live, expired,
         # revoked, or invented. The token is read client-side from the
         # URL; nothing org- or target-identifying is in these bytes
         # (§5.3: the URL is a pure network pointer). Only the STATUS
         # differs, and it mirrors the envelope endpoint's liveness rule
         # exactly, so it opens no oracle the envelope doesn't already.
-        live = _resolve_live_link(store, token, now()) is not None
+        admission = abuse_limiter.begin(_peer_host(request))
+        link = (
+            _resolve_live_link(store, token, now())
+            if admission is not None
+            else None
+        )
+        live = (
+            link is not None
+            and abuse_limiter.resolve(admission, token, link.org_uuid) is not None
+        )
         return Response(
             content=shell_bytes,
             status_code=200 if live else 404,
@@ -1767,7 +1791,9 @@ def create_app(
 
     @app.websocket("/v1/links/{token}/channel")
     async def relay_viewer(websocket: WebSocket, token: str):
-        await viewer_endpoint(websocket, token, hub, store, now_fn)
+        await viewer_endpoint(
+            websocket, token, hub, store, now_fn, abuse_limiter=abuse_limiter
+        )
 
     @app.get("/healthz")
     async def healthz():

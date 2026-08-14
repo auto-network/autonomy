@@ -60,6 +60,7 @@ from tools.network.relaykit.hello import (
     parse_tunnel_hello,
 )
 
+from .abuse import ChannelLease, RelayAbuseLimiter
 from .signing import MAX_CLOCK_SKEW
 from .store import LinkGrant, RegistryStore
 
@@ -69,7 +70,6 @@ CLOSE_UNKNOWN_LINK = 4404  # unknown token or no serving tunnel
 CLOSE_PROTOCOL_MISMATCH = 4406
 CLOSE_REPLACED = 4409
 CLOSE_VIEWER_QUEUE_OVERFLOW = 4413
-CLOSE_TUNNEL_CHANNELS_EXCEEDED = 4429  # per-tunnel concurrent viewer cap hit
 # Resumable, not an error: this listener fell behind a stream's retention
 # window. The viewer reconnects and requests its own offset through history
 # (auto-albp6.7) -- distinct from every other close code above, none of
@@ -113,6 +113,7 @@ class _ViewerRelayChannel:
         *,
         on_writer_failure: Callable[["_ViewerRelayChannel"], None],
         max_queued_bytes: int = VIEWER_QUEUE_MAX_BYTES,
+        abuse_lease: ChannelLease | None = None,
     ):
         self.ws = ws
         self.max_queued_bytes = max_queued_bytes
@@ -122,6 +123,7 @@ class _ViewerRelayChannel:
         #: down. None for every ordinary (non-session) channel.
         self.stream_token: Optional[str] = None
         self._on_writer_failure = on_writer_failure
+        self._abuse_lease = abuse_lease
         self._queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._queued_bytes = 0
         self._closing = False
@@ -141,6 +143,14 @@ class _ViewerRelayChannel:
         payload = bytes(payload)
         if len(payload) > self.max_queued_bytes - self._queued_bytes:
             return False
+        if self._abuse_lease is not None and not self._abuse_lease.charge_bytes(
+            len(payload)
+        ):
+            # The public close remains deliberately uniform. Starting the
+            # close here also makes stream fan-out drop the listener through
+            # its existing failed-enqueue cleanup path.
+            self.start_close(CLOSE_UNKNOWN_LINK)
+            return False
         self._queued_bytes += len(payload)
         self._queue.put_nowait(payload)
         return True
@@ -150,6 +160,7 @@ class _ViewerRelayChannel:
         if self._close_task is not None:
             return self._close_task
         self._closing = True
+        self._release_abuse_lease()
         self._release_pending()
         self._writer_task.cancel()
         self._close_task = asyncio.create_task(self._finish_close(code))
@@ -182,6 +193,7 @@ class _ViewerRelayChannel:
         if self._closing:
             return
         self._closing = True
+        self._release_abuse_lease()
         self._release_pending()
         self._on_writer_failure(self)
         self._close_task = asyncio.create_task(
@@ -196,6 +208,10 @@ class _ViewerRelayChannel:
                 return
             self._queued_bytes -= len(payload)
             self._queue.task_done()
+
+    def _release_abuse_lease(self) -> None:
+        if self._abuse_lease is not None:
+            self._abuse_lease.release()
 
     async def _finish_close(self, code: int) -> None:
         with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -334,12 +350,19 @@ class Tunnel:
         async with self._send_lock:
             await self.ws.send_bytes(encode_frame(frame_type, channel_id, payload))
 
-    def add_viewer(self, channel_id: bytes, ws: WebSocket) -> _ViewerRelayChannel:
+    def add_viewer(
+        self,
+        channel_id: bytes,
+        ws: WebSocket,
+        *,
+        abuse_lease: ChannelLease | None = None,
+    ) -> _ViewerRelayChannel:
         channel = _ViewerRelayChannel(
             ws,
             on_writer_failure=lambda failed: self._writer_failed(
                 channel_id, failed
             ),
+            abuse_lease=abuse_lease,
         )
         self.channels[channel_id] = channel
         return channel
@@ -775,11 +798,33 @@ def _resolve_live_link(store: RegistryStore, token: str, now: int):
     return link
 
 
-async def viewer_endpoint(websocket: WebSocket, token: str, hub: TunnelHub,
-                          store: RegistryStore, now_fn) -> None:
+async def viewer_endpoint(
+    websocket: WebSocket,
+    token: str,
+    hub: TunnelHub,
+    store: RegistryStore,
+    now_fn,
+    *,
+    abuse_limiter: RelayAbuseLimiter | None = None,
+) -> None:
     """Handle one viewer (bootloader) connection for its whole lifetime."""
     await websocket.accept()
+    admission = None
+    if abuse_limiter is not None:
+        peer = getattr(websocket, "client", None)
+        admission = abuse_limiter.begin(
+            peer.host if peer is not None else "unknown"
+        )
+        if admission is None:
+            await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
+            return
     link = _resolve_live_link(store, token, int(now_fn()))
+    resolved = None
+    if link is not None and abuse_limiter is not None:
+        resolved = abuse_limiter.resolve(admission, token, link.org_uuid)
+        if resolved is None:
+            await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
+            return
     tunnel = hub.get(link.org_uuid) if link is not None else None
     if link is None or tunnel is None:
         # The WebSocket uses one close code; the bootloader has already
@@ -792,20 +837,33 @@ async def viewer_endpoint(websocket: WebSocket, token: str, hub: TunnelHub,
     # cannot open unbounded attachment-streaming channels to exhaust relay
     # memory on the shared tunnel. Accounting is per this tunnel, not global.
     if len(tunnel.channels) >= MAX_VIEWER_CHANNELS_PER_TUNNEL:
-        await _close_quietly(websocket, CLOSE_TUNNEL_CHANNELS_EXCEEDED)
+        await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
         return
 
+    abuse_lease = None
+    if abuse_limiter is not None:
+        abuse_lease = abuse_limiter.acquire(resolved)
+        if abuse_lease is None:
+            await _close_quietly(websocket, CLOSE_UNKNOWN_LINK)
+            return
     channel_id = new_channel_id()
-    relay_channel = tunnel.add_viewer(channel_id, websocket)
+    try:
+        relay_channel = tunnel.add_viewer(
+            channel_id, websocket, abuse_lease=abuse_lease
+        )
+    except Exception:
+        if abuse_lease is not None:
+            abuse_lease.release()
+        raise
     # Every channel is a candidate stream listener (auto-albp6.7) -- the
     # relay cannot see target_type (it never parses grants, I5), so it
     # cannot know here whether this token names a session/mission. That
     # is fine: an un-published-to stream costs one empty buffer and one
     # idle listener entry, and only auto-albp6.8's connector-side
     # publisher ever decides which tokens actually receive frames.
-    relay_channel.stream_token = token
-    tunnel.attach_listener(token, channel_id, relay_channel)
     try:
+        relay_channel.stream_token = token
+        tunnel.attach_listener(token, channel_id, relay_channel)
         await tunnel.send_frame(FRAME_OPEN, channel_id,
                                 canonical_json({"token": token}))
     except Exception:
@@ -824,6 +882,8 @@ async def viewer_endpoint(websocket: WebSocket, token: str, hub: TunnelHub,
                 continue
             if tunnel.channels.get(channel_id) is not relay_channel:
                 break  # channel torn down from the dashboard side
+            if abuse_lease is not None and not abuse_lease.charge_bytes(len(raw)):
+                break
             try:
                 await tunnel.send_frame(FRAME_DATA, channel_id, raw)
             except Exception:
