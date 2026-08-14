@@ -489,8 +489,18 @@ def _require_seq(payload: dict, field: str = "since") -> int:
     return value
 
 
-def _parse_recovery_policy(payload: dict) -> tuple:
-    """Returns (policy, recovery_pub_or_None); enforces pairing rules."""
+def _parse_recovery_policy(payload: dict, root_pub: str) -> tuple:
+    """Returns (policy, recovery_pub_or_None); enforces pairing rules AND that
+    the recovery factor is a key DISTINCT from ``root_pub``.
+
+    A recovery key the root controls is no second factor -- a stolen root would
+    sign both the rotation/rebind and its "recovery" co-signature, defeating the
+    whole 'a stolen root alone cannot rotate' property. This is the AUTHORITATIVE
+    check: the registry is the control (a non-browser client curls the envelope
+    directly), so the browser's mirror of this is only a UX nicety. ``root_pub``
+    is the root the recovery factor must differ from, per endpoint: the payload
+    root at registration, the NEW root at rebind, the bound root at policy update.
+    """
     policy = payload.get("recovery_policy")
     if policy not in RECOVERY_POLICIES:
         raise _bad_request(f"recovery_policy must be one of {sorted(RECOVERY_POLICIES)}")
@@ -498,7 +508,13 @@ def _parse_recovery_policy(payload: dict) -> tuple:
     if policy == "recovery-key":
         if recovery_pub is None:
             raise _bad_request("recovery_policy recovery-key requires recovery_pub")
-        return policy, _require_pub(recovery_pub, "recovery_pub")
+        recovery_pub = _require_pub(recovery_pub, "recovery_pub")
+        if recovery_pub == root_pub:
+            raise _bad_request(
+                "recovery_pub must differ from root_pub -- a recovery factor the "
+                "root controls is no second factor"
+            )
+        return policy, recovery_pub
     if recovery_pub is not None:
         raise _bad_request("recovery_pub is only valid with recovery_policy recovery-key")
     return policy, None
@@ -588,7 +604,7 @@ def create_app(
         )
         org_uuid = _require_uuid(payload["org_uuid"], "org_uuid")
         root_pub = _require_pub(payload["root_pub"], "root_pub")
-        policy, recovery_pub = _parse_recovery_policy(payload)
+        policy, recovery_pub = _parse_recovery_policy(payload, root_pub)
         endpoint_hints = payload.get("endpoint_hints")
         if endpoint_hints is not None and not isinstance(endpoint_hints, list):
             raise _bad_request("endpoint_hints must be a list")
@@ -669,11 +685,20 @@ def create_app(
         )
         new_root_pub = _require_pub(payload["new_root_pub"], "new_root_pub")
         if "recovery_policy" in payload:
-            new_policy, new_recovery_pub = _parse_recovery_policy(payload)
+            new_policy, new_recovery_pub = _parse_recovery_policy(payload, new_root_pub)
         else:
             if "recovery_pub" in payload:
                 raise _bad_request("recovery_pub requires recovery_policy")
             new_policy, new_recovery_pub = binding.recovery_policy, binding.recovery_pub
+        # After the rebind the bound root is new_root_pub, so the recovery factor
+        # must differ from IT -- this also covers the carried-over policy path,
+        # where _parse_recovery_policy was not re-run (rebinding onto the
+        # recovery key itself, keeping it as recovery, would otherwise
+        # self-defeat on the new root).
+        if new_policy == "recovery-key" and new_recovery_pub == new_root_pub:
+            raise _bad_request(
+                "recovery_pub must differ from the new root_pub after a rebind"
+            )
 
         # The ONLY key that can sign a rebind is the pre-declared cold
         # recovery key. Not the root (a stolen root must not be able to
@@ -730,7 +755,7 @@ def create_app(
             raise _forbidden("policy update must be signed by the org's current bound root")
         _verify_envelope_signature(envelope, "POST", str(request.url.path), t)
 
-        new_policy, new_recovery_pub = _parse_recovery_policy(payload)
+        new_policy, new_recovery_pub = _parse_recovery_policy(payload, binding.root_pub)
 
         epoch = payload["policy_epoch"]
         if type(epoch) is not int:

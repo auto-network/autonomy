@@ -73,15 +73,27 @@ def found_org_ledger(
     personal_root_seed: bytes,
     now: int,
     kem_seed: Optional[bytes] = None,
+    recovery_pub: Optional[str] = None,
 ) -> FoundedLedger:
-    """Found the ledger in one atomic sequence of four appends."""
+    """Found the ledger in one atomic sequence of four appends.
+
+    ``recovery_pub`` (the public half of the recovery-code ceremony's cold key,
+    the only secretless artifact that crosses) declares the org's recovery
+    policy at genesis: present -> policy ``recovery-key``; absent -> ``none``.
+    make_event validates the genesis through ``_v_genesis``, so an
+    ``recovery_pub == root_pub`` self-defeat is rejected here just as it is on
+    the registration path -- the recovery factor must be a key the root does
+    not control.
+    """
+    genesis_payload = {
+        "type": "genesis", "org": org_id, "root_pub": org_root.public_hex,
+    }
+    if recovery_pub is not None:
+        genesis_payload["recovery"] = {
+            "policy": "recovery-key", "recovery_pub": recovery_pub,
+        }
     genesis_id = store.append(
-        make_event(
-            org_root,
-            {"type": "genesis", "org": org_id, "root_pub": org_root.public_hex},
-            [],
-            HLC(now, 0),
-        )
+        make_event(org_root, genesis_payload, [], HLC(now, 0))
     )
     founder = derive_persona(personal_root_seed, genesis_id)
 
