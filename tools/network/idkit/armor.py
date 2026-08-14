@@ -313,8 +313,6 @@ _MASTER_KEK_LEN = 32
 _WRAP_LEN = _MASTER_KEK_LEN + 16
 _V2_SEAL_AAD = b"autonomy.idkit.armor.v2.kek-seal\n"
 _V2_FACTOR_AAD = b"autonomy.idkit.armor.v2.factor\n"
-#: Closed registry of factor types (unit 1). recovery/passkey join here later.
-_KNOWN_FACTOR_TYPES = frozenset({"password"})
 
 
 def _v2_seal_aad(root_pub: str) -> bytes:
@@ -343,6 +341,10 @@ def encrypt_root_key_v2(
             f"iterations must be in [{_MIN_ITERATIONS}, {_MAX_ITERATIONS}]"
         )
     root_pub = key.public_hex
+    # No zeroization here: Python bytes are immutable and cannot be reliably
+    # wiped (same as v1). The browser/JS mirror — where the real ceremony runs —
+    # zeroes its seed and master-KEK copies; this canonical Python path backs
+    # tests, fixtures, and the one-shot migration.
     seed = bytes.fromhex(key.private_hex)
     master_kek = os.urandom(_MASTER_KEK_LEN)
     seal_iv = os.urandom(_IV_LEN)
@@ -408,6 +410,17 @@ def _parse_password_factor(f: dict, index: int) -> None:
     _b64_field(f, "wrap", length=_WRAP_LEN, what="factor.wrap")
 
 
+# Factor-type dispatch is TOTAL BY CONSTRUCTION: the registry IS the parser
+# table, so a type cannot be "known" without a strict parser. Adding a factor
+# type (recovery, passkey) means adding its parser here — there is no path where
+# a registered type clears the membership check yet hits no field-closure, which
+# would reopen I1 at the exact growth point this envelope exists for.
+_FACTOR_PARSERS = {"password": _parse_password_factor}
+#: Closed registry of factor types (unit 1); derived so it cannot drift from the
+#: parsers. recovery/passkey add a (type -> strict parser) entry above.
+_KNOWN_FACTOR_TYPES = frozenset(_FACTOR_PARSERS)
+
+
 def parse_armor_v2(armor: str) -> dict:
     """Strict, RECURSIVELY closed parse of the v2 envelope (I1 preserved).
 
@@ -442,16 +455,16 @@ def parse_armor_v2(armor: str) -> dict:
         if not isinstance(f, dict) or "type" not in f:
             raise ArmorError(f"v2 factor[{i}] must be an object with a type")
         ftype = f["type"]
-        if ftype not in _KNOWN_FACTOR_TYPES:
+        parser = _FACTOR_PARSERS.get(ftype)
+        if parser is None:
             raise ArmorError(
                 f"v2 factor[{i}] has unknown type {ftype!r}; the registry is "
-                f"closed to {sorted(_KNOWN_FACTOR_TYPES)}"
+                f"closed to {sorted(_FACTOR_PARSERS)}"
             )
         if ftype in seen:
             raise ArmorError(f"v2 has a duplicate factor type {ftype!r}")
         seen.add(ftype)
-        if ftype == "password":
-            _parse_password_factor(f, i)
+        parser(f, i)  # total dispatch — a known type always has a strict parser
     return data
 
 
