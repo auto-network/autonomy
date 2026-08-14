@@ -433,6 +433,18 @@ def _build_mission_control_nag_message(entries: list[dict]) -> str:
         )
     if n > 5:
         lines.append(f"...and {n - 5} more.")
+    # SAY WHAT THIS IS AND WHAT STOPS IT. A reminder whose recipient cannot
+    # identify it cannot be acted on: this is not the session's own idle nag,
+    # so `graph set-nag --off` does nothing to it, and a coordinator hunting
+    # for a switch finds one that turns off something else. It has no switch
+    # by design -- it exists so a question put to a person does not rot -- so
+    # the message has to name the thing that actually ends it.
+    lines.append(
+        "This is Mission Control, not your session's idle nag — "
+        "`graph set-nag --off` does not affect it. It stops when the question "
+        "is dealt with: answer it, close it if it no longer needs an answer, "
+        "or retire it if its subject is gone."
+    )
     return "\n".join(lines)
 
 
