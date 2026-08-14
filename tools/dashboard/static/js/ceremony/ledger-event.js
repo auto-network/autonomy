@@ -250,6 +250,7 @@ export {
   buildEvent,
   derivePersona,
   eventId,
+  importDerivedPersonaKey,
   signEvent,
   signingInput,
 };
