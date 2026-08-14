@@ -705,15 +705,19 @@
     return line.length > 120 ? line.slice(0, 117) + "\u2026" : line;
   }
 
+  //: ANSWERED BEATS BUSY. A conversation stays open after it is answered, and
+  //: it has rounds in it by then -- so reading "working" off the presence of
+  //: rounds labelled an answered exchange as though nobody had replied yet.
   function rowChipText(q) {
     if (q.closed_at) return q.answer ? "answered" : "closed";
     if (q.relay_status === "failed") return "not delivered";
+    if (q.answer) return "answered";
     if ((q.updates || []).length) return "working";
     return "open";
   }
 
   function rowChipClass(q) {
-    if (q.closed_at) return "mc-chip mc-chip-done";
+    if (q.closed_at || q.answer) return "mc-chip mc-chip-done";
     if (q.relay_status === "failed") return "mc-chip mc-chip-bad";
     if ((q.updates || []).length) return "mc-chip mc-chip-working";
     return "mc-chip mc-chip-open";
@@ -902,7 +906,7 @@
       addFiles(e.target.files); e.target.value = "";
     });
     var clip = el("button", {
-      class: "mc-clip", text: "\uD83D\uDCCE",
+      class: "mc-clip", text: "+",
       // Absent rather than disabled when there is nowhere to send a file:
       // over a shared link there is no session to deliver it to.
       title: target ? "Attach" : "",
@@ -1120,8 +1124,7 @@
                           title: "Close this without an answer",
                           onclick: function () { closeEntry(q.entry_id); }})
           : el("span", {}),
-        el("span", {class: q.closed_at ? "mc-chip" : "mc-chip mc-chip-open",
-                    text: q.closed_at ? (q.answer ? "answered" : "closed") : "open"}),
+        el("span", {class: rowChipClass(q), text: rowChipText(q)}),
       ]),
       el("div", {class: "mc-pbody"}, body),
       composer(COMPOSE[replyKind(q)].hint, "", COMPOSE[replyKind(q)].label,
