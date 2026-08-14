@@ -18,6 +18,7 @@ function makeHarness() {
   const components = {};
   const stores = {};
   const fetchCalls = [];
+  const requestCalls = [];
   let reconnectCount = 0;
 
   const document = {
@@ -62,10 +63,17 @@ function makeHarness() {
     },
   };
 
-  const fetchFn = (url) => {
+  const fetchFn = (url, options) => {
     fetchCalls.push(url);
+    requestCalls.push({ url, options: options || null });
     if (url === '/api/dao/active_sessions') {
       return Promise.resolve({ json: () => Promise.resolve([]) });
+    }
+    if (url === '/api/session/resume') {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ tmux_name: 'auto-test', label: 'Enterprise NG' }),
+      });
     }
     if (url.startsWith('/api/session/autonomy/auto-test/tail?after_file=f&after=12')) {
       return Promise.resolve({
@@ -149,6 +157,7 @@ function makeHarness() {
     document,
     stores,
     fetchCalls,
+    requestCalls,
     makeViewer,
     getReconnectCount() { return reconnectCount; },
     emitDocument(name, event) {
@@ -240,5 +249,33 @@ describe('session viewer resume catch-up (auto-16g9t wake protocol)', () => {
     assert.equal(store.offset, 20);
     assert.equal(store.entries.length, 1);
     viewer.destroy();
+  });
+});
+
+describe('session viewer cross-org resume', () => {
+  it('scopes source lookup to the session owning org', async () => {
+    const h = makeHarness();
+    const { viewer } = primeViewer(h);
+    viewer._setupWatchers = function() {};
+    viewer._armResumeReadyWatch = function() {};
+    viewer._resumeMeta = {
+      resumable: true,
+      sourceId: 'f919a3fe-39a9-4eb1-b9e7-3154a4dac34c',
+      sessionUuid: '76b3e374-e2b9-4304-bbce-878580d68351',
+      filePath: '/host/enterprise-ng/session.jsonl',
+      orgSlug: 'anchore',
+    };
+
+    await viewer.resumeFromViewer();
+
+    const call = h.requestCalls.find((entry) => entry.url === '/api/session/resume');
+    assert.ok(call, 'resume request was not sent');
+    assert.equal(call.options.headers['X-Graph-Org'], 'anchore');
+    assert.equal(call.options.headers['Content-Type'], 'application/json');
+    assert.deepEqual(JSON.parse(call.options.body), {
+      source_id: 'f919a3fe-39a9-4eb1-b9e7-3154a4dac34c',
+    });
+    assert.equal(viewer._resumeMeta.orgSlug, 'anchore',
+      'org ownership must survive the transition to non-resumable state');
   });
 });
