@@ -14295,6 +14295,15 @@ class TestNetworkSignOn:
     @pytest.fixture(scope="class", autouse=True)
     @classmethod
     def checks(cls, browser, request):
+        # The multi-eval ceremony below is the sweep's most
+        # degradation-sensitive shape: on a daemon aged by hundreds of
+        # prior SPA transitions its async evals time out wholesale
+        # (auto-s3him — the late-file classes errored 38 times while the
+        # board classes, which already reset, passed). Every
+        # ceremony-checks class therefore starts from a fresh server +
+        # fresh browser rather than inheriting the module's shared aged
+        # pair.
+        _hard_reset_sweep(browser)
         _navigate_and_check("/sessions", "", wait_ms=600)
         request.cls._checks = _run_async_eval(_network_signon_js())
 
@@ -14743,6 +14752,15 @@ class TestNetworkIdentityCeremony:
     @pytest.fixture(scope="class", autouse=True)
     @classmethod
     def checks(cls, browser, request):
+        # The multi-eval ceremony below is the sweep's most
+        # degradation-sensitive shape: on a daemon aged by hundreds of
+        # prior SPA transitions its async evals time out wholesale
+        # (auto-s3him — the late-file classes errored 38 times while the
+        # board classes, which already reset, passed). Every
+        # ceremony-checks class therefore starts from a fresh server +
+        # fresh browser rather than inheriting the module's shared aged
+        # pair.
+        _hard_reset_sweep(browser)
         _navigate_and_check("/sessions", "", wait_ms=600)
         request.cls._checks = _run_async_eval(_network_identity_js())
 
@@ -14990,6 +15008,15 @@ class TestOnboardingSurface:
     @pytest.fixture(scope="class", autouse=True)
     @classmethod
     def checks(cls, browser, request):
+        # The multi-eval ceremony below is the sweep's most
+        # degradation-sensitive shape: on a daemon aged by hundreds of
+        # prior SPA transitions its async evals time out wholesale
+        # (auto-s3him — the late-file classes errored 38 times while the
+        # board classes, which already reset, passed). Every
+        # ceremony-checks class therefore starts from a fresh server +
+        # fresh browser rather than inheriting the module's shared aged
+        # pair.
+        _hard_reset_sweep(browser)
         _navigate_and_check("/sessions", "", wait_ms=600)
         request.cls._checks = _run_async_eval(_ONBOARDING_JS)
 
@@ -15207,6 +15234,15 @@ class TestCreateOrgScreen:
     @pytest.fixture(scope="class", autouse=True)
     @classmethod
     def checks(cls, browser, request):
+        # The multi-eval ceremony below is the sweep's most
+        # degradation-sensitive shape: on a daemon aged by hundreds of
+        # prior SPA transitions its async evals time out wholesale
+        # (auto-s3him — the late-file classes errored 38 times while the
+        # board classes, which already reset, passed). Every
+        # ceremony-checks class therefore starts from a fresh server +
+        # fresh browser rather than inheriting the module's shared aged
+        # pair.
+        _hard_reset_sweep(browser)
         _navigate_and_check("/sessions", "", wait_ms=600)
         request.cls._checks = _run_async_eval(_CREATE_ORG_JS)
 
