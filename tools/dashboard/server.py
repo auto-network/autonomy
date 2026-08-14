@@ -10145,6 +10145,56 @@ def _bootstrap_gate_open() -> bool:
         return False
 
 
+def _welcome_gate_open() -> bool:
+    """True when the onboarding empty-state still holds (bead auto-inpkd).
+
+    Layer-1 gate, above the Layer-0 harness bootstrap: while the machine
+    lacks a personal identity OR a collaborative organization, the Welcome
+    shell renders instead of the session UI, then passes through silently
+    once both hold. It never intercepts again.
+
+    Workspace is step three's destination (the board), not a gate input:
+    the committed design (graph://9a4219b3) has no "opening a workspace"
+    intermediate state — it collapses that step into the exit CTA — and
+    there is no reliable server-side workspace signal that would not regress
+    an established install. Identity + a collaborative org are the two hard,
+    verifiable signals; the third is "you're now on the board."
+
+    Any read error fails OPEN (gate closed) so a substrate hiccup never
+    traps the dashboard behind onboarding.
+    """
+    try:
+        return not (_has_personal_identity() and _has_collaborative_org())
+    except Exception:
+        logger.exception("welcome gate check failed; not gating")
+        return False
+
+
+def _has_personal_identity() -> bool:
+    """Whether this machine carries an enrolled personal identity.
+
+    The same signal ``/api/identity/status`` reports as ``personal_identity``:
+    a canonical personal row whose payload holds armored key material. Pinned
+    to the personal DB (``org=None``) inside ``_personal_member`` — never
+    follows caller-org context.
+    """
+    from tools.dashboard import identity_routes
+    member = identity_routes._personal_member()
+    return bool(member is not None and member.payload.get("armored_private_key"))
+
+
+def _has_collaborative_org() -> bool:
+    """Whether any collaborative organization exists on this machine.
+
+    ``list_orgs`` enumerates ``data/orgs/*.db``; the operator's own
+    ``personal`` store is not a collaborative org, so it is excluded. A
+    genuinely fresh invite-join machine (personal store only) reads False
+    here until the operator creates or joins one.
+    """
+    from tools.graph import org_ops
+    return any(ref.slug != "personal" for ref in org_ops.list_orgs())
+
+
 async def page_index(request):
     # First-launch gate: with no verified harness recorded, render the
     # deterministic bootstrap walkthrough rather than the session UI. This is
@@ -10152,7 +10202,23 @@ async def page_index(request):
     # on setup, not on a session-create board it cannot use yet.
     if _bootstrap_gate_open():
         return HTMLResponse(_load_template("bootstrap.html"))
+    # Empty-state gate (bead auto-inpkd): once the harness is set up but the
+    # machine still lacks an identity or an organization, the Welcome shell
+    # renders — same server-side-decision pattern, one layer up.
+    if _welcome_gate_open():
+        return HTMLResponse(_load_template("welcome.html"))
     return RedirectResponse(url="/beads")
+
+
+async def page_welcome(request):
+    """GET /welcome — the onboarding empty-state shell.
+
+    Always serves the shell; the page reads identity + org state on load and
+    renders the matching step (fresh / mid / ready). Reachable directly so an
+    invited operator can land here org-attached, and so setup can be revisited
+    even after the gate has closed.
+    """
+    return HTMLResponse(_load_template("welcome.html"))
 
 
 async def page_bootstrap(request):
@@ -17170,6 +17236,8 @@ routes = [
     Route("/api/bootstrap/probe", api_bootstrap_probe),
     Route("/api/bootstrap/verify", api_bootstrap_verify, methods=["POST"]),
     Route("/api/bootstrap/install", api_bootstrap_install, methods=["POST"]),
+    # Layer-1 onboarding empty-state (bead auto-inpkd) — identity/org/workspace.
+    Route("/welcome", page_welcome),
     Route("/beads", page_beads),
     Route("/pages/beads", page_beads_fragment),
     Route("/dispatch", page_dispatch),

@@ -216,6 +216,10 @@
   }
 
   async function maybeOpen() {
+    // The welcome shell (bead auto-inpkd) drives onboarding explicitly from
+    // its own step-1 "Begin", showing its quest rail first — the ambient
+    // auto-open stays quiet there so an overlay never covers the rail on load.
+    if (window.__AUTONOMY_WELCOME_SHELL__) return;
     // Never auto-open inside an embedded frame (Design Studio previews,
     // plugin iframes) — only the top-level dashboard shell onboards.
     if (window.top !== window.self) return;
