@@ -1029,6 +1029,64 @@ def make_grant_handler(org: str | None = None, *, now=None):
     return handler
 
 
+def make_ice_grant_handler(
+    org: str | None,
+    *,
+    configuration_provider,
+    key,
+    channel_cert,
+    peer_runtime,
+    signaling_capacity,
+    modules=None,
+    now=None,
+):
+    """Add one bounded ICE capability to the ordinary grant handler.
+
+    The credential issuer is injected because it belongs to the separate TURN
+    credential work.  Policy is not injected and is never read from the
+    viewer: it is derived only from this dashboard's verified, browser-signed
+    local grant. ``meta.ice_policy`` is immutable per grant; omission means the
+    operator-approved ``direct_allowed`` default. Changing the policy means
+    publishing and signing a new grant, not mutating a live one.
+    """
+    from tools.network.relaykit.aiortc_responder import AiortcResponderFactory
+    from tools.network.relaykit.ice_handler import IceRoutingHandler
+
+    clock = now or time.time
+    application_handler = make_grant_handler(org, now=clock)
+
+    async def valid_grant(token: str) -> bool:
+        grant = await asyncio.to_thread(check_grant, token, org=org, now=clock())
+        return grant is not None
+
+    async def policy_provider(token: str):
+        grant = await asyncio.to_thread(check_grant, token, org=org, now=clock())
+        if grant is None:
+            return None
+        meta = grant.get("meta") or {}
+        return meta.get("ice_policy", "direct_allowed")
+
+    def responder_factory_provider(token: str):
+        return AiortcResponderFactory(
+            token=token,
+            owner=peer_runtime,
+            key=key,
+            cert=channel_cert,
+            org=org,
+            application_handler=application_handler,
+            authorization_check=valid_grant,
+            modules=modules,
+        )
+
+    return IceRoutingHandler(
+        application_handler,
+        policy_provider=policy_provider,
+        configuration_provider=configuration_provider,
+        responder_factory_provider=responder_factory_provider,
+        capacity=signaling_capacity,
+    )
+
+
 async def _serve_control_listener(connector, ctl_path: str) -> None:
     """A loopback listener the dashboard drives to run D19 control ops on
     this connector's tunnel (register §3). One newline-delimited JSON

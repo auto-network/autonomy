@@ -630,6 +630,16 @@ def test_tunnel_meta_carries_participant_id():
     assert meta == {"participant_id": "guest:abc", "label": "Briefing", "ttl": 3600}
 
 
+def test_tunnel_meta_carries_the_signed_ice_policy():
+    meta, error = link_approvals._tunnel_link_meta(
+        {"meta": {"ice_policy": "relay_only", "label": "Private route"}},
+        {},
+    )
+
+    assert error is None
+    assert meta == {"ice_policy": "relay_only", "label": "Private route"}
+
+
 def test_tunnel_meta_still_drops_unknown_keys():
     """The allowlist is the point: an unknown key must never reach a grant."""
     from tools.dashboard import link_approvals

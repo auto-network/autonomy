@@ -121,7 +121,12 @@ def link_grant_payload() -> dict:
         "url": f"{ni.NETWORK_PUBLIC_LINK_BASE_URL}/l/{TOKEN}",
         "target_uuid": TARGET_UUID,
         "target_type": "present",
-        "meta": {"ttl": 3600, "label": "OSS Insights binder", "require_auth": False},
+        "meta": {
+            "ttl": 3600,
+            "label": "OSS Insights binder",
+            "require_auth": False,
+            "ice_policy": "relay_only",
+        },
         "subject": {"kind": "agent", "id": "auto-0716-220131"},
         "issued_at": "2026-07-17T00:00:00Z",
     }
@@ -310,6 +315,7 @@ def test_binding_rejects_malformed_payloads(mutate, match):
         (lambda p: p.update(meta={"ttl": "3600"}), "positive integer"),
         (lambda p: p.update(meta={"ttl": True}), "positive integer"),
         (lambda p: p.update(meta={"label": ""}), "label"),
+        (lambda p: p.update(meta={"ice_policy": "viewer_decides"}), "ice_policy"),
         (lambda p: p.update(meta={"surprise": 1}), "unknown keys"),
         (lambda p: p.update(meta={"require_auth": "yes"}), "boolean"),
         (lambda p: p.update(subject={"kind": "agent"}), "subject"),

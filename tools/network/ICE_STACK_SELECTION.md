@@ -72,7 +72,16 @@ adapter owns:
 4. reporting connection-state changes without logging SDP, candidates,
    addresses, credentials, or application bytes; and
 5. closing the DataChannel and peer connection on local cancellation,
-   timeout, signaling-socket close, or failed application handshake.
+   timeout, or failed application handshake. A signaling socket that closes
+   before its answer is fully sent also closes the peer; after that confirmed
+   send, ownership belongs to the peer runtime and the deliberately
+   short-lived signaling socket closes without touching the DataChannel.
+
+The one reliable, ordered DataChannel is labeled `autonomy-v1`. The dashboard
+refuses a different label or a second channel. `v1` is the DataChannel protocol
+epoch, not a library version: bump it only for a wire-incompatible change that
+must hard-refuse an older peer. Compatibility within the epoch remains the job
+of the existing application handshake and record protocol.
 
 An abrupt remote disappearance is not treated as immediate cleanup: ICE
 consent timeout may retain that peer temporarily. The implementation must cap
@@ -85,17 +94,17 @@ two ends.
 
 ## Message-size rule: reuse the existing record protocol
 
-aiortc advertises a 65,536-byte SCTP message limit. The current encrypted
-channel normally emits records from plaintext chunks of up to 128 KiB, so
-sending those records unchanged as individual DataChannel messages would
-exceed the selected implementation's limit.
+aiortc advertises a 65,536-byte SCTP message limit. The encrypted channel emits
+records from plaintext chunks of at most 60 KiB, so every record fits as one
+DataChannel message after its fixed cryptographic overhead.
 
-The direct adapter therefore uses the existing channel record chunking with a
-60 KiB maximum plaintext chunk. The encrypted record adds 25 bytes, keeping
-each DataChannel message safely below 65,536 bytes. The receiver already
-accepts any record chunk up to 128 KiB, so this changes neither the record
-format nor the application message limit. Large messages and attachments are
-split and reassembled by the existing sequence-and-final-flag machinery.
+The encrypted record adds 25 bytes, keeping each DataChannel message safely
+below 65,536 bytes. Large messages and attachments are split and reassembled
+by the existing sequence-and-final-flag machinery. The v1 receive ceiling is
+also 60 KiB: before direct paths activate, the temporary 128 KiB receive
+allowance in deployed relay code is removed after confirming active pages have
+cycled onto 60 KiB sends. Reloadable pages do not justify a permanent second
+ceiling.
 
 Do not add a second fragmentation header, signaling operation, or protocol
 version for WebRTC.
@@ -115,6 +124,29 @@ means the Python endpoint has no ICE-server failover. Supporting multiple
 independent TURN sites requires a deliberate adapter or library change, not
 merely adding URLs to configuration.
 
+## Relay-only enforcement in the pinned Python implementation
+
+aiortc 1.15.0 has no public equivalent of the browser's
+`iceTransportPolicy: "relay"`. aioice 0.10.2's private
+`TransportPolicy.RELAY` is also incomplete for this privacy contract: it
+suppresses advertised host candidates but still gathers server-reflexive
+candidates and retains host sockets.
+
+For a signed `relay_only` grant, the adapter therefore does both before
+gathering:
+
+1. sets the pinned aioice connection policy to `RELAY`; and
+2. replaces that connection instance's candidate-gather call with a bounded
+   wrapper that passes an empty local-address list.
+
+In the exercised version, the empty list creates no host or STUN protocols
+while the independent TURN task still produces the relay protocol and
+candidate. The adapter asserts the exact aiortc/aioice versions and private
+object path and fails the upgrade closed if either changes. Acceptance checks
+both the gathered candidates and the selected local pair are relay type. This
+test, not the private mechanism's name, is the privacy guarantee and belongs
+in every dependency-upgrade run.
+
 Browsers may consume the fuller standards-compatible ICE server list their
 implementation supports. That operational asymmetry is explicit; it is not a
 wire difference.
@@ -122,16 +154,13 @@ wire difference.
 ## Packaging and runtime gates
 
 `aiortc==1.15.0` requires `av>=14,<18`, plus aioice, pylibsrtp, cryptography,
-and pyOpenSSL. The disposable environment resolved PyAV 17.1.0; the current
-dashboard image carries PyAV 18.1.0, so installing aiortc is a dependency
-downgrade, not an additive one. The complete transitive set must be pinned and
-the existing dashboard tests rerun before the dependency enters the image.
-
-PyAV's binary wheels bundle FFmpeg. The acceptable distribution/license shape
-for that bundled build has not been established for this product. Do not ship
-the PyPI binary wheel by assumption: packaging must either use an approved
-FFmpeg build or obtain an explicit license disposition. This packaging gate
-does not change the selected wire protocol.
+and pyOpenSSL. The complete transitive set is pinned for user-side installs
+and was exercised with PyAV 17.1.0. PyAV's binary wheel bundles FFmpeg builds
+that Autonomy does not redistribute: the WebRTC dependency is installed on
+the user's own system and is excluded from every prebuilt artifact Autonomy
+publishes. Moving the responder into a published image requires a new
+packaging and license disposition; it is not an alternate path in this
+adapter.
 
 aiortc's SCTP processing runs in Python on the dashboard event loop. The
 adapter must apply DataChannel buffered-amount backpressure and bound peers;

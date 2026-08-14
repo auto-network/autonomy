@@ -46,6 +46,7 @@ _MDNS_RE = re.compile(
 _CANDIDATE_FIELDS = frozenset(
     {"candidate", "sdpMid", "sdpMLineIndex", "usernameFragment"}
 )
+_SDP_CONNECTION_RE = re.compile(r"^(c=IN IP(4|6) )(\S+)(\r?\n)?$", re.IGNORECASE)
 
 
 class IceSignalingError(ValueError):
@@ -280,20 +281,29 @@ def assert_candidate_free_sdp(sdp: Any) -> str:
     if not isinstance(sdp, str) or _wire_size(sdp) > MAX_SDP_BYTES:
         raise IceSignalingError("SDP is malformed or exceeds its byte limit")
     for line in sdp.splitlines():
-        if line.strip().lower().startswith("a=candidate:"):
+        stripped = line.strip()
+        if stripped.lower().startswith("a=candidate:"):
             raise IceSignalingError("SDP contains a smuggled ICE candidate")
+        match = _SDP_CONNECTION_RE.match(stripped)
+        if match and match.group(3) not in ("0.0.0.0", "::"):
+            raise IceSignalingError("SDP contains a non-placeholder connection address")
     return sdp
 
 
 def strip_candidate_lines(sdp: str) -> str:
-    """Remove gathered candidates before emitting SDP, then prove absence."""
+    """Remove gathered candidates and neutralize SDP's other address field."""
     if not isinstance(sdp, str):
         raise IceSignalingError("SDP must be a string")
-    clean = "".join(
-        line
-        for line in sdp.splitlines(keepends=True)
-        if not line.strip().lower().startswith("a=candidate:")
-    )
+    clean_lines = []
+    for line in sdp.splitlines(keepends=True):
+        if line.strip().lower().startswith("a=candidate:"):
+            continue
+        match = _SDP_CONNECTION_RE.match(line)
+        if match:
+            placeholder = "0.0.0.0" if match.group(2) == "4" else "::"
+            line = match.group(1) + placeholder + (match.group(4) or "")
+        clean_lines.append(line)
+    clean = "".join(clean_lines)
     return assert_candidate_free_sdp(clean)
 
 
