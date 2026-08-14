@@ -514,3 +514,25 @@ def test_the_question_list_can_be_filtered():
     assert 'qFilter === "open"' in rows and 'qFilter === "done"' in rows, (
         "the filter must actually be applied to the rows, not only rendered"
     )
+
+
+def test_a_shared_link_is_not_told_the_coordinators_session_name():
+    """Sending an attachment means addressing the coordinator's own session.
+    On the dashboard that name is ordinary furniture -- every session is listed
+    by name there. A guest holding a share link has no use for it, cannot reach
+    the upload endpoint anyway, and should not be handed the internal name of a
+    machine session along with the screen they were invited to read."""
+    mission = db.create_mission("Sessions", coordinator_session="auto-top-secret")
+    mission_id = mission["mission_id"]
+    db.push_site_revision(mission_id, "<html>x</html>", "first")
+    pillar = db.create_pillar(mission_id, "P", "auto-pillar-secret", "#4ade80")
+    db.push_pillar_site_revision(pillar["pillar_id"], "<html>p</html>", "first")
+
+    dashboard = compose.compose_screen(mission_id).decode()
+    assert "auto-top-secret" in dashboard, "the app cannot address an upload"
+
+    framed = compose.compose_screen(mission_id, framed=True).decode()
+    assert "auto-top-secret" not in framed
+    framed_pillar = compose.compose_screen(
+        mission_id, pillar["pillar_id"], framed=True).decode()
+    assert "auto-pillar-secret" not in framed_pillar

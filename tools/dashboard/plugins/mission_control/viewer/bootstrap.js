@@ -762,8 +762,83 @@
     });
   }
 
+  //: Where a file for this screen goes: the coordinator's own session. Absent
+  //: over a share link, which is what disables attaching there.
+  function uploadTarget() {
+    var p = currentPillar();
+    return (p && p.coordinator_session) || state.coordinator_session || "";
+  }
+
   function composer(placeholder, note, label, onSend) {
     var ta = el("textarea", {class: "mc-ta", rows: "2", placeholder: placeholder});
+    // ---- attachments ------------------------------------------------------
+    // Picked files are shown from memory before anything is sent, and upload
+    // in the background while the message is still being written. The send
+    // waits on them, so a large picture delays the picture and never the
+    // message.
+    var picked = [];
+    var strip = el("div", {class: "mc-strip"});
+    var target = uploadTarget();
+
+    function drawStrip() {
+      strip.textContent = "";
+      picked.forEach(function (item, i) {
+        var tile = el("div", {class: item.path ? "mc-thumb" : "mc-thumb mc-thumb-busy"});
+        if (item.dataUrl) {
+          tile.style.backgroundImage = "url(" + item.dataUrl + ")";
+        } else {
+          tile.appendChild(el("span", {class: "mc-thumb-ext", text: item.ext}));
+        }
+        tile.appendChild(el("button", {
+          class: "mc-thumb-x", text: "\u00d7", title: "Remove",
+          onclick: function () { picked.splice(i, 1); drawStrip(); },
+        }));
+        strip.appendChild(tile);
+      });
+    }
+
+    function addFiles(files) {
+      if (!target || !files || !files.length) return;
+      Array.prototype.forEach.call(files, function (file) {
+        var item = {name: file.name || "file", path: null,
+                    ext: (file.name || "").split(".").pop().slice(0, 4).toUpperCase()};
+        picked.push(item);
+        // Straight from memory -- no server involved, so this looks the same
+        // however the page was opened.
+        if (/^image\//.test(file.type)) {
+          var reader = new FileReader();
+          reader.onload = function () { item.dataUrl = reader.result; drawStrip(); };
+          reader.readAsDataURL(file);
+        }
+        drawStrip();
+        var body = new FormData();
+        body.append("file", file);
+        body.append("tmux_session", target);
+        fetch("/api/upload", {method: "POST", body: body, credentials: "same-origin"})
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            var meta = (d && d.files && d.files[0]) || d || {};
+            item.path = meta.path || meta.host_path || null;
+            if (!item.path) throw new Error("no path");
+            drawStrip();
+          })
+          .catch(function () {
+            item.failed = true;
+            var at = picked.indexOf(item);
+            if (at !== -1) picked.splice(at, 1);
+            drawStrip();
+            status.textContent = "Could not attach " + item.name;
+          });
+      });
+    }
+
+    ta.addEventListener("paste", function (e) {
+      var files = [];
+      Array.prototype.forEach.call((e.clipboardData || {}).items || [], function (it) {
+        if (it.kind === "file") { var f = it.getAsFile(); if (f) files.push(f); }
+      });
+      if (files.length) { e.preventDefault(); addFiles(files); }
+    });
     // Focusing a textarea is what opens the keyboard, so that is the moment
     // the panel has to be re-measured -- the resize event alone can land
     // before the browser has settled on a height.
@@ -799,9 +874,21 @@
       onclick: function () {
         var text = ta.value.trim();
         if (!text) return;
+        // A picture still going up is the one thing worth waiting for. Sending
+        // now would deliver a message referring to a file that is not there.
+        if (picked.some(function (x) { return !x.path; })) {
+          status.textContent = "Still attaching\u2026";
+          return;
+        }
+        // The paths go above the message, which is how a session receives an
+        // attachment everywhere else on this dashboard.
+        var body = picked.length
+          ? picked.map(function (x) { return x.path; }).join("\n") + "\n\n" + text
+          : text;
         status.textContent = "Sending\u2026";
-        Promise.resolve(onSend(text)).then(function () {
-          ta.value = ""; grow(); status.textContent = note;
+        Promise.resolve(onSend(body)).then(function () {
+          ta.value = ""; picked = []; drawStrip(); grow();
+          status.textContent = note;
         }, function (err) {
           // Never silent. A refused write used to reject a promise nobody
           // was listening to, so the tap did nothing and said nothing.
@@ -810,12 +897,37 @@
       },
     });
     if (why) send.disabled = true;
-    return el("div", {class: "mc-foot"}, [
-      ta,
-      el("div", {class: "mc-foot-row"}, [
-        status, send,
-      ]),
+    var picker = el("input", {class: "mc-file", type: "file", multiple: "multiple"});
+    picker.addEventListener("change", function (e) {
+      addFiles(e.target.files); e.target.value = "";
+    });
+    var clip = el("button", {
+      class: "mc-clip", text: "\uD83D\uDCCE",
+      // Absent rather than disabled when there is nowhere to send a file:
+      // over a shared link there is no session to deliver it to.
+      title: target ? "Attach" : "",
+      onclick: function () { picker.click(); },
+    });
+    var foot = el("div", {class: "mc-foot"}, [
+      strip, ta,
+      el("div", {class: "mc-foot-row"},
+         target ? [clip, status, send] : [status, send]),
     ]);
+    if (target) {
+      foot.appendChild(picker);
+      ["dragenter", "dragover"].forEach(function (ev) {
+        foot.addEventListener(ev, function (e) {
+          e.preventDefault(); foot.classList.add("mc-foot-drop");
+        });
+      });
+      ["dragleave", "drop"].forEach(function (ev) {
+        foot.addEventListener(ev, function (e) {
+          e.preventDefault(); foot.classList.remove("mc-foot-drop");
+          if (ev === "drop") addFiles((e.dataTransfer || {}).files);
+        });
+      });
+    }
+    return foot;
   }
 
   function pillarName(id) {
