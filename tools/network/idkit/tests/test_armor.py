@@ -11,9 +11,15 @@ from tools.network.idkit.armor import (
     ARMOR_END,
     ArmorError,
     ArmorPassphraseError,
+    armor_version,
     decrypt_root_key,
+    decrypt_root_key_any,
+    decrypt_root_key_v2,
     encrypt_root_key,
+    encrypt_root_key_v2,
+    migrate_v1_to_v2,
     parse_armor,
+    parse_armor_v2,
 )
 
 
@@ -187,3 +193,140 @@ def test_duplicate_body_keys_rejected_at_parser(armor, dup_key):
     )
     with pytest.raises(ArmorError, match="duplicate"):
         parse_armor(forged)
+
+
+# ── Armor v2: versioned multi-wrap envelope + one-shot v1->v2 migration ──────
+
+_V2_PW = "correct horse battery staple"
+
+
+@pytest.fixture(scope="module")
+def armor_v2(root: KeyPair) -> str:
+    return encrypt_root_key_v2(root, _V2_PW, iterations=10_000)
+
+
+def test_v2_roundtrip(root, armor_v2):
+    opened = decrypt_root_key_v2(armor_v2, _V2_PW)
+    assert opened.private_hex == root.private_hex
+    assert opened.public_hex == root.public_hex
+
+
+def test_v2_shape_is_versioned_factor_list(root, armor_v2):
+    data = parse_armor_v2(armor_v2)
+    assert data["v"] == 2
+    assert set(data) == {"v", "root_pub", "kek_seal", "factors"}
+    assert data["root_pub"] == root.public_hex
+    assert [f["type"] for f in data["factors"]] == ["password"]
+
+
+def test_v2_never_contains_plaintext(root, armor_v2):
+    assert root.private_hex not in armor_v2
+    body = base64.b64decode(
+        "".join(ln for ln in armor_v2.splitlines() if ln and "-----" not in ln)
+    )
+    assert bytes.fromhex(root.private_hex) not in body
+
+
+def test_v2_wrong_passphrase(armor_v2):
+    with pytest.raises(ArmorPassphraseError):
+        decrypt_root_key_v2(armor_v2, "not the passphrase")
+
+
+def test_migration_v1_to_v2_recovers_exact_key(root):
+    v1 = encrypt_root_key(root, _V2_PW, iterations=10_000)
+    assert armor_version(v1) == 1
+    v2 = migrate_v1_to_v2(v1, _V2_PW, iterations=10_000)
+    assert armor_version(v2) == 2
+    opened = decrypt_root_key_v2(v2, _V2_PW)
+    assert opened.private_hex == root.private_hex
+    assert opened.public_hex == root.public_hex
+
+
+def test_migration_refuses_a_v2_input(armor_v2):
+    with pytest.raises(ArmorError):
+        migrate_v1_to_v2(armor_v2, _V2_PW)
+
+
+def test_version_dispatch_opens_both(root):
+    v1 = encrypt_root_key(root, _V2_PW, iterations=10_000)
+    v2 = encrypt_root_key_v2(root, _V2_PW, iterations=10_000)
+    assert armor_version(v1) == 1 and armor_version(v2) == 2
+    assert decrypt_root_key_any(v1, _V2_PW).private_hex == root.private_hex
+    assert decrypt_root_key_any(v2, _V2_PW).private_hex == root.private_hex
+
+
+def test_v1_parser_refuses_v2_and_vice_versa(armor, armor_v2):
+    with pytest.raises(ArmorError):
+        parse_armor(armor_v2)          # v1 strict parser must reject a v2 body
+    with pytest.raises(ArmorError):
+        parse_armor_v2(armor)          # v2 strict parser must reject a v1 body
+
+
+def _v2_body(armor_v2: str) -> dict:
+    lines = [ln for ln in armor_v2.strip().splitlines() if ln.strip()]
+    return json.loads(base64.b64decode("".join(lines[1:-1])))
+
+
+def _reseal(body: dict) -> str:
+    b64 = base64.b64encode(json.dumps(body, separators=(",", ":")).encode()).decode()
+    return "\n".join([ARMOR_BEGIN, b64, ARMOR_END])
+
+
+def test_v2_extra_toplevel_field_refused_I1(armor_v2):
+    body = _v2_body(armor_v2)
+    body["smuggled"] = "AAAA"
+    with pytest.raises(ArmorError, match="I1|unknown fields"):
+        parse_armor_v2(_reseal(body))
+
+
+def test_v2_extra_field_in_kek_seal_refused(armor_v2):
+    body = _v2_body(armor_v2)
+    body["kek_seal"]["extra"] = "AAAA"
+    with pytest.raises(ArmorError):
+        parse_armor_v2(_reseal(body))
+
+
+def test_v2_extra_field_in_factor_refused(armor_v2):
+    body = _v2_body(armor_v2)
+    body["factors"][0]["extra"] = "AAAA"
+    with pytest.raises(ArmorError):
+        parse_armor_v2(_reseal(body))
+
+
+def test_v2_unknown_factor_type_refused(armor_v2):
+    body = _v2_body(armor_v2)
+    body["factors"][0]["type"] = "backdoor"
+    with pytest.raises(ArmorError, match="unknown type|registry"):
+        parse_armor_v2(_reseal(body))
+
+
+def test_v2_duplicate_factor_type_refused(armor_v2):
+    body = _v2_body(armor_v2)
+    body["factors"].append(dict(body["factors"][0]))
+    with pytest.raises(ArmorError, match="duplicate factor type"):
+        parse_armor_v2(_reseal(body))
+
+
+def test_v2_empty_factor_list_refused(armor_v2):
+    body = _v2_body(armor_v2)
+    body["factors"] = []
+    with pytest.raises(ArmorError, match="non-empty"):
+        parse_armor_v2(_reseal(body))
+
+
+def test_v2_relabelled_root_pub_fails_aad(root, armor_v2):
+    # Rewriting root_pub to another key must fail authentication (AAD-bound),
+    # not silently open — the same protection v1 has, per factor and per seal.
+    body = _v2_body(armor_v2)
+    other = KeyPair.generate().public_hex
+    body["root_pub"] = other
+    with pytest.raises((ArmorPassphraseError, ArmorError)):
+        decrypt_root_key_v2(_reseal(body), _V2_PW)
+
+
+@pytest.mark.parametrize("field", ["iv", "wrap"])
+def test_v2_bad_factor_lengths_refused(armor_v2, field):
+    body = _v2_body(armor_v2)
+    body["factors"][0][field] = base64.b64encode(b"short").decode()
+    with pytest.raises(ArmorError):
+        parse_armor_v2(_reseal(body))
