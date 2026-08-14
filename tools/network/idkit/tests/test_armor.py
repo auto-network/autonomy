@@ -6,6 +6,7 @@ import json
 import pytest
 
 from tools.network.idkit import KeyPair
+from tools.network.idkit.errors import MalformedError
 from tools.network.idkit.armor import (
     ARMOR_BEGIN,
     ARMOR_END,
@@ -315,13 +316,59 @@ def test_v2_empty_factor_list_refused(armor_v2):
 
 
 def test_v2_relabelled_root_pub_fails_aad(root, armor_v2):
-    # Rewriting root_pub to another key must fail authentication (AAD-bound),
-    # not silently open — the same protection v1 has, per factor and per seal.
+    # Rewriting root_pub to another key must fail AUTHENTICATION specifically —
+    # the factor wrap's AAD binds root_pub, so with the right passphrase but a
+    # relabelled root_pub the GCM tag fails: proves AAD-auth, not just "some
+    # error". A blob cannot be re-labelled as another identity's key.
     body = _v2_body(armor_v2)
-    other = KeyPair.generate().public_hex
-    body["root_pub"] = other
-    with pytest.raises((ArmorPassphraseError, ArmorError)):
+    body["root_pub"] = KeyPair.generate().public_hex
+    with pytest.raises(ArmorPassphraseError):
         decrypt_root_key_v2(_reseal(body), _V2_PW)
+
+
+def test_v2_factor_dispatch_is_total(root):
+    # F4 (review finding): every registered factor type MUST have a strict
+    # parser, so a type can never clear the membership check yet hit no
+    # field-closure (which would reopen I1 at the growth point). The registry IS
+    # the parser table — this guards against adding a type without its parser.
+    from tools.network.idkit import armor as _armor
+
+    assert set(_armor._KNOWN_FACTOR_TYPES) == set(_armor._FACTOR_PARSERS)
+    assert all(callable(p) for p in _armor._FACTOR_PARSERS.values())
+
+
+def test_v2_factor_splice_across_armors_fails(root):
+    # AEAD binding: a factor from one armor wraps THAT armor's master KEK, so
+    # splicing it onto another armor's kek_seal yields the wrong KEK and the
+    # seal fails to open. Material minted for one envelope can't be replayed.
+    a = encrypt_root_key_v2(root, _V2_PW, iterations=10_000)
+    b = encrypt_root_key_v2(root, _V2_PW, iterations=10_000)
+    body_b = _v2_body(b)
+    body_b["factors"] = _v2_body(a)["factors"]  # A's factor onto B's seal
+    with pytest.raises((MalformedError, ArmorPassphraseError)):
+        decrypt_root_key_v2(_reseal(body_b), _V2_PW)
+
+
+def test_v2_seal_tamper_fails(armor_v2):
+    # Flipping a byte of the master-KEK-sealed seed must fail the seal's GCM tag
+    # (the password factor opens fine; the seal does not) -> MalformedError.
+    body = _v2_body(armor_v2)
+    ct = bytearray(base64.b64decode(body["kek_seal"]["ct"]))
+    ct[0] ^= 0xFF
+    body["kek_seal"]["ct"] = base64.b64encode(bytes(ct)).decode()
+    with pytest.raises(MalformedError):
+        decrypt_root_key_v2(_reseal(body), _V2_PW)
+
+
+def test_v2_aad_prefixes_are_distinct_across_slot_and_version():
+    # Domain separation: the seal AAD, the factor AAD, and the v1 AAD are all
+    # distinct, so no ciphertext minted for one slot/version verifies as another.
+    from tools.network.idkit.armor import _aad, _v2_factor_aad, _v2_seal_aad
+
+    rp = "ab" * 32
+    assert _v2_seal_aad(rp) != _v2_factor_aad(rp, "password")
+    assert _v2_seal_aad(rp) != _aad(rp)
+    assert _v2_factor_aad(rp, "password") != _aad(rp)
 
 
 @pytest.mark.parametrize("field", ["iv", "wrap"])
