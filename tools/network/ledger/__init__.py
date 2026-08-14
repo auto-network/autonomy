@@ -28,9 +28,11 @@ from .events import (
     make_event,
     rotate_continuity_input,
     rekey_continuity_input,
+    rotate_recovery_input,
     sign_approval,
     sign_rotate_continuity,
     sign_rekey_continuity,
+    sign_rotate_recovery,
     validate_payload,
 )
 from .fold import (
@@ -138,8 +140,10 @@ __all__ = [
     "sign_approval",
     "rotate_continuity_input",
     "rekey_continuity_input",
+    "rotate_recovery_input",
     "sign_rotate_continuity",
     "sign_rekey_continuity",
+    "sign_rotate_recovery",
     # fold
     "fold",
     "FoldState",

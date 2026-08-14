@@ -71,6 +71,43 @@ class TestL8SchemaBoundary:
         with pytest.raises(SchemaError):
             validate_payload(payload)
 
+    def test_key_rotate_malformed_recovery_continuity_is_schema_error(self):
+        # The optional recovery co-signature gets the same fail-safe as
+        # continuity: junk hex is a SchemaError, not an uncaught idkit fault.
+        payload = {
+            "type": "key.rotate",
+            "old_pub": KeyPair.generate().public_hex,
+            "new_pub": KeyPair.generate().public_hex,
+            "continuity": "a" * 128,
+            "recovery_continuity": "not-a-valid-signature",
+        }
+        with pytest.raises(SchemaError):
+            validate_payload(payload)
+
+    def test_genesis_recovery_policy_validation(self):
+        rk = KeyPair.generate().public_hex
+        base = {"type": "genesis", "org": "o", "root_pub": KeyPair.generate().public_hex}
+        validate_payload(base)  # no recovery declared -> policy "none"
+        validate_payload({**base, "recovery": {"policy": "none"}})
+        validate_payload({**base, "recovery": {"policy": "recovery-key", "recovery_pub": rk}})
+        for bad in (
+            {"policy": "recovery-key"},                    # missing recovery_pub
+            {"policy": "none", "recovery_pub": rk},        # recovery_pub forbidden
+            {"policy": "vouch-quorum"},                    # unknown policy, fail closed
+            {"policy": "recovery-key", "recovery_pub": rk, "extra": 1},  # unknown field
+        ):
+            with pytest.raises(SchemaError):
+                validate_payload({**base, "recovery": bad})
+        with pytest.raises(SchemaError):
+            validate_payload({**base, "recovery": "not-an-object"})
+        # The recovery factor must be a DISTINCT key from the root -- else a
+        # stolen root signs both the possession proof and the co-signature.
+        with pytest.raises(SchemaError):
+            validate_payload({
+                **base,
+                "recovery": {"policy": "recovery-key", "recovery_pub": base["root_pub"]},
+            })
+
     def test_payload_type_must_be_string(self):
         with pytest.raises(SchemaError):
             validate_payload({"type": 7})

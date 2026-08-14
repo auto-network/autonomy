@@ -23,6 +23,7 @@ from tools.network.ledger import (
     sign_approval,
     sign_rotate_continuity,
     sign_rekey_continuity,
+    sign_rotate_recovery,
 )
 
 ORG = "33333333-3333-4333-8333-333333333333"
@@ -41,15 +42,18 @@ class Sim:
     current heads"; pass explicit parents to build concurrent branches.
     """
 
-    def __init__(self, org: str = ORG):
+    def __init__(self, org: str = ORG, recovery_key=None):
         self.root = KeyPair.generate()
         self.ledger = Ledger()
         self._ts = T0
-        self.genesis_id = self.emit(
-            self.root,
-            {"type": "genesis", "org": org, "root_pub": self.root.public_hex},
-            parents=[],
-        )
+        self.recovery_key = recovery_key
+        payload = {"type": "genesis", "org": org, "root_pub": self.root.public_hex}
+        if recovery_key is not None:
+            payload["recovery"] = {
+                "policy": "recovery-key",
+                "recovery_pub": recovery_key.public_hex,
+            }
+        self.genesis_id = self.emit(self.root, payload, parents=[])
 
     def next_ts(self) -> int:
         self._ts += 1_000
@@ -172,7 +176,8 @@ class Sim:
         payload["approvals"] = sorted(approvals, key=lambda e: e["key"])
         return self.emit(signer, payload, parents=parents)
 
-    def rotate(self, signer, new_key, continuity=None, parents=None):
+    def rotate(self, signer, new_key, continuity=None, parents=None,
+               recovery_key=None, recovery_continuity=None):
         payload = {
             "type": "key.rotate",
             "old_pub": signer.public_hex,
@@ -181,6 +186,12 @@ class Sim:
             if continuity is not None
             else sign_rotate_continuity(new_key, signer.public_hex),
         }
+        if recovery_continuity is not None:
+            payload["recovery_continuity"] = recovery_continuity
+        elif recovery_key is not None:
+            payload["recovery_continuity"] = sign_rotate_recovery(
+                recovery_key, self.genesis_id, signer.public_hex, new_key.public_hex
+            )
         return self.emit(signer, payload, parents=parents)
 
     def checkpoint(self, author, state_hash=None, parents=None):
