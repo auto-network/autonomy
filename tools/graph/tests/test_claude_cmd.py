@@ -34,7 +34,16 @@ from tools.graph.schemas.claude_setup_tokens import (
 
 @pytest.fixture
 def graph_db_env(tmp_path, monkeypatch):
-    db_path = tmp_path / "graph.db"
+    # Agreement pin (the org-honest recipe for single-org modules, matching
+    # test_credential_import.py): ``graph claude`` reads and writes at
+    # explicit org='personal' like every other credential consumer, and a
+    # pin at an arbitrary tmp graph.db contradicts that org under the
+    # fail-loud resolver (OrgResolutionConflict). Point the pin AT the orgs
+    # tree's own personal.db so pin and org resolution agree.
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir()
+    db_path = orgs_dir / "personal.db"
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
     monkeypatch.setenv("GRAPH_DB", str(db_path))
     monkeypatch.delenv("GRAPH_API", raising=False)
     yield db_path
