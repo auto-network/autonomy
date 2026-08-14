@@ -377,3 +377,13 @@ def test_v2_bad_factor_lengths_refused(armor_v2, field):
     body["factors"][0][field] = base64.b64encode(b"short").decode()
     with pytest.raises(ArmorError):
         parse_armor_v2(_reseal(body))
+
+
+def test_armor_root_pub_version_agnostic(root):
+    v1 = encrypt_root_key(root, _V2_PW, iterations=10_000)
+    v2 = encrypt_root_key_v2(root, _V2_PW, iterations=10_000)
+    from tools.network.idkit.armor import armor_root_pub
+    assert armor_root_pub(v1) == root.public_hex
+    assert armor_root_pub(v2) == root.public_hex
+    with pytest.raises(ArmorError):
+        armor_root_pub("not an armor")

@@ -512,6 +512,9 @@ _ARMOR_DECRYPTORS = {
 }
 
 
+_ARMOR_PARSERS = {ARMOR_VERSION: parse_armor, ARMOR_VERSION_2: parse_armor_v2}
+
+
 def armor_version(armor: str) -> int:
     """The declared version of *armor* (1 or 2), else :class:`ArmorError`."""
     data = _armor_body(armor)
@@ -519,6 +522,15 @@ def armor_version(armor: str) -> int:
     if v not in _ARMOR_DECRYPTORS:
         raise ArmorError(f"unsupported armor version: {v!r}")
     return v
+
+
+def armor_root_pub(armor: str) -> str:
+    """The bound ``root_pub`` of a v1 OR v2 armor, WITHOUT decrypting.
+
+    For the server-side call sites that only need the identity, not the key —
+    version-agnostic replacement for the v1-only ``parse_armor(armor)["root_pub"]``.
+    Strict-parses per version (so a malformed blob is still refused)."""
+    return _ARMOR_PARSERS[armor_version(armor)](armor)["root_pub"]
 
 
 def decrypt_root_key_any(armor: str, passphrase: str) -> KeyPair:
