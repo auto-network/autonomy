@@ -303,3 +303,11 @@
 .mc-clip { flex: none; font-size: 1rem; opacity: .75; padding: 0 .15rem 0 0; }
 .mc-file { display: none; }
 .mc-foot-drop { outline: 1px dashed #475569; outline-offset: -3px; }
+
+/* The rounds of a conversation, in one column. A receipt is the platform
+   speaking, progress is someone working, a message is someone talking --
+   three different things that all belong in the same sequence, because the
+   sequence is what a reader cannot reconstruct afterwards. */
+.mc-ic-message { color: #93c5fd; border-color: #1e40af77; }
+.mc-ic-echo { color: #64748b; }
+.mc-round-said { color: #cbd5e1; }
