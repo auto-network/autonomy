@@ -876,11 +876,22 @@ def _materialize_codex_auth_json(run_dir: Path) -> Path | None:
     is fresh at launch.
 
     Returns the host path to the written file, or ``None`` when no usable
-    row exists — a missing row means Codex is simply unavailable to the
-    session, which is the truthful state.
+    row exists. A missing row means Codex is unavailable to the session; we
+    WARN with the remedy (``graph credentials import``) before returning
+    ``None`` so a missed migration surfaces as an operator-visible error
+    rather than a silent sign-in prompt.
     """
     row = _pick_codex_credential_row(_codex_credential_rows())
     if row is None:
+        # No usable Codex credential row: the launch mounts nothing and the
+        # session prompts for sign-in with no operator-visible cause. A
+        # missed migration must present as an error message, not an outage —
+        # WARN with the remedy inline instead of returning None silently.
+        logger.warning(
+            "session_launcher: no usable Codex credential row — the session "
+            "will launch WITHOUT mounted Codex auth and will prompt for "
+            "sign-in. Remedy: run `graph credentials import`.",
+        )
         return None
     payload = row.payload
     now_iso = (
