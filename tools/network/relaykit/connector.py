@@ -210,7 +210,11 @@ async def serve_channel(key: KeyPair, cert: DelegationCert, *, org: str, token: 
                 timeout = receive_timeout()
                 if inspect.isawaitable(timeout):
                     raise TypeError("channel receive timeout must be synchronous")
-                record = await asyncio.wait_for(recv(), timeout=timeout)
+                record = (
+                    await recv()
+                    if timeout is None
+                    else await asyncio.wait_for(recv(), timeout=timeout)
+                )
             if record is None:
                 return
             message = crypto.open_record(record)

@@ -170,14 +170,27 @@ def test_offer_refuses_candidate_smuggling_in_sdp_and_cross_attempt_data():
 def test_outgoing_sdp_is_stripped_then_asserted_candidate_free():
     dirty = (
         "v=0\r\n"
+        "c=IN IP4 192.168.1.2\r\n"
         "a=group:BUNDLE 0\r\n"
         "a=candidate:1 1 udp 1 192.168.1.2 50000 typ host\r\n"
         "a=end-of-candidates\r\n"
     )
     clean = strip_candidate_lines(dirty)
     assert "a=candidate:" not in clean
+    assert "c=IN IP4 0.0.0.0\r\n" in clean
+    assert "192.168.1.2" not in clean
     assert "a=end-of-candidates" in clean
     assert assert_candidate_free_sdp(clean) == clean
+
+
+def test_incoming_sdp_refuses_address_smuggling_outside_candidates():
+    with pytest.raises(IceSignalingError, match="connection address"):
+        assert_candidate_free_sdp("v=0\r\nc=IN IP6 fd00::1\r\n")
+    with pytest.raises(IceSignalingError, match="connection address"):
+        assert_candidate_free_sdp("v=0\r\n  c=IN IP4 192.168.1.2  \r\n")
+    assert assert_candidate_free_sdp(
+        "v=0\r\nc=IN IP4 0.0.0.0\r\nc=IN IP6 ::\r\n"
+    )
 
 
 def test_total_attempt_byte_budget_includes_begin_and_offer():

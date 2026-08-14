@@ -955,7 +955,7 @@ def _tunnel_link_meta(req: dict, decision: dict) -> tuple[dict, str | None]:
         return {}, "request metadata is malformed"
     meta = {
         k: base[k]
-        for k in ("ttl", "label", "participant_id")
+        for k in ("ttl", "label", "participant_id", "ice_policy")
         if k in (base or {})
     }
     if "ttl" in decision:

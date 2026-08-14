@@ -104,7 +104,10 @@ TARGET_TYPES = (
 RECOVERY_MODES = ("none", "recovery-key", "org-vouch", "blindhash-escrow")
 RESERVED_RECOVERY_MODES = ("org-vouch", "blindhash-escrow")  # companion ledger spec
 
-GRANT_META_KEYS = frozenset({"ttl", "label", "require_auth", "participant_id"})
+GRANT_META_KEYS = frozenset(
+    {"ttl", "label", "require_auth", "participant_id", "ice_policy"}
+)
+ICE_POLICIES = ("direct_allowed", "relay_only")
 
 _ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _HEX_RE = re.compile(r"^[0-9a-f]+$")
@@ -511,9 +514,11 @@ class NetworkLinkGrantV1(SettingSchema):
         default_factory=dict,
         description=(
             "Grant metadata: {ttl: seconds > 0, label: str, require_auth: "
-            "bool}. require_auth=true is RESERVED for rung 2 (Track E "
-            "session linking; registry answers 501 until then) and is "
-            "rejected for now."
+            "bool, ice_policy: direct_allowed|relay_only}. ice_policy is "
+            "immutable for the life of this signed grant; omission means "
+            "direct_allowed. require_auth=true is RESERVED for rung 2 "
+            "(Track E session linking; registry answers 501 until then) "
+            "and is rejected for now."
         ),
     )
     subject: dict = field(
@@ -583,6 +588,11 @@ class NetworkLinkGrantV1(SettingSchema):
                         "answers 501 for it today — issue the grant without "
                         "require_auth"
                     )
+            if "ice_policy" in meta and meta["ice_policy"] not in ICE_POLICIES:
+                raise SchemaValidationError(
+                    f"{cls.__name__}: meta.ice_policy must be one of "
+                    f"{ICE_POLICIES}, got {meta['ice_policy']!r}"
+                )
             if target_type != "mission" and "participant_id" in meta:
                 raise SchemaValidationError(
                     f"{cls.__name__}: meta.participant_id is only valid for "
