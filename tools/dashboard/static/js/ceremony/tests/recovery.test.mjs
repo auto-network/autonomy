@@ -13,9 +13,20 @@ if (!globalThis.crypto) {
 
 const {
   deriveRecoveryFactors,
+  generateRecoveryCode,
+  encodeRecoveryCode,
+  decodeRecoveryCode,
   RECOVERY_SIGN_INFO,
   RECOVERY_KEK_INFO,
 } = await import('../recovery.js');
+
+const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+function flipLastCrockford(printable) {
+  const chars = [...printable];
+  const i = chars.length - 1;
+  chars[i] = CROCKFORD[(CROCKFORD.indexOf(chars[i]) + 1) % 32];
+  return chars.join('');
+}
 
 const te = new TextEncoder();
 
@@ -146,6 +157,28 @@ async function withSpies(run, { throwOnDeriveCall = 0 } = {}) {
     'code copy must be zeroed even when derivation throws',
   );
   assert.equal(derived[0].every((x) => x === 0), true, 'signing seed zeroed on the thrown path');
+}
+
+// 8. The printable recovery code: generate -> encode -> decode round-trips,
+//    tolerates case/whitespace/ambiguous chars, catches a typo by checksum, and
+//    the decoded bytes drive the same derivation as the originals.
+{
+  const bytes = generateRecoveryCode();
+  assert.equal(bytes.length, 32);
+  const printable = await encodeRecoveryCode(bytes);
+  assert.match(printable, /^[0-9A-HJKMNP-TV-Z-]+$/); // crockford alphabet + group dashes
+  assert.deepEqual([...(await decodeRecoveryCode(printable))], [...bytes]);
+  // lowercase, spaces instead of dashes, and ambiguous o/i/l all normalise
+  const noisy = printable.toLowerCase().replace(/-/g, '  ');
+  assert.deepEqual([...(await decodeRecoveryCode(noisy))], [...bytes]);
+  // a single mistyped checksum character is refused, not silently accepted
+  await assert.rejects(decodeRecoveryCode(flipLastCrockford(printable)), /checksum failed/);
+  // the round-tripped bytes derive the same recovery keypair
+  const a = await deriveRecoveryFactors(bytes);
+  const b = await deriveRecoveryFactors(await decodeRecoveryCode(printable));
+  assert.equal(a.recoveryPub, b.recoveryPub);
+  // two generated codes differ (real entropy)
+  assert.notDeepEqual([...generateRecoveryCode()], [...generateRecoveryCode()]);
 }
 
 console.log('recovery: all assertions passed');

@@ -86,4 +86,89 @@ export async function deriveRecoveryFactors(recoveryCode) {
   }
 }
 
+// ── The printable recovery code ────────────────────────────────────────────
+//
+// FRESH-FORK DECISION (no prior ruling on the encoding; the vault crib fixes
+// only the 256-bit entropy and the mechanism): the code renders as CROCKFORD
+// BASE32 -- a transcription-resistant alphabet that excludes the ambiguous
+// I L O U, so 1/I/L and 0/O read the same and decode maps them -- plus a
+// 2-character SHA-256 checksum that catches a typo BEFORE derivation, grouped
+// in fives for reading. Chosen over a BIP-39 word list to avoid embedding a
+// 2048-word table in the ceremony bundle; the operator can override the
+// surface without touching deriveRecoveryFactors, which takes raw bytes.
+const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+
+function base32Encode(bytes) {
+  let bits = 0;
+  let value = 0;
+  let out = '';
+  for (const b of bytes) {
+    value = (value << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      out += CROCKFORD[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += CROCKFORD[(value << (5 - bits)) & 31];
+  return out;
+}
+
+function base32Decode(str) {
+  let bits = 0;
+  let value = 0;
+  const out = [];
+  for (const ch of str) {
+    const idx = CROCKFORD.indexOf(ch);
+    if (idx < 0) throw new Error(`invalid recovery code character: ${ch}`);
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      out.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  return new Uint8Array(out);
+}
+
+async function checksumSuffix(bytes) {
+  const digest = new Uint8Array(await webCrypto.subtle.digest('SHA-256', bytes));
+  return CROCKFORD[digest[0] >>> 3]
+    + CROCKFORD[((digest[0] & 7) << 2) | (digest[1] >>> 6)];
+}
+
+export function generateRecoveryCode() {
+  return webCrypto.getRandomValues(new Uint8Array(RECOVERY_MIN_CODE_BYTES));
+}
+
+export async function encodeRecoveryCode(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.length !== RECOVERY_MIN_CODE_BYTES) {
+    throw new Error(`recovery code must be ${RECOVERY_MIN_CODE_BYTES} bytes`);
+  }
+  const body = base32Encode(bytes) + await checksumSuffix(bytes);
+  return body.match(/.{1,5}/g).join('-');
+}
+
+export async function decodeRecoveryCode(printable) {
+  if (typeof printable !== 'string') {
+    throw new Error('recovery code must be a string');
+  }
+  const cleaned = printable
+    .toUpperCase()
+    .replace(/[\s-]/g, '')
+    .replace(/O/g, '0')
+    .replace(/[IL]/g, '1');
+  if (cleaned.length < 3) throw new Error('recovery code is too short');
+  const body = cleaned.slice(0, -2);
+  const check = cleaned.slice(-2);
+  const bytes = base32Decode(body);
+  if (bytes.length !== RECOVERY_MIN_CODE_BYTES) {
+    throw new Error('recovery code has the wrong length');
+  }
+  if (await checksumSuffix(bytes) !== check) {
+    throw new Error('recovery code checksum failed — check for a typo');
+  }
+  return bytes;
+}
+
 export { RECOVERY_SIGN_INFO, RECOVERY_KEK_INFO, RECOVERY_MIN_CODE_BYTES, bytesToHex };
