@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<title>Welcome</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="manifest" href="/static/manifest.json?v=__STATIC_VERSION__">
+<!-- Tailwind carries the reused Get-started / create-org overlays. The
+     onboarding ceremony (AutonomyOnboarding), the create-org screen
+     (AutonomyCreateOrg) and the stepped /network/join accept flow are the
+     ONE delivered path for each action; this shell only sequences them.
+     No ceremony, crypto, or org/session creation lives here (bead
+     auto-inpkd). -->
+<link rel="stylesheet" href="/static/tailwind.css?v=__STATIC_VERSION__">
+<style>
+  /* Copied from the committed "Welcome App — onboarding empty state"
+     design (graph://9a4219b3 — fresh / mid / ready variants). The quest
+     rail is hand-styled; Tailwind above only dresses the composed
+     overlays. */
+  :root { --bg:#0f1117; --panel:#171a23; --line:#2a2f3d; --ink:#e5e7eb; --dim:#9ca3af; --accent:#6366f1; --ok:#34d399; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width:560px; margin:0 auto; padding:3.5rem 1.25rem 4rem; }
+  h1 { font-size:1.5rem; margin:0 0 .35rem; } .sub { color:var(--dim); margin-bottom:1.8rem; }
+  .step { display:flex; align-items:center; gap:1rem; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:1.2rem 1.4rem; margin-bottom:.8rem; }
+  .step.current { border-color:var(--accent); }
+  .step.locked { opacity:.45; }
+  .n { flex:0 0 auto; width:2rem; height:2rem; border-radius:50%; background:#262b38; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:.9rem; }
+  .step.done .n { background:rgba(52,211,153,.15); color:var(--ok); }
+  .step h2 { margin:0; font-size:1.05rem; } .step p { margin:.15rem 0 0; color:var(--dim); font-size:.88rem; }
+  .step .body { flex:1; min-width:0; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:.6rem 1.3rem; font-size:.95rem; font-weight:600; cursor:pointer; }
+  button.secondary { background:#262b38; }
+  .actions { display:flex; flex-direction:column; gap:.5rem; }
+  .invite-org { display:flex; align-items:center; gap:.6rem; margin:.15rem 0 .1rem; }
+  .invite-org .mark { width:1.6rem; height:1.6rem; border-radius:6px; background:#262b38; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:.8rem; }
+  [x-cloak] { display:none !important; }
+</style>
+<script>
+  // The welcome shell owns onboarding sequencing, so the ambient
+  // auto-open in network-onboarding.js stays quiet here — step 1's
+  // "Begin" opens the ceremony deliberately (design shows the rail
+  // first, not an overlay on load).
+  window.__AUTONOMY_WELCOME_SHELL__ = true;
+</script>
+<script type="importmap">{"imports": {"/static/js/ceremony/primitives.js": "/static/js/ceremony/primitives.js?v=__STATIC_VERSION__"}}</script>
+<script type="module" src="/static/js/network-signon.mjs?v=__STATIC_VERSION__"></script>
+<script src="/static/js/network-identity.js?v=__STATIC_VERSION__" defer></script>
+<script src="/static/js/network-onboarding.js?v=__STATIC_VERSION__" defer></script>
+<script src="/static/js/create-org.js?v=__STATIC_VERSION__" defer></script>
+<script defer src="/static/vendor/alpine.min.js?v=__STATIC_VERSION__"></script>
+</head>
+<body>
+<main x-data="welcomeApp()" x-init="init()" x-cloak>
+
+  <template x-if="!ready">
+    <p class="sub" style="margin-top:4rem">One moment&hellip;</p>
+  </template>
+
+  <!-- ── FRESH · no identity (design variant 0) ─────────────────── -->
+  <template x-if="ready && step === 1">
+    <div>
+      <h1>Welcome</h1>
+      <p class="sub">Three steps and this machine is yours.</p>
+      <div class="step current"><div class="n">1</div><div class="body">
+        <h2>Create your identity</h2>
+        <p>Your name and your keys &mdash; made here, kept here.</p></div>
+        <button data-testid="welcome-begin" @click="beginIdentity()">Begin</button></div>
+      <div class="step locked"><div class="n">2</div><div class="body">
+        <h2>Create or join an organization</h2>
+        <p>Your work lives in organizations &mdash; start one, or accept an invitation.</p></div></div>
+      <div class="step locked"><div class="n">3</div><div class="body">
+        <h2>Open your first workspace</h2>
+        <p>Where you and your assistant build together.</p></div></div>
+    </div>
+  </template>
+
+  <!-- ── MID · identity done, organization current (variant 1) ──── -->
+  <template x-if="ready && step === 2">
+    <div>
+      <h1 x-text="userName ? ('Welcome, ' + userName) : 'Welcome'"></h1>
+      <p class="sub">Two to go.</p>
+      <div class="step done"><div class="n">&check;</div><div class="body">
+        <h2>Create your identity</h2>
+        <p x-text="userName ? ('You’re ' + userName + ' on this machine.') : 'Your identity is set on this machine.'"></p></div></div>
+      <div class="step current"><div class="n">2</div><div class="body">
+        <h2>Create or join an organization</h2>
+        <template x-if="invited">
+          <div class="invite-org" data-testid="welcome-invite-org">
+            <span class="mark" x-text="inviteInitial"></span>
+            <p x-text="inviteName ? ('You’re invited to ' + inviteName + '.') : 'You were invited &mdash; accept to join.'"></p>
+          </div>
+        </template>
+        <p x-show="!invited">Start one, or paste an invitation link if you were invited.</p></div>
+        <!-- Invited: Join is pre-selected (primary). Otherwise Create leads. -->
+        <div class="actions">
+          <template x-if="invited">
+            <div class="actions">
+              <button data-testid="welcome-join" @click="joinOrg()">Join</button>
+              <button class="secondary" data-testid="welcome-create" @click="createOrg()">Create</button>
+            </div>
+          </template>
+          <template x-if="!invited">
+            <div class="actions">
+              <button data-testid="welcome-create" @click="createOrg()">Create</button>
+              <button class="secondary" data-testid="welcome-join" @click="joinOrg()">Join</button>
+            </div>
+          </template>
+        </div></div>
+      <div class="step locked"><div class="n">3</div><div class="body">
+        <h2>Open your first workspace</h2>
+        <p>Where you and your assistant build together.</p></div></div>
+    </div>
+  </template>
+
+  <!-- ── READY · identity + organization done (design variant 2) ── -->
+  <template x-if="ready && step === 3">
+    <div>
+      <h1>You&rsquo;re set</h1>
+      <p class="sub">Identity, organization, workspace &mdash; all yours.</p>
+      <div class="step done"><div class="n">&check;</div><div class="body">
+        <h2 x-text="userName || 'Your identity'"></h2><p>Your identity on this machine.</p></div></div>
+      <div class="step done"><div class="n">&check;</div><div class="body">
+        <h2 x-text="orgName || 'Your organization'"></h2><p>Your organization.</p></div></div>
+      <div class="step done"><div class="n">&check;</div><div class="body">
+        <h2>First workspace</h2><p>Open and waiting.</p></div></div>
+      <button style="margin-top:.6rem" data-testid="welcome-open-workspace" @click="goToWorkspace()">Go to your workspace</button>
+    </div>
+  </template>
+
+</main>
+
+<script>
+function welcomeApp() {
+  return {
+    ready: false,
+    hasIdentity: false,
+    userName: '',
+    hasOrg: false,
+    orgName: '',
+    // Arrived-via-invitation: the same shell, org-attached. The context
+    // rides the URL exactly as /network/join reads it (auto-yw5gz) — this
+    // shell only detects it and hands it on, one source of truth.
+    invited: false,
+    inviteName: '',
+    inviteInitial: '?',
+
+    get step() {
+      if (!this.hasIdentity) return 1;
+      if (!this.hasOrg) return 2;
+      return 3;
+    },
+
+    async init() {
+      var q = new URLSearchParams(location.search);
+      this.invited = (location.search.length > 1 || location.hash.length > 1);
+      var org = q.get('org') || '';
+      this.inviteName = org;
+      this.inviteInitial = (org.charAt(0) || '?').toUpperCase();
+      await this.refresh();
+      // Completing a step elsewhere (the ceremony overlay, the create-org
+      // screen) fires these — the rail re-reads and advances live.
+      window.addEventListener('autonomy:identity-changed', () => this.refresh());
+      window.addEventListener('autonomy:orgs-changed', () => this.refresh());
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') this.refresh();
+      });
+    },
+
+    async refresh() {
+      try {
+        var s = await (await fetch('/api/identity/status', { cache: 'no-store' })).json();
+        this.hasIdentity = !!s.personal_identity;
+        this.userName = (s.personal_identity || {}).display_name || '';
+      } catch (e) { /* fresh install: no status yet → step 1 */ }
+      try {
+        var o = await (await fetch('/api/orgs')).json();
+        var orgs = (o.orgs || []).map(function (e) {
+          var id = e.identity_resolved || {};
+          return { slug: id.slug || (e.org || {}).slug || '',
+                   name: id.name || (e.org || {}).slug || '' };
+        }).filter(function (x) {
+          // The operator's own personal store is not a collaborative org.
+          return x.slug && x.slug !== 'personal';
+        });
+        this.hasOrg = orgs.length > 0;
+        this.orgName = orgs.length ? (orgs[0].name || orgs[0].slug) : '';
+      } catch (e) { /* org list unreadable → stay on the org step */ }
+      this.ready = true;
+    },
+
+    // Step 1 → the delivered identity ceremony (network-onboarding.js).
+    beginIdentity() {
+      if (window.AutonomyOnboarding) window.AutonomyOnboarding.open({ step: 1 });
+    },
+    // Step 2 create → the delivered create-org screen (create-org.js).
+    createOrg() {
+      if (window.AutonomyCreateOrg) window.AutonomyCreateOrg.open({ entry: 'standalone' });
+    },
+    // Step 2 join → the delivered stepped accept flow, carrying whatever
+    // invitation context the URL holds (the bearer in #t= rides along and
+    // never touches this shell).
+    joinOrg() {
+      location.assign('/network/join' + location.search + location.hash);
+    },
+    // Step 3 → the session UI, where the first workspace is opened.
+    goToWorkspace() {
+      location.assign('/beads');
+    },
+  };
+}
+</script>
+</body>
+</html>
