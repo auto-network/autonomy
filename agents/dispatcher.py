@@ -482,12 +482,24 @@ def release_bead(bead_id: str, status: str, reason: str) -> bool:
                     and not re.search(
                         proof_re, run_bd(["show", bead_id]) or "", re.I)):
                 _retry_bd(["update", bead_id, "-s", "open"])
+                # Refusal is the one moment the gate KNOWS host evidence
+                # is outstanding — flip the readiness axis too, or the
+                # reopened bead stays dispatch-eligible and the pipeline
+                # re-dispatches work it structurally cannot finish
+                # (packaging's observed loop). approved -> host-verify,
+                # replacing not stacking; the coordinator flips it back
+                # explicitly if build work remains.
+                run_bd(["update", bead_id,
+                        "--remove-label", "readiness:approved",
+                        "--add-label", "readiness:host-verify"])
                 run_bd(["update", bead_id, "--append-notes",
                         "golden-rule gate (host closer): refusing DONE close "
                         "— runtime-critical bead has no functional-proof "
                         "reference. Provide real-run evidence "
                         "(functional-proof: <ref>) or remove the label with "
-                        "a recorded justification."])
+                        "a recorded justification. Readiness moved to "
+                        "host-verify: not dispatch-eligible until the "
+                        "evidence lands or a coordinator flips it back."])
                 print(f"  Golden-rule gate: host close REFUSED for {bead_id}")
                 return True
             _retry_bd(["close", bead_id, "--reason", reason])
