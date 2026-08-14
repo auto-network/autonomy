@@ -247,10 +247,18 @@ def parse_claude_identity(body: Any) -> ClaudeIdentity:
         raise CredentialImportError(
             "profile response missing 'organization.uuid'"
         )
-    account_email = acct.get("email_address") if isinstance(acct, dict) else None
+    # The PROFILE endpoint returns "email"; "email_address" belongs to the
+    # TOKEN endpoint's payload (claude_oauth.py) — the two are not the same
+    # shape. Accept both, preferring the profile's own field, so this parser
+    # is honest about the endpoint it actually calls (host incident
+    # 2026-08-14: the fixture had been written to match the code, so the
+    # test confirmed the code agreed with itself).
+    account_email = None
+    if isinstance(acct, dict):
+        account_email = acct.get("email") or acct.get("email_address")
     if not isinstance(account_email, str) or not account_email:
         raise CredentialImportError(
-            "profile response missing 'account.email_address'"
+            "profile response missing 'account.email'"
         )
     org_name = org.get("name") if isinstance(org, dict) else None
     if not isinstance(org_name, str) or not org_name:

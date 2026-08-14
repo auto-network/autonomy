@@ -458,7 +458,7 @@ def test_dry_run_writes_nothing(graph_db_env, tmp_path):
 def test_parse_claude_identity_full():
     identity = ci.parse_claude_identity({
         "organization": {"uuid": "org-Z", "name": "Zeta"},
-        "account": {"email_address": "z@zeta.io"},
+        "account": {"email": "z@zeta.io"},
     })
     assert identity.org_uuid == "org-Z"
     assert identity.organization_name == "Zeta"
