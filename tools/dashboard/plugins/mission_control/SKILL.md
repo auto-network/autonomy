@@ -80,8 +80,8 @@ you wrote — unlike Present's viewer. What is added is a top bar and the Q&A
 surfaces, prepended as their own runtime; your markup is untouched and your
 scripts, load events and in-page anchors all behave normally.
 
-The same is true over the relay: one composed document, one function building
-it, so the two surfaces cannot disagree.
+The same is true in a Content Frame: one composed document, one function
+building it, so the two surfaces cannot disagree.
 
 ## 4. Roll back without re-pushing
 
@@ -125,7 +125,7 @@ CrossTalk; you answer via the API; the question and your final answer become
 part of the mission's permanent record. Every question is attributed to the
 person who asked it, and every answer to you.
 
-### Mint a share link for a person (you do this, once per person)
+### Mint a Content Link for a person (you do this, once per person)
 
 ```bash
 curl -sk https://host.docker.internal:8080/api/visitor-tokens \
@@ -310,8 +310,10 @@ bookmarking/refreshing on one pillar once you're already inside a mission —
 
 ### One link per mission, not one per pillar
 
-The share link you mint (§6) and hand to a person is always the
-**mission-level** link. A guest navigates to a specific pillar from the
+The Content Link you mint (§6) and hand to a person is always the
+**mission-level** link. (A Content Link carries a screen to a reader. It is
+not a Join Link, which brings someone into an organization -- different
+credential, different gate, different protocol.) A guest navigates to a specific pillar from the
 platform's own top bar (§10), which lists every pillar with its open-question
 count — you do not build that, and there is no separate onboarding step per
 pillar.
@@ -539,8 +541,9 @@ Your whole contract is two lines:
    add `data-mc-ask="<question>"` to any of them where you need an answer.
 
 That is all of it. Ordinary HTML, CSS, `<script>`, in-page `#anchor` links —
-all work natively, on the dashboard and over the relay alike. Your document is
-served **byte for byte**: nothing parses it, rewrites it, or reserialises it.
+all work natively, on the dashboard and in a Content Frame alike. Your
+document is served **byte for byte**: nothing parses it, rewrites it, or
+reserialises it.
 
 ### What the platform puts on your page
 
@@ -749,15 +752,15 @@ underneath it. The platform can stack them only when it owns both.
 
 ### The two things that do not work, and why
 
-**Scripts must be inline.** The relay serves your document under a CSP that
-permits inline script, not arbitrary `https:` sources — and an external
+**Scripts must be inline.** A Content Frame is served under a CSP that permits
+inline script, not arbitrary `https:` sources — and an external
 classic script would not preserve execution order relative to your inline
 ones anyway. Paste the code in; do not reference `/static/...`.
 
-**Screen data arrives from the platform, not from `fetch("/api/...")`.** Over
-the relay your document runs in a sandboxed frame with no origin, so there is
-no dashboard to call: a relative URL has nothing to resolve against and no
-credential to carry. The platform delivers the pillar list, the conversation
+**Screen data arrives from the platform, not from `fetch("/api/...")`.** Read
+through a Content Link, your document runs in a **Content Frame**: sandboxed,
+with no origin. There is no dashboard to call -- a relative URL has nothing to
+resolve against and no credential to carry. The platform delivers the pillar list, the conversation
 and presence with the document, and renders them itself. Your page's job is
 the content; the state around it is not yours to fetch.
 
