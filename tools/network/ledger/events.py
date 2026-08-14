@@ -38,6 +38,7 @@ EVENT_DOMAIN = b"autonomy.ledger.event.v1\n"
 APPROVAL_DOMAIN = b"autonomy.ledger.approval.v1\n"
 ROTATE_DOMAIN = b"autonomy.ledger.rotate-continuity.v1\n"
 REKEY_CONTINUITY_DOMAIN = b"autonomy.ledger.member-rekey-continuity.v1\n"
+ROTATE_RECOVERY_DOMAIN = b"autonomy.ledger.rotate-recovery.v1\n"
 #: Frozen, byte-identical to storagekit.credentials.CREDENTIAL_DOMAIN —
 #: the fold verifies an embedded kem_credential with idkit only, and a
 #: cross-package fidelity test keeps the two constants from drifting.
@@ -232,9 +233,48 @@ def _profile_size_ok(profile: object) -> None:
 
 
 def _v_genesis(p: dict) -> None:
-    _require_fields(p, "genesis", frozenset({"org", "root_pub"}))
+    _require_fields(
+        p, "genesis",
+        frozenset({"org", "root_pub"}), frozenset({"recovery"}),
+    )
     _require_str(p["org"], "genesis.org", max_len=128)
     _require_key(p["root_pub"], "genesis.root_pub")
+    # A genesis with no `recovery` declares policy "none": no co-factor, so an
+    # in-possession key.rotate needs only the root's own continuity proof.
+    if "recovery" in p:
+        _v_genesis_recovery(p["recovery"])
+        # The recovery factor MUST be a distinct key. If recovery_pub == root_pub
+        # the "second signature" is the root itself, so a stolen root signs both
+        # the possession proof and the recovery co-signature -- silently
+        # defeating the whole "a stolen root alone cannot rotate" property this
+        # event exists to establish. Reject at genesis, fail closed.
+        if p["recovery"].get("recovery_pub") == p["root_pub"]:
+            raise SchemaError(
+                "genesis.recovery.recovery_pub must differ from root_pub -- the "
+                "recovery factor must be a key the root does not control"
+            )
+
+
+def _v_genesis_recovery(value: object) -> None:
+    # {"policy": "none"|"recovery-key", "recovery_pub"?: key}. An unknown policy
+    # is refused now (fail closed) -- future modes (e.g. a vouch quorum) are
+    # added by the recovery epic's schema revision, never silently tolerated.
+    if not isinstance(value, dict):
+        raise SchemaError("genesis.recovery must be an object")
+    _require_fields(
+        value, "genesis.recovery",
+        frozenset({"policy"}), frozenset({"recovery_pub"}),
+    )
+    if value["policy"] not in ("none", "recovery-key"):
+        raise SchemaError("genesis.recovery.policy must be 'none' or 'recovery-key'")
+    if value["policy"] == "recovery-key":
+        if "recovery_pub" not in value:
+            raise SchemaError(
+                "genesis.recovery.policy 'recovery-key' requires recovery_pub"
+            )
+        _require_key(value["recovery_pub"], "genesis.recovery.recovery_pub")
+    elif "recovery_pub" in value:
+        raise SchemaError("genesis.recovery.policy 'none' forbids recovery_pub")
 
 
 def _v_delegate(p: dict) -> None:
@@ -376,7 +416,11 @@ def _v_member_rekey(p: dict) -> None:
 
 
 def _v_key_rotate(p: dict) -> None:
-    _require_fields(p, "key.rotate", frozenset({"old_pub", "new_pub", "continuity"}))
+    _require_fields(
+        p, "key.rotate",
+        frozenset({"old_pub", "new_pub", "continuity"}),
+        frozenset({"recovery_continuity"}),
+    )
     _require_key(p["old_pub"], "key.rotate.old_pub")
     _require_key(p["new_pub"], "key.rotate.new_pub")
     _require_str(p["continuity"], "key.rotate.continuity", max_len=SIGNATURE_HEX_LEN)
@@ -384,6 +428,20 @@ def _v_key_rotate(p: dict) -> None:
         _decode_hex(p["continuity"], SIGNATURE_HEX_LEN, "key.rotate.continuity")
     except _IdkitMalformed as exc:
         raise SchemaError(str(exc)) from None
+    # The recovery factor's co-signature (present iff the rotation carries one;
+    # whether it is REQUIRED is the fold's call, per the org's declared policy).
+    if "recovery_continuity" in p:
+        _require_str(
+            p["recovery_continuity"], "key.rotate.recovery_continuity",
+            max_len=SIGNATURE_HEX_LEN,
+        )
+        try:
+            _decode_hex(
+                p["recovery_continuity"], SIGNATURE_HEX_LEN,
+                "key.rotate.recovery_continuity",
+            )
+        except _IdkitMalformed as exc:
+            raise SchemaError(str(exc)) from None
 
 
 def _v_checkpoint(p: dict) -> None:
@@ -640,3 +698,26 @@ def sign_rekey_continuity(new_key: KeyPair, persona: str, old_pub: str) -> str:
     return new_key.sign_hex(
         rekey_continuity_input(persona, old_pub, new_key.public_hex)
     )
+
+
+def rotate_recovery_input(genesis_id: str, old_pub: str, new_pub: str) -> bytes:
+    """The org's declared recovery factor's co-signature binding on a root
+    rotation. Its OWN domain, distinct from the new-key possession proof
+    (ROTATE_DOMAIN), so the two signatures can never substitute for each other;
+    bound to the exact {old_pub, new_pub}, so a co-signature minted for one
+    rotation authorises no other; and bound to the org's genesis_id, so a
+    recovery co-signature can never be replayed across orgs BY CONSTRUCTION --
+    not merely because old_pub (the current root) is org-unique today. This is
+    the org's constitutional root rotation, so the binding must not rest on an
+    assumption a future change could weaken."""
+    return ROTATE_RECOVERY_DOMAIN + canonical_json(
+        {"genesis_id": genesis_id, "old_pub": old_pub, "new_pub": new_pub}
+    )
+
+
+def sign_rotate_recovery(
+    recovery_key: KeyPair, genesis_id: str, old_pub: str, new_pub: str,
+) -> str:
+    """The declared recovery key co-signs the rotation — the second factor a
+    stolen root alone cannot supply."""
+    return recovery_key.sign_hex(rotate_recovery_input(genesis_id, old_pub, new_pub))

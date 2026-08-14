@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 from tools.network.idkit import KeyPair
-from tools.network.ledger import fold, sign_rotate_continuity, sign_rekey_continuity
+from tools.network.ledger import (
+    fold,
+    sign_rotate_continuity,
+    sign_rekey_continuity,
+    sign_rotate_recovery,
+)
 from tools.network.ledger.fold import (
     R_BAD_CONTINUITY,
+    R_BAD_RECOVERY_CONTINUITY,
     R_NOT_ROOT,
+    R_RECOVERY_CONTINUITY_MISSING,
+    R_RECOVERY_NOT_DECLARED,
     R_REKEY_REVOKED_KEY,
     R_REKEY_UNAUTHORIZED,
     R_REKEY_WRONG_KEY,
@@ -240,3 +248,75 @@ class TestCheckpoint:
         sim.delegate(sim.root, a, ["checkpoint"])
         cp = sim.checkpoint(a)
         assert fold(sim.ledger).valid[cp] is True
+
+
+class TestRecoveryFactorRotation:
+    """auto-n9cy3: an in-possession key.rotate needs the declared recovery
+    factor's co-signature, so a stolen root alone cannot rotate the org."""
+
+    def test_recovery_key_policy_admits_dual_signed_rotation(self):
+        rk = KeyPair.generate()
+        sim = Sim(recovery_key=rk)
+        new_root = KeyPair.generate()
+        ok = sim.rotate(sim.root, new_root, recovery_key=rk)
+        assert fold(sim.ledger).valid[ok] is True
+
+    def test_recovery_key_policy_refuses_root_only_rotation(self):
+        rk = KeyPair.generate()
+        sim = Sim(recovery_key=rk)
+        bad = sim.rotate(sim.root, KeyPair.generate())  # no co-signature
+        state = fold(sim.ledger)
+        assert state.valid[bad] is False
+        assert state.reasons[bad] == R_RECOVERY_CONTINUITY_MISSING
+
+    def test_recovery_key_policy_refuses_wrong_recovery_signer(self):
+        rk, mallory = KeyPair.generate(), KeyPair.generate()
+        sim = Sim(recovery_key=rk)
+        bad = sim.rotate(sim.root, KeyPair.generate(), recovery_key=mallory)
+        state = fold(sim.ledger)
+        assert state.valid[bad] is False
+        assert state.reasons[bad] == R_BAD_RECOVERY_CONTINUITY
+
+    def test_recovery_co_signature_binds_the_exact_transition(self):
+        # A recovery co-signature minted for one {old,new} authorises no other:
+        # replaying it onto a different new_pub is refused.
+        rk = KeyPair.generate()
+        sim = Sim(recovery_key=rk)
+        intended, attacker = KeyPair.generate(), KeyPair.generate()
+        replayed = sign_rotate_recovery(
+            rk, sim.genesis_id, sim.root.public_hex, intended.public_hex
+        )
+        bad = sim.rotate(sim.root, attacker, recovery_continuity=replayed)
+        state = fold(sim.ledger)
+        assert state.valid[bad] is False
+        assert state.reasons[bad] == R_BAD_RECOVERY_CONTINUITY
+
+    def test_recovery_co_signature_is_genesis_bound(self):
+        # A co-signature minted under ANOTHER genesis is rejected here, even for
+        # the same recovery key and the same {old_pub,new_pub} -- so a recovery
+        # co-sig can never be replayed across orgs by construction, not merely
+        # because old_pub is org-unique today.
+        rk = KeyPair.generate()
+        sim = Sim(recovery_key=rk)
+        new_root = KeyPair.generate()
+        foreign = sign_rotate_recovery(
+            rk, "f" * 64, sim.root.public_hex, new_root.public_hex
+        )
+        bad = sim.rotate(sim.root, new_root, recovery_continuity=foreign)
+        state = fold(sim.ledger)
+        assert state.valid[bad] is False
+        assert state.reasons[bad] == R_BAD_RECOVERY_CONTINUITY
+
+    def test_none_policy_refuses_an_unvalidatable_co_signature(self):
+        # Under policy "none" a recovery co-signature the ledger cannot validate
+        # against a declared factor is refused, never ignored.
+        sim = Sim()
+        bad = sim.rotate(sim.root, KeyPair.generate(), recovery_key=KeyPair.generate())
+        state = fold(sim.ledger)
+        assert state.valid[bad] is False
+        assert state.reasons[bad] == R_RECOVERY_NOT_DECLARED
+
+    def test_none_policy_admits_a_plain_rotation(self):
+        sim = Sim()  # no recovery declared
+        ok = sim.rotate(sim.root, KeyPair.generate())
+        assert fold(sim.ledger).valid[ok] is True

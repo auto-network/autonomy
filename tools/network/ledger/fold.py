@@ -53,6 +53,7 @@ from .events import (
     approval_signing_input,
     rotate_continuity_input,
     rekey_continuity_input,
+    rotate_recovery_input,
 )
 from .ledger import Ledger
 from .scopes import UNIVERSE, attenuates, covered_subset, set_covers
@@ -87,6 +88,9 @@ R_REKEY_REVOKED_KEY = "rekey-revoked-key"
 R_NOT_ROOT = "not-root"
 R_ROTATE_WRONG_OLD = "rotate-wrong-old"
 R_BAD_CONTINUITY = "bad-continuity"
+R_RECOVERY_CONTINUITY_MISSING = "recovery-continuity-missing"
+R_BAD_RECOVERY_CONTINUITY = "bad-recovery-continuity"
+R_RECOVERY_NOT_DECLARED = "recovery-continuity-not-declared"
 R_CHECKPOINT_UNAUTHORIZED = "checkpoint-unauthorized"
 
 INVITE_LIVE = "live"
@@ -389,6 +393,17 @@ class _Folder:
         self.org = genesis.payload["org"]
         self.genesis_root = genesis.payload["root_pub"]
         self.genesis_id = genesis.event_id
+        # The org's declared recovery policy. Version one reads it fixed at
+        # genesis; when the recovery epic adds policy-change events, a
+        # policy_at(ctx) walk over the event's ancestry replaces this direct
+        # read and the genesis declaration becomes the chain's first state.
+        _recovery = genesis.payload.get("recovery")
+        if isinstance(_recovery, dict):
+            self.recovery_policy: str = _recovery.get("policy", "none")
+            self.recovery_pub: Optional[str] = _recovery.get("recovery_pub")
+        else:
+            self.recovery_policy = "none"
+            self.recovery_pub = None
 
         self.heads = tuple(sorted(set(heads))) if heads is not None else ledger.heads()
         self.ctx = ledger.ancestry(self.heads)
@@ -814,6 +829,27 @@ class _Folder:
             )
         except IdkitError:
             return R_BAD_CONTINUITY
+        # The org's declared recovery factor must co-sign an in-possession
+        # rotation, so a stolen root alone cannot rotate (and two competing
+        # rotations would both need the recovery factor, collapsing the fork
+        # race). Under policy "recovery-key" the co-signature is required and
+        # verified against the exact transition; under "none" a recovery
+        # co-signature the ledger cannot validate is refused, never ignored.
+        if self.recovery_policy == "recovery-key":
+            if "recovery_continuity" not in p:
+                return R_RECOVERY_CONTINUITY_MISSING
+            try:
+                verify_signature(
+                    self.recovery_pub,
+                    p["recovery_continuity"],
+                    rotate_recovery_input(
+                        self.genesis_id, p["old_pub"], p["new_pub"]
+                    ),
+                )
+            except IdkitError:
+                return R_BAD_RECOVERY_CONTINUITY
+        elif "recovery_continuity" in p:
+            return R_RECOVERY_NOT_DECLARED
         self.rotations[event.event_id] = _Rotation(
             id=event.event_id, old_pub=p["old_pub"], new_pub=p["new_pub"]
         )
