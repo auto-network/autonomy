@@ -3756,10 +3756,17 @@ class TestWorktreeWatchEndpoint:
 
 @pytest.fixture
 def isolated_settings_db(monkeypatch, tmp_path):
-    """Pin Settings to a per-test SQLite file so binding/cache writes
-    don't bleed across tests or touch the operator's real DB."""
-    db_path = tmp_path / "settings.db"
-    monkeypatch.setenv("GRAPH_DB", str(db_path))
+    """Hermetic Settings, orgs-tree, NO pin: binding/cache writes go at
+    explicit org='autonomy' while server paths also touch 'personal' —
+    no single pin agrees with both under the fail-loud resolver."""
+    from tools.graph.db import GraphDB
+    orgs = tmp_path / "orgs"
+    orgs.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    GraphDB.close_all_pooled()
+    GraphDB.create_org_db("autonomy").close()
+    db_path = orgs / "autonomy.db"
     yield db_path
 
 

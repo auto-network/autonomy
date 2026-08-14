@@ -2227,6 +2227,12 @@ def _tracked_set_id_from_row_id(
 ) -> str | None:
     if not row_id:
         return None
+    # Resolve the caller sentinel BEFORE the fetch (settings-owner ack,
+    # 2026-08-14): raw CALLER_ORG leaked into cross_org.resolve_peers'
+    # sqlite binding and crashed; the wrapper's guard swallowed it into
+    # set_id=None, undercounting per-set diag activity. The public API
+    # normalizes exactly this way on every call — this helper missed it.
+    org = _resolve_org_arg(org)
     row = _fetch_setting_any_org(row_id, org)
     if row is None:
         return None

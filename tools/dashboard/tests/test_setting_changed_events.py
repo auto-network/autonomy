@@ -22,8 +22,16 @@ from tools.graph.schemas.registry import SCHEMAS, UPCONVERTERS
 
 @pytest.fixture
 def graph_db_env(tmp_path, monkeypatch):
-    db_path = tmp_path / "graph.db"
-    monkeypatch.setenv("GRAPH_DB", str(db_path))
+    # Orgs-tree, no pin: the emit path resolves explicit 'autonomy',
+    # which a pin contradicts under the fail-loud resolver (73bad14e).
+    from tools.graph.db import GraphDB
+    orgs = tmp_path / "orgs"
+    orgs.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    GraphDB.close_all_pooled()
+    GraphDB.create_org_db("autonomy").close()
+    db_path = orgs / "autonomy.db"
     monkeypatch.delenv("GRAPH_API", raising=False)
     yield db_path
 

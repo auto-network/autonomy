@@ -92,7 +92,16 @@ def test_default_spawn_captures_connector_warnings_in_shared_log(tmp_path):
 def env(tmp_path, monkeypatch):
     from tools.graph.db import GraphDB
     GraphDB.close_all_pooled()
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
+    # Orgs-tree hermeticity, no GRAPH_DB pin: the code under test
+    # resolves explicit orgs, which a pin silently swallows (73bad14e)
+    # and the fail-loud resolver refuses. delenv guards ambient leaks.
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    from tools.graph.db import GraphDB
+    GraphDB.close_all_pooled()
+    GraphDB.create_org_db(ORG).close()
     monkeypatch.delenv("GRAPH_ORG", raising=False)
     yield tmp_path
     GraphDB.close_all_pooled()
@@ -496,9 +505,11 @@ def test_bootstrap_ensures_and_arms_watchdog(env, monkeypatch):
     assert s._watchdog is None            # can be armed again in the same process
 
 
-def test_startup_org_discovery_covers_every_local_org(env, monkeypatch):
+def test_startup_org_discovery_covers_every_local_org(env, monkeypatch, tmp_path):
     monkeypatch.setenv("GRAPH_ORG", ORG)
-    # GRAPH_DB pins one physical test database regardless of org slug.
+    # Phase 1 tests the PINNED branch explicitly (the fixture no longer
+    # pins): with GRAPH_DB set, discovery collapses to the caller org.
+    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "pin.db"))
     assert sup._discover_startup_orgs() == [ORG]
 
     monkeypatch.delenv("GRAPH_DB")

@@ -58,7 +58,16 @@ def env(tmp_path, monkeypatch):
     from tools.graph.db import GraphDB
 
     GraphDB.close_all_pooled()
-    monkeypatch.setenv("GRAPH_DB", str(tmp_path / "graph.db"))
+    # Orgs-tree hermeticity, no GRAPH_DB pin: the code under test
+    # resolves explicit orgs, which a pin silently swallows (73bad14e)
+    # and the fail-loud resolver refuses. delenv guards ambient leaks.
+    orgs_dir = tmp_path / "orgs"
+    orgs_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(orgs_dir))
+    monkeypatch.delenv("GRAPH_DB", raising=False)
+    from tools.graph.db import GraphDB
+    GraphDB.close_all_pooled()
+    GraphDB.create_org_db(ORG).close()
     monkeypatch.delenv("GRAPH_ORG", raising=False)
     monkeypatch.setattr(design_db, "DB_PATH", tmp_path / "designs.db")
     monkeypatch.setattr(design_db, "_initialized", False)
@@ -377,7 +386,7 @@ def _attach(path, *, mime: str | None = None, source_id: str | None = None) -> s
     from tools.graph.db import GraphDB
     from tools.graph.models import Attachment
 
-    db = GraphDB(os.environ["GRAPH_DB"])
+    db = GraphDB.for_org(ORG)  # content lives in the org DB the resolvers read
     try:
         att = Attachment(filename=os.path.basename(str(path)), mime_type=mime,
                          file_path=str(path), source_id=source_id)
@@ -487,7 +496,7 @@ class TestNoteResolver:
 
         src = Source(type="session", platform="local", title="a transcript",
                      file_path="session:fixture")
-        db = GraphDB(os.environ["GRAPH_DB"])
+        db = GraphDB.for_org(ORG)  # content lives in the org DB the resolvers read
         try:
             db.insert_source(src)
         finally:
@@ -651,7 +660,7 @@ class TestAttachmentManifest:
             "body", title="Corrupt", attachments=[str(f)], org=ORG,
         )
         ref = note["attachments"][0]["id"]
-        db = GraphDB(os.environ["GRAPH_DB"])
+        db = GraphDB.for_org(ORG)  # content lives in the org DB the resolvers read
         try:
             db.conn.execute(
                 "UPDATE attachments SET hash = ? WHERE id = ?", ("NOTHEX", ref)
