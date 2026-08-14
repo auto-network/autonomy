@@ -223,10 +223,14 @@ def _ab_eval_batch(js: str) -> Any:
     ``--json`` envelope, or ``None`` if no parsable line was present.
     """
     wrapped = f"(() => {{ {js} }})()"
+    _t0 = time.time()
     result = subprocess.run(
         ["agent-browser", "--json", "eval", wrapped],
         capture_output=True, text=True, timeout=10,
     )
+    if os.environ.get("L2B_EVAL_TIMING_LOG"):
+        with open(os.environ["L2B_EVAL_TIMING_LOG"], "a") as _f:
+            _f.write(f"{time.time() - _t0:.2f}\n")
     stdout = result.stdout.strip()
     if not stdout:
         return None
