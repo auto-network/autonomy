@@ -2441,6 +2441,106 @@ def _parse_codex_exec_end(payload: dict, timestamp: str) -> dict | list[dict] | 
     return out if len(out) > 1 else result
 
 
+# First Codex release that stopped emitting ``event_msg.user_message`` /
+# ``agent_message``. From 0.147.0 the operator-visible chat exists ONLY as
+# ``response_item.message``. Measured across all 176 rollouts on this host:
+# every version through 0.146.0 (172 files) emits the event_msg shape; only
+# 0.147.0 does not.
+_CODEX_RESPONSE_ITEM_CHAT_FROM = (0, 147, 0)
+
+
+def _codex_cli_version(ctx: dict | None) -> tuple[int, ...] | None:
+    raw = (ctx or {}).get("codex_cli_version")
+    if not raw:
+        return None
+    try:
+        return tuple(int(p) for p in str(raw).split("."))
+    except (TypeError, ValueError):
+        return None
+
+
+def _codex_reads_response_item_chat(ctx: dict | None) -> bool:
+    """True when this rollout's Codex no longer emits event_msg chat.
+
+    Older rollouts carry the SAME message in both shapes, plus tool-runtime
+    warnings filed under the user role — which is exactly why the
+    ``response_item.message`` skip below exists and must stay for them.
+    Unknown version → False, the safe default that preserves today's
+    behaviour.
+    """
+    ver = _codex_cli_version(ctx)
+    return ver is not None and ver >= _CODEX_RESPONSE_ITEM_CHAT_FROM
+
+
+def _codex_response_item_chat_entry(
+    payload: dict, timestamp: str,
+) -> dict | None:
+    """Build a viewer entry from a ``response_item.message``.
+
+    Deliberately mirrors the ``event_msg`` user/assistant construction below
+    rather than refactoring it: that path renders every session older than
+    2026-08-14 and is not worth disturbing to remove a duplicate. Same
+    crosstalk/system classification and same identity helper, so a session
+    that straddles the format change reads identically either way.
+    """
+    role = payload.get("role")
+    if role not in ("user", "assistant"):
+        # 'developer' is the injected skills/AGENTS.md preamble, not a turn.
+        return None
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return None
+    text = "".join(
+        str(part.get("text") or "")
+        for part in content
+        if isinstance(part, dict)
+    )
+    if not text:
+        return None
+
+    if role == "assistant":
+        return {
+            "type": "assistant",
+            "role": "assistant",
+            "content": text,
+            "timestamp": timestamp,
+            **_codex_event_message_identity(payload, "assistant", text),
+        }
+
+    identity = _codex_event_message_identity(payload, "user", text)
+    ct = _classify_crosstalk(text)
+    if ct:
+        return {
+            "type": "crosstalk",
+            "role": "crosstalk",
+            "content": ct["message"],
+            "sender": ct["from"],
+            "sender_label": ct["label"],
+            "source_id": ct["source"],
+            "turn": ct["turn"],
+            "timestamp": timestamp,
+        }
+    sys_info = _classify_system_message(text)
+    if sys_info:
+        entry = {
+            "type": "system",
+            "role": "system",
+            "content": sys_info["summary"],
+            "tag": sys_info["tag"],
+            "timestamp": timestamp,
+        }
+        if sys_info.get("body"):
+            entry["body"] = sys_info["body"]
+        return entry
+    return {
+        "type": "user",
+        "role": "user",
+        "content": text,
+        "timestamp": timestamp,
+        **identity,
+    }
+
+
 def parse_codex_log_line(line: str, ctx: dict | None = None) -> dict | list[dict] | None:
     try:
         raw = json.loads(line)
@@ -2452,6 +2552,14 @@ def parse_codex_log_line(line: str, ctx: dict | None = None) -> dict | list[dict
     if not isinstance(payload, dict):
         return None
     entry_type = raw.get("type")
+
+    # session_meta is the FIRST record of every rollout, so the CLI version
+    # is known before any chat record arrives — which is what makes the
+    # version gate on response_item chat safe in a streaming parser.
+    if entry_type == "session_meta":
+        if ctx is not None and payload.get("cli_version"):
+            ctx["codex_cli_version"] = str(payload["cli_version"])
+        return None
 
     if entry_type == "compacted":
         return _build_codex_compact_summary(payload, timestamp)
@@ -2607,7 +2715,12 @@ def parse_codex_log_line(line: str, ctx: dict | None = None) -> dict | list[dict
             return entry
 
     # Skip response_item.message to avoid duplicating the operator-visible
-    # stream already emitted by event_msg.user_message/agent_message.
+    # stream already emitted by event_msg.user_message/agent_message — unless
+    # this rollout's Codex no longer emits that stream at all (>=0.147.0),
+    # in which case response_item.message IS the operator-visible stream and
+    # skipping it renders the session blank.
+    if item_type == "message" and _codex_reads_response_item_chat(ctx):
+        return _codex_response_item_chat_entry(payload, timestamp)
     return None
 
 

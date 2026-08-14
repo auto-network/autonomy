@@ -678,9 +678,15 @@ class CodexTurnExtractor:
             "last_ts": None,
             "originator": None,
             "model_provider": None,
+            "cli_version": None,
+            # Sliding window of recently emitted message_ids, for the
+            # two-shapes dedupe described in :meth:`_seen`.
+            "recent_ids": [],
         }
         if state:
             self._s.update(state)
+        if not isinstance(self._s.get("recent_ids"), list):
+            self._s["recent_ids"] = []
 
     @property
     def state(self) -> dict:
@@ -689,6 +695,96 @@ class CodexTurnExtractor:
     @classmethod
     def from_state(cls, state: dict) -> "CodexTurnExtractor":
         return cls(state=state)
+
+    # Codex writes each chat message TWICE, in two different record shapes:
+    # a ``response_item`` (the model-facing view) and an ``event_msg``
+    # (``user_message`` / ``agent_message``, the UI view). Measured on a
+    # real 837-row rollout: 275 messages appear in both shapes, and the two
+    # copies are ALWAYS exactly one record apart — but the order varies
+    # (218 event_msg-first, 34 response_item-first), so "skip if it matches
+    # the previous turn" is not enough on its own.
+    #
+    # Both branches below therefore build byte-identical turns — same text
+    # cleaning, same injected-role rule, same :func:`_codex_message_id` —
+    # so whichever shape arrives first wins and the other is dropped here.
+    # A window of 16 absorbs the reasoning/item_completed records that can
+    # sit between the pair while staying trivially small in persisted state.
+    _RECENT_ID_WINDOW = 16
+
+    # First Codex release that stopped emitting event_msg chat. Measured
+    # across all 176 rollouts on this host: every version through 0.146.0
+    # (172 files) emits it; only 0.147.0 does not.
+    _RESPONSE_ITEM_CHAT_FROM = (0, 147, 0)
+
+    @staticmethod
+    def _version_tuple(raw: str | None) -> tuple[int, ...] | None:
+        if not raw:
+            return None
+        try:
+            return tuple(int(p) for p in str(raw).split("."))
+        except (TypeError, ValueError):
+            return None
+
+    def _reads_response_items(self) -> bool:
+        """True when this rollout's Codex is new enough to need the fallback.
+
+        Older rollouts carry the SAME message in both shapes (measured: 275
+        of 561 in one file, always one record apart), plus tool-runtime
+        warnings filed under the user role that the event_msg shape never
+        surfaced. Reading response_items there would double-count, reclassify
+        and inject noise into sessions that render correctly today — so the
+        branch stays off unless the file's own cli_version says event_msg
+        chat is gone. Unknown/unparseable version → off, the safe default.
+        """
+        ver = self._version_tuple(self._s.get("cli_version"))
+        return ver is not None and ver >= self._RESPONSE_ITEM_CHAT_FROM
+
+    def _seen(self, message_id: str | None) -> bool:
+        """True when ``message_id`` was already emitted in the recent window.
+
+        Only armed on rollouts that read response_items. Older rollouts
+        render correctly today and sometimes legitimately re-emit the same
+        identity; suppressing those would change 21 measured files that
+        nothing is wrong with. Dedupe exists to reconcile the two shapes,
+        not to second-guess the single-shape path.
+        """
+        if not message_id or not self._reads_response_items():
+            return False
+        recent = self._s["recent_ids"]
+        if message_id in recent:
+            return True
+        recent.append(message_id)
+        if len(recent) > self._RECENT_ID_WINDOW:
+            del recent[: len(recent) - self._RECENT_ID_WINDOW]
+        return False
+
+    def _chat_turn(
+        self, *, role: str, text: str, payload: dict, entry: dict, ts: str,
+    ) -> dict | None:
+        """Build one chat turn, or ``None`` if it is empty or a duplicate.
+
+        ``role`` is the *wire* role; the stored role may become ``injected``
+        for operator briefs (W1 §12.3), while ``message_id`` stays computed
+        with the wire role so the live viewer overlay and accepted turn
+        corrections resolve to the same identity.
+        """
+        text = _clean_codex_text(text)
+        if len(text) < 5:
+            return None
+        message_id = _codex_message_id(payload, entry, role, text)
+        if self._seen(message_id):
+            return None
+        stored_role = role
+        if role == "user" and _is_codex_noise_text(text):
+            stored_role = "injected"
+        self._s["turn_number"] += 1
+        return {
+            "turn_number": self._s["turn_number"],
+            "role": stored_role,
+            "content": text,
+            "message_id": message_id,
+            "timestamp": ts,
+        }
 
     def feed(self, entry: dict) -> dict | None:
         s = self._s
@@ -704,6 +800,11 @@ class CodexTurnExtractor:
             return None
 
         if etype == "session_meta":
+            # session_meta is always the FIRST record, so the CLI version is
+            # known before any chat record arrives — which is what makes the
+            # version gate below safe in a streaming extractor.
+            if payload.get("cli_version"):
+                s["cli_version"] = str(payload["cli_version"])
             if payload.get("originator"):
                 s["originator"] = payload["originator"]
             if payload.get("model_provider"):
@@ -714,6 +815,36 @@ class CodexTurnExtractor:
 
         if etype == "compacted":
             return None
+
+        # Codex ≥0.147 (agent images rebuilt 2026-08-14) stopped emitting
+        # ``event_msg.user_message`` / ``agent_message`` entirely — chat now
+        # arrives ONLY as ``response_item`` messages. Sessions started after
+        # that upgrade ingested zero turns while still counting tokens (the
+        # ``token_count`` event survived), so the viewer showed a live,
+        # resolved, empty session. Read both shapes; see :meth:`_seen` for
+        # why that does not double-count the older rollouts, which carry
+        # both.
+        if etype == "response_item":
+            if not self._reads_response_items():
+                return None
+            if payload.get("type") != "message":
+                return None
+            role = payload.get("role")
+            if role not in ("user", "assistant"):
+                # 'developer' is the injected skills/AGENTS.md preamble —
+                # never operator-visible, and not a turn.
+                return None
+            content = payload.get("content")
+            if not isinstance(content, list):
+                return None
+            text = "".join(
+                str(part.get("text") or "")
+                for part in content
+                if isinstance(part, dict)
+            )
+            return self._chat_turn(
+                role=role, text=text, payload=payload, entry=entry, ts=ts,
+            )
 
         if etype != "event_msg":
             return None
@@ -731,31 +862,16 @@ class CodexTurnExtractor:
             return None
 
         if event_type == "user_message":
-            text = _clean_codex_text(str(payload.get("message") or ""))
-            if len(text) < 5:
-                return None
-            role = "injected" if _is_codex_noise_text(text) else "user"
-            s["turn_number"] += 1
-            return {
-                "turn_number": s["turn_number"],
-                "role": role,
-                "content": text,
-                "message_id": _codex_message_id(payload, entry, "user", text),
-                "timestamp": ts,
-            }
+            return self._chat_turn(
+                role="user", text=str(payload.get("message") or ""),
+                payload=payload, entry=entry, ts=ts,
+            )
 
         if event_type == "agent_message":
-            text = _clean_codex_text(str(payload.get("message") or ""))
-            if len(text) < 5:
-                return None
-            s["turn_number"] += 1
-            return {
-                "turn_number": s["turn_number"],
-                "role": "assistant",
-                "content": text,
-                "message_id": _codex_message_id(payload, entry, "assistant", text),
-                "timestamp": ts,
-            }
+            return self._chat_turn(
+                role="assistant", text=str(payload.get("message") or ""),
+                payload=payload, entry=entry, ts=ts,
+            )
 
         return None
 
