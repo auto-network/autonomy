@@ -125,6 +125,12 @@
       ? value : null;
   }
 
+  // Brand accent: a bare hex color and nothing else — never arbitrary CSS.
+  function safeColor(value) {
+    return (typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value))
+      ? value : null;
+  }
+
   function renderOrgHeader(context, inputs) {
     var name = typeof context.org_name === "string"
       ? context.org_name.slice(0, 120) : "";
@@ -138,6 +144,8 @@
       $("org-icon").src = icon;
       $("org-icon").classList.remove("hidden");
     }
+    var accent = safeColor(context.org_color);
+    if (accent) $("org-header").style.borderColor = accent;
     $("org-header").classList.remove("hidden");
     $("invite-line").textContent =
       name + " has invited you. Two ways in — pick whichever fits.";
@@ -178,7 +186,7 @@
   };
 
   if (typeof module === "object" && module.exports) {
-    module.exports = { safeIcon: safeIcon };
+    module.exports = { safeIcon: safeIcon, safeColor: safeColor };
   }
 
   if (typeof document !== "undefined") {
