@@ -2732,3 +2732,65 @@ def test_a_failed_delivery_says_so_in_the_conversation():
     assert any("Not delivered" in t for t in trail), (
         f"a failed delivery is silent in the conversation: {trail}"
     )
+
+
+# ── a coordinator acting on its own surface ───────────────────────
+
+
+def test_a_coordinator_session_is_a_participant_on_its_own_surface():
+    """A pillar screen can ask the operator a question, so a coordinator is an
+    ASKER on its own surface -- and could not act as one, because identity
+    resolution knew only a browser operator and a link guest. The session it
+    acts as is the same pillar identity its screen's questions are already
+    attributed to."""
+    client = _client()
+    mission_id = _mission_with_site(client)
+    pillar = db.create_pillar(mission_id, "Infra", "auto-infra", "#4ade80")
+
+    req = MagicMock()
+    req.headers = {"authorization": "Bearer whatever"}
+    req.cookies = {}
+    req.query_params = {}
+
+    with patch("tools.dashboard.server.authenticate_session_request",
+               return_value=(("auto-infra", "autonomy"), None)):
+        identity = mc_api._resolve_visitor_identity(req)
+
+    assert identity["participant_id"] == f"pillar:{pillar['pillar_id']}"
+    assert identity["participant_label"] == "Infra"
+
+
+def test_a_session_that_coordinates_nothing_here_is_nobody_here():
+    """Authenticating proves which session is calling, not that it has any
+    standing on this mission."""
+    client = _client()
+    _mission_with_site(client)
+
+    req = MagicMock()
+    req.headers = {"authorization": "Bearer whatever"}
+    req.cookies = {}
+    req.query_params = {}
+
+    with patch("tools.dashboard.server.authenticate_session_request",
+               return_value=(("auto-a-stranger", "autonomy"), None)), \
+         patch.object(mc_api, "_operator_identity", return_value=None):
+        assert mc_api._resolve_visitor_identity(req) is None
+
+
+def test_a_visitor_token_still_wins_over_a_bearer():
+    """A guest on a share link presents a token; an agent presents a bearer.
+    The two must not be confusable for one another."""
+    client = _client()
+    _mission_with_site(client)
+    visitor = _visitor(client)
+
+    req = MagicMock()
+    req.headers = {"authorization": "Bearer whatever"}
+    req.cookies = {VISITOR_COOKIE_NAME: visitor["token"]}
+    req.query_params = {}
+
+    identity = mc_api._resolve_visitor_identity(req)
+    assert identity["participant_id"] == visitor["participant_id"]
+
+
+VISITOR_COOKIE_NAME = mc_api.VISITOR_COOKIE
