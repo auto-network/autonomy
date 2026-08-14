@@ -10975,10 +10975,39 @@ async def api_worktree_commit_merge(request):
 async def api_worktree_merge(request):
     session_name = request.path_params["session"]
     repo_name = request.path_params["repo"]
+    # ONLY RE-READ WHEN ABOUT TO REFUSE. Eligibility comes from whatever the
+    # background poll last cached, so a session that wrote files, committed
+    # them a second later and asked to merge was refused against a snapshot
+    # taken mid-edit -- modified files with zero additions and zero
+    # deletions, while the worktree itself was clean. It cleared on the next
+    # poll, so the only apparent fix was waiting and retrying.
+    #
+    # Refreshing unconditionally would fix that and make every merge in the
+    # fleet pay a scoped git sweep, a rate-limited capability fetch and the
+    # monitor lock. Staleness is only ever wrong in ONE direction here: a
+    # cached "eligible" that has gone stale is harmless, because the merge
+    # itself is the real check and fails safely. A cached "not eligible" is
+    # the one that costs a caller minutes. So spend the refresh there, on
+    # the path that would otherwise be a refusal, and nowhere else.
     row = _find_worktree_row(worktree_monitor.get_all(), session_name, repo_name)
+    if row is not None and not row.ff_eligible:
+        rows = await worktree_monitor.refresh_one(session_name, repo_name)
+        row = _find_worktree_row(rows, session_name, repo_name)
     if row is None:
         return JSONResponse({"error": "worktree not found"}, status_code=404)
     if not row.ff_eligible:
+        # NOTHING TO MERGE IS NOT A REFUSAL. A branch whose commits are
+        # already on master is not ff-eligible for the plain reason that
+        # there is nothing left to fast-forward, and reporting that as a
+        # failure reads as "your merge did not happen" -- which invites
+        # committing the same work again.
+        if not getattr(row, "commits_ahead", None) and not getattr(row, "is_dirty", False):
+            return JSONResponse({
+                "ok": True,
+                "merged": False,
+                "reason": "nothing to merge — this branch is already on the target",
+                "state": _worktree_state_json(row),
+            })
         return JSONResponse(
             {
                 "error": "worktree is not ff-eligible",
@@ -11014,7 +11043,12 @@ async def api_worktree_merge(request):
 async def api_worktree_cherry_pick(request):
     session_name = request.path_params["session"]
     repo_name = request.path_params["repo"]
+    # Same shape as the merge path: the cached answer is trusted when it
+    # says yes, and re-read only when it is about to say no.
     row = _find_worktree_row(worktree_monitor.get_all(), session_name, repo_name)
+    if row is not None and not row.cherry_pick_eligible:
+        rows = await worktree_monitor.refresh_one(session_name, repo_name)
+        row = _find_worktree_row(rows, session_name, repo_name)
     if row is None:
         return JSONResponse({"error": "worktree not found"}, status_code=404)
     if not row.cherry_pick_eligible:
