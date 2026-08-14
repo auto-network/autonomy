@@ -58,8 +58,17 @@ def create_org_body(slug: str, **extra) -> dict:
 
 @pytest.fixture
 def orgs_root(tmp_path, monkeypatch):
-    root = tmp_path / "data" / "orgs"
+    # Same directory test_app exports as the app's hermetic orgs dir: the
+    # identity seeded below must land where the running app actually looks,
+    # or the create/delete routes read an empty personal store and refuse.
+    root = tmp_path / "orgs"
     monkeypatch.setenv("AUTONOMY_ORGS_DIR", str(root))
+    # The container's ambient GRAPH_DB pin would contradict the explicit-org
+    # settings writes inside org creation/deletion — the fail-loud resolver
+    # refuses that instead of silently misrouting the org key into the pinned
+    # store. Org creation never coincides with a GRAPH_DB pin in production
+    # (pin callers pass org=None), so unpinning is honest, not a workaround.
+    monkeypatch.delenv("GRAPH_DB", raising=False)
     root.mkdir(parents=True, exist_ok=True)
 
     # personal.db must exist BEFORE the identity write: settings_ops with
