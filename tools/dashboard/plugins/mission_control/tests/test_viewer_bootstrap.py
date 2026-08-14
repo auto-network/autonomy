@@ -498,3 +498,21 @@ def test_a_conversation_reads_as_one_ordered_column():
     # The old separate blocks are gone.
     assert '"While this is open"' not in src
     assert 'text: "Delivered"' not in src
+
+
+def test_what_was_typed_outlives_a_redraw_and_a_refusal():
+    """A redraw preserved the textarea only while it still had focus, and
+    tapping Send moves focus to the button -- so a live event arriving while a
+    message was in flight rebuilt an empty box and took the unsent text with
+    it. What the writer saw was a long answer vanishing on click with no
+    error, which is indistinguishable from having been sent."""
+    src = _viewer("bootstrap.js")
+    # Held outside the composer and mirrored to storage, because a
+    # backgrounded page on a phone can be evicted outright.
+    assert "function draftGet(" in src and "function draftSet(" in src
+    assert "ta.value = draftGet(pendingKey());" in src
+    # Discarded only by a confirmed success.
+    assert 'ta.value = ""; draftSet(slot, "");' in src
+    # And the refusal itself survives the next redraw.
+    assert "var sendErrors" in src
+    assert "sendErrors[pendingKey()]" in src

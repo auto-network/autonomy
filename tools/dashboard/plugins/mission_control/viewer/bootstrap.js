@@ -783,6 +783,34 @@
   //: carry someone's files somewhere they did not attach them.
   var pendingFiles = Object.create(null);
 
+  //: WHAT WAS TYPED OUTLIVES EVERYTHING THE PAGE DOES ON ITS OWN. A redraw
+  //: preserved the textarea only when it still had focus -- and tapping Send
+  //: moves focus to the button, so a live event arriving while a message was
+  //: in flight rebuilt an empty box and took the unsent text with it. What
+  //: the reader saw was a long answer vanishing on click with no error, which
+  //: is indistinguishable from having been sent.
+  //:
+  //: Mirrored to localStorage for the same reason the session viewer does it:
+  //: on a phone a backgrounded page can be evicted outright, and a draft that
+  //: only exists in memory dies with it.
+  var _DRAFTS = "mc-draft:";
+
+  function draftGet(slot) {
+    try { return window.localStorage.getItem(_DRAFTS + slot) || ""; }
+    catch (_e) { return ""; }
+  }
+
+  function draftSet(slot, text) {
+    try {
+      if (text) window.localStorage.setItem(_DRAFTS + slot, text);
+      else window.localStorage.removeItem(_DRAFTS + slot);
+    } catch (_e) { /* private mode, quota -- the in-page value still stands */ }
+  }
+
+  //: A refusal has to survive the next redraw too, or the reader is told
+  //: nothing at all about why their message did not go.
+  var sendErrors = Object.create(null);
+
   function pendingKey() {
     return (ui.entry ? "e:" + ui.entry
             : ui.anchor ? "a:" + ui.anchor
@@ -877,6 +905,8 @@
       ta.style.height = Math.min(ta.scrollHeight, window.innerHeight * 0.4) + "px";
     }
     ta.addEventListener("input", grow);
+    ta.value = draftGet(pendingKey());
+    ta.addEventListener("input", function () { draftSet(pendingKey(), ta.value); });
     setTimeout(grow, 0);
     // With no channel there is nothing to send to, and a button that looks
     // live and does nothing is worse than one that says so.
@@ -894,7 +924,8 @@
     // while leaving an inviting text box is worse than either: it opens the
     // keyboard, asks you to compose something, and then refuses to send it.
     if (why) return el("div", {class: "mc-foot"}, [el("p", {class: "mc-readonly", text: why})]);
-    var status = el("span", {class: "mc-sub", text: why || note});
+    var status = el("span", {class: sendErrors[pendingKey()] ? "mc-sub mc-sub-bad" : "mc-sub",
+                             text: sendErrors[pendingKey()] || why || note});
     var send = el("button", {
       class: "mc-send", text: label,
       onclick: function () {
@@ -912,13 +943,18 @@
           ? picked.map(function (x) { return x.path; }).join("\n") + "\n\n" + text
           : text;
         status.textContent = "Sending\u2026";
+        delete sendErrors[slot];
         Promise.resolve(onSend(body)).then(function () {
-          ta.value = ""; picked.length = 0; delete pendingFiles[slot];
+          // Only a confirmed success discards what was written.
+          ta.value = ""; draftSet(slot, "");
+          picked.length = 0; delete pendingFiles[slot];
           drawStrip(); grow(); status.textContent = note;
         }, function (err) {
-          // Never silent. A refused write used to reject a promise nobody
-          // was listening to, so the tap did nothing and said nothing.
-          status.textContent = "Not sent: " + ((err && err.message) || "refused");
+          sendErrors[slot] = "Not sent: " + ((err && err.message) || "refused")
+            + " \u2014 your message is still here.";
+          // Never silent, and never lost: the text stays in the box, the
+          // draft stays in storage, and the reason survives the next redraw.
+          status.textContent = sendErrors[slot];
         });
       },
     });
